@@ -34,6 +34,10 @@ class StepStack:
     # ---- inspection ---------------------------------------------------
     @property
     def entries(self) -> list[tuple[Any, bool]]:
+        """A copy of the (step, enabled) list. The step OBJECTS are shared,
+        not copied: mutating a step's attributes in place bypasses cache
+        invalidation and makes `to_dicts()` disagree with the cached result.
+        Edit steps with `replace_step(i, build_step(name, **params))`."""
         return list(self._entries)
 
     @property
