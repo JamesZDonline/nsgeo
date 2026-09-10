@@ -16,7 +16,7 @@ from nsgeo.processing import StepStack, build_step
 from nsgeo.processing.base import Radargram
 
 DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(DATA.glob("*.DZT")) if DATA.exists() else []
+FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
 
 pytestmark = pytest.mark.skipif(not FILES, reason="no real DZT files in tests/data/local")
 
