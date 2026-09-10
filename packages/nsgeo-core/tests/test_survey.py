@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
-from nsgeo.model.survey import Line, Site, clear_profile_cache
+from nsgeo.model.survey import Line, Profile, Site, clear_profile_cache
 
 from tests.synthetic import write_dzt
 
@@ -124,3 +124,14 @@ def test_site_accepts_cross_hatched_lines_in_one_grid(tmp_path, grid):
     )
     site = Site(grids=[grid], lines=[a, b])
     site.validate()
+
+
+def test_profile_is_hashable_with_identity_equality(tmp_path):
+    """Frozen dataclasses over ndarrays cannot use field equality (ambiguous
+    truth value) — eq=False gives identity semantics and a working hash."""
+    line = _line(tmp_path)
+    a = line.load()[0]
+    assert a == a
+    assert hash(a) == hash(a)
+    assert a != Profile(data=a.data, header=a.header)
+    assert len({a, a}) == 1

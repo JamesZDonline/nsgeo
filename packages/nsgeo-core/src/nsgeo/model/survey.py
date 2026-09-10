@@ -24,9 +24,12 @@ from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
 _CACHE_SIZE = 16
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Profile:
-    """One channel of one radargram. `data` is raw and never mutated."""
+    """One channel of one radargram. `data` is raw and never mutated.
+
+    Equality is identity (`eq=False`): comparing sample arrays is a test
+    concern, done with `np.testing`."""
 
     data: np.ndarray
     header: DztHeader
