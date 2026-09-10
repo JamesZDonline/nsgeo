@@ -38,7 +38,7 @@ class GainAgc:
         window = int(round(self.window_ns / rg.dt_ns))
         if window < 1:
             raise ValueError(f"window_ns={self.window_ns} is shorter than one sample")
-        rms = np.sqrt(running_mean(rg.data**2, window, axis=0))
+        rms = np.sqrt(running_mean(np.asarray(rg.data, dtype=float) ** 2, window, axis=0))
         # eps guards all-zero traces, which are normal at the start of a line.
         return rg.replace(data=rg.data * (self.target / np.maximum(rms, self.eps)))
 

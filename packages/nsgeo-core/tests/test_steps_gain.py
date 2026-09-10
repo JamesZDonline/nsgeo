@@ -26,6 +26,15 @@ def test_agc_handles_all_zero_traces_without_dividing_by_zero():
     assert np.isfinite(out.data).all()
 
 
+def test_agc_is_finite_on_int32_input_with_real_amplitudes():
+    """1_500_000 ** 2 overflows int32; squaring before casting to float
+    silently produces negative values and NaN RMS."""
+    rg = Radargram(data=np.full((64, 8), 1_500_000, dtype=np.int32), dt_ns=0.2, t0_ns=0.0)
+    out = build_step("gain_agc", window_ns=4.0, target=1.0).apply(rg)
+    assert np.isfinite(out.data).all()
+    assert out.data[32, 0] == pytest.approx(1.0, rel=1e-6)
+
+
 def test_agc_leaves_the_time_axis_untouched():
     rg = decaying()
     out = build_step("gain_agc", window_ns=20.0).apply(rg)
