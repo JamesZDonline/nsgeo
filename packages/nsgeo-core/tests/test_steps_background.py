@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import nsgeo.processing.background  # noqa: F401
+import nsgeo.processing  # noqa: F401
 import numpy as np
 import pytest
-from nsgeo.processing.base import Radargram, build_step
+from nsgeo.processing.base import Radargram, available_steps, build_step
 
 
 def banded(n_samples=128, n_traces=300, seed=0):
@@ -84,13 +84,27 @@ def test_svd_rejects_negative_components():
         build_step("background_svd", n_components=-1).apply(rg)
 
 
-def test_none_of_the_steps_mutate_their_input():
-    rg, _, _ = banded()
+_STEP_PARAMS = {
+    "time_zero": {"mode": "sample", "sample": 4},
+    "dewow": {"window_ns": 4.0},
+    "gain_agc": {"window_ns": 4.0},
+    "gain_parametric": {},
+    "gain_curve": {"points": [[0, 0], [20, 6]]},
+    "bandpass": {"low_mhz": 100, "high_mhz": 700},
+    "background_mean": {},
+    "background_sliding": {"window_traces": 20},
+    "background_svd": {"n_components": 1},
+}
+
+
+@pytest.mark.parametrize("name", sorted(_STEP_PARAMS))
+def test_none_of_the_steps_mutate_their_input(name):
+    """Every registered step, not just the three background ones: a step
+    that overwrote rg.data in place would corrupt every other consumer of
+    the same Radargram (e.g. an earlier cached stack entry)."""
+    assert set(_STEP_PARAMS) == set(available_steps())
+    rng = np.random.default_rng(0)
+    rg = Radargram(data=rng.normal(size=(128, 300)), dt_ns=0.2, t0_ns=0.0)
     before = rg.data.copy()
-    for name, kwargs in [
-        ("background_mean", {}),
-        ("background_sliding", {"window_traces": 20}),
-        ("background_svd", {"n_components": 1}),
-    ]:
-        build_step(name, **kwargs).apply(rg)
+    build_step(name, **_STEP_PARAMS[name]).apply(rg)
     np.testing.assert_array_equal(rg.data, before)
