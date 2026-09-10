@@ -28,11 +28,20 @@ def write_dzt(
     channels are interleaved per trace, which is how GSSI writes them.
     """
     if data.ndim == 2:
+        if n_channels != 1:
+            raise ValueError(f"2D data requires n_channels=1, got n_channels={n_channels}")
         n_samples, n_traces = data.shape
-        stack = np.repeat(data[None, :, :], n_channels, axis=0)
-    else:
-        n_channels, n_samples, n_traces = data.shape
+        stack = data[None, :, :]
+    elif data.ndim == 3:
+        n_ch, n_samples, n_traces = data.shape
+        if n_ch != n_channels:
+            raise ValueError(
+                f"data has shape {data.shape} but n_channels={n_channels}; "
+                f"mismatch on first dimension"
+            )
         stack = data
+    else:
+        raise ValueError(f"data must be 2D or 3D, got shape {data.shape}")
 
     head = bytearray(MINHEADSIZE)
     struct.pack_into("<H", head, 0, tag)

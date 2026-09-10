@@ -19,7 +19,7 @@ def test_header_size_uses_rh_data_rule(tmp_path):
 
 def test_header_size_falls_back_to_channel_rule(tmp_path):
     p = tmp_path / "b.DZT"
-    write_dzt(p, np.zeros((512, 10), dtype=np.int32), rh_data=1024, n_channels=2)
+    write_dzt(p, np.zeros((2, 512, 10), dtype=np.int32), rh_data=1024, n_channels=2)
     h = read_header(p)
     assert h.data_offset == 2048
 
@@ -73,3 +73,17 @@ def test_rejects_zero_samples():
     struct.pack_into("<H", raw, 52, 1)
     with pytest.raises(DztError, match="samples"):
         parse_header(bytes(raw))
+
+
+def test_multi_channel_samples_are_interleaved_per_trace(tmp_path):
+    """On disk: trace0ch0, trace0ch1, trace1ch0, trace1ch1, ... Task 3's reader
+    inverts exactly this order, so it is pinned here with distinct values."""
+    data = np.zeros((2, 3, 2), dtype=np.int32)  # (channels, samples, traces)
+    data[0] = [[10, 11], [12, 13], [14, 15]]  # channel 0
+    data[1] = [[20, 21], [22, 23], [24, 25]]  # channel 1
+    p = tmp_path / "i.DZT"
+    write_dzt(p, data, n_channels=2, rh_data=1)  # 1024-byte header
+    h = read_header(p)
+    raw = np.fromfile(p, dtype="<i4", offset=h.data_offset)
+    # trace 0: ch0 samples then ch1 samples; then trace 1 likewise
+    assert raw.tolist() == [10, 12, 14, 20, 22, 24, 11, 13, 15, 21, 23, 25]
