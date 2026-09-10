@@ -52,6 +52,11 @@ class Bandpass:
 
     def apply(self, rg: Radargram) -> Radargram:
         nyquist_mhz = 500.0 / rg.dt_ns  # (1 / (2 * dt_ns * 1e-9)) / 1e6
+        if self.taper_frac < 0:
+            raise ValueError(
+                f"taper_frac must be >= 0, got {self.taper_frac}; a negative taper is a brick "
+                f"wall, which is the ringing this filter exists to avoid"
+            )
         if self.low_mhz < 0:
             raise ValueError(f"low_mhz must be >= 0, got {self.low_mhz}")
         if self.low_mhz >= self.high_mhz:

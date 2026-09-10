@@ -3,6 +3,7 @@ from __future__ import annotations
 import nsgeo.processing.bandpass  # noqa: F401
 import numpy as np
 import pytest
+from nsgeo.processing.bandpass import Bandpass
 from nsgeo.processing.base import Radargram, build_step
 
 DT_NS = 0.2  # 5 GHz sampling -> 2500 MHz Nyquist
@@ -74,3 +75,33 @@ def test_rejects_negative_low():
 def test_output_is_real_valued():
     out = build_step("bandpass", low_mhz=150.0, high_mhz=600.0).apply(tone(350.0))
     assert np.isrealobj(out.data)
+
+
+def test_rejects_negative_taper_frac():
+    with pytest.raises(ValueError, match="taper_frac"):
+        build_step("bandpass", low_mhz=150.0, high_mhz=600.0, taper_frac=-0.1).apply(tone(300.0))
+
+
+def test_mask_has_hard_edges_at_zero_taper_and_ramps_otherwise():
+    freqs = np.linspace(0, 1000, 10001)
+
+    brick = Bandpass(low_mhz=200.0, high_mhz=600.0, taper_frac=0.0)
+    mask = brick._mask(freqs)
+    assert set(np.unique(mask)) == {0.0, 1.0}
+
+    tapered = Bandpass(low_mhz=200.0, high_mhz=600.0, taper_frac=0.25)
+    mask = tapered._mask(freqs)
+    width = 0.25 * (600.0 - 200.0)
+
+    def at(freq_mhz):
+        idx = np.where(freqs == freq_mhz)[0][0]
+        return mask[idx]
+
+    assert at(200.0) == pytest.approx(1.0)
+    assert at(600.0) == pytest.approx(1.0)
+    assert at(200.0 - width) == pytest.approx(0.0)
+    assert at(600.0 + width) == pytest.approx(0.0)
+
+    ramp_idx = (freqs > 200.0 - width) & (freqs < 200.0)
+    ramp = mask[ramp_idx]
+    assert np.all(np.diff(ramp) > 0)
