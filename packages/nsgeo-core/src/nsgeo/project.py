@@ -5,7 +5,9 @@ loadable with no QGIS present. Front ends derive display layers from it; those
 layers are regenerable and are explicitly not the source of truth.
 
 DZT paths are stored relative to the JSON file with POSIX separators, so a
-project directory can be moved or shared across platforms intact.
+project directory can be moved or shared across platforms intact — except
+files outside that directory, which are refused unless the caller opts into
+absolute paths (see `save_site`).
 """
 
 from __future__ import annotations
@@ -92,7 +94,7 @@ def _line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False
         if allow_absolute:
             return resolved.as_posix()
         raise ProjectError(
-            f"{line_path} is not under the project directory {root}; survey "
+            f"{resolved} is not under the project directory {root}; survey "
             f"files must live inside the folder that holds survey.nsgeo.json "
             f"so the project stays portable, or pass allow_absolute=True to "
             f"record an absolute path tied to this machine"
@@ -113,13 +115,13 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     lines_data = []
     keys_written: list[str] = []
     for line in site.lines:
-        rel = _line_key(line.path, root, allow_absolute=allow_absolute)
-        keys_written.append(rel)
+        key = _line_key(line.path, root, allow_absolute=allow_absolute)
+        keys_written.append(key)
         entry: dict[str, Any] = {
-            "path": rel,
+            "path": key,
             "placement": _placement_to_dict(line.placement),
         }
-        stack = site.stacks.get(rel)
+        stack = site.stacks.get(key)
         if stack is not None:
             entry["stack"] = stack.to_dicts()
         lines_data.append(entry)
@@ -161,7 +163,9 @@ def load_site(path: str | Path) -> Site:
         stored = Path(entry["path"])
         dzt = stored if stored.is_absolute() else root / stored
         if not dzt.exists():
-            raise ProjectError(f"referenced file does not exist: {dzt}")
+            raise ProjectError(
+                f"referenced file does not exist: {dzt} (stored as {entry['path']!r})"
+            )
         lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
         if "stack" in entry:
             stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
