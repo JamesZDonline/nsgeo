@@ -45,6 +45,14 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
 
 
 def _grid_from_dict(doc: dict[str, Any]) -> Grid:
+    velocity = None
+    if "velocity" in doc:
+        try:
+            velocity = VelocityModel.from_dict(doc["velocity"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(
+                f"invalid velocity for grid {doc.get('id', '<unknown>')!r}: {exc}"
+            ) from exc
     return Grid(
         id=doc["id"],
         origin=(float(doc["origin"][0]), float(doc["origin"][1])),
@@ -53,7 +61,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         size_y=float(doc["size_y"]),
         crs=doc["crs"],
         default_spacing=float(doc["default_spacing"]),
-        velocity=VelocityModel.from_dict(doc["velocity"]) if "velocity" in doc else None,
+        velocity=velocity,
     )
 
 
@@ -173,15 +181,13 @@ def load_site(path: str | Path) -> Site:
             raise ProjectError(
                 f"referenced file does not exist: {dzt} (stored as {entry['path']!r})"
             )
-        lines.append(
-            Line.open(
-                dzt,
-                _placement_from_dict(entry["placement"]),
-                velocity=VelocityModel.from_dict(entry["velocity"])
-                if "velocity" in entry
-                else None,
-            )
-        )
+        velocity = None
+        if "velocity" in entry:
+            try:
+                velocity = VelocityModel.from_dict(entry["velocity"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(f"invalid velocity for line {entry['path']!r}: {exc}") from exc
+        lines.append(Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity))
         if "stack" in entry:
             try:
                 stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])

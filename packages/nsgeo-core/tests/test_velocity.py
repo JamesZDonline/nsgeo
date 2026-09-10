@@ -7,6 +7,7 @@ correct, and the last test pins it against a real header.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzt import read_header
 from nsgeo.model.survey import Line, Site
-from nsgeo.project import load_site, save_site
+from nsgeo.project import ProjectError, load_site, save_site
 from nsgeo.velocity import C_M_PER_NS, VelocityModel, resolve_velocity
 
 from tests.synthetic import write_dzt
@@ -53,6 +54,18 @@ def test_two_layers_integrate_piecewise():
     assert not m.is_constant
 
 
+def test_velocity_at_of_non_finite_time_is_nan():
+    """`searchsorted` sorts NaN to the end, which would otherwise resolve an
+    invalid time to the last layer's velocity as if it were a real, very late
+    time. `depth_at` already returns NaN for a NaN input (via `t - tops[idx]`);
+    `velocity_at` must agree instead of returning a plausible-looking value."""
+    m = VelocityModel(layers=((0.0, 0.1), (20.0, 0.05)))
+    result = m.velocity_at(np.array([float("nan"), float("inf"), 10.0]))
+    assert np.isnan(result[0])
+    assert np.isnan(result[1])
+    assert result[2] == pytest.approx(0.1)
+
+
 def test_depth_is_monotone_for_any_valid_model():
     m = VelocityModel(layers=((0.0, 0.12), (15.0, 0.07), (60.0, 0.09)))
     d = m.depth_at(np.linspace(-10, 120, 400))
@@ -70,6 +83,16 @@ def test_validation():
         VelocityModel(layers=((0.0, -0.1),))
     with pytest.raises(ValueError, match="positive"):
         VelocityModel.constant(0.0)
+
+
+def test_non_finite_layer_top_is_rejected():
+    """A NaN or infinite top sorts to the end under `np.searchsorted`, which
+    would otherwise pass the strict-increase check silently (`nan <= a` is
+    always False) and make the deeper layer unreachable rather than fail."""
+    with pytest.raises(ValueError, match="finite"):
+        VelocityModel(layers=((0.0, 0.1), (float("nan"), 0.05)))
+    with pytest.raises(ValueError, match="finite"):
+        VelocityModel(layers=((0.0, 0.1), (float("inf"), 0.05)))
 
 
 def test_layers_are_normalised_to_floats_and_immutable():
@@ -127,6 +150,61 @@ def test_project_round_trips_velocities_and_tolerates_their_absence(tmp_path, li
     assert "velocity" not in text
     back = load_site(out)
     assert back.grids[0].velocity is None and back.lines[0].velocity is None
+
+
+def test_malformed_velocity_block_raises_project_error(tmp_path):
+    """A hand-edited survey file is the primary way a velocity block would
+    ever be malformed, since there is no layered editor in v1. `load_site`
+    already wraps a bad stack as `ProjectError`; a bad velocity block must
+    get the same treatment rather than escape as a bare ValueError/KeyError,
+    or a UI that catches only `ProjectError` crashes instead of reporting a
+    bad file."""
+    p = tmp_path / "L0.DZT"
+    write_dzt(p, np.zeros((512, 30), dtype=np.int32))
+    out = tmp_path / "survey.nsgeo.json"
+
+    base = {
+        "schema_version": 1,
+        "grids": [
+            {
+                "id": "G",
+                "origin": [0.0, 0.0],
+                "azimuth": 0.0,
+                "size_x": 10.0,
+                "size_y": 10.0,
+                "crs": "EPSG:32616",
+                "default_spacing": 0.5,
+            }
+        ],
+        "lines": [
+            {
+                "path": "L0.DZT",
+                "placement": {"type": "grid", "grid_id": "G", "axis": "y", "offset": 0.0},
+            }
+        ],
+    }
+
+    # Invalid velocity on the grid: first layer does not start at 0 ns.
+    bad_grid = json.loads(json.dumps(base))
+    bad_grid["grids"][0]["velocity"] = {"layers": [{"top_ns": 5.0, "v_m_ns": 0.1}]}
+    out.write_text(json.dumps(bad_grid))
+    with pytest.raises(ProjectError, match="G"):
+        load_site(out)
+
+    # Invalid velocity on the line: negative interval velocity.
+    bad_line = json.loads(json.dumps(base))
+    bad_line["lines"][0]["velocity"] = {"layers": [{"top_ns": 0.0, "v_m_ns": -1.0}]}
+    out.write_text(json.dumps(bad_line))
+    with pytest.raises(ProjectError, match="L0.DZT"):
+        load_site(out)
+
+    # Typo'd key: VelocityModel.from_dict raises a bare KeyError, which must
+    # still surface as ProjectError.
+    typo = json.loads(json.dumps(base))
+    typo["grids"][0]["velocity"] = {"lyaers": []}
+    out.write_text(json.dumps(typo))
+    with pytest.raises(ProjectError, match="G"):
+        load_site(out)
 
 
 @pytest.mark.skipif(not FILES, reason="no real DZT files in tests/data/local")
