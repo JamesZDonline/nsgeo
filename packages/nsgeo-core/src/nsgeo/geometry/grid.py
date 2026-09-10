@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple  # noqa: UP035
 
 import numpy as np
 
@@ -17,14 +16,14 @@ import numpy as np
 @dataclass(frozen=True)
 class Grid:
     id: str
-    origin: Tuple[float, float]  # noqa: UP006
+    origin: tuple[float, float]
     azimuth: float
     size_x: float
     size_y: float
     crs: str
     default_spacing: float
 
-    def axes(self) -> Tuple[np.ndarray, np.ndarray]:  # noqa: UP006
+    def axes(self) -> tuple[np.ndarray, np.ndarray]:
         """Unit vectors of grid-local +X and +Y in world coordinates.
 
         azimuth is degrees clockwise from CRS north to grid-local +Y, so
