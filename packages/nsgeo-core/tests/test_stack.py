@@ -107,6 +107,23 @@ def test_difference_rejects_an_out_of_range_index():
         st.difference(5)
 
 
+def test_difference_is_undefined_for_a_step_that_crops_samples():
+    """time_zero drops rows, so before - after has no meaning; fail with a
+    named error rather than numpy's broadcast message."""
+    st = stack_of(("time_zero", {"mode": "sample", "sample": 8}))
+    with pytest.raises(ValueError, match="changes the sample count"):
+        st.difference(0)
+
+
+def test_move_rejects_negative_or_out_of_range_indices():
+    """A negative dst would under-invalidate and serve stale results."""
+    st = stack_of(("dewow", {"window_ns": 4.0}), ("background_mean", {}))
+    with pytest.raises(IndexError, match="move indices"):
+        st.move(0, -1)
+    with pytest.raises(IndexError, match="move indices"):
+        st.move(2, 0)
+
+
 def test_result_without_a_source_raises():
     with pytest.raises(ValueError, match="source"):
         StepStack().result()

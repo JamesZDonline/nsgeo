@@ -65,6 +65,9 @@ class StepStack:
         self._invalidate_from(index)
 
     def move(self, src: int, dst: int) -> None:
+        n = len(self._entries)
+        if not (0 <= src < n and 0 <= dst < n):
+            raise IndexError(f"move indices must be in 0..{n - 1}, got src={src}, dst={dst}")
         entry = self._entries.pop(src)
         self._entries.insert(dst, entry)
         self._invalidate_from(min(src, dst))
@@ -110,6 +113,13 @@ class StepStack:
         after = self.intermediate(index)
         before = self._cache[index - 1] if index else self._source
         assert before is not None
+        if before.data.shape != after.data.shape:
+            step = self._entries[index][0]
+            raise ValueError(
+                f"step {index} ({step.name}) changes the sample count "
+                f"({before.n_samples} -> {after.n_samples}); a difference view is "
+                f"undefined for it"
+            )
         return after.replace(data=before.data - after.data)
 
     # ---- serialisation ------------------------------------------------
