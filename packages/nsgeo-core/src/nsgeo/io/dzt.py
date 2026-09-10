@@ -11,6 +11,8 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 MINHEADSIZE = 1024
 
 #: Sample dtype by rh_bits. Only 32-bit has been validated against real files;
@@ -103,3 +105,40 @@ def read_header(path: str | Path) -> DztHeader:
     """Read only the header. Cheap: reads 1024 bytes regardless of file size."""
     with open(path, "rb") as fh:
         return parse_header(fh.read(MINHEADSIZE))
+
+
+def _bytes_per_trace(header: DztHeader) -> int:
+    return header.n_samples * header.bytes_per_sample * header.n_channels
+
+
+def trace_count(path: str | Path, header: DztHeader) -> int:
+    """Number of traces, derived from file size. Raises if not a whole number."""
+    payload = Path(path).stat().st_size - header.data_offset
+    if payload <= 0:
+        raise DztError(f"file has no traces after a {header.data_offset}-byte header")
+    per = _bytes_per_trace(header)
+    if payload % per:
+        raise DztError(
+            f"non-integer trace count: {payload} payload bytes is not divisible by "
+            f"{per} bytes/trace. The header size ({header.data_offset}) is probably "
+            f"wrong; refusing to truncate because that would silently misalign data."
+        )
+    return payload // per
+
+
+def read_samples(path: str | Path, header: DztHeader | None = None) -> np.ndarray:
+    """Read all samples as (n_channels, n_samples, n_traces).
+
+    Channels are interleaved per trace on disk. Raw values are returned
+    unmodified: no zero-offset is applied, because rh_zero is not trustworthy
+    (it is 105 in real files, neither documented sentinel).
+    """
+    path = Path(path)
+    if header is None:
+        header = read_header(path)
+    n_traces = trace_count(path, header)
+    flat = np.fromfile(path, dtype=np.dtype(header.dtype), offset=header.data_offset)
+    expected = n_traces * header.n_channels * header.n_samples
+    if flat.size != expected:
+        raise DztError(f"expected {expected} samples, read {flat.size}")
+    return flat.reshape(n_traces, header.n_channels, header.n_samples).transpose(1, 2, 0)

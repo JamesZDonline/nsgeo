@@ -22,10 +22,11 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.mypy]
-# 3.10 rather than 3.9: mypy 2.x no longer targets 3.9. Runtime 3.9
-# compatibility is guarded by the CI 3.9 matrix job and ruff's py39 target,
-# not by mypy, so the package still declares requires-python >= 3.9.
-python_version = "3.10"
+# 3.12, not the package's 3.9 floor: numpy >= 2 ships stubs using PEP 695
+# `type` statements, which mypy rejects below 3.12. Runtime 3.9 compatibility
+# is guarded by the CI 3.9 matrix job and ruff's py39 target, not by mypy, so
+# requires-python stays >= 3.9.
+python_version = "3.12"
 disallow_untyped_defs = true
 warn_unused_ignores = true
 warn_redundant_casts = true
