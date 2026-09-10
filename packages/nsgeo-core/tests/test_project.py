@@ -115,3 +115,24 @@ def test_output_is_human_readable(tmp_path, site):
     save_site(site, out)
     text = out.read_text()
     assert "\n" in text and "  " in text  # indented, diffable
+
+
+def test_dzt_outside_project_dir_is_a_project_error(tmp_path):
+    """Storing an absolute path would silently break portability, so refuse."""
+    project = tmp_path / "project"
+    project.mkdir()
+    elsewhere = tmp_path / "elsewhere" / "L9.DZT"
+    elsewhere.parent.mkdir()
+    write_dzt(elsewhere, np.zeros((512, 60), dtype=np.int32))
+    grid = Grid(
+        id="G1",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
+    line = Line.open(elsewhere, GridPlacement(grid_id="G1", axis="y", offset=0.0))
+    with pytest.raises(ProjectError, match="not under the project directory"):
+        save_site(Site(grids=[grid], lines=[line]), project / "survey.nsgeo.json")

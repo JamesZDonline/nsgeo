@@ -80,16 +80,26 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
 def save_site(site: Site, path: str | Path) -> None:
     path = Path(path)
     root = path.parent.resolve()
+    lines_data = []
+    for line in site.lines:
+        try:
+            rel = Path(line.path).resolve().relative_to(root).as_posix()
+        except ValueError:
+            raise ProjectError(
+                f"{line.path} is not under the project directory {root}; survey "
+                f"files must live inside the folder that holds survey.nsgeo.json "
+                f"so the project stays portable"
+            ) from None
+        lines_data.append(
+            {
+                "path": rel,
+                "placement": _placement_to_dict(line.placement),
+            }
+        )
     doc = {
         "schema_version": SCHEMA_VERSION,
         "grids": [_grid_to_dict(g) for g in site.grids],
-        "lines": [
-            {
-                "path": Path(line.path).resolve().relative_to(root).as_posix(),
-                "placement": _placement_to_dict(line.placement),
-            }
-            for line in site.lines
-        ],
+        "lines": lines_data,
     }
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
