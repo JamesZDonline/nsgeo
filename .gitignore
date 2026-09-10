@@ -48,3 +48,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Git worktrees for isolated feature work
+.worktrees/

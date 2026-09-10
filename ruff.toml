@@ -1,0 +1,9 @@
+line-length = 100
+target-version = "py39"
+
+# Planning/spec docs, not source: ruff's markdown-embedded-code formatting
+# would otherwise rewrite illustrative snippets in these committed documents.
+extend-exclude = ["docs"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
