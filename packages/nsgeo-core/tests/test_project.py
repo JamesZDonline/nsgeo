@@ -7,6 +7,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
+from nsgeo.processing import StepStack, build_step
 from nsgeo.project import ProjectError, load_site, save_site
 
 from tests.synthetic import write_dzt
@@ -136,3 +137,23 @@ def test_dzt_outside_project_dir_is_a_project_error(tmp_path):
     line = Line.open(elsewhere, GridPlacement(grid_id="G1", axis="y", offset=0.0))
     with pytest.raises(ProjectError, match="not under the project directory"):
         save_site(Site(grids=[grid], lines=[line]), project / "survey.nsgeo.json")
+
+
+def test_stack_keyed_by_a_path_that_matches_no_line_is_refused(tmp_path, site):
+    """Lines live under data/, so a stack keyed by the bare filename matches
+    no line: silently dropping it on save would lose processing provenance."""
+    out = tmp_path / "survey.nsgeo.json"
+    site.stacks = {"L0.DZT": StepStack()}
+    with pytest.raises(ProjectError, match="match no line"):
+        save_site(site, out)
+    assert not out.exists()  # a bad save leaves no partial output
+
+
+def test_stacks_round_trip_in_a_nested_layout(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    st = StepStack()
+    st.append(build_step("dewow", window_ns=4.0))
+    site.stacks = {"data/L0.DZT": st}
+    save_site(site, out)
+    back = load_site(out)
+    assert back.stacks["data/L0.DZT"].to_dicts() == st.to_dicts()

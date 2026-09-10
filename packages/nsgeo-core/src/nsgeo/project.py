@@ -78,19 +78,25 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
     )
 
 
+def _line_key(line_path: str | Path, root: Path) -> str:
+    try:
+        return Path(line_path).resolve().relative_to(root).as_posix()
+    except ValueError:
+        raise ProjectError(
+            f"{line_path} is not under the project directory {root}; survey "
+            f"files must live inside the folder that holds survey.nsgeo.json "
+            f"so the project stays portable"
+        ) from None
+
+
 def save_site(site: Site, path: str | Path) -> None:
     path = Path(path)
     root = path.parent.resolve()
     lines_data = []
+    keys_written: list[str] = []
     for line in site.lines:
-        try:
-            rel = Path(line.path).resolve().relative_to(root).as_posix()
-        except ValueError:
-            raise ProjectError(
-                f"{line.path} is not under the project directory {root}; survey "
-                f"files must live inside the folder that holds survey.nsgeo.json "
-                f"so the project stays portable"
-            ) from None
+        rel = _line_key(line.path, root)
+        keys_written.append(rel)
         entry: dict[str, Any] = {
             "path": rel,
             "placement": _placement_to_dict(line.placement),
@@ -99,6 +105,14 @@ def save_site(site: Site, path: str | Path) -> None:
         if stack is not None:
             entry["stack"] = stack.to_dicts()
         lines_data.append(entry)
+
+    orphans = sorted(set(site.stacks) - set(keys_written))
+    if orphans:
+        raise ProjectError(
+            f"stacks are keyed by paths that match no line: {orphans}; "
+            f"expected one of {sorted(keys_written)}"
+        )
+
     doc = {
         "schema_version": SCHEMA_VERSION,
         "grids": [_grid_to_dict(g) for g in site.grids],
