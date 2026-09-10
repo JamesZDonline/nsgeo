@@ -182,10 +182,8 @@ Grid      # a coordinate frame, not a container
   azimuth: float               # degrees clockwise from CRS north to the
                                #   grid-local +Y axis
   size_x, size_y: float        # metres
-  line_spacing: float          # metres between adjacent line indices
-  axis: Literal["x", "y"]      # grid-local axis the lines run ALONG;
-                               #   "y" means line i sits at x = i * spacing
   crs: str                     # authority string, e.g. "EPSG:32616"
+  default_spacing: float       # import convenience ONLY, not geometric truth
 
 Site
   grids: list[Grid]
@@ -199,8 +197,21 @@ class Placement(Protocol):
     def trace_coords(self, n_traces, header) -> np.ndarray:   # (n_traces, 2|3) world
     def distance_along(self, n_traces, header) -> np.ndarray: # (n_traces,) metres
 
-GridPlacement(grid_id, index, reversed, start_offset)
+GridPlacement(
+    grid_id: str,
+    axis: Literal["x", "y"],   # grid-local axis this line runs ALONG
+    offset: float,             # metres along the OTHER axis. Geometric truth.
+    start_along: float,        # along-axis coordinate of trace 0
+    direction: int,            # +1 or -1
+    label: str | None,         # e.g. "line 12" — provenance, never geometry
+)
 TrackPlacement(coords, trace_marks)   # v1.1, from DZG/NMEA
+```
+
+For a grid line:
+
+```
+distance_along[i] = start_along + direction * (i / traces_per_metre)
 ```
 
 All consumers use only `trace_coords()` and `distance_along()` and never learn
@@ -222,10 +233,41 @@ must fail loudly at load.
 **Ownership runs one way.** `Line` owns its `Profile` channels; `Profile` holds
 no back-reference, keeping it a pure, picklable, trivially testable data object.
 
-**Zigzag is handled in geometry, never by flipping arrays.** A reversed line
-keeps traces in raw file order; `distance_along()` returns a decreasing
-coordinate. Flipping at read time would silently desynchronise the data from
-the file.
+**Zigzag is handled in geometry, never by flipping arrays.** A line collected
+against the axis keeps its traces in raw file order and carries `direction = -1`,
+so `distance_along()` returns a decreasing coordinate. Flipping at read time
+would silently desynchronise the data from the file.
+
+**Line position is stored in metres, not as an index times a spacing.** The
+grid does not own a single line direction or a single spacing, because real
+acquisition does not work that way:
+
+- **Cross-hatched grids.** Lines are run in one direction and then again
+  perpendicular across the same block, for better coverage where noise is high
+  or features are subtle. `axis` therefore belongs to the *placement*, not the
+  grid: one grid holds lines along x and lines along y simultaneously. This also
+  pays off later for timeslices, where two directions allow directional striping
+  to be cancelled rather than merely tolerated.
+- **Infill and irregular spacing.** Half-spacing infill lines over an anomaly
+  are just another offset in metres; as an index they would need a fractional
+  index or a second spacing.
+
+`label` retains the field name ("line 12") for display and provenance, while
+`offset` carries the geometry. Import computes `offset` from index times
+`default_spacing` as a convenience, then discards the coupling.
+
+**Lines need not span the grid.** `start_along` is the along-axis coordinate of
+trace 0, which covers a line that starts inside the grid rather than at its
+edge. A line that *stops* early — an obstruction, a parked car, a tree — needs
+no field at all: it simply has fewer traces, and its drawn extent follows from
+the trace count. A line interrupted and resumed past the obstruction is two
+`Line` objects sharing an axis and offset with different `start_along` values,
+which the model already expresses.
+
+No `known_length` field is included. Correcting odometer drift against a known
+line length is a real need, but it is a processing concern rather than a model
+one, and adding the field before the correction exists would leave it unused
+and unvalidated.
 
 **Three georeferencing methods, one representation.** GNSS corners,
 on-map digitising, and reading an existing polygon are three UI paths producing
@@ -236,6 +278,42 @@ grid squareness.
 **Lazy headers, on-demand samples.** A DZT header is a 1024-byte read, so
 opening a site with 60 lines reads ~60 KB and populates the tree and map layer
 immediately. Sample arrays load on demand into a bounded LRU cache.
+
+## 6a. DZT format notes, verified against real files
+
+Verified against ten SIR-4000 files (antenna `HS350US`, campus training run,
+2024). These are empirical findings from real data, not readings of the spec,
+and each one is a place a naive reader goes wrong:
+
+- **`rh_tag` is 2047 (0x07FF), not the 255 (0x00FF) that most format
+  descriptions cite.** The reader must accept the known tag values rather than
+  asserting one.
+- **Header size is `1024 * rh_data` when `rh_data < 1024`.** Here `rh_data` is
+  128, giving a 131,072-byte header — far larger than the 1024-byte minimum
+  header that a naive reader assumes. Assuming 1024 produced a non-integer trace
+  count (671.5) in all ten files; the correct rule produces exact integers in all
+  ten. **A non-integer trace count is the diagnostic**, and the reader should
+  treat it as a hard error rather than truncating, because truncation would turn
+  a wrong header size into plausible-looking but misaligned data.
+- **`rh_bits` is 32, and samples are signed `int32` centred near zero**
+  (means around -300 against a range of roughly +/-1.5e7). No zero-offset
+  correction applies for this variant, despite `rh_zero` being 105, which is
+  neither of the documented 0x80 / 0x8000 sentinels. `rh_zero` must not be
+  trusted blindly.
+- **Leading all-zero traces are normal** — recording starts before the cart
+  moves. These are data, not corruption, and must not be silently trimmed.
+- `rhf_spm` is 60 traces/m, giving line lengths of 10.1 to 11.1 m, consistent
+  with the recorded survey.
+- `.DZX` sidecars accompany the files and are not yet parsed. They are XML
+  metadata and may carry marks and line information worth reading in v1.1.
+
+### Other formats seen
+
+`.gpr` files from a second instrument are present in the local data directory
+for future reference. Structure so far: magic `GPR\x01`, a 16-byte file header,
+then fixed 195-byte records, 8-bit samples; `(filesize - 16) % 195 == 0` holds
+across all four samples. The originating instrument is not yet identified and no
+reader is planned for v1.
 
 ## 7. Processing
 
@@ -393,7 +471,10 @@ and no `X | Y` union syntax.
 **Test data.** A synthetic DZT *writer*, used only in tests, generates files
 with known headers and sample values for round-trip property tests without
 committing binaries. Synthetic files prove self-consistency only; real GSSI
-files are needed to catch real header quirks. Real survey files live in
+files are needed to catch real header quirks. The real files now in hand are ten
+single-channel SIR-4000 DZT files from a campus training run, with nine `.DZX`
+sidecars; no `.DZG` yet, so `TrackPlacement` remains unvalidated against real
+data. Real survey files live in
 `packages/nsgeo-core/tests/data/local/`, which is **gitignored**: DZT headers can
 carry GPS and DZG files certainly do, and publishing archaeological site
 locations in a public repository is not reversible. Survey data is additionally
@@ -480,5 +561,9 @@ that in advance is how the boundary erodes.
 - Default colormap greyscale black-high, bipolar symmetric about zero
 - Anomaly picking promoted into v1
 - Public repository
+- Line position stored in metres on the placement, not as index times spacing
+  on the grid, so one grid can hold cross-hatched lines in both directions
+- No `known_length` field; odometer correction deferred to processing
+- Header size rule `1024 * rh_data` verified empirically against ten real files
 - Single repository, with the core/plugin boundary enforced by a CI import test
   rather than by repository separation; split triggers documented in section 3
