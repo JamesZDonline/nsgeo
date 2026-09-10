@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.processing.base import Radargram, register
+from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
 @register
@@ -21,6 +21,36 @@ class TimeZero:
     @property
     def params(self) -> dict[str, Any]:
         return {"mode": self.mode, "sample": self.sample, "threshold": self.threshold}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="mode",
+                kind="choice",
+                label="Mode",
+                default="first_break",
+                choices=("first_break", "sample"),
+                help="Pick the first arrival automatically, or crop at a fixed sample.",
+            ),
+            ParamSpec(
+                name="sample",
+                kind="int",
+                label="Sample",
+                default=0,
+                min=0,
+                help="Used when mode is 'sample'.",
+            ),
+            ParamSpec(
+                name="threshold",
+                kind="float",
+                label="Threshold",
+                default=0.2,
+                min=0.0,
+                max=1.0,
+                help="Fraction of the peak mean amplitude.",
+            ),
+        )
 
     def _pick(self, rg: Radargram) -> int:
         if self.mode == "sample":

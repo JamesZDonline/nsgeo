@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.processing._util import running_mean
-from nsgeo.processing.base import Radargram, register
+from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
 @register
@@ -18,6 +18,20 @@ class Dewow:
     @property
     def params(self) -> dict[str, Any]:
         return {"window_ns": self.window_ns}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="window_ns",
+                kind="float",
+                label="Window",
+                default=4.0,
+                unit="ns",
+                min=0.0,
+                help="Running-mean window; must exceed one sample interval.",
+            ),
+        )
 
     def apply(self, rg: Radargram) -> Radargram:
         window = int(round(self.window_ns / rg.dt_ns))

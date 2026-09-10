@@ -168,7 +168,12 @@ def load_site(path: str | Path) -> Site:
             )
         lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
         if "stack" in entry:
-            stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+            try:
+                stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(
+                    f"invalid processing stack for line {entry['path']!r}: {exc}"
+                ) from exc
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks

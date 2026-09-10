@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.processing.base import Radargram, register
+from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 
 
 @register
@@ -31,6 +31,37 @@ class Bandpass:
             "high_mhz": self.high_mhz,
             "taper_frac": self.taper_frac,
         }
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="low_mhz",
+                kind="float",
+                label="Low",
+                default=REQUIRED,
+                unit="MHz",
+                min=0.0,
+                help="No default: a wrong passband silently filters real data.",
+            ),
+            ParamSpec(
+                name="high_mhz",
+                kind="float",
+                label="High",
+                default=REQUIRED,
+                unit="MHz",
+                min=0.0,
+                help="Must be below the Nyquist frequency of the radargram.",
+            ),
+            ParamSpec(
+                name="taper_frac",
+                kind="float",
+                label="Taper",
+                default=0.25,
+                min=0.0,
+                help="Cosine taper width as a fraction of the passband.",
+            ),
+        )
 
     def _mask(self, freqs_mhz: np.ndarray) -> np.ndarray:
         width = self.taper_frac * (self.high_mhz - self.low_mhz)

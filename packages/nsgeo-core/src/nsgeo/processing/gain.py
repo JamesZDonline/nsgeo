@@ -10,13 +10,14 @@ and are never recorded in a stack.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
 
 from nsgeo.processing._util import running_mean
-from nsgeo.processing.base import Radargram, register
+from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 
 
 @register
@@ -33,6 +34,23 @@ class GainAgc:
     @property
     def params(self) -> dict[str, Any]:
         return {"window_ns": self.window_ns, "target": self.target, "eps": self.eps}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0
+            ),
+            ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
+            ParamSpec(
+                name="eps",
+                kind="float",
+                label="Epsilon",
+                default=1e-12,
+                min=0.0,
+                help="Guards all-zero traces at the start of a line.",
+            ),
+        )
 
     def apply(self, rg: Radargram) -> Radargram:
         window = int(round(self.window_ns / rg.dt_ns))
@@ -60,6 +78,33 @@ class GainParametric:
     def params(self) -> dict[str, Any]:
         return {"mode": self.mode, "alpha": self.alpha, "exponent": self.exponent}
 
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="mode",
+                kind="choice",
+                label="Mode",
+                default="exponential",
+                choices=("exponential", "power"),
+            ),
+            ParamSpec(
+                name="alpha",
+                kind="float",
+                label="Alpha",
+                default=0.05,
+                unit="1/ns",
+                help="Exponential rate; used when mode is 'exponential'.",
+            ),
+            ParamSpec(
+                name="exponent",
+                kind="float",
+                label="Exponent",
+                default=1.0,
+                help="Used when mode is 'power'.",
+            ),
+        )
+
     def apply(self, rg: Radargram) -> Radargram:
         # Elapsed time from the first sample, so gain is 1.0 at the top
         # regardless of what t0 happens to be.
@@ -86,15 +131,31 @@ class GainCurve:
     name = "gain_curve"
 
     def __init__(self, points: Sequence[Sequence[float]]) -> None:
-        self.points: list[list[float]] = [[float(t), float(db)] for t, db in points]
+        pts = [[float(t), float(db)] for t, db in points]
+        if len(pts) < 2:
+            raise ValueError("gain_curve needs at least two control points")
+        if not all(math.isfinite(v) for p in pts for v in p):
+            raise ValueError("gain_curve control points must be finite")
+        self.points: list[list[float]] = pts
 
     @property
     def params(self) -> dict[str, Any]:
         return {"points": [list(p) for p in self.points]}
 
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="points",
+                kind="curve",
+                label="Gain curve",
+                default=REQUIRED,
+                unit="dB",
+                help="(two-way time ns, gain dB) control points on the viewer's time axis.",
+            ),
+        )
+
     def apply(self, rg: Radargram) -> Radargram:
-        if len(self.points) < 2:
-            raise ValueError("gain_curve needs at least two control points")
         pts = sorted(self.points, key=lambda p: p[0])
         times = np.array([p[0] for p in pts], dtype=float)
         decibels = np.array([p[1] for p in pts], dtype=float)

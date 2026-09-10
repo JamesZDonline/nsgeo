@@ -8,9 +8,9 @@ an obvious test failure instead of a silent bug.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
-from typing import Any, Protocol
+from typing import Any, ClassVar, Final, Protocol
 
 import numpy as np
 
@@ -56,6 +56,58 @@ class Radargram:
         )
 
 
+class _Required:
+    """Sentinel default meaning: the UI must ask; there is no safe value."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "REQUIRED"
+
+
+REQUIRED: Final = _Required()
+
+
+@dataclass(frozen=True)
+class ParamSpec:
+    """One parameter of a step, declared so a front end can build a widget.
+
+    `kind` decides the widget: float and int are numeric entries with optional
+    bounds and a unit, choice is a combo box over `choices`, curve is the gain
+    curve editor. `default` is a value or REQUIRED.
+    """
+
+    KINDS: ClassVar[tuple[str, ...]] = ("float", "int", "choice", "curve")
+
+    name: str
+    kind: str
+    label: str
+    default: Any
+    unit: str | None = None
+    min: float | None = None
+    max: float | None = None
+    choices: tuple[str, ...] = field(default=())
+    help: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind not in self.KINDS:
+            raise ValueError(f"unknown param kind {self.kind!r}; expected one of {self.KINDS}")
+        if self.kind == "choice" and not self.choices:
+            raise ValueError(f"param {self.name!r} is a choice but declares no choices")
+        if self.kind != "choice" and self.choices:
+            raise ValueError(f"param {self.name!r} is {self.kind!r} but declares choices")
+        if (
+            self.kind == "choice"
+            and self.default is not REQUIRED
+            and self.default not in self.choices
+        ):
+            raise ValueError(f"param {self.name!r} default {self.default!r} is not in choices")
+
+    @property
+    def required(self) -> bool:
+        return self.default is REQUIRED
+
+
 class Step(Protocol):
     """A pure function of (parameters, radargram). No I/O, no hidden state."""
 
@@ -63,6 +115,9 @@ class Step(Protocol):
 
     @property
     def params(self) -> dict[str, Any]: ...
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]: ...
 
     def apply(self, rg: Radargram) -> Radargram: ...
 
@@ -94,3 +149,13 @@ def get_step(name: str) -> type[Any]:
 
 def build_step(name: str, **params: Any) -> Any:
     return get_step(name)(**params)
+
+
+def default_params(name: str) -> dict[str, Any]:
+    """Constructor kwargs for every parameter that has a real default."""
+    return {s.name: s.default for s in get_step(name).schema() if not s.required}
+
+
+def required_params(name: str) -> tuple[str, ...]:
+    """Parameters the UI must collect before the step can be built."""
+    return tuple(s.name for s in get_step(name).schema() if s.required)
