@@ -29,9 +29,15 @@ class Normalizer(Protocol):
 class PercentileClip:
     """Limit = the given percentile of |data|.
 
-    Above `max_samples` values, a strided subsample is used. On a 512 x 6301
-    radargram the full percentile costs about 120 ms; the subsample keeps a
-    display-gain drag interactive and is deterministic for a given array.
+    Above `max_samples` values, a strided subsample is used, which is what
+    keeps a display-gain drag interactive on a full-size radargram; the plan's
+    ~120 ms normalise + LUT budget on a 512 x 6301 radargram is for that whole
+    render, not for this method alone. Deterministic for a given array.
+
+    NaN and infinite samples (e.g. an AGC divide-by-zero on an all-zero
+    leading trace) are excluded before the percentile is taken, so one bad
+    sample cannot collapse the limit to the all-zero fallback and blow the
+    display out to saturated black/white.
     """
 
     percentile: float = 99.0
@@ -47,9 +53,10 @@ class PercentileClip:
         flat = np.asarray(data, dtype=float).ravel()
         if flat.size > self.max_samples:
             flat = flat[:: int(math.ceil(flat.size / self.max_samples))]
-        if flat.size == 0:
+        finite = flat[np.isfinite(flat)]
+        if finite.size == 0:
             return 1.0
-        lim = float(np.percentile(np.abs(flat), self.percentile))
+        lim = float(np.percentile(np.abs(finite), self.percentile))
         return lim if lim > 0.0 else 1.0
 
 
@@ -112,11 +119,29 @@ def colormap(name: str) -> np.ndarray:
 
 
 def to_index8(data: np.ndarray, limit: float) -> np.ndarray:
-    """Map amplitudes to 0..255 with -limit -> 0, 0 -> 128, +limit -> 255."""
+    """Map amplitudes to 0..255 with -limit -> 0, 0 -> 128, +limit -> 255.
+
+    A NaN amplitude (e.g. an AGC divide-by-zero on an all-zero leading trace)
+    maps to the neutral middle of the table rather than a saturated extreme,
+    so a processing artifact never reads as a reflector; the isnan/any check
+    is skipped past at nearly no cost on the common, NaN-free path, so
+    guarding against it doesn't tax every render. Building `scaled` as one
+    array reused in place (rather than a chain of temporaries) is what keeps
+    this close to the plan's normalise + LUT budget; none of the in-place
+    ops touch `data` itself -- `data / limit` always allocates a new array
+    before it, so the caller's array is never mutated.
+    """
     if not limit > 0.0:
         raise ValueError(f"limit must be positive, got {limit}")
-    scaled = (np.asarray(data, dtype=float) / limit + 1.0) * 127.5
-    return np.round(np.clip(scaled, 0.0, 255.0)).astype(np.uint8)
+    scaled = np.asarray(data, dtype=np.float64) / limit
+    scaled += 1.0
+    scaled *= 127.5
+    nan_mask = np.isnan(scaled)
+    if nan_mask.any():
+        scaled[nan_mask] = 127.5
+    np.clip(scaled, 0.0, 255.0, out=scaled)
+    np.rint(scaled, out=scaled)
+    return scaled.astype(np.uint8)
 
 
 def to_rgb8(data: np.ndarray, limit: float, lut: np.ndarray) -> np.ndarray:
@@ -124,13 +149,20 @@ def to_rgb8(data: np.ndarray, limit: float, lut: np.ndarray) -> np.ndarray:
     lut = np.asarray(lut)
     if lut.shape != (256, 3) or lut.dtype != np.uint8:
         raise ValueError(f"lut must be a (256, 3) uint8 table, got {lut.shape} {lut.dtype}")
-    return np.ascontiguousarray(lut[to_index8(data, limit)])
+    return np.ascontiguousarray(lut.take(to_index8(data, limit), axis=0))
 
 
 def decimate_columns(data: np.ndarray, max_width: int) -> np.ndarray:
     """Block-mean along the trace axis until there are at most `max_width`
     columns. Happens after processing, never before, so the view is a
-    downsampled real result. Returns `data` itself when already narrow."""
+    downsampled real result. Returns `data` itself when already narrow.
+
+    Full blocks are averaged with one reduction over whole blocks; only the
+    (at most one) ragged tail block gets its own plain mean. That is
+    equivalent to NaN-padding the whole array to a multiple of the block
+    size and taking `nanmean` throughout, but without paying NaN-detection
+    overhead on every element of every block.
+    """
     if max_width < 1:
         raise ValueError(f"max_width must be >= 1, got {max_width}")
     n = data.shape[1]
@@ -138,6 +170,11 @@ def decimate_columns(data: np.ndarray, max_width: int) -> np.ndarray:
         return data
     block = int(math.ceil(n / max_width))
     n_blocks = int(math.ceil(n / block))
-    padded = np.full((data.shape[0], n_blocks * block), np.nan)
-    padded[:, :n] = data
-    return np.nanmean(padded.reshape(data.shape[0], n_blocks, block), axis=2)
+    full_blocks = n // block
+    out = np.empty((data.shape[0], n_blocks), dtype=np.float64)
+    if full_blocks:
+        full = data[:, : full_blocks * block].reshape(data.shape[0], full_blocks, block)
+        out[:, :full_blocks] = full.mean(axis=2)
+    if full_blocks < n_blocks:
+        out[:, full_blocks] = data[:, full_blocks * block :].mean(axis=1)
+    return out
