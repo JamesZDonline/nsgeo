@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
 from nsgeo.processing._util import running_mean
 from nsgeo.processing.base import (
     Radargram,
@@ -10,6 +12,8 @@ from nsgeo.processing.base import (
     get_step,
     register,
 )
+
+from tests.synthetic import write_dzt
 
 
 def rg(n_samples=8, n_traces=4, dt_ns=0.2, t0_ns=0.0):
@@ -119,3 +123,20 @@ def test_radargram_is_hashable_with_identity_equality():
     assert r == r and hash(r) == hash(r)
     assert r != Radargram(data=r.data, dt_ns=r.dt_ns, t0_ns=r.t0_ns)
     assert len({r, r}) == 1
+
+
+def test_from_profile_casts_to_float_and_copies_the_header_axis(tmp_path):
+    """The seam between the data model (int32 Profile) and processing
+    (float Radargram): real files feed this exact path."""
+    path = tmp_path / "L0.DZT"
+    write_dzt(path, np.zeros((512, 4), dtype=np.int32), range_ns=102.4)
+    line = Line.open(path, GridPlacement(grid_id="G1", axis="y", offset=0.0))
+    profile = line.load()[0]
+
+    rg_out = Radargram.from_profile(profile)
+
+    assert np.issubdtype(rg_out.data.dtype, np.floating)
+    assert rg_out.dt_ns == pytest.approx(profile.header.dt_ns)
+    assert rg_out.t0_ns == pytest.approx(profile.header.position_ns)
+    assert rg_out.n_traces == profile.n_traces
+    assert rg_out.data is not profile.data
