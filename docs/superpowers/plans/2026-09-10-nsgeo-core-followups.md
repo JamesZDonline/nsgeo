@@ -26,7 +26,8 @@ design decision the user should make. Nothing here is a known bug in shipped beh
 - **`Site.stacks` keys are relative POSIX paths from the `survey.nsgeo.json` directory**, not
   filenames and not `Line.path`. `Site` does not know the project root; keep the JSON path
   alongside the `Site`, or use `project._line_key`. A mismatched key now raises
-  `ProjectError` (it used to be dropped silently).
+  `ProjectError` (it used to be dropped silently). For an out-of-tree line saved with
+  `allow_absolute=True`, the key is the absolute POSIX string (`Path(...).resolve().as_posix()`).
 - **Never mutate a step object in place.** `StepStack.entries` hands back live objects; editing
   one bypasses cache invalidation and desynchronises `to_dicts()` from the cached result.
   Use `replace_step(i, build_step(name, **params))` — that is also the fast path.

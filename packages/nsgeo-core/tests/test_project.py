@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -157,3 +158,84 @@ def test_stacks_round_trip_in_a_nested_layout(tmp_path, site):
     save_site(site, out)
     back = load_site(out)
     assert back.stacks["data/L0.DZT"].to_dicts() == st.to_dicts()
+
+
+def _grid():
+    return Grid(
+        id="G1",
+        origin=(0.0, 0.0),
+        azimuth=0.0,
+        size_x=20.0,
+        size_y=20.0,
+        crs="EPSG:32616",
+        default_spacing=0.5,
+    )
+
+
+def _line_at(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_dzt(path, np.zeros((512, 60), dtype=np.int32))
+    return Line.open(path, GridPlacement(grid_id="G1", axis="y", offset=0.0))
+
+
+def test_allow_absolute_stores_an_absolute_posix_path_for_an_out_of_tree_file(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    line = _line_at(tmp_path / "elsewhere" / "L9.DZT")
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[line]), out, allow_absolute=True)
+    stored = json.loads(out.read_text())["lines"][0]["path"]
+    assert Path(stored).is_absolute()
+    assert stored == line.path.resolve().as_posix()
+    assert "\\" not in stored
+
+
+def test_absolute_path_round_trips_through_load(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    line = _line_at(tmp_path / "elsewhere" / "L9.DZT")
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[line]), out, allow_absolute=True)
+    back = load_site(out)
+    assert back.lines[0].path.resolve() == line.path.resolve()
+    assert back.lines[0].n_traces == 60
+
+
+def test_in_tree_files_stay_relative_even_when_absolute_is_allowed(tmp_path, site):
+    """The option is a fallback for out-of-tree files, not a switch to absolute."""
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out, allow_absolute=True)
+    stored = [ln["path"] for ln in json.loads(out.read_text())["lines"]]
+    assert stored == ["data/L0.DZT", "data/L1.DZT", "data/L2.DZT"]
+
+
+def test_mixed_project_keeps_in_tree_relative_and_out_of_tree_absolute(tmp_path):
+    project = tmp_path / "project"
+    inside = _line_at(project / "data" / "L0.DZT")
+    outside = _line_at(tmp_path / "elsewhere" / "L9.DZT")
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[inside, outside]), out, allow_absolute=True)
+    stored = [ln["path"] for ln in json.loads(out.read_text())["lines"]]
+    assert stored[0] == "data/L0.DZT"
+    assert Path(stored[1]).is_absolute()
+    assert len(load_site(out).lines) == 2
+
+
+def test_stack_for_an_absolute_line_is_keyed_by_the_absolute_string(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    line = _line_at(tmp_path / "elsewhere" / "L9.DZT")
+    key = line.path.resolve().as_posix()
+    st = StepStack()
+    st.append(build_step("dewow", window_ns=4.0))
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[line], stacks={key: st}), out, allow_absolute=True)
+    assert load_site(out).stacks[key].to_dicts() == st.to_dicts()
+
+
+def test_out_of_tree_error_names_the_opt_in(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    line = _line_at(tmp_path / "elsewhere" / "L9.DZT")
+    with pytest.raises(ProjectError, match="allow_absolute=True"):
+        save_site(Site(grids=[_grid()], lines=[line]), project / "survey.nsgeo.json")

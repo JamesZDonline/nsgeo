@@ -455,6 +455,12 @@ assignments, placements, processing stacks, relative DZT paths, and a schema
 version. Human-readable, diffable, git-friendly, and readable by core with no
 QGIS present.
 
+Files outside the project directory are refused by default. `save_site(..., allow_absolute=True)`
+stores such a file's absolute POSIX path instead, at the explicit cost of tying the survey file to
+that machine's mount points and drive letters; in-tree files stay relative regardless. Decided
+after Plan 1 review: shared-drive raw data is a normal layout, and an explicit opt-in beats both
+a silent fallback and a hard refusal.
+
 The plugin derives a GeoPackage of line geometries from it for map display. That
 layer is regenerable and explicitly not the source of truth.
 
@@ -567,3 +573,5 @@ that in advance is how the boundary erodes.
 - Header size rule `1024 * rh_data` verified empirically against ten real files
 - Single repository, with the core/plugin boundary enforced by a CI import test
   rather than by repository separation; split triggers documented in section 3
+- Absolute paths for out-of-tree survey files are supported as an explicit `allow_absolute` opt-in
+  on `save_site`, never as a silent fallback (2026-09-10, post-Plan-1 user decision)

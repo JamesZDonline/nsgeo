@@ -78,24 +78,42 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
     )
 
 
-def _line_key(line_path: str | Path, root: Path) -> str:
+def _line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
+    """The string a line is stored and keyed by.
+
+    Relative POSIX when the file is under `root`, which keeps the project
+    portable. For a file outside `root`: its absolute POSIX path when
+    `allow_absolute` is set, otherwise a ProjectError.
+    """
+    resolved = Path(line_path).resolve()
     try:
-        return Path(line_path).resolve().relative_to(root).as_posix()
+        return resolved.relative_to(root).as_posix()
     except ValueError:
+        if allow_absolute:
+            return resolved.as_posix()
         raise ProjectError(
             f"{line_path} is not under the project directory {root}; survey "
             f"files must live inside the folder that holds survey.nsgeo.json "
-            f"so the project stays portable"
+            f"so the project stays portable, or pass allow_absolute=True to "
+            f"record an absolute path tied to this machine"
         ) from None
 
 
-def save_site(site: Site, path: str | Path) -> None:
+def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> None:
+    """Write `site` to `path` as the survey.nsgeo.json source of truth.
+
+    Paths are stored relative to the JSON file with POSIX separators so the
+    project directory can be moved intact. A file outside that directory is
+    refused unless `allow_absolute=True`, in which case its absolute POSIX path
+    is stored — tying the survey file to this machine's mount points and drive
+    letters. In-tree files stay relative even when the option is on.
+    """
     path = Path(path)
     root = path.parent.resolve()
     lines_data = []
     keys_written: list[str] = []
     for line in site.lines:
-        rel = _line_key(line.path, root)
+        rel = _line_key(line.path, root, allow_absolute=allow_absolute)
         keys_written.append(rel)
         entry: dict[str, Any] = {
             "path": rel,
@@ -140,7 +158,8 @@ def load_site(path: str | Path) -> Site:
     lines = []
     stacks: dict[str, StepStack] = {}
     for entry in doc.get("lines", []):
-        dzt = root / entry["path"]
+        stored = Path(entry["path"])
+        dzt = stored if stored.is_absolute() else root / stored
         if not dzt.exists():
             raise ProjectError(f"referenced file does not exist: {dzt}")
         lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
