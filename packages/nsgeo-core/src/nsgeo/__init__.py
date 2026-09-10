@@ -1,0 +1,5 @@
+"""nsgeo — near-surface geophysics core library."""
+
+from __future__ import annotations
+
+__version__ = "0.1.0.dev0"
