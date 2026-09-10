@@ -5,6 +5,25 @@
 packages/nsgeo-core/tests/data/local/*
 !packages/nsgeo-core/tests/data/local/README.md
 
+# Belt and braces: survey data is ignored by EXTENSION anywhere in the tree,
+# not just inside the drop directory. A stray file in the repo root or copied
+# into fixtures/ would otherwise be committed silently.
+#
+# Committing a scrubbed fixture is therefore a deliberate act requiring
+# `git add -f`. That is intentional.
+#
+# GSSI
+*.[dD][zZ][tT]
+*.[dD][zZ][gG]
+*.[dD][zZ][xX]
+# MALA
+*.[rR][dD]3
+*.[rR][dD]7
+*.[rR][aA][dD]
+*.[cC][oO][rR]
+# Sensors & Software
+*.[dD][tT]1
+
 # Python
 __pycache__/
 *.py[cod]

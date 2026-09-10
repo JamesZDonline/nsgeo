@@ -4,6 +4,11 @@ Drop real `.DZT` / `.DZG` files here for development and manual testing.
 
 Everything in this directory is gitignored except this README.
 
+Survey data is *also* ignored by extension anywhere in the repository
+(`.DZT`, `.DZG`, `.DZX`, and the MALA and Sensors & Software equivalents), so a
+file dropped in the wrong place is still caught. Committing a scrubbed fixture
+requires `git add -f` — deliberately.
+
 ## Why
 
 DZT headers can contain GPS information, and DZG files contain per-trace

@@ -376,7 +376,11 @@ committing binaries. Synthetic files prove self-consistency only; real GSSI
 files are needed to catch real header quirks. Real survey files live in
 `packages/nsgeo-core/tests/data/local/`, which is **gitignored**: DZT headers can
 carry GPS and DZG files certainly do, and publishing archaeological site
-locations in a public repository is not reversible. Committed fixtures under
+locations in a public repository is not reversible. Survey data is additionally
+ignored by extension across the whole tree — GSSI `.DZT`/`.DZG`/`.DZX`, MALA
+`.rd3`/`.rd7`/`.rad`/`.cor`, Sensors & Software `.DT1` — because a path-scoped
+rule does not catch a file dropped in the wrong directory. Committing a fixture
+therefore requires `git add -f`, making it a deliberate act. Committed fixtures under
 `tests/data/fixtures/` must be synthetic, or real files truncated and scrubbed
 of coordinates after inspection.
 
