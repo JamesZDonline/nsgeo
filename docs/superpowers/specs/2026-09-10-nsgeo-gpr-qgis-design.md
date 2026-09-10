@@ -157,7 +157,15 @@ Line      # one collected survey line
   placement: Placement
 
 Grid      # a coordinate frame, not a container
-  id, origin, azimuth, size_x, size_y, line_spacing, axis, crs
+  id: str
+  origin: tuple[float, float]  # world coords of grid-local (0, 0)
+  azimuth: float               # degrees clockwise from CRS north to the
+                               #   grid-local +Y axis
+  size_x, size_y: float        # metres
+  line_spacing: float          # metres between adjacent line indices
+  axis: Literal["x", "y"]      # grid-local axis the lines run ALONG;
+                               #   "y" means line i sits at x = i * spacing
+  crs: str                     # authority string, e.g. "EPSG:32616"
 
 Site
   grids: list[Grid]
@@ -412,6 +420,21 @@ Repository. This is only safe because the core is numpy-only.
 
 M1 through M3 involve no QGIS, so they are fast to write and properly testable
 rather than verified by clicking.
+
+### Plan decomposition
+
+Nine milestones is too much for one implementation plan. This splits cleanly at
+the package boundary:
+
+- **Plan 1 — core (M0 to M3).** No QGIS anywhere. Ends with a tested, installable
+  `nsgeo` that reads DZT files, models a georeferenced survey, and applies
+  processing steps, verified by pytest rather than by hand.
+- **Plan 2 — plugin (M4 to M9).** Consumes Plan 1's public API. Ends with an
+  installable zip.
+
+Plan 2 should not be written until Plan 1 is done, because the plugin's design
+depends on what the core's API actually turns out to look like, and guessing at
+that in advance is how the boundary erodes.
 
 ## 14. Decisions log
 
