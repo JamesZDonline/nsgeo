@@ -33,6 +33,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-qgis/
 venv/
 .pytest_cache/
 .mypy_cache/

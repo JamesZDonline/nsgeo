@@ -1,0 +1,16 @@
+[general]
+name=nsgeo
+qgisMinimumVersion=3.40
+supportsQt6=True
+description=Near-surface geophysics: GPR profiles in map context
+about=Load GSSI DZT files, organise them into georeferenced grids, view and process radargrams, and navigate them from the QGIS map. Core library is numpy-only and vendored into this plugin.
+version=0.1.0
+author=James Zimmer-Dauphinee
+email=james.r.zimmer-dauphinee@vanderbilt.edu
+repository=https://github.com/JamesZDonline/nsgeo
+tracker=https://github.com/JamesZDonline/nsgeo/issues
+homepage=https://github.com/JamesZDonline/nsgeo
+category=Plugins
+tags=gpr,geophysics,archaeology,radar,near-surface
+hasProcessingProvider=no
+experimental=True

@@ -16,6 +16,20 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e "./packages/nsgeo-core[dev]"
       - run: python -m pytest packages/nsgeo-core/tests -v
+      - run: python -m pytest packages/nsgeo-qgis/tests/pure -v
+
+  plugin-qgis:
+    runs-on: ubuntu-latest
+    container: qgis/qgis:ltr
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QGIS_PREFIX_PATH: /usr
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 -m pip --version || (apt-get update && apt-get install -y python3-pip)
+          python3 -m pip install --break-system-packages pytest
+      - run: python3 -m pytest packages/nsgeo-qgis/tests -v
 
   lint:
     runs-on: ubuntu-latest
