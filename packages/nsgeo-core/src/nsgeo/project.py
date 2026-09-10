@@ -20,6 +20,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
+from nsgeo.velocity import VelocityModel
 
 SCHEMA_VERSION = 1
 
@@ -29,7 +30,7 @@ class ProjectError(Exception):
 
 
 def _grid_to_dict(grid: Grid) -> dict[str, Any]:
-    return {
+    doc: dict[str, Any] = {
         "id": grid.id,
         "origin": list(grid.origin),
         "azimuth": grid.azimuth,
@@ -38,6 +39,9 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
         "crs": grid.crs,
         "default_spacing": grid.default_spacing,
     }
+    if grid.velocity is not None:
+        doc["velocity"] = grid.velocity.to_dict()
+    return doc
 
 
 def _grid_from_dict(doc: dict[str, Any]) -> Grid:
@@ -49,6 +53,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         size_y=float(doc["size_y"]),
         crs=doc["crs"],
         default_spacing=float(doc["default_spacing"]),
+        velocity=VelocityModel.from_dict(doc["velocity"]) if "velocity" in doc else None,
     )
 
 
@@ -124,6 +129,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         stack = site.stacks.get(key)
         if stack is not None:
             entry["stack"] = stack.to_dicts()
+        if line.velocity is not None:
+            entry["velocity"] = line.velocity.to_dict()
         lines_data.append(entry)
 
     orphans = sorted(set(site.stacks) - set(keys_written))
@@ -166,7 +173,15 @@ def load_site(path: str | Path) -> Site:
             raise ProjectError(
                 f"referenced file does not exist: {dzt} (stored as {entry['path']!r})"
             )
-        lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
+        lines.append(
+            Line.open(
+                dzt,
+                _placement_from_dict(entry["placement"]),
+                velocity=VelocityModel.from_dict(entry["velocity"])
+                if "velocity" in entry
+                else None,
+            )
+        )
         if "stack" in entry:
             try:
                 stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])

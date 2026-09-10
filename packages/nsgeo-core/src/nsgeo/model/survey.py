@@ -18,6 +18,7 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.velocity import VelocityModel
 
 #: How many lines' sample arrays stay resident. A 30x30 m grid at 0.5 m
 #: spacing is about 100 MB in total, so a bound of 16 lines is generous
@@ -70,9 +71,10 @@ class Line:
     header: DztHeader
     placement: Placement
     n_traces: int
+    velocity: VelocityModel | None = None
 
     @classmethod
-    def open(cls, path: Path, placement: Placement) -> Line:
+    def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:
         """Read the header and derive the trace count. Reads 1024 bytes plus
         a stat, regardless of file size."""
         path = Path(path)
@@ -82,6 +84,7 @@ class Line:
             header=header,
             placement=placement,
             n_traces=trace_count(path, header),
+            velocity=velocity,
         )
 
     def load(self) -> list[Profile]:
