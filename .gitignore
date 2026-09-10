@@ -1,0 +1,29 @@
+# Real survey data — never committed.
+# DZT headers can carry GPS, and DZG files certainly do. Publishing
+# archaeological site locations is not reversible. Committed fixtures must be
+# synthetic, or truncated and coordinate-scrubbed after inspection.
+packages/nsgeo-core/tests/data/local/*
+!packages/nsgeo-core/tests/data/local/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# QGIS
+*.qgs~
+*.qgz~
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
