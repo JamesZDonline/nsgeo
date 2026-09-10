@@ -18,6 +18,11 @@ def test_vendored_core_wins_when_present(tmp_path):
     pkg = tmp_path / "packages" / "nsgeo-qgis" / "nsgeo_qgis"
     (pkg / "_vendor" / "nsgeo").mkdir(parents=True)
     (pkg / "_vendor" / "nsgeo" / "__init__.py").write_text("")
+    # The sibling development checkout is present too, so this actually
+    # exercises precedence rather than passing under either order.
+    src = tmp_path / "packages" / "nsgeo-core" / "src"
+    (src / "nsgeo").mkdir(parents=True)
+    (src / "nsgeo" / "__init__.py").write_text("")
     assert _find_core(pkg) == pkg / "_vendor"
 
 

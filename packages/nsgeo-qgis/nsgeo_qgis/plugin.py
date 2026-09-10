@@ -41,6 +41,7 @@ class NsgeoPlugin:
         self.docks.clear()
         for action in self.actions:
             self.iface.removePluginMenu(MENU, action)
+            action.deleteLater()
         self.actions.clear()
         if self.toolbar is not None:
             self.toolbar.setParent(None)

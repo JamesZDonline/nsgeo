@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,9 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     from tests.synthetic import write_dzt
 
     folder.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(abs(hash(name)) % (2**32))
+    # crc32, not hash(): str hashing is salted per-process (PYTHONHASHSEED),
+    # so the same `name` would otherwise seed different data every run.
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
     data = (rng.normal(size=(512, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000  # a flat band, so background removal has something to remove
     path = folder / name

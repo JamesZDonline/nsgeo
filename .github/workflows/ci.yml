@@ -29,6 +29,8 @@ jobs:
       - run: |
           python3 -m pip --version || (apt-get update && apt-get install -y python3-pip)
           python3 -m pip install --break-system-packages pytest
+      - name: assert QGIS bindings are actually importable
+        run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
       - run: python3 -m pytest packages/nsgeo-qgis/tests -v
 
   lint:

@@ -52,22 +52,38 @@ def test_no_direct_qt_or_forbidden_imports() -> None:
     assert not offenders, "forbidden imports:\n" + "\n".join(offenders)
 
 
+def _processing_offenders(path: Path) -> list[tuple[int, str]]:
+    """(lineno, message) for each disallowed use of nsgeo.processing in `path`.
+
+    Standalone so it can be proven against a scratch file directly, not only
+    through the package tree the test below scans.
+    """
+    offenders: list[tuple[int, str]] = []
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module == "nsgeo.processing":
+                bad = {a.name for a in node.names} - ALLOWED_FROM_PROCESSING
+                if bad:
+                    offenders.append((node.lineno, str(sorted(bad))))
+            elif node.module.startswith("nsgeo.processing."):
+                offenders.append((node.lineno, node.module))
+            elif node.module == "nsgeo" and any(a.name == "processing" for a in node.names):
+                # `from nsgeo import processing` (or `... as X`) reaches the
+                # same internals as `import nsgeo.processing` — both forbidden.
+                offenders.append((node.lineno, "from nsgeo import processing"))
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.startswith("nsgeo.processing"):
+                    offenders.append((node.lineno, f"import {a.name}"))
+    return offenders
+
+
 def test_processing_is_used_only_through_its_public_surface() -> None:
     offenders = []
     for path in _py_files():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                if node.module == "nsgeo.processing":
-                    bad = {a.name for a in node.names} - ALLOWED_FROM_PROCESSING
-                    if bad:
-                        offenders.append(f"{path.relative_to(SRC)}:{node.lineno}: {sorted(bad)}")
-                elif node.module.startswith("nsgeo.processing."):
-                    offenders.append(f"{path.relative_to(SRC)}:{node.lineno}: {node.module}")
-            elif isinstance(node, ast.Import):
-                for a in node.names:
-                    if a.name.startswith("nsgeo.processing"):
-                        offenders.append(f"{path.relative_to(SRC)}:{node.lineno}: import {a.name}")
+        for lineno, msg in _processing_offenders(path):
+            offenders.append(f"{path.relative_to(SRC)}:{lineno}: {msg}")
     assert not offenders, "processing internals imported by the plugin:\n" + "\n".join(offenders)
 
 
@@ -75,7 +91,7 @@ def test_package_init_imports_no_qgis_at_module_level() -> None:
     """The pure test tier and the zip's shim both import the package without
     a QGIS runtime. classFactory imports qgis lazily."""
     tree = ast.parse((SRC / "__init__.py").read_text(encoding="utf-8"))
-    for node in tree.body:
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert not any(a.name.split(".")[0] == "qgis" for a in node.names)
         if isinstance(node, ast.ImportFrom):
