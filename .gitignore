@@ -23,6 +23,8 @@ packages/nsgeo-core/tests/data/local/*
 *.[cC][oO][rR]
 # Sensors & Software
 *.[dD][tT]1
+# Utsi / Groundvue and other .gpr-writing systems
+*.[gG][pP][rR]
 
 # Python
 __pycache__/
