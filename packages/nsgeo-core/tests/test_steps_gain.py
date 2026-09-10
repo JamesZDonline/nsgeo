@@ -54,6 +54,28 @@ def test_power_gain_is_one_at_the_first_sample():
     assert out.data[99, 0] > 1.0
 
 
+def test_parametric_gain_is_one_at_the_first_row_regardless_of_t0():
+    """Real files have t0_ns around -11.09 ns; gain_parametric uses elapsed
+    time from the first row, not absolute two-way time, so it stays 1.0 at
+    row 0 no matter what t0 is."""
+    rg = Radargram(data=np.ones((50, 2)), dt_ns=0.2, t0_ns=-11.0)
+    out_power = build_step("gain_parametric", mode="power", exponent=2.0).apply(rg)
+    assert out_power.data[0, 0] == 1.0
+    out_exp = build_step("gain_parametric", mode="exponential", alpha=0.1).apply(rg)
+    assert out_exp.data[0, 0] == 1.0
+
+
+def test_curve_uses_absolute_two_way_time():
+    """Unlike gain_parametric, gain_curve places control points on the
+    absolute two-way time axis (times_ns, which includes t0), matching what
+    a profile viewer draws. dt_ns=1.0, t0_ns=-11.0 -> row 11 is t=0 ns."""
+    rg = Radargram(data=np.ones((100, 1)), dt_ns=1.0, t0_ns=-11.0)
+    out = build_step("gain_curve", points=[[0.0, 0.0], [10.0, 20.0]]).apply(rg)
+    assert out.data[11, 0] == pytest.approx(1.0)  # t=0 ns -> 0 dB
+    assert out.data[0, 0] == pytest.approx(1.0)  # t=-11 ns, below range -> held at 0 dB
+    assert out.data[21, 0] == pytest.approx(10.0)  # t=10 ns -> 20 dB
+
+
 def test_parametric_rejects_unknown_mode():
     with pytest.raises(ValueError, match="mode"):
         build_step("gain_parametric", mode="wishful").apply(

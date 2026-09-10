@@ -100,5 +100,7 @@ class GainCurve:
         decibels = np.array([p[1] for p in pts], dtype=float)
         # np.interp holds the end values outside the control range, which is
         # the behaviour a user dragging a curve expects.
+        # Absolute two-way time (times_ns includes t0), unlike gain_parametric's elapsed time:
+        # control points are placed on the same axis the profile viewer draws.
         db = np.interp(rg.times_ns(), times, decibels)
         return rg.replace(data=rg.data * (10.0 ** (db / 20.0))[:, None])
