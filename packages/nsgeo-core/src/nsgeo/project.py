@@ -17,6 +17,7 @@ from typing import Any
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
+from nsgeo.processing.stack import StepStack
 
 SCHEMA_VERSION = 1
 
@@ -90,12 +91,14 @@ def save_site(site: Site, path: str | Path) -> None:
                 f"files must live inside the folder that holds survey.nsgeo.json "
                 f"so the project stays portable"
             ) from None
-        lines_data.append(
-            {
-                "path": rel,
-                "placement": _placement_to_dict(line.placement),
-            }
-        )
+        entry: dict[str, Any] = {
+            "path": rel,
+            "placement": _placement_to_dict(line.placement),
+        }
+        stack = site.stacks.get(rel)
+        if stack is not None:
+            entry["stack"] = stack.to_dicts()
+        lines_data.append(entry)
     doc = {
         "schema_version": SCHEMA_VERSION,
         "grids": [_grid_to_dict(g) for g in site.grids],
@@ -121,12 +124,16 @@ def load_site(path: str | Path) -> Site:
     root = path.parent.resolve()
     grids = [_grid_from_dict(g) for g in doc.get("grids", [])]
     lines = []
+    stacks: dict[str, StepStack] = {}
     for entry in doc.get("lines", []):
         dzt = root / entry["path"]
         if not dzt.exists():
             raise ProjectError(f"referenced file does not exist: {dzt}")
         lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
+        if "stack" in entry:
+            stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
 
     site = Site(grids=grids, lines=lines)
+    site.stacks = stacks
     site.validate()
     return site

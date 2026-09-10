@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -99,6 +100,7 @@ class Line:
 class Site:
     grids: list[Grid] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
+    stacks: dict[str, Any] = field(default_factory=dict)
 
     @property
     def frames(self) -> dict[str, Grid]:
