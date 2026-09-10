@@ -66,6 +66,26 @@ Rejected alternatives:
   the extraction cost lands exactly when the second instrument is added.
 - **Core library plus standalone viewer first.** Cleanest core, but defers the
   one feature that motivates the project.
+- **Two separate repositories.** Rejected for now, not on principle. The core's
+  API does not exist yet and will churn through M4 to M7; every discovery that
+  the plugin needs something the core does not expose would become two pull
+  requests and a version bump, at exactly the stage with the most such
+  discoveries. The plugin also vendors the core's *source tree* into its zip,
+  which is trivial in one repo and needs a submodule or a CI download step
+  across two. Neither distribution target cares: plugins.qgis.org takes an
+  uploaded zip, and PyPI publishes fine from a subdirectory.
+
+  The genuine argument for splitting is that separate repositories make
+  cross-boundary imports physically impossible rather than merely disciplined.
+  That is better served by a boundary test (see section 11), which additionally
+  catches scipy becoming a hard dependency and matplotlib appearing at all —
+  neither of which a repository split would catch.
+
+  Split when one of these becomes true, not before: outside contributors arrive
+  for one side and the other's CI noise obstructs them; release cadences
+  genuinely diverge; or a second front end makes the plugin one consumer among
+  several. Extraction stays cheap because `git subtree split` preserves history
+  and the core has no dependency on the plugin, so it only has to go one way.
 
 ### Dependencies
 
@@ -384,6 +404,12 @@ therefore requires `git add -f`, making it a deliberate act. Committed fixtures 
 `tests/data/fixtures/` must be synthetic, or real files truncated and scrubbed
 of coordinates after inspection.
 
+**The boundary is enforced mechanically, not by discipline.** A test walks every
+module under `src/nsgeo`, parses the AST, and asserts that nothing imports
+`qgis`, `PyQt5`, `PyQt6`, `matplotlib`, or `scipy` at module level. It lands in
+M0, before there is any code to violate it. This is what makes a single
+repository safe: the rule fails the build rather than relying on vigilance.
+
 **Plugin testing stays thin** by keeping logic out of widgets: file-to-line
 matching, layer generation, and coordinate lookups are plain functions tested
 headless. Widget behaviour is tested by hand. No `pytest-qt` scaffolding
@@ -411,7 +437,7 @@ Repository. This is only safe because the core is numpy-only.
 
 | | Milestone | Rationale |
 |---|---|---|
-| M0 | Repo scaffold, licences, CI green | Nothing else is verifiable without it |
+| M0 | Repo scaffold, licences, CI green, boundary test | Nothing else is verifiable without it; the boundary test lands before any code can violate it |
 | M1 | DZT reader plus golden-file tests | Highest risk; everything depends on it |
 | M2 | Data model, placements, grid geometry, JSON round-trip | The join everything uses |
 | M3 | Processing steps, registry, property tests | Fully testable before any UI exists |
@@ -454,3 +480,5 @@ that in advance is how the boundary erodes.
 - Default colormap greyscale black-high, bipolar symmetric about zero
 - Anomaly picking promoted into v1
 - Public repository
+- Single repository, with the core/plugin boundary enforced by a CI import test
+  rather than by repository separation; split triggers documented in section 3
