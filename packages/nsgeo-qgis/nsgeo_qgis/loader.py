@@ -27,6 +27,23 @@ line, cleared on site_closed so a fresh request for a reused key is never
 blocked by a stale entry) is therefore not enough on its own to keep a
 task alive until it truly finishes; `_pending` below is the deliberate
 keep-alive that is not tied to which site the task was requested against.
+
+A fourth: `_tasks.clear()` on site_closed frees a key up for a fresh
+request immediately (see above), which means a *stale* task's own
+`finished()` can arrive after a *different*, live task has already been
+registered under the same key. Popping and reporting unconditionally
+there would tear down that live task's bookkeeping out from under it, so
+`finished()` below only touches `_tasks`/`loading_changed` when it is
+still the task on record for its key -- not merely when a slot for that
+key still exists.
+
+Finally: `QgsTaskWrapper.finished()` (the C++ side, not this module --
+see `qgis/core/additions/qgstaskwrapper.py`) swallows any exception an
+`on_finished` callback raises completely, with no traceback printed
+anywhere -- worse than the standing signal/slot hazard, which at least
+reaches stderr. `finished()` below therefore guards its own body with an
+`except`, not just a `finally`: a bug reaching the message bar beats one
+vanishing with no trace at all.
 """
 
 from __future__ import annotations
@@ -115,8 +132,13 @@ class LineLoader(QObject):
             return line.load()
 
         def finished(exception: BaseException | None, result: Any = None) -> None:
-            self._tasks.pop(key, None)
             self._pending.discard(task)
+            # Only this task's own bookkeeping is touched, not "whatever is
+            # registered for `key` right now": a stale task (its site
+            # closed, its key's slot since taken by a fresh request -- see
+            # the module docstring) must not pop or report on a live task's
+            # entry just because they happen to share a key string.
+            live = self._tasks.get(key) is task
             try:
                 if exception is not None:
                     if self.on_error is not None:
@@ -130,37 +152,65 @@ class LineLoader(QObject):
                     still_present = same_site and key in self.session.keys()  # noqa: SIM118 -- not a dict
                     if still_present:
                         self.session.set_profiles(key, result)
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring: an
+                # on_finished exception is swallowed with no traceback anywhere, not
+                # even stderr. This is the only chance to make a bug here visible at
+                # all rather than a load silently vanishing without a trace.
+                if self.on_error is not None:
+                    self.on_error(key, str(exc))
             finally:
-                # Always emitted, even if on_error or set_profiles above
-                # misbehaves: a caller tracking per-key loading state (a
-                # spinner, wait_for()'s own event loop) must see this
-                # request end, not hang because a later step in an
-                # otherwise-independent handler raised.
-                self.loading_changed.emit(key, False)
+                # Both guaranteed together, and only for the live task:
+                # a caller tracking per-key loading state (a spinner,
+                # wait_for()'s own event loop) must see a request it is
+                # actually watching end, not hang because a later step
+                # in an otherwise-independent handler raised, and must
+                # never be told a *different*, still-running request
+                # for the same key has ended.
+                if live:
+                    self._tasks.pop(key, None)
+                    self.loading_changed.emit(key, False)
 
         task = QgsTask.fromFunction(f"nsgeo: load {line.path.name}", work, on_finished=finished)
         self._tasks[key] = task
         self._pending.add(task)
         self.loading_changed.emit(key, True)
-        QgsApplication.taskManager().addTask(task)
+        if not QgsApplication.taskManager().addTask(task):
+            # addTask() returns 0 (never a real task ID) if it could not add
+            # the task at all -- and per the module docstring, nothing else
+            # keeps an un-added task alive either, so on_finished is never
+            # going to run for it. Without this, `key` would stay marked as
+            # loading forever: is_loading(key) stuck True and every future
+            # request(key) a permanent no-op.
+            self._tasks.pop(key, None)
+            self._pending.discard(task)
+            self.loading_changed.emit(key, False)
+            if self.on_error is not None:
+                self.on_error(key, "could not schedule the background load")
 
     def wait_for(self, key: str, timeout_ms: int = 5000) -> bool:
         """Spin the event loop until `key` finishes loading, or `timeout_ms`
-        elapses. For tests. Returns whether the key is no longer loading --
-        a hung load fails the caller's assertion instead of the suite."""
+        elapses. For tests. Returns whether `key` actually finished loading
+        while this waited -- not merely whether it is no longer tracked
+        afterwards, which a bare timeout could also produce if finished()'s
+        own guarantee to report were ever broken (see the module docstring:
+        an on_finished exception vanishes with no trace, so this must not
+        quietly agree that a hang was success)."""
         if key not in self._tasks:
             return True
+        fired = False
         loop = QEventLoop()
         timer = QTimer()
         timer.setSingleShot(True)
         timer.timeout.connect(loop.quit)
 
         def on_change(k: str, flag: bool) -> None:
+            nonlocal fired
             if k == key and not flag:
+                fired = True
                 loop.quit()
 
         self.loading_changed.connect(on_change)
         timer.start(timeout_ms)
         loop.exec()
         self.loading_changed.disconnect(on_change)
-        return key not in self._tasks
+        return fired and key not in self._tasks

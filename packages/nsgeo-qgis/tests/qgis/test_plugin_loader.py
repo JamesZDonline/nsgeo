@@ -20,28 +20,34 @@ def session(qgis_app, tmp_path):
     return s
 
 
-def _wait_signal(signal, predicate, timeout_ms: int = 5000) -> bool:
-    """Spin until `signal`'s args satisfy `predicate`, or time out. Used
-    only where `LineLoader.wait_for` cannot apply -- see the cross-site
-    test below, where the key has already stopped being tracked by the
-    loader (site_closed cleared it) before the stale task actually finishes.
+def _wait_for_task_finished(task, timeout_ms: int = 5000) -> bool:
+    """Spin until `task`'s own on_finished callback has run, or time out.
+
+    Needed once a task is no longer "live" for its key (a stale task after
+    site_closed, or one superseded by a fresh request for the same key --
+    see loader.py's `finished()`): LineLoader no longer emits
+    `loading_changed` for such a task's completion, by design, so this
+    observes the callback directly instead of going through the loader's
+    own signal.
     """
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)
     timer.timeout.connect(loop.quit)
-    matched = []
+    done = []
+    original = task.on_finished
 
-    def on_emit(*args: object) -> None:
-        if predicate(*args):
-            matched.append(args)
+    def wrapped(*args: object, **kwargs: object) -> object:
+        try:
+            return original(*args, **kwargs)
+        finally:
+            done.append(True)
             loop.quit()
 
-    signal.connect(on_emit)
+    task.on_finished = wrapped
     timer.start(timeout_ms)
     loop.exec()
-    signal.disconnect(on_emit)
-    return bool(matched)
+    return bool(done)
 
 
 def test_opening_a_line_loads_it_in_the_background(session, tmp_path):
@@ -181,13 +187,12 @@ def test_switching_sites_mid_load_does_not_write_into_the_new_site(session, tmp_
     loader = LineLoader(session)
     session.open_line(key)
     assert loader.is_loading(key)
+    # Grabbed before site_closed clears the dict: the stale task is no
+    # longer "live" for `key` once a fresh one is registered below, so
+    # LineLoader no longer emits loading_changed for its completion (see
+    # loader.py's finished()) -- wait on the task itself instead.
+    stale_task = loader._tasks[key]
 
-    # loader.wait_for() cannot be used from here on for this key: closing
-    # the site clears LineLoader's own bookkeeping immediately (see the
-    # loader's site_closed connection), so `key` stops being tracked well
-    # before the stale background task actually finishes. loading_changed
-    # still fires when it does, regardless of what -- if anything -- it
-    # wrote, so that is what this waits on instead.
     session.close_site()
     site_b = tmp_path.parent / f"{tmp_path.name}_b"  # a sibling root, same "raw/..." layout
     site_b.mkdir()
@@ -197,7 +202,7 @@ def test_switching_sites_mid_load_does_not_write_into_the_new_site(session, tmp_
     session.add_lines([Line.open(q, GridPlacement("A", "y", 0.0))])
     assert session.keys() == [key]  # same key string, a different site and file
 
-    assert _wait_signal(loader.loading_changed, lambda k, f: k == key and not f)
+    assert _wait_for_task_finished(stale_task)
     assert session.profiles_for(key) is None  # the stale load did not land here
 
     session.open_line(key)
@@ -219,7 +224,197 @@ def test_closing_the_site_entirely_mid_load_does_not_crash_the_callback(session,
     loader = LineLoader(session)
     session.open_line(key)
     assert loader.is_loading(key)
+    stale_task = loader._tasks[key]  # see the sibling test above for why
 
     session.close_site()
-    assert _wait_signal(loader.loading_changed, lambda k, f: k == key and not f)
-    assert not session.is_open
+    assert _wait_for_task_finished(stale_task)
+
+
+def test_a_stale_tasks_finished_does_not_clobber_a_live_tasks_bookkeeping(session, tmp_path):
+    """Review round 1, Finding 1 (and, via the `task_b is not task_a`
+    assertion below, Finding 5): a stale task's finished() must only ever
+    touch _tasks/loading_changed for *its own* registration, never
+    whatever the current live task for that key happens to be.
+
+    Reproduced by controlling the interleaving directly rather than
+    racing two real background reads: grab site A's task, close the site
+    (task keeps running via _pending, but _tasks.clear() -- itself
+    pinned by the `task_b is not task_a` assertion below -- frees `key`),
+    open site B with the same relative key and register its own task
+    under `key`, then invoke site A's *stale* on_finished callback
+    directly, exactly as QGIS's own task manager would, but at a moment
+    of our choosing: while site B's task is still genuinely in flight.
+    """
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    loader = LineLoader(session)
+    session.open_line(key)
+    task_a = loader._tasks[key]
+
+    session.close_site()
+    site_b = tmp_path.parent / f"{tmp_path.name}_stale"
+    site_b.mkdir()
+    session.new_site(site_b)
+    session.add_grid(GRID)
+    q = synthetic_dzt(site_b / "raw", "FILE__001.DZT", n_traces=333)
+    session.add_lines([Line.open(q, GridPlacement("A", "y", 0.0))])
+    session.open_line(key)
+    task_b = loader._tasks[key]
+    # If _on_site_closed's _tasks.clear() were a no-op, request() would
+    # have seen `key` still "in flight" above and skipped registering
+    # task_b entirely -- this is what pins Finding 5.
+    assert task_b is not task_a
+
+    states = []
+    loader.loading_changed.connect(lambda k, f: states.append((k, f)))
+
+    task_a.on_finished(None, [])  # site A's stale task, reporting late
+
+    assert loader.is_loading(key)  # task_b's registration must survive
+    assert loader._tasks.get(key) is task_b
+    assert states == []  # no spurious (key, False) for the still-running task_b
+
+    assert loader.wait_for(key)  # let task_b actually finish
+    assert session.stack_for(key).source.n_traces == 333
+
+
+def test_removing_the_line_mid_load_is_not_written_back(session, tmp_path):
+    """The brief's headline race, and the one Task 6 built
+    SiteSession.set_profiles's key-validates-first behaviour for: request
+    a load, remove the line before it finishes, let the task complete
+    clean (no exception). Dropping the `key in self.session.keys()` half
+    of finished()'s check (keeping only the site-identity half, which
+    does not change here -- the site stays open throughout) would call
+    set_profiles on a key remove_line() already deleted from every
+    session structure it touches, raising a KeyError from inside
+    stack_for() -- caught by finished()'s own `except` (Finding 7) and
+    routed to on_error, which is what `errors == []` below actually pins.
+    """
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    errors = []
+    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
+    session.open_line(key)
+    assert loader.is_loading(key)
+
+    session.remove_line(key)
+
+    assert loader.wait_for(key)
+    assert session.profiles_for(key) is None
+    assert errors == []
+
+
+def test_wait_for_does_not_report_success_from_a_timeout_alone(session):
+    """wait_for()'s contract is "key actually finished loading while this
+    waited", not merely "key is no longer tracked afterwards" -- those
+    happen together on every real path today only because finished()
+    keeps its pop and its emit paired on purpose (see Finding 1's fix).
+    Simulated here by taking the key out of _tasks without ever emitting
+    for it -- standing in for that guarantee breaking -- via a QTimer
+    that fires *during* wait_for's own event-loop spin.
+    """
+    loader = LineLoader(session)
+    loader._tasks["ghost"] = object()
+
+    def sabotage() -> None:
+        loader._tasks.pop("ghost", None)  # removed, but nothing ever emits for it
+
+    QTimer.singleShot(20, sabotage)
+    assert loader.wait_for("ghost", timeout_ms=200) is False
+
+
+def test_request_is_a_no_op_while_already_in_flight(session, tmp_path):
+    """request() is public interface, reachable directly and not only via
+    line_opened: calling it twice for the same still-loading key must
+    start exactly one task. open_line()'s own early-return on an
+    unchanged current key means the brief's four given tests exercise
+    this guard only through a path (test_reopening_a_loaded_line_does_not_reload)
+    that never actually reaches it while the first load is still running --
+    calling request() directly does.
+    """
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    loader = LineLoader(session)
+    states = []
+    loader.loading_changed.connect(lambda k, f: states.append((k, f)))
+
+    loader.request(key)
+    loader.request(key)
+
+    assert states == [(key, True)]
+    assert loader.wait_for(key)
+
+
+def test_line_opened_empty_key_is_a_no_op(session, tmp_path):
+    """close_site() emits line_opened("") when a line was current (see
+    SiteSession.close_site's docstring) -- _on_line_opened's `if not key:
+    return` guard exists specifically to ignore that, not route "" into
+    request()/on_error as if it were a real key.
+    """
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    errors = []
+    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
+    session.open_line(key)
+    assert loader.wait_for(key)
+
+    session.close_site()  # had_current_line -> emits line_opened("")
+
+    assert errors == []
+
+
+def test_an_unexpected_failure_after_a_successful_load_is_reported_not_lost(
+    session, tmp_path, monkeypatch
+):
+    """Nothing today makes set_profiles raise once finished()'s own
+    site/key checks pass, but if it (or anything else on that path) ever
+    did, QgsTaskWrapper.finished() (QGIS's own code, not this module's)
+    swallows the exception completely -- no traceback, nowhere at all.
+    finished()'s own `except` is the only thing standing between that and
+    a load silently vanishing without a trace.
+    """
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    errors = []
+    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
+
+    def boom(key_: str, profiles: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(session, "set_profiles", boom)
+    session.open_line(key)
+    assert loader.wait_for(key)
+
+    assert errors and errors[0][0] == key and "boom" in errors[0][1]
+
+
+def test_a_task_the_manager_refuses_to_schedule_does_not_pin_the_key_forever(
+    session, tmp_path, monkeypatch
+):
+    """addTask() returns 0 (never a real task ID) if it could not add the
+    task at all -- and per loader.py's module docstring, nothing else
+    keeps an un-added task alive either, so on_finished is never going to
+    run for it. Without checking the return value, `key` would stay
+    marked as loading forever: is_loading(key) stuck True, and every
+    future request(key) a permanent no-op, with no way back short of
+    restarting the process.
+    """
+    from qgis.core import QgsTaskManager
+
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
+    key = session.keys()[0]
+    errors = []
+    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
+
+    monkeypatch.setattr(QgsTaskManager, "addTask", lambda self, task, priority=0: 0)
+
+    session.open_line(key)
+
+    assert not loader.is_loading(key)
+    assert errors and errors[0][0] == key

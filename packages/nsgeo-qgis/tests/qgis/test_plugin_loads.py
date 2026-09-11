@@ -9,6 +9,7 @@ def test_class_factory_builds_a_plugin_that_adds_and_removes_its_ui(fake_iface):
     assert plugin.toolbar is not None
     assert plugin.toolbar.objectName() == "nsgeoToolBar"
     assert [name for name, _ in fake_iface.menu_actions] == ["&nsgeo"]
+    assert plugin.loader is not None
 
     plugin.show_about()
     item = fake_iface.messageBar().currentItem()
@@ -17,3 +18,4 @@ def test_class_factory_builds_a_plugin_that_adds_and_removes_its_ui(fake_iface):
     plugin.unload()
     assert plugin.toolbar is None
     assert fake_iface.menu_actions == []
+    assert plugin.loader is None
