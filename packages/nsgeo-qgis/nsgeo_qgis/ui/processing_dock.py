@@ -34,14 +34,21 @@ def dest_index(start: int, row: int) -> int:
     item is inserted *before*, in pre-move numbering) into the index the
     item ends up at.
 
-    A single row moving down (`row > start`) is removed from `start` first,
-    which shifts every later index down by one before the insertion --
-    so the item lands at `row - 1`. A row moving up (`row < start`) is
-    unaffected by its own later removal, so it lands exactly at `row`. The
-    tie (`row == start`) is a drop back onto the row's own original
-    position -- nothing moved, so it lands back at `start` too, which
-    `row <= start` (not `row < start`) is what makes land at `row` rather
-    than one short of it.
+    A row moving down (`row > start`) is removed from `start` first, which
+    shifts every later index down by one before the insertion, so it lands
+    at `row - 1`. A row moving up (`row < start`) is unaffected by its own
+    later removal, so it lands exactly at `row`.
+
+    The tie (`row == start`) is not something a real `rowsMoved` ever
+    reports: Qt's `beginMoveRows` rejects a same-parent destination inside
+    `[start, start + 1]` (verified directly against a live
+    `QListWidget.model()`: `moveRow(src=1, dest=1)` and
+    `moveRow(src=1, dest=2)` both return `False` and emit nothing). Using
+    `row <= start` here rather than `row < start` is defensive only, for
+    that unreachable case -- it costs nothing, and lands it back at `start`
+    instead of one short of it. What actually stops a same-position drop
+    from spuriously calling `session.move_step` is `_on_rows_moved`'s own
+    `dst != start` guard below, not this function.
     """
     return row if row <= start else row - 1
 
@@ -57,7 +64,14 @@ class ProcessingDock(QgsDockWidget):
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
         )
         self.session = session
-        self._updating = False
+        # A depth counter, not a bool: Task 17 connects `step_selected`
+        # (emitted at the end of `rebuild()`) to a parameter form that can
+        # write back to the session, which can trigger a nested
+        # `rebuild()` while the outer one is still on the stack. A plain
+        # set/clear flag would let the inner call's `finally` clear the
+        # guard while the outer frame is still mid-rebuild; a counter
+        # only reaches zero when the outermost call finishes.
+        self._updating = 0
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -69,7 +83,14 @@ class ProcessingDock(QgsDockWidget):
         self.add_menu = QMenu(self.add_button)
         for name in available_steps():
             text = f"{name}  (needs values)" if required_params(name) else name
-            self.add_menu.addAction(text, lambda n=name: self.add_step(n))
+            # `checked=False` absorbs whatever `addAction`'s convenience
+            # overload passes the slot -- binding the zero-argument
+            # `triggered()` overload is an implementation detail of that
+            # overload, not documented API, and this repo has no PyQt6 to
+            # confirm it holds there too. `n=name` keeps the step name
+            # correct under either binding (see `test_add_menu_...` below,
+            # which triggers these for real rather than only reading text).
+            self.add_menu.addAction(text, lambda checked=False, n=name: self.add_step(n))
         self.add_button.setMenu(self.add_menu)
         self.remove_button = QPushButton("Remove")
         self.up_button = QPushButton("↑")
@@ -125,8 +146,14 @@ class ProcessingDock(QgsDockWidget):
 
     def rebuild(self) -> None:
         key = self.key()
+        # A stack change (or a line switch) makes any earlier "applied to
+        # N line(s)" or "cancelled" caption stale; this is the one piece
+        # of state in this dock that isn't just re-read from the session,
+        # so it's cleared on every rebuild rather than left to say
+        # something about a stack that no longer applies.
+        self.status.setText("")
         keep = self.list.currentRow()
-        self._updating = True
+        self._updating += 1
         try:
             self.list.clear()
             if key is not None:
@@ -145,7 +172,7 @@ class ProcessingDock(QgsDockWidget):
             if 0 <= keep < self.list.count():
                 self.list.setCurrentRow(keep)
         finally:
-            self._updating = False
+            self._updating -= 1
         has_line = key is not None
         for w in (self.add_button, self.apply_button):
             w.setEnabled(has_line)
@@ -234,6 +261,7 @@ class ProcessingDock(QgsDockWidget):
                 "with this one?",
             )
             if answer != QMessageBox.StandardButton.Yes:
+                self.status.setText("cancelled; nothing was applied")
                 return []
         changed = self.session.apply_stack_to_grid(key, grid.id)
         self.status.setText(f"applied to {len(changed)} line(s) in grid {grid.id}")
