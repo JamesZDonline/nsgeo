@@ -21,7 +21,8 @@ def session(qgis_app, tmp_path):
 
 
 def _wait_for_task_finished(task, timeout_ms: int = 5000) -> bool:
-    """Spin until `task`'s own on_finished callback has run, or time out.
+    """Spin until `task`'s own on_finished callback has run *without
+    raising*, or time out.
 
     Needed once a task is no longer "live" for its key (a stale task after
     site_closed, or one superseded by a fresh request for the same key --
@@ -29,17 +30,29 @@ def _wait_for_task_finished(task, timeout_ms: int = 5000) -> bool:
     `loading_changed` for such a task's completion, by design, so this
     observes the callback directly instead of going through the loader's
     own signal.
+
+    Review round 2, Finding 1: the callback finishing at all is not
+    enough -- if it raised outright (nothing in loader.py catches an
+    exception that escapes finished() entirely), QgsTaskWrapper.finished()
+    (QGIS's own code) still swallows it completely, so this must not
+    report success for that either. `raised` is tracked separately from
+    `done` so a caller cannot mistake "the callback ran" for "the callback
+    ran correctly".
     """
     loop = QEventLoop()
     timer = QTimer()
     timer.setSingleShot(True)
     timer.timeout.connect(loop.quit)
     done = []
+    raised = []
     original = task.on_finished
 
     def wrapped(*args: object, **kwargs: object) -> object:
         try:
             return original(*args, **kwargs)
+        except Exception:
+            raised.append(True)
+            raise
         finally:
             done.append(True)
             loop.quit()
@@ -47,7 +60,7 @@ def _wait_for_task_finished(task, timeout_ms: int = 5000) -> bool:
     task.on_finished = wrapped
     timer.start(timeout_ms)
     loop.exec()
-    return bool(done)
+    return bool(done) and not raised
 
 
 def test_opening_a_line_loads_it_in_the_background(session, tmp_path):
@@ -217,17 +230,30 @@ def test_closing_the_site_entirely_mid_load_does_not_crash_the_callback(session,
     raises `ProjectError` otherwise, so `finished()` must short-circuit on
     the identity check *before* ever calling it -- not just happen to
     still work because some other site was opened in time.
+
+    Review round 2, Finding 1: `_wait_for_task_finished` alone only
+    catches the check escaping finished() entirely (the callback raising
+    outright) -- it does *not* catch the check being evaluated eagerly
+    but still inside finished()'s own `try`, since Finding 7's `except`
+    absorbs that before it ever reaches the helper. The `on_error`
+    recorder and `errors == []` below catch that half instead: an eager
+    `key in self.session.keys()` raises `ProjectError`, caught internally
+    and routed to on_error -- a spurious Critical message-bar entry on
+    every site close with a load in flight, not a crash the helper would
+    ever see.
     """
     p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
     session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
     key = session.keys()[0]
-    loader = LineLoader(session)
+    errors = []
+    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
     session.open_line(key)
     assert loader.is_loading(key)
     stale_task = loader._tasks[key]  # see the sibling test above for why
 
     session.close_site()
     assert _wait_for_task_finished(stale_task)
+    assert errors == []
 
 
 def test_a_stale_tasks_finished_does_not_clobber_a_live_tasks_bookkeeping(session, tmp_path):
@@ -279,7 +305,7 @@ def test_a_stale_tasks_finished_does_not_clobber_a_live_tasks_bookkeeping(sessio
     assert session.stack_for(key).source.n_traces == 333
 
 
-def test_removing_the_line_mid_load_is_not_written_back(session, tmp_path):
+def test_removing_the_line_mid_load_is_not_written_back(session, tmp_path, monkeypatch):
     """The brief's headline race, and the one Task 6 built
     SiteSession.set_profiles's key-validates-first behaviour for: request
     a load, remove the line before it finishes, let the task complete
@@ -287,23 +313,27 @@ def test_removing_the_line_mid_load_is_not_written_back(session, tmp_path):
     of finished()'s check (keeping only the site-identity half, which
     does not change here -- the site stays open throughout) would call
     set_profiles on a key remove_line() already deleted from every
-    session structure it touches, raising a KeyError from inside
-    stack_for() -- caught by finished()'s own `except` (Finding 7) and
-    routed to on_error, which is what `errors == []` below actually pins.
+    session structure it touches.
+
+    Review round 2, Finding 2: spy on the write directly rather than on
+    the resulting error, so this pins "finished() must not attempt the
+    write-back" on its own -- independent of whether attempting it would
+    also have raised (it does today, via stack_for(), caught by Finding
+    7's `except`; that is a separate, already-covered concern).
     """
     p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
     session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0))])
     key = session.keys()[0]
-    errors = []
-    loader = LineLoader(session, on_error=lambda k, msg: errors.append((k, msg)))
+    loader = LineLoader(session)
     session.open_line(key)
     assert loader.is_loading(key)
 
+    calls = []
+    monkeypatch.setattr(session, "set_profiles", lambda k, v: calls.append(k))
     session.remove_line(key)
 
     assert loader.wait_for(key)
-    assert session.profiles_for(key) is None
-    assert errors == []
+    assert calls == []
 
 
 def test_wait_for_does_not_report_success_from_a_timeout_alone(session):
