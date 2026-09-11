@@ -52,7 +52,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QMetaType, QObject
+from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.session import SiteSession
@@ -631,6 +631,7 @@ class SiteLayers(QObject):
             f["velocity_json"] = json.dumps(grid.velocity.to_dict()) if grid.velocity else ""
             feats.append(f)
         self._refill("grids", feats)
+        self._style_grids()
 
     def refill_lines(self) -> None:
         site = self.session.site
@@ -704,6 +705,27 @@ class SiteLayers(QObject):
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
+
+    def _style_grids(self) -> None:
+        # A dashed, unfilled outline: the grid is a reference frame drawn
+        # over imagery and basemaps, and an opaque fill would hide the
+        # ground the user is judging its placement against. Categorised by
+        # `grid_id` and indexed by position in `site.grids`, same as
+        # `_style_lines()` above, so a grid's outline colour always matches
+        # the colour of its own lines.
+        site = self.session.site
+        assert site is not None
+        categories = []
+        for i, grid in enumerate(site.grids):
+            symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PolygonGeometry)
+            outline = symbol.symbolLayer(0)
+            outline.setBrushStyle(Qt.BrushStyle.NoBrush)
+            outline.setStrokeStyle(Qt.PenStyle.DashLine)
+            outline.setStrokeColor(QColor(GRID_COLOURS[i % len(GRID_COLOURS)]))
+            outline.setStrokeWidth(0.5)
+            categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
+        self.layers["grids"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
+        self.layers["grids"].triggerRepaint()
 
 
 def line_for_feature(session: SiteSession, feature: QgsFeature) -> Line:

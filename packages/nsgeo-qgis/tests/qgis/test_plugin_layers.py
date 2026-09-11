@@ -14,6 +14,7 @@ from nsgeo_qgis.session import SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
     QgsApplication,
+    QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
@@ -27,7 +28,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QMetaType
+from qgis.PyQt.QtCore import QMetaType, Qt
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -141,6 +142,42 @@ def test_grid_in_another_crs_is_transformed_into_the_package_crs(populated):
     feats = {f["grid_id"]: f for f in layers.layers["grids"].getFeatures()}
     x = feats["B"].geometry().centroid().asPoint().x()
     assert 100_000 < x < 900_000  # UTM easting, not a longitude
+
+
+def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
+    """The grid polygon is a reference frame drawn over imagery: an opaque
+    fill would hide the ground the user is judging placement against. This
+    asserts on the renderer actually installed, not on a call being made --
+    deleting `_style_grids()` leaves the default single-symbol renderer and
+    fails the `isinstance` check below."""
+    session, layers, _ = populated
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    renderer = layers.layers["grids"].renderer()
+    assert isinstance(renderer, QgsCategorizedSymbolRenderer)
+    assert renderer.classAttribute() == "grid_id"
+
+    # `.categories()` hands back a list of value-type QgsRendererCategory
+    # objects that own their symbol; `.symbol()` only borrows from that
+    # owner. Keep the list itself alive for as long as the borrowed symbols
+    # are in use, or the category can be garbage-collected out from under
+    # them (PyQGIS won't keep it alive on your behalf).
+    grid_cats = list(renderer.categories())
+    by_grid = {str(cat.value()): cat.symbol() for cat in grid_cats}
+    assert set(by_grid) == {"A", "B"}
+    for symbol in by_grid.values():
+        outline = symbol.symbolLayer(0)
+        assert outline.brushStyle() == Qt.BrushStyle.NoBrush
+        assert outline.strokeStyle() == Qt.PenStyle.DashLine
+
+    # A grid's outline colour matches the colour of its own lines: both
+    # `_style_grids()` and `_style_lines()` index GRID_COLOURS by the
+    # grid's position in `site.grids`, not by its id.
+    lines_renderer = layers.layers["lines"].renderer()
+    line_cats = list(lines_renderer.categories())
+    lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
+    for grid_id, symbol in by_grid.items():
+        assert symbol.symbolLayer(0).strokeColor().name() == lines_colours[grid_id]
 
 
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's
