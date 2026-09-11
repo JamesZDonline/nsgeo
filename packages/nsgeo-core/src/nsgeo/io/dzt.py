@@ -7,6 +7,7 @@ not hold in real data, and each is called out at the point it matters.
 
 from __future__ import annotations
 
+import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,8 +79,10 @@ def parse_header(raw: bytes) -> DztHeader:
 
     if n_samples == 0:
         raise DztError("header declares zero samples per trace")
-    if range_ns <= 0:
-        raise DztError(f"header declares a non-positive range: {range_ns} ns")
+    if not math.isfinite(range_ns) or range_ns <= 0:
+        raise DztError(f"header declares a non-finite or non-positive range: {range_ns} ns")
+    if not math.isfinite(position):
+        raise DztError(f"header declares a non-finite position (t0): {position} ns")
     if bits not in _DTYPES:
         raise DztError(f"unsupported bit depth {bits}; expected one of {sorted(_DTYPES)}")
 

@@ -35,6 +35,9 @@ def test_parses_verified_real_world_field_values(tmp_path):
     assert h.traces_per_metre == pytest.approx(60.0)
     assert h.range_ns == pytest.approx(110.864, abs=1e-3)
     assert h.antenna == "HS350US"
+    # t0 is legitimately negative on real data; the non-finite-position guard
+    # below must not start rejecting this real-world value.
+    assert h.position_ns == pytest.approx(-11.086)
 
 
 def test_dt_ns_is_range_over_samples(tmp_path):
@@ -76,24 +79,57 @@ def test_rejects_zero_samples():
         parse_header(bytes(raw))
 
 
-def test_rejects_non_positive_range():
-    """`dt_ns` is `range_ns / n_samples`; a zero (or negative) `range_ns`
-    yields `dt_ns == 0` without `n_samples` itself being zero, which the
-    existing zero-samples guard does not catch. Downstream, Task 15 feeds a
-    header's `dt_ns` straight into `ViewTransform.fit()` before samples ever
-    load, well before `Radargram.__post_init__`'s `dt_ns > 0` check would see
-    it -- so this must be rejected here, at the header boundary."""
+def test_rejects_non_finite_or_non_positive_range():
+    """`dt_ns` is `range_ns / n_samples`; a bad `range_ns` yields a bad
+    `dt_ns` without `n_samples` itself being zero, which the existing
+    zero-samples guard does not catch. Downstream, Task 15 feeds a header's
+    `dt_ns` straight into `ViewTransform.fit()` before samples ever load,
+    well before `Radargram.__post_init__`'s `dt_ns > 0` check would see it --
+    so this must be rejected here, at the header boundary. `range_ns <= 0`
+    alone misses `nan` (`nan <= 0` is False) and `+inf` (neither comparison
+    is true); both still parse a `dt_ns` that poisons `ViewTransform` the same
+    way, so all three must be rejected."""
     import struct
 
-    raw = bytearray(1024)
-    struct.pack_into("<H", raw, 0, 2047)
-    struct.pack_into("<H", raw, 2, 128)
-    struct.pack_into("<H", raw, 4, 512)
-    struct.pack_into("<H", raw, 6, 32)
-    struct.pack_into("<f", raw, 26, 0.0)  # rh_rng: zero range
-    struct.pack_into("<H", raw, 52, 1)
-    with pytest.raises(DztError, match="range"):
-        parse_header(bytes(raw))
+    def header_with_range(range_ns: float) -> bytes:
+        raw = bytearray(1024)
+        struct.pack_into("<H", raw, 0, 2047)
+        struct.pack_into("<H", raw, 2, 128)
+        struct.pack_into("<H", raw, 4, 512)
+        struct.pack_into("<H", raw, 6, 32)
+        struct.pack_into("<f", raw, 26, range_ns)
+        struct.pack_into("<H", raw, 52, 1)
+        return bytes(raw)
+
+    for bad_range in (0.0, float("nan"), float("inf")):
+        with pytest.raises(DztError, match="range"):
+            parse_header(header_with_range(bad_range))
+
+
+def test_rejects_non_finite_position():
+    """`rhf_position` becomes `DztHeader.position_ns`, handed straight to
+    `ViewTransform.fit()` as `t0_ns` by Task 15's header-before-samples flow
+    -- the identical hazard as `range_ns`, on a field that had no validation
+    at all. Unlike `range_ns`, `t0_ns` is legitimately NEGATIVE on real data
+    (about -11.09 ns on this project's own files -- see
+    `test_parses_verified_real_world_field_values`), so the check here is
+    finiteness, not positivity."""
+    import struct
+
+    def header_with_position(position_ns: float) -> bytes:
+        raw = bytearray(1024)
+        struct.pack_into("<H", raw, 0, 2047)
+        struct.pack_into("<H", raw, 2, 128)
+        struct.pack_into("<H", raw, 4, 512)
+        struct.pack_into("<H", raw, 6, 32)
+        struct.pack_into("<f", raw, 22, position_ns)
+        struct.pack_into("<f", raw, 26, 110.864)  # a valid range
+        struct.pack_into("<H", raw, 52, 1)
+        return bytes(raw)
+
+    for bad_position in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(DztError, match="position"):
+            parse_header(header_with_position(bad_position))
 
 
 def test_multi_channel_samples_are_interleaved_per_trace(tmp_path):

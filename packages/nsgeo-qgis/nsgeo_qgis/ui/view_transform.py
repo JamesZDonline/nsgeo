@@ -29,6 +29,32 @@ class ViewTransform:
     time_lo: float
     time_hi: float
 
+    def __post_init__(self) -> None:
+        # Every construction path -- fit(), a direct call, and the replace()
+        # with_window/resized use internally -- runs __init__ and so lands
+        # here. This matters specifically because fit() receives t0_ns/dt_ns
+        # straight off a DZT header (Task 15 shows header-derived axes before
+        # samples load), ahead of anywhere else that might reject a bad one.
+        # with_window keeps its own finiteness check too: it fires earlier,
+        # with a message describing the window change being attempted, before
+        # replace() -- and this check -- are ever reached.
+        if not all(
+            math.isfinite(v)
+            for v in (
+                self.t0_ns,
+                self.dt_ns,
+                self.trace_lo,
+                self.trace_hi,
+                self.time_lo,
+                self.time_hi,
+            )
+        ):
+            raise ValueError(
+                "ViewTransform requires finite axes: "
+                f"t0_ns={self.t0_ns}, dt_ns={self.dt_ns}, "
+                f"trace=[{self.trace_lo}, {self.trace_hi}), time=[{self.time_lo}, {self.time_hi})"
+            )
+
     @classmethod
     def fit(
         cls, n_traces: int, n_samples: int, t0_ns: float, dt_ns: float, width: int, height: int
@@ -52,13 +78,19 @@ class ViewTransform:
 
     # ---- forward and inverse ------------------------------------------------
     def x_of_trace(self, i: float) -> float:
-        return (i - self.trace_lo) / (self.trace_hi - self.trace_lo) * self.width
+        span = self.trace_hi - self.trace_lo
+        if span == 0.0:  # n_traces == 0: a valid, empty-axis ViewTransform (see M6)
+            return 0.0
+        return (i - self.trace_lo) / span * self.width
 
     def trace_of_x(self, x: float) -> float:
         return self.trace_lo + x / self.width * (self.trace_hi - self.trace_lo)
 
     def y_of_time(self, t: float) -> float:
-        return (t - self.time_lo) / (self.time_hi - self.time_lo) * self.height
+        span = self.time_hi - self.time_lo
+        if span == 0.0:  # n_samples == 0: a valid, empty-axis ViewTransform (see M6)
+            return 0.0
+        return (t - self.time_lo) / span * self.height
 
     def time_of_y(self, y: float) -> float:
         return self.time_lo + y / self.height * (self.time_hi - self.time_lo)
