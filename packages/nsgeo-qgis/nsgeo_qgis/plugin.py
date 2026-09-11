@@ -14,6 +14,25 @@ actions above all -- guards its own body and reports failure through
 a real-world failure (a full disk, a permissions error, a corrupt survey
 file) disappear into stderr while the user is left thinking nothing
 happened, or worse, that it succeeded.
+
+Modal-dialog hazard: QDialog.exec()'s event loop is application-modal --
+it terminates the instant the dialog is hidden, from *any* cause, not only
+its own Ok/Cancel buttons (verified directly: a bare QDialog.exec() with a
+QTimer calling hide() returns immediately, before anything else runs). Any
+dialog whose flow needs the user to interact with something else first --
+GridDialog's digitise-on-map tab needs the canvas -- cannot be opened with
+exec() at all: hiding it to reach the canvas would silently end the exec()
+call in the same turn (Task 10 fix round 4, Finding 1 -- this shipped
+undetected through three earlier review rounds because the test double for
+exec(), used everywhere, does not run a real event loop and so cannot
+observe this). open_grid_dialog() below is the pattern for a dialog like
+that: show() instead of exec(), lifecycle (committing the result, tearing
+down any state the dialog armed, deleteLater()) moved onto dialog.finished
+rather than living after a blocking call, and a single `self._grid_dialog`
+tracking slot so a second one isn't opened on top of the first. A dialog
+that never needs anything else to be interactive while it's open -- no
+reason to expect Task 11's import dialog will -- can still use exec(); only
+copy this pattern where something like it is actually needed.
 """
 
 from __future__ import annotations
@@ -58,6 +77,7 @@ class NsgeoPlugin:
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
+        self._grid_dialog: GridDialog | None = None
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
@@ -95,6 +115,15 @@ class NsgeoPlugin:
         self.session.site_closed.connect(self._update_enabled)
 
     def unload(self) -> None:
+        # Fix round 4, Finding 1: GridDialog is modeless (see
+        # open_grid_dialog()), so -- unlike the old application-modal
+        # exec() it replaced -- unload() can now run while one is still
+        # open. close() runs finished()'s own cleanup (releasing a
+        # still-active digitise tool, deleteLater()) via reject(),
+        # rather than leaving the dialog dangling with a reference to
+        # a session this method is about to tear down below.
+        if self._grid_dialog is not None:
+            self._grid_dialog.close()
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -273,8 +302,32 @@ class NsgeoPlugin:
 
     # ---- dialogs (provided by later tasks) --------------------------------
     def open_grid_dialog(self, grid_id: str | None) -> None:
+        # Fix round 4, Finding 1 (critical): GridDialog must be
+        # modeless. QDialog.exec()'s application-modal event loop
+        # terminates the instant the dialog is hidden -- verified
+        # directly: a bare QDialog.exec() with a QTimer calling hide()
+        # returns 0 in the same turn. _start_digitise()'s dialog.hide()
+        # (called from a slot that only fires *while* exec() would be
+        # running) would therefore end the modal loop before the user
+        # could click the canvas even once -- "digitise on map" could
+        # never actually work under a real event loop. show() instead
+        # of exec() means the rest of this method's old post-exec()
+        # logic (commit the result, release a still-active digitise
+        # tool, dispose the dialog) can no longer run synchronously
+        # after a blocking call; it lives in finished() below instead,
+        # which fires exactly once for accept, reject, or the window
+        # closed any other way.
         assert self.session is not None
         if not self.session.is_open:
+            return
+        if self._grid_dialog is not None:
+            # Modeless means the toolbar and dock stay clickable while
+            # one is already open, unlike the old exec()'s
+            # application-modal block. Only one at a time: a second
+            # would fight the first over the canvas's one map tool
+            # during a digitise pick.
+            self._grid_dialog.raise_()
+            self._grid_dialog.activateWindow()
             return
         try:
             grid = self.session.grid(grid_id) if grid_id else None
@@ -303,51 +356,62 @@ class NsgeoPlugin:
         dialog = GridDialog(
             self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
         )
-        try:
-            dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            result = dialog.result_grid()
+
+        def finished(result: int) -> None:
+            # `finished` is a slot on dialog.finished (a pyqtSignal): an
+            # uncaught exception here would be swallowed by Qt (see the
+            # module docstring), same hazard as everywhere else in this
+            # file.
             try:
-                if grid is None:
-                    self.session.add_grid(result)
-                else:
-                    self.session.replace_grid(result)
-            except (ValueError, KeyError) as exc:
-                self.message(str(exc), Qgis.MessageLevel.Critical)
-        finally:
-            # Fix round 2, Finding 4: dialog.exec() can return (accept,
-            # reject, or the window closed outright) while a digitise
-            # pick is still in progress -- the dialog is hidden and the
-            # map tool active, with neither done() nor the tool's
-            # cancelled signal ever having fired to release it. Left
-            # alone, that tool would later call back into show_dialog()
-            # (a click, a switch to another tool) against a `dialog`
-            # this method is about to delete, raising RuntimeError out
-            # of a signal-connected slot.
-            canvas = self.iface.mapCanvas()
-            tool = canvas.mapTool()
-            if isinstance(tool, DigitiseGridTool):
-                # unsetMapTool() -> deactivate() -> cancelled ->
-                # show_dialog() would otherwise re-show `dialog` --
-                # already accepted or rejected here, and about to be
-                # deleteLater()'d below regardless -- for one event-loop
-                # turn before its own deletion actually runs (round 3,
-                # Finding 3). blockSignals() lets deactivate()'s own
-                # cleanup (releasing the rubber band) run without
-                # re-triggering show_dialog().
-                tool.blockSignals(True)
-                canvas.unsetMapTool(tool)
-            # Fix round 1, Finding 3: `dialog` is parented to the main
-            # window and nothing ever deleted it, so every grid dialog
-            # opened stayed alive (with its full widget tree) for the
-            # life of the QGIS session -- harmless for one dialog, but a
-            # segfault at interpreter shutdown once enough of them pile
-            # up alongside a QgsMapCanvas/QgsRubberBand from the digitise
-            # flow (verified with gdb). deleteLater() only schedules the
-            # deletion; `dialog` is still perfectly usable above, before
-            # this runs.
-            dialog.deleteLater()
+                if result == QDialog.DialogCode.Accepted:
+                    new_grid = dialog.result_grid()
+                    try:
+                        if grid is None:
+                            self.session.add_grid(new_grid)
+                        else:
+                            self.session.replace_grid(new_grid)
+                    except (ValueError, KeyError) as exc:
+                        self.message(str(exc), Qgis.MessageLevel.Critical)
+            finally:
+                # Fix round 2, Finding 4 (still applies to a modeless
+                # dialog): finished() can fire while a digitise pick is
+                # still in progress -- the map tool active, with
+                # neither done() nor the tool's cancelled signal ever
+                # having fired to release it. Left alone, that tool
+                # would later call back into show_dialog() (a click, a
+                # switch to another tool) against a `dialog` about to
+                # be deleted, raising RuntimeError out of a
+                # signal-connected slot.
+                canvas = self.iface.mapCanvas()
+                tool = canvas.mapTool()
+                if isinstance(tool, DigitiseGridTool):
+                    # unsetMapTool() -> deactivate() -> cancelled ->
+                    # show_dialog() would otherwise re-show `dialog` --
+                    # already finished here, and about to be
+                    # deleteLater()'d below regardless -- for one
+                    # event-loop turn before its own deletion actually
+                    # runs (round 3, Finding 3). blockSignals() lets
+                    # deactivate()'s own cleanup (releasing the rubber
+                    # band) run without re-triggering show_dialog().
+                    tool.blockSignals(True)
+                    canvas.unsetMapTool(tool)
+                # Fix round 1, Finding 3: `dialog` is parented to the
+                # main window and nothing else ever deleted it, so
+                # every grid dialog opened stayed alive (with its full
+                # widget tree) for the life of the QGIS session --
+                # harmless for one dialog, but a segfault at
+                # interpreter shutdown once enough of them pile up
+                # alongside a QgsMapCanvas/QgsRubberBand from the
+                # digitise flow (verified with gdb).
+                dialog.deleteLater()
+                self._grid_dialog = None
+
+        dialog.finished.connect(finished)
+        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
+        self._grid_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _start_digitise(self, dialog: GridDialog) -> None:
         canvas = self.iface.mapCanvas()
@@ -380,15 +444,20 @@ class NsgeoPlugin:
         tool.points_picked.connect(done)
         # A right-click (QGIS's universal "abort this tool" gesture) or
         # switching to a different map tool entirely both abandon the
-        # pick without completing it. Before, neither restored the
-        # dialog: it stayed hidden with its exec() loop still running,
-        # and the user's only way out was killing QGIS (Task 10 fix
-        # round 1, Finding 4). DigitiseGridTool emits `cancelled` from
-        # deactivate() for exactly this case, and by then the canvas has
-        # already moved off this tool, so only the dialog needs restoring
-        # here -- unlike `done()` above, which must still release the
-        # tool itself.
+        # pick without completing it. Before round 1's fix, neither
+        # restored the dialog, and the user's only way out was killing
+        # QGIS (Task 10 fix round 1, Finding 4). DigitiseGridTool emits
+        # `cancelled` from deactivate() for exactly this case, and by
+        # then the canvas has already moved off this tool, so only the
+        # dialog needs restoring here -- unlike `done()` above, which
+        # must still release the tool itself.
         tool.cancelled.connect(show_dialog)
+        # dialog.hide() here is exactly what a modal exec() could never
+        # survive (round 4, Finding 1): hiding the dialog that owns the
+        # running exec() loop ends that loop immediately. GridDialog is
+        # modeless now (see open_grid_dialog()), so this is an ordinary
+        # hide -- the canvas stays interactive and the user can actually
+        # click it.
         dialog.hide()
         canvas.setMapTool(tool)
 

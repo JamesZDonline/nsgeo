@@ -93,7 +93,17 @@ class GridDialog(QDialog):
         self.tabs.addTab(self._build_polygon_tab(), "From polygon")
         layout.addWidget(self.tabs)
 
-        form = QFormLayout()
+        # Round 4, Finding 2: crs_hint needs to be a real sibling in the
+        # *outer* QVBoxLayout, not a row inside a QFormLayout nested in
+        # it via addLayout() -- QFormLayout rows added that way do not
+        # participate in Qt's height-for-width layout pass (verified
+        # directly: the identical QLabel, added straight to a QVBoxLayout
+        # instead, sizes correctly; nested inside the form it was locked
+        # to a single-line row height regardless of heightForWidth()).
+        # The form is split in two around it so it still reads Id, CRS,
+        # [hint], Origin, ... top to bottom.
+        form_top = QFormLayout()
+        form_bottom = QFormLayout()
         self.id_edit = QLineEdit()
         self.crs_widget = QgsProjectionSelectionWidget()
         self.origin_x = _spin(-1e8, 1e8, 3, 0.1)
@@ -117,22 +127,26 @@ class GridDialog(QDialog):
         vel_row = QHBoxLayout()
         vel_row.addWidget(self.velocity)
         vel_row.addWidget(self.velocity_hint)
-        form.addRow("Id", self.id_edit)
-        form.addRow("CRS", self.crs_widget)
+        form_top.addRow("Id", self.id_edit)
+        form_top.addRow("CRS", self.crs_widget)
+        form_bottom.addRow("Origin E, N", origin_row)
+        form_bottom.addRow("Azimuth (° cw from N to +Y)", self.azimuth)
+        form_bottom.addRow("Size X, Y (m)", size_row)
+        form_bottom.addRow("Default spacing (m)", self.spacing)
+        form_bottom.addRow("Velocity (m/ns)", vel_row)
+        layout.addLayout(form_top)
         # Round 3, Finding 2: crs_hint sharing a row with crs_widget (in
         # a QHBoxLayout, the way velocity_hint shares with velocity)
         # squeezed crs_widget down to an unreadable few px whenever the
         # hint had anything to say -- exactly the moment F3 added it to
         # be seen. velocity_hint's text is always short ("from the
         # header dielectric"); crs_hint's can run to a full sentence, so
-        # it gets its own row instead of competing for width.
-        form.addRow("", self.crs_hint)
-        form.addRow("Origin E, N", origin_row)
-        form.addRow("Azimuth (° cw from N to +Y)", self.azimuth)
-        form.addRow("Size X, Y (m)", size_row)
-        form.addRow("Default spacing (m)", self.spacing)
-        form.addRow("Velocity (m/ns)", vel_row)
-        layout.addLayout(form)
+        # it was moved to its own row -- which round 4's Finding 2 then
+        # found was silently clipped to one line's height regardless
+        # (see the comment above form_top/form_bottom): added directly
+        # to this outer layout instead, it sizes to its real content.
+        layout.addWidget(self.crs_hint)
+        layout.addLayout(form_bottom)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

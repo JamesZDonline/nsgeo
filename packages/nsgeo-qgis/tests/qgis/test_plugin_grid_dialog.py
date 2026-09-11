@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import numpy as np
 import pytest
@@ -19,7 +20,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
 LOCAL = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]])
@@ -65,6 +66,30 @@ def _select_sole_feature(qgis_app: object, dialog: GridDialog, layer: QgsVectorL
     fid = next(layer.getFeatures()).id()
     dialog.feature_picker.setFeature(fid)
     _pump(qgis_app, lambda: dialog.feature_picker.feature().id() == fid)
+
+
+def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
+    """Call open_grid_dialog() and return the GridDialog it just showed.
+
+    Fix round 4, Finding 1: GridDialog is modeless (plugin.py's
+    open_grid_dialog() calls show(), not exec()) precisely so the
+    digitise flow can reach the canvas at all -- exec()'s
+    application-modal event loop terminates the instant the dialog is
+    hidden, so _start_digitise()'s dialog.hide() would otherwise end it
+    before a single canvas click landed (verified directly with a bare
+    QDialog; see the fix-round report). That also means these tests
+    never monkeypatch QDialog.exec (unlike drive_dialog, still used
+    elsewhere for a genuinely modal dialog): open_grid_dialog() returns
+    immediately with a real, already-shown dialog tracked on the plugin
+    as `_grid_dialog`, and driving it -- typing into fields, clicking
+    digitise_button, emitting real canvasClicked signals, calling
+    accept()/reject() -- exercises the exact same code path a live QGIS
+    session would.
+    """
+    plugin.open_grid_dialog(grid_id)
+    dialog = plugin._grid_dialog
+    assert dialog is not None
+    return dialog
 
 
 def test_ok_is_blocked_until_id_and_velocity_are_set(session):
@@ -208,6 +233,39 @@ def test_crs_scale_guard_accepts_correct_uses_and_refuses_mismatches(session):
         d.origin_y.setValue(origin[1])
         assert not d.ok_button.isEnabled(), f"3857 at lat {lat}"
         assert "%" in d.crs_hint.text(), f"3857 at lat {lat}"
+
+
+def test_crs_scale_check_skips_the_untouched_zero_origin(session):
+    # Fix round 4, Finding 3: the (0, 0) skip in _crs_scale_error() is a
+    # pure-accept path -- a regression here would silently *loosen* the
+    # guard (measuring at (0, 0), the CRS's own origin, was verified to
+    # give false positives for EPSG:5070/3035) rather than fail anything
+    # visibly, so it needs its own test rather than relying on it never
+    # coming up.
+    d = GridDialog(session)
+    d.id_edit.setText("A")
+    d.velocity.setValue(0.08)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:5070"))  # false-positive at (0, 0)
+    assert d.origin_x.value() == 0.0 and d.origin_y.value() == 0.0
+    assert d.ok_button.isEnabled()
+    assert d.crs_hint.text() == ""
+
+
+def test_crs_scale_check_skips_on_transform_failure_rather_than_refusing(session):
+    # Fix round 4, Finding 3: the broad except in _crs_scale_error() is
+    # also a pure-accept path. (1e8, 1e8) as a UTM 16N easting/northing
+    # is genuinely outside the CRS's domain -- verified directly, the
+    # transform itself raises QgsCsException ("Point outside of
+    # projection domain") -- so this exercises the real exception path,
+    # not a contrived stand-in for one.
+    d = GridDialog(session)
+    d.id_edit.setText("A")
+    d.velocity.setValue(0.08)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    d.origin_x.setValue(1e8)
+    d.origin_y.setValue(1e8)
+    assert d.ok_button.isEnabled()
+    assert d.crs_hint.text() == ""
 
 
 def test_corner_fit_fills_origin_azimuth_and_sizes(session):
@@ -566,6 +624,30 @@ def test_crs_widget_stays_usable_when_the_hint_is_showing(session):
         d.hide()
 
 
+def test_crs_hint_is_not_vertically_clipped_when_it_wraps_to_two_lines(session):
+    # Fix round 4, Finding 2: crs_hint's own row (round 3's fix above)
+    # was given a fixed single-line row height regardless of
+    # heightForWidth() -- a QFormLayout row nested in the dialog's outer
+    # QVBoxLayout via addLayout() does not participate in Qt's
+    # height-for-width layout pass. Only the two scale-check messages
+    # added this round are long enough to wrap to two lines; the
+    # authority/units hints (one line each) were never affected.
+    d = GridDialog(session)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    d.origin_x.setValue(-9350837.227)  # lat ~36N -- a genuine REFUSE-level hint
+    d.origin_y.setValue(4300621.372)
+    assert "%" in d.crs_hint.text()
+    d.adjustSize()
+    d.show()
+    try:
+        # heightForWidth() at the label's actual width is what Qt itself
+        # says the wrapped text needs; the clipping bug gave it less.
+        needed = d.crs_hint.heightForWidth(d.crs_hint.width())
+        assert d.crs_hint.height() >= needed
+    finally:
+        d.hide()
+
+
 def test_grid_dialog_exec_is_guarded_by_default(session):
     # Task 9's autouse guard forbids QMessageBox/QFileDialog modals so a
     # test that trips one fails fast instead of hanging under
@@ -579,62 +661,56 @@ def test_grid_dialog_exec_is_guarded_by_default(session):
 # ---- plugin wiring ---------------------------------------------------------
 
 
-def test_open_grid_dialog_accepts_and_adds_a_new_grid(
-    fake_iface, tmp_path, drive_dialog, answer_modal
-):
+def test_open_grid_dialog_accepts_and_adds_a_new_grid(fake_iface, tmp_path, answer_modal):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     plugin.session.new_site(tmp_path)
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.id_edit.setText("A")
-        dialog.velocity.setValue(0.08)
-        dialog.origin_x.setValue(10.0)
-        dialog.origin_y.setValue(20.0)
-        # Round 3, Finding 1: no fallback CRS any more -- this dialog's
-        # crs_widget starts unset in this bare test harness (no project
-        # CRS either), so a real user's OK button would stay disabled
-        # here too until they pick one, exactly like
-        # test_ok_is_blocked_until_id_and_velocity_are_set. accept()
-        # bypasses that gating (nothing stops calling it directly, the
-        # way this test does), so pick one explicitly to reflect what a
-        # real user's flow requires, not incidentally re-prove Finding 2
-        # (crs="").
-        dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-        dialog.accept()
+    dialog = _open(plugin)
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.origin_x.setValue(10.0)
+    dialog.origin_y.setValue(20.0)
+    # Round 3, Finding 1: no fallback CRS any more -- this dialog's
+    # crs_widget starts unset in this bare test harness (no project
+    # CRS either), so a real user's OK button would stay disabled here
+    # too until they pick one, exactly like
+    # test_ok_is_blocked_until_id_and_velocity_are_set. accept()
+    # bypasses that gating (nothing stops calling it directly, the way
+    # this test does), so pick one explicitly to reflect what a real
+    # user's flow requires, not incidentally re-prove Finding 2 (crs="").
+    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    dialog.accept()
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
     grid = plugin.session.grid("A")
     assert grid.origin == (10.0, 20.0)
     assert grid.velocity == VelocityModel.constant(0.08)
     assert grid.crs == "EPSG:32616"
+    assert plugin._grid_dialog is None  # finished() cleared it
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
-def test_open_grid_dialog_cancel_leaves_the_session_untouched(fake_iface, tmp_path, drive_dialog):
+def test_open_grid_dialog_cancel_leaves_the_session_untouched(fake_iface, tmp_path):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     plugin.session.new_site(tmp_path)
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.id_edit.setText("A")
-        dialog.velocity.setValue(0.08)
-        dialog.reject()
+    dialog = _open(plugin)
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.reject()
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
     assert plugin.session.site is not None and plugin.session.site.grids == []
     plugin.unload()
 
 
 def test_open_grid_dialog_reports_a_duplicate_id_through_the_message_bar(
-    fake_iface, tmp_path, drive_dialog, answer_modal
+    fake_iface, tmp_path, answer_modal
 ):
     import nsgeo_qgis
 
@@ -647,20 +723,18 @@ def test_open_grid_dialog_reports_a_duplicate_id_through_the_message_bar(
         )
     )
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.id_edit.setText("A")
-        dialog.velocity.setValue(0.08)
-        dialog.accept()
+    dialog = _open(plugin)
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.accept()
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
     item = fake_iface.messageBar().currentItem()
     assert item is not None and "already exists" in item.text()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
-def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, drive_dialog, answer_modal):
+def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, answer_modal):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
@@ -679,13 +753,11 @@ def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, drive_dia
         )
     )
 
-    def driver(dialog: GridDialog) -> None:
-        assert dialog.id_edit.text() == "A" and not dialog.id_edit.isEnabled()
-        dialog.azimuth.setValue(46.0)
-        dialog.accept()
+    dialog = _open(plugin, "A")
+    assert dialog.id_edit.text() == "A" and not dialog.id_edit.isEnabled()
+    dialog.azimuth.setValue(46.0)
+    dialog.accept()
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog("A")
     assert plugin.session.grid("A").azimuth == pytest.approx(46.0)
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
@@ -708,7 +780,7 @@ def test_open_grid_dialog_reports_a_stale_grid_id_without_crashing(fake_iface, t
     plugin.unload()
 
 
-def test_digitise_flow_recovers_from_coincident_points(fake_iface, tmp_path, drive_dialog):
+def test_digitise_flow_recovers_from_coincident_points(fake_iface, tmp_path):
     # set_digitised() now rejects two clicks landing on the same point;
     # the plugin's done() callback must still hand control back to the
     # dialog (unset the map tool, show() it again) and tell the user why
@@ -721,28 +793,35 @@ def test_digitise_flow_recovers_from_coincident_points(fake_iface, tmp_path, dri
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        tool = canvas.mapTool()
-        tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-        tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)  # same point
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    tool = canvas.mapTool()
+    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
+    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)  # same point
 
-        assert canvas.mapTool() is None  # control handed back regardless
-        assert not dialog.isHidden()
-        item = fake_iface.messageBar().currentItem()
-        assert item is not None and "coincide" in item.text()
-        assert dialog.azimuth.value() == 0.0  # untouched
+    assert canvas.mapTool() is None  # control handed back regardless
+    assert not dialog.isHidden()
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "coincide" in item.text()
+    assert dialog.azimuth.value() == 0.0  # untouched
 
-        dialog.reject()
-
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
+    dialog.reject()
     plugin.unload()
 
 
 def test_digitise_flow_through_the_plugin_fills_and_restores_the_dialog(
-    fake_iface, tmp_path, drive_dialog, answer_modal
+    fake_iface, tmp_path, answer_modal
 ):
+    # Fix round 4, Finding 1 (critical): this is the test that exposed
+    # the bug. drive_dialog's exec() monkeypatch (used here in every
+    # earlier round) hid it completely: faking exec() to just call a
+    # driver callback directly never runs Qt's real application-modal
+    # event loop, so dialog.hide() below never got the chance to
+    # terminate it -- which is exactly what it does for real (verified
+    # directly with a bare QDialog; see the fix-round report). No
+    # QDialog.exec anywhere in this test: open_grid_dialog() now calls
+    # show(), and this drives the real, already-visible dialog exactly
+    # as a user would -- two real canvas clicks, then accept().
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
@@ -750,46 +829,45 @@ def test_digitise_flow_through_the_plugin_fills_and_restores_the_dialog(
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        tool = canvas.mapTool()
-        assert isinstance(tool, DigitiseGridTool)
+    dialog = _open(plugin)
+    assert dialog.isVisible()
 
-        tool.canvasClicked.emit(QgsPointXY(500.0, 700.0), Qt.MouseButton.LeftButton)
-        tool.canvasClicked.emit(
-            QgsPointXY(500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30))),
-            Qt.MouseButton.LeftButton,
-        )
+    dialog.digitise_button.click()
+    assert dialog.isHidden()  # out of the way so the canvas can be clicked
+    tool = canvas.mapTool()
+    assert isinstance(tool, DigitiseGridTool)
 
-        assert canvas.mapTool() is None  # the tool hands control back
-        assert not dialog.isHidden()  # and the dialog is restored
-        assert dialog.origin_x.value() == pytest.approx(500.0)
-        assert dialog.origin_y.value() == pytest.approx(700.0)
-        assert dialog.azimuth.value() == pytest.approx(30.0, abs=1e-6)
+    tool.canvasClicked.emit(QgsPointXY(500.0, 700.0), Qt.MouseButton.LeftButton)
+    tool.canvasClicked.emit(
+        QgsPointXY(500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30))),
+        Qt.MouseButton.LeftButton,
+    )
 
-        dialog.id_edit.setText("D")
-        dialog.velocity.setValue(0.08)
-        # done() adopts canvas.mapSettings().destinationCrs(), which is
-        # invalid on this bare test canvas (no project/layer ever set
-        # one) -- a real user's canvas has the project's CRS. Set one
-        # explicitly so this test's accept() reflects a real usable
-        # state rather than incidentally re-proving Finding 2 (crs="").
-        dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-        dialog.accept()
+    assert canvas.mapTool() is None  # the tool hands control back
+    assert dialog.isVisible()  # and the dialog is restored
+    assert dialog.origin_x.value() == pytest.approx(500.0)
+    assert dialog.origin_y.value() == pytest.approx(700.0)
+    assert dialog.azimuth.value() == pytest.approx(30.0, abs=1e-6)
 
-    calls = drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
-    assert len(calls) == 1
+    dialog.id_edit.setText("D")
+    dialog.velocity.setValue(0.08)
+    # done() adopts canvas.mapSettings().destinationCrs(), which is
+    # invalid on this bare test canvas (no project/layer ever set one)
+    # -- a real user's canvas has the project's CRS. Set one explicitly
+    # so this test's accept() reflects a real usable state rather than
+    # incidentally re-proving Finding 2 (crs="").
+    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    dialog.accept()
+
     grid = plugin.session.grid("D")
     assert grid.azimuth == pytest.approx(30.0, abs=1e-6)
     assert grid.crs == "EPSG:32616"
+    assert plugin._grid_dialog is None  # finished() cleared it
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
-def test_digitise_flow_right_click_restores_the_dialog_without_a_pick(
-    fake_iface, tmp_path, drive_dialog
-):
+def test_digitise_flow_right_click_restores_the_dialog_without_a_pick(fake_iface, tmp_path):
     # Fix round 1, Finding 4: before this fix, a right-click meant to
     # cancel instead completed the pick (or set the origin), and there
     # was no way back short of killing QGIS if the pick was abandoned.
@@ -800,25 +878,22 @@ def test_digitise_flow_right_click_restores_the_dialog_without_a_pick(
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        assert dialog.isHidden()
-        tool = canvas.mapTool()
-        tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-        tool.canvasClicked.emit(QgsPointXY(2.0, 2.0), Qt.MouseButton.RightButton)  # abort
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert dialog.isHidden()
+    tool = canvas.mapTool()
+    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
+    tool.canvasClicked.emit(QgsPointXY(2.0, 2.0), Qt.MouseButton.RightButton)  # abort
 
-        assert canvas.mapTool() is None
-        assert not dialog.isHidden()  # restored -- without ever completing the pick
-        assert dialog.azimuth.value() == 0.0  # untouched
+    assert canvas.mapTool() is None
+    assert not dialog.isHidden()  # restored -- without ever completing the pick
+    assert dialog.azimuth.value() == 0.0  # untouched
 
-        dialog.reject()
-
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
+    dialog.reject()
     plugin.unload()
 
 
-def test_digitise_flow_switching_map_tools_restores_the_dialog(fake_iface, tmp_path, drive_dialog):
+def test_digitise_flow_switching_map_tools_restores_the_dialog(fake_iface, tmp_path):
     # Fix round 1, Finding 4: switching to a completely different map
     # tool (e.g. Pan) mid-pick used to leave the dialog hidden forever,
     # since only done() (a successful two-click pick) ever restored it.
@@ -830,21 +905,19 @@ def test_digitise_flow_switching_map_tools_restores_the_dialog(fake_iface, tmp_p
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        assert dialog.isHidden()
-        canvas.setMapTool(QgsMapToolPan(canvas))
-        assert not dialog.isHidden()
-        dialog.reject()
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert dialog.isHidden()
+    canvas.setMapTool(QgsMapToolPan(canvas))
+    assert not dialog.isHidden()
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)
+    dialog.reject()
     plugin.unload()
 
 
-def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_path, drive_dialog):
-    # Fix round 2, Finding 4: dialog.exec() can return (accept, reject,
-    # or the dialog closed outright) while a digitise pick is still in
+def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_path):
+    # Fix round 2, Finding 4: the dialog can finish (accept, reject, or
+    # the window closed outright) while a digitise pick is still in
     # progress, with neither done() nor the tool's own cancelled signal
     # ever having fired to release it -- e.g. a keyboard shortcut, or
     # (as simulated here) a caller that just gives up on the pick
@@ -859,22 +932,20 @@ def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        assert isinstance(canvas.mapTool(), DigitiseGridTool)
-        dialog.reject()  # gives up on the pick entirely, tool still active
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert isinstance(canvas.mapTool(), DigitiseGridTool)
+    dialog.reject()  # gives up on the pick entirely, tool still active -- must not raise
 
-    drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)  # must not raise
     assert canvas.mapTool() is None  # released, not left stranded
     plugin.unload()
 
 
 def test_open_grid_dialog_releases_a_stranded_tool_on_accept_without_flashing_the_dialog(
-    fake_iface, tmp_path, drive_dialog, answer_modal
+    fake_iface, tmp_path, answer_modal
 ):
     # Fix round 3, Finding 3: releasing a still-active digitise tool in
-    # open_grid_dialog()'s finally (round 2, Finding 4's fix) runs
+    # finished()'s cleanup (round 2, Finding 4's fix) runs
     # unsetMapTool() -> deactivate() -> cancelled -> show_dialog(),
     # which would otherwise re-show `dialog` -- already accepted here --
     # for one event-loop turn before deleteLater() actually destroys it.
@@ -885,26 +956,46 @@ def test_open_grid_dialog_releases_a_stranded_tool_on_accept_without_flashing_th
     plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
 
-    def driver(dialog: GridDialog) -> None:
-        dialog.digitise_button.click()
-        assert isinstance(canvas.mapTool(), DigitiseGridTool)
-        assert dialog.isHidden()
-        dialog.id_edit.setText("A")
-        dialog.velocity.setValue(0.08)
-        dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-        dialog.accept()  # accepted mid-pick, tool still active
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert isinstance(canvas.mapTool(), DigitiseGridTool)
+    assert dialog.isHidden()
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    dialog.accept()  # accepted mid-pick, tool still active -- must not raise
 
-    calls = drive_dialog(QDialog, "exec", driver)
-    plugin.open_grid_dialog(None)  # must not raise
     assert canvas.mapTool() is None  # released
-    assert calls[0].isHidden()  # never re-shown after being accepted
+    assert dialog.isHidden()  # never re-shown after being accepted
     assert plugin.session.grid("A").crs == "EPSG:32616"
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
+def test_open_grid_dialog_does_not_open_a_second_dialog_while_one_is_open(fake_iface, tmp_path):
+    # Fix round 4, Finding 1: modeless means the toolbar/dock stay
+    # clickable while a grid dialog is open, unlike the old exec()'s
+    # application-modal block -- so "Add grid" can be triggered again
+    # before the first one closes. open_grid_dialog() must not open a
+    # second one on top of the first (it would fight the first over the
+    # canvas's one map tool during a digitise pick); it raises/
+    # activates the existing one instead.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    first = _open(plugin)
+    plugin.open_grid_dialog(None)
+    assert plugin._grid_dialog is first  # no second dialog created
+
+    first.reject()
+    plugin.unload()
+
+
 def test_open_grid_dialog_seeds_velocity_from_the_header_dielectric(
-    fake_iface, tmp_path, drive_dialog, answer_modal
+    fake_iface, tmp_path, answer_modal
 ):
     # Fix round 1, Finding 6: one of the brief's two headline
     # requirements -- velocity is seeded from the first line's header
@@ -921,16 +1012,14 @@ def test_open_grid_dialog_seeds_velocity_from_the_header_dielectric(
     plugin.session.add_lines([Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, path.stem))])
     expected = VelocityModel.from_dielectric(14.0).surface_velocity
 
-    def driver(dialog: GridDialog) -> None:
-        # velocity is a 4-decimal QDoubleSpinBox, so setValue() itself
-        # rounds -- compare at that precision, not the raw float's.
-        assert dialog.velocity.value() == pytest.approx(expected, abs=5e-5)
-        assert "dielectric" in dialog.velocity_hint.text().lower()
-        dialog.reject()
-
-    drive_dialog(QDialog, "exec", driver)
     # grid_id=None and no grids yet: open_grid_dialog's "new grid" path,
     # which is the one that seeds the suggestion.
-    plugin.open_grid_dialog(None)
+    dialog = _open(plugin)
+    # velocity is a 4-decimal QDoubleSpinBox, so setValue() itself
+    # rounds -- compare at that precision, not the raw float's.
+    assert dialog.velocity.value() == pytest.approx(expected, abs=5e-5)
+    assert "dielectric" in dialog.velocity_hint.text().lower()
+
+    dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
