@@ -124,7 +124,43 @@ def test_radargram_image_with_radargram_keeps_display_settings_swaps_data():
     assert (ri2.image.width(), ri2.image.height()) == (64, 32)
 
 
-def test_decimated_image_paints_the_correctly_scaled_source_rect(qgis_app):
+@pytest.fixture
+def make_view(qgis_app):
+    """Constructs a `ProfileView` and guarantees it is torn down before the
+    test process moves on, instead of being left for Python's GC to collect
+    whenever it happens to run.
+
+    Every `ProfileView` in this file is parentless (no dock/main-window
+    owns it, unlike production use -- see `nsgeo_qgis.plugin`), and every
+    test but the ones using this fixture used to just construct one, use
+    it, and `return`/fall off the end with no teardown at all. Confirmed
+    directly this is a real, not theoretical, hazard: a *shown*, parentless
+    `ProfileView` destroyed by GC instead of Qt (reliably reproduced by
+    running each of this file's tests individually rather than as a whole
+    suite -- collecting them into one process hides it, because the
+    QApplication then outlives every widget) segfaults inside
+    `libQt5Widgets.so` at interpreter/`QgsApplication` shutdown, not a
+    Python-level exception -- widget teardown ordering, not this file's own
+    logic. `hide()` first (so a *shown* top-level window is never left for
+    GC to tear down) and `deleteLater()` (so the QObject is deleted through
+    Qt's own object-deletion path rather than Python's `__del__` on a
+    C++-owned object) together were verified to take every affected test in
+    this file from crashing to not, run individually, one at a time.
+    """
+    widgets: list[ProfileView] = []
+
+    def _make() -> ProfileView:
+        v = ProfileView()
+        widgets.append(v)
+        return v
+
+    yield _make
+    for v in widgets:
+        v.hide()
+        v.deleteLater()
+
+
+def test_decimated_image_paints_the_correctly_scaled_source_rect(make_view):
     """The hazard the task brief calls out by name: `source_rect()` is in
     *unbinned* trace-index units, but a decimated `RadargramImage.image` is
     narrower than `n_traces` pixels. `paintEvent` must scale the rect down
@@ -147,7 +183,7 @@ def test_decimated_image_paints_the_correctly_scaled_source_rect(qgis_app):
         ri.image.width() == 2000
     )  # exact: 20_000 / 10 traces per decimated column, no ragged tail
 
-    v = ProfileView()
+    v = make_view()
     v.resize(800, 300)
     v.show()
     v.set_axes(n_traces, n_samples, 0.0, 0.5)
@@ -178,8 +214,8 @@ def test_decimated_image_paints_the_correctly_scaled_source_rect(qgis_app):
 
 
 @pytest.fixture
-def view(qgis_app):
-    v = ProfileView()
+def view(make_view):
+    v = make_view()
     v.resize(800, 300)
     v.show()
     rg = _rg()
@@ -205,8 +241,8 @@ def test_paints_the_image_inside_the_margins(view):
     assert margin.red() == margin.green() == margin.blue()  # axis gutter is neutral
 
 
-def test_loading_state_when_there_is_no_image(qgis_app):
-    v = ProfileView()
+def test_loading_state_when_there_is_no_image(make_view):
+    v = make_view()
     v.resize(400, 200)
     v.set_axes(100, 50, 0.0, 0.5)
     v.set_image(None)
@@ -221,7 +257,7 @@ def test_loading_state_when_there_is_no_image(qgis_app):
         pytest.param(100, 0, id="empty_sample_axis"),
     ],
 )
-def test_paint_event_handles_an_empty_axis_without_dividing_by_zero(qgis_app, n_traces, n_samples):
+def test_paint_event_handles_an_empty_axis_without_dividing_by_zero(make_view, n_traces, n_samples):
     """Defect (a) in the task brief: the reference `paintEvent` computed
     `self._image.width() / t.n_traces` (and the symmetric sample-axis
     division) unconditionally, before ever checking whether the axis was
@@ -237,7 +273,7 @@ def test_paint_event_handles_an_empty_axis_without_dividing_by_zero(qgis_app, n_
     other loading-state test) never reaches the division line at all,
     since that branch is guarded by `self._image is not None` already.
     """
-    v = ProfileView()
+    v = make_view()
     v.resize(400, 200)
     v.set_axes(n_traces, n_samples, 0.0, 0.5)
     img = QImage(max(1, n_traces), max(1, n_samples), QImage.Format.Format_RGB888)
@@ -423,12 +459,12 @@ def test_depth_axis_uses_the_velocity_model(view):
 
 
 @needs_real_data
-def test_real_file_renders_at_full_resolution(qgis_app):
+def test_real_file_renders_at_full_resolution(make_view):
     h = read_header(REAL_DZT[0])
     rg = Radargram.from_profile(Profile(data=read_samples(REAL_DZT[0])[0], header=h))
     ri = RadargramImage(rg)
     assert (ri.image.width(), ri.image.height()) == (rg.n_traces, 512)
-    v = ProfileView()
+    v = make_view()
     v.resize(900, 320)
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns)
     v.set_image(ri.image)
