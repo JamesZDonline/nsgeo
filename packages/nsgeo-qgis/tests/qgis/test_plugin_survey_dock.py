@@ -8,8 +8,9 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QFileDialog
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QEvent, Qt
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -202,28 +203,129 @@ def test_save_with_prompt_reports_unexpected_errors_and_keeps_the_site_dirty(
     item = fake_iface.messageBar().currentItem()
     assert item is not None and "simulated disk-full error" in item.text()
     # No plugin.unload() here: the site is deliberately left dirty, and
-    # unload() itself would then show a real "save before continuing?"
-    # confirmation prompt (ask_first=True) -- a modal that would block
-    # forever under the offscreen platform with nothing to answer it.
-    # That prompt is independent of save()'s own behaviour, so undoing the
-    # monkeypatch would not help either. This test's job ends at the
-    # assertions above; plugin/session cleanup is not part of it.
+    # unload()'s own dirty-session prompt is this file's business, not
+    # this test's -- see the test_unload_* tests below, which use
+    # answer_modal to drive that prompt directly. Without it, the
+    # _no_unhandled_modals guard would fail this test fast rather than
+    # hang it, but the point stands: that prompt is a separate concern
+    # from save_with_prompt()'s own failure handling, which is what this
+    # test exists to pin.
 
 
-def test_unload_releases_every_toolbar_and_menu_action(fake_iface):
+def test_unload_releases_every_toolbar_and_menu_action(fake_iface, qgis_app):
     # Task 5 fixed this leak for the menu's About action (removePluginMenu
     # alone drops the Python reference but never deletes the underlying
     # QAction). The toolbar actions this task adds are not children of the
     # toolbar itself (QToolBar.addAction does not reparent), so unload()
     # must deleteLater() each of them explicitly too, not just tear down
     # the toolbar that displayed them.
+    #
+    # Asserting only that the bookkeeping lists end up empty would stay
+    # green even if the deleteLater() calls themselves were deleted --
+    # deleteLater() is deferred, and (measured directly) a plain
+    # processEvents() does not dispatch a DeferredDelete event; only
+    # sendPostedEvents(None, QEvent.DeferredDelete) forces it through so
+    # sip.isdeleted() can tell "scheduled" apart from "actually deleted".
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     assert plugin.toolbar_actions and plugin.menu_actions
     assert plugin.act_new is not None
+    toolbar_action = plugin.toolbar_actions[0]
+    menu_action = plugin.menu_actions[0]
+
     plugin.unload()
+    qgis_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
     assert plugin.toolbar_actions == []
     assert plugin.menu_actions == []
     assert plugin.act_new is None
+    assert sip.isdeleted(toolbar_action)
+    assert sip.isdeleted(menu_action)
+
+
+def test_line_velocity_requested_reports_that_no_dialog_exists_yet(fake_iface):
+    # Finding 2 (review round 1): this signal was emitted by the context
+    # menu's "Set velocity override..." action but never connected to
+    # anything -- a permanent, silent no-op with no message, no log line,
+    # nothing. Now routed to the same message-bar-stub pattern as
+    # open_grid_dialog/open_import_dialog.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.survey_dock.line_velocity_requested.emit("raw/FILE__001.DZT")
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "elocity" in item.text()
+    plugin.unload()
+
+
+def test_unload_does_not_offer_a_cancel_that_would_be_ignored(fake_iface, tmp_path, answer_modal):
+    # Finding 1 (review round 1): unload() cannot veto QGIS unloading the
+    # plugin, so a "Save / Discard / Cancel" prompt whose Cancel answer
+    # is then silently discarded would let a user press a button labelled
+    # Cancel and lose the site anyway. Pin the button set directly rather
+    # than trust that no one re-adds Cancel later.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(GRID)
+    assert plugin.session.dirty
+
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+    assert len(calls) == 1
+    buttons = calls[0][0][3]
+    assert buttons & QMessageBox.StandardButton.Save
+    assert buttons & QMessageBox.StandardButton.Discard
+    assert not (buttons & QMessageBox.StandardButton.Cancel)
+    assert plugin.survey_dock is None  # unload proceeded regardless of the answer
+
+
+def test_unload_saves_a_dirty_site_when_the_user_chooses_save(fake_iface, tmp_path, answer_modal):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(GRID)
+    session = plugin.session  # plugin.session is None after unload(); keep our own handle
+    assert session.dirty
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Save)
+    plugin.unload()
+
+    assert not session.dirty
+    assert plugin.session is None
+
+
+def test_unload_warns_explicitly_when_the_chosen_save_then_fails(
+    fake_iface, tmp_path, answer_modal, monkeypatch
+):
+    # Finding 1's other half: Save was chosen, but the save itself fails.
+    # unload() cannot retry or abort at that point (QGIS is unloading the
+    # plugin regardless), so the failure must be reported as data loss,
+    # not merely as "could not save the site" -- a message identical to
+    # save_with_prompt()'s normal failure message would not tell the user
+    # their edits are gone rather than merely unsaved-for-now.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(GRID)
+
+    def boom(**_kw):
+        raise OSError("simulated disk-full error")
+
+    monkeypatch.setattr(plugin.session, "save", boom)
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Save)
+    plugin.unload()  # must not raise or hang despite the failed save
+
+    assert plugin.survey_dock is None  # unload still proceeded
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "unsaved changes will be lost" in item.text()

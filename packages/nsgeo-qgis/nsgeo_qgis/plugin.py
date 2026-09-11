@@ -84,6 +84,7 @@ class NsgeoPlugin:
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
         self.survey_dock.import_requested.connect(self.open_import_dialog)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
+        self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
         self._update_enabled()
@@ -91,8 +92,22 @@ class NsgeoPlugin:
         self.session.site_closed.connect(self._update_enabled)
 
     def unload(self) -> None:
-        if self.session is not None and self.session.dirty:
-            self.save_with_prompt(ask_first=True)
+        # QGIS cannot be told "no" here -- the plugin is unloading
+        # regardless of what save_with_prompt() returns -- so there is no
+        # Cancel option: offering one would be a button that cannot do
+        # what it says (see save_with_prompt()'s docstring). Save or
+        # Discard only; if the user chooses Save and it then fails, say
+        # so explicitly, since save_with_prompt()'s own failure message
+        # does not mention that the data is about to be lost anyway.
+        if (
+            self.session is not None
+            and self.session.dirty
+            and not self.save_with_prompt(ask_first=True, allow_cancel=False)
+        ):
+            self.message(
+                "could not save changes before unloading; unsaved changes will be lost",
+                Qgis.MessageLevel.Critical,
+            )
         for dock in self.docks:
             self.iface.removeDockWidget(dock)
             dock.deleteLater()
@@ -193,7 +208,7 @@ class NsgeoPlugin:
             # load_site() fully succeeds).
             self.message(f"could not open {path}: {exc}", Qgis.MessageLevel.Critical)
 
-    def save_with_prompt(self, *, ask_first: bool = False) -> bool:
+    def save_with_prompt(self, *, ask_first: bool = False, allow_cancel: bool = True) -> bool:
         """Save the site. Returns True when the caller may proceed (saved,
         or the user chose to discard). Handles the out-of-tree opt-in.
 
@@ -202,20 +217,28 @@ class NsgeoPlugin:
         swallowed by Qt (see the module docstring), and New/Open/unload all
         treat True as "safe to discard the dirty site" -- a failed save
         must never look like one that succeeded.
+
+        `allow_cancel=False` (unload()'s case) drops Cancel from the
+        button set entirely rather than showing it and ignoring the
+        answer: QGIS cannot be told not to unload the plugin, so a button
+        that cannot do what it says must not be offered. new_site() and
+        open_site() can genuinely abort their own action, so they keep
+        the default of True.
         """
         assert self.session is not None
         if not self.session.is_open:
             return True
         if ask_first:
+            buttons = QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            if allow_cancel:
+                buttons |= QMessageBox.StandardButton.Cancel
             answer = QMessageBox.question(
                 self.iface.mainWindow(),
                 "Unsaved changes",
                 "Save the site before continuing?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
+                buttons,
             )
-            if answer == QMessageBox.StandardButton.Cancel:
+            if allow_cancel and answer == QMessageBox.StandardButton.Cancel:
                 return False
             if answer == QMessageBox.StandardButton.Discard:
                 return True
@@ -251,3 +274,6 @@ class NsgeoPlugin:
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         self.message("Import dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+
+    def open_velocity_dialog(self, key: str) -> None:
+        self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)

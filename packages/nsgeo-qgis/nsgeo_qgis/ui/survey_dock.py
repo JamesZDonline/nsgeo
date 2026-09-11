@@ -101,19 +101,30 @@ class SurveyDock(QgsDockWidget):
     def _rebuild(self) -> None:
         root_expanded, known_grids, selected = self._capture_state()
         self.tree.clear()
-        site = self.session.site
-        if site is None:
+        if not self.session.is_open:
             self._update_status()
             return
+        site = self.session.site
+        assert site is not None  # is_open just confirmed this
         root = QTreeWidgetItem([self.session.site_name])
         root.setData(0, ROLE_KIND, "site")
         self.tree.addTopLevelItem(root)
         root.setExpanded(root_expanded)
-        by_grid: dict[str, list[Any]] = {g.id: [] for g in site.grids}
-        loose = []
-        for line in site.lines:
+        # Grouped by (key, line) pairs from the session's own keys() /
+        # line_for_key(), not by walking site.lines and recomputing each
+        # key: keys() reads the authoritative _lines_by_key map (Task 6),
+        # so this can never compute a key that disagrees with the one
+        # open_line()/item_for_key() use for the same line. There is no
+        # equivalent per-grid accessor on SiteSession (grid ids are not
+        # derived the way a line's key is, so nothing can drift), so
+        # site.grids is still read directly here, matching SiteLayers'
+        # own established pattern for the same reason.
+        by_grid: dict[str, list[tuple[str, Any]]] = {g.id: [] for g in site.grids}
+        loose: list[tuple[str, Any]] = []
+        for key in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+            line = self.session.line_for_key(key)
             grid_id = getattr(line.placement, "grid_id", None)
-            by_grid.get(grid_id, loose).append(line)
+            by_grid.get(grid_id, loose).append((key, line))
         for grid in site.grids:
             v = f" · v {grid.velocity.surface_velocity:.3f}" if grid.velocity else ""
             lines = by_grid[grid.id]
@@ -130,14 +141,14 @@ class SurveyDock(QgsDockWidget):
             # expanded; a grid the user explicitly collapsed stays collapsed
             # across an unrelated rebuild instead of snapping back open.
             g_item.setExpanded(known_grids.get(grid.id, True))
-            for line in lines:
-                g_item.addChild(self._line_item(line))
-        for line in loose:
-            root.addChild(self._line_item(line))
+            for key, line in lines:
+                g_item.addChild(self._line_item(key, line))
+        for key, line in loose:
+            root.addChild(self._line_item(key, line))
         self._restore_selection(selected)
         self._update_status()
 
-    def _line_item(self, line: Any) -> QTreeWidgetItem:
+    def _line_item(self, key: str, line: Any) -> QTreeWidgetItem:
         p = line.placement
         arrow = "↑" if getattr(p, "direction", 1) == 1 else "↓"
         cross = "x" if getattr(p, "axis", "y") == "y" else "y"
@@ -155,7 +166,7 @@ class SurveyDock(QgsDockWidget):
             text += f" · v {line.velocity.surface_velocity:.3f}*"
         item = QTreeWidgetItem([text])
         item.setData(0, ROLE_KIND, "line")
-        item.setData(0, ROLE_ID, self.session.line_key(line))
+        item.setData(0, ROLE_ID, key)
         item.setToolTip(0, str(line.path))
         return item
 
