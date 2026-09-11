@@ -247,7 +247,7 @@ class GridDialog(QDialog):
         v.addWidget(
             QLabel(
                 "Click the grid origin on the map, then a point along the +Y edge. "
-                "Then enter the sizes."
+                "Right-click to cancel the pick. Then enter the sizes."
             )
         )
         self.digitise_button = QPushButton("Pick on map")

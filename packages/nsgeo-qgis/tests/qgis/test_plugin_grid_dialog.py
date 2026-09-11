@@ -20,7 +20,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QLabel, QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
 LOCAL = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]])
@@ -567,6 +567,16 @@ def test_digitised_points_set_origin_and_azimuth(session):
     )
     assert (d.origin_x.value(), d.origin_y.value()) == (500.0, 700.0)
     assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
+
+
+def test_digitise_tab_instructions_mention_the_right_click_abort(session):
+    # The dialog hides itself during a pick (see digitise_button.click()
+    # elsewhere in this file), so there is no visible Cancel button while
+    # a pick is in progress -- the label is the only place a user can
+    # learn that right-click is the way out.
+    d = GridDialog(session)
+    labels = d.tabs.widget(1).findChildren(QLabel)
+    assert any("right-click" in lbl.text().lower() for lbl in labels)
 
 
 def test_set_digitised_rejects_coincident_points(session):
