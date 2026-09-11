@@ -189,5 +189,77 @@ def test_plan_import_survives_one_corrupt_header_among_good_files(tmp_path):
     assert bad.n_traces is None and bad.length_m is None
     assert bad.include is False and bad.placeable is False
     assert "cannot read header" in bad.note
+    # Review round 1, finding 3: nothing is known about a file whose header
+    # never read, so the note must not assert a false fact about its
+    # acquisition mode.
+    assert "time-triggered" not in bad.note
     lines = rows_to_lines(rows, OPTS)
     assert [ln.path.name for ln in lines] == ["FILE__001.DZT"]
+
+
+# --- review round 1 findings -------------------------------------------------
+
+
+@needs_real_data
+def test_reversed_lines_are_placed_within_the_grid_on_real_files():
+    """Finding 1: GridPlacement.distance_along is
+    start_along + direction * (i / spm), so a direction=-1 row starting at
+    the same start_along as a direction=1 row runs *backward*, off the far
+    side of the origin edge, instead of down into the grid. A reversed row
+    must start at the far end of the axis (start_along + grid_size_along)
+    for its samples to land inside [0, grid_size_along] at all.
+
+    With the default alternating zigzag, half of the ten real lines are
+    reversed. Every one of them must run from the far edge back toward the
+    origin, landing within the grid except for FILE__008, which is already
+    known to overrun it by about 10 cm (666 traces / 60 traces per metre =
+    11.1 m in an 11.0 m grid) -- not by the ~10 m a mirrored placement
+    would produce.
+    """
+    rows = plan_import(REAL_DZT, OPTS)
+    lines = rows_to_lines(rows, OPTS)
+    reversed_lines = [ln for ln in lines if ln.placement.direction == -1]
+    assert len(reversed_lines) == 5  # FILE__002, 004, 006, 008, 010
+    overruns = 0
+    for ln in reversed_lines:
+        along = ln.distance_along()
+        assert along.max() == pytest.approx(OPTS.grid_size_along)
+        assert along.min() > -0.15  # the known ~10 cm overrun, never ~10 m
+        if along.min() < 0:
+            overruns += 1
+    assert overruns == 1  # exactly FILE__008
+
+
+def test_corners_from_polygon_rejects_a_mirrored_plus_y_pick():
+    """Finding 2: only a *diagonal* plus_y_index was rejected. Of the two
+    corners adjacent to the origin, exactly one yields a right-handed
+    frame; the other silently mirrors +X and +Y onto each other's corners.
+    fit_grid_from_corners forbids reflection by construction, so the
+    mirrored pick still returns a plausible-looking grid (same size,
+    azimuth, and origin as the correct pick) with only a large
+    residual_rms to show for it."""
+    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
+    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
+    ring = [tuple(p) for p in world] + [tuple(world[0])]
+    with pytest.raises(ValueError, match="mirrored"):
+        corners_from_polygon(ring, origin_index=1, plus_y_index=2)
+
+
+def test_corners_from_polygon_mirror_check_is_winding_independent():
+    """Finding 2, continued: the mirror check must key off world-coordinate
+    handedness, not the ring's own traversal direction. Reversing the
+    ring's vertex order must not change which pick is flagged: the same
+    physical +Y corner is still accepted, and the same physical +X corner
+    (now offered as a plausible plus_y_index) is still rejected."""
+    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
+    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
+    reversed_ring = [tuple(world[i]) for i in (0, 3, 2, 1)]
+    reversed_ring = reversed_ring + [reversed_ring[0]]
+    # index 1 of the reversed ring is world[3], the true +Y corner: valid.
+    corners = corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=1)
+    assert corners.size_x == pytest.approx(5.0) and corners.size_y == pytest.approx(11.0)
+    fit = fit_grid_from_corners(corners.local, corners.world)
+    assert fit.residual_rms < 1e-9
+    # index 3 of the reversed ring is world[1], the true +X corner: mirrored.
+    with pytest.raises(ValueError, match="mirrored"):
+        corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=3)

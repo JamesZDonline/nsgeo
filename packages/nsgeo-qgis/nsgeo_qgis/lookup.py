@@ -128,23 +128,32 @@ def _merge_note(note: str, marker: str, text: str | None) -> str:
 
 
 def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
-    """Offsets, directions, and labels over the included rows, in table
-    order. A hand-edited offset is kept; everything else follows the slot
-    index, so excluding a redone line pulls the next file into its place.
+    """Offsets, directions, labels, and start_along over the included rows,
+    in table order. A hand-edited offset is kept; everything else follows
+    the slot index, so excluding a redone line pulls the next file into its
+    place.
 
-    Also (re)derives the two placement-dependent note components -- the
-    time-triggered exclusion and the over-length warning -- without
-    touching any other note already on the row.
+    Also (re)derives three placement-dependent note components -- the
+    unplaceable-row exclusion, the reversed-direction start point, and the
+    over-length warning -- without touching any other note already on the
+    row.
     """
     slot = 0
     for row in rows:
         if not row.placeable:
             row.include = False
-            row.note = _merge_note(
-                row.note,
-                "time-triggered",
-                "time-triggered (traces/m = 0): cannot be grid-placed",
-            )
+            if row.n_traces is not None:
+                # A real header, but a non-positive acquisition rate: this
+                # really is a time-triggered survey. When the header itself
+                # never read (n_traces is None), nothing is known about the
+                # acquisition mode -- plan_import's own "cannot read header"
+                # note already says why, and asserting time-triggering here
+                # would be a fabricated diagnosis.
+                row.note = _merge_note(
+                    row.note,
+                    "time-triggered",
+                    "time-triggered (traces/m = 0): cannot be grid-placed",
+                )
         if not row.include:
             continue
         if not row.offset_edited:
@@ -156,6 +165,26 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
         else:
             row.direction = 1
         row.label = f"line {slot}" if options.label_source == "number" else row.path.stem
+
+        # GridPlacement.distance_along is start_along + direction * (i/spm):
+        # a reversed row starting at the same start_along as a forward row
+        # runs the wrong way, off the far side of the origin edge, instead
+        # of down into the grid. A reversed row must start at the far end
+        # of the axis instead.
+        reversed_note: str | None = None
+        if row.direction == -1:
+            if options.grid_size_along is not None:
+                row.start_along = options.start_along + options.grid_size_along
+            else:
+                row.start_along = options.start_along
+                reversed_note = (
+                    "reversed direction cannot be positioned without a known "
+                    "grid length along this axis; using start_along as given"
+                )
+        else:
+            row.start_along = options.start_along
+        row.note = _merge_note(row.note, "reversed direction", reversed_note)
+
         exceeds: str | None = None
         if (
             options.grid_size_along is not None
@@ -219,7 +248,17 @@ def corners_from_polygon(
 ) -> PolygonCorners:
     """Turn a four-vertex ring into the control points a rigid fit wants.
     `plus_y_index` must neighbour `origin_index`; the other neighbour is +X
-    and the remaining vertex is +X+Y."""
+    and the remaining vertex is +X+Y.
+
+    Of the two corners adjacent to the origin, only one yields a
+    right-handed (non-mirrored) frame; the other is rejected. Silently
+    accepting it would be worse than accepting a non-square quadrilateral:
+    fit_grid_from_corners forbids reflection by construction, so a mirrored
+    pick still returns a plausible-looking origin, size, and azimuth --
+    identical to the correct pick's -- with nothing but a large
+    residual_rms to distinguish it, which callers may reasonably read as
+    "not square" rather than "wrong corner".
+    """
     pts = [tuple(map(float, v)) for v in vertices]
     if len(pts) >= 2 and pts[0] == pts[-1]:
         pts = pts[:-1]
@@ -230,6 +269,20 @@ def corners_from_polygon(
         raise ValueError("the +Y corner must be adjacent to the origin corner")
     y = plus_y_index % 4
     x = (o - 1) % 4 if y == (o + 1) % 4 else (o + 1) % 4
+    # cross(x - o, y - o) is positive iff (+X, +Y) is a right-handed pair --
+    # which a real grid's axes always are (Grid.axes() has
+    # cross(x_hat, y_hat) == +1 at every azimuth). A rotation (to_world's
+    # only transform) preserves that sign; a reflection would flip it. So a
+    # non-positive cross here means this (origin, +Y) pick mirrors the two
+    # neighbours onto each other's roles, regardless of the ring's own
+    # winding direction.
+    cross = (pts[x][0] - pts[o][0]) * (pts[y][1] - pts[o][1]) - (pts[x][1] - pts[o][1]) * (
+        pts[y][0] - pts[o][0]
+    )
+    if cross <= 0:
+        raise ValueError(
+            "these corners are mirrored: pick the other corner adjacent to the origin for +Y"
+        )
     far = ({0, 1, 2, 3} - {o, x, y}).pop()
     world = np.array([pts[o], pts[x], pts[far], pts[y]], dtype=float)
     size_x = float(math.dist(pts[o], pts[x]))
