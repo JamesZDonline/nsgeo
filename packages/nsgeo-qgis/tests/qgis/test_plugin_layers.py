@@ -22,6 +22,7 @@ from qgis.core import (
     QgsGeometry,
     QgsPointXY,
     QgsProject,
+    QgsProviderRegistry,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
@@ -52,6 +53,26 @@ def populated(qgis_app, tmp_path):
     yield session, layers, project
     layers.detach()
     project.clear()
+
+
+@pytest.fixture
+def message_log(qgis_app):
+    """Captured `QgsMessageLog` messages, for the life of this test only.
+
+    `QgsApplication.messageLog()` is a session-scoped singleton: a
+    connection left dangling would keep accumulating every later test's
+    messages into this test's own list for the rest of the (also
+    session-scoped) `qgis_app` fixture. Disconnected on teardown.
+    """
+    log = QgsApplication.messageLog()
+    messages: list[str] = []
+
+    def _on_message(msg: str, tag: str, level: int) -> None:
+        messages.append(msg)
+
+    log.messageReceived.connect(_on_message)
+    yield messages
+    log.messageReceived.disconnect(_on_message)
 
 
 def test_tables_exist_with_the_declared_fields_and_flags(populated):
@@ -308,7 +329,7 @@ def test_removing_the_last_grid_clears_the_derived_tables(populated):
 # must be logged and must not prevent the others from being prepared. ---
 
 
-def test_ensure_tables_contains_a_failing_table_and_logs_it(populated, monkeypatch):
+def test_ensure_tables_contains_a_failing_table_and_logs_it(populated, monkeypatch, message_log):
     session, layers, _ = populated
     real_create_table = layers._create_table
 
@@ -319,8 +340,8 @@ def test_ensure_tables_contains_a_failing_table_and_logs_it(populated, monkeypat
 
     monkeypatch.setattr(layers, "_create_table", flaky_create_table)
 
-    logged: list[str] = []
-    QgsApplication.messageLog().messageReceived.connect(lambda msg, tag, level: logged.append(msg))
+    original_grid_feature = next(layers.layers["grids"].getFeatures())
+    original_grid_wkt = original_grid_feature.geometry().asWkt()
 
     # A CRS change forces every table, including "grids", to need a
     # rebuild -- replace_grid, exactly as in the round-1 CRS-freeze fix.
@@ -328,10 +349,18 @@ def test_ensure_tables_contains_a_failing_table_and_logs_it(populated, monkeypat
 
     # "grids"'s rebuild failed and was logged -- not merely a stderr
     # traceback -- but the other three tables still got rebuilt.
-    assert any("grids" in msg for msg in logged)
+    assert any("grids" in msg for msg in message_log)
     assert layers.layers["lines"].crs().authid() == "EPSG:4326"
     assert layers.layers["marks"].crs().authid() == "EPSG:4326"
     assert layers.layers["picks"].crs().authid() == "EPSG:4326"
+    # And "grids" itself was neither silently rebuilt (its schema never
+    # changed) nor refilled with new (4326-degree) geometry into a table
+    # still declared 32616 -- it must stay exactly, byte-for-byte, as it
+    # was. Stale-and-self-consistent is recoverable next refresh;
+    # mislabelled-and-wrong looks correct and isn't.
+    assert layers.layers["grids"].crs().authid() == "EPSG:32616"
+    survivor = next(layers.layers["grids"].getFeatures())
+    assert survivor.geometry().asWkt() == original_grid_wkt
 
 
 # --- fix round 2: a picks rebuild must never destroy the on-disk rows
@@ -473,6 +502,91 @@ def test_an_untransformable_crs_pair_refuses_rather_than_relabelling_a_pick(popu
     pt = survivor.geometry().asPoint()
     assert (pt.x(), pt.y()) == pytest.approx((500.0, 700.0))
     assert survivor["line_key"] == "raw/FILE__001.DZT"
+
+
+# --- fix round 3: a leftover _PICKS_BACKUP is not cosmetic -- nothing
+# ever cleaned it up, so it wedged every future rebuild permanently
+# (picks frozen at its old CRS *and* old field set forever, even though
+# the data itself was safe and the failure logged loudly). -------------
+
+
+def test_a_stale_rebuild_backup_is_cleared_not_wedged_forever(populated):
+    session, layers, _ = populated
+
+    # Plant a leftover backup, as if a previous rebuild's final cleanup
+    # step (dropping the backup once the swap had already succeeded) had
+    # failed: rename the current "picks" out, then recreate a fresh one
+    # in its place -- exactly what a completed-but-not-cleaned-up rebuild
+    # leaves behind on disk.
+    conn = (
+        QgsProviderRegistry.instance()
+        .providerMetadata("ogr")
+        .createConnection(str(session.gpkg_path), {})
+    )
+    layers._drop_loaded_layer("picks")
+    conn.renameVectorTable("", "picks", _PICKS_BACKUP)
+    layers._create_table(
+        str(session.gpkg_path),
+        "picks",
+        QgsWkbTypes.Type.Point,
+        TABLES["picks"][1],
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+    )
+
+    # A later, unrelated rebuild (a real CRS change) must not be wedged
+    # by the leftover: without clearing it first, the rename this
+    # rebuild needs ("picks" -> the same backup name) fails with "table
+    # already exists" -- and would keep failing on every subsequent
+    # refresh too, freezing "picks" at its old CRS forever even though
+    # the data itself is never actually at risk.
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"
+
+
+# --- fix round 3: process death between the two renames in
+# _rebuild_picks left the authored rows on disk but invisible to the
+# plugin -- and, unrecovered, triggered the round-3 Finding 2 wedge on
+# every later attempt. The recovery the docstring already claimed must
+# actually happen. ------------------------------------------------------
+
+
+def test_reopening_after_a_crash_between_the_two_renames_recovers_picks(populated, tmp_path):
+    session, layers, project = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 42.0
+    assert picks.dataProvider().addFeatures([f])[0]
+    session.save()
+
+    # Simulate a crash exactly between the two renames in _rebuild_picks:
+    # the original "picks" has been renamed to its backup name, and
+    # nothing else has happened -- as if the process died right there.
+    layers.detach()
+    project.clear()
+    conn = (
+        QgsProviderRegistry.instance()
+        .providerMetadata("ogr")
+        .createConnection(str(session.gpkg_path), {})
+    )
+    conn.renameVectorTable("", "picks", _PICKS_BACKUP)
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / "survey.nsgeo.json")
+
+    assert layers2.feature_count("picks") == 1
+    survivor = next(layers2.layers["picks"].getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(42.0)
+    # No leftover backup once recovered -- otherwise this is exactly the
+    # round-3 Finding 2 wedge, reintroduced.
+    backup = QgsVectorLayer(f"{session.gpkg_path}|layername={_PICKS_BACKUP}", _PICKS_BACKUP, "ogr")
+    assert not backup.isValid()
+
+    layers2.detach()
 
 
 # --- strengthened proof: picks survive attributes and geometry intact,

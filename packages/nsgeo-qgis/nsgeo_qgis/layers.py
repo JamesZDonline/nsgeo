@@ -23,6 +23,7 @@ it before ever touching the original (see `_rebuild_picks`).
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -285,6 +286,14 @@ class SiteLayers(QObject):
         a plain overwrite is safe for them.
         """
         existing_crs, existing_fields = self._table_schema(path, name)
+        if name == "picks" and existing_crs is None and self._recover_picks_backup(path):
+            # `picks` is missing but a rebuild's backup is sitting on
+            # disk: a previous rebuild died between renaming the
+            # original out of the way and renaming the migrated table
+            # into place (see _rebuild_picks). Recovered rows may or may
+            # not still need the rebuild that was interrupted -- re-probe
+            # rather than assume, and let the normal logic below decide.
+            existing_crs, existing_fields = self._table_schema(path, name)
         up_to_date = existing_crs is not None and existing_crs == crs
         if up_to_date and existing_fields == [f for f, _ in spec]:
             return  # up to date; nothing to rebuild
@@ -293,6 +302,31 @@ class SiteLayers(QObject):
             return
         self._drop_loaded_layer(name)
         self._create_table(path, name, wkb, spec, crs)
+
+    def _recover_picks_backup(self, path: str) -> bool:
+        """True if a leftover `_PICKS_BACKUP` was renamed back into
+        `picks`, False if there was nothing to recover.
+
+        `_rebuild_picks` renames `picks` out of the way before renaming
+        the verified migration into place; if the process dies in
+        between, the authored rows are still on disk but under the
+        backup's name -- invisible to `_table_schema` and therefore, left
+        unchecked, silently replaced by a fresh empty table the next time
+        `_ensure_table` runs. Restoring first means the rows are seen
+        again (and, if the CRS/schema mismatch that started the
+        interrupted rebuild is still there, `_rebuild_picks` runs again
+        from a fully consistent starting point rather than from nothing).
+        """
+        if self._table_schema(path, _PICKS_BACKUP)[0] is None:
+            return False
+        _log(
+            "found a leftover picks backup from an interrupted rebuild; "
+            "restoring it before continuing",
+            Qgis.MessageLevel.Warning,
+        )
+        conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+        conn.renameVectorTable("", _PICKS_BACKUP, "picks")
+        return True
 
     @staticmethod
     def _table_schema(
@@ -306,6 +340,19 @@ class SiteLayers(QObject):
         if not layer.isValid():
             return None, []
         return layer.crs(), [f.name() for f in layer.fields() if f.name() != "fid"]
+
+    @staticmethod
+    def _drop_table_if_exists(conn: Any, name: str) -> None:
+        """Best-effort: drop `name` if the connection can see it, do
+        nothing if it can't. Used only to clear a table this method is
+        about to need for itself (a stale rebuild backup) -- if nothing
+        is actually there, or this raises for some other reason, the
+        very next operation that needs `name` to be free (a rename) fails
+        loudly on its own account, so silence here never hides a real
+        problem, only a no-op.
+        """
+        with contextlib.suppress(Exception):  # see the caller's comment
+            conn.dropVectorTable("", name)
 
     def _rebuild_picks(
         self,
@@ -327,9 +374,13 @@ class SiteLayers(QObject):
         original out of the way, rename the migrated table into its
         place, and drop the renamed-out original. If the rename-in step
         itself fails, the original is renamed back before re-raising, so
-        a failure anywhere in this method leaves a fully-populated
-        `picks` table on disk -- the pre-rebuild one, or the migrated
-        one, never neither.
+        a failure *within this call* leaves a fully-populated `picks`
+        table on disk -- the pre-rebuild one, or the migrated one, never
+        neither. If the *process* dies between the two renames, there is
+        no code left running to rename back -- `picks` is genuinely
+        absent and the pre-rebuild rows sit under the backup name until
+        `_ensure_table`'s next call finds it missing and recovers it via
+        `_recover_picks_backup` before this method runs again.
         """
         old_rows = self._read_picks_rows(path, existing_crs, crs)
 
@@ -377,6 +428,15 @@ class SiteLayers(QObject):
 
         self._drop_loaded_layer("picks")
         conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+        # A backup from an earlier, already-finished rebuild has no
+        # reason to still be here (the last step of this same method
+        # drops it), but if one is, the rename below would fail with
+        # "table already exists" on every future rebuild forever rather
+        # than just this once -- clear it first. Best-effort: if nothing
+        # is there, or this connection cannot see it, there is nothing to
+        # clear, and a real failure surfaces normally at the rename below
+        # instead of being hidden here.
+        self._drop_table_if_exists(conn, _PICKS_BACKUP)
         conn.renameVectorTable("", "picks", _PICKS_BACKUP)
         try:
             conn.renameVectorTable("", _PICKS_REBUILD, "picks")
@@ -513,6 +573,22 @@ class SiteLayers(QObject):
 
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
+        target = self.crs()
+        # A table whose own prep failed this cycle (ensure_tables()
+        # contains that failure and moves on, but does not track which
+        # table it was) must not be refilled anyway: the geometry being
+        # written is computed in `target`, so writing it into a layer
+        # still declaring its old CRS would silently mislabel every
+        # feature -- stale data left alone is recoverable next refresh;
+        # mislabelled data looks correct and is wrong. `target` is only
+        # None while clearing derived tables with no grids left, which
+        # has no CRS to compare against and every reason to proceed.
+        if target is not None and layer.crs() != target:
+            raise RuntimeError(
+                f"refusing to refill {name!r}: its CRS ({layer.crs().authid()}) does not "
+                f"match the package CRS ({target.authid()}); its own preparation must have "
+                f"failed this cycle"
+            )
         provider = layer.dataProvider()
         if not provider.truncate():
             raise RuntimeError(f"could not truncate {name}: {provider.error().message()}")
