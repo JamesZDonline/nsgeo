@@ -49,7 +49,7 @@ def test_rejects_short_file():
         parse_header(b"\x00" * 100)
 
 
-def test_rejects_unknown_bit_depth(tmp_path):
+def test_rejects_unknown_bit_depth():
     raw = bytearray(1024)
     import struct
 
@@ -57,6 +57,7 @@ def test_rejects_unknown_bit_depth(tmp_path):
     struct.pack_into("<H", raw, 2, 128)
     struct.pack_into("<H", raw, 4, 512)
     struct.pack_into("<H", raw, 6, 24)  # unsupported
+    struct.pack_into("<f", raw, 26, 110.864)  # a valid range, not what's under test here
     struct.pack_into("<H", raw, 52, 1)
     with pytest.raises(DztError, match="bit depth"):
         parse_header(bytes(raw))
@@ -72,6 +73,26 @@ def test_rejects_zero_samples():
     struct.pack_into("<H", raw, 6, 32)
     struct.pack_into("<H", raw, 52, 1)
     with pytest.raises(DztError, match="samples"):
+        parse_header(bytes(raw))
+
+
+def test_rejects_non_positive_range():
+    """`dt_ns` is `range_ns / n_samples`; a zero (or negative) `range_ns`
+    yields `dt_ns == 0` without `n_samples` itself being zero, which the
+    existing zero-samples guard does not catch. Downstream, Task 15 feeds a
+    header's `dt_ns` straight into `ViewTransform.fit()` before samples ever
+    load, well before `Radargram.__post_init__`'s `dt_ns > 0` check would see
+    it -- so this must be rejected here, at the header boundary."""
+    import struct
+
+    raw = bytearray(1024)
+    struct.pack_into("<H", raw, 0, 2047)
+    struct.pack_into("<H", raw, 2, 128)
+    struct.pack_into("<H", raw, 4, 512)
+    struct.pack_into("<H", raw, 6, 32)
+    struct.pack_into("<f", raw, 26, 0.0)  # rh_rng: zero range
+    struct.pack_into("<H", raw, 52, 1)
+    with pytest.raises(DztError, match="range"):
         parse_header(bytes(raw))
 
 

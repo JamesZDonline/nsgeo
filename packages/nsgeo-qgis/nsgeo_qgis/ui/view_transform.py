@@ -64,11 +64,15 @@ class ViewTransform:
         return self.time_lo + y / self.height * (self.time_hi - self.time_lo)
 
     def trace_index_at(self, x: float) -> int:
-        return int(min(self.n_traces - 1, max(0, math.floor(self.trace_of_x(x)))))
+        # max(0, ...) on the upper bound first: n_traces == 0 must clamp to 0,
+        # never to -1, which would be numpy's "last trace" rather than "no trace".
+        upper = max(0, self.n_traces - 1)
+        return int(min(upper, max(0, math.floor(self.trace_of_x(x)))))
 
     def sample_index_at(self, y: float) -> int:
         s = math.floor((self.time_of_y(y) - self.t0_ns) / self.dt_ns)
-        return int(min(self.n_samples - 1, max(0, s)))
+        upper = max(0, self.n_samples - 1)
+        return int(min(upper, max(0, s)))
 
     def source_rect(self) -> tuple[float, float, float, float]:
         """Visible window as (x, y, w, h) in image pixels: traces and samples."""
@@ -86,6 +90,17 @@ class ViewTransform:
         )
         lo = min(max(trace_lo, 0.0), self.n_traces - t_span)
         tlo = min(max(time_lo, self.t0_ns), self.t_end - s_span)
+        if not all(math.isfinite(v) for v in (lo, t_span, tlo, s_span)):
+            # A NaN factor/delta (zoomed/panned) or a NaN argument here poisons
+            # the min/max clamps above without raising -- Python's min/max keep
+            # whichever operand happens not to be NaN, silently. Left unchecked,
+            # the resulting window is only discovered broken on some *later*
+            # call (trace_index_at raising ValueError, far from the real cause).
+            # Fail here instead, at the one place all window changes pass
+            # through, rather than let a half-corrupted transform propagate.
+            raise ValueError(
+                f"non-finite view window: trace=[{lo}, {lo + t_span}), time=[{tlo}, {tlo + s_span})"
+            )
         return replace(self, trace_lo=lo, trace_hi=lo + t_span, time_lo=tlo, time_hi=tlo + s_span)
 
     def zoomed(self, factor: float, anchor_x: float, anchor_y: float) -> ViewTransform:

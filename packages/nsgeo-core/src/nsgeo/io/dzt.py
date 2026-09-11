@@ -78,6 +78,8 @@ def parse_header(raw: bytes) -> DztHeader:
 
     if n_samples == 0:
         raise DztError("header declares zero samples per trace")
+    if range_ns <= 0:
+        raise DztError(f"header declares a non-positive range: {range_ns} ns")
     if bits not in _DTYPES:
         raise DztError(f"unsupported bit depth {bits}; expected one of {sorted(_DTYPES)}")
 
