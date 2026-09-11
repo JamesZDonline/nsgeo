@@ -9,6 +9,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis import session as session_module
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from plugin_testing import synthetic_dzt
 
@@ -222,6 +223,186 @@ def test_further_mutators_emit_only_on_real_change(session, tmp_path):
     session.clear_selection()
     session.clear_selection()  # already cleared: no-op
     assert selection_changed.calls == [(key, -1, -1)]
+
+
+def test_set_selection_clamps_both_ends_independently_into_range(session, tmp_path):
+    # Review round 1, Finding 1: the old clamp floored only the low end and
+    # capped only the high end, so an out-of-range drag produced an
+    # inverted, out-of-range selection, and (-1, -1) -- the documented
+    # "cleared" sentinel -- was reachable through here too.
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]  # n_traces == 60, valid indices 0..59
+    session.open_line(key)
+    sel = Spy(session.selection_changed)
+
+    session.set_selection(key, -5, -3)  # dragged entirely off the left edge
+    assert session.selection == (0, 0)
+
+    session.set_selection(key, 5000, 6000)  # dragged entirely off the right edge
+    assert session.selection == (59, 59)
+
+    session.set_selection(key, -1, -1)
+    # Must never collide with the "cleared" sentinel: only clear_selection()
+    # may produce (-1, -1).
+    assert session.selection == (0, 0)
+    assert session.selection != (-1, -1)
+
+    assert sel.calls == [(key, 0, 0), (key, 59, 59), (key, 0, 0)]
+
+
+def test_set_profiles_leaves_no_residue_when_the_key_is_unknown(session, tmp_path):
+    # Review round 1, Finding 2: profiles/channel were cached before the key
+    # was validated, so a failed set_profiles() left profiles_for() lying
+    # about a line that does not exist.
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    with pytest.raises(KeyError):
+        session.set_profiles("nope", lines[0].load())
+    assert session.profiles_for("nope") is None
+
+
+def test_set_profiles_builds_the_radargram_exactly_once(session, tmp_path, monkeypatch):
+    # Review round 1, Finding 3: stack_for()'s creation branch and the
+    # explicit attach after it each built a Radargram from the same
+    # profiles, doubling an int32->float64 copy of the whole line.
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+
+    build_calls: list[object] = []
+    original_from_profile = session_module.Radargram.from_profile
+
+    def counting_from_profile(profile):
+        build_calls.append(profile)
+        return original_from_profile(profile)
+
+    monkeypatch.setattr(
+        session_module.Radargram, "from_profile", staticmethod(counting_from_profile)
+    )
+    session.set_profiles(key, lines[0].load())
+    assert len(build_calls) == 1
+
+
+def test_set_profiles_with_an_empty_list_clears_a_previously_attached_source(session, tmp_path):
+    # Review round 1, Finding 6: _attach_source() skipped silently when
+    # profiles was falsy, so reloading with no profiles kept rendering the
+    # previous line's samples while still emitting line_loaded.
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.set_profiles(key, lines[0].load())
+    assert session.stack_for(key).source is not None
+
+    session.set_profiles(key, [])
+    assert session.stack_for(key).source is None
+
+
+def test_line_index_stays_correct_across_every_list_changing_operation(session, tmp_path):
+    # Review round 1, Finding 4: line_for_key()/keys() now read a cached
+    # key -> Line map instead of re-resolving every line's path on every
+    # call; this pins that the map is invalidated everywhere the line list
+    # or the objects in it can change.
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 2)
+    session.add_lines(lines)
+    a, b = session.keys()
+
+    # set_line_velocity swaps in a new Line object at the same key.
+    session.set_line_velocity(a, VelocityModel.constant(0.07))
+    assert session.line_for_key(a).velocity == VelocityModel.constant(0.07)
+    assert session.keys() == [a, b]
+
+    # remove_line drops exactly that key and nothing else.
+    session.remove_line(a)
+    assert session.keys() == [b]
+    with pytest.raises(KeyError):
+        session.line_for_key(a)
+
+    # open_site rebuilds the index from what was actually saved.
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    assert reopened.keys() == [b]
+
+    # close_site clears it: both keys() and line_for_key() need an open site.
+    reopened.close_site()
+    with pytest.raises(ProjectError):
+        reopened.keys()
+    with pytest.raises(ProjectError):
+        reopened.line_for_key(b)
+
+
+def test_close_site_does_not_emit_line_opened_when_nothing_was_current(qgis_app, tmp_path):
+    s = SiteSession()
+    s.new_site(tmp_path)
+    opened = Spy(s.line_opened)
+    s.close_site()
+    assert opened.calls == []
+
+
+def test_close_site_emits_line_opened_empty_and_resets_allow_absolute_when_a_line_was_current(
+    session, tmp_path
+):
+    # Review round 1, Finding 5: remove_line() reports the "no line is
+    # current" transition, but close_site() silently dropped the current
+    # line without telling a widget bound only to line_opened; it also
+    # never reset the per-session allow_absolute opt-in the way _install()
+    # does.
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.open_line(key)
+    session.save(allow_absolute=True)  # flip the per-session opt-in on
+
+    opened = Spy(session.line_opened)
+    session.close_site()
+    assert opened.calls == [("",)]
+    # Not otherwise observable: a fresh new_site()/open_site() would reset
+    # this anyway via _install(). Checked directly because close_site() must
+    # own this reset rather than relying on always being followed by
+    # _install().
+    assert session._allow_absolute is False
+
+
+def test_new_site_does_not_install_when_the_initial_save_fails(qgis_app, tmp_path, monkeypatch):
+    # Review round 1, Finding 7: new_site() installed the site before
+    # writing it, so a failed initial save (e.g. a read-only folder) left
+    # the session is_open with site_opened never emitted. open_site()
+    # already gets this ordering right; new_site() now matches it.
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated read-only filesystem")
+
+    monkeypatch.setattr(session_module, "save_site", boom)
+    s = SiteSession()
+    opened = Spy(s.site_opened)
+    with pytest.raises(OSError):
+        s.new_site(tmp_path)
+    assert not s.is_open
+    assert opened.calls == []
+
+
+def test_apply_stack_to_grid_marks_dirty_before_any_stack_changed_slot_runs(session, tmp_path):
+    # Review round 1, Finding 8: dirty was set only after the whole loop,
+    # so a synchronous stack_changed slot reacting to the first copied
+    # line saw session.dirty as False while handling a change that had
+    # already dirtied the site.
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 2))
+    a, b = session.keys()
+    session.append_step(a, build_step("dewow"))
+    session.save()
+    assert not session.dirty
+
+    observed_dirty_during_emit = []
+    session.stack_changed.connect(lambda _key: observed_dirty_during_emit.append(session.dirty))
+    changed = session.apply_stack_to_grid(a, "A")
+
+    assert changed == [b]
+    assert observed_dirty_during_emit == [True]
 
 
 def test_save_out_of_tree_line_needs_allow_absolute(qgis_app, tmp_path):

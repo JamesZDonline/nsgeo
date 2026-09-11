@@ -5,6 +5,11 @@ holds survey state or talks to another widget directly. Every signal fires
 only when a value actually changed, which is the loop guard for the
 map<->profile link. Stack mutation goes through the methods here and nowhere
 else, so the core's no-in-place-mutation rule stays true.
+
+Main-thread only: every method call and every signal handler is expected to
+run on the Qt main thread. A background loader (a QgsTask worker) must marshal
+its result back to the main thread and call into the session from there --
+none of this is protected by a lock.
 """
 
 from __future__ import annotations
@@ -40,6 +45,8 @@ class SiteSession(QObject):
         super().__init__(parent)
         self._site: Site | None = None
         self._json_path: Path | None = None
+        self._root: Path | None = None
+        self._lines_by_key: dict[str, Line] = {}
         self._dirty = False
         self._allow_absolute = False
         self._profiles: dict[str, list[Profile]] = {}
@@ -63,7 +70,9 @@ class SiteSession(QObject):
 
     @property
     def root(self) -> Path:
-        return self._require_path().parent.resolve()
+        self._require_path()
+        assert self._root is not None  # set by _install whenever a path is
+        return self._root
 
     @property
     def site_name(self) -> str:
@@ -112,8 +121,9 @@ class SiteSession(QObject):
         json_path = folder / SURVEY_FILE
         if json_path.exists():
             raise ProjectError(f"{folder} already holds a {SURVEY_FILE}; open it instead")
-        self._install(Site(), json_path)
-        save_site(self._require_site(), json_path)
+        site = Site()
+        save_site(site, json_path)  # write first; a failure installs nothing
+        self._install(site, json_path)
         self.site_opened.emit()
 
     def open_site(self, json_path: str | Path) -> None:
@@ -127,6 +137,10 @@ class SiteSession(QObject):
             self.close_site()
         self._site = site
         self._json_path = json_path
+        self._root = json_path.parent.resolve()
+        # One resolve() per line, exactly once, at install time -- not on
+        # every cursor event. line_for_key()/keys() read this map only.
+        self._lines_by_key = {self.line_key(ln): ln for ln in site.lines}
         self._profiles.clear()
         self._channel.clear()
         self._current_key = None
@@ -146,14 +160,22 @@ class SiteSession(QObject):
     def close_site(self) -> None:
         if self._site is None:
             return
+        had_current_line = self._current_key is not None
         self._site = None
         self._json_path = None
+        self._root = None
+        self._lines_by_key = {}
         self._profiles.clear()
         self._channel.clear()
         self._current_key = None
         self._current_trace = -1
         self._selection = (-1, -1)
+        self._allow_absolute = False
         self._set_dirty(False)
+        if had_current_line:
+            # Same "no line is current" transition remove_line() reports;
+            # a widget bound only to line_opened must not keep a stale line.
+            self.line_opened.emit("")
         self.site_closed.emit()
 
     # ---- keys and lookups -------------------------------------------------
@@ -163,13 +185,15 @@ class SiteSession(QObject):
         return _line_key(line.path, self.root, allow_absolute=True)
 
     def keys(self) -> list[str]:
-        return [self.line_key(ln) for ln in self._require_site().lines]
+        self._require_site()
+        return list(self._lines_by_key)
 
     def line_for_key(self, key: str) -> Line:
-        for line in self._require_site().lines:
-            if self.line_key(line) == key:
-                return line
-        raise KeyError(f"no line with key {key!r}")
+        self._require_site()
+        try:
+            return self._lines_by_key[key]
+        except KeyError:
+            raise KeyError(f"no line with key {key!r}") from None
 
     def grid(self, grid_id: str) -> Grid:
         for g in self._require_site().grids:
@@ -217,13 +241,16 @@ class SiteSession(QObject):
     # ---- lines ------------------------------------------------------------
     def add_lines(self, lines: list[Line]) -> None:
         site = self._require_site()
-        existing = set(self.keys())
+        existing = set(self._lines_by_key)
+        keyed: list[tuple[str, Line]] = []
         for line in lines:
             key = self.line_key(line)
             if key in existing:
                 raise ValueError(f"line {key!r} is already in the site")
             existing.add(key)
+            keyed.append((key, line))
         site.lines.extend(lines)
+        self._lines_by_key.update(keyed)
         self._set_dirty(True)
         self.lines_changed.emit()
 
@@ -231,6 +258,7 @@ class SiteSession(QObject):
         site = self._require_site()
         line = self.line_for_key(key)
         site.lines.remove(line)
+        del self._lines_by_key[key]
         site.stacks.pop(key, None)
         self._profiles.pop(key, None)
         self._channel.pop(key, None)
@@ -245,7 +273,9 @@ class SiteSession(QObject):
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
         site = self._require_site()
         line = self.line_for_key(key)
-        site.lines[site.lines.index(line)] = dataclasses.replace(line, velocity=model)
+        new_line = dataclasses.replace(line, velocity=model)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line  # same key: only the object changed
         self._set_dirty(True)
         self.lines_changed.emit()
 
@@ -266,8 +296,13 @@ class SiteSession(QObject):
 
     def _attach_source(self, key: str, stack: StepStack) -> None:
         profiles = self._profiles.get(key)
-        if profiles:
-            stack.source = Radargram.from_profile(profiles[self._channel.get(key, 0)])
+        if not profiles:
+            # No profiles loaded (yet), or explicitly cleared: the stack must
+            # not keep rendering a previous line's samples as if they were
+            # still current.
+            stack.source = None
+            return
+        stack.source = Radargram.from_profile(profiles[self._channel.get(key, 0)])
 
     def _touch_stack(self, key: str) -> None:
         self._set_dirty(True)
@@ -309,17 +344,17 @@ class SiteSession(QObject):
         site = self._require_site()
         dicts = self.stack_for(key).to_dicts()
         changed: list[str] = []
-        for line in site.lines:
-            other = self.line_key(line)
+        for other, line in self._lines_by_key.items():
             if other == key or getattr(line.placement, "grid_id", None) != grid_id:
                 continue
             fresh = StepStack.from_dicts(dicts)
             self._attach_source(other, fresh)
             site.stacks[other] = fresh
             changed.append(other)
-            self.stack_changed.emit(other)
-        if changed:
+            # Dirty before the emit: a synchronous stack_changed slot must
+            # never see a change it is handling as if the site were clean.
             self._set_dirty(True)
+            self.stack_changed.emit(other)
         return changed
 
     # ---- current line, samples, cursor ------------------------------------
@@ -336,9 +371,10 @@ class SiteSession(QObject):
         return self._profiles.get(key)
 
     def set_profiles(self, key: str, profiles: list[Profile]) -> None:
+        stack = self.stack_for(key)  # validates the key before anything is cached
         self._profiles[key] = list(profiles)
         self._channel.setdefault(key, 0)
-        self._attach_source(key, self.stack_for(key))
+        self._attach_source(key, stack)  # the only build: stack_for saw no profiles yet
         self.line_loaded.emit(key)
 
     def channel(self, key: str) -> int:
@@ -368,7 +404,11 @@ class SiteSession(QObject):
             return
         n = self.line_for_key(key).n_traces
         lo, hi = sorted((int(start), int(end)))
-        sel = (max(0, lo), min(n - 1, hi))
+        # Each end is clamped independently into [0, n - 1]. That means this
+        # can never land on (-1, -1): clearing the selection is exclusively
+        # clear_selection()'s job, and a caller cannot accidentally forge the
+        # "cleared" sentinel by dragging off either edge.
+        sel = (max(0, min(lo, n - 1)), max(0, min(hi, n - 1)))
         if sel != self._selection:
             self._selection = sel
             self.selection_changed.emit(key, sel[0], sel[1])
