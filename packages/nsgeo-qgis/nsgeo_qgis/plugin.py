@@ -65,6 +65,7 @@ from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
@@ -88,6 +89,7 @@ class NsgeoPlugin:
         self.loader: LineLoader | None = None
         self.survey_dock: SurveyDock | None = None
         self.profile_dock: ProfileDock | None = None
+        self.processing_dock: ProcessingDock | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -136,6 +138,10 @@ class NsgeoPlugin:
         self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
         self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.docks.append(self.profile_dock)
+
+        self.processing_dock = ProcessingDock(self.session, main)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.processing_dock)
+        self.docks.append(self.processing_dock)
 
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
@@ -190,6 +196,7 @@ class NsgeoPlugin:
         self.docks.clear()
         self.survey_dock = None
         self.profile_dock = None
+        self.processing_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
