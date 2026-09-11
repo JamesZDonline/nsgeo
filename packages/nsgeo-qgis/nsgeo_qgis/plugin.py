@@ -65,6 +65,7 @@ from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
@@ -86,6 +87,7 @@ class NsgeoPlugin:
         self.layers: SiteLayers | None = None
         self.loader: LineLoader | None = None
         self.survey_dock: SurveyDock | None = None
+        self.profile_dock: ProfileDock | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -129,6 +131,12 @@ class NsgeoPlugin:
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
+
+        self.profile_dock = ProfileDock(self.session, main)
+        self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
+        self.docks.append(self.profile_dock)
+
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
         self.session.site_closed.connect(self._update_enabled)
@@ -181,6 +189,7 @@ class NsgeoPlugin:
             dock.deleteLater()
         self.docks.clear()
         self.survey_dock = None
+        self.profile_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
