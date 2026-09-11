@@ -84,6 +84,7 @@ class GridDialog(QDialog):
         self.velocity = _spin(0.0, 0.3, 4, 0.001)
         self.velocity.setSpecialValueText("required")
         self.velocity_hint = QLabel("")
+        self.crs_hint = QLabel("")
         origin_row = QHBoxLayout()
         origin_row.addWidget(self.origin_x)
         origin_row.addWidget(self.origin_y)
@@ -93,8 +94,11 @@ class GridDialog(QDialog):
         vel_row = QHBoxLayout()
         vel_row.addWidget(self.velocity)
         vel_row.addWidget(self.velocity_hint)
+        crs_row = QHBoxLayout()
+        crs_row.addWidget(self.crs_widget)
+        crs_row.addWidget(self.crs_hint)
         form.addRow("Id", self.id_edit)
-        form.addRow("CRS", self.crs_widget)
+        form.addRow("CRS", crs_row)
         form.addRow("Origin E, N", origin_row)
         form.addRow("Azimuth (° cw from N to +Y)", self.azimuth)
         form.addRow("Size X, Y (m)", size_row)
@@ -117,13 +121,18 @@ class GridDialog(QDialog):
         self.crs_widget.crsChanged.connect(self._validate)
 
         project_crs = QgsProject.instance().crs()
-        # A brand-new QGIS project defaults to EPSG:4326, so this fallback
-        # is a placeholder for the bare-application case only (this
-        # project's own test harness among them) -- same spirit as
-        # size_x/size_y defaulting to 10.0: a valid, non-blocking value
-        # the user is expected to override, not a real answer.
+        # A real QGIS project's own CRS is (almost) never invalid --
+        # this fallback is a placeholder for the bare-application case
+        # only (this project's own test harness among them) -- same
+        # spirit as size_x/size_y defaulting to 10.0: a valid,
+        # non-blocking value the user is expected to override, not a
+        # real answer. EPSG:3857 specifically, not EPSG:4326: origin/
+        # size_x/size_y are metres, and _validate() below refuses a
+        # geographic CRS on the same grounds as Finding 1/2's
+        # degrees-as-metres bugs, so the placeholder must not be
+        # geographic either.
         self.crs_widget.setCrs(
-            project_crs if project_crs.isValid() else QgsCoordinateReferenceSystem("EPSG:4326")
+            project_crs if project_crs.isValid() else QgsCoordinateReferenceSystem("EPSG:3857")
         )
         if grid is not None:
             self._prefill(grid)
@@ -226,15 +235,28 @@ class GridDialog(QDialog):
         except ValueError as exc:
             self.residual_label.setText(str(exc))
             return
-        self.origin_x.setValue(fit.origin[0])
-        self.origin_y.setValue(fit.origin[1])
+        # fit.origin is the world position of local (0, 0) *in the
+        # control points' own local frame* -- but a Grid's canonical
+        # rectangle spans local [0, size_x] x [0, size_y], and control
+        # points need not be anchored at that local origin (e.g. the
+        # origin stake is unreachable, so the crew surveys local
+        # (100, 50) to (137.5, 62.25) instead of (0, 0) to
+        # (37.5, 12.25)). Round 1 fixed size_x/size_y to the extent
+        # (max - min) but left fit.origin as-is, which put the *origin*
+        # 111.8 m from every one of the surveyed corners it was fitted
+        # to -- a correct azimuth and a 0.000 m residual on a grid whose
+        # own outline no longer contains the ground it was measured
+        # from. The true origin is the world position of local
+        # (min_x, min_y), i.e. fit.origin translated by that offset
+        # along the fitted axes.
+        mins = local.min(axis=0)
+        a = math.radians(fit.azimuth)
+        y_hat = np.array([math.sin(a), math.cos(a)])
+        x_hat = np.array([math.cos(a), -math.sin(a)])
+        origin = np.asarray(fit.origin) + mins[0] * x_hat + mins[1] * y_hat
+        self.origin_x.setValue(float(origin[0]))
+        self.origin_y.setValue(float(origin[1]))
         self.azimuth.setValue(fit.azimuth)
-        # The extent of the local coordinates, not their max(): control
-        # points need not be anchored at the local origin (e.g. the
-        # origin stake is unreachable, so the crew surveys (100, 50) to
-        # (120, 57.5) instead of (0, 0) to (20, 7.5)). max() alone reads
-        # that as a 120 x 57.5 m grid -- a correct origin, a correct
-        # azimuth, and a 0.000 m residual on a wildly wrong size.
         self.size_x.setValue(float(local[:, 0].max() - local[:, 0].min()))
         self.size_y.setValue(float(local[:, 1].max() - local[:, 1].min()))
         # A nonzero RMS here has two very different causes, and this label
@@ -289,6 +311,15 @@ class GridDialog(QDialog):
             # convincing success message on a wrong frame is exactly the
             # failure mode this plan has already shipped twice, so this
             # is refused outright rather than merely warned about.
+            #
+            # _validate()'s crs.isGeographic() check would also catch
+            # this (round 2, Finding 2) and keep OK disabled either way
+            # -- but only by disabling a button, silently, after this
+            # method has already gone on to compute and display exactly
+            # that convincing-but-wrong fit. Kept deliberately: refusing
+            # here means azimuth/size_x/size_y and polygon_status never
+            # show a plausible answer for this layer at all, rather than
+            # showing one that then can't be saved.
             self.polygon_status.setText(
                 "this layer's CRS is geographic (degrees, not metres) -- reproject it "
                 "to a projected CRS before reading corners from it"
@@ -344,18 +375,38 @@ class GridDialog(QDialog):
             self.velocity.setValue(grid.velocity.surface_velocity)
 
     def _validate(self, *_: Any) -> None:
-        # crs.authid() gates OK too: the spec types Grid.crs as an
-        # authority string, and a CRS that is valid but has no authid
-        # (a custom PROJ string, e.g. an oblique Mercator) must be
-        # refused rather than silently written as crs="" -- session's
-        # add_grid/replace_grid don't validate this, and layers.py builds
-        # the whole GeoPackage's CRS from it.
+        # One CRS guard, not one per path in: the fallback above, the
+        # project's own CRS, the digitise flow's canvas CRS
+        # (plugin.py's done()), and a hand-picked CRS in this widget all
+        # flow through crs_widget, so checking it here once covers all
+        # of them (round 2, Finding 2) -- rather than teaching every
+        # path that can set a CRS to separately refuse a bad one.
+        #
+        # Two ways a CRS is unusable for a metric grid frame:
+        # - crs.authid() empty: valid CRS (e.g. a custom oblique
+        #   Mercator), but Grid.crs is spec'd as an authority string,
+        #   and session.add_grid/layers.py both trust it blindly, so it
+        #   must be refused rather than silently written as crs="".
+        # - crs.isGeographic(): origin/size_x/size_y are metres; a
+        #   geographic (degrees) CRS makes them meaningless, and a
+        #   convincing-looking success message on a wrong frame is
+        #   exactly the failure mode this plan has already shipped
+        #   twice (round 1's polygon-tab Finding 1, round 2's digitise
+        #   canvas CRS).
+        crs = self.crs_widget.crs()
+        if not crs.authid():
+            self.crs_hint.setText("needs an authority code (e.g. EPSG) -- pick a registered CRS")
+        elif crs.isGeographic():
+            self.crs_hint.setText("must be a projected CRS in metres, not geographic (degrees)")
+        else:
+            self.crs_hint.setText("")
         ok = (
             bool(self.id_edit.text().strip())
             and self.velocity.value() > 0
             and self.size_x.value() > 0
             and self.size_y.value() > 0
-            and bool(self.crs_widget.crs().authid())
+            and bool(crs.authid())
+            and not crs.isGeographic()
         )
         self.ok_button.setEnabled(ok)
 

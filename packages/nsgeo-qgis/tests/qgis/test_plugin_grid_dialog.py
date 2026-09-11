@@ -76,25 +76,64 @@ def test_ok_is_blocked_until_id_and_velocity_are_set(session):
     assert d.ok_button.isEnabled()
 
 
-def test_ok_is_blocked_by_a_valid_crs_with_no_authid(session):
-    # Fix round 1, Finding 2: .authid() is empty for any CRS not in the
-    # EPSG database (e.g. a custom oblique Mercator) even though the CRS
-    # itself is perfectly valid. Grid.crs is spec'd as an authority
-    # string, and session.add_grid/layers.py both trust it blindly, so
-    # writing "" for a custom CRS -- rather than refusing -- would build
-    # a whole GeoPackage off a blank CRS.
+def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
+    # Fix round 2, Finding 2: one guard in _validate() -- authid() and
+    # not isGeographic() -- rather than a separate check bolted onto
+    # every path that can set crs_widget's CRS. Four such paths, all
+    # caught by the same guard:
+
+    # 1. The fallback used when the project has no CRS of its own
+    #    (GridDialog.__init__): EPSG:3857 -- has an authid, not
+    #    geographic -- so this alone does not block OK.
+    d = GridDialog(session)
+    d.id_edit.setText("A")
+    d.velocity.setValue(0.08)
+    assert d.crs_widget.crs().authid() == "EPSG:3857"
+    assert d.ok_button.isEnabled()
+    assert d.crs_hint.text() == ""
+
+    # 2. The *project's* own CRS, when it is geographic -- QGIS's
+    #    out-of-the-box default for a brand-new project.
+    original_project_crs = QgsProject.instance().crs()
+    try:
+        QgsProject.instance().setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+        d_project = GridDialog(session)
+        d_project.id_edit.setText("A")
+        d_project.velocity.setValue(0.08)
+        assert not d_project.ok_button.isEnabled()
+        assert "geographic" in d_project.crs_hint.text().lower()
+    finally:
+        QgsProject.instance().setCrs(original_project_crs)
+
+    # 3. The digitise flow's canvas CRS (plugin.py's done() adopts
+    #    canvas.mapSettings().destinationCrs() unconditionally --
+    #    Concern 1 from round 1, confirmed geographic-canvas numbers in
+    #    the round 2 report). Simulated directly: from crs_widget's
+    #    point of view it is just another setCrs() call.
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+    assert not d.ok_button.isEnabled()
+    assert "geographic" in d.crs_hint.text().lower()
+
+    # 4a. A CRS the user picks by hand that is valid but has no
+    #     authority code (round 1, Finding 2).
     custom = QgsCoordinateReferenceSystem.fromProj(
         "+proj=omerc +lat_0=36 +lonc=15 +alpha=30 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
     )
     assert custom.isValid() and not custom.authid()  # the exact case this guards
-    d = GridDialog(session)
-    d.id_edit.setText("A")
-    d.velocity.setValue(0.08)
-    assert d.ok_button.isEnabled()  # the EPSG:4326 fallback has an authid
     d.crs_widget.setCrs(custom)
     assert not d.ok_button.isEnabled()
+    assert "authority" in d.crs_hint.text().lower()
+
+    # 4b. ... or one the user picks that is geographic outright.
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+    assert not d.ok_button.isEnabled()
+    assert "geographic" in d.crs_hint.text().lower()
+
+    # Recovering with an ordinary registered, projected CRS re-enables OK
+    # and clears the hint.
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
     assert d.ok_button.isEnabled()
+    assert d.crs_hint.text() == ""
 
 
 def test_corner_fit_fills_origin_azimuth_and_sizes(session):
@@ -134,28 +173,63 @@ def test_corner_tab_residual_caption_distinguishes_mirrored_from_not_square(sess
     assert "mirror" in text.lower()
 
 
-def test_corner_fit_sizes_control_points_not_anchored_at_the_local_origin(session):
-    # Fix round 1, Finding 5: the origin stake is sometimes unreachable,
-    # so the crew surveys local (100, 50) .. (120, 57.5) instead of
-    # (0, 0) .. (20, 7.5). max() alone reads that as a 120 x 57.5 m grid
-    # -- a correct origin, a correct azimuth, and a 0.000 m residual on
-    # a wildly wrong size. Ground truth here is deliberately rotated
-    # (azimuth 200 degrees) and off the (0, 0)/(500, 700)-shaped truths
-    # used elsewhere in this file.
-    true_grid = Grid("B", (300.0, 900.0), 200.0, 20.0, 7.5, "EPSG:32616", 0.5)
-    local_offset = np.array([[100.0, 50.0], [120.0, 50.0], [120.0, 57.5], [100.0, 57.5]])
-    world = true_grid.to_world(local_offset)
+def test_corner_fit_places_control_points_not_anchored_at_the_local_origin(session):
+    # Fix round 1, Finding 5 fixed the *size* (max() -> max() - min()) but
+    # left fit.origin as-is: fit.origin is the world position of local
+    # (0, 0) *in the control points' own local frame*, which is not the
+    # same point as local (0, 0) of the fitted grid's own canonical
+    # [0, size_x] x [0, size_y] rectangle when the control points are
+    # offset (the origin stake is unreachable, so the crew surveys local
+    # (100, 50) .. (137.5, 62.25) instead of (0, 0) .. (37.5, 12.25)).
+    # Round 2, Finding 1: that left the *origin* 111.8 m from every one
+    # of the four corners it was fitted to -- a correct azimuth and a
+    # 0.000 m residual on a grid whose own outline no longer contains the
+    # ground it was measured from. Fixed by translating fit.origin by
+    # local.min(axis=0) along the fitted axes.
+    #
+    # True grid deliberately independent of this test's control points:
+    # world corners come from true_grid.to_world() of its *own* canonical
+    # rectangle, not of the offset local coordinates -- the offset is
+    # only how the crew recorded distances, not a claim about where the
+    # grid's own [0, size] rectangle sits.
+    true_grid = Grid("B", (5000.0, 8000.0), 200.0, 37.5, 12.25, "EPSG:32616", 0.5)
+    canonical = np.array([[0.0, 0.0], [37.5, 0.0], [37.5, 12.25], [0.0, 12.25]])
+    world = true_grid.to_world(canonical)
+    local_offset = np.array([[100.0, 50.0], [137.5, 50.0], [137.5, 62.25], [100.0, 62.25]])
+
     d = GridDialog(session)
     for row, (lo, wo) in enumerate(zip(local_offset, world)):
         d.set_corner_row(row, lo[0], lo[1], wo[0], wo[1])
     d.fit_corners()
-    assert d.origin_x.value() == pytest.approx(300.0, abs=1e-6)
-    assert d.origin_y.value() == pytest.approx(900.0, abs=1e-6)
+    assert d.origin_x.value() == pytest.approx(5000.0, abs=1e-6)
+    assert d.origin_y.value() == pytest.approx(8000.0, abs=1e-6)
     assert d.azimuth.value() == pytest.approx(200.0, abs=1e-6)
-    # BEFORE this fix: size_x == 120.0, size_y == 57.5 (local[:, i].max()).
-    assert d.size_x.value() == pytest.approx(20.0, abs=1e-6)
-    assert d.size_y.value() == pytest.approx(7.5, abs=1e-6)
+    assert d.size_x.value() == pytest.approx(37.5, abs=1e-6)
+    assert d.size_y.value() == pytest.approx(12.25, abs=1e-6)
     assert "0.000" in d.residual_label.text()
+
+    # The real test: does the *fitted grid's own rectangle* land back on
+    # the four points it was surveyed from? (Round 1's fix alone put
+    # this at 111.8 m on all four corners -- correct size, wrong origin.)
+    fitted = Grid(
+        "B",
+        (d.origin_x.value(), d.origin_y.value()),
+        d.azimuth.value(),
+        d.size_x.value(),
+        d.size_y.value(),
+        "EPSG:32616",
+        0.5,
+    )
+    own_canonical = np.array(
+        [
+            [0.0, 0.0],
+            [d.size_x.value(), 0.0],
+            [d.size_x.value(), d.size_y.value()],
+            [0.0, d.size_y.value()],
+        ]
+    )
+    distances = np.linalg.norm(fitted.to_world(own_canonical) - world, axis=1)
+    assert distances == pytest.approx([0.0, 0.0, 0.0, 0.0], abs=1e-6)
 
 
 def test_fit_corners_reports_bad_numeric_entry_without_crashing(session):
@@ -288,6 +362,38 @@ def test_use_polygon_refuses_a_geographic_crs_layer(qgis_app, session):
         QgsProject.instance().removeMapLayer(layer.id())
 
 
+def test_use_polygon_success_still_gets_a_visible_crs_refusal(qgis_app, session):
+    # Fix round 2, Finding 3, worst case: a layer in a valid, *non*
+    # geographic custom CRS with no authority code. use_polygon()'s own
+    # isGeographic() guard does not catch this (correctly -- the fit
+    # itself is genuinely fine), so it proceeds, reports success, and
+    # overwrites crs_widget with that CRS -- silently disabling OK
+    # before this fix, with nothing in polygon_status (which still,
+    # correctly, says the fit succeeded) explaining why.
+    custom = QgsCoordinateReferenceSystem.fromProj(
+        "+proj=omerc +lat_0=36 +lonc=15 +alpha=30 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
+    )
+    assert custom.isValid() and not custom.isGeographic() and not custom.authid()
+    layer = _memory_layer(TRUE.to_world(LOCAL))
+    layer.setCrs(custom)
+    QgsProject.instance().addMapLayer(layer)
+    try:
+        d = GridDialog(session)
+        d.id_edit.setText("A")
+        d.velocity.setValue(0.08)
+        assert d.ok_button.isEnabled()  # the EPSG:3857 fallback, still fine
+        _select_sole_feature(qgis_app, d, layer)
+        d.origin_combo.setCurrentIndex(0)
+        d.plus_y_combo.setCurrentIndex(3)
+        d.use_polygon()
+        assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)  # the fit is genuinely correct
+        assert "0.000" in d.polygon_status.text()
+        assert not d.ok_button.isEnabled()  # but its CRS has no authority code
+        assert "authority" in d.crs_hint.text().lower()
+    finally:
+        QgsProject.instance().removeMapLayer(layer.id())
+
+
 def test_digitised_points_set_origin_and_azimuth(session):
     d = GridDialog(session)
     d.set_digitised(
@@ -408,8 +514,9 @@ def test_open_grid_dialog_accepts_and_adds_a_new_grid(
     # this dialog previously wrote grid.crs == "" in that case (the
     # project's own CRS is invalid in this bare test harness -- see
     # GridDialog.__init__). It must never be "": the fallback used when
-    # nothing else is available is still a valid authority string.
-    assert grid.crs == "EPSG:4326"
+    # nothing else is available is still a valid, projected authority
+    # string (round 2: EPSG:4326 would also now be refused as geographic).
+    assert grid.crs == "EPSG:3857"
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
@@ -638,6 +745,34 @@ def test_digitise_flow_switching_map_tools_restores_the_dialog(fake_iface, tmp_p
 
     drive_dialog(QDialog, "exec", driver)
     plugin.open_grid_dialog(None)
+    plugin.unload()
+
+
+def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_path, drive_dialog):
+    # Fix round 2, Finding 4: dialog.exec() can return (accept, reject,
+    # or the dialog closed outright) while a digitise pick is still in
+    # progress, with neither done() nor the tool's own cancelled signal
+    # ever having fired to release it -- e.g. a keyboard shortcut, or
+    # (as simulated here) a caller that just gives up on the pick
+    # without clicking the map or right-clicking to abort. Before this
+    # fix that left a live DigitiseGridTool wired to a `dialog`
+    # open_grid_dialog was about to delete; a later click on it raised
+    # RuntimeError out of a signal-connected slot.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+
+    def driver(dialog: GridDialog) -> None:
+        dialog.digitise_button.click()
+        assert isinstance(canvas.mapTool(), DigitiseGridTool)
+        dialog.reject()  # gives up on the pick entirely, tool still active
+
+    drive_dialog(QDialog, "exec", driver)
+    plugin.open_grid_dialog(None)  # must not raise
+    assert canvas.mapTool() is None  # released, not left stranded
     plugin.unload()
 
 

@@ -316,6 +316,20 @@ class NsgeoPlugin:
             except (ValueError, KeyError) as exc:
                 self.message(str(exc), Qgis.MessageLevel.Critical)
         finally:
+            # Fix round 2, Finding 4: dialog.exec() can return (accept,
+            # reject, or the window closed outright) while a digitise
+            # pick is still in progress -- the dialog is hidden and the
+            # map tool active, with neither done() nor the tool's
+            # cancelled signal ever having fired to release it. Left
+            # alone, that tool would later call back into show_dialog()
+            # (a click, a switch to another tool) against a `dialog`
+            # this method is about to delete, raising RuntimeError out
+            # of a signal-connected slot. Unsetting it here -- while
+            # `dialog` is still alive -- runs that same cancelled path
+            # cleanly instead.
+            canvas = self.iface.mapCanvas()
+            if isinstance(canvas.mapTool(), DigitiseGridTool):
+                canvas.unsetMapTool(canvas.mapTool())
             # Fix round 1, Finding 3: `dialog` is parented to the main
             # window and nothing ever deleted it, so every grid dialog
             # opened stayed alive (with its full widget tree) for the
