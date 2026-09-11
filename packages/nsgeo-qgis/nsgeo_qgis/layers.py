@@ -1,4 +1,4 @@
-"""The site GeoPackage: one file, several tables, three rules.
+"""The site GeoPackage: one file, several tables, four rules.
 
 1. Regenerate per table, never per file: rebuilding `lines` truncates and
    refills that table; the file is never deleted, so picks survive and
@@ -7,9 +7,17 @@
    second OGR handle on a package QGIS already has open.
 3. Derived tables (grids, lines, marks) are read-only in QGIS; the survey
    JSON is the source of truth for geometry. Picks are authored.
+4. A signal slot's exception never reaches whatever emitted the signal --
+   PyQt5 prints it to stderr and moves on -- so `refresh()` contains each
+   table's own refill and logs a failure via `QgsMessageLog` rather than
+   letting one bad table silently cancel the other two.
 
 The package CRS is the CRS of the first grid; other grids are transformed
-into it on write.
+into it on write. If the first grid's own CRS changes (or a package
+predates a field this version of `TABLES` expects), every table is
+rebuilt: `picks` rows are carried across (matching fields copied by name,
+geometry transformed to the new CRS), and the derived tables are simply
+refilled anew immediately afterward.
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QMetaType, QObject
 from qgis.PyQt.QtGui import QColor
 
@@ -110,6 +119,10 @@ def _fields(spec: list[tuple[str, str]]) -> QgsFields:
     return fields
 
 
+def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
+    QgsMessageLog.logMessage(message, "nsgeo", level)
+
+
 class SiteLayers(QObject):
     def __init__(
         self, session: SiteSession, project: QgsProject | None = None, parent: QObject | None = None
@@ -123,20 +136,35 @@ class SiteLayers(QObject):
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
+        # A layer removed from the legend by hand (or any other code) is
+        # gone from QGIS but not from the GeoPackage: drop it from our
+        # registry so the next refresh reopens it, rather than holding a
+        # Python wrapper around a since-deleted C++ object.
+        self.project.layersWillBeRemoved.connect(self._on_layers_removed)
 
     # ---- lifecycle --------------------------------------------------------
     def _on_site_opened(self) -> None:
         self.detach()
         self.refresh()
 
+    def _on_layers_removed(self, ids: list[str]) -> None:
+        gone = {
+            name for name, lyr in self.layers.items() if not sip.isdeleted(lyr) and lyr.id() in ids
+        }
+        for name in gone:
+            del self.layers[name]
+
     def detach(self) -> None:
         if self.layers:
-            self.project.removeMapLayers([lyr.id() for lyr in self.layers.values()])
+            ids = [lyr.id() for lyr in self.layers.values() if not sip.isdeleted(lyr)]
+            if ids:
+                self.project.removeMapLayers(ids)
             self.layers.clear()
         if self.group is not None:
-            parent = self.group.parent()
-            if parent is not None:
-                parent.removeChildNode(self.group)
+            if not sip.isdeleted(self.group):
+                parent = self.group.parent()
+                if parent is not None:
+                    parent.removeChildNode(self.group)
             self.group = None
 
     def crs(self) -> QgsCoordinateReferenceSystem | None:
@@ -147,12 +175,34 @@ class SiteLayers(QObject):
 
     def refresh(self) -> None:
         site = self.session.site
-        if site is None or not site.grids:
-            return  # a table needs a CRS; nothing to show without a grid anyway
+        if site is None:
+            return
+        if not site.grids:
+            self._clear_derived_tables()
+            return
         self.ensure_tables()
-        self.refill_grids()
-        self.refill_lines()
-        self.refill_marks()
+        for name, fn in (
+            ("grids", self.refill_grids),
+            ("lines", self.refill_lines),
+            ("marks", self.refill_marks),
+        ):
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                _log(f"could not refill {name!r}: {exc}", Qgis.MessageLevel.Critical)
+
+    def _clear_derived_tables(self) -> None:
+        """No grids left: there is nothing to derive line/mark geometry
+        from. The tables were already created while a grid existed, so
+        clear them rather than leaving the last grid's stale features on
+        the map. `picks` is untouched, same as every other refill."""
+        for name in DERIVED:
+            if name not in self.layers:
+                continue  # a site that has never had a grid: nothing to clear
+            try:
+                self._refill(name, [])
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                _log(f"could not clear {name!r}: {exc}", Qgis.MessageLevel.Critical)
 
     # ---- tables -----------------------------------------------------------
     def ensure_tables(self) -> None:
@@ -160,10 +210,10 @@ class SiteLayers(QObject):
         crs = self.crs()
         assert crs is not None
         for name, (wkb, spec) in TABLES.items():
-            if not self._table_exists(path, name):
-                self._create_table(path, name, wkb, spec, crs)
+            self._ensure_table(path, name, wkb, spec, crs)
         if self.group is None:
             self.group = self.project.layerTreeRoot().addGroup(f"nsgeo · {self.session.site_name}")
+        opened = []
         for name in TABLES:
             if name in self.layers:
                 continue
@@ -174,13 +224,119 @@ class SiteLayers(QObject):
             self.project.addMapLayer(layer, False)
             self.group.addLayer(layer)
             self.layers[name] = layer
+            opened.append(layer)
+        # A just-(re)created table's provider feature count is sometimes
+        # left at the GPKG driver's -1 "not yet counted" sentinel until
+        # something forces a recount -- measured to need every table in
+        # this GeoPackage opened first: reloading a layer immediately
+        # after opening it does not reliably clear it, reloading again
+        # once the whole batch is open does. feature_count() below also
+        # falls back to counting directly, belt and braces.
+        for layer in opened:
+            layer.reload()
+
+    def _ensure_table(
+        self,
+        path: str,
+        name: str,
+        wkb: Any,
+        spec: list[tuple[str, str]],
+        crs: QgsCoordinateReferenceSystem,
+    ) -> None:
+        """Create the table if it doesn't exist yet, or rebuild it if its
+        on-disk CRS or field set no longer matches `crs`/`spec`. A grid's
+        CRS can change after its table was first created (`replace_grid`),
+        and an older package can predate a field this version of `TABLES`
+        expects -- either way, refilling into a stale table would write
+        the wrong CRS or crash on a missing field.
+
+        `picks` rows are migrated across the rebuild; the derived tables
+        are about to be fully refilled by refill_grids/lines/marks right
+        after this returns, so their old rows need no such care.
+        """
+        existing_crs, existing_fields = self._table_schema(path, name)
+        up_to_date = existing_crs is not None and existing_crs == crs
+        if up_to_date and existing_fields == [f for f, _ in spec]:
+            return  # up to date; nothing to rebuild
+        old_rows: list[tuple[dict[str, Any], QgsGeometry]] = []
+        if name == "picks" and existing_crs is not None:
+            old_rows = self._read_picks_rows(path, existing_crs, crs)
+        self._drop_loaded_layer(name)
+        self._create_table(path, name, wkb, spec, crs)
+        if old_rows:
+            # Built against the newly (re)created layer's own `.fields()`,
+            # not `_fields(spec)`: a GPKG table always carries an implicit
+            # leading "fid" field that `spec` doesn't list, and attributes
+            # keyed off a Fields object one short of the provider's own
+            # silently land one column over (measured directly: a pick's
+            # `line_key` came back as its `time_ns` value, `time_ns` as
+            # NULL). Setting by field *name* against the real fields is
+            # what keeps this correct regardless of column order.
+            layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
+            new_field_names = {f.name() for f in layer.fields()}
+            feats = []
+            for attrs, geom in old_rows:
+                f = QgsFeature(layer.fields())
+                for fname, value in attrs.items():
+                    if fname in new_field_names:
+                        f[fname] = value
+                f.setGeometry(geom)
+                feats.append(f)
+            ok, _ = layer.dataProvider().addFeatures(feats)
+            if not ok:
+                raise RuntimeError(
+                    f"could not carry {name} rows across a rebuild: "
+                    f"{layer.dataProvider().error().message()}"
+                )
 
     @staticmethod
-    def _table_exists(path: str, name: str) -> bool:
-        return (
-            Path(path).exists()
-            and QgsVectorLayer(f"{path}|layername={name}", name, "ogr").isValid()
-        )
+    def _table_schema(
+        path: str, name: str
+    ) -> tuple[QgsCoordinateReferenceSystem | None, list[str]]:
+        """The on-disk table's CRS and field names, or (None, []) when the
+        table doesn't exist yet."""
+        if not Path(path).exists():
+            return None, []
+        layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
+        if not layer.isValid():
+            return None, []
+        return layer.crs(), [f.name() for f in layer.fields() if f.name() != "fid"]
+
+    def _read_picks_rows(
+        self,
+        path: str,
+        existing_crs: QgsCoordinateReferenceSystem,
+        target_crs: QgsCoordinateReferenceSystem,
+    ) -> list[tuple[dict[str, Any], QgsGeometry]]:
+        """Every row of the current on-disk `picks` table as a plain
+        (field name -> value, geometry) pair, geometry already transformed
+        if the CRS is changing. Read out *before* the table is dropped and
+        recreated -- authored data, unlike grids/lines/marks there is
+        nowhere else this comes from, so it must not be silently
+        discarded. Kept as plain dicts rather than `QgsFeature` objects
+        tied to the old schema, since the new table's field set (and its
+        implicit `fid` column) may not match.
+        """
+        old_layer = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+        if not old_layer.isValid():
+            return []
+        transform = None
+        if existing_crs != target_crs:
+            transform = QgsCoordinateTransform(existing_crs, target_crs, self.project)
+        field_names = [f.name() for f in old_layer.fields() if f.name() != "fid"]
+        rows = []
+        for old in old_layer.getFeatures():
+            attrs = {fname: old[fname] for fname in field_names}
+            geom = old.geometry()
+            if transform is not None and not geom.isNull():
+                geom.transform(transform)
+            rows.append((attrs, geom))
+        return rows
+
+    def _drop_loaded_layer(self, name: str) -> None:
+        layer = self.layers.pop(name, None)
+        if layer is not None and not sip.isdeleted(layer):
+            self.project.removeMapLayer(layer.id())
 
     def _create_table(
         self,
@@ -225,20 +381,20 @@ class SiteLayers(QObject):
         """World points for every trace of `line`, or None when the line
         cannot be positioned at all.
 
-        `Line.trace_coords` (by way of `GridPlacement.distance_along`) raises
-        `ValueError` for a time-triggered acquisition (traces_per_metre <= 0).
-        That is a property of one file, not a reason to abort the whole
-        table: the caller drops this one line and keeps the rest.
+        Only `Line.trace_coords` is guarded: it (by way of
+        `GridPlacement.distance_along`) raises `ValueError` for a
+        time-triggered acquisition (traces_per_metre <= 0), a property of
+        one file that must not abort the whole table. `self._points`
+        (the CRS transform) stays outside the guard -- a `ValueError`
+        from there is a real bug (a bad shape, a broken transform), not
+        an unplaceable line, and must not be misreported as one.
         """
         try:
-            return self._points(line.trace_coords(frames), grid.crs)
+            xy = line.trace_coords(frames)
         except ValueError as exc:
-            QgsMessageLog.logMessage(
-                f"{line.path.name} could not be placed and was left out of the map: {exc}",
-                "nsgeo",
-                Qgis.MessageLevel.Warning,
-            )
+            _log(f"{line.path.name} could not be placed and was left out of the map: {exc}")
             return None
+        return self._points(xy, grid.crs)
 
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
@@ -253,7 +409,16 @@ class SiteLayers(QObject):
         layer.triggerRepaint()
 
     def feature_count(self, name: str) -> int:
-        return int(self.layers[name].featureCount())
+        layer = self.layers[name]
+        count = layer.featureCount()
+        if count < 0:
+            # Belt and braces alongside ensure_tables()'s reload(): the
+            # GPKG driver's cached count can come back negative in cases
+            # we haven't all named. Counting features directly is correct
+            # regardless of why the cache is stale, and this is a handful
+            # to a few thousand rows, never a reason to avoid it.
+            count = sum(1 for _ in layer.getFeatures())
+        return int(count)
 
     # ---- derived tables ---------------------------------------------------
     def refill_grids(self) -> None:
@@ -280,7 +445,9 @@ class SiteLayers(QObject):
         site = self.session.site
         assert site is not None
         feats = []
-        for line in site.lines:
+        keys = self.session.keys()
+        for key in keys:
+            line = self.session.line_for_key(key)
             grid = self.session.grid_for_line(line)
             if grid is None:
                 continue  # trackless lines arrive with TrackPlacement, later
@@ -290,7 +457,7 @@ class SiteLayers(QObject):
             f = QgsFeature(self.layers["lines"].fields())
             f.setGeometry(QgsGeometry.fromPolylineXY(coords))
             p: Any = line.placement
-            f["line_key"] = self.session.line_key(line)
+            f["line_key"] = key
             f["grid_id"] = grid.id
             f["label"] = p.label or ""
             f["axis"] = p.axis
@@ -309,7 +476,9 @@ class SiteLayers(QObject):
         site = self.session.site
         assert site is not None
         feats = []
-        for line in site.lines:
+        keys = self.session.keys()
+        for key in keys:
+            line = self.session.line_for_key(key)
             grid = self.session.grid_for_line(line)
             if grid is None:
                 continue
@@ -326,7 +495,7 @@ class SiteLayers(QObject):
                 idx = max(0, min(mark.scan, line.n_traces - 1))
                 f = QgsFeature(self.layers["marks"].fields())
                 f.setGeometry(QgsGeometry.fromPointXY(coords[idx]))
-                f["line_key"] = self.session.line_key(line)
+                f["line_key"] = key
                 f["scan"] = int(mark.scan)
                 f["kind"] = mark.kind
                 f["name"] = mark.name
