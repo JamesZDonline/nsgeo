@@ -123,7 +123,23 @@ class ProfileDock(QgsDockWidget):
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Display gain"))
         self.percentile_slider = QSlider(Qt.Orientation.Horizontal)
-        self.percentile_slider.setRange(900, 1000)
+        self.percentile_slider.setRange(500, 1000)
+        # M5 follow-up (Finding 1): a lower percentile clips more of the
+        # signal, which saturates more samples to black/white -- "more
+        # gained" in the user's words. The intuitive drag direction is
+        # therefore backwards from the slider's own min/max: dragging
+        # right should LOWER the percentile. `setInvertedAppearance` only
+        # flips which physical end of the widget the minimum/maximum are
+        # drawn at (and which way a mouse drag or arrow key moves the
+        # value) -- it leaves `value()`/`setValue()` semantics completely
+        # alone, so `percentile` below still reads the slider's own value
+        # directly and still returns the true percentile, exactly as
+        # `RadargramImage` requires. An explicit inverse mapping (e.g.
+        # `percentile = (minimum + maximum - value) / 10.0`) was the other
+        # option the brief allowed, but it would make `value()` mean
+        # something other than "percentile x 10" everywhere else this
+        # slider is touched (tests included) for no benefit here.
+        self.percentile_slider.setInvertedAppearance(True)
         self.percentile_slider.setValue(990)
         self.percentile_slider.setFixedWidth(120)
         self.percentile_label = QLabel("99.0 %")

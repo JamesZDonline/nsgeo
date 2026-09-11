@@ -8,10 +8,12 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
+from nsgeo.render import PercentileClip
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtWidgets import QStyle
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -123,6 +125,71 @@ def test_display_gain_rerenders_without_touching_the_stack(opened):
     dock.colormap_combo.setCurrentText("seismic")
     assert dock.image.colormap_name == "seismic"
     assert len(session.stack_for(key)) == 0
+
+
+def test_percentile_slider_direction_is_gain_intuitive(opened):
+    """M5 follow-up (Finding 1): dragging the display-gain slider toward
+    its right-hand end must produce a LOWER percentile -- a lower
+    percentile clips more of the signal, saturating more samples to
+    black/white, which is "more gained" in the user's own words. The
+    slider's `value()`/`setValue()` are unaffected by
+    `setInvertedAppearance` (Qt's own contract), so this cannot be pinned
+    by calling `setValue()` with numbers taken from the implementation --
+    that would only prove `percentile == value / 10.0`, true before this
+    fix too. Instead this asks Qt's own `QStyle.sliderValueFromPosition`
+    -- the same function a real mouse drag resolves a handle's pixel
+    position through -- what value results at each physical end of the
+    widget, independently of this file's own percentile arithmetic.
+    """
+    _, dock, _, _ = opened
+    slider = dock.percentile_slider
+    span = 200  # arbitrary groove length in pixels; only 0 vs. span matters
+    value_at_right_end = QStyle.sliderValueFromPosition(
+        slider.minimum(), slider.maximum(), span, span, slider.invertedAppearance()
+    )
+    value_at_left_end = QStyle.sliderValueFromPosition(
+        slider.minimum(), slider.maximum(), 0, span, slider.invertedAppearance()
+    )
+
+    slider.setValue(value_at_right_end)
+    percentile_at_right_end = dock.percentile
+    slider.setValue(value_at_left_end)
+    percentile_at_left_end = dock.percentile
+
+    assert percentile_at_right_end < percentile_at_left_end
+
+
+def test_percentile_slider_range_reaches_fifty_percent(opened):
+    """M5 follow-up (Finding 1): the old floor of 90.0 % was arbitrary and
+    the user wants to go lower. `PercentileClip` only requires
+    `0 < percentile <= 100`, so 50.0 is confirmed against the actual
+    validator here rather than assumed.
+    """
+    _, dock, _, _ = opened
+    slider = dock.percentile_slider
+
+    PercentileClip(percentile=50.0)  # does not raise -- confirms the contract
+
+    assert slider.minimum() == 500
+    slider.setValue(slider.minimum())
+    assert dock.percentile == pytest.approx(50.0)
+
+
+def test_percentile_label_reports_the_true_percentile_at_both_ends(opened):
+    """M5 follow-up (Finding 1): the label must keep showing the honest
+    percentile the user reads, at both the widened floor and the
+    ceiling -- never a made-up "gain" number.
+    """
+    _, dock, _, _ = opened
+    slider = dock.percentile_slider
+
+    slider.setValue(slider.minimum())
+    assert dock.percentile == pytest.approx(50.0)
+    assert "50.0" in dock.percentile_label.text()
+
+    slider.setValue(slider.maximum())
+    assert dock.percentile == pytest.approx(100.0)
+    assert "100.0" in dock.percentile_label.text()
 
 
 def test_stack_changes_rerender_and_axes_follow_the_result(opened):
