@@ -64,35 +64,42 @@ from nsgeo_qgis.ui.profile_view import ProfileView
 
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
-    "line override", "Grid <id>", or a header-dielectric fallback.
+    "line override", "Grid <id>", a header-dielectric fallback, or
+    "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
     the grid's model, then the header's dielectric) -- but does not
-    *re-decide* it. `resolve_velocity` returns `line.velocity`/`grid.velocity`
-    by identity (no copy) when one of those tiers applies, and only builds a
-    fresh `VelocityModel` for the header-fallback tier; comparing the
-    object `resolve_velocity` actually returned against those two candidates
-    (`is`, not `==`) names the tier it used, without this function
-    independently re-checking "is `line.velocity` not None" itself.
+    *re-decide* it. Instead it checks the actual object `resolve_velocity`
+    returned against each of the three candidates it is documented to
+    return, by *value* (`==`, not `is`): a `VelocityModel` is a frozen
+    dataclass with value equality, so this is correct whether or not
+    `resolve_velocity` happens to return the original object or an
+    equal copy of it -- unlike an identity (`is`) comparison, which a
+    review confirmed is strictly weaker (a `resolve_velocity` that
+    returns `VelocityModel(layers=grid.velocity.layers)` instead of
+    `grid.velocity` itself would fool an identity check into falling
+    through to the wrong tier, but cannot fool `==`).
 
-    That matters because GitHub issue #4 is going to change this precedence
-    (grid velocity becomes optional in a different way): two copies of the
-    same "line, then grid, then header" cascade -- one here, one in
-    `resolve_velocity` -- would drift the moment either side is edited and
-    the other is not, and a label that confidently names the wrong tier is
-    worse than no label at all. Deriving it from `resolve_velocity`'s own
-    return value instead means this can never name the wrong tier, whatever
-    the precedence becomes -- there is nothing left here to forget to
-    update.
+    Reordering the three known tiers is still always named correctly,
+    because every candidate is still checked. What this can *not* do is
+    invent a name for a tier that does not exist yet: if GitHub issue #4
+    adds a fourth tier (e.g. a site-level default) and a line resolves to
+    it, none of the three `==` checks below matches, and this returns
+    "unknown source" rather than guessing "header ε ..." -- a label that
+    confidently names the wrong tier is worse than no label at all, so the
+    fallback is an explicit check against the header candidate, not a
+    blind `else`.
     """
     line = session.line_for_key(key)
     grid = session.grid_for_line(line)
     resolved = resolve_velocity(line, grid)
-    if resolved is line.velocity:
+    if resolved == line.velocity:
         return "line override"
-    if grid is not None and resolved is grid.velocity:
+    if grid is not None and resolved == grid.velocity:
         return f"Grid {grid.id}"
-    return f"header ε {line.header.epsr:g}"
+    if resolved == VelocityModel.from_dielectric(line.header.epsr):
+        return f"header ε {line.header.epsr:g}"
+    return "unknown source"
 
 
 class ProfileDock(QgsDockWidget):
@@ -219,6 +226,19 @@ class ProfileDock(QgsDockWidget):
         self.setWindowTitle(f"nsgeo Profile · {label} · {line.n_traces} traces")
         self.view.set_direction(int(getattr(line.placement, "direction", 1)))
         self.image = None
+        # C1: `SiteSession.open_line` resets `_current_trace`/`_selection`
+        # to their cleared sentinels but emits neither `trace_changed` nor
+        # `selection_changed` for that reset (only `line_opened`), and
+        # `ProfileView.set_axes` -- called below either way -- touches
+        # neither `_cursor` nor `_selection` either. Left alone, the
+        # previous line's cursor and selection band carry across to this
+        # one: the widget would go on showing state the session has
+        # already discarded, which is exactly what routing all state
+        # through `SiteSession` (see its own module docstring) exists to
+        # prevent. Cleared explicitly, every time a line opens, regardless
+        # of whether its profiles are loaded yet.
+        self.view.set_cursor(-1)
+        self.view.clear_selection()
         profiles = self.session.profiles_for(key)
         if profiles:
             self._configure_channels(len(profiles))
@@ -337,18 +357,28 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText(step_text)
 
     def _refresh_velocity(self, *_: Any) -> None:
+        # I4: both halves of this guard matter, even though only the first
+        # is reachable today. `self._key is None` alone would not be
+        # enough: `resolved_velocity` -> `line_for_key` -> `_require_site()`
+        # raises `ProjectError` (not a `KeyError`) once the site is closed,
+        # which the broad `except Exception` below would then catch and
+        # log as a Critical failure instead of this returning quietly --
+        # a silent no-op and a logged error are not the same outcome, so
+        # this is not redundant with the exception handler even though
+        # nothing in today's call graph reaches it (`close_site` always
+        # emits `line_opened("")` -- which clears `self._key` via `_open`
+        # -- before `site_closed`). Keep both halves.
         if self._key is None or not self.session.is_open:
             return
         try:
             model: VelocityModel = self.session.resolved_velocity(self._key)
             label = velocity_source(self.session, self._key)
+            self.view.set_velocity(model)
+            self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
         except KeyError:
             return
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
-            return
-        self.view.set_velocity(model)
-        self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
 
     def _configure_channels(self, n: int) -> None:
         self.channel_combo.blockSignals(True)
@@ -386,5 +416,21 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not update the selection: {exc}", Qgis.MessageLevel.Critical)
 
     def _pick(self, trace: int, time_ns: float) -> None:
-        if self._key is not None:
+        # I6: guarded like every other slot here, even though nothing
+        # connects to `pick_requested` yet (Task 18/19 will). Verified
+        # directly: an exception raised by a *downstream* subscriber of
+        # `pick_requested` is swallowed by PyQt at the point that
+        # subscriber is invoked, and never propagates back into this
+        # `try` at all -- so this cannot catch a future picking dock's own
+        # bug. What it does guard is this method's own body, which is
+        # exactly the "every slot guards its body" rule this file's
+        # docstring states, and the one place that will matter if this
+        # method ever grows logic ahead of the `emit()` call. A pick is
+        # authored data with no other source of truth; failing loudly
+        # here is cheap insurance for what this line can control.
+        if self._key is None:
+            return
+        try:
             self.pick_requested.emit(self._key, trace, time_ns)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not relay the pick: {exc}", Qgis.MessageLevel.Critical)

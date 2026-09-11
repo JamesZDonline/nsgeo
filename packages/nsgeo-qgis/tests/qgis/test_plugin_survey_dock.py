@@ -105,12 +105,20 @@ def test_plugin_wires_the_dock_and_file_actions(fake_iface, tmp_path):
     plugin.initGui()
     assert plugin.survey_dock in fake_iface.docks
     assert plugin.survey_dock.allowedAreas() & Qt.DockWidgetArea.LeftDockWidgetArea
+    # I1: Task 15's entire profile-dock construction block in `initGui`
+    # (and its teardown in `unload`) had no assertion at all -- deleting
+    # the four lines that build, wire, add and track `ProfileDock`, or the
+    # `for dock in self.docks: ...` teardown loop, both left the full
+    # 258-test suite green. The plugin could ship with no profile dock at
+    # all and nothing would notice.
+    assert plugin.profile_dock in fake_iface.docks
     plugin.session.new_site(tmp_path)
     plugin.session.add_grid(GRID)
     assert plugin.save_with_prompt() is True
     assert not plugin.session.dirty
     plugin.unload()
     assert plugin.survey_dock is None
+    assert fake_iface.docks == [] and plugin.profile_dock is None
 
 
 # ---- additional coverage: the "Get these right" requirements and the
