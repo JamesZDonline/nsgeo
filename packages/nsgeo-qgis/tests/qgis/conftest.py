@@ -84,8 +84,8 @@ def _no_unhandled_modals(monkeypatch):
     """Every test in this tier defaults to *forbidding* a real modal.
 
     QMessageBox.question()/warning()/information(),
-    QFileDialog.getOpenFileName()/getExistingDirectory(), and
-    QDialog.exec() all block indefinitely under QT_QPA_PLATFORM=offscreen
+    QFileDialog.getOpenFileName()/getOpenFileNames()/getExistingDirectory(),
+    and QDialog.exec() all block indefinitely under QT_QPA_PLATFORM=offscreen
     -- there is no window manager to click a button, so a test that
     triggers one by accident would hang the whole suite rather than fail
     fast. A test that means to trigger one must use the `answer_modal`
@@ -115,6 +115,7 @@ def _no_unhandled_modals(monkeypatch):
         (QMessageBox, "warning"),
         (QMessageBox, "information"),
         (QFileDialog, "getOpenFileName"),
+        (QFileDialog, "getOpenFileNames"),
         (QFileDialog, "getExistingDirectory"),
         (QDialog, "exec"),
     ):

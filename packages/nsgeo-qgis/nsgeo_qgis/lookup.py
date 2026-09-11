@@ -62,6 +62,7 @@ class ImportRow:
     sidecar: DzxInfo | None
     include: bool = True
     offset_edited: bool = False
+    label_edited: bool = False
     note: str = ""
 
     @property
@@ -173,7 +174,8 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
             row.direction = -1
         else:
             row.direction = 1
-        row.label = f"line {slot}" if options.label_source == "number" else row.path.stem
+        if not row.label_edited:
+            row.label = f"line {slot}" if options.label_source == "number" else row.path.stem
 
         # GridPlacement.distance_along is start_along + direction * (i/spm):
         # a reversed row starting at the same start_along as a forward row

@@ -29,10 +29,21 @@ observe this). open_grid_dialog() below is the pattern for a dialog like
 that: show() instead of exec(), lifecycle (committing the result, tearing
 down any state the dialog armed, deleteLater()) moved onto dialog.finished
 rather than living after a blocking call, and a single `self._grid_dialog`
-tracking slot so a second one isn't opened on top of the first. A dialog
-that never needs anything else to be interactive while it's open -- no
-reason to expect Task 11's import dialog will -- can still use exec(); only
-copy this pattern where something like it is actually needed.
+tracking slot so a second one isn't opened on top of the first.
+
+Task 11's ImportDialog copies the same show()/finished pattern
+(`self._import_dialog`) even though nothing in its own flow needs the
+canvas or anything else mid-dialog: an application-modal exec() would have
+blocked the toolbar and dock for as long as it was open, which would have
+been a real (if accidental) way to avoid the races below rather than one
+this plugin actually chose. Modeless is the one pattern this plugin uses
+for every dialog, so a stray exec() staying modal by oversight is not a
+failure mode reachable here -- and modeless does mean the site can be
+closed or replaced, or the very grid an open import is targeting can be
+removed (the dock's "Remove grid" has no guard against an import in
+flight), before Import is clicked. ImportDialog's own accept() re-checks
+all three before writing anything (see its module docstring) rather than
+lean on exec() to make them unreachable.
 """
 
 from __future__ import annotations
@@ -52,6 +63,7 @@ from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
+from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
@@ -78,6 +90,7 @@ class NsgeoPlugin:
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
         self._grid_dialog: GridDialog | None = None
+        self._import_dialog: ImportDialog | None = None
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
@@ -134,6 +147,13 @@ class NsgeoPlugin:
         # work in exactly the state its own feature creates.
         if self._grid_dialog is not None:
             self._grid_dialog.reject()
+        # Same reasoning as GridDialog just above: ImportDialog is
+        # modeless too, so it can still be open here, and reject() (not
+        # close(), for the same hidden-dialog reason) is what runs its
+        # finished-signal cleanup instead of leaving it dangling with a
+        # reference to a session this method is about to tear down.
+        if self._import_dialog is not None:
+            self._import_dialog.reject()
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -536,7 +556,52 @@ class NsgeoPlugin:
         canvas.setMapTool(tool)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
-        self.message("Import dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+        # Modeless -- see the module docstring and open_grid_dialog() above,
+        # whose shape this copies: single-instance tracking on
+        # self._import_dialog, lifecycle on dialog.finished rather than
+        # after a blocking exec(), deleteLater() plus a destroyed() guard
+        # against a dialog torn down some other way.
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        if not (self.session.site and self.session.site.grids):
+            self.message("Add a grid before importing lines.", Qgis.MessageLevel.Warning)
+            return
+        if self._import_dialog is not None:
+            self._import_dialog.show()
+            self._import_dialog.raise_()
+            self._import_dialog.activateWindow()
+            return
+        dialog = ImportDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+
+        def finished(result: int) -> None:
+            # `finished` is a slot on dialog.finished (a pyqtSignal): an
+            # uncaught exception here would be swallowed by Qt (see the
+            # module docstring). ImportDialog.accept() already did the
+            # actual session write (and its own identity/grid re-checks --
+            # see its module docstring) before emitting Accepted, so there
+            # is nothing left to guard here beyond reporting the count.
+            try:
+                if result == QDialog.DialogCode.Accepted:
+                    self.message(f"imported {len(dialog.imported_keys)} line(s)")
+            finally:
+                dialog.deleteLater()
+                self._import_dialog = None
+
+        def clear_if_current() -> None:
+            # Same reasoning as open_grid_dialog()'s clear_if_current: only
+            # compare identity, never touch `dialog` (already gone by the
+            # time destroyed() fires), and only clear the tracker if it
+            # still points at *this* dialog.
+            if self._import_dialog is dialog:
+                self._import_dialog = None
+
+        dialog.finished.connect(finished)
+        dialog.destroyed.connect(clear_if_current)
+        self._import_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def open_velocity_dialog(self, key: str) -> None:
         self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)

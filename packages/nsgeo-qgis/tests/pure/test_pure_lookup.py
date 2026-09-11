@@ -67,6 +67,14 @@ def test_hand_edited_offsets_survive_recompute(three):
     assert [r.offset for r in rows if r.include] == [0.0, 3.25]
 
 
+def test_hand_edited_labels_survive_recompute(three):
+    rows = plan_import(three, OPTS)
+    rows[1].label = "line 6a"
+    rows[1].label_edited = True
+    recompute_offsets(rows, OPTS)
+    assert rows[1].label == "line 6a"
+
+
 def test_direction_modes_and_line_number_labels(three):
     forward = ImportOptions("A", "y", 0.5, direction_mode="forward", label_source="number")
     rows = plan_import(three, forward)
