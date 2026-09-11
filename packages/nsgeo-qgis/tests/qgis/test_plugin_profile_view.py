@@ -477,7 +477,9 @@ def test_paint_event_survives_an_empty_trace_axis_with_a_matching_empty_distance
     v.grab_image()  # must not raise either, end to end
 
 
-def test_paint_event_survives_an_unexpected_exception_across_two_repaints(view, monkeypatch):
+def test_paint_event_survives_an_unexpected_exception_across_two_repaints(
+    view, monkeypatch, message_log
+):
     """C1, the generic mechanism: `paintEvent` must survive *any* exception
     raised while painting, not only the three specific inputs (C1a/b/c)
     rejected earlier at their own source, and specifically survive a
@@ -504,6 +506,13 @@ def test_paint_event_survives_an_unexpected_exception_across_two_repaints(view, 
     from "either one present"; it can only tell "both present" apart from
     "neither present", which is exactly the shape defect (a) originally
     shipped in and C1 fixed.
+
+    N3: the guard correctly stops the segfault either way, but if the
+    `_log(...)` call inside the `except` is ever dropped, the failure
+    becomes completely invisible -- no crash, no traceback, no log line,
+    just a widget that silently stops painting. Asserting only "the
+    process survives" (as this test originally did) does not catch that;
+    added an assertion that something was actually logged.
     """
     v, rg = view
 
@@ -513,6 +522,7 @@ def test_paint_event_survives_an_unexpected_exception_across_two_repaints(view, 
     monkeypatch.setattr(ProfileView, "_paint_axes", boom)
     v.grab_image()  # first repaint: must not raise
     v.grab_image()  # second repaint: an exception that escaped uncaught would crash here
+    assert any("could not paint the profile view" in m for m in message_log)
 
 
 def test_cursor_is_drawn_at_the_trace(view):
@@ -549,6 +559,24 @@ def test_mouse_move_emits_the_trace_under_the_cursor(view):
     # on 66.666..., nowhere near an integer boundary.
     QTest.mouseMove(v, QPoint(r.left() + r.width() // 3, r.top() + 20))
     assert got and got[-1] == v.transform.trace_index_at(r.width() // 3) == 66
+
+
+def test_hover_outside_the_image_rect_emits_nothing(view):
+    """N1: `if 0 <= x < self.transform.width: self.trace_hovered.emit(...)`
+    had no test at all -- mutating it to `if True:` (the reviewer's own
+    mutation) passed 44/44. Decided behaviour: a pointer in the axis
+    margins is not "over" any trace, so hovering there must emit nothing --
+    matches the reviewer's own reproduction directly (widget x=5, in the
+    left axis gutter, local x=-51, emits nothing today; with the guard
+    removed it would emit `trace_hovered(0)`).
+    """
+    v, rg = view
+    got = []
+    v.trace_hovered.connect(got.append)
+    r = v.image_rect()
+    assert r.left() > 5  # sanity: widget x=5 really is left of image_rect for this fixture
+    QTest.mouseMove(v, QPoint(5, r.top() + 20))  # left margin: local x = 5 - r.left() < 0
+    assert got == []
 
 
 def test_wheel_zooms_about_the_cursor_and_emits_view_changed(view):
@@ -666,6 +694,17 @@ def test_stuck_pan_is_not_armed_by_a_later_non_middle_release(view):
     including one this widget cannot see coming, like losing focus
     mid-drag), rather than trying to clear `_pan_last` from every place
     that might need to.
+
+    N5: this test used to also assert `v._pan_last is not None` right
+    after the left release, pinning the *absence* of any defensive
+    clearing at that specific point -- but two strictly *safer*
+    implementations (clearing `_pan_last` on a left release too; clearing
+    it on any release) both fail that mid-sequence assertion despite
+    fixing the same bug correctly. A test that rejects a better
+    implementation of the thing it's testing is a liability, not a
+    guard-rail. Loosened to assert only the property that actually
+    matters -- the view does not get stuck panning -- not the exact
+    intermediate value of a private attribute along the way.
     """
     v, rg = view
     r = v.image_rect()
@@ -690,7 +729,6 @@ def test_stuck_pan_is_not_armed_by_a_later_non_middle_release(view):
         Qt.KeyboardModifier.NoModifier,
         QPoint(r.left() + 200, r.top() + 100),
     )
-    assert v._pan_last is not None  # only a *middle* release clears it directly -- still armed
     # A plain, button-less move must not pan the view. `QTest.mouseMove`
     # cannot be used for this step: the middle button was never released
     # (that omission is the point -- see the docstring), so Qt's own
@@ -707,8 +745,8 @@ def test_stuck_pan_is_not_armed_by_a_later_non_middle_release(view):
     _send_move_while_pressed(
         v, QPoint(r.left() + 400, r.top() + 100), held_button=Qt.MouseButton.NoButton
     )
-    assert v.transform == before
-    assert v._pan_last is None  # the move itself recognises the stale arm and clears it
+    assert v.transform == before  # the property that matters: no stuck pan
+    assert v._pan_last is None  # not armed afterwards either, however that came about
 
 
 def test_wheel_event_survives_a_degenerate_zoom_factor_instead_of_leaking_to_qt(view, monkeypatch):
