@@ -8,7 +8,7 @@ from nsgeo.processing import available_steps
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QModelIndex, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -147,12 +147,16 @@ def test_dest_index_matches_qt_rows_moved_semantics():
 
 def test_on_rows_moved_uses_dest_index_not_the_raw_row(opened):
     """`_on_rows_moved` must translate Qt's `row` through `dest_index`
-    before calling `session.move_step` -- `QTest` cannot drive a real
+    before calling `session.move_step`. `QTest` cannot drive a real
     internal `QListWidget` drag under the offscreen platform (verified
     directly: synthetic mouse press/move/release on the viewport produces
-    no `rowsMoved` at all), so the slot is called directly instead, the
-    same case `test_dest_index_matches_qt_rows_moved_semantics` covers as
-    a pure function, now exercised end to end through the session.
+    no `rowsMoved` at all) -- but the model can be driven directly instead
+    of the mouse: `model().moveRow(parent, 0, parent, 3)` is a real move
+    (verified directly: it returns `True` and emits a real `rowsMoved`,
+    while `dest=1`/`dest=2` -- the tie and one-past-it -- both return
+    `False` and emit nothing), which exercises the actual
+    `rowsMoved -> _on_rows_moved` connection end to end rather than
+    fabricating the slot's call.
 
     Fails under exactly one single-line substitution: replacing
     `self.session.move_step(key, start, dst)` with
@@ -162,7 +166,9 @@ def test_on_rows_moved_uses_dest_index_not_the_raw_row(opened):
     session, dock, key = opened
     for name in ("dewow", "background_mean", "gain_agc", "time_zero"):
         dock.add_step(name)
-    dock._on_rows_moved(None, 0, 0, None, 3)
+    parent = QModelIndex()
+    moved = dock.list.model().moveRow(parent, 0, parent, 3)
+    assert moved
     assert [s.name for s, _ in session.stack_for(key).entries] == [
         "background_mean",
         "gain_agc",
@@ -224,7 +230,8 @@ def test_apply_button_click_confirms_before_applying(opened, answer_modal):
     which would silently skip the confirmation prompt on every real click
     and overwrite every other line in the grid with no way to back out.
     Pins the wiring that avoids that: a real click must still ask, and
-    declining must leave every other line's stack untouched.
+    declining must leave every other line's stack untouched and say so
+    rather than leave the caption blank.
     """
     session, dock, key = opened
     dock.add_step("dewow")
@@ -233,3 +240,4 @@ def test_apply_button_click_confirms_before_applying(opened, answer_modal):
     assert len(calls) == 1
     other = session.keys()[1]
     assert len(session.stack_for(other)) == 0
+    assert "cancelled" in dock.status.text()
