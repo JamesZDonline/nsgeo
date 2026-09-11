@@ -14,7 +14,16 @@ import numpy as np
 from nsgeo.geometry.fit import fit_grid_from_corners
 from nsgeo.geometry.grid import Grid
 from nsgeo.velocity import VelocityModel
-from qgis.core import QgsCoordinateReferenceSystem, QgsMapLayerProxyModel, QgsProject
+from qgis.core import (
+    Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsDistanceArea,
+    QgsMapLayerProxyModel,
+    QgsPointXY,
+    QgsProject,
+    QgsUnitTypes,
+)
 from qgis.gui import QgsFeaturePickerWidget, QgsMapLayerComboBox, QgsProjectionSelectionWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -38,6 +47,19 @@ from nsgeo_qgis.lookup import corners_from_polygon
 from nsgeo_qgis.session import SiteSession
 
 CORNER_NAMES = ("origin", "+X", "+X+Y", "+Y")
+
+# Local scale-factor thresholds for _validate()'s CRS check (round 3,
+# Finding 1): |k - 1| where k is ground distance / declared distance at
+# the grid's own origin. Calibrated against real CRSs used as intended
+# (UTM mid-zone/edge, British National Grid, a metres state plane: all
+# comfortably under 0.1%; CONUS Albers/ETRS89 LAEA, both anisotropic
+# equal-area projections: up to ~1.26% away from their centre) against
+# CRSs that are not fit for a metric grid frame at all (EPSG:3857 well
+# above both thresholds everywhere off the equator; a UTM zone abused
+# three zones over, ~1.4-3%). Warn, but do not block, in between --
+# refusing at 1% would false-refuse legitimate Albers/LAEA work.
+CRS_SCALE_WARN = 0.001  # 0.1%
+CRS_SCALE_REFUSE = 0.02  # ~2%
 
 
 def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) -> QDoubleSpinBox:
@@ -85,6 +107,7 @@ class GridDialog(QDialog):
         self.velocity.setSpecialValueText("required")
         self.velocity_hint = QLabel("")
         self.crs_hint = QLabel("")
+        self.crs_hint.setWordWrap(True)
         origin_row = QHBoxLayout()
         origin_row.addWidget(self.origin_x)
         origin_row.addWidget(self.origin_y)
@@ -94,11 +117,16 @@ class GridDialog(QDialog):
         vel_row = QHBoxLayout()
         vel_row.addWidget(self.velocity)
         vel_row.addWidget(self.velocity_hint)
-        crs_row = QHBoxLayout()
-        crs_row.addWidget(self.crs_widget)
-        crs_row.addWidget(self.crs_hint)
         form.addRow("Id", self.id_edit)
-        form.addRow("CRS", crs_row)
+        form.addRow("CRS", self.crs_widget)
+        # Round 3, Finding 2: crs_hint sharing a row with crs_widget (in
+        # a QHBoxLayout, the way velocity_hint shares with velocity)
+        # squeezed crs_widget down to an unreadable few px whenever the
+        # hint had anything to say -- exactly the moment F3 added it to
+        # be seen. velocity_hint's text is always short ("from the
+        # header dielectric"); crs_hint's can run to a full sentence, so
+        # it gets its own row instead of competing for width.
+        form.addRow("", self.crs_hint)
         form.addRow("Origin E, N", origin_row)
         form.addRow("Azimuth (° cw from N to +Y)", self.azimuth)
         form.addRow("Size X, Y (m)", size_row)
@@ -119,21 +147,26 @@ class GridDialog(QDialog):
         self.size_x.valueChanged.connect(self._validate)
         self.size_y.valueChanged.connect(self._validate)
         self.crs_widget.crsChanged.connect(self._validate)
+        # The local-scale-factor check below depends on where the grid
+        # actually is, so a change to the origin can flip its own
+        # verdict (round 3, Finding 1) -- unlike id/velocity/size, this
+        # was not wired at all before this round.
+        self.origin_x.valueChanged.connect(self._validate)
+        self.origin_y.valueChanged.connect(self._validate)
 
         project_crs = QgsProject.instance().crs()
-        # A real QGIS project's own CRS is (almost) never invalid --
-        # this fallback is a placeholder for the bare-application case
-        # only (this project's own test harness among them) -- same
-        # spirit as size_x/size_y defaulting to 10.0: a valid,
-        # non-blocking value the user is expected to override, not a
-        # real answer. EPSG:3857 specifically, not EPSG:4326: origin/
-        # size_x/size_y are metres, and _validate() below refuses a
-        # geographic CRS on the same grounds as Finding 1/2's
-        # degrees-as-metres bugs, so the placeholder must not be
-        # geographic either.
-        self.crs_widget.setCrs(
-            project_crs if project_crs.isValid() else QgsCoordinateReferenceSystem("EPSG:3857")
-        )
+        # Round 1 and 2 fell back to a placeholder CRS (first EPSG:4326,
+        # then EPSG:3857) when the project had none, reasoning it was
+        # harmless because a real QGIS project's own CRS is (almost)
+        # never invalid. Round 3: EPSG:3857 itself turned out to be
+        # exactly the failure this dialog exists to prevent (a CRS that
+        # merely *passes* the guard, chosen only because it does) -- the
+        # next placeholder would only repeat that pattern with a
+        # different CRS. No fallback: an unset CRS is refused by the
+        # authid() check below like any other unusable one, with the
+        # same visible, actionable hint.
+        if project_crs.isValid():
+            self.crs_widget.setCrs(project_crs)
         if grid is not None:
             self._prefill(grid)
         elif suggested_velocity is not None:
@@ -374,39 +407,100 @@ class GridDialog(QDialog):
         if grid.velocity is not None:
             self.velocity.setValue(grid.velocity.surface_velocity)
 
+    def _crs_scale_error(self, crs: QgsCoordinateReferenceSystem) -> float | None:
+        """max|k - 1| of `crs`'s local linear scale at the current
+        origin, where k = ground (ellipsoidal) distance / declared
+        (crs-unit) distance -- or None if it can't be measured.
+
+        A CRS whose stated unit is metres is not the same thing as a
+        CRS whose metres are ground metres here: EPSG:3857 (Web
+        Mercator) reports Meters and is not geographic, yet its scale
+        factor grows without bound away from the equator (round 3,
+        Finding 1). Measuring at (0, 0) specifically would be worse
+        than not checking at all -- that is the origin of the *CRS*,
+        which for something like EPSG:5070 or EPSG:3035 sits far
+        outside the CRS's own area of use and gives a spuriously large
+        error -- so this measures at the grid's own origin instead, and
+        answers None (skip, don't refuse) before that origin has been
+        set to anything, or if the transform/measurement itself fails
+        (e.g. the origin lies outside the CRS's area of use).
+        """
+        ox, oy = self.origin_x.value(), self.origin_y.value()
+        if ox == 0.0 and oy == 0.0:
+            return None
+        try:
+            xform = QgsCoordinateTransform(
+                crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance()
+            )
+            da = QgsDistanceArea()
+            da.setEllipsoid("WGS84")
+            baseline = 1000.0
+            worst = 0.0
+            for dx, dy in ((baseline, 0.0), (-baseline, 0.0), (0.0, baseline), (0.0, -baseline)):
+                g0 = xform.transform(QgsPointXY(ox, oy))
+                g1 = xform.transform(QgsPointXY(ox + dx, oy + dy))
+                ground = da.measureLine(g0, g1)
+                worst = max(worst, abs(ground / baseline - 1.0))
+        except Exception:  # noqa: BLE001 -- see the docstring: skip, don't refuse
+            return None
+        return worst
+
     def _validate(self, *_: Any) -> None:
-        # One CRS guard, not one per path in: the fallback above, the
-        # project's own CRS, the digitise flow's canvas CRS
-        # (plugin.py's done()), and a hand-picked CRS in this widget all
-        # flow through crs_widget, so checking it here once covers all
-        # of them (round 2, Finding 2) -- rather than teaching every
-        # path that can set a CRS to separately refuse a bad one.
+        # One CRS guard, not one per path in: the project's own CRS,
+        # the digitise flow's canvas CRS (plugin.py's done()), and a
+        # hand-picked CRS in this widget all flow through crs_widget, so
+        # checking it here once covers all of them (round 2, Finding 2)
+        # -- rather than teaching every path that can set a CRS to
+        # separately refuse a bad one.
         #
-        # Two ways a CRS is unusable for a metric grid frame:
+        # Three ways a CRS is unusable for a metric grid frame:
         # - crs.authid() empty: valid CRS (e.g. a custom oblique
         #   Mercator), but Grid.crs is spec'd as an authority string,
         #   and session.add_grid/layers.py both trust it blindly, so it
         #   must be refused rather than silently written as crs="".
-        # - crs.isGeographic(): origin/size_x/size_y are metres; a
-        #   geographic (degrees) CRS makes them meaningless, and a
-        #   convincing-looking success message on a wrong frame is
-        #   exactly the failure mode this plan has already shipped
-        #   twice (round 1's polygon-tab Finding 1, round 2's digitise
-        #   canvas CRS).
+        # - crs.mapUnits() != Meters: not just geographic (degrees) --
+        #   also catches a CRS in US survey feet (e.g. many state-plane
+        #   ftUS zones sit right next to their metre sibling in the
+        #   picker), which is not geographic and has an authid, but
+        #   still not ground metres (round 3, Finding 1).
+        # - the local scale factor: a CRS can report Meters and still
+        #   not mean *ground* metres here -- EPSG:3857 is the sharpest
+        #   example, off by double digits of percent away from the
+        #   equator. Warn between CRS_SCALE_WARN and CRS_SCALE_REFUSE
+        #   (real anisotropic equal-area CRSs like EPSG:5070/3035 land
+        #   here when used away from their own centre) rather than
+        #   blocking OK outright; only refuse past CRS_SCALE_REFUSE.
         crs = self.crs_widget.crs()
+        scale_error = None
         if not crs.authid():
             self.crs_hint.setText("needs an authority code (e.g. EPSG) -- pick a registered CRS")
-        elif crs.isGeographic():
-            self.crs_hint.setText("must be a projected CRS in metres, not geographic (degrees)")
+        elif crs.mapUnits() != Qgis.DistanceUnit.Meters:
+            self.crs_hint.setText(f"must use metres, not {QgsUnitTypes.toString(crs.mapUnits())}")
         else:
-            self.crs_hint.setText("")
+            scale_error = self._crs_scale_error(crs)
+            if scale_error is not None and scale_error > CRS_SCALE_REFUSE:
+                self.crs_hint.setText(
+                    f"off by {scale_error * 100:.1f}% here -- ground distances would be "
+                    "wrong; pick a CRS accurate at this location"
+                )
+            elif scale_error is not None and scale_error > CRS_SCALE_WARN:
+                self.crs_hint.setText(
+                    f"off by {scale_error * 100:.2f}% at this origin -- distances will be "
+                    "slightly distorted"
+                )
+            else:
+                self.crs_hint.setText("")
+        crs_ok = (
+            bool(crs.authid())
+            and crs.mapUnits() == Qgis.DistanceUnit.Meters
+            and not (scale_error is not None and scale_error > CRS_SCALE_REFUSE)
+        )
         ok = (
             bool(self.id_edit.text().strip())
             and self.velocity.value() > 0
             and self.size_x.value() > 0
             and self.size_y.value() > 0
-            and bool(crs.authid())
-            and not crs.isGeographic()
+            and crs_ok
         )
         self.ok_button.setEnabled(ok)
 

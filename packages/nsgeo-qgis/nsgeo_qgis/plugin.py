@@ -324,12 +324,20 @@ class NsgeoPlugin:
             # alone, that tool would later call back into show_dialog()
             # (a click, a switch to another tool) against a `dialog`
             # this method is about to delete, raising RuntimeError out
-            # of a signal-connected slot. Unsetting it here -- while
-            # `dialog` is still alive -- runs that same cancelled path
-            # cleanly instead.
+            # of a signal-connected slot.
             canvas = self.iface.mapCanvas()
-            if isinstance(canvas.mapTool(), DigitiseGridTool):
-                canvas.unsetMapTool(canvas.mapTool())
+            tool = canvas.mapTool()
+            if isinstance(tool, DigitiseGridTool):
+                # unsetMapTool() -> deactivate() -> cancelled ->
+                # show_dialog() would otherwise re-show `dialog` --
+                # already accepted or rejected here, and about to be
+                # deleteLater()'d below regardless -- for one event-loop
+                # turn before its own deletion actually runs (round 3,
+                # Finding 3). blockSignals() lets deactivate()'s own
+                # cleanup (releasing the rubber band) run without
+                # re-triggering show_dialog().
+                tool.blockSignals(True)
+                canvas.unsetMapTool(tool)
             # Fix round 1, Finding 3: `dialog` is parented to the main
             # window and nothing ever deleted it, so every grid dialog
             # opened stayed alive (with its full widget tree) for the

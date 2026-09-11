@@ -73,26 +73,32 @@ def test_ok_is_blocked_until_id_and_velocity_are_set(session):
     d.id_edit.setText("A")
     assert not d.ok_button.isEnabled()  # velocity still 0 = required
     d.velocity.setValue(0.08)
+    # Round 3, Finding 1: no fallback CRS any more (the fallback tried in
+    # rounds 1 and 2 was itself always going to be a CRS chosen only
+    # because it passed the guard -- EPSG:3857 turned out to be exactly
+    # the failure this dialog exists to prevent). crs_widget starts
+    # unset in this bare test harness (no project CRS either), so OK
+    # stays blocked until a CRS is actually picked.
+    assert not d.ok_button.isEnabled()
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
     assert d.ok_button.isEnabled()
 
 
 def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
-    # Fix round 2, Finding 2: one guard in _validate() -- authid() and
-    # not isGeographic() -- rather than a separate check bolted onto
-    # every path that can set crs_widget's CRS. Four such paths, all
-    # caught by the same guard:
+    # Fix round 2, Finding 2: one guard in _validate() rather than a
+    # separate check bolted onto every path that can set crs_widget's
+    # CRS. Several such paths, all caught by the same guard (round 3,
+    # Finding 1 replaced the geographic check with units + local scale,
+    # and removed the fallback route entirely -- see
+    # test_ok_is_blocked_until_id_and_velocity_are_set and
+    # test_crs_scale_guard_accepts_correct_uses_and_refuses_mismatches
+    # for those):
 
-    # 1. The fallback used when the project has no CRS of its own
-    #    (GridDialog.__init__): EPSG:3857 -- has an authid, not
-    #    geographic -- so this alone does not block OK.
     d = GridDialog(session)
     d.id_edit.setText("A")
     d.velocity.setValue(0.08)
-    assert d.crs_widget.crs().authid() == "EPSG:3857"
-    assert d.ok_button.isEnabled()
-    assert d.crs_hint.text() == ""
 
-    # 2. The *project's* own CRS, when it is geographic -- QGIS's
+    # 1. The *project's* own CRS, when it is geographic -- QGIS's
     #    out-of-the-box default for a brand-new project.
     original_project_crs = QgsProject.instance().crs()
     try:
@@ -101,20 +107,20 @@ def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
         d_project.id_edit.setText("A")
         d_project.velocity.setValue(0.08)
         assert not d_project.ok_button.isEnabled()
-        assert "geographic" in d_project.crs_hint.text().lower()
+        assert "metres" in d_project.crs_hint.text().lower()
     finally:
         QgsProject.instance().setCrs(original_project_crs)
 
-    # 3. The digitise flow's canvas CRS (plugin.py's done() adopts
+    # 2. The digitise flow's canvas CRS (plugin.py's done() adopts
     #    canvas.mapSettings().destinationCrs() unconditionally --
     #    Concern 1 from round 1, confirmed geographic-canvas numbers in
     #    the round 2 report). Simulated directly: from crs_widget's
     #    point of view it is just another setCrs() call.
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
     assert not d.ok_button.isEnabled()
-    assert "geographic" in d.crs_hint.text().lower()
+    assert "metres" in d.crs_hint.text().lower()
 
-    # 4a. A CRS the user picks by hand that is valid but has no
+    # 3a. A CRS the user picks by hand that is valid but has no
     #     authority code (round 1, Finding 2).
     custom = QgsCoordinateReferenceSystem.fromProj(
         "+proj=omerc +lat_0=36 +lonc=15 +alpha=30 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
@@ -124,16 +130,84 @@ def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
     assert not d.ok_button.isEnabled()
     assert "authority" in d.crs_hint.text().lower()
 
-    # 4b. ... or one the user picks that is geographic outright.
+    # 3b. ... or one the user picks that is geographic outright.
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
     assert not d.ok_button.isEnabled()
-    assert "geographic" in d.crs_hint.text().lower()
+    assert "metres" in d.crs_hint.text().lower()
 
     # Recovering with an ordinary registered, projected CRS re-enables OK
     # and clears the hint.
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
     assert d.ok_button.isEnabled()
     assert d.crs_hint.text() == ""
+
+
+def test_crs_scale_guard_accepts_correct_uses_and_refuses_mismatches(session):
+    # Fix round 3, Finding 1: authid() and mapUnits() == Meters are
+    # necessary but not sufficient. Two whole families of CRS pass both
+    # yet are not ground metres at the grid's own origin: EPSG:3857 (Web
+    # Mercator -- mapUnits() reports Meters, isGeographic() is False,
+    # but its scale factor grows without bound away from the equator),
+    # and US survey feet zones (not geographic, valid authid, but not
+    # metres at all -- caught by the units check directly, no scale
+    # measurement needed).
+    #
+    # Points and expected |k-1| below were computed with QgsDistanceArea
+    # (WGS84 ellipsoid) against a 1000 m baseline at each origin, in the
+    # same script used for the fix-round report's calibration table.
+    d = GridDialog(session)
+    d.id_edit.setText("A")
+    d.velocity.setValue(0.08)
+
+    # Accepted, no hint: real CRSs used as intended (all measured well
+    # under CRS_SCALE_WARN = 0.1%).
+    for code, origin, why in (
+        ("EPSG:32616", (500000.0, 3983948.453), "UTM 16N at its own central meridian"),
+        ("EPSG:32616", (770421.370, 3988111.962), "UTM 16N near a zone edge"),
+        ("EPSG:27700", (468748.556, 233978.339), "British National Grid"),
+        ("EPSG:32119", (645754.486, 227483.520), "NC state plane, metres"),
+    ):
+        d.crs_widget.setCrs(QgsCoordinateReferenceSystem(code))
+        d.origin_x.setValue(origin[0])
+        d.origin_y.setValue(origin[1])
+        assert d.ok_button.isEnabled(), why
+        assert d.crs_hint.text() == "", why
+
+    # Warned but not blocked: anisotropic equal-area CRSs away from
+    # their own centre (~1.25%/~0.60% here) -- refusing these would
+    # false-refuse legitimate work; CRS_SCALE_REFUSE is set well above
+    # them (~2%).
+    for code, origin in (
+        ("EPSG:5070", (0.0, 2888222.097)),  # Albers CONUS, northern edge
+        ("EPSG:3035", (5026876.835, 4731029.964)),  # ETRS89 LAEA, far corner
+    ):
+        d.crs_widget.setCrs(QgsCoordinateReferenceSystem(code))
+        d.origin_x.setValue(origin[0])
+        d.origin_y.setValue(origin[1])
+        assert d.ok_button.isEnabled(), code
+        assert "distort" in d.crs_hint.text().lower(), code
+
+    # Refused: US survey feet, caught by the units check alone --
+    # mapUnits() != Meters regardless of where the origin is.
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:2264"))
+    d.origin_x.setValue(700000.0)
+    d.origin_y.setValue(200000.0)
+    assert not d.ok_button.isEnabled()
+    assert "feet" in d.crs_hint.text().lower()
+
+    # Refused: EPSG:3857 away from the equator. mapUnits() reports
+    # Meters and isGeographic() is False, so only the local scale check
+    # catches it -- 19.4% at lat 36, 27.0% at lat 43, both far past
+    # CRS_SCALE_REFUSE.
+    for origin, lat in (
+        ((-9350837.227, 4300621.372), 36),
+        ((-9350837.227, 5311971.847), 43),
+    ):
+        d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+        d.origin_x.setValue(origin[0])
+        d.origin_y.setValue(origin[1])
+        assert not d.ok_button.isEnabled(), f"3857 at lat {lat}"
+        assert "%" in d.crs_hint.text(), f"3857 at lat {lat}"
 
 
 def test_corner_fit_fills_origin_azimuth_and_sizes(session):
@@ -381,7 +455,6 @@ def test_use_polygon_success_still_gets_a_visible_crs_refusal(qgis_app, session)
         d = GridDialog(session)
         d.id_edit.setText("A")
         d.velocity.setValue(0.08)
-        assert d.ok_button.isEnabled()  # the EPSG:3857 fallback, still fine
         _select_sole_feature(qgis_app, d, layer)
         d.origin_combo.setCurrentIndex(0)
         d.plus_y_combo.setCurrentIndex(3)
@@ -476,6 +549,23 @@ def test_digitise_tool_right_click_after_origin_cancels_not_completes(qgis_app, 
     assert picked == []
 
 
+def test_crs_widget_stays_usable_when_the_hint_is_showing(session):
+    # Fix round 3, Finding 2: crs_hint shared a row with crs_widget (a
+    # QHBoxLayout, the way velocity_hint shares with velocity), which
+    # squeezed crs_widget down to ~29 px and its inner combo to 0 -- the
+    # CRS name entirely invisible exactly when the user is being told to
+    # change it. crs_hint now gets its own row below crs_widget instead.
+    d = GridDialog(session)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))  # a real, long hint
+    assert d.crs_hint.text() != ""
+    d.adjustSize()
+    d.show()
+    try:
+        assert d.crs_widget.width() > 200
+    finally:
+        d.hide()
+
+
 def test_grid_dialog_exec_is_guarded_by_default(session):
     # Task 9's autouse guard forbids QMessageBox/QFileDialog modals so a
     # test that trips one fails fast instead of hanging under
@@ -503,6 +593,16 @@ def test_open_grid_dialog_accepts_and_adds_a_new_grid(
         dialog.velocity.setValue(0.08)
         dialog.origin_x.setValue(10.0)
         dialog.origin_y.setValue(20.0)
+        # Round 3, Finding 1: no fallback CRS any more -- this dialog's
+        # crs_widget starts unset in this bare test harness (no project
+        # CRS either), so a real user's OK button would stay disabled
+        # here too until they pick one, exactly like
+        # test_ok_is_blocked_until_id_and_velocity_are_set. accept()
+        # bypasses that gating (nothing stops calling it directly, the
+        # way this test does), so pick one explicitly to reflect what a
+        # real user's flow requires, not incidentally re-prove Finding 2
+        # (crs="").
+        dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
         dialog.accept()
 
     drive_dialog(QDialog, "exec", driver)
@@ -510,13 +610,7 @@ def test_open_grid_dialog_accepts_and_adds_a_new_grid(
     grid = plugin.session.grid("A")
     assert grid.origin == (10.0, 20.0)
     assert grid.velocity == VelocityModel.constant(0.08)
-    # Fix round 1, Finding 2: this never explicitly picked a CRS, and
-    # this dialog previously wrote grid.crs == "" in that case (the
-    # project's own CRS is invalid in this bare test harness -- see
-    # GridDialog.__init__). It must never be "": the fallback used when
-    # nothing else is available is still a valid, projected authority
-    # string (round 2: EPSG:4326 would also now be refused as geographic).
-    assert grid.crs == "EPSG:3857"
+    assert grid.crs == "EPSG:32616"
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
@@ -773,6 +867,39 @@ def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_
     drive_dialog(QDialog, "exec", driver)
     plugin.open_grid_dialog(None)  # must not raise
     assert canvas.mapTool() is None  # released, not left stranded
+    plugin.unload()
+
+
+def test_open_grid_dialog_releases_a_stranded_tool_on_accept_without_flashing_the_dialog(
+    fake_iface, tmp_path, drive_dialog, answer_modal
+):
+    # Fix round 3, Finding 3: releasing a still-active digitise tool in
+    # open_grid_dialog()'s finally (round 2, Finding 4's fix) runs
+    # unsetMapTool() -> deactivate() -> cancelled -> show_dialog(),
+    # which would otherwise re-show `dialog` -- already accepted here --
+    # for one event-loop turn before deleteLater() actually destroys it.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+
+    def driver(dialog: GridDialog) -> None:
+        dialog.digitise_button.click()
+        assert isinstance(canvas.mapTool(), DigitiseGridTool)
+        assert dialog.isHidden()
+        dialog.id_edit.setText("A")
+        dialog.velocity.setValue(0.08)
+        dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+        dialog.accept()  # accepted mid-pick, tool still active
+
+    calls = drive_dialog(QDialog, "exec", driver)
+    plugin.open_grid_dialog(None)  # must not raise
+    assert canvas.mapTool() is None  # released
+    assert calls[0].isHidden()  # never re-shown after being accepted
+    assert plugin.session.grid("A").crs == "EPSG:32616"
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
 
