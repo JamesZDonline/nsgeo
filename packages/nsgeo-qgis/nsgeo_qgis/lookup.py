@@ -120,7 +120,16 @@ def _merge_note(note: str, marker: str, text: str | None) -> str:
     warning set once when the row was built. This is what keeps
     recompute_offsets safe to call repeatedly as the import table is
     edited: it only ever touches the notes it itself derives, and never
-    duplicates them on a second call."""
+    duplicates them on a second call.
+
+    `"; "` is this function's own delimiter between components, so neither
+    `marker` nor `text` may contain it: a `text` with an embedded `"; "` is
+    stored as two components, only the first of which starts with
+    `marker`, so the second is never recognised (and never cleared) again.
+    """
+    assert "; " not in marker and (text is None or "; " not in text), (
+        f"a note component may not contain '; ', which is _merge_note's own delimiter: {text!r}"
+    )
     parts = [p for p in note.split("; ") if p and not p.startswith(marker)]
     if text is not None:
         parts.append(text)
@@ -177,9 +186,12 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
                 row.start_along = options.start_along + options.grid_size_along
             else:
                 row.start_along = options.start_along
+                # A comma, not "; " -- that is _merge_note's own delimiter
+                # (see its docstring), and this text must stay one
+                # component across repeated recompute_offsets calls.
                 reversed_note = (
                     "reversed direction cannot be positioned without a known "
-                    "grid length along this axis; using start_along as given"
+                    "grid length along this axis, so start_along is used as given"
                 )
         else:
             row.start_along = options.start_along

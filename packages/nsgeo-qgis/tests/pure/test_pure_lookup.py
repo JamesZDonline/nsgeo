@@ -263,3 +263,31 @@ def test_corners_from_polygon_mirror_check_is_winding_independent():
     # index 3 of the reversed ring is world[1], the true +X corner: mirrored.
     with pytest.raises(ValueError, match="mirrored"):
         corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=3)
+
+
+def test_reversed_direction_note_is_idempotent_and_clears_once_grid_length_is_known(tmp_path):
+    """Round 2 regression: the reversed-direction note (added when a
+    direction=-1 row can't be positioned because grid_size_along is
+    unknown) used to embed _merge_note's own "; " delimiter, so it was
+    stored as two components -- only the first recognised by the
+    "reversed direction" marker on a later call. That orphaned the second
+    component, which then grew by one copy on every recompute_offsets
+    call and could never be cleared, even after the grid length became
+    known and the row was correctly placed."""
+    unknown = ImportOptions("A", "y", 0.5)  # grid_size_along=None
+    path_a = synthetic_dzt(tmp_path, "FILE__001.DZT")
+    path_b = synthetic_dzt(tmp_path, "FILE__002.DZT")
+    rows = plan_import([path_a, path_b], unknown)  # plan_import itself recomputes once
+    reversed_row = next(r for r in rows if r.direction == -1)
+    note_after_first_recompute = reversed_row.note
+    assert "reversed direction" in note_after_first_recompute
+
+    for _ in range(3):
+        recompute_offsets(rows, unknown)
+    assert reversed_row.note == note_after_first_recompute  # unchanged, not growing
+    assert reversed_row.note.count("reversed direction") == 1
+
+    known = ImportOptions("A", "y", 0.5, grid_size_along=11.0)
+    recompute_offsets(rows, known)
+    assert "reversed direction" not in reversed_row.note  # cleared, not left stale
+    assert reversed_row.start_along == pytest.approx(11.0)
