@@ -114,10 +114,17 @@ class GridDialog(QDialog):
         self.velocity.valueChanged.connect(self._validate)
         self.size_x.valueChanged.connect(self._validate)
         self.size_y.valueChanged.connect(self._validate)
+        self.crs_widget.crsChanged.connect(self._validate)
 
         project_crs = QgsProject.instance().crs()
-        if project_crs.isValid():
-            self.crs_widget.setCrs(project_crs)
+        # A brand-new QGIS project defaults to EPSG:4326, so this fallback
+        # is a placeholder for the bare-application case only (this
+        # project's own test harness among them) -- same spirit as
+        # size_x/size_y defaulting to 10.0: a valid, non-blocking value
+        # the user is expected to override, not a real answer.
+        self.crs_widget.setCrs(
+            project_crs if project_crs.isValid() else QgsCoordinateReferenceSystem("EPSG:4326")
+        )
         if grid is not None:
             self._prefill(grid)
         elif suggested_velocity is not None:
@@ -222,8 +229,14 @@ class GridDialog(QDialog):
         self.origin_x.setValue(fit.origin[0])
         self.origin_y.setValue(fit.origin[1])
         self.azimuth.setValue(fit.azimuth)
-        self.size_x.setValue(float(local[:, 0].max()))
-        self.size_y.setValue(float(local[:, 1].max()))
+        # The extent of the local coordinates, not their max(): control
+        # points need not be anchored at the local origin (e.g. the
+        # origin stake is unreachable, so the crew surveys (100, 50) to
+        # (120, 57.5) instead of (0, 0) to (20, 7.5)). max() alone reads
+        # that as a 120 x 57.5 m grid -- a correct origin, a correct
+        # azimuth, and a 0.000 m residual on a wildly wrong size.
+        self.size_x.setValue(float(local[:, 0].max() - local[:, 0].min()))
+        self.size_y.setValue(float(local[:, 1].max() - local[:, 1].min()))
         # A nonzero RMS here has two very different causes, and this label
         # cannot tell them apart: it may mean the physical corners just
         # weren't surveyed perfectly square (the ordinary case), or it may
@@ -262,6 +275,24 @@ class GridDialog(QDialog):
         layer = self.layer_combo.currentLayer()
         if layer is None or not feature.isValid() or feature.geometry().isNull():
             self.polygon_status.setText("select a polygon feature first")
+            return
+        if layer.crs().isGeographic():
+            # corners_from_polygon/fit_grid_from_corners treat the ring's
+            # raw coordinates as metres. In a geographic CRS they are
+            # degrees: size_x/size_y come out as ~1e-3 (rounds to 0.00 at
+            # this dialog's 2 decimals, which is the only thing that
+            # currently stops OK from enabling), and a rigid fit of the
+            # ring to itself in degree units still finds a near-zero
+            # residual -- "rigid fit RMS 0.000 m" -- at an azimuth that is
+            # wrong by several degrees (1 degree of longitude is not 1
+            # degree of latitude in metres, away from the equator). A
+            # convincing success message on a wrong frame is exactly the
+            # failure mode this plan has already shipped twice, so this
+            # is refused outright rather than merely warned about.
+            self.polygon_status.setText(
+                "this layer's CRS is geographic (degrees, not metres) -- reproject it "
+                "to a projected CRS before reading corners from it"
+            )
             return
         geom = feature.geometry()
         try:
@@ -313,11 +344,18 @@ class GridDialog(QDialog):
             self.velocity.setValue(grid.velocity.surface_velocity)
 
     def _validate(self, *_: Any) -> None:
+        # crs.authid() gates OK too: the spec types Grid.crs as an
+        # authority string, and a CRS that is valid but has no authid
+        # (a custom PROJ string, e.g. an oblique Mercator) must be
+        # refused rather than silently written as crs="" -- session's
+        # add_grid/replace_grid don't validate this, and layers.py builds
+        # the whole GeoPackage's CRS from it.
         ok = (
             bool(self.id_edit.text().strip())
             and self.velocity.value() > 0
             and self.size_x.value() > 0
             and self.size_y.value() > 0
+            and bool(self.crs_widget.crs().authid())
         )
         self.ok_button.setEnabled(ok)
 

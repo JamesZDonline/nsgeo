@@ -303,21 +303,37 @@ class NsgeoPlugin:
         dialog = GridDialog(
             self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
         )
-        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        result = dialog.result_grid()
         try:
-            if grid is None:
-                self.session.add_grid(result)
-            else:
-                self.session.replace_grid(result)
-        except (ValueError, KeyError) as exc:
-            self.message(str(exc), Qgis.MessageLevel.Critical)
+            dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            result = dialog.result_grid()
+            try:
+                if grid is None:
+                    self.session.add_grid(result)
+                else:
+                    self.session.replace_grid(result)
+            except (ValueError, KeyError) as exc:
+                self.message(str(exc), Qgis.MessageLevel.Critical)
+        finally:
+            # Fix round 1, Finding 3: `dialog` is parented to the main
+            # window and nothing ever deleted it, so every grid dialog
+            # opened stayed alive (with its full widget tree) for the
+            # life of the QGIS session -- harmless for one dialog, but a
+            # segfault at interpreter shutdown once enough of them pile
+            # up alongside a QgsMapCanvas/QgsRubberBand from the digitise
+            # flow (verified with gdb). deleteLater() only schedules the
+            # deletion; `dialog` is still perfectly usable above, before
+            # this runs.
+            dialog.deleteLater()
 
     def _start_digitise(self, dialog: GridDialog) -> None:
         canvas = self.iface.mapCanvas()
         tool = DigitiseGridTool(canvas)
+
+        def show_dialog() -> None:
+            dialog.show()
+            dialog.raise_()
 
         def done(origin: Any, along: Any) -> None:
             # `done` is a slot on tool.points_picked (a pyqtSignal): an
@@ -337,10 +353,20 @@ class NsgeoPlugin:
                 )
             finally:
                 canvas.unsetMapTool(tool)
-                dialog.show()
-                dialog.raise_()
+                show_dialog()
 
         tool.points_picked.connect(done)
+        # A right-click (QGIS's universal "abort this tool" gesture) or
+        # switching to a different map tool entirely both abandon the
+        # pick without completing it. Before, neither restored the
+        # dialog: it stayed hidden with its exec() loop still running,
+        # and the user's only way out was killing QGIS (Task 10 fix
+        # round 1, Finding 4). DigitiseGridTool emits `cancelled` from
+        # deactivate() for exactly this case, and by then the canvas has
+        # already moved off this tool, so only the dialog needs restoring
+        # here -- unlike `done()` above, which must still release the
+        # tool itself.
+        tool.cancelled.connect(show_dialog)
         dialog.hide()
         canvas.setMapTool(tool)
 
