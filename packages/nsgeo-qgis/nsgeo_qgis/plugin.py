@@ -23,13 +23,16 @@ from typing import Any
 
 import nsgeo
 from nsgeo.project import ProjectError
+from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QAction, QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
 from nsgeo_qgis import plugin_version
 from nsgeo_qgis.layers import SiteLayers
+from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
@@ -270,7 +273,76 @@ class NsgeoPlugin:
 
     # ---- dialogs (provided by later tasks) --------------------------------
     def open_grid_dialog(self, grid_id: str | None) -> None:
-        self.message("Grid dialog arrives in the next task.", Qgis.MessageLevel.Warning)
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        try:
+            grid = self.session.grid(grid_id) if grid_id else None
+        except KeyError as exc:
+            # edit_grid_requested/grid_velocity_requested carry a grid id
+            # captured when a context menu was built; it is stale if the
+            # grid was removed by then. This is a QAction.triggered-style
+            # slot (see the module docstring), so this must not raise.
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+            return
+        suggestion = None
+        if grid is None:
+            lines = self.session.site.lines if self.session.site else []
+            if lines:
+                try:
+                    suggestion = VelocityModel.from_dielectric(
+                        lines[0].header.epsr
+                    ).surface_velocity
+                except ValueError as exc:
+                    # Cosmetic only -- a bad header must not block the
+                    # dialog from opening at all, just leave it unseeded.
+                    self.message(
+                        f"could not suggest a velocity from the header: {exc}",
+                        Qgis.MessageLevel.Warning,
+                    )
+        dialog = GridDialog(
+            self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
+        )
+        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        result = dialog.result_grid()
+        try:
+            if grid is None:
+                self.session.add_grid(result)
+            else:
+                self.session.replace_grid(result)
+        except (ValueError, KeyError) as exc:
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+
+    def _start_digitise(self, dialog: GridDialog) -> None:
+        canvas = self.iface.mapCanvas()
+        tool = DigitiseGridTool(canvas)
+
+        def done(origin: Any, along: Any) -> None:
+            # `done` is a slot on tool.points_picked (a pyqtSignal): an
+            # uncaught exception here would be swallowed by Qt (see the
+            # module docstring) and leave the map tool stuck active with
+            # the dialog hidden and no explanation -- e.g. a fast
+            # double-click that reads as two coincident canvasClicked
+            # events, which set_digitised() now rejects. The finally
+            # clause guarantees control always comes back to the dialog
+            # regardless of what failed.
+            try:
+                dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
+                dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                self.message(
+                    f"could not use the digitised points: {exc}", Qgis.MessageLevel.Critical
+                )
+            finally:
+                canvas.unsetMapTool(tool)
+                dialog.show()
+                dialog.raise_()
+
+        tool.points_picked.connect(done)
+        dialog.hide()
+        canvas.setMapTool(tool)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         self.message("Import dialog arrives in a later task.", Qgis.MessageLevel.Warning)

@@ -7,6 +7,7 @@ matrix (no QGIS) stays green while `.venv-qgis` and the Docker job run it.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 
@@ -82,20 +83,26 @@ def fake_iface(qgis_app):
 def _no_unhandled_modals(monkeypatch):
     """Every test in this tier defaults to *forbidding* a real modal.
 
-    QMessageBox.question()/warning()/information() and
-    QFileDialog.getOpenFileName()/getExistingDirectory() all block
-    indefinitely under QT_QPA_PLATFORM=offscreen -- there is no window
-    manager to click a button, so a test that triggers one by accident
-    would hang the whole suite rather than fail fast. A test that means
-    to trigger one must use the `answer_modal` fixture below, which
-    overrides this guard for exactly the call it is told to expect.
+    QMessageBox.question()/warning()/information(),
+    QFileDialog.getOpenFileName()/getExistingDirectory(), and
+    QDialog.exec() all block indefinitely under QT_QPA_PLATFORM=offscreen
+    -- there is no window manager to click a button, so a test that
+    triggers one by accident would hang the whole suite rather than fail
+    fast. A test that means to trigger one must use the `answer_modal`
+    fixture (QMessageBox/QFileDialog) or `drive_dialog` fixture
+    (QDialog.exec) below, which override this guard for exactly the call
+    they are told to expect.
 
     Raising is strictly stronger than the alternative of returning some
     default answer: nothing before this asserted that a prompt appeared
     at all, let alone with which buttons, so a silently-supplied default
-    would mask exactly the kind of bug this guard exists to catch.
+    would mask exactly the kind of bug this guard exists to catch. This
+    is also why QDialog.exec() is forbidden here rather than given a
+    default DialogCode: a test that never drives the dialog would
+    otherwise see it silently "Accepted" or "Rejected" and assert on
+    fields nothing actually set.
     """
-    from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
 
     def _forbid(cls: type, name: str) -> None:
         def _raise(*args: object, **kwargs: object) -> None:
@@ -109,6 +116,7 @@ def _no_unhandled_modals(monkeypatch):
         (QMessageBox, "information"),
         (QFileDialog, "getOpenFileName"),
         (QFileDialog, "getExistingDirectory"),
+        (QDialog, "exec"),
     ):
         _forbid(cls, name)
 
@@ -133,6 +141,39 @@ def answer_modal(monkeypatch):
             return value
 
         monkeypatch.setattr(cls, name, staticmethod(_fake))
+        return calls
+
+    return _install
+
+
+@pytest.fixture
+def drive_dialog(monkeypatch):
+    """Opt-in override of `_no_unhandled_modals` for `QDialog.exec()`.
+
+    Unlike `answer_modal`'s targets, `QDialog.exec()` is an *instance*
+    method, and a real dialog needs its fields set and its buttons
+    clicked before it can be answered -- there is no single fixed
+    "value" to return the way there is for `QMessageBox.question()`.
+
+    `calls = drive_dialog(QDialog, "exec", lambda dialog: dialog.accept())`
+    makes the next (and every later) call to `cls.exec` run
+    `driver(dialog_instance)` -- so a test can set fields and click
+    buttons on the real dialog, exactly as a user would -- and then
+    return `dialog_instance.result()` (DialogCode.Accepted/Rejected,
+    whichever `driver` chose) instead of blocking in a real modal event
+    loop. Each call's dialog instance is appended to the returned list,
+    so a test can still assert on which dialog was shown.
+    """
+
+    def _install(cls: type, name: str, driver: Any) -> list[object]:
+        calls: list[object] = []
+
+        def _fake(self: object, *args: object, **kwargs: object) -> int:
+            calls.append(self)
+            driver(self)
+            return self.result()  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(cls, name, _fake)
         return calls
 
     return _install
