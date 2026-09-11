@@ -118,12 +118,22 @@ class NsgeoPlugin:
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
-        # open. close() runs finished()'s own cleanup (releasing a
-        # still-active digitise tool, deleteLater()) via reject(),
-        # rather than leaving the dialog dangling with a reference to
-        # a session this method is about to tear down below.
+        # open. reject() runs finished()'s own cleanup (releasing a
+        # still-active digitise tool, deleteLater()) via the same path
+        # as a normal Cancel, rather than leaving the dialog dangling
+        # with a reference to a session this method is about to tear
+        # down below.
+        #
+        # Fix round 5, Finding 1: not close(). QDialog.closeEvent only
+        # calls reject() when the dialog isVisible() -- on a hidden one
+        # it just accepts the close event and finished() never fires at
+        # all (verified directly: hidden + close() -> 0 finished
+        # emissions; hidden + reject() -> 1). _start_digitise() hides
+        # the dialog deliberately, so "hidden mid-pick" is this
+        # feature's ordinary state, not an edge case -- unload() must
+        # work in exactly the state its own feature creates.
         if self._grid_dialog is not None:
-            self._grid_dialog.close()
+            self._grid_dialog.reject()
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -326,6 +336,14 @@ class NsgeoPlugin:
             # application-modal block. Only one at a time: a second
             # would fight the first over the canvas's one map tool
             # during a digitise pick.
+            #
+            # Fix round 5, Finding 5: show() too, not just raise_()/
+            # activateWindow() -- _start_digitise() hides the dialog
+            # deliberately while a pick is in progress, and raising a
+            # hidden window activates nothing visible. Without this,
+            # re-triggering "Add grid" mid-pick was a silent no-op: no
+            # window, no message.
+            self._grid_dialog.show()
             self._grid_dialog.raise_()
             self._grid_dialog.activateWindow()
             return
@@ -356,6 +374,13 @@ class NsgeoPlugin:
         dialog = GridDialog(
             self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
         )
+        # Fix round 5, Finding 2: modeless means the toolbar stays
+        # clickable while the dialog is open, so the site it was opened
+        # against can close or be replaced by a different one before OK
+        # is clicked -- impossible under the old modal exec(), which
+        # blocked the toolbar entirely. json_path identifies which site
+        # session.site.grids/add_grid/replace_grid would actually act on.
+        opened_against = self.session.json_path
 
         def finished(result: int) -> None:
             # `finished` is a slot on dialog.finished (a pyqtSignal): an
@@ -364,14 +389,42 @@ class NsgeoPlugin:
             # file.
             try:
                 if result == QDialog.DialogCode.Accepted:
-                    new_grid = dialog.result_grid()
-                    try:
-                        if grid is None:
-                            self.session.add_grid(new_grid)
-                        else:
-                            self.session.replace_grid(new_grid)
-                    except (ValueError, KeyError) as exc:
-                        self.message(str(exc), Qgis.MessageLevel.Critical)
+                    if not self.session.is_open:
+                        # session.add_grid/replace_grid would raise
+                        # ProjectError ("no site is open") here, which
+                        # is not in the except below and has no outer
+                        # handler -- it would escape this slot to
+                        # stderr with an empty message bar, and the
+                        # dialog would still close as if the grid had
+                        # been saved.
+                        self.message(
+                            f"no site is open; grid {dialog.id_edit.text().strip()!r} "
+                            "was not saved",
+                            Qgis.MessageLevel.Critical,
+                        )
+                    elif self.session.json_path != opened_against:
+                        # A *different* site opened under the dialog --
+                        # not caught by the ValueError/KeyError below at
+                        # all, since it is session.grids that changed
+                        # meaning, not this grid's id: it could define
+                        # its own grid with the same id as the one this
+                        # dialog was editing, which would otherwise be
+                        # silently overwritten with this dialog's
+                        # geometry with no error whatsoever.
+                        self.message(
+                            "a different site was opened while the grid dialog was "
+                            f"open; grid {dialog.id_edit.text().strip()!r} was not saved",
+                            Qgis.MessageLevel.Critical,
+                        )
+                    else:
+                        new_grid = dialog.result_grid()
+                        try:
+                            if grid is None:
+                                self.session.add_grid(new_grid)
+                            else:
+                                self.session.replace_grid(new_grid)
+                        except (ValueError, KeyError) as exc:
+                            self.message(str(exc), Qgis.MessageLevel.Critical)
             finally:
                 # Fix round 2, Finding 4 (still applies to a modeless
                 # dialog): finished() can fire while a digitise pick is
@@ -406,7 +459,28 @@ class NsgeoPlugin:
                 dialog.deleteLater()
                 self._grid_dialog = None
 
+        def clear_if_current() -> None:
+            # Fix round 5, Finding 6: `finished` above is the only path
+            # that is *expected* to clear self._grid_dialog, but if the
+            # dialog were ever destroyed some other way (probed
+            # directly: setParent(None) + deleteLater() bypasses
+            # finished() entirely), the tracker would stay stale --
+            # unload() would then call reject() on an already-deleted
+            # C++ object (RuntimeError), and every later "Add grid"
+            # would wedge forever calling show()/raise_() on it (Finding
+            # 5's fix above). destroyed() fires from the QObject
+            # destructor itself, after the C++ side is gone, so this
+            # must not touch `dialog` at all -- only compare Python
+            # object identity. The `is` check matters: by the time this
+            # object is actually destroyed, self._grid_dialog may
+            # already point to a newer dialog opened in between (this
+            # one's own deleteLater() above is itself deferred), and
+            # clearing unconditionally would wedge *that* one instead.
+            if self._grid_dialog is dialog:
+                self._grid_dialog = None
+
         dialog.finished.connect(finished)
+        dialog.destroyed.connect(clear_if_current)
         dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
         self._grid_dialog = dialog
         dialog.show()

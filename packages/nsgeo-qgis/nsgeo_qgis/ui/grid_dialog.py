@@ -71,6 +71,33 @@ def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) 
     return s
 
 
+# Round 4's fix for Finding 2 (crs_hint clipped to one line) split the
+# dialog's single QFormLayout into form_top/form_bottom around crs_hint,
+# a real QVBoxLayout sibling rather than a nested-form row. Two separate
+# QFormLayouts each size their own label column independently, though,
+# so without this the top two rows (round 5, Finding 4: measured
+# id_edit.x() == crs_widget.x() == 48 against origin_x.x() ==
+# azimuth.x() == 236) sat well left of, and wider than, every row below.
+# Building every row's label from this one shared width keeps both
+# layouts' label columns aligned regardless of which form a given row
+# ends up in.
+_FORM_LABELS = (
+    "Id",
+    "CRS",
+    "Origin E, N",
+    "Azimuth (° cw from N to +Y)",
+    "Size X, Y (m)",
+    "Default spacing (m)",
+    "Velocity (m/ns)",
+)
+
+
+def _label(text: str, width: int) -> QLabel:
+    label = QLabel(text)
+    label.setMinimumWidth(width)
+    return label
+
+
 class GridDialog(QDialog):
     digitise_requested = pyqtSignal()
 
@@ -127,13 +154,14 @@ class GridDialog(QDialog):
         vel_row = QHBoxLayout()
         vel_row.addWidget(self.velocity)
         vel_row.addWidget(self.velocity_hint)
-        form_top.addRow("Id", self.id_edit)
-        form_top.addRow("CRS", self.crs_widget)
-        form_bottom.addRow("Origin E, N", origin_row)
-        form_bottom.addRow("Azimuth (° cw from N to +Y)", self.azimuth)
-        form_bottom.addRow("Size X, Y (m)", size_row)
-        form_bottom.addRow("Default spacing (m)", self.spacing)
-        form_bottom.addRow("Velocity (m/ns)", vel_row)
+        label_width = max(QLabel(text).sizeHint().width() for text in _FORM_LABELS)
+        form_top.addRow(_label("Id", label_width), self.id_edit)
+        form_top.addRow(_label("CRS", label_width), self.crs_widget)
+        form_bottom.addRow(_label("Origin E, N", label_width), origin_row)
+        form_bottom.addRow(_label("Azimuth (° cw from N to +Y)", label_width), self.azimuth)
+        form_bottom.addRow(_label("Size X, Y (m)", label_width), size_row)
+        form_bottom.addRow(_label("Default spacing (m)", label_width), self.spacing)
+        form_bottom.addRow(_label("Velocity (m/ns)", label_width), vel_row)
         layout.addLayout(form_top)
         # Round 3, Finding 2: crs_hint sharing a row with crs_widget (in
         # a QHBoxLayout, the way velocity_hint shares with velocity)

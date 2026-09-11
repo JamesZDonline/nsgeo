@@ -19,7 +19,7 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -31,6 +31,28 @@ def session(qgis_app, tmp_path):
     s = SiteSession()
     s.new_site(tmp_path)
     return s
+
+
+@pytest.fixture(autouse=True)
+def _flush_deferred_deletes(qgis_app):
+    """Process every dialog's queued deleteLater() at the end of each test.
+
+    Round 5, Finding 6 connects dialog.destroyed to a plugin.py closure so
+    self._grid_dialog can never point at a dead C++ object -- but nothing
+    in this file ever previously ran the Qt event loop, so 44 tests'
+    worth of deleteLater()'d dialogs (each now destroyed()-connected back
+    into plugin.py) piled up unflushed for qgis_app's own session-scoped
+    exitQgis() to reap all at once at process teardown. Probed directly:
+    that bulk, simultaneous destruction -- not any single dialog's --
+    segfaults inside exitQgis() (crash while running a destroyed()
+    slot, reentered from QGIS's own C++ teardown deep within it).
+    Flushing after every test instead means exitQgis() only ever reaps
+    whatever the *last* test itself left outstanding, which on its own
+    is not a new failure mode: it is exactly what a real QGIS session
+    already does with one dialog at a time (round 1, Finding 3).
+    """
+    yield
+    qgis_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def _memory_layer(ring_world: np.ndarray) -> QgsVectorLayer:
@@ -78,8 +100,9 @@ def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
     hidden, so _start_digitise()'s dialog.hide() would otherwise end it
     before a single canvas click landed (verified directly with a bare
     QDialog; see the fix-round report). That also means these tests
-    never monkeypatch QDialog.exec (unlike drive_dialog, still used
-    elsewhere for a genuinely modal dialog): open_grid_dialog() returns
+    never monkeypatch QDialog.exec (unlike `drive_dialog` in conftest.py,
+    which no test in this file uses any more but which is kept for a
+    future genuinely-modal dialog): open_grid_dialog() returns
     immediately with a real, already-shown dialog tracked on the plugin
     as `_grid_dialog`, and driving it -- typing into fields, clicking
     digitise_button, emitting real canvasClicked signals, calling
@@ -264,6 +287,18 @@ def test_crs_scale_check_skips_on_transform_failure_rather_than_refusing(session
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
     d.origin_x.setValue(1e8)
     d.origin_y.setValue(1e8)
+    # Fix round 5, Finding 3: origin_x/origin_y.setValue() route through
+    # _validate() only as a signal-connected slot -- if _crs_scale_error
+    # raised instead of catching the exception, that exception would be
+    # swallowed by Qt before it ever reached this test (the standing
+    # signal/slot hazard), leaving crs_hint/ok_button exactly as they
+    # were *before* these two setValue() calls, which already happened
+    # to equal the expected "skip" outcome. A mutation that deletes
+    # _crs_scale_error's except branch was confirmed to still pass here
+    # without this line. Calling it directly, not through a signal,
+    # means a real QgsCsException reaches this test instead of being
+    # silently eaten.
+    assert d._crs_scale_error(d.crs_widget.crs()) is None
     assert d.ok_button.isEnabled()
     assert d.crs_hint.text() == ""
 
@@ -648,6 +683,26 @@ def test_crs_hint_is_not_vertically_clipped_when_it_wraps_to_two_lines(session):
         d.hide()
 
 
+def test_form_columns_stay_aligned_across_the_split_form(session):
+    # Fix round 5, Finding 4: splitting the form into form_top/form_bottom
+    # around crs_hint (round 4's fix above) let each QFormLayout size its
+    # own label column independently -- measured before this fix:
+    # id_edit.x() == crs_widget.x() == 48 against origin_x.x() ==
+    # azimuth.x() == 236, and crs_widget.width() == 665 against
+    # azimuth.width() == 477. Every row's label is now built from one
+    # shared width so both layouts' field columns line up regardless of
+    # which form a given row is actually in.
+    d = GridDialog(session)
+    d.adjustSize()
+    d.show()
+    try:
+        assert d.id_edit.x() == d.origin_x.x() == d.azimuth.x()
+        assert d.crs_widget.x() == d.origin_x.x()
+        assert d.crs_widget.width() == d.azimuth.width()
+    finally:
+        d.hide()
+
+
 def test_grid_dialog_exec_is_guarded_by_default(session):
     # Task 9's autouse guard forbids QMessageBox/QFileDialog modals so a
     # test that trips one fails fast instead of hanging under
@@ -994,6 +1049,69 @@ def test_open_grid_dialog_does_not_open_a_second_dialog_while_one_is_open(fake_i
     plugin.unload()
 
 
+def test_open_grid_dialog_shows_the_existing_dialog_even_if_hidden_mid_pick(fake_iface, tmp_path):
+    # Fix round 5, Finding 5: re-triggering "Add grid" while the dialog
+    # is hidden (a digitise pick in progress -- _start_digitise() hides
+    # it deliberately) used to call only raise_()/activateWindow(), not
+    # show(): a hidden window raised and activated is still invisible,
+    # so the user got no window and no message at all.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    dialog = _open(plugin)
+    dialog.digitise_button.click()  # hides the dialog, arms the tool
+    assert dialog.isHidden()
+
+    plugin.open_grid_dialog(None)  # "Add grid" clicked again
+    assert plugin._grid_dialog is dialog  # still the same dialog...
+    assert dialog.isVisible()  # ...but now actually visible again
+
+    dialog.reject()
+    plugin.unload()
+
+
+def test_open_grid_dialog_recovers_from_a_dialog_destroyed_outside_finished(fake_iface, tmp_path):
+    # Fix round 5, Finding 6: finished() is the only path that is
+    # *expected* to clear self._grid_dialog. Probed directly: destroying
+    # the dialog some other way (setParent(None) + deleteLater(), which
+    # bypasses finished() entirely) used to leave the tracker stale --
+    # the next unload() would call reject() on an already-deleted C++
+    # object (RuntimeError), and every later "Add grid" would wedge
+    # forever calling show()/raise_() on it.
+    import nsgeo_qgis
+    from qgis.PyQt.QtWidgets import QApplication
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    dialog = _open(plugin)
+    dialog.setParent(None)
+    dialog.deleteLater()
+    # sendPostedEvents(None, ...) flushes *every* object's queued
+    # DeferredDelete in the whole process, not just this dialog's --
+    # including ones left pending by earlier tests in the same run (their
+    # own dialog.deleteLater() calls, never otherwise flushed). That
+    # segfaults here, but not from anything this fix touches: it is the
+    # pre-existing, out-of-scope object-leak this file already documents
+    # (round 1, Finding 3's dialog leak; the DigitiseGridTool leak noted
+    # in plugin.py) becoming reachable only because this is the first
+    # test to force a flush at all. Passing `dialog` as the receiver
+    # restricts the flush to events actually posted to it, which is all
+    # this test is testing.
+    QApplication.sendPostedEvents(dialog, QEvent.Type.DeferredDelete)
+
+    assert plugin._grid_dialog is None  # cleared by destroyed(), not finished()
+
+    # And a later open/unload must not raise or wedge.
+    plugin.open_grid_dialog(None)
+    assert plugin._grid_dialog is not None and plugin._grid_dialog is not dialog
+    plugin.unload()  # must not raise
+
+
 def test_open_grid_dialog_seeds_velocity_from_the_header_dielectric(
     fake_iface, tmp_path, answer_modal
 ):
@@ -1021,5 +1139,140 @@ def test_open_grid_dialog_seeds_velocity_from_the_header_dielectric(
     assert "dielectric" in dialog.velocity_hint.text().lower()
 
     dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_unload_closes_a_visible_grid_dialog(fake_iface, tmp_path):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    dialog = _open(plugin)
+    assert dialog.isVisible()
+    plugin.unload()
+    assert plugin._grid_dialog is None
+
+
+def test_unload_closes_a_dialog_hidden_mid_digitise_pick(fake_iface, tmp_path):
+    # Fix round 5, Finding 1: QDialog::closeEvent only calls reject()
+    # when the dialog isVisible() -- close() on a hidden one just
+    # accepts the close event, and finished() never fires at all
+    # (verified directly on a bare QDialog: hidden + close() -> 0
+    # finished emissions; hidden + reject() -> 1). Hidden mid-pick is
+    # this feature's *ordinary* state -- _start_digitise() hides the
+    # dialog deliberately so the canvas can be clicked -- so unload()
+    # must work in exactly the state its own feature creates, not only
+    # the visible one. Left unfixed, this was user-reachable (not
+    # merely a leak): two further canvas clicks would re-show the
+    # orphaned dialog over an unloaded plugin, and clicking OK would
+    # raise AttributeError on self.session (already None), swallowed to
+    # stderr -- the dialog closing as if the grid were saved when
+    # nothing was.
+    import nsgeo_qgis
+    from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert dialog.isHidden()
+    assert isinstance(canvas.mapTool(), DigitiseGridTool)
+
+    plugin.unload()
+
+    assert plugin._grid_dialog is None
+    assert canvas.mapTool() is None
+
+
+def test_finished_reports_when_the_site_closed_under_the_dialog(fake_iface, tmp_path):
+    # Fix round 5, Finding 2(a): modeless means the toolbar stays
+    # clickable while the dialog is open, so the site can be closed
+    # before OK is clicked -- impossible under the old modal exec().
+    # session.add_grid would then raise ProjectError ("no site is
+    # open"), which is not in finished()'s except (ValueError, KeyError)
+    # and has no outer handler -- it escaped to stderr with an empty
+    # message bar, the dialog closing as if the grid had been saved.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    dialog = _open(plugin)
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+
+    plugin.session.close_site()  # the site closes while the dialog is still open
+    dialog.accept()  # must not raise
+
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "no site is open" in item.text().lower()
+    plugin.unload()
+
+
+def test_finished_reports_when_a_different_site_was_opened_under_the_dialog(
+    fake_iface, tmp_path, answer_modal
+):
+    # Fix round 5, Finding 2(b): probed editing grid A of site A, then
+    # opening site B (which also defines its own grid A) while the
+    # dialog was still open, then clicking OK -- B's A was silently
+    # overwritten with A's geometry, no error at all. json_path
+    # identifies which site session.add_grid/replace_grid would
+    # actually act on; it changed under the dialog, so the edit must be
+    # refused, not applied to whatever site happens to be open now.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+
+    site_a = tmp_path / "site_a"
+    site_a.mkdir()
+    plugin.session.new_site(site_a)
+    plugin.session.add_grid(
+        Grid(
+            "A",
+            (999.0, 999.0),
+            0.0,
+            50.0,
+            50.0,
+            "EPSG:32616",
+            0.5,
+            velocity=VelocityModel.constant(0.1),
+        )
+    )
+
+    dialog = _open(plugin, "A")  # editing site A's grid A
+    dialog.azimuth.setValue(46.0)  # a real edit, so a leak-through would be visible
+
+    site_b = tmp_path / "site_b"
+    site_b.mkdir()
+    plugin.session.new_site(site_b)  # a different site opened under the dialog
+    plugin.session.add_grid(
+        Grid(
+            "A",
+            (1.0, 2.0),
+            45.0,
+            3.0,
+            4.0,
+            "EPSG:32616",
+            0.25,
+            velocity=VelocityModel.constant(0.1),
+        )
+    )
+
+    dialog.accept()  # OK, still believing it is editing site A's grid A
+
+    # site B's own "A" must be untouched by site A's dialog.
+    grid_b_a = plugin.session.grid("A")
+    assert grid_b_a.origin == (1.0, 2.0) and grid_b_a.azimuth == 45.0
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "different site" in item.text().lower()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
