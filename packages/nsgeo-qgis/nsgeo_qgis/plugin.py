@@ -60,6 +60,7 @@ from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
 from nsgeo_qgis import plugin_version
 from nsgeo_qgis.layers import SiteLayers
+from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
@@ -83,6 +84,7 @@ class NsgeoPlugin:
         self.docks: list[Any] = []
         self.session: SiteSession | None = None
         self.layers: SiteLayers | None = None
+        self.loader: LineLoader | None = None
         self.survey_dock: SurveyDock | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
@@ -99,6 +101,10 @@ class NsgeoPlugin:
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
         self.layers = SiteLayers(self.session)
+        self.loader = LineLoader(
+            self.session,
+            on_error=lambda key, msg: self.message(f"{key}: {msg}", Qgis.MessageLevel.Critical),
+        )
         main = self.iface.mainWindow()
 
         self.toolbar = self.iface.addToolBar("nsgeo")
@@ -194,6 +200,15 @@ class NsgeoPlugin:
         if self.layers is not None:
             self.layers.detach()
             self.layers = None
+        # Not cancelled: a QgsTask has no way to interrupt a blocking disk
+        # read partway through, and LineLoader keeps every submitted task
+        # referenced (its own `_pending`) until it actually finishes, so
+        # dropping this plugin's reference here does not abandon an
+        # in-flight load -- it completes and reports through the same
+        # finished() path as always, just with the site-identity check
+        # there almost certainly finding a different (or no) site open by
+        # then and declining to write anywhere (see loader.py).
+        self.loader = None
         self.session = None
 
     # ---- helpers ----------------------------------------------------------
