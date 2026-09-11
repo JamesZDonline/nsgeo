@@ -45,4 +45,5 @@ jobs:
       - run: ruff format --check .
       - run: |
           mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent \
-            packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py
+            packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py \
+            packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py
