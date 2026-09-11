@@ -30,11 +30,12 @@ from typing import Any
 
 import numpy as np
 from nsgeo.velocity import VelocityModel
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import Qgis
 from qgis.PyQt.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen
 from qgis.PyQt.QtWidgets import QWidget
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
 
@@ -46,10 +47,6 @@ SELECTION_COLOUR = QColor(48, 140, 198, 60)
 SELECTION_EDGE = QColor(48, 140, 198)
 PICK_COLOUR = QColor(224, 66, 27)
 DRAG_THRESHOLD_PX = 3
-
-
-def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
-    QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
 class ProfileView(QWidget):
@@ -93,9 +90,36 @@ class ProfileView(QWidget):
         dt_ns: float,
         distance_along: np.ndarray | None = None,
     ) -> None:
+        # C1c: `ViewTransform.__post_init__` checks `dt_ns` for finiteness only,
+        # not positivity -- `dt_ns == 0.0` is finite and constructs a transform
+        # that only explodes later, inside `source_rect()` (`(time_lo - t0_ns) /
+        # dt_ns`), which paintEvent's own guard below cannot see coming since it
+        # only checks n_traces/n_samples, not dt_ns. Not reachable from real
+        # data today (`nsgeo.io.dzt.parse_header` and `Radargram.__post_init__`
+        # both already reject `dt_ns <= 0`), but `set_axes` is a public entry
+        # point with no caller between it and a header value, so it enforces
+        # its own contract rather than trust every future caller to.
+        if not dt_ns > 0:
+            _log(f"set_axes: dt_ns must be positive, got {dt_ns}; axes left unchanged")
+            return
+        # C1a: a `distance_along` of the wrong length reaches `_distance_ticks`
+        # unvalidated and raises `ValueError: fp and xp are not of the same
+        # length` from `np.interp` -- inside `paintEvent`, where an escaping
+        # exception is the hard-segfault hazard `paintEvent`'s own try/finally
+        # below exists to catch. Rejecting the mismatch here, before it is ever
+        # stored, means a caller's bug shows up as a logged warning at the
+        # call site instead of a crash on the next repaint.
+        if distance_along is not None:
+            distance_along = np.asarray(distance_along, dtype=float)
+            if distance_along.ndim != 1 or distance_along.shape[0] != n_traces:
+                _log(
+                    f"set_axes: distance_along has shape {distance_along.shape}, "
+                    f"expected ({n_traces},); ignoring it"
+                )
+                distance_along = None
         r = self.image_rect()
         self.transform = ViewTransform.fit(n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height())
-        self._distance = None if distance_along is None else np.asarray(distance_along, dtype=float)
+        self._distance = distance_along
         self._message = "loading…"
         self.view_changed.emit()
         self.update()
@@ -181,40 +205,74 @@ class ProfileView(QWidget):
 
     # ---- painting ---------------------------------------------------------
     def paintEvent(self, _event: Any) -> None:  # noqa: N802
+        # C1: paintEvent is a Qt-invoked virtual method override -- the one
+        # where an escaping exception is not merely invisible (see the module
+        # docstring), it is a live process hazard. `QPainter(self)` binds the
+        # painter to this widget; if anything below raises before
+        # `painter.end()` runs, the painter stays bound (Qt's own words:
+        # "Cannot destroy paint device that is being painted") and the
+        # *next* repaint segfaults the process -- measured directly, not
+        # theorised: the first escaped exception only warns, the second
+        # crashes. `try/finally` is what turns a crash into a blank widget;
+        # `except Exception` alone (as wheelEvent/mouseMoveEvent use) is not
+        # enough here, because it does not guarantee `painter.end()` runs.
+        # Three concrete inputs reach this from the public `set_axes`
+        # signature alone -- a `distance_along` of the wrong length, the
+        # empty-trace-axis state defect (a) exists to make safe, and (were
+        # `dt_ns <= 0` ever able to reach this far) `source_rect()` dividing
+        # by a zero `dt_ns` -- all three now also rejected earlier, in
+        # `set_axes` itself (C1a/C1c) and `_distance_ticks` (C1b), so this is
+        # defence in depth, not the only guard.
         painter = QPainter(self)
-        painter.fillRect(self.rect(), BACKGROUND)
-        r = self.image_rect()
-        t = self.transform
-        if t is None:
-            painter.setPen(AXIS_COLOUR)
-            painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), self._message)
+        try:
+            painter.fillRect(self.rect(), BACKGROUND)
+            r = self.image_rect()
+            t = self.transform
+            if t is None:
+                painter.setPen(AXIS_COLOUR)
+                painter.drawText(self.rect(), int(Qt.AlignmentFlag.AlignCenter), self._message)
+                return
+            # Task 13 makes an empty trace or sample axis (n_traces == 0 or
+            # n_samples == 0) a legal ViewTransform state, not an error -- so
+            # it must be handled *before* any division, not turned into one.
+            # The original shape here computed
+            # `self._image.width() / t.n_traces` unconditionally, ahead of
+            # this check: a live ZeroDivisionError inside paintEvent.
+            # Checking emptiness first and falling through to the same
+            # "no image" message branch below keeps the empty-axis contract
+            # intact while still being safe to paint.
+            if self._image is not None and t.n_traces > 0 and t.n_samples > 0:
+                # m4: `sx` is the *average* traces-per-decimated-column
+                # (`n_traces / image.width()`, inverted). `decimate_columns`
+                # bins a ragged tail (when `n_traces` is not an exact
+                # multiple of its block size) into a narrower last column,
+                # so the true per-column trace count is not perfectly
+                # uniform whenever a line is wide enough to decimate at all
+                # (`max_width`, default 8192). The resulting few-tenths-of-a-
+                # pixel error is invisible at a fit zoom and only reaches a
+                # couple of image columns' worth of misregistration zoomed
+                # in near the tail -- and is unreachable with real data
+                # today regardless (lines here are 606-666 traces, nowhere
+                # near `max_width`). Not fixed exactly here: doing so needs
+                # `decimate_columns`'s own block size, which `paintEvent`
+                # does not otherwise need to know.
+                sx = self._image.width() / t.n_traces
+                sy = self._image.height() / t.n_samples
+                x, y, w, h = t.source_rect()
+                painter.drawImage(QRectF(r), self._image, QRectF(x * sx, y * sy, w * sx, h * sy))
+            else:
+                painter.setPen(AXIS_COLOUR)
+                painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
+            painter.setClipRect(r)
+            self._paint_selection(painter, r, t)
+            self._paint_picks(painter, r, t)
+            self._paint_cursor(painter, r, t)
+            painter.setClipping(False)
+            self._paint_axes(painter, r, t)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring and C1 above
+            _log(f"could not paint the profile view: {exc}")
+        finally:
             painter.end()
-            return
-        # Task 13 makes an empty trace or sample axis (n_traces == 0 or
-        # n_samples == 0) a legal ViewTransform state, not an error -- so it
-        # must be handled *before* any division, not turned into one. The
-        # original shape here computed `self._image.width() / t.n_traces`
-        # unconditionally, ahead of this check: a live ZeroDivisionError
-        # inside paintEvent, silently swallowed by Qt on every repaint
-        # (see the module docstring) with the widget just never drawing
-        # again. Checking emptiness first and falling through to the same
-        # "no image" message branch below keeps the empty-axis contract
-        # intact while still being safe to paint.
-        if self._image is not None and t.n_traces > 0 and t.n_samples > 0:
-            sx = self._image.width() / t.n_traces
-            sy = self._image.height() / t.n_samples
-            x, y, w, h = t.source_rect()
-            painter.drawImage(QRectF(r), self._image, QRectF(x * sx, y * sy, w * sx, h * sy))
-        else:
-            painter.setPen(AXIS_COLOUR)
-            painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
-        painter.setClipRect(r)
-        self._paint_selection(painter, r, t)
-        self._paint_picks(painter, r, t)
-        self._paint_cursor(painter, r, t)
-        painter.setClipping(False)
-        self._paint_axes(painter, r, t)
-        painter.end()
 
     def _paint_cursor(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         if self._cursor < 0:
@@ -223,24 +281,39 @@ class ProfileView(QWidget):
         p.setPen(QPen(CURSOR_COLOUR, 1.5))
         p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
 
-    def _paint_selection(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+    def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
+        """Local (unoffset by `r.left()`) x-bounds of the selection band, or
+        `None` when there is no selection. `b + 1`, not `b`: the selection
+        is inclusive of trace `b`, so its right edge is the *start* of the
+        next trace -- factored out so this is a plain value comparable in a
+        test without rendering a pixel."""
         a, b = self._selection
         if a < 0:
+            return None
+        return t.x_of_trace(a), t.x_of_trace(b + 1)
+
+    def _paint_selection(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        bounds = self._selection_bounds(t)
+        if bounds is None:
             return
-        x0 = r.left() + t.x_of_trace(a)
-        x1 = r.left() + t.x_of_trace(b + 1)
+        x0, x1 = r.left() + bounds[0], r.left() + bounds[1]
         p.fillRect(QRectF(x0, r.top(), x1 - x0, r.height()), SELECTION_COLOUR)
         p.setPen(QPen(SELECTION_EDGE, 1, Qt.PenStyle.DashLine))
         p.drawLine(QPointF(x0, r.top()), QPointF(x0, r.bottom()))
         p.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
 
+    def _pick_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
+        """Local (unoffset) (x, y) of each pick marker's centre. Factored
+        out the same way `_selection_bounds` is, and for the same reason:
+        a plain list of coordinates a test can assert on directly."""
+        return [(t.x_of_trace(trace + 0.5), t.y_of_time(time_ns)) for trace, time_ns in self._picks]
+
     def _paint_picks(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         p.setPen(QPen(QColor(255, 255, 255), 1))
         p.setBrush(PICK_COLOUR)
-        for trace, time_ns in self._picks:
-            x = r.left() + t.x_of_trace(trace + 0.5)
-            y = r.top() + t.y_of_time(time_ns)
-            p.drawPolygon(QPointF(x, y), QPointF(x - 5, y - 9), QPointF(x + 5, y - 9))
+        for x, y in self._pick_positions(t):
+            xx, yy = r.left() + x, r.top() + y
+            p.drawPolygon(QPointF(xx, yy), QPointF(xx - 5, yy - 9), QPointF(xx + 5, yy - 9))
 
     def _paint_axes(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         p.setPen(AXIS_COLOUR)
@@ -249,13 +322,13 @@ class ProfileView(QWidget):
         p.setFont(font)
         # left: two-way time
         p.drawLine(r.topLeft(), r.bottomLeft())
-        for tick in nice_ticks(t.time_lo, t.time_hi):
-            y = r.top() + t.y_of_time(float(tick))
-            p.drawLine(QPointF(r.left() - 4, y), QPointF(r.left(), y))
+        for tick, y in self._time_ticks(t):
+            yy = r.top() + y
+            p.drawLine(QPointF(r.left() - 4, yy), QPointF(r.left(), yy))
             p.drawText(
-                QRectF(0, y - 8, r.left() - 6, 16),
+                QRectF(0, yy - 8, r.left() - 6, 16),
                 int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                f"{tick:g}",
+                tick,
             )
         p.drawText(
             QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns"
@@ -284,13 +357,28 @@ class ProfileView(QWidget):
             p.drawText(
                 QRectF(xx - 30, r.bottom() + 6, 60, 14), int(Qt.AlignmentFlag.AlignHCenter), label
             )
-        unit = "m" if self._distance is not None else "trace"
-        arrow = "→" if self._direction == 1 else "←"
         p.drawText(
             QRectF(r.left(), r.bottom() + 14, r.width(), 14),
             int(Qt.AlignmentFlag.AlignHCenter),
-            f"{unit} along line {arrow}",
+            f"{self._distance_unit_label()} along line {self._direction_arrow()}",
         )
+
+    def _time_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
+        """Left-axis (two-way time) tick labels and pixel y-positions.
+
+        Factored out of `_paint_axes` alongside `_depth_ticks`/
+        `_distance_ticks` so the value computation -- which tick values, at
+        which y -- is unit-testable directly, the same way those two
+        already were, rather than only provable by rendering pixels."""
+        return [
+            (f"{tick:g}", t.y_of_time(float(tick))) for tick in nice_ticks(t.time_lo, t.time_hi)
+        ]
+
+    def _distance_unit_label(self) -> str:
+        return "m" if self._distance is not None else "trace"
+
+    def _direction_arrow(self) -> str:
+        return "→" if self._direction == 1 else "←"
 
     def _depth_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         assert self._velocity is not None
@@ -309,7 +397,15 @@ class ProfileView(QWidget):
 
     def _distance_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
         lo, hi = t.trace_lo, t.trace_hi
-        if self._distance is None:
+        # C1b: n_traces == 0 is a legal, empty-axis ViewTransform (Task 13;
+        # also defect (a)). `set_axes` already rejects a `distance_along`
+        # whose length disagrees with `n_traces` (C1a), but a *correctly*
+        # zero-length array for a zero-trace axis passes that check and
+        # still reaches `np.interp` below with an empty `xp`, raising
+        # `ValueError: array of sample points is empty`. Falling back to the
+        # same trace-tick branch as "no distance set" is correct either way:
+        # there is nothing to tick in metres along zero traces.
+        if self._distance is None or t.n_traces == 0:
             return [(f"{tick:g}", t.x_of_trace(float(tick))) for tick in nice_ticks(lo, hi)]
         idx = np.arange(t.n_traces, dtype=float)
         d = self._distance
@@ -364,12 +460,28 @@ class ProfileView(QWidget):
         pos = event_pos(event)
         x, y = self._local(event)
         if self._pan_last is not None:
-            d = pos - self._pan_last
-            self._pan_last = pos
-            self.transform = self.transform.panned(d.x(), d.y())
-            self.view_changed.emit()
-            self.update()
-            return
+            # I3: `_pan_last` was only ever cleared by a *middle-button*
+            # mouseReleaseEvent. A middle-press followed by an unrelated
+            # left-press/release (or any release path other than a middle
+            # one) left it set, and this check ran before any button state
+            # was consulted -- so the very next mouse move, with no button
+            # held at all, was read as an in-progress pan and moved the
+            # view. Measured: middle-press, left-press, left-release, one
+            # button-less move -- panned 14.4 traces. Checking the event's
+            # *actual current* buttons() here (rather than trusting
+            # `_pan_last`'s own bookkeeping to have been cleared by every
+            # path that should clear it) is authoritative regardless of
+            # which release path got there, including one this file cannot
+            # see coming (focus lost mid-drag, no release event at all).
+            if not (event.buttons() & Qt.MouseButton.MiddleButton):
+                self._pan_last = None
+            else:
+                d = pos - self._pan_last
+                self._pan_last = pos
+                self.transform = self.transform.panned(d.x(), d.y())
+                self.view_changed.emit()
+                self.update()
+                return
         if self._press is not None:
             if abs(pos.x() - self._press.x()) > DRAG_THRESHOLD_PX:
                 self._dragging = True
@@ -383,6 +495,18 @@ class ProfileView(QWidget):
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = None
+            return
+        # I4: this branch used to run for *any* released button, not just
+        # the left one that starts a drag in mousePressEvent -- so a right
+        # click landing anywhere while a left-drag was in progress (`_press`
+        # still set from the left press) ended and committed that drag as
+        # if it were the left button's own release. Measured: left-press at
+        # x=100, drag to x=300, then press-and-release the *right* button --
+        # `range_selected` fired `(28, 86)` from a button the user never
+        # used to start the selection. Left is the only button
+        # mousePressEvent ever arms `_press`/`_dragging` for, so it is the
+        # only one release should act on here.
+        if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._press is not None and self.transform is not None:
             if self._dragging:

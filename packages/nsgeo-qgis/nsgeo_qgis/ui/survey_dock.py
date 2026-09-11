@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -35,14 +35,11 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
 
 ROLE_KIND = int(Qt.ItemDataRole.UserRole)
 ROLE_ID = int(Qt.ItemDataRole.UserRole) + 1
-
-
-def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
-    QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
 class SurveyDock(QgsDockWidget):
