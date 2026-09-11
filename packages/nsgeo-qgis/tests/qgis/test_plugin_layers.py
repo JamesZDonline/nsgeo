@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import nsgeo_qgis.layers as layers_module
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
-from nsgeo_qgis.layers import DERIVED, TABLES, SiteLayers
+from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
+    QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
@@ -298,6 +300,179 @@ def test_removing_the_last_grid_clears_the_derived_tables(populated):
     # empty.
     assert session.gpkg_path.is_file()
     assert set(layers.layers) == set(TABLES)
+
+
+# --- fix round 2: ensure_tables() sat outside refresh()'s own signal-slot
+# containment, and was the largest new failure surface added by round 1
+# (a schema probe, a picks migration, a create). A failing table's setup
+# must be logged and must not prevent the others from being prepared. ---
+
+
+def test_ensure_tables_contains_a_failing_table_and_logs_it(populated, monkeypatch):
+    session, layers, _ = populated
+    real_create_table = layers._create_table
+
+    def flaky_create_table(path, name, wkb, spec, crs):
+        if name == "grids":
+            raise RuntimeError("simulated disk failure")
+        return real_create_table(path, name, wkb, spec, crs)
+
+    monkeypatch.setattr(layers, "_create_table", flaky_create_table)
+
+    logged: list[str] = []
+    QgsApplication.messageLog().messageReceived.connect(lambda msg, tag, level: logged.append(msg))
+
+    # A CRS change forces every table, including "grids", to need a
+    # rebuild -- replace_grid, exactly as in the round-1 CRS-freeze fix.
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # "grids"'s rebuild failed and was logged -- not merely a stderr
+    # traceback -- but the other three tables still got rebuilt.
+    assert any("grids" in msg for msg in logged)
+    assert layers.layers["lines"].crs().authid() == "EPSG:4326"
+    assert layers.layers["marks"].crs().authid() == "EPSG:4326"
+    assert layers.layers["picks"].crs().authid() == "EPSG:4326"
+
+
+# --- fix round 2: a picks rebuild must never destroy the on-disk rows
+# before a verified copy exists elsewhere -- picks has no other source of
+# truth, unlike grids/lines/marks which are about to be fully refilled
+# from survey.nsgeo.json regardless. Each test injects a failure at a
+# different point in the rebuild and asserts the picks are still on disk
+# afterwards, read back independently of `layers` (which may itself be
+# left in a stale state by the same failure). --------------------------
+
+
+def test_picks_survive_a_failure_while_building_the_temporary_table(populated, monkeypatch):
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 7.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_create_table = layers._create_table
+
+    def flaky_create_table(path, name, wkb, spec, crs):
+        if name == _PICKS_REBUILD:
+            raise RuntimeError("simulated failure while building the temporary table")
+        return real_create_table(path, name, wkb, spec, crs)
+
+    monkeypatch.setattr(layers, "_create_table", flaky_create_table)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # The failure happened before the real "picks" table was ever
+    # touched: `layers.layers["picks"]` was never dropped...
+    assert layers.feature_count("picks") == 1
+    survivor = next(layers.layers["picks"].getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(7.0)
+    # ...and reading it back with a brand-new QgsVectorLayer -- not
+    # through `layers`, in case a failed rebuild left its registry stale
+    # -- confirms the same thing directly from disk.
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"  # unchanged: never rebuilt
+    assert on_disk.featureCount() == 1 or sum(1 for _ in on_disk.getFeatures()) == 1
+    # The other three tables, unaffected by picks's failure, did rebuild.
+    assert layers.layers["lines"].crs().authid() == "EPSG:4326"
+
+
+def test_picks_survive_a_failure_during_the_swap(populated, monkeypatch):
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 9.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_registry = layers_module.QgsProviderRegistry
+
+    class FlakyConnection:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def renameVectorTable(self, schema, name, new_name):
+            if name == _PICKS_REBUILD and new_name == "picks":
+                raise RuntimeError("simulated failure during the swap")
+            return self._real.renameVectorTable(schema, name, new_name)
+
+        def dropVectorTable(self, schema, name):
+            return self._real.dropVectorTable(schema, name)
+
+    class FlakyMetadata:
+        def __init__(self, real_md):
+            self._real = real_md
+
+        def createConnection(self, uri, options):
+            return FlakyConnection(self._real.createConnection(uri, options))
+
+    class FlakyWrapper:
+        def __init__(self, real_instance):
+            self._real = real_instance
+
+        def providerMetadata(self, name):
+            return FlakyMetadata(self._real.providerMetadata(name))
+
+    class FlakyRegistry:
+        @staticmethod
+        def instance():
+            return FlakyWrapper(real_registry.instance())
+
+    monkeypatch.setattr(layers_module, "QgsProviderRegistry", FlakyRegistry)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # The migrated data was verified in the temporary table, but the
+    # rename-in step failed: the *original* picks table must have been
+    # renamed back into place, not left missing.
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"  # the restored original, not the migrated copy
+    survivor = next(on_disk.getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(9.0)
+    # No leftover backup table from the restore.
+    backup = QgsVectorLayer(f"{session.gpkg_path}|layername={_PICKS_BACKUP}", _PICKS_BACKUP, "ogr")
+    assert not backup.isValid()
+    # `layers` itself recovers too: ensure_tables()'s reopen loop picks
+    # the restored table back up.
+    assert layers.feature_count("picks") == 1
+
+
+# --- fix round 2: an untransformable CRS pair (measured with a projected
+# CRS on Earth and a geographic one on Mars) leaves QgsCoordinateTransform
+# invalid and short-circuited -- both the point- and geometry-based
+# transform() calls then silently return their input unchanged while
+# reporting success. Unchecked, that relabels a pick into the wrong CRS
+# rather than transforming it: the rebuild must refuse instead. ---------
+
+
+def test_an_untransformable_crs_pair_refuses_rather_than_relabelling_a_pick(populated):
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 3.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    mars = Grid("A", (0.0, 0.0), 0.0, 0.001, 0.001, "ESRI:104905", 0.5)  # GCS_Mars_2000
+    session.replace_grid(mars)
+
+    # The rebuild refused rather than silently relabelling the pick into
+    # a CRS PROJ has no path to: the original table, CRS, and geometry
+    # are exactly as they were.
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"
+    survivor = next(on_disk.getFeatures())
+    pt = survivor.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx((500.0, 700.0))
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
 
 
 # --- strengthened proof: picks survive attributes and geometry intact,

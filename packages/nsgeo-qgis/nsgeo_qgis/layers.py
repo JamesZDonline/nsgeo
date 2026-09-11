@@ -15,9 +15,10 @@
 The package CRS is the CRS of the first grid; other grids are transformed
 into it on write. If the first grid's own CRS changes (or a package
 predates a field this version of `TABLES` expects), every table is
-rebuilt: `picks` rows are carried across (matching fields copied by name,
-geometry transformed to the new CRS), and the derived tables are simply
-refilled anew immediately afterward.
+rebuilt: the derived tables are simply overwritten, since they are fully
+refilled anew immediately afterward, but `picks` has no other source of
+truth, so its rebuild migrates every row into a fresh table and verifies
+it before ever touching the original (see `_rebuild_picks`).
 """
 
 from __future__ import annotations
@@ -42,6 +43,7 @@ from qgis.core import (
     QgsMessageLog,
     QgsPointXY,
     QgsProject,
+    QgsProviderRegistry,
     QgsRendererCategory,
     QgsSymbol,
     QgsVectorFileWriter,
@@ -110,6 +112,12 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
 DERIVED = ("grids", "lines", "marks")
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
+
+# Working table names for a non-destructive picks rebuild (see
+# SiteLayers._rebuild_picks): the original is never dropped until a
+# verified copy exists under _PICKS_REBUILD.
+_PICKS_REBUILD = "picks__rebuild"
+_PICKS_BACKUP = "picks__before_rebuild"
 
 
 def _fields(spec: list[tuple[str, str]]) -> QgsFields:
@@ -180,7 +188,16 @@ class SiteLayers(QObject):
         if not site.grids:
             self._clear_derived_tables()
             return
-        self.ensure_tables()
+        try:
+            self.ensure_tables()
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            # ensure_tables() already contains each table's own setup (see
+            # below); this is the belt-and-braces catch for anything that
+            # still escapes it (e.g. the group itself failing to create).
+            # Nothing later in this method can do more than log too, but
+            # not returning here matters: whichever refills below don't
+            # depend on the table that just failed still get a chance.
+            _log(f"could not prepare the site's tables: {exc}", Qgis.MessageLevel.Critical)
         for name, fn in (
             ("grids", self.refill_grids),
             ("lines", self.refill_lines),
@@ -210,21 +227,32 @@ class SiteLayers(QObject):
         crs = self.crs()
         assert crs is not None
         for name, (wkb, spec) in TABLES.items():
-            self._ensure_table(path, name, wkb, spec, crs)
+            try:
+                self._ensure_table(path, name, wkb, spec, crs)
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                # This is the largest failure surface in the module (a
+                # schema probe, for `picks` a full migration, a create):
+                # one table's setup failing here must not silently cancel
+                # trying the other three, the same containment refresh()
+                # already gives each refill.
+                _log(f"could not prepare table {name!r}: {exc}", Qgis.MessageLevel.Critical)
         if self.group is None:
             self.group = self.project.layerTreeRoot().addGroup(f"nsgeo · {self.session.site_name}")
         opened = []
         for name in TABLES:
             if name in self.layers:
                 continue
-            layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
-            if not layer.isValid():
-                raise RuntimeError(f"could not open table {name!r} in {path}")
-            layer.setReadOnly(name in DERIVED)
-            self.project.addMapLayer(layer, False)
-            self.group.addLayer(layer)
-            self.layers[name] = layer
-            opened.append(layer)
+            try:
+                layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
+                if not layer.isValid():
+                    raise RuntimeError(f"could not open table {name!r} in {path}")
+                layer.setReadOnly(name in DERIVED)
+                self.project.addMapLayer(layer, False)
+                self.group.addLayer(layer)
+                self.layers[name] = layer
+                opened.append(layer)
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                _log(f"could not open table {name!r}: {exc}", Qgis.MessageLevel.Critical)
         # A just-(re)created table's provider feature count is sometimes
         # left at the GPKG driver's -1 "not yet counted" sentinel until
         # something forces a recount -- measured to need every table in
@@ -250,44 +278,21 @@ class SiteLayers(QObject):
         expects -- either way, refilling into a stale table would write
         the wrong CRS or crash on a missing field.
 
-        `picks` rows are migrated across the rebuild; the derived tables
-        are about to be fully refilled by refill_grids/lines/marks right
-        after this returns, so their old rows need no such care.
+        `picks` has no other source of truth, so its rebuild
+        (`_rebuild_picks`) never destroys the original until a verified
+        copy exists elsewhere. The derived tables are about to be fully
+        refilled by refill_grids/lines/marks right after this returns, so
+        a plain overwrite is safe for them.
         """
         existing_crs, existing_fields = self._table_schema(path, name)
         up_to_date = existing_crs is not None and existing_crs == crs
         if up_to_date and existing_fields == [f for f, _ in spec]:
             return  # up to date; nothing to rebuild
-        old_rows: list[tuple[dict[str, Any], QgsGeometry]] = []
         if name == "picks" and existing_crs is not None:
-            old_rows = self._read_picks_rows(path, existing_crs, crs)
+            self._rebuild_picks(path, wkb, spec, crs, existing_crs)
+            return
         self._drop_loaded_layer(name)
         self._create_table(path, name, wkb, spec, crs)
-        if old_rows:
-            # Built against the newly (re)created layer's own `.fields()`,
-            # not `_fields(spec)`: a GPKG table always carries an implicit
-            # leading "fid" field that `spec` doesn't list, and attributes
-            # keyed off a Fields object one short of the provider's own
-            # silently land one column over (measured directly: a pick's
-            # `line_key` came back as its `time_ns` value, `time_ns` as
-            # NULL). Setting by field *name* against the real fields is
-            # what keeps this correct regardless of column order.
-            layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
-            new_field_names = {f.name() for f in layer.fields()}
-            feats = []
-            for attrs, geom in old_rows:
-                f = QgsFeature(layer.fields())
-                for fname, value in attrs.items():
-                    if fname in new_field_names:
-                        f[fname] = value
-                f.setGeometry(geom)
-                feats.append(f)
-            ok, _ = layer.dataProvider().addFeatures(feats)
-            if not ok:
-                raise RuntimeError(
-                    f"could not carry {name} rows across a rebuild: "
-                    f"{layer.dataProvider().error().message()}"
-                )
 
     @staticmethod
     def _table_schema(
@@ -302,6 +307,111 @@ class SiteLayers(QObject):
             return None, []
         return layer.crs(), [f.name() for f in layer.fields() if f.name() != "fid"]
 
+    def _rebuild_picks(
+        self,
+        path: str,
+        wkb: Any,
+        spec: list[tuple[str, str]],
+        crs: QgsCoordinateReferenceSystem,
+        existing_crs: QgsCoordinateReferenceSystem,
+    ) -> None:
+        """Rebuild `picks` without ever destroying the on-disk rows before
+        a verified copy exists elsewhere. `picks` is the one table with
+        no other source of truth: unlike grids/lines/marks it cannot be
+        regenerated from survey.nsgeo.json, so a failure partway through
+        must leave the original recoverable, never silently gone.
+
+        Sequence: migrate every row into a fresh, differently-named table
+        and confirm the row count matches exactly (the original `picks`
+        is untouched throughout this part); only then rename the
+        original out of the way, rename the migrated table into its
+        place, and drop the renamed-out original. If the rename-in step
+        itself fails, the original is renamed back before re-raising, so
+        a failure anywhere in this method leaves a fully-populated
+        `picks` table on disk -- the pre-rebuild one, or the migrated
+        one, never neither.
+        """
+        old_rows = self._read_picks_rows(path, existing_crs, crs)
+
+        self._create_table(path, _PICKS_REBUILD, wkb, spec, crs)
+        temp_layer = QgsVectorLayer(f"{path}|layername={_PICKS_REBUILD}", _PICKS_REBUILD, "ogr")
+        if not temp_layer.isValid():
+            raise RuntimeError(
+                f"could not open a temporary picks table in {path}; "
+                f"the original picks table is untouched"
+            )
+        if old_rows:
+            # Built against the temporary layer's own `.fields()`, not
+            # `_fields(spec)`: a GPKG table always carries an implicit
+            # leading "fid" field that `spec` doesn't list, and attributes
+            # keyed off a Fields object one short of the provider's own
+            # silently land one column over (measured directly: a pick's
+            # `line_key` came back as its `time_ns` value, `time_ns` as
+            # NULL). Setting by field *name* against the real fields is
+            # what keeps this correct regardless of column order.
+            new_field_names = {f.name() for f in temp_layer.fields()}
+            feats = []
+            for attrs, geom in old_rows:
+                f = QgsFeature(temp_layer.fields())
+                for fname, value in attrs.items():
+                    if fname in new_field_names:
+                        f[fname] = value
+                f.setGeometry(geom)
+                feats.append(f)
+            ok, _ = temp_layer.dataProvider().addFeatures(feats)
+            if not ok:
+                raise RuntimeError(
+                    f"could not migrate picks into a temporary table: "
+                    f"{temp_layer.dataProvider().error().message()}; "
+                    f"the original picks table is untouched"
+                )
+        written = temp_layer.featureCount()
+        if written < 0:  # the -1 sentinel; see feature_count()
+            written = sum(1 for _ in temp_layer.getFeatures())
+        if written != len(old_rows):
+            raise RuntimeError(
+                f"picks migration wrote {written} of {len(old_rows)} rows; "
+                f"the original picks table is untouched"
+            )
+        del temp_layer  # close the write handle before the swap below
+
+        self._drop_loaded_layer("picks")
+        conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+        conn.renameVectorTable("", "picks", _PICKS_BACKUP)
+        try:
+            conn.renameVectorTable("", _PICKS_REBUILD, "picks")
+        except Exception:
+            # Put the verified-safe original back rather than leaving
+            # "picks" missing while _PICKS_REBUILD (also verified) sits
+            # under a different name.
+            conn.renameVectorTable("", _PICKS_BACKUP, "picks")
+            raise
+        conn.dropVectorTable("", _PICKS_BACKUP)
+
+    def _require_transform(
+        self, source: QgsCoordinateReferenceSystem, target: QgsCoordinateReferenceSystem
+    ) -> QgsCoordinateTransform:
+        """A validated coordinate transform, or a loud failure.
+
+        An invalid transform (PROJ has no path between the two CRSs --
+        measured with a projected CRS on Earth and a geographic one on
+        Mars) does not raise: `QgsCoordinateTransform.isValid()` is
+        False, `isShortCircuited()` is True, and both the point- and
+        geometry-based `transform()` calls silently return their input
+        unchanged while reporting success. Left unchecked, that relabels
+        a pick, grid, or line into the wrong CRS while looking like a
+        completed transform -- the same defect class as writing a grid's
+        old CRS into its table forever (this round's Finding 1),
+        discovered while fixing picks specifically but not limited to it.
+        """
+        transform = QgsCoordinateTransform(source, target, self.project)
+        if not transform.isValid():
+            raise RuntimeError(
+                f"no coordinate transform from {source.authid() or source.toWkt()} to "
+                f"{target.authid() or target.toWkt()}; refusing to silently relabel geometry"
+            )
+        return transform
+
     def _read_picks_rows(
         self,
         path: str,
@@ -310,26 +420,31 @@ class SiteLayers(QObject):
     ) -> list[tuple[dict[str, Any], QgsGeometry]]:
         """Every row of the current on-disk `picks` table as a plain
         (field name -> value, geometry) pair, geometry already transformed
-        if the CRS is changing. Read out *before* the table is dropped and
-        recreated -- authored data, unlike grids/lines/marks there is
-        nowhere else this comes from, so it must not be silently
-        discarded. Kept as plain dicts rather than `QgsFeature` objects
-        tied to the old schema, since the new table's field set (and its
-        implicit `fid` column) may not match.
+        if the CRS is changing. Read out *before* the table is touched --
+        authored data, unlike grids/lines/marks there is nowhere else
+        this comes from, so it must not be silently discarded or
+        mis-transformed. Kept as plain dicts rather than `QgsFeature`
+        objects tied to the old schema, since the new table's field set
+        (and its implicit `fid` column) may not match.
         """
         old_layer = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
         if not old_layer.isValid():
             return []
         transform = None
         if existing_crs != target_crs:
-            transform = QgsCoordinateTransform(existing_crs, target_crs, self.project)
+            transform = self._require_transform(existing_crs, target_crs)
         field_names = [f.name() for f in old_layer.fields() if f.name() != "fid"]
         rows = []
         for old in old_layer.getFeatures():
             attrs = {fname: old[fname] for fname in field_names}
             geom = old.geometry()
             if transform is not None and not geom.isNull():
-                geom.transform(transform)
+                result = geom.transform(transform)
+                if result != Qgis.GeometryOperationResult.Success:
+                    raise RuntimeError(
+                        f"could not transform a pick's geometry from "
+                        f"{existing_crs.authid()} to {target_crs.authid()} (error {result})"
+                    )
             rows.append((attrs, geom))
         return rows
 
@@ -368,7 +483,7 @@ class SiteLayers(QObject):
         source = QgsCoordinateReferenceSystem(grid_crs)
         if source == target:
             return None
-        return QgsCoordinateTransform(source, target, self.project)
+        return self._require_transform(source, target)
 
     def _points(self, xy: np.ndarray, grid_crs: str) -> list[QgsPointXY]:
         tr = self._transform_for(grid_crs)
