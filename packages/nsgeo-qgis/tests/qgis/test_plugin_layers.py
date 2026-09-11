@@ -170,14 +170,19 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
         assert outline.brushStyle() == Qt.BrushStyle.NoBrush
         assert outline.strokeStyle() == Qt.PenStyle.DashLine
 
-    # A grid's outline colour matches the colour of its own lines: both
-    # `_style_grids()` and `_style_lines()` index GRID_COLOURS by the
-    # grid's position in `site.grids`, not by its id.
+    # M5 follow-up (Finding 2): a grid's outline colour must now DIFFER
+    # from the colour of its own lines (they used to share a palette
+    # index, which was useless with the single-grid case). Both sides
+    # below are read off the renderers QGIS actually installed -- not
+    # recomputed from GRID_COLOURS or the offset `_style_grids()` uses --
+    # so this fails for any offset that leaves the two equal, including
+    # zero, rather than being a tautology that passes no matter what the
+    # offset is.
     lines_renderer = layers.layers["lines"].renderer()
     line_cats = list(lines_renderer.categories())
     lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
     for grid_id, symbol in by_grid.items():
-        assert symbol.symbolLayer(0).strokeColor().name() == lines_colours[grid_id]
+        assert symbol.symbolLayer(0).strokeColor().name() != lines_colours[grid_id]
 
 
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's

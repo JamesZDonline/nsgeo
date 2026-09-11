@@ -114,6 +114,22 @@ DERIVED = ("grids", "lines", "marks")
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
 
+# M5 follow-up (Finding 2): a grid's outline used to share its lines'
+# colour (both indexed by the grid's position in `site.grids`), which is
+# useless with the common case of a single grid. Offsetting the outline's
+# index by half of `GRID_COLOURS` puts a grid's outline and its own lines
+# at opposite ends of the 6-colour palette -- the maximum separation
+# available -- while keeping the two associated by position. Consequence,
+# examined rather than left implicit: with 6 colours and an offset of 3, a
+# fourth grid's outline reuses the first grid's *line* colour. Lines and
+# grids are different layers with different geometry types (LineString vs.
+# Polygon) rendered as visually distinct symbols (solid fill vs. dashed
+# unfilled stroke) regardless of hue, so a same-hue collision between a
+# 4th grid's outline and the 1st grid's lines is not the same confusion
+# this fix removes (a layer's own outline vs. its own lines) and is
+# accepted.
+_GRID_OUTLINE_OFFSET = len(GRID_COLOURS) // 2
+
 # Working table names for a non-destructive picks rebuild (see
 # SiteLayers._rebuild_picks): the original is never dropped until a
 # verified copy exists under _PICKS_REBUILD.
@@ -711,8 +727,11 @@ class SiteLayers(QObject):
         # over imagery and basemaps, and an opaque fill would hide the
         # ground the user is judging its placement against. Categorised by
         # `grid_id` and indexed by position in `site.grids`, same as
-        # `_style_lines()` above, so a grid's outline colour always matches
-        # the colour of its own lines.
+        # `_style_lines()` above, but offset by `_GRID_OUTLINE_OFFSET` so a
+        # grid's outline colour is never the same as its own lines' colour
+        # (see the M5 follow-up note by `GRID_COLOURS` above) -- the two
+        # are still associated by position, just no longer by identical
+        # hue.
         site = self.session.site
         assert site is not None
         categories = []
@@ -721,7 +740,8 @@ class SiteLayers(QObject):
             outline = symbol.symbolLayer(0)
             outline.setBrushStyle(Qt.BrushStyle.NoBrush)
             outline.setStrokeStyle(Qt.PenStyle.DashLine)
-            outline.setStrokeColor(QColor(GRID_COLOURS[i % len(GRID_COLOURS)]))
+            colour_index = (i + _GRID_OUTLINE_OFFSET) % len(GRID_COLOURS)
+            outline.setStrokeColor(QColor(GRID_COLOURS[colour_index]))
             outline.setStrokeWidth(0.5)
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["grids"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
