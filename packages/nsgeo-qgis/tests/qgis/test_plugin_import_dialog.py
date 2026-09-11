@@ -164,6 +164,11 @@ def test_hand_edited_direction_survives_a_later_replan(session, tmp_path):
     d = ImportDialog(session, grid_id="A")
     d.add_files(files)
     assert d.table.item(1, COL_DIR).text() == "−1"  # alternate's default for slot 1
+    # Fix round 2, Finding 1: the previous version of this test drove the
+    # edit with item.setText(), which bypasses ItemIsEditable entirely --
+    # EDITABLE not actually including COL_DIR left every assertion below
+    # still green. This is the one thing that would catch that.
+    assert d.table.item(1, COL_DIR).flags() & Qt.ItemFlag.ItemIsEditable
     d.table.item(1, COL_DIR).setText("+1")
     assert d.rows[1].direction == 1 and d.rows[1].direction_edited
     assert d.rows[1].start_along == 0.0  # forward: options.start_along, not mirrored
@@ -171,6 +176,35 @@ def test_hand_edited_direction_survives_a_later_replan(session, tmp_path):
     assert d.rows[1].direction == 1
     assert d.table.item(1, COL_DIR).text() == "+1"
     assert d.table.item(1, COL_START).text() == "0.00"
+
+
+def test_dir_edit_recognises_a_leading_minus_and_reports_unrecognised_text(session, tmp_path):
+    # Fix round 2, Finding 2: the previous exact-string match ("-1"/"−1"
+    # only) read "-1.0" -- a natural thing to type into a numeric-looking
+    # cell -- as *forward*, and silently pinned it there (direction_edited
+    # = True) against whatever the user actually meant, with no message.
+    # A leading minus (either glyph) must mean reversed no matter what
+    # follows; text that is not recognised as a direction at all ("0" is
+    # not a valid direction; "" and "reverse" do not parse) must be
+    # reported and reverted, the same as COL_OFFSET does, not silently
+    # pinned forward.
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    assert d.rows[0].direction == 1  # alternate's default for slot 0
+
+    for text in ("-1.0", "-2", "-", "−"):
+        d.rows[0].direction_edited = False  # reset between cases
+        d.table.item(0, COL_DIR).setText(text)
+        assert d.rows[0].direction == -1, text
+        assert d.rows[0].direction_edited, text
+
+    for text in ("0", "", "reverse"):
+        d.rows[0].direction = 1
+        d.rows[0].direction_edited = False
+        d.table.item(0, COL_DIR).setText(text)
+        assert d.rows[0].direction == 1 and not d.rows[0].direction_edited, text
+        assert "not recognised" in d.status.text(), text
+        assert d.table.item(0, COL_DIR).text() == "+1", text  # reverted, not left showing text
 
 
 def test_status_is_not_cleared_by_a_label_or_direction_edit(session, tmp_path):

@@ -427,11 +427,35 @@ class ImportDialog(QDialog):
             self.status.setText("")
             self.set_offset(r, value)
         elif c == COL_DIR:
-            # Same reasoning as COL_LABEL: parsing here always succeeds
-            # (anything not recognised as reversed reads as forward), so
-            # this must not clear an unrelated standing status either.
-            text = item.text().strip().lstrip("+")
-            self.set_direction(r, -1 if text in ("-1", "−1") else 1)
+            # Fix round 2, Finding 2: a leading minus (either glyph) means
+            # reversed regardless of what follows -- "-1.0", "-2", and a
+            # bare "-" all count. The previous exact-string match
+            # ("-1"/"−1" only) silently read every one of those as
+            # *forward* instead, and -- worse -- still set
+            # direction_edited, pinning the row against direction_mode
+            # with no status message at all; "-1.0" in particular is a
+            # natural thing to type into a numeric-looking cell. Anything
+            # without a leading minus must parse as a positive number to
+            # count as forward; genuinely unrecognised text (including
+            # "0", which is not a valid direction, and "" or "reverse",
+            # neither of which parses at all) is reported and reverted
+            # instead of silently pinned, the same as COL_OFFSET does for
+            # unparseable text. A successful parse clears nothing (see
+            # COL_LABEL above): only the failure case has anything of its
+            # own to report.
+            text = item.text().strip()
+            if text.startswith(("-", "−")):
+                self.set_direction(r, -1)
+                return
+            try:
+                value = float(text.lstrip("+"))
+            except ValueError:
+                value = None
+            if value is None or value <= 0:
+                self.status.setText(f"{item.text()!r} is not recognised as a direction; unchanged")
+                self._refresh_table()
+                return
+            self.set_direction(r, 1)
 
     # ---- accept -----------------------------------------------------------
     def accept(self) -> None:
