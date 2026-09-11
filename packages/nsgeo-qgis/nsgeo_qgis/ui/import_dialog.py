@@ -1,10 +1,11 @@
 """Import DZT files into a grid, with a correction table.
 
 The guess (Task 7's plan_import) is vendor-neutral and the table is the
-real mechanism: Include, Label, Offset are editable; Dir and Start (along)
-are shown but not -- see the note above EDITABLE below for why. Traces,
-Length, Sidecar come from the file. Excluding a redone line pulls later
-files into its slot unless their offsets (or labels) were hand-edited.
+real mechanism: Include, Label, Offset, and Dir are editable; Start
+(along) is shown but not -- see the note above EDITABLE below for why.
+Traces, Length, Sidecar come from the file. Excluding a redone line pulls
+later files into its slot unless their offsets, labels, or direction were
+hand-edited.
 
 Modeless, like GridDialog (plugin.py's open_grid_dialog is the pattern):
 show() plus the finished signal, never exec(). Nothing this dialog itself
@@ -12,8 +13,15 @@ does needs the rest of QGIS to stay interactive, but the toolbar and the
 survey dock do stay clickable while it is open -- which means the site can
 be closed or replaced, or the very grid this dialog is importing into can
 be removed (the dock's "Remove grid" has no guard against an import still
-in flight), before Import is clicked. accept() re-checks both before it
-writes anything.
+in flight), before Import is clicked. _grid() absorbs both (KeyError for a
+removed grid, ProjectError for a closed site -- SiteSession.grid() raises
+the latter via _require_site()) so that every slot reading the target
+grid stays safe, not only accept(): fix round 1 found set_include(),
+remove_selected(), and every spin-box/radio-button-triggered replan
+raising ProjectError uncaught (silently, in every case reachable via a
+signal) when only KeyError was handled. accept() additionally re-checks
+session identity and re-derives the target grid right before it writes
+anything -- see its own docstring below.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry.grid import Grid
+from nsgeo.project import ProjectError
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -75,20 +84,27 @@ HEADERS = [
     "Sidecar",
     "Note",
 ]
-# Dir and Start (along) are NOT here, on purpose: recompute_offsets always
-# re-derives both from direction_mode and the row's slot position --
-# ImportRow has offset_edited (and now label_edited) but no
-# direction_edited (Task 7's own contract; see lookup.py's docstring), and
-# start_along is mechanically derived from direction, not independently
-# editable. Every edit in this dialog (including Include/Remove/reorder)
-# triggers a full replan, so a hand-typed Dir or Start would either be
-# silently overwritten by the very next replan, or -- worse, for Start --
-# leave a reversed row's start_along mirrored outside the grid if a
-# replan were skipped to preserve it. Showing them as free-text edits that
-# do not stick would be a lie to the user; the real per-line control is
-# the Direction mode below the file list, plus reordering/excluding rows
-# to change which slot a file lands in.
-EDITABLE = {COL_LABEL, COL_OFFSET}
+# Start (along) is NOT here, on purpose: it is mechanically derived from
+# row.direction (options.start_along + grid_size_along when reversed,
+# options.start_along otherwise -- lookup.py's own start_along contract),
+# not independently editable, and ImportRow has no start_along_edited to
+# protect a hand-typed value across the next replan (every edit in this
+# dialog triggers one). A reversed row's start_along left stale after a
+# replan would place it mirrored outside the grid instead of into it, so
+# this must stay derived rather than editable.
+#
+# Dir IS here (unlike Task 11's first round): a line re-walked in the same
+# direction as its neighbour is an ordinary field exception under the
+# zigzag default, not an edge case, and excluding+re-importing a redone
+# line to work around a read-only Dir cell re-derives every later line's
+# offset/direction too (recompute_offsets' documented, correct behaviour
+# for a *redone* line -- wrong for fixing one direction in isolation).
+# ImportRow.direction_edited (mirroring offset_edited/label_edited) is
+# what makes this actually stick: recompute_offsets skips re-deriving
+# row.direction once it is set, and the start_along mirroring above keys
+# off row.direction, not options.direction_mode, so it follows a
+# hand-flipped row for free.
+EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR}
 
 
 class ImportDialog(QDialog):
@@ -172,6 +188,15 @@ class ImportDialog(QDialog):
 
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
+        # Fix round 1, Finding 4: with Dir now editable, Start (m) is the
+        # only inert cell left in the table -- without this, a user who
+        # clicks it and gets nothing has no way to learn why, or what
+        # would actually move it (Direction, or row order).
+        start_header = self.table.horizontalHeaderItem(COL_START)
+        assert start_header is not None
+        start_header.setToolTip(
+            "Derived from Direction (mode, or a per-row edit) and row order; not directly editable."
+        )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table)
@@ -208,11 +233,18 @@ class ImportDialog(QDialog):
             return None
         try:
             return self.session.grid(gid)
-        except KeyError:
+        except (KeyError, ProjectError):
             # The target grid can be removed from under a still-open,
-            # modeless dialog (see the module docstring) -- every caller
-            # of _grid()/options() below must see "no grid selected", not
-            # an uncaught KeyError escaping a signal-connected slot.
+            # modeless dialog (KeyError), or the site itself can close
+            # entirely (session.grid() -> _require_site() raises
+            # ProjectError -- see the module docstring). Fix round 1,
+            # Finding 1: catching only KeyError here left ProjectError
+            # escaping every caller below uncaught -- set_include(),
+            # remove_selected() (desyncing self.rows from the table:
+            # it deletes before replanning), and every spin-box/radio
+            # slot's replan, all silently via the signal/slot hazard.
+            # Every caller of _grid()/options() must see "no grid
+            # selected" for both causes, not just one of them.
             return None
 
     def _grid_changed(self, *_: Any) -> None:
@@ -308,6 +340,17 @@ class ImportDialog(QDialog):
         self.rows[row].offset_edited = True
         self._replan()
 
+    def set_direction(self, row: int, value: int) -> None:
+        # value need not already be exactly +-1 (a hand-typed cell only
+        # promises "negative means reversed" -- see _on_item_changed).
+        # direction_edited is what makes this stick: without it,
+        # recompute_offsets re-derives row.direction from direction_mode
+        # on the very next replan, which every other edit in this dialog
+        # triggers (fix round 1, Finding 2).
+        self.rows[row].direction = 1 if value >= 0 else -1
+        self.rows[row].direction_edited = True
+        self._replan()
+
     # ---- table ------------------------------------------------------------
     def _refresh_table(self) -> None:
         self._updating = True
@@ -363,11 +406,13 @@ class ImportDialog(QDialog):
         if c == COL_INCLUDE:
             self.set_include(r, item.checkState() == Qt.CheckState.Checked)
         elif c == COL_LABEL:
+            # Fix round 1, Finding 5: this edit cannot itself fail, so it
+            # must not clear a standing `status` message about something
+            # else (e.g. add_files' "could not read a file: ..."). No
+            # placement field changed either: a full replan is unnecessary
+            # (and would just redraw the same table).
             row.label = item.text().strip() or row.path.stem
             row.label_edited = True
-            self.status.setText("")
-            # No placement field changed: a full replan is unnecessary (and
-            # would just redraw the same table).
         elif c == COL_OFFSET:
             try:
                 value = float(item.text().replace(",", "."))
@@ -381,6 +426,12 @@ class ImportDialog(QDialog):
                 return
             self.status.setText("")
             self.set_offset(r, value)
+        elif c == COL_DIR:
+            # Same reasoning as COL_LABEL: parsing here always succeeds
+            # (anything not recognised as reversed reads as forward), so
+            # this must not clear an unrelated standing status either.
+            text = item.text().strip().lstrip("+")
+            self.set_direction(r, -1 if text in ("-1", "−1") else 1)
 
     # ---- accept -----------------------------------------------------------
     def accept(self) -> None:

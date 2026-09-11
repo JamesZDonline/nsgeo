@@ -67,6 +67,24 @@ def test_hand_edited_offsets_survive_recompute(three):
     assert [r.offset for r in rows if r.include] == [0.0, 3.25]
 
 
+def test_hand_edited_direction_survives_recompute_and_start_along_follows_it(three):
+    # A per-row direction flip: recompute_offsets must not re-derive
+    # row.direction from direction_mode/slot once direction_edited is set
+    # (mirrors offset_edited/label_edited), and the start_along mirroring
+    # -- keyed off row.direction, not options.direction_mode -- must
+    # follow the hand-set direction too, not strand it with the *other*
+    # direction's start_along and a spurious "reversed direction" note.
+    rows = plan_import(three, OPTS)
+    assert rows[1].direction == -1  # alternate's default for slot 1
+    rows[1].direction = 1
+    rows[1].direction_edited = True
+    recompute_offsets(rows, OPTS)
+    recompute_offsets(rows, OPTS)  # a second, unrelated replan must not undo it
+    assert rows[1].direction == 1
+    assert rows[1].start_along == 0.0  # forward: starts at options.start_along
+    assert "reversed direction" not in rows[1].note
+
+
 def test_hand_edited_labels_survive_recompute(three):
     rows = plan_import(three, OPTS)
     rows[1].label = "line 6a"

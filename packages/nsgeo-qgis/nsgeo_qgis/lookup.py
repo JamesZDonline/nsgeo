@@ -63,6 +63,7 @@ class ImportRow:
     include: bool = True
     offset_edited: bool = False
     label_edited: bool = False
+    direction_edited: bool = False
     note: str = ""
 
     @property
@@ -168,12 +169,13 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
             continue
         if not row.offset_edited:
             row.offset = options.first_offset + slot * options.spacing
-        if options.direction_mode == "alternate":
-            row.direction = 1 if slot % 2 == 0 else -1
-        elif options.direction_mode == "reverse":
-            row.direction = -1
-        else:
-            row.direction = 1
+        if not row.direction_edited:
+            if options.direction_mode == "alternate":
+                row.direction = 1 if slot % 2 == 0 else -1
+            elif options.direction_mode == "reverse":
+                row.direction = -1
+            else:
+                row.direction = 1
         if not row.label_edited:
             row.label = f"line {slot}" if options.label_source == "number" else row.path.stem
 

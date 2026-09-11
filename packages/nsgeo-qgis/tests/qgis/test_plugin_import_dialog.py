@@ -139,21 +139,79 @@ def test_real_files_import_into_the_grid(session):
 # ---- decisions beyond the brief's own tests ---------------------------------
 
 
-def test_direction_and_start_along_are_derived_not_hand_editable(session, tmp_path):
-    # recompute_offsets always re-derives both direction and start_along
-    # from direction_mode/slot position (ImportRow has offset_edited, and
-    # now label_edited, but no direction_edited -- lookup.py's own
-    # docstring on the contract). A per-row edit to either would either be
-    # silently discarded on the very next replan (which every other edit
-    # in this dialog triggers), or -- worse, for start_along -- leave a
-    # reversed row mirrored outside the grid if a replan were skipped
-    # instead to preserve it. Both columns show the derived value and are
-    # not user-editable; the real per-line control is the Direction mode,
-    # plus reordering/excluding rows to change which slot a file lands in.
+def test_start_along_is_derived_not_hand_editable(session, tmp_path):
+    # start_along is mechanically derived from row.direction (lookup.py's
+    # own start_along contract) and ImportRow has no start_along_edited to
+    # protect a hand-typed value across the next replan (every other edit
+    # in this dialog triggers one) -- a reversed row left stale would be
+    # mirrored outside the grid instead of into it. Unlike Dir (fix round
+    # 1, Finding 2), there is no direction_edited-style fix that makes
+    # this one safe to expose, so it stays read-only, with a header
+    # tooltip explaining why (fix round 1, Finding 4).
     d = ImportDialog(session, grid_id="A")
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
-    for col in (COL_DIR, COL_START):
-        assert not d.table.item(0, col).flags() & Qt.ItemFlag.ItemIsEditable
+    assert not d.table.item(0, COL_START).flags() & Qt.ItemFlag.ItemIsEditable
+    header = d.table.horizontalHeaderItem(COL_START)
+    assert header.toolTip()  # not silently inert with no explanation
+
+
+def test_hand_edited_direction_survives_a_later_replan(session, tmp_path):
+    # Fix round 1, Finding 2: a per-row direction flip through the table
+    # (not the pure ImportRow field directly, which test_pure_lookup.py
+    # covers) must survive an unrelated later edit -- and start_along
+    # must follow the hand-set direction, not the mode's original one.
+    files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)]
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(files)
+    assert d.table.item(1, COL_DIR).text() == "−1"  # alternate's default for slot 1
+    d.table.item(1, COL_DIR).setText("+1")
+    assert d.rows[1].direction == 1 and d.rows[1].direction_edited
+    assert d.rows[1].start_along == 0.0  # forward: options.start_along, not mirrored
+    d.set_offset(0, 0.0)  # an unrelated edit that triggers a full replan
+    assert d.rows[1].direction == 1
+    assert d.table.item(1, COL_DIR).text() == "+1"
+    assert d.table.item(1, COL_START).text() == "0.00"
+
+
+def test_status_is_not_cleared_by_a_label_or_direction_edit(session, tmp_path):
+    # Fix round 1, Finding 5: neither edit can itself fail, so neither may
+    # clear a standing status message left by something else -- otherwise
+    # a real warning (e.g. add_files' own failure message) silently
+    # disappears on the next unrelated keystroke.
+    d = ImportDialog(session, grid_id="A")
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
+    d.status.setText("a standing message")
+    d.table.item(0, COL_LABEL).setText("renamed")
+    assert d.status.text() == "a standing message"
+    d.table.item(0, COL_DIR).setText("-1")
+    assert d.status.text() == "a standing message"
+
+
+def test_dialog_methods_stay_safe_when_the_site_closes_under_it(session, tmp_path):
+    # Fix round 1, Finding 1: _grid() (and therefore every caller --
+    # set_include, remove_selected, add_files, and every spin-box/radio
+    # replan) must stay safe when the site closes entirely under a
+    # still-open, modeless dialog, not only when the *grid* is removed
+    # from a still-open site. session.grid() raises ProjectError via
+    # _require_site() in that case, not KeyError -- catching only KeyError
+    # left it escaping every one of these (mostly silently, through the
+    # signal/slot hazard), and desynced self.rows from the table in
+    # remove_selected() specifically: it deletes from self.rows, then
+    # raised evaluating self.options() before _refresh_table() ever ran.
+    files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2, 3)]
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(files)
+    session.close_site()
+
+    d.table.selectRow(0)
+    d.remove_selected()  # must not raise, and must not desync rows from the table
+    assert d.table.rowCount() == len(d.rows) == 2
+
+    d.set_include(0, False)  # must not raise
+    d.spacing.setValue(0.75)  # must not raise -- a signal-connected slot
+
+    d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__004.DZT")])
+    assert d.rows[-1].path.name == "FILE__004.DZT"  # read fine, not misreported
 
 
 def test_add_files_ignores_a_file_already_in_the_table(session, tmp_path):
@@ -330,6 +388,32 @@ def test_unload_closes_a_visible_import_dialog(fake_iface, tmp_path, answer_moda
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
     assert plugin._import_dialog is None
+
+
+def test_unload_closes_a_hidden_import_dialog(fake_iface, tmp_path, answer_modal):
+    # Fix round 1, Finding 3: the *visible*-dialog test above stayed green
+    # even with unload()'s reject() swapped for close(), because
+    # QDialog.closeEvent calls reject() anyway when the dialog isVisible()
+    # -- it never actually exercised the fix. Nothing in ImportDialog's
+    # own flow hides itself today (unlike GridDialog's digitise pick), but
+    # unload() must not assume a dialog is always visible: close() on a
+    # hidden one just accepts the close event and finished() never fires
+    # at all (verified for GridDialog directly: hidden + close() -> 0
+    # finished emissions, hidden + reject() -> 1 -- the same QDialog
+    # machinery applies here).
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(GRID)
+
+    dialog = _open(plugin, "A")
+    dialog.hide()
+    assert dialog.isHidden()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+    assert plugin._import_dialog is None  # only true if finished() actually ran
 
 
 def test_open_import_dialog_recovers_from_a_dialog_destroyed_outside_finished(
