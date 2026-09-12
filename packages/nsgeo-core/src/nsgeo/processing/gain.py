@@ -151,6 +151,18 @@ class GainCurve:
                 label="Gain curve",
                 default=REQUIRED,
                 unit="dB",
+                # The bounds are on the dB column, and they are what stops
+                # `10 ** (db / 20)` from overflowing every sample to inf.
+                # +-120 dB is a factor of a million in amplitude either
+                # way -- far past any real GPR gain, so it rejects nothing
+                # a user would author, while the runaway an earlier commit
+                # on this branch could write into a project file (over
+                # 1,000,000 dB) is refused on load instead of rendering a
+                # saturated radargram. The drag clamp in the plugin's gain
+                # strip fixed the same runaway for one front end only;
+                # this is the funnel every front end shares.
+                min=-120.0,
+                max=120.0,
                 help="(two-way time ns, gain dB) control points on the viewer's time axis.",
             ),
         )

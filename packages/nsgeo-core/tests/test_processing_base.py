@@ -6,6 +6,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing._util import running_mean
 from nsgeo.processing.base import (
+    ParamSpec,
     Radargram,
     available_steps,
     build_step,
@@ -73,6 +74,14 @@ def test_registry_round_trip(clean_registry):
         def params(self):
             return {"factor": self.factor}
 
+        @classmethod
+        def schema(cls):
+            # Declared, like every real step: `Step` lists `schema()` in the
+            # protocol, a front end enumerating the registry calls it to
+            # build a form, and `build_step` validates against it. A
+            # registered class without one is not a usable step.
+            return (ParamSpec(name="factor", kind="float", label="Factor", default=2.0),)
+
         def apply(self, r: Radargram) -> Radargram:
             return r.replace(data=r.data * self.factor)
 
@@ -82,6 +91,64 @@ def test_registry_round_trip(clean_registry):
     out = step.apply(rg())
     assert out.data[1, 1] == pytest.approx(rg().data[1, 1] * 3.0)
     assert step.params == {"factor": 3.0}
+
+
+def test_register_refuses_a_name_another_step_already_owns(clean_registry):
+    """Import order must not decide what a saved stack runs.
+
+    Verified before the guard: a class declaring `name = "dewow"` replaced
+    the real one, and `build_step("dewow")` returned the impostor with no
+    warning anywhere. A stack saved against one implementation then loads
+    and runs against the other, changing the processing applied to
+    irreplaceable survey data.
+    """
+    real = get_step("dewow")
+
+    with pytest.raises(ValueError, match="dewow"):
+
+        @register
+        class _Impostor:
+            name = "dewow"
+
+            def __init__(self, window_ns: float = 4.0):
+                self.window_ns = window_ns
+
+            @property
+            def params(self):
+                return {"window_ns": self.window_ns}
+
+            @classmethod
+            def schema(cls):
+                return (ParamSpec(name="window_ns", kind="float", label="W", default=4.0),)
+
+            def apply(self, r: Radargram) -> Radargram:
+                return r
+
+    assert get_step("dewow") is real
+    assert type(build_step("dewow", window_ns=4.0)) is real
+
+
+def test_registering_the_same_class_twice_is_not_a_conflict(clean_registry):
+    """A module imported twice re-runs its decorators; that is not two steps
+    fighting over a name, and must not raise."""
+
+    @register
+    class _Once:
+        name = "test_once"
+
+        @property
+        def params(self):
+            return {}
+
+        @classmethod
+        def schema(cls):
+            return ()
+
+        def apply(self, r: Radargram) -> Radargram:
+            return r
+
+    assert register(_Once) is _Once
+    assert get_step("test_once") is _Once
 
 
 def test_unknown_step_name_lists_alternatives():
