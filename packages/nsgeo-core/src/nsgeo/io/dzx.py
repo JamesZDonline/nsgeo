@@ -60,7 +60,7 @@ def sidecar_for(path: str | Path) -> Path | None:
         # An unreadable or absent directory holds no sidecar, and a missing
         # sidecar is normal rather than an error (see the module docstring).
         return None
-    candidates = (path.with_suffix(".DZX").name, path.with_suffix(".dzx").name)
+    candidates: tuple[str, ...] = (path.with_suffix(".DZX").name, path.with_suffix(".dzx").name)
     if path.suffix.lower() == ".dzx":
         candidates = (path.name, *candidates)
     for name in candidates:

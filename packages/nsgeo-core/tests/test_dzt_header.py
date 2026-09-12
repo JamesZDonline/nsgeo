@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import dataclasses
+import struct
+
 import numpy as np
 import pytest
-from nsgeo.io.dzt import DztError, parse_header, read_header
+from nsgeo.io.dzt import DztError, parse_header, read_header, trace_count
 
 from tests.synthetic import write_dzt
 
@@ -45,6 +48,38 @@ def test_dt_ns_is_range_over_samples(tmp_path):
     write_dzt(p, np.zeros((512, 10), dtype=np.int32), range_ns=102.4)
     h = read_header(p)
     assert h.dt_ns == pytest.approx(0.2)
+
+
+def test_rejects_a_data_offset_that_lands_inside_the_header(tmp_path):
+    """`rh_data == 0` makes `data_offset` 0: the samples would be read from
+    byte 0, i.e. from inside the header.
+
+    `trace_count`'s divisibility guard -- whose stated purpose is refusing
+    to truncate, because that would silently misalign data -- does not
+    catch this one, because a header length is itself a whole multiple of
+    the trace size. The count then divides evenly and comes out too high by
+    exactly one header's worth of traces: 64 of them here, as on the real
+    file this was measured against, prepending 64 traces of raw header
+    bytes and shifting the whole distance axis by 64/60 m. Every map
+    position and every pick on that line would be a metre out, with nothing
+    reported.
+    """
+    p = tmp_path / "zeroed.DZT"
+    write_dzt(p, np.zeros((512, 60), dtype=np.int32), rh_data=128)
+    good = read_header(p)
+    raw = bytearray(p.read_bytes())
+    struct.pack_into("<H", raw, 2, 0)  # rh_data = 0
+    p.write_bytes(bytes(raw))
+
+    with pytest.raises(DztError, match="rh_data"):
+        read_header(p)
+
+    # Why the existing guard is no help: the file size is a whole number of
+    # traces measured from byte 0, so the divisibility check passes...
+    assert p.stat().st_size % (512 * 4) == 0
+    # ...and what it then reports is 64 fabricated traces on top of the 60
+    # real ones, with no error at all.
+    assert trace_count(p, dataclasses.replace(good, data_offset=0)) == 124
 
 
 def test_rejects_short_file():

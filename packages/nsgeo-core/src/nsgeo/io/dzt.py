@@ -89,6 +89,23 @@ def parse_header(raw: bytes) -> DztHeader:
     # Verified against real files: rh_data is 128, giving a 131072-byte
     # header. Assuming MINHEADSIZE here produces a non-integer trace count.
     data_offset = MINHEADSIZE * rh_data if rh_data < MINHEADSIZE else MINHEADSIZE * n_channels
+    if data_offset < MINHEADSIZE:
+        # Only reachable with rh_data == 0, and then the samples would be
+        # read starting inside the header itself. `trace_count`'s
+        # divisibility guard does not catch it -- a header length is itself
+        # a whole multiple of the trace size often enough that the count
+        # divides evenly (measured on a real file with rh_data zeroed: 672
+        # traces against a true 608), so 64 traces of raw header bytes are
+        # prepended and every position along the line shifts by about a
+        # metre, silently. Cannot reject a real file: the observed value
+        # across all ten is 131072, and the `else` branch floors at
+        # 1024 * n_channels.
+        raise DztError(
+            f"header declares rh_data={rh_data}, putting the start of the "
+            f"samples at byte {data_offset}, inside the {MINHEADSIZE}-byte "
+            f"header; refusing to read header bytes as traces because that "
+            f"would shift every position along the line"
+        )
 
     return DztHeader(
         tag=tag,
