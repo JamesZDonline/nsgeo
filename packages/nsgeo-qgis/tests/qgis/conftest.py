@@ -7,6 +7,8 @@ matrix (no QGIS) stays green while `.venv-qgis` and the Docker job run it.
 from __future__ import annotations
 
 import os
+import sys
+import traceback
 from typing import Any
 
 import pytest
@@ -85,13 +87,25 @@ def _no_unhandled_modals(monkeypatch):
 
     QMessageBox.question()/warning()/information(),
     QFileDialog.getOpenFileName()/getOpenFileNames()/getExistingDirectory(),
-    QInputDialog.getText(), and QDialog.exec() all block indefinitely under
-    QT_QPA_PLATFORM=offscreen -- there is no window manager to click a
-    button, so a test that triggers one by accident would hang the whole
-    suite rather than fail fast. A test that means to trigger one must use
-    the `answer_modal` fixture (QMessageBox/QFileDialog/QInputDialog) or
-    `drive_dialog` fixture (QDialog.exec) below, which override this guard
-    for exactly the call they are told to expect.
+    QInputDialog.getText(), QDialog.exec(), and QMenu.exec() all block
+    indefinitely under QT_QPA_PLATFORM=offscreen -- there is no window
+    manager to click a button, so a test that triggers one by accident
+    would hang the whole suite rather than fail fast. A test that means to
+    trigger one must use the `answer_modal` fixture
+    (QMessageBox/QFileDialog/QInputDialog) or `drive_dialog` fixture
+    (QDialog.exec, QMenu.exec) below, which override this guard for
+    exactly the call they are told to expect.
+
+    QMenu.exec() is listed separately from QDialog.exec() because it is a
+    separate function: verified against this Qt build, `'exec' in
+    QMenu.__dict__` is True, so QMenu defines its own and patching
+    QDialog's does not cover it. That gap was real -- `SurveyDock.
+    _on_context_menu` calls `menu.exec(...)`, the one reachable modal path
+    the guard missed, so a test of the survey tree's context menu would
+    have hung the suite instead of failing fast. Both `exec` and the
+    PyQt5-only `exec_` spelling are forbidden for each class, because they
+    are distinct objects (`QDialog.exec is QDialog.exec_` is False) and
+    production code calling the other spelling would otherwise slip past.
 
     Raising is strictly stronger than the alternative of returning some
     default answer: nothing before this asserted that a prompt appeared
@@ -116,7 +130,7 @@ def _no_unhandled_modals(monkeypatch):
     not to call it.
     """
     from qgis.PyQt.QtTest import QTest
-    from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QInputDialog, QMenu, QMessageBox
 
     def _forbid(cls: type, name: str, reason: str = "unexpected modal") -> None:
         def _raise(*args: object, **kwargs: object) -> None:
@@ -132,6 +146,9 @@ def _no_unhandled_modals(monkeypatch):
         (QFileDialog, "getOpenFileNames"),
         (QFileDialog, "getExistingDirectory"),
         (QDialog, "exec"),
+        (QDialog, "exec_"),
+        (QMenu, "exec"),
+        (QMenu, "exec_"),
         (QInputDialog, "getText"),
     ):
         _forbid(cls, name)
@@ -141,6 +158,62 @@ def _no_unhandled_modals(monkeypatch):
         reason="QTest.mouseDClick corrupts mouse state that outlives this test -- "
         "use plugin_testing.send_double_click instead",
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_swallowed_slot_exceptions(monkeypatch):
+    """Fail any test that let an exception escape a Qt slot.
+
+    PyQt cannot propagate an exception raised inside a slot back to
+    whatever emitted the signal: the emit came from C++, and there is no
+    Python frame to unwind into. What it does instead is build-dependent,
+    and that is the whole problem. This build (PyQt 5.15.10) hands the
+    exception to `sys.excepthook`, prints a traceback to stderr, and
+    carries on -- so the test still reports PASSED. The CI container's
+    build routes the same exception to `qFatal()`, which calls `abort()`.
+    That is exactly how two tests in `test_plugin_processing_dock.py`
+    stayed green here for four tasks while job `plugin-qgis` died with
+    `Aborted (core dumped)` at the first of them, taking every test after
+    it down unrun.
+
+    Recording the hook and failing the test turns that whole class of bug
+    into a local red test instead of a CI-only abort -- including a
+    `_no_unhandled_modals` AssertionError raised inside a slot, which is
+    the one place that guard could otherwise be reported and ignored.
+    `sys.unraisablehook` is covered for the same reason: an exception
+    escaping a `__del__` or a weakref callback (Qt object teardown is full
+    of both) never reaches `sys.excepthook` at all.
+
+    There is deliberately no opt-out fixture. A test that means to provoke
+    an exception inside a slot should assert on the observable consequence
+    -- "a traceback was printed to stderr" is not something any test can
+    assert on, which is precisely why this hole existed.
+    """
+    escaped: list[str] = []
+
+    def _excepthook(exc_type: Any, exc: BaseException, tb: Any) -> None:
+        escaped.append("".join(traceback.format_exception(exc_type, exc, tb)))
+
+    def _unraisablehook(unraisable: Any) -> None:
+        escaped.append(
+            f"unraisable in {unraisable.object!r}:\n"
+            + "".join(
+                traceback.format_exception(
+                    unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback
+                )
+            )
+        )
+
+    monkeypatch.setattr(sys, "excepthook", _excepthook)
+    monkeypatch.setattr(sys, "unraisablehook", _unraisablehook)
+    yield
+    if escaped:
+        pytest.fail(
+            f"{len(escaped)} exception(s) escaped a Qt slot and were swallowed. "
+            "This build prints them and carries on; the CI container turns the "
+            "first one into qFatal() and aborts the whole job:\n\n" + "\n".join(escaped),
+            pytrace=False,
+        )
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -39,7 +39,7 @@ def test_add_menu_lists_the_registry_and_marks_required_steps(opened):
     assert not any(t.startswith("dewow") and "needs values" in t for t in texts)
 
 
-def test_add_menu_action_triggers_add_step(opened):
+def test_add_menu_action_triggers_add_step(opened, drive_dialog):
     """`QMenu.addAction(text, slot)` binds the zero-argument `triggered()`
     overload as an implementation detail of that convenience form, not
     documented API -- and neither venv in this repo has PyQt6 to check
@@ -56,19 +56,33 @@ def test_add_menu_action_triggers_add_step(opened):
     name that isn't a string, which the slot swallows to stderr -- no
     step would be added and `asked` would stay empty, and both
     assertions below would fail.
+
+    Since Task 17 the dock also listens to its own `add_step_requested`
+    and opens `AddStepDialog` from it, so triggering the `bandpass` action
+    really does open a modal. This test drives that dialog (and cancels
+    it) rather than leaving it to `_no_unhandled_modals`: that guard's
+    AssertionError is raised inside a slot, where PyQt cannot propagate it
+    back here -- it printed a traceback, this test passed anyway, and CI's
+    PyQt build aborted the process on the same emission. See conftest's
+    `_no_swallowed_slot_exceptions`, which now makes that state a failure.
     """
     session, dock, key = opened
     asked: list[str] = []
     dock.add_step_requested.connect(asked.append)
+    shown = drive_dialog(QDialog, "exec", lambda d: d.reject())
 
     def action_named(name: str):
         return next(a for a in dock.add_menu.actions() if a.text().split(" ")[0] == name)
 
     action_named("dewow").trigger()
     assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow"]
+    assert shown == []  # dewow has no required params: nothing to ask for
 
     action_named("bandpass").trigger()
     assert asked == ["bandpass"]
+    # The request really reached add_step_with_dialog and opened the
+    # dialog; cancelling it is what leaves the step unbuilt.
+    assert [type(d).__name__ for d in shown] == ["AddStepDialog"]
     assert len(session.stack_for(key)) == 1  # bandpass needs a form first, still not built
 
 
@@ -92,12 +106,21 @@ def test_add_remove_toggle_and_reorder(opened):
     assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow", "background_mean"]
 
 
-def test_required_steps_are_requested_not_built(opened):
+def test_required_steps_are_requested_not_built(opened, drive_dialog):
+    """`add_step` must never build a REQUIRED-params step itself.
+
+    The dialog the request opens is driven and cancelled here for the same
+    reason as `test_add_menu_action_triggers_add_step` above: the modal
+    opens inside a slot, so the guard's AssertionError could not reach
+    this test and the emission aborted CI instead.
+    """
     session, dock, key = opened
     asked = []
     dock.add_step_requested.connect(asked.append)
+    shown = drive_dialog(QDialog, "exec", lambda d: d.reject())
     dock.add_step("bandpass")
     assert asked == ["bandpass"] and len(session.stack_for(key)) == 0
+    assert [type(d).__name__ for d in shown] == ["AddStepDialog"]
 
 
 def test_selection_emits_and_rebuild_keeps_it(opened):
