@@ -9,12 +9,12 @@ from nsgeo_qgis.ui.gain_strip import GainStrip
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
+from plugin_testing import send_double_click as _send_double_click
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, Qt
-from qgis.PyQt.QtGui import QMouseEvent
+from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -27,8 +27,8 @@ def strip(qgis_app):
     destroy it while still shown, racing Qt's own teardown). `hide()` +
     `deleteLater()` on teardown is that fixture's own fix, copied here for
     the same reason -- it does not, by itself, fix the separate ordering
-    hazard `_send_double_click` below exists for; see that function's own
-    docstring.
+    hazard `plugin_testing.send_double_click` exists for; see that
+    function's own docstring.
     """
     s = GainStrip()
     s.resize(96, 300 + MARGIN_TOP + 28)
@@ -39,46 +39,6 @@ def strip(qgis_app):
     yield s
     s.hide()
     s.deleteLater()
-
-
-def _send_double_click(widget, local_pos: QPoint, button=Qt.MouseButton.LeftButton) -> None:
-    """`QTest.mouseDClick` is not just unreliable the way plain
-    `QTest.mouseMove` is (see `_send_move_while_pressed` above) -- verified
-    directly, it corrupts state in this offscreen-QPA environment that
-    outlives both the widget and the test: a `QTest.mouseDClick` call
-    here, in what became `test_double_click_adds_and_right_click_removes`,
-    made `test_plugin_profile_view.py::test_mouse_move_emits_the_trace_
-    under_the_cursor` -- an unrelated test, in a different file, on a
-    widget that does not exist yet when this one runs -- fail every time
-    it ran afterwards in the same session, its `QTest.mouseMove` silently
-    never reaching `mouseMoveEvent` at all. Isolated with a minimal
-    `QWidget` outside this file entirely (no GainStrip involved): a bare
-    `QTest.mouseDClick` on one widget in one test reproducibly blocks a
-    plain, buttonless `QTest.mouseMove` on a *different* widget in the
-    *next* test; neither `hide()`/`deleteLater()` on the first widget nor
-    a forced extra `QMouseEvent(MouseButtonRelease, ...)` afterwards
-    cleared it. Replacing `QTest.mouseDClick` with the same four events a
-    real double-click actually delivers (press, release, dblclick,
-    release -- Qt turns the second physical press into a
-    `MouseButtonDblClick`, not a second `MouseButtonPress`), sent directly
-    via `QApplication.sendEvent` the same way `_send_move_while_pressed`
-    bypasses `QTest` above, reaches `mouseDoubleClickEvent` correctly and
-    was confirmed, in that same minimal reproduction, to leave no such
-    trace behind.
-    """
-    local = QPointF(local_pos)
-    glob = QPointF(widget.mapToGlobal(local_pos))
-
-    def send(typ: QEvent.Type, buttons: Qt.MouseButton) -> None:
-        QApplication.sendEvent(
-            widget,
-            QMouseEvent(typ, local, glob, button, buttons, Qt.KeyboardModifier.NoModifier),
-        )
-
-    send(QEvent.Type.MouseButtonPress, button)
-    send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
-    send(QEvent.Type.MouseButtonDblClick, button)
-    send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
 
 
 def test_mappings_round_trip(strip):
@@ -120,9 +80,9 @@ def test_double_click_adds_and_right_click_removes(strip):
     got = []
     strip.points_changed.connect(got.append)
     mid = QPoint(int(strip.x_of_db(10.0)), int(strip.y_of_time(50.0)))
-    # Not QTest.mouseDClick: see _send_double_click's docstring above -- it
-    # corrupts mouse state in this offscreen environment that outlives
-    # this test entirely.
+    # Not QTest.mouseDClick: see plugin_testing.send_double_click's own
+    # docstring -- it corrupts mouse state in this offscreen environment
+    # that outlives this test entirely.
     _send_double_click(strip, mid)
     assert len(strip.points()) == 3 and got[-1][1][0] == pytest.approx(50.0, abs=0.5)
     QTest.mouseClick(strip, Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, mid)
@@ -134,6 +94,45 @@ def test_double_click_adds_and_right_click_removes(strip):
         QPoint(int(strip.x_of_db(0.0)), int(strip.y_of_time(0.0))),
     )
     assert len(strip.points()) == 2  # never below two
+
+
+def test_double_click_clears_a_stale_drag_db_range(strip):
+    """Fix round 2, item 3. `mouseDoubleClickEvent` cleared `_drag` but not
+    `_drag_db_range` -- the one place that pairing wasn't kept in step:
+    `mouseMoveEvent`'s own bounds-check branch and `mouseReleaseEvent` both
+    already clear both together.
+
+    Unreachable through real Qt event sequencing today, and not just in
+    the abstract: verified directly that routing this through
+    `plugin_testing.send_double_click` (its leading `MouseButtonPress`,
+    hitting no handle at `mid`, resets `_drag_db_range` to `None` itself
+    via `mousePressEvent`'s own `hit is not None` branch) clears the
+    forced stale value *before* `mouseDoubleClickEvent` ever runs, hiding
+    the bug entirely -- a reversion of the fix still passed with that
+    approach. Sending only the bare `MouseButtonDblClick` event -- no
+    preceding press -- isolates `mouseDoubleClickEvent`'s own clearing
+    from that unrelated one, the same way a real double-click's *second*
+    physical press is delivered as a `MouseButtonDblClick`, never a
+    second `MouseButtonPress` (see `send_double_click`'s own docstring).
+    """
+    from qgis.PyQt.QtCore import QEvent, QPointF
+    from qgis.PyQt.QtGui import QMouseEvent
+    from qgis.PyQt.QtWidgets import QApplication
+
+    strip._drag_db_range = (-6.0, 26.0)  # a stale value nothing real produces here
+    mid = QPoint(int(strip.x_of_db(10.0)), int(strip.y_of_time(50.0)))
+    local, glob = QPointF(mid), QPointF(strip.mapToGlobal(mid))
+    ev = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        local,
+        glob,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(strip, ev)
+
+    assert strip._drag_db_range is None
 
 
 def test_profile_dock_shows_the_strip_only_when_asked(qgis_app, tmp_path):
@@ -463,16 +462,34 @@ def test_drag_above_the_strip_keeps_the_handle_reachable(strip):
     `_clamped`'s own `[top, top + transform.height]` before it is ever
     written into `_points` means the stored point always maps back to a
     reachable position afterwards.
+
+    Dragging handle 1 (t=100.0, this fixture's own time_hi), not handle 0
+    (already at time_lo, where "dragged past the top" and "left alone"
+    would look identical): the fix must show up as a real,
+    non-degenerate change, not one that happens to match doing nothing.
+
+    Asserted directly against the stored point, not solely through
+    `handle_at`'s own hit-radius slack: fix round 2's review found
+    `handle_at(QPoint(x, 0))` here used to pass only because this
+    fixture's 8px `MARGIN_TOP` gap happens to be smaller than `HIT_RADIUS
+    + 1.0` (9px) -- a coincidence that would break if `MARGIN_TOP` ever
+    changed, for a reason unrelated to clamping.
     """
-    x0, y0 = strip.x_of_db(0.0), strip.y_of_time(0.0)  # handle 0: (0.0, 0.0)
+    x1, y1 = strip.x_of_db(20.0), strip.y_of_time(100.0)  # handle 1: (100.0, 20.0)
     QTest.mousePress(
-        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x0), int(y0))
+        strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x1), int(y1))
     )
-    far_above = QPoint(int(x0), int(y0) - 500)  # far above the strip's own top
+    far_above = QPoint(int(x1), int(y1) - 500)  # far above the strip's own top
     _send_move_while_pressed(strip, far_above)
     QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, far_above)
 
-    assert strip.handle_at(QPoint(int(x0), 0)) is not None
+    # Clamped to this fixture's own time_lo (t0 = 0.0); db unchanged, since
+    # the drag never moved horizontally -- not left at some unreachable,
+    # off-axis time.
+    assert any(
+        t == pytest.approx(0.0) and db == pytest.approx(20.0, abs=0.5) for t, db in strip.points()
+    )
+    assert strip.handle_at(QPoint(int(x1), int(strip.y_of_time(0.0)))) is not None
 
 
 def test_a_shrunk_point_list_mid_drag_does_not_raise(strip):
@@ -506,6 +523,69 @@ def test_a_shrunk_point_list_mid_drag_does_not_raise(strip):
     # of hazard _send_double_click's own docstring documents for
     # QTest.mouseDClick.
     QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_hiding_mid_drag_ends_the_gesture(strip):
+    """Fix round 2, item 1. Nothing delivers a matching `mouseReleaseEvent`
+    to a widget hidden mid-drag -- a line load completing mid-drag, or an
+    arrow-key row change stealing focus away (this widget sets no focus
+    policy of its own, so the processing list keeps focus during a strip
+    drag either way). Reproduced directly: press a handle, hide the
+    widget, and `self._drag` stayed set indefinitely -- `set_points`'s own
+    refusal (the first invariant) then permanently refused every later
+    resync. `hideEvent` now clears `_drag`/`_drag_db_range` itself, ending
+    the gesture the same way a release would have.
+    """
+    x0, y0 = strip.x_of_db(20.0), strip.y_of_time(100.0)
+    pos = QPoint(int(x0), int(y0))
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+    assert strip._drag is not None
+
+    strip.hide()
+
+    assert strip._drag is None
+    assert strip._drag_db_range is None
+    strip.set_points([[0.0, 0.0], [50.0, 5.0]])  # must be honoured now, not refused
+    assert strip.points() == [[0.0, 0.0], [50.0, 5.0]]
+    # This test's own press is deliberately never followed by a real
+    # release (that's the whole scenario: nothing delivers one to a
+    # hidden widget) -- but leaving Qt's own mouse grab unbalanced is a
+    # second, independent hazard from the one this test targets: verified
+    # directly, it silently blocked a later, unrelated test's plain
+    # QTest.mouseMove in a different file, the same class of hazard
+    # `plugin_testing.send_double_click`'s own docstring documents for
+    # `QTest.mouseDClick`. A release delivered here, after hide(), still
+    # reaches Qt's own bookkeeping (confirmed directly) even though the
+    # widget's own mouseReleaseEvent now finds _drag already None and
+    # does nothing with it.
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, pos)
+
+
+def test_a_buttonless_move_never_edits_a_stranded_drag(strip):
+    """Fix round 2, item 2. `hideEvent` above closes the strand at its
+    source, but this is a deliberate second, independent barrier for the
+    same silent failure -- reproduced directly before this fix: with
+    `_drag` left set (by the pre-fix hide-mid-drag bug, or any future path
+    this file cannot foresee) and no button held, a plain hover across the
+    strip still rewrote the stranded index's point and emitted
+    `points_changed`, which `plugin.py` routes straight into
+    `session.replace_step` -- silently editing the user's gain curve on a
+    hover. `mouseMoveEvent` now checks `event.buttons()` first, unrelated
+    to whether `hideEvent` ever ran.
+    """
+    got = []
+    strip.points_changed.connect(got.append)
+    before = strip.points()
+    strip._drag = 1  # simulate a stranded index without relying on the hide bug to produce it
+
+    _send_move_while_pressed(
+        strip,
+        QPoint(int(strip.x_of_db(5.0)), int(strip.y_of_time(30.0))),
+        held_button=Qt.MouseButton.NoButton,  # a plain hover: no button held
+    )
+
+    assert strip.points() == before
+    assert not got
 
 
 def test_a_strip_hidden_for_want_of_a_transform_reappears_once_profiles_load(

@@ -380,30 +380,6 @@ def test_time_axis_falls_back_to_source_when_evaluating_the_stack_would_raise(op
     assert [s.name for s, _ in session.stack_for(key).entries] == ["bandpass", "gain_curve"]
 
 
-@pytest.fixture
-def message_log(qgis_app):
-    """Captured `QgsMessageLog` messages, for the life of this test only.
-
-    Mirrors `test_plugin_profile_dock.py`'s fixture of the same name (also
-    duplicated in `test_plugin_profile_view.py`/`test_plugin_layers.py`):
-    `QgsApplication.messageLog()` is a session-scoped singleton, so a
-    connection left dangling would keep accumulating every later test's
-    messages into this one's list for the rest of the (also
-    session-scoped) `qgis_app` fixture. Disconnected on teardown.
-    """
-    from qgis.core import QgsApplication
-
-    log = QgsApplication.messageLog()
-    messages: list[str] = []
-
-    def _on_message(msg: str, tag: str, level: int) -> None:
-        messages.append(msg)
-
-    log.messageReceived.connect(_on_message)
-    yield messages
-    log.messageReceived.disconnect(_on_message)
-
-
 def test_time_axis_logs_when_it_falls_back_to_source(opened, message_log):
     """m2 (fix round 1 review). The `ValueError` fallback above used to be
     silent: when it fires, a new curve step's seed lands on the raw source

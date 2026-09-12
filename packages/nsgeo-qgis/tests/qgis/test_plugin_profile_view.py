@@ -364,29 +364,6 @@ def test_paint_event_handles_an_empty_axis_without_dividing_by_zero(make_view, n
     assert (v.transform.n_traces, v.transform.n_samples) == (n_traces, n_samples)
 
 
-@pytest.fixture
-def message_log(qgis_app):
-    """Captured `QgsMessageLog` messages, for the life of this test only.
-
-    `QgsApplication.messageLog()` is a session-scoped singleton: a
-    connection left dangling would keep accumulating every later test's
-    messages into this test's own list for the rest of the (also
-    session-scoped) `qgis_app` fixture. Disconnected on teardown.
-    (Mirrors `tests/qgis/test_plugin_layers.py`'s fixture of the same name.)
-    """
-    from qgis.core import QgsApplication
-
-    log = QgsApplication.messageLog()
-    messages: list[str] = []
-
-    def _on_message(msg: str, tag: str, level: int) -> None:
-        messages.append(msg)
-
-    log.messageReceived.connect(_on_message)
-    yield messages
-    log.messageReceived.disconnect(_on_message)
-
-
 def test_set_axes_rejects_a_mismatched_distance_along_and_logs_it(make_view, message_log):
     """C1a: `distance_along` of the wrong length used to reach
     `_distance_ticks` unvalidated, raising `ValueError: fp and xp are not

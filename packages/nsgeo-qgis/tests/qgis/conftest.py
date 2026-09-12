@@ -108,11 +108,12 @@ def _no_unhandled_modals(monkeypatch):
     the test -- a `QTest.mouseDClick` in one test reproducibly blocked a
     plain, buttonless `QTest.mouseMove` on a *different* widget in the
     *next* test, in a different file, with `mouseMoveEvent` silently never
-    firing (see `test_plugin_gain_strip.py`'s `_send_double_click` for the
-    full account and the fix). A hazard like that is worth making
-    unrepresentable here, the same way a real modal already is, rather
-    than trusting every future test in this tier to remember not to call
-    it.
+    firing (see `plugin_testing.send_double_click` for the full account
+    and the fix -- a shared helper any test in this tier can import,
+    unlike a private one local to a single file). A hazard like that is
+    worth making unrepresentable here, the same way a real modal already
+    is, rather than trusting every future test in this tier to remember
+    not to call it.
     """
     from qgis.PyQt.QtTest import QTest
     from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
@@ -137,8 +138,36 @@ def _no_unhandled_modals(monkeypatch):
         QTest,
         "mouseDClick",
         reason="QTest.mouseDClick corrupts mouse state that outlives this test -- "
-        "use test_plugin_gain_strip.py's _send_double_click instead",
+        "use plugin_testing.send_double_click instead",
     )
+
+
+@pytest.fixture
+def message_log(qgis_app):
+    """Captured `QgsMessageLog` messages, for the life of this test only.
+
+    `QgsApplication.messageLog()` is a session-scoped singleton, so a
+    connection left dangling would keep accumulating every later test's
+    messages into this one's list for the rest of the (also
+    session-scoped) `qgis_app` fixture. Disconnected on teardown.
+
+    Previously duplicated, with only the docstring differing, across
+    `test_plugin_layers.py`, `test_plugin_profile_view.py`,
+    `test_plugin_profile_dock.py`, and `test_plugin_param_form.py`;
+    consolidated here so every test in this tier gets it for free, with
+    no import needed, the same way `fake_iface`/`answer_modal` already are.
+    """
+    from qgis.core import QgsApplication
+
+    log = QgsApplication.messageLog()
+    messages: list[str] = []
+
+    def _on_message(msg: str, tag: str, level: int) -> None:
+        messages.append(msg)
+
+    log.messageReceived.connect(_on_message)
+    yield messages
+    log.messageReceived.disconnect(_on_message)
 
 
 @pytest.fixture

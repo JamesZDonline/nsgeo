@@ -60,30 +60,6 @@ def bare(qgis_app, tmp_path):
     dock.deleteLater()
 
 
-@pytest.fixture
-def message_log(qgis_app):
-    """Captured `QgsMessageLog` messages, for the life of this test only.
-
-    Mirrors `test_plugin_profile_view.py`'s fixture of the same name (also
-    duplicated in `test_plugin_layers.py`): `QgsApplication.messageLog()` is
-    a session-scoped singleton, so a connection left dangling would keep
-    accumulating every later test's messages into this one's list for the
-    rest of the (also session-scoped) `qgis_app` fixture. Disconnected on
-    teardown.
-    """
-    from qgis.core import QgsApplication
-
-    log = QgsApplication.messageLog()
-    messages: list[str] = []
-
-    def _on_message(msg: str, tag: str, level: int) -> None:
-        messages.append(msg)
-
-    log.messageReceived.connect(_on_message)
-    yield messages
-    log.messageReceived.disconnect(_on_message)
-
-
 def test_opening_shows_axes_and_loading_before_samples_arrive(opened):
     """C2: the three central M5 observables (the image reaching the
     widget, the depth axis existing, t0 coming from the header) had no

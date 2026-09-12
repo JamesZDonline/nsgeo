@@ -77,3 +77,44 @@ def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(widget, ev)
+
+
+def send_double_click(widget: Any, local_pos: Any, button: Any = None) -> None:
+    """`QTest.mouseDClick` is not just unreliable the way plain
+    `QTest.mouseMove` is (see `send_move_while_pressed` above) -- verified
+    directly, it corrupts state in this offscreen-QPA environment that
+    outlives both the widget and the test: a `QTest.mouseDClick` call in
+    one test reproducibly blocked a plain, buttonless `QTest.mouseMove` on
+    a *different* widget in the *next* test, in a different file, with
+    `mouseMoveEvent` silently never firing; neither `hide()`/
+    `deleteLater()` on the first widget nor a forced extra
+    `QMouseEvent(MouseButtonRelease, ...)` afterwards cleared it (see
+    `tests/qgis/conftest.py`'s `_no_unhandled_modals`, which forbids
+    `QTest.mouseDClick` in this tier entirely and points here instead).
+
+    Replacing `QTest.mouseDClick` with the same four events a real
+    double-click actually delivers (press, release, dblclick, release --
+    Qt turns the second physical press into a `MouseButtonDblClick`, not a
+    second `MouseButtonPress`), sent directly via `QApplication.sendEvent`
+    the same way `send_move_while_pressed` bypasses `QTest`, reaches
+    `mouseDoubleClickEvent` correctly and was confirmed, in the same
+    minimal reproduction, to leave no such trace behind.
+    """
+    from qgis.PyQt.QtCore import QEvent, QPointF, Qt
+    from qgis.PyQt.QtGui import QMouseEvent
+    from qgis.PyQt.QtWidgets import QApplication
+
+    btn = button if button is not None else Qt.MouseButton.LeftButton
+    local = QPointF(local_pos)
+    glob = QPointF(widget.mapToGlobal(local_pos))
+
+    def send(typ: QEvent.Type, buttons: Qt.MouseButton) -> None:
+        QApplication.sendEvent(
+            widget,
+            QMouseEvent(typ, local, glob, btn, buttons, Qt.KeyboardModifier.NoModifier),
+        )
+
+    send(QEvent.Type.MouseButtonPress, btn)
+    send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+    send(QEvent.Type.MouseButtonDblClick, btn)
+    send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)

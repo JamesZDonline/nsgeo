@@ -34,6 +34,25 @@ position into the widget's own bounds (`_clamped`) is the other half --
 without it, a handle dragged past `MARGIN_TOP` or the strip's edges paints
 off-widget, where `handle_at` can never find it again to re-drag or
 right-click-remove.
+
+A third invariant, added after a real reproduction: nothing delivers
+`mouseReleaseEvent` to a widget that is hidden mid-gesture (a line load
+completing mid-drag, or an arrow-key row change stealing focus away --
+this widget sets no focus policy of its own, so the processing list keeps
+focus during a strip drag either way), so `hideEvent` clears `_drag` and
+`_drag_db_range` itself rather than waiting for a release that is never
+coming. Without it, `_drag` stays set indefinitely; `set_points`'s own
+guard (the first invariant above) then keeps refusing every external
+resync, permanently stuck. Worse than merely stuck: `mouseMoveEvent`
+guarded only `_drag is None`, not whether a button was actually held, so
+a plain, buttonless hover across the strip after this -- no click, no
+drag -- silently rewrote the stranded index's point and emitted
+`points_changed`, which `plugin.py` routes straight into
+`session.replace_step`. `hideEvent` closes the strand; the `event.
+buttons()` check at the top of `mouseMoveEvent` is a second, independent
+barrier for the same failure, kept even though `hideEvent` alone would
+suffice, because this specific failure is silent -- a loud one is worth
+fixing once, a silent one is worth two barriers against.
 """
 
 from __future__ import annotations
@@ -170,6 +189,15 @@ class GainStrip(QWidget):
         finally:
             p.end()
 
+    # ---- lifecycle ----------------------------------------------------------
+    def hideEvent(self, event: Any) -> None:  # noqa: N802
+        """Nothing delivers a matching `mouseReleaseEvent` to a widget
+        hidden mid-drag: see the module docstring's third invariant. Ends
+        the gesture here instead of leaving `_drag` stranded."""
+        super().hideEvent(event)
+        self._drag = None
+        self._drag_db_range = None
+
     # ---- mouse ------------------------------------------------------------
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802
         if self._transform is None:
@@ -199,10 +227,18 @@ class GainStrip(QWidget):
         self._points.append([self.time_of_y(y), self.db_of_x(x)])
         self._points.sort(key=lambda q: q[0])
         self._drag = None
+        self._drag_db_range = None
         self.update()
         self.points_changed.emit(self.points())
 
     def mouseMoveEvent(self, event: Any) -> None:  # noqa: N802
+        if not event.buttons():
+            # A move with no button held is a hover, not a drag
+            # continuation: see the module docstring's third invariant.
+            # Independent of hideEvent's own fix for the same failure --
+            # kept as a second barrier because a stranded _drag silently
+            # rewriting a point on a plain hover is silent, not loud.
+            return
         if self._drag is None or self._transform is None:
             return
         if self._drag >= len(self._points):

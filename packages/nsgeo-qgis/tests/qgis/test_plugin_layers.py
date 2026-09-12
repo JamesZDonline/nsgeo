@@ -13,7 +13,6 @@ from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
-    QgsApplication,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -54,26 +53,6 @@ def populated(qgis_app, tmp_path):
     yield session, layers, project
     layers.detach()
     project.clear()
-
-
-@pytest.fixture
-def message_log(qgis_app):
-    """Captured `QgsMessageLog` messages, for the life of this test only.
-
-    `QgsApplication.messageLog()` is a session-scoped singleton: a
-    connection left dangling would keep accumulating every later test's
-    messages into this test's own list for the rest of the (also
-    session-scoped) `qgis_app` fixture. Disconnected on teardown.
-    """
-    log = QgsApplication.messageLog()
-    messages: list[str] = []
-
-    def _on_message(msg: str, tag: str, level: int) -> None:
-        messages.append(msg)
-
-    log.messageReceived.connect(_on_message)
-    yield messages
-    log.messageReceived.disconnect(_on_message)
 
 
 def test_tables_exist_with_the_declared_fields_and_flags(populated):
