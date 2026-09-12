@@ -75,6 +75,59 @@ def test_remove_and_move_invalidate_correctly():
     assert st.cache_size == 1
 
 
+def test_disabling_a_step_after_the_result_was_computed_changes_the_result():
+    """A warm cache is the only state in which invalidation does anything.
+
+    `test_disabled_step_is_skipped_but_keeps_its_index` toggles *before*
+    ever calling `result()`, so the cache is empty and `set_enabled`'s
+    `_invalidate_from` has nothing to invalidate -- with that call deleted,
+    both tiers stayed green while `result()` handed back the pre-toggle
+    data, off by up to 0.75 max-abs. The per-step checkbox in the
+    processing dock is exactly this call, so what a user got was the
+    unchanged radargram, which they could then save or apply to a whole
+    grid.
+
+    Asserts the cache emptied *and* that the data really changed, against a
+    from-scratch recomputation rather than against the stack itself.
+    """
+    st = stack_of(("dewow", {"window_ns": 4.0}), ("background_mean", {}))
+    processed = st.result().data.copy()
+    assert st.cache_size == 2
+
+    st.set_enabled(0, False)
+    assert st.cache_size == 0
+
+    after = st.result().data
+    assert np.abs(after - processed).max() > 0.1
+    np.testing.assert_allclose(after, build_step("background_mean").apply(st.source).data)
+
+
+def test_inserting_a_step_before_a_cached_one_changes_the_result():
+    """`insert` had no cache test at all, while append, replace_step, remove
+    and move each had one -- and deleting its `_invalidate_from` survived
+    both tiers for the same reason as `set_enabled` above. Inserting is
+    reachable from the UI's drag-reorder and from applying a preset.
+    """
+    st = stack_of(("background_mean", {}))
+    first = st.result().data.copy()
+    assert st.cache_size == 1
+
+    st.insert(0, build_step("gain_agc", window_ns=4.0))
+    assert st.cache_size == 0
+
+    after = st.result().data
+    assert np.abs(after - first).max() > 0.1
+    expected = build_step("background_mean").apply(
+        build_step("gain_agc", window_ns=4.0).apply(st.source)
+    )
+    np.testing.assert_allclose(after, expected.data)
+
+    # Inserting past the end of the cached prefix leaves that prefix alone.
+    st.result()
+    st.insert(2, build_step("dewow", window_ns=4.0))
+    assert st.cache_size == 2
+
+
 def test_setting_a_new_source_clears_everything():
     st = stack_of(("background_mean", {}))
     st.result()
