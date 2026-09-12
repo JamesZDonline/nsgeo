@@ -21,8 +21,9 @@ from nsgeo_qgis.ui.profile_view import (
 )
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data
-from qgis.PyQt.QtCore import QEvent, QPoint, QPointF, Qt
-from qgis.PyQt.QtGui import QColor, QImage, QMouseEvent, QWheelEvent
+from plugin_testing import send_move_while_pressed as _send_move_while_pressed
+from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
 
@@ -32,35 +33,6 @@ def _rg(n_traces=200, n_samples=128):
     data = rng.normal(size=(n_samples, n_traces))
     data[20:24, :] += 8.0
     return Radargram(data=data, dt_ns=0.5, t0_ns=-4.0)
-
-
-def _send_move_while_pressed(
-    widget, local_pos: QPoint, held_button=Qt.MouseButton.LeftButton
-) -> None:
-    """A mouse move sent *while a button is logically held* (i.e. between a
-    `QTest.mousePress` and the matching `mouseRelease`) is not reliably
-    delivered by `QTest.mouseMove` -- confirmed directly in this
-    environment (offscreen QPA): the identical `QTest.mousePress(...)` +
-    `QTest.mouseMove(...)` sequence the task brief's own drag-select test
-    uses never invokes `mouseMoveEvent` at all when a button is still
-    down, though the exact same `QTest.mouseMove` call works fine with no
-    button held (as `test_mouse_move_emits_the_trace_under_the_cursor`
-    above confirms). Building and sending the `QMouseEvent` directly
-    bypasses `QTest`'s cursor-warp-based simulation and reaches the
-    widget's real `mouseMoveEvent` every time, which is what a genuine
-    OS-level drag actually delivers.
-    """
-    local = QPointF(local_pos)
-    glob = QPointF(widget.mapToGlobal(local_pos))
-    ev = QMouseEvent(
-        QEvent.Type.MouseMove,
-        local,
-        glob,
-        Qt.MouseButton.NoButton,
-        held_button,
-        Qt.KeyboardModifier.NoModifier,
-    )
-    QApplication.sendEvent(widget, ev)
 
 
 def test_rgb_to_qimage_owns_its_memory_and_matches_pixels():

@@ -27,6 +27,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
@@ -324,14 +325,22 @@ class ProcessingDock(QgsDockWidget):
         Nyquist, say) -- that is a problem with that step, not a reason
         this method should raise too: it falls back to the stack's raw
         source instead, same as before this method looked at `result()` at
-        all, and to the line's header when nothing has loaded yet."""
+        all, and to the line's header when nothing has loaded yet. Logged
+        when it fires: the seed then lands on the raw axis while the
+        viewer keeps its last good (possibly quite different) transform,
+        so a curve step seeded right now can end up with control points
+        off the drawn axis with nothing said otherwise."""
         key = self.key()
         assert key is not None
         stack = self.session.stack_for(key)
         if stack.source is not None:
             try:
                 rg = stack.result()
-            except ValueError:
+            except ValueError as exc:
+                _log(
+                    f"time_axis: stack does not evaluate cleanly ({exc}); "
+                    "seeding a new step against the raw source axis instead"
+                )
                 rg = stack.source
             return rg.t0_ns, rg.dt_ns, rg.n_samples
         h = self.session.line_for_key(key).header

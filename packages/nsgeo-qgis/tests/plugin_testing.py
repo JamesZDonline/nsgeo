@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import zlib
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -32,3 +33,47 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     path = folder / name
     write_dzt(path, data, **kw)
     return path
+
+
+def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None) -> None:
+    """A mouse move sent *while a button is logically held* (between a
+    `QTest.mousePress` and the matching `mouseRelease`) is not reliably
+    delivered by `QTest.mouseMove` -- confirmed directly in this
+    environment (offscreen QPA): the identical `QTest.mousePress(...)` +
+    `QTest.mouseMove(...)` sequence a naive drag test would use never
+    invokes `mouseMoveEvent` at all while a button is still down, though
+    the exact same `QTest.mouseMove` call works fine with no button held.
+    Building and sending the `QMouseEvent` directly bypasses `QTest`'s
+    cursor-warp-based simulation and reaches the widget's real
+    `mouseMoveEvent` every time, which is what a genuine OS-level drag
+    actually delivers.
+
+    Used by both `test_plugin_profile_view.py` (a drag-select) and
+    `test_plugin_gain_strip.py` (a control-point drag) -- kept here, not
+    duplicated in each, so the one subtle Qt workaround both rely on
+    cannot drift between two copies. Qt-only imports are local to this
+    function (not at module level): this module is also imported by the
+    pure tier's `test_pure_lookup.py`, which runs with no QGIS/PyQt
+    installed at all.
+
+    `held_button` defaults to the left button; a Qt enum member cannot be
+    a module-level-evaluated default (it would need `qgis.PyQt` imported
+    at module level, which the pure tier cannot do), so `None` is resolved
+    to it inside the function instead.
+    """
+    from qgis.PyQt.QtCore import QEvent, QPointF, Qt
+    from qgis.PyQt.QtGui import QMouseEvent
+    from qgis.PyQt.QtWidgets import QApplication
+
+    button = held_button if held_button is not None else Qt.MouseButton.LeftButton
+    local = QPointF(local_pos)
+    glob = QPointF(widget.mapToGlobal(local_pos))
+    ev = QMouseEvent(
+        QEvent.Type.MouseMove,
+        local,
+        glob,
+        Qt.MouseButton.NoButton,
+        button,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    QApplication.sendEvent(widget, ev)

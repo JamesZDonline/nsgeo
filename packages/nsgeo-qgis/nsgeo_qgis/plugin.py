@@ -98,21 +98,6 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
-        # (key, row) and step identity of the very last step _on_gain_points
-        # itself wrote, mirroring ProcessingDock's own _shown/_shown_step
-        # (see that class's docstring for the general reasoning). Every
-        # session.replace_step here triggers stack_changed -> rebuild() ->
-        # step_selected, which reaches _sync_gain_strip as an echo of our
-        # own edit; without recognising it, that echo would call
-        # show_gain_strip() -> GainStrip.set_points(), which re-sorts by
-        # time -- remapping GainStrip._drag's index to a *different* point
-        # the instant a drag crosses a neighbouring control point's time,
-        # silently overwriting that neighbour instead of the point actually
-        # being dragged (verified directly with a multi-step synthetic
-        # drag). -2 is a sentinel no real row index is, matching
-        # ProcessingDock's own choice.
-        self._gain_echo_pos: tuple[str | None, int] = (None, -2)
-        self._gain_echo_step: Any = None
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
@@ -161,6 +146,14 @@ class NsgeoPlugin:
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
+        # ProcessingDock never reacts to line_loaded (only ProfileDock
+        # does, to re-render), so a curve step selected before this line's
+        # profiles arrive would otherwise stay exactly as
+        # _sync_gain_strip last left it -- e.g. hidden for want of an axis
+        # -- with nothing to re-check it once ProfileDock's own render
+        # gives it one. Re-running _sync_gain_strip here on the same
+        # signal ProfileDock re-renders from closes that gap.
+        self.session.line_loaded.connect(self._resync_gain_strip)
 
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
@@ -273,7 +266,13 @@ class NsgeoPlugin:
         return None
 
     def _sync_gain_strip(self, row: int) -> None:
-        assert self.session is not None and self.profile_dock is not None
+        # Slots on session/dock signals can still fire after unload() nulls
+        # these -- the docks are only deleteLater()'d, not disconnected, so
+        # a still-queued signal can reach here before the C++ side is
+        # actually gone. An AssertionError here would die silently (see the
+        # module docstring); None-guard the same way _update_enabled does.
+        if self.session is None or self.profile_dock is None:
+            return
         key = self.session.current_key
         if key is None or row < 0:
             self.profile_dock.show_gain_strip(None)
@@ -283,17 +282,24 @@ class NsgeoPlugin:
             self.profile_dock.show_gain_strip(None)
             return
         step = entries[row][0]
-        # An echo of _on_gain_points' own replace_step (stack_changed ->
-        # ProcessingDock.rebuild() -> this same step_selected), not a real
-        # selection change: see this attribute's own comment in __init__
-        # for why resyncing here would corrupt an in-progress drag.
-        if (key, row) == self._gain_echo_pos and step is self._gain_echo_step:
-            return
         name = self._curve_param_name(step)
         self.profile_dock.show_gain_strip(step.params[name] if name else None)
 
+    def _resync_gain_strip(self, key: str) -> None:
+        """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
+        See its own connection in `initGui` for why this is needed at all:
+        `line_loaded` is the one render-triggering event `ProcessingDock`
+        never reacts to, so nothing else re-checks a strip `_sync_gain_strip`
+        last left hidden for want of an axis that has since arrived."""
+        if self.session is None or self.processing_dock is None:
+            return
+        if key != self.session.current_key:
+            return
+        self._sync_gain_strip(self.processing_dock.current_row())
+
     def _on_gain_points(self, points: list) -> None:
-        assert self.session is not None and self.processing_dock is not None
+        if self.session is None or self.processing_dock is None:
+            return
         key = self.session.current_key
         row = self.processing_dock.current_row()
         if key is None or row < 0:
@@ -304,18 +310,17 @@ class NsgeoPlugin:
             return
         params = dict(step.params)
         params[name] = points
+        if step.params == params:
+            # No actual change -- e.g. a plain click on a handle with no
+            # movement, which GainStrip.mouseReleaseEvent still emits
+            # unconditionally. Matches ProcessingDock._on_form_committed's
+            # own no-op guard: a replace_step here would still dirty the
+            # session and earn the user a save prompt for an edit they
+            # never made.
+            return
         try:
-            new = build_step(step.name, **params)
-            # Set before replace_step, the same way ProcessingDock._on_form_
-            # committed does for its own form: the stack_changed ->
-            # rebuild() -> step_selected echo this triggers reports this
-            # exact object back to _sync_gain_strip, which then recognises
-            # it as the edit it just made and skips resyncing the strip's
-            # own live points.
-            self._gain_echo_pos, self._gain_echo_step = (key, row), new
-            self.session.replace_step(key, row, new)
+            self.session.replace_step(key, row, build_step(step.name, **params))
         except ValueError as exc:
-            self._gain_echo_pos, self._gain_echo_step = (None, -2), None
             self.message(str(exc), Qgis.MessageLevel.Warning)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:

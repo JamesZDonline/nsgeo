@@ -101,12 +101,25 @@ def _no_unhandled_modals(monkeypatch):
     default DialogCode: a test that never drives the dialog would
     otherwise see it silently "Accepted" or "Rejected" and assert on
     fields nothing actually set.
+
+    `QTest.mouseDClick` is forbidden here too, for an unrelated but
+    similarly repo-wide reason: verified directly, it corrupts mouse state
+    in this offscreen-QPA environment that outlives both the widget and
+    the test -- a `QTest.mouseDClick` in one test reproducibly blocked a
+    plain, buttonless `QTest.mouseMove` on a *different* widget in the
+    *next* test, in a different file, with `mouseMoveEvent` silently never
+    firing (see `test_plugin_gain_strip.py`'s `_send_double_click` for the
+    full account and the fix). A hazard like that is worth making
+    unrepresentable here, the same way a real modal already is, rather
+    than trusting every future test in this tier to remember not to call
+    it.
     """
+    from qgis.PyQt.QtTest import QTest
     from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
 
-    def _forbid(cls: type, name: str) -> None:
+    def _forbid(cls: type, name: str, reason: str = "unexpected modal") -> None:
         def _raise(*args: object, **kwargs: object) -> None:
-            raise AssertionError(f"unexpected modal: {cls.__name__}.{name}{args!r}")
+            raise AssertionError(f"{reason}: {cls.__name__}.{name}{args!r}")
 
         monkeypatch.setattr(cls, name, staticmethod(_raise))
 
@@ -120,6 +133,12 @@ def _no_unhandled_modals(monkeypatch):
         (QDialog, "exec"),
     ):
         _forbid(cls, name)
+    _forbid(
+        QTest,
+        "mouseDClick",
+        reason="QTest.mouseDClick corrupts mouse state that outlives this test -- "
+        "use test_plugin_gain_strip.py's _send_double_click instead",
+    )
 
 
 @pytest.fixture
