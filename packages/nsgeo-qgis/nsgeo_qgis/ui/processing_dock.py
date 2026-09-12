@@ -160,6 +160,18 @@ class ProcessingDock(QgsDockWidget):
         self.presets_button.setText("Presets")
         self.presets_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.presets_menu = QMenu(self.presets_button)
+        # Built once and reused, never recreated in _rebuild_presets_menu:
+        # QMenu.clear() removes presets_menu's *actions* (including
+        # whichever action last opened a "Delete" submenu) but does not
+        # delete the submenu QMenu object itself -- it stays alive,
+        # parented to presets_menu, just unreachable from its actions()
+        # list. A fresh `presets_menu.addMenu("Delete")` every rebuild
+        # therefore left one more orphaned QMenu behind every time
+        # (verified directly: 5 rebuilds, 5 leaked "Delete" QMenus, one
+        # of them live), growing on every presets_changed and every
+        # site_opened for the dock's whole life. Clearing and re-adding
+        # this one persistent menu instead leaves exactly one.
+        self._delete_presets_menu = QMenu("Delete", self.presets_menu)
         self.presets_button.setMenu(self.presets_menu)
         bottom.addWidget(self.presets_button)
         session.presets_changed.connect(self._rebuild_presets_menu)
@@ -239,6 +251,14 @@ class ProcessingDock(QgsDockWidget):
         self.remove_button.setEnabled(row >= 0)
         self.up_button.setEnabled(row > 0)
         self.down_button.setEnabled(0 <= row < n - 1)
+        # Same condition as remove_button: there is no step to difference
+        # against with nothing selected. `rebuild()`'s has_line loop
+        # already disables this when no line is open at all, and `row`
+        # is always -1 in that case too (list.clear() leaves it there),
+        # so this narrows further rather than conflicts with it -- the
+        # two together mean "enabled iff a line is open AND a row in it
+        # is selected".
+        self.diff_button.setEnabled(row >= 0)
 
     def _on_stack_changed(self, key: str) -> None:
         if key == self.key():
@@ -246,11 +266,32 @@ class ProcessingDock(QgsDockWidget):
 
     # ---- difference ----------------------------------------------------
     def _emit_difference(self, checked: bool) -> None:
-        self.difference_toggled.emit(self.list.currentRow() if checked else -1)
+        row = self.list.currentRow()
+        if checked and row < 0:
+            # `_update_row_buttons` disables this button whenever nothing
+            # is selected, so an ordinary click can't reach this branch
+            # -- but `toggled(bool)` doesn't distinguish a real click
+            # from a direct `setChecked(True)`, and disabling a widget
+            # never prevents that. Left unhandled, checking it with
+            # nothing selected emitted the same -1 a genuine "off" does
+            # (`self.list.currentRow() if checked else -1`, with
+            # `currentRow()` already -1), so `diff_button` stayed
+            # visually checked while `_open`'s own `was_diff` guard
+            # (keyed on the *index*, not the button) saw nothing to
+            # clear -- checked-but-off survived a line switch and
+            # silently armed itself against whatever row got selected
+            # next. Correcting the button back off here, rather than
+            # emitting -1 and leaving it checked, is what makes "checked"
+            # and "a difference is showing" the same fact everywhere
+            # else in this dock relies on that being true.
+            self.diff_button.setChecked(False)
+            return
+        self.difference_toggled.emit(row if checked else -1)
 
     # ---- presets ---------------------------------------------------------
     def _rebuild_presets_menu(self) -> None:
         self.presets_menu.clear()
+        self._delete_presets_menu.clear()
         self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
         names = self.session.preset_names() if self.session.is_open else []
         if names:
@@ -259,9 +300,11 @@ class ProcessingDock(QgsDockWidget):
                 self.presets_menu.addAction(
                     name, lambda checked=False, n=name: self.apply_preset_named(n)
                 )
-            delete = self.presets_menu.addMenu("Delete")
             for name in names:
-                delete.addAction(name, lambda checked=False, n=name: self.session.delete_preset(n))
+                self._delete_presets_menu.addAction(
+                    name, lambda checked=False, n=name: self.session.delete_preset(n)
+                )
+            self.presets_menu.addMenu(self._delete_presets_menu)
 
     def _save_preset_prompt(self) -> None:
         name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")

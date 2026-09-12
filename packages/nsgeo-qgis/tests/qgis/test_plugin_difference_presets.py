@@ -7,7 +7,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QInputDialog, QMenu, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -221,7 +221,10 @@ def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
     shorter preset, this task's own feature) produces exactly that. Left
     uncaught, it escapes `current_radargram` into the render slots' broad
     `except Exception`: logged Critical, the button still checked, the
-    label still naming a step that no longer exists."""
+    label still naming a step that no longer exists. The message itself
+    is asserted by content, not by pinning `IndexError`'s own developer-
+    facing wording (0-based indices, a raw range) -- that string is never
+    shown to a user; `ProfileDock` translates it."""
     plugin, s, key = plugin
     pd, prd = plugin.processing_dock, plugin.profile_dock
     pd.add_step("dewow")
@@ -234,7 +237,7 @@ def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
     prd.error.connect(messages.append)
     s.remove_step(key, 1)  # the differenced step itself is gone
 
-    assert messages and "out of range" in messages[0]
+    assert messages and "no longer exists" in messages[0]
     assert not pd.diff_button.isChecked()
     assert prd.difference_label.text() == ""
 
@@ -242,6 +245,81 @@ def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
 def test_diff_button_is_disabled_with_no_line_open(plugin):
     plugin, s, key = plugin
     pd = plugin.processing_dock
+    pd.add_step("dewow")  # a selected row: see the sibling test below for
+    # why an empty, nothing-selected list is not this test's concern
     assert pd.diff_button.isEnabled()
     s.close_site()
     assert not pd.diff_button.isEnabled()
+
+
+def test_diff_button_disabled_and_self_corrects_with_nothing_selected(plugin):
+    """`_emit_difference` used to emit `difference_toggled.emit(-1)` for
+    both "unchecked" and "checked with nothing selected"
+    (`self.list.currentRow() if checked else -1`, with `currentRow()`
+    already -1) -- the same payload for two different-looking button
+    states. `_open`'s `was_diff` guard is keyed on the *index*, not the
+    button, so it missed the second case: switching lines with
+    `diff_button` checked but no row selected left it checked (and armed
+    against whatever row got selected on the next line), unlike checking
+    it WITH a row selected, which correctly clears on a line switch
+    (`test_difference_view_clears_when_switching_lines` above). Picks one
+    rule: `diff_button` cannot be usefully checked with nothing selected
+    at all -- disabled while `list.currentRow() < 0` (so an ordinary
+    click can't reach the inconsistent state), and self-corrected back
+    off if some other path still manages to check it anyway (disabling a
+    widget never blocks a direct `setChecked(True)`)."""
+    plugin, s, key = plugin
+    pd = plugin.processing_dock
+    assert pd.list.currentRow() == -1
+    assert not pd.diff_button.isEnabled()
+
+    pd.diff_button.setChecked(True)  # forced despite being disabled
+    assert not pd.diff_button.isChecked()  # self-corrected back off
+
+    other = s.keys()[1]
+    s.open_line(other)
+    assert not pd.diff_button.isChecked()  # never armed on the new line
+
+
+def test_closing_the_site_while_differencing_logs_nothing(plugin, message_log):
+    """Closing the site (or switching lines) while the difference view is
+    on re-enters `set_difference_index` synchronously: `_open`/`_clear`
+    both already set `_difference_index = -1` themselves before emitting
+    `difference_cleared`, which unchecks `diff_button`, which re-emits
+    `difference_toggled(-1)` right back into `set_difference_index`. That
+    re-entrant call always carries the index unchanged (both callers set
+    it first), so it is always a no-op -- but on `close_site`, the
+    session has already dropped its site by the time this fires
+    (`SiteSession.close_site` clears `_site` before emitting
+    `line_opened("")`), so a naive re-render there called `stack_for()`
+    against a closed session and got logged Critical for an ordinary
+    File > Close, not a real failure."""
+    plugin, s, key = plugin
+    pd, prd = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("dewow")
+    pd.add_step("background_mean")
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    assert prd.difference_label.text() != ""
+
+    s.close_site()
+
+    assert message_log == []
+
+
+def test_presets_menu_delete_submenu_is_reused_not_leaked(plugin):
+    """`QMenu.clear()` deletes `presets_menu`'s *actions* -- including
+    whichever one last opened a "Delete" submenu -- but not the submenu
+    QMenu object itself, which stays alive, parented to `presets_menu`,
+    just unreachable from its `actions()` list. `_rebuild_presets_menu`
+    runs on every `presets_changed` and every `site_opened`, so a fresh
+    `presets_menu.addMenu("Delete")` each time leaked one more orphaned
+    QMenu per rebuild, for the dock's whole life."""
+    plugin, s, key = plugin
+    pd = plugin.processing_dock
+    pd.add_step("dewow")
+    for i in range(5):
+        pd.save_preset_named(f"p{i}", confirm=False)  # 5 real presets_changed rebuilds
+    submenus = [m for m in pd.presets_menu.findChildren(QMenu) if m.title() == "Delete"]
+    assert len(submenus) == 1
+    assert [a.text() for a in submenus[0].actions()] == [f"p{i}" for i in range(5)]

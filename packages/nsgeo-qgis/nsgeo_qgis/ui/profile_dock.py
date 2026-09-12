@@ -338,11 +338,25 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not update the profile selection: {exc}", Qgis.MessageLevel.Critical)
 
     def _clear(self) -> None:
+        # `_open` (the other place this dock forgets a line) resets the
+        # same three pieces of difference-view bookkeeping; this path
+        # must agree with it rather than leave `_difference_index` and
+        # `diff_button` stuck on whatever they last were. `self._key` is
+        # cleared first, so a `difference_cleared` emitted from here (and
+        # any re-entrant `set_difference_index` it triggers) finds
+        # `current_radargram()`'s own `self._key is None` check and
+        # returns cleanly -- no re-entrant render to guard against here,
+        # unlike `_open`'s ordering.
         self._key = None
+        was_diff = self._difference_index >= 0
+        self._difference_index = -1
+        self.difference_label.setText("")
         try:
             self._clear_view_only()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the profile view: {exc}", Qgis.MessageLevel.Critical)
+        if was_diff:
+            self.difference_cleared.emit()
 
     def _clear_view_only(self) -> None:
         self.image = None
@@ -353,6 +367,21 @@ class ProfileDock(QgsDockWidget):
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
+        # `_open` and `current_radargram`'s except branch both already
+        # set `_difference_index = -1` themselves before emitting
+        # `difference_cleared`, which routes back here (via `diff_button`
+        # unchecking itself and re-emitting `difference_toggled(-1)`) --
+        # so that re-entrant call always arrives with the index unchanged.
+        # Without this early-out, it re-rendered anyway: on an ordinary
+        # line switch that alone re-rendered the OLD line one extra time
+        # (a fresh RadargramImage, set_axes, set_image) before `_open`
+        # went on to replace it, pure wasted work: and once the session
+        # closes mid-switch, that re-entrant render runs against a stack
+        # whose site is already gone, so it always raised and always got
+        # logged Critical for an ordinary File > Close -- noise, not a
+        # real failure, which is exactly what Critical is not for.
+        if index == self._difference_index:
+            return
         self._difference_index = index
         try:
             self._render()
@@ -369,24 +398,39 @@ class ProfileDock(QgsDockWidget):
             if self._difference_index >= 0:
                 return stack.difference(self._difference_index)
             return stack.result()
-        except (ValueError, IndexError) as exc:
-            # ValueError: the differenced step changes the sample count
-            # (StepStack.difference's own guard). IndexError: the
-            # differenced index no longer exists at all -- StepStack.
-            # difference/intermediate both raise it for an out-of-range
-            # index (stack.py), which is exactly what applying a shorter
-            # preset, or removing the differenced step, produces. Left
-            # uncaught here, it escaped into the render slots' broad
-            # `except Exception`: logged Critical, the image frozen on the
-            # stale render, `diff_button` still checked, and
-            # `difference_label` still naming a step that no longer
-            # exists -- no visible crash, just silently wrong.
-            self.error.emit(str(exc))
-            if self._difference_index >= 0:
-                self._difference_index = -1
-                self.difference_label.setText("")
-                self.difference_cleared.emit()
-            return None
+        except ValueError as exc:
+            # The differenced step changes the sample count
+            # (StepStack.difference's own guard) -- already a
+            # human-facing message, unlike the IndexError sibling below.
+            return self._decline_difference(str(exc))
+        except IndexError:
+            # The differenced index no longer exists at all --
+            # StepStack.difference/intermediate both raise a developer-
+            # facing IndexError for an out-of-range index (stack.py: "step
+            # index 1 out of range (0..0)"), which is exactly what
+            # applying a shorter preset, or removing the differenced
+            # step, produces. Left uncaught here, it escaped into the
+            # render slots' broad `except Exception`: logged Critical,
+            # the image frozen on the stale render, `diff_button` still
+            # checked, and `difference_label` still naming a step that no
+            # longer exists -- no visible crash, just silently wrong. Its
+            # own text is not shown to the user (unlike the ValueError
+            # above): 0-based indices and a raw range are implementation
+            # detail, not something a message bar should say.
+            return self._decline_difference("the differenced step no longer exists in this stack")
+
+    def _decline_difference(self, message: str) -> None:
+        """Report `message` and revert an active difference view: shared
+        by both branches of `current_radargram`'s except clause above, so
+        the reset-clear-emit sequence -- and the `difference_cleared`
+        guard that keeps it a no-op when no difference was showing --
+        cannot drift between them."""
+        self.error.emit(message)
+        if self._difference_index >= 0:
+            self._difference_index = -1
+            self.difference_label.setText("")
+            self.difference_cleared.emit()
+        return None
 
     def _render(self) -> None:
         rg = self.current_radargram()
