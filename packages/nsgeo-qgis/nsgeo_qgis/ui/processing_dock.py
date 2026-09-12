@@ -76,24 +76,33 @@ class ProcessingDock(QgsDockWidget):
         # guard while the outer frame is still mid-rebuild; a counter
         # only reaches zero when the outermost call finishes.
         self._updating = 0
-        # (key, row) `_show_form` last actually displayed. `rebuild()` emits
+        # `_show_form` last actually displayed: the (key, row) it was shown
+        # at, AND the step object identity found there. `rebuild()` emits
         # `step_selected` unconditionally every time it runs, including the
         # echo that comes back from this very form's own commits
         # (`_on_form_committed` -> `session.replace_step` -> `stack_changed`
         # -> `rebuild()`) and the second of `add_step()`'s two emissions
-        # (once from `rebuild()`, once from its own `setCurrentRow`). Rows in
-        # this class only ever change identity in place through that commit
-        # path -- nothing else replaces a step at a fixed index -- so when a
-        # `step_selected(row)` reports the same row this form is already
-        # showing, its content is already exactly what the user has on
-        # screen and `_show_form` skips rebuilding it: rebuilding
-        # unconditionally would call `self.form.clear()` and tear down every
-        # editor, including the very one whose `editingFinished` just fired,
-        # and discard whatever the user has typed into any other field that
-        # has not been committed yet. -2 is a sentinel no real row index is,
-        # so the very first `step_selected` (row -1, nothing open yet) is
-        # never mistaken for an echo.
+        # (once from `rebuild()`, once from its own `setCurrentRow`).
+        # Rebuilding on that echo would call `self.form.clear()` and tear
+        # down every editor, including the very one whose `editingFinished`
+        # just fired, discarding whatever the user has typed into any other
+        # field that has not been committed yet -- so a genuine echo (the
+        # row and the step at it both unchanged) must be a no-op.
+        #
+        # (key, row) alone is NOT enough: it cannot distinguish "same row,
+        # same step" (an echo) from "same row, a *different* step now sits
+        # there" (a real change this form must show) -- e.g. removing the
+        # row above the selection, or an insert at/above it, both leave
+        # `row` unchanged while swapping in a different step underneath.
+        # Comparing the step's object identity as well as its position
+        # fixes that: this project never mutates a step in place (every
+        # edit is `build_step(...)` producing a new instance), so identity
+        # is exactly "is this the step whose editors are already on
+        # screen", not merely "is this the same list position". -2 is a
+        # sentinel no real row index is, so the very first `step_selected`
+        # (row -1, nothing open yet) is never mistaken for an echo.
         self._shown: tuple[str | None, int] = (None, -2)
+        self._shown_step: Any = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -221,13 +230,16 @@ class ProcessingDock(QgsDockWidget):
     def _show_form(self, row: int) -> None:
         key = self.key()
         shown = (key, row)
-        if shown == self._shown:
-            return  # an echo of our own commit, or add_step()'s second emit
-        self._shown = shown
         if key is None or row < 0:
+            if shown == self._shown:
+                return  # already showing "nothing"
+            self._shown, self._shown_step = shown, None
             self.form.clear()
             return
         step, _ = self.session.stack_for(key).entries[row]
+        if shown == self._shown and step is self._shown_step:
+            return  # an echo of our own commit, or add_step()'s second emit
+        self._shown, self._shown_step = shown, step
         self.form.set_step(step.name, step.params)
 
     def _on_form_committed(self, params: dict[str, Any]) -> None:
@@ -236,9 +248,22 @@ class ProcessingDock(QgsDockWidget):
         if key is None or row < 0 or self.form.step_name is None:
             return
         current = self.session.stack_for(key).entries[row][0]
+        # Second line of defence: if the row this form is bound to no
+        # longer holds the step the form was built from (it shouldn't,
+        # given `_show_form`'s identity check above, but this is cheap and
+        # turns any residual desync into a no-op instead of corrupting the
+        # wrong step), bail rather than write the new params onto it.
+        if current.name != self.form.step_name:
+            return
         if current.params == params:
             return
-        self.session.replace_step(key, row, build_step(self.form.step_name, **params))
+        new = build_step(self.form.step_name, **params)
+        # Set before replace_step: the stack_changed -> rebuild() ->
+        # step_selected echo this triggers reports this exact object back
+        # to _show_form, which then correctly recognises it as the step
+        # already on screen and skips rebuilding the editors.
+        self._shown_step = new
+        self.session.replace_step(key, row, new)
 
     # ---- list events ------------------------------------------------------
     def _on_item_changed(self, item: QListWidgetItem) -> None:
@@ -320,8 +345,15 @@ class ProcessingDock(QgsDockWidget):
             self.list.setCurrentRow(self.list.count() - 1)
             return
         dialog = self.build_add_dialog(name)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.append_from_dialog(dialog)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.append_from_dialog(dialog)
+        finally:
+            # Parenting (`parent=self` in build_add_dialog) keeps Qt from
+            # segfaulting on a parentless-widget GC, but it also means the
+            # dialog otherwise lives on, hidden, for the dock's whole
+            # lifetime -- every add-step interaction would leak one.
+            dialog.deleteLater()
 
     def remove_selected(self) -> None:
         key = self.key()

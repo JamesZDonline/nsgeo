@@ -10,14 +10,14 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.io.dzt import DztHeader
-from nsgeo.processing import Radargram
+from nsgeo.processing import Radargram, Step, nyquist_mhz
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
 
 from nsgeo_qgis.ui.param_form import ParamForm
 
 
 def header_facts(header: DztHeader) -> str:
-    nyquist = 500.0 / header.dt_ns
+    nyquist = nyquist_mhz(header.dt_ns)
     return (
         f"From this file's header: antenna {header.antenna or '?'} · sample interval "
         f"{header.dt_ns:.4f} ns · Nyquist {nyquist:.0f} MHz · {header.n_samples} samples"
@@ -65,11 +65,18 @@ class AddStepDialog(QDialog):
             probe = self.radargram.replace(data=self.radargram.data[:, :1])
             try:
                 step.apply(probe)
-            except ValueError as exc:
+            except Exception as exc:
+                # Broad on purpose: this is a Qt slot (`edited` -> `_validate`),
+                # and a step's `apply` is arbitrary third-party-shaped code we
+                # do not control the exception types of. Catching only
+                # ValueError would let anything else propagate out of a slot,
+                # where PyQt swallows it to stderr and leaves `ok_button`
+                # exactly as it was before -- possibly enabled, on a step that
+                # cannot actually run.
                 self.form.message.setText(str(exc))
                 self.ok_button.setEnabled(False)
                 return
         self.ok_button.setEnabled(True)
 
-    def result_step(self) -> Any:
+    def result_step(self) -> Step | None:
         return self.form.build()

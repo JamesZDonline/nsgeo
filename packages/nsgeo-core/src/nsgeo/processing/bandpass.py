@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
+from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, nyquist_mhz, register
 
 
 @register
@@ -82,7 +82,7 @@ class Bandpass:
         return mask
 
     def apply(self, rg: Radargram) -> Radargram:
-        nyquist_mhz = 500.0 / rg.dt_ns  # (1 / (2 * dt_ns * 1e-9)) / 1e6
+        nyquist = nyquist_mhz(rg.dt_ns)
         if self.taper_frac < 0:
             raise ValueError(
                 f"taper_frac must be >= 0, got {self.taper_frac}; a negative taper is a brick "
@@ -92,10 +92,10 @@ class Bandpass:
             raise ValueError(f"low_mhz must be >= 0, got {self.low_mhz}")
         if self.low_mhz >= self.high_mhz:
             raise ValueError(f"low_mhz ({self.low_mhz}) must be below high_mhz ({self.high_mhz})")
-        if self.high_mhz > nyquist_mhz:
+        if self.high_mhz > nyquist:
             raise ValueError(
                 f"high_mhz ({self.high_mhz}) exceeds the Nyquist frequency "
-                f"({nyquist_mhz:.1f} MHz) for a {rg.dt_ns} ns sample interval"
+                f"({nyquist:.1f} MHz) for a {rg.dt_ns} ns sample interval"
             )
 
         spectrum = np.fft.rfft(rg.data, axis=0)

@@ -56,6 +56,18 @@ class Radargram:
         )
 
 
+def nyquist_mhz(dt_ns: float) -> float:
+    """Nyquist frequency, in MHz, for a sample interval given in ns.
+
+    `1 / (2 * dt_ns * 1e-9)` in Hz, rearranged to take `dt_ns` directly and
+    return MHz: `(1 / (2 * dt_ns * 1e-9)) / 1e6 == 500.0 / dt_ns`. Shared so
+    a front end reporting "this file's Nyquist" (a fact about the header,
+    not a processing step) and `Bandpass.apply`'s own guard use the same
+    formula rather than risking two copies drifting apart.
+    """
+    return 500.0 / dt_ns
+
+
 class _Required:
     """Sentinel default meaning: the UI must ask; there is no safe value."""
 

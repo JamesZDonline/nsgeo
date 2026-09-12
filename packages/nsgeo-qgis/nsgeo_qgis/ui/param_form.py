@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing import REQUIRED, ParamSpec, build_step, get_step
+from nsgeo.processing import REQUIRED, ParamSpec, Step, build_step, get_step
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QComboBox,
@@ -53,19 +53,30 @@ class ParamForm(QWidget):
         outer.addWidget(self.message)
         self.editors: dict[str, QWidget] = {}
         self._specs: tuple[ParamSpec, ...] = ()
-        self._curve_value: Any = None
+        # Keyed by param name, not one shared slot: a step with two
+        # curve-kind params (none exist yet, but the schema allows it)
+        # would otherwise silently overwrite one's value with the other's.
+        self._curve_values: dict[str, Any] = {}
         self.step_name: str | None = None
         self._updating = False
 
     # ---- building ---------------------------------------------------------
     def clear(self) -> None:
-        while self._layout.rowCount():
-            self._layout.removeRow(0)
-        self.editors = {}
-        self._specs = ()
-        self._curve_value = None
-        self.step_name = None
-        self.message.setText("")
+        # Guarded like set_step()'s own build loop: removeRow() destroying a
+        # combo box mid-teardown can fire currentIndexChanged, which is
+        # wired to _on_edited/commit -- without this guard those would run
+        # against a half-cleared self.editors/self._specs.
+        self._updating = True
+        try:
+            while self._layout.rowCount():
+                self._layout.removeRow(0)
+            self.editors = {}
+            self._specs = ()
+            self._curve_values = {}
+            self.step_name = None
+            self.message.setText("")
+        finally:
+            self._updating = False
 
     def set_step(self, name: str, params: dict[str, Any] | None = None) -> None:
         self.clear()
@@ -94,7 +105,7 @@ class ParamForm(QWidget):
             combo.currentIndexChanged.connect(self.commit)
             return combo
         if spec.kind == "curve":
-            self._curve_value = None if value is REQUIRED else value
+            self._curve_values[spec.name] = None if value is REQUIRED else value
             return QLabel("edited in the profile viewer's gain strip")
         edit = QLineEdit()
         if value is REQUIRED:
@@ -114,7 +125,10 @@ class ParamForm(QWidget):
     def set_value(self, name: str, text: str) -> None:
         editor = self.editors[name]
         if isinstance(editor, QComboBox):
-            editor.setCurrentIndex(max(0, editor.findData(text)))
+            index = editor.findData(text)
+            if index < 0:
+                raise ValueError(f"{text!r} is not one of this field's choices")
+            editor.setCurrentIndex(index)
         elif isinstance(editor, QLineEdit):
             editor.setText(text)
 
@@ -123,7 +137,7 @@ class ParamForm(QWidget):
             editor = self.editors[spec.name]
             if isinstance(editor, QLineEdit) and not editor.text().strip():
                 return False
-            if spec.kind == "curve" and self._curve_value is None:
+            if spec.kind == "curve" and self._curve_values.get(spec.name) is None:
                 return False
         return True
 
@@ -135,21 +149,42 @@ class ParamForm(QWidget):
                 assert isinstance(editor, QComboBox)
                 out[spec.name] = editor.currentData()
             elif spec.kind == "curve":
-                if self._curve_value is None:
+                curve_value = self._curve_values.get(spec.name)
+                if curve_value is None:
                     raise ValueError(f"{spec.label}: no control points yet")
-                out[spec.name] = self._curve_value
+                out[spec.name] = curve_value
             else:
                 assert isinstance(editor, QLineEdit)
-                text = editor.text().strip().replace(",", ".")
+                text = editor.text().strip()
                 if not text:
                     raise ValueError(f"{spec.label} is required")
-                try:
-                    out[spec.name] = int(text) if spec.kind == "int" else float(text)
-                except ValueError:
-                    raise ValueError(f"{spec.label}: {text!r} is not a number") from None
+                out[spec.name] = self._parse_number(spec, text)
         return out
 
-    def build(self) -> Any:
+    def _parse_number(self, spec: ParamSpec, text: str) -> int | float:
+        # No comma-as-decimal-point guessing: "1,000" and "1,5" cannot be
+        # told apart from the text alone (thousands separator vs. a
+        # European decimal comma), and silently picking one reading is
+        # exactly the kind of guess this form otherwise never makes. A
+        # comma is reported as bad input, same as any other non-numeral.
+        try:
+            if spec.kind == "int":
+                return int(text)
+            return float(text)
+        except ValueError:
+            pass
+        if spec.kind == "int":
+            try:
+                float(text)
+            except ValueError:
+                pass
+            else:
+                # A real number, just not a whole one -- "is not a number"
+                # would be actively wrong here.
+                raise ValueError(f"{spec.label} must be a whole number, got {text!r}") from None
+        raise ValueError(f"{spec.label}: {text!r} is not a number") from None
+
+    def build(self) -> Step | None:
         """The step, or None with `message` and `error` set."""
         if self.step_name is None:
             return None

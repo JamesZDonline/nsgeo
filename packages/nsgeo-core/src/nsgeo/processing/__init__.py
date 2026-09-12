@@ -22,6 +22,7 @@ from nsgeo.processing.base import (  # noqa: F401
     build_step,
     default_params,
     get_step,
+    nyquist_mhz,
     register,
     required_params,
 )

@@ -17,6 +17,7 @@ SRC = Path(nsgeo_qgis.__file__).parent
 FORBIDDEN_ROOTS = {"PyQt5", "PyQt6", "PySide2", "PySide6", "matplotlib", "scipy"}
 ALLOWED_FROM_PROCESSING = {
     "StepStack",
+    "Step",
     "build_step",
     "available_steps",
     "get_step",
@@ -25,6 +26,10 @@ ALLOWED_FROM_PROCESSING = {
     "REQUIRED",
     "default_params",
     "required_params",
+    # Pure arithmetic (Nyquist frequency from a sample interval), not signal
+    # processing: shared so the plugin's "this file's Nyquist" fact and
+    # Bandpass's own guard use one formula instead of two that can drift.
+    "nyquist_mhz",
 }
 
 

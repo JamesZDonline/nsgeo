@@ -57,6 +57,86 @@ def test_required_fields_start_blank_and_block_completion(qgis_app):
     assert f.build().params["high_mhz"] == 600.0
 
 
+def test_a_comma_is_reported_not_silently_read_as_a_decimal_point(qgis_app):
+    """`"1,000"` and a European `"1,5"` cannot be told apart from the text
+    alone (thousands separator vs. decimal comma) -- silently converting
+    every comma to a dot would read `"1,000"` as `1.0`, a wrong value with
+    no error at all. A comma is reported as bad input instead, same as any
+    other character `float`/`int` can't parse.
+
+    Fails under a one-line reversion: restoring
+    `.replace(",", ".")` on the stripped text in `_parse_number`'s caller.
+    """
+    f = ParamForm()
+    f.set_step("dewow")
+    errors = []
+    f.error.connect(errors.append)
+    f.set_value("window_ns", "1,000")
+    f.commit()
+    assert errors and "1,000" in errors[0]
+
+
+def test_int_field_reports_a_clearer_message_for_a_non_integer_number(qgis_app):
+    """`int("3.5")` raises `ValueError`, and the old blanket handler
+    reported `"...: '3.5' is not a number"` -- wrong, since 3.5 plainly is
+    a number, just not a whole one.
+
+    Fails under a one-line reversion: removing `_parse_number`'s
+    int-specific `float(text)` probe, falling straight through to the
+    generic "is not a number" message for every failed `int()` call.
+    """
+    f = ParamForm()
+    f.set_step("time_zero")
+    errors = []
+    f.error.connect(errors.append)
+    f.set_value("sample", "3.5")
+    f.commit()
+    assert errors and "whole number" in errors[0].lower()
+
+
+def test_set_value_reports_an_unknown_combo_choice_instead_of_guessing(qgis_app):
+    """`findData()` returns -1 for a choice that isn't in the combo; the
+    old `max(0, -1)` silently landed on index 0 -- the first choice,
+    regardless of whether it was the one asked for.
+
+    Fails under a one-line reversion: restoring
+    `editor.setCurrentIndex(max(0, editor.findData(text)))` in place of
+    the `index < 0` check.
+    """
+    f = ParamForm()
+    f.set_step("time_zero")
+    with pytest.raises(ValueError):
+        f.set_value("mode", "not_a_real_mode")
+
+
+def test_validate_disables_ok_on_any_exception_not_just_valueerror(opened, monkeypatch):
+    """`_validate` runs inside a Qt slot (`form.edited` -> `_validate`), so
+    an exception it doesn't catch is printed to stderr by PyQt and the
+    slot just returns -- `ok_button` is left exactly as it was, and
+    `message` is never updated to say why. `step.apply()` is arbitrary
+    step code with no promise of raising only `ValueError`; force a
+    different exception type to prove the wider catch actually reports it.
+
+    Fails under a one-line reversion: narrowing `except Exception` back to
+    `except ValueError` in `_validate` -- the RuntimeError below then
+    propagates out of the slot instead, `message` stays `""` (never
+    updated), and only the `errors`/message assertion below tells the two
+    apart (`ok_button` was already disabled before this call either way).
+    """
+    from nsgeo.processing.bandpass import Bandpass
+
+    def boom(self: Bandpass, rg: object) -> object:
+        raise RuntimeError("synthetic failure, not a ValueError")
+
+    monkeypatch.setattr(Bandpass, "apply", boom)
+    _, dock, _ = opened
+    dialog = dock.build_add_dialog("bandpass")
+    dialog.form.set_value("low_mhz", "100")
+    dialog.form.set_value("high_mhz", "600")
+    assert not dialog.ok_button.isEnabled()
+    assert "synthetic failure" in dialog.form.message.text()
+
+
 def test_message_label_survives_being_set_twice(qgis_app):
     """`clear()` (called at the top of every `set_step()`) empties every row
     of `QFormLayout` it manages by calling `removeRow(0)` in a loop -- and
@@ -170,8 +250,23 @@ def test_add_step_with_dialog_opens_a_real_modal_and_accepts(opened, drive_dialo
 
 
 def test_add_step_with_dialog_cancel_adds_nothing(opened, drive_dialog):
+    """The stack must stay empty *because* the dialog was rejected, not
+    merely because an unfilled form can't build a step: fill both required
+    fields first (so `result_step()` would return a real, buildable
+    `bandpass` step), then reject. If `add_step_with_dialog` appended the
+    step unconditionally instead of gating on `exec()`'s result, this
+    would fail -- run directly (not merely named): with the driver
+    below and the gate removed from `add_step_with_dialog`,
+    `len(session.stack_for(key))` comes back `1`, not `0`.
+    """
     session, dock, key = opened
-    drive_dialog(QDialog, "exec", lambda dialog: dialog.reject())
+
+    def fill_and_reject(dialog: AddStepDialog) -> None:
+        dialog.form.set_value("low_mhz", "100")
+        dialog.form.set_value("high_mhz", "600")
+        dialog.reject()
+
+    drive_dialog(QDialog, "exec", fill_and_reject)
     dock.add_step_with_dialog("bandpass")
     assert len(session.stack_for(key)) == 0
 
@@ -186,7 +281,10 @@ def test_committing_one_field_does_not_rebuild_the_others(opened):
     replacing it with a fresh widget the user is not focused in.
 
     Fails under a one-line reversion: deleting the
-    `if shown == self._shown: return` early-out in `_show_form`, so every
+    `if shown == self._shown and step is self._shown_step: return`
+    early-out in `_show_form` (both halves -- see
+    `test_removing_the_selected_row_shows_the_step_that_slides_into_it`
+    below for why the `(key, row)` half alone is not enough), so every
     echo rebuilds the row unconditionally.
     """
     session, dock, key = opened
@@ -228,3 +326,35 @@ def test_typing_in_a_field_survives_an_unrelated_stack_change(opened):
 
     assert dock.form.editors["window_ns"] is window_editor
     assert window_editor.text() == "12"
+
+
+def test_removing_the_selected_row_shows_the_step_that_slides_into_it(opened):
+    """The positive complement the two tests above don't cover: a row
+    whose *content* actually changed must still be re-shown, not just a
+    row whose content didn't. `(key, row)` alone cannot tell "same row,
+    same step" (an echo -- the case above) from "same row, a *different*
+    step now sits there": add `dewow` (row 0) and `gain_agc` (row 1),
+    select row 0 (form shows `dewow`), then `remove_selected()` deletes
+    the selected row -- `dewow` -- so `gain_agc` slides up to fill row 0.
+    `currentRow` stays 0 (still a valid index), but the step actually at
+    row 0 is now a different object entirely.
+
+    Fails under a one-line reversion: dropping the `step is
+    self._shown_step` half of `_show_form`'s guard back to comparing
+    `(key, row)` alone -- the form then keeps showing `dewow`'s stale
+    editors over a stack that no longer has a `dewow` step at all, and
+    the next edit through them would silently resurrect `dewow` in place
+    of `gain_agc`.
+    """
+    session, dock, key = opened
+    dock.add_step("dewow")
+    dock.add_step("gain_agc")
+    dock.list.setCurrentRow(0)
+    assert dock.form.step_name == "dewow"
+
+    dock.remove_selected()
+
+    assert [s.name for s, _ in session.stack_for(key).entries] == ["gain_agc"]
+    assert dock.list.currentRow() == 0
+    assert dock.form.step_name == "gain_agc"
+    assert set(dock.form.editors) == {"window_ns", "target", "eps"}
