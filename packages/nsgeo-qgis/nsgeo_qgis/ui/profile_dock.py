@@ -107,6 +107,7 @@ class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
     gain_points_changed = pyqtSignal(list)
+    difference_cleared = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
@@ -355,6 +356,7 @@ class ProfileDock(QgsDockWidget):
             if self._difference_index >= 0:
                 self._difference_index = -1
                 self.difference_label.setText("")
+                self.difference_cleared.emit()
             return None
 
     def _render(self) -> None:

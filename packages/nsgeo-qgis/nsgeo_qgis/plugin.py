@@ -145,6 +145,10 @@ class NsgeoPlugin:
         self.docks.append(self.processing_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
+        self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
+        self.profile_dock.difference_cleared.connect(
+            lambda: self.processing_dock.diff_button.setChecked(False)
+        )
         self.profile_dock.gain_points_changed.connect(self._on_gain_points)
         # ProcessingDock never reacts to line_loaded (only ProfileDock
         # does, to re-render), so a curve step selected before this line's

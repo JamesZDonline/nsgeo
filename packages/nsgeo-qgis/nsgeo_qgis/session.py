@@ -40,6 +40,7 @@ class SiteSession(QObject):
     selection_changed = pyqtSignal(str, int, int)  # (-1, -1) when cleared
     stack_changed = pyqtSignal(str)
     picks_changed = pyqtSignal()
+    presets_changed = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -356,6 +357,30 @@ class SiteSession(QObject):
             self._set_dirty(True)
             self.stack_changed.emit(other)
         return changed
+
+    # ---- presets ----------------------------------------------------------
+    def preset_names(self) -> list[str]:
+        return sorted(self._require_site().presets)
+
+    def save_preset(self, name: str, key: str) -> None:
+        name = name.strip()
+        if not name:
+            raise ValueError("a preset needs a name")
+        self._require_site().presets[name] = self.stack_for(key).to_dicts()
+        self._set_dirty(True)
+        self.presets_changed.emit()
+
+    def apply_preset(self, name: str, key: str) -> None:
+        site = self._require_site()
+        fresh = StepStack.from_dicts(site.presets[name])
+        self._attach_source(key, fresh)
+        site.stacks[key] = fresh
+        self._touch_stack(key)
+
+    def delete_preset(self, name: str) -> None:
+        self._require_site().presets.pop(name, None)
+        self._set_dirty(True)
+        self.presets_changed.emit()
 
     # ---- current line, samples, cursor ------------------------------------
     def open_line(self, key: str) -> None:

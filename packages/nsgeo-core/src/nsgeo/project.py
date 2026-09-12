@@ -153,6 +153,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
+    if site.presets:
+        doc["presets"] = site.presets
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -198,5 +200,14 @@ def load_site(path: str | Path) -> Site:
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
+
+    presets = doc.get("presets", {})
+    for name, dicts in presets.items():
+        try:
+            StepStack.from_dicts(dicts)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
+    site.presets = dict(presets)
+
     site.validate()
     return site

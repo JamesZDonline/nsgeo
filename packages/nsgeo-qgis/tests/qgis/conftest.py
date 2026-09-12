@@ -85,13 +85,13 @@ def _no_unhandled_modals(monkeypatch):
 
     QMessageBox.question()/warning()/information(),
     QFileDialog.getOpenFileName()/getOpenFileNames()/getExistingDirectory(),
-    and QDialog.exec() all block indefinitely under QT_QPA_PLATFORM=offscreen
-    -- there is no window manager to click a button, so a test that
-    triggers one by accident would hang the whole suite rather than fail
-    fast. A test that means to trigger one must use the `answer_modal`
-    fixture (QMessageBox/QFileDialog) or `drive_dialog` fixture
-    (QDialog.exec) below, which override this guard for exactly the call
-    they are told to expect.
+    QInputDialog.getText(), and QDialog.exec() all block indefinitely under
+    QT_QPA_PLATFORM=offscreen -- there is no window manager to click a
+    button, so a test that triggers one by accident would hang the whole
+    suite rather than fail fast. A test that means to trigger one must use
+    the `answer_modal` fixture (QMessageBox/QFileDialog/QInputDialog) or
+    `drive_dialog` fixture (QDialog.exec) below, which override this guard
+    for exactly the call they are told to expect.
 
     Raising is strictly stronger than the alternative of returning some
     default answer: nothing before this asserted that a prompt appeared
@@ -116,7 +116,7 @@ def _no_unhandled_modals(monkeypatch):
     not to call it.
     """
     from qgis.PyQt.QtTest import QTest
-    from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QInputDialog, QMessageBox
 
     def _forbid(cls: type, name: str, reason: str = "unexpected modal") -> None:
         def _raise(*args: object, **kwargs: object) -> None:
@@ -132,6 +132,7 @@ def _no_unhandled_modals(monkeypatch):
         (QFileDialog, "getOpenFileNames"),
         (QFileDialog, "getExistingDirectory"),
         (QDialog, "exec"),
+        (QInputDialog, "getText"),
     ):
         _forbid(cls, name)
     _forbid(

@@ -104,6 +104,11 @@ class Site:
     grids: list[Grid] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
     stacks: dict[str, Any] = field(default_factory=dict)
+    #: Named stacks, saved as (step, params, enabled) dicts -- the same
+    #: shape `StepStack.to_dicts()` produces -- so applying one is a plain
+    #: `StepStack.from_dicts()` with no extra conversion. Keyed by name,
+    #: not by line: unlike `stacks`, a preset is not tied to any one line.
+    presets: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     @property
     def frames(self) -> dict[str, Grid]:

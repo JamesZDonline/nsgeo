@@ -16,6 +16,7 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -61,6 +62,7 @@ def dest_index(start: int, row: int) -> int:
 class ProcessingDock(QgsDockWidget):
     step_selected = pyqtSignal(int)  # -1 when nothing is selected
     add_step_requested = pyqtSignal(str)  # steps with REQUIRED params
+    difference_toggled = pyqtSignal(int)  # -1 when the difference view is off
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Processing", parent)
@@ -129,6 +131,12 @@ class ProcessingDock(QgsDockWidget):
         self.down_button = QPushButton("↓")
         for w in (self.add_button, self.remove_button, self.up_button, self.down_button):
             row.addWidget(w)
+        self.diff_button = QToolButton()
+        self.diff_button.setText("Difference")
+        self.diff_button.setCheckable(True)
+        self.diff_button.setToolTip("Show what the selected step removed instead of the result")
+        row.addWidget(self.diff_button)
+        self.diff_button.toggled.connect(self._emit_difference)
         row.addStretch(1)
         layout.addLayout(row)
 
@@ -148,6 +156,15 @@ class ProcessingDock(QgsDockWidget):
         bottom = QHBoxLayout()
         self.apply_button = QPushButton("Apply to grid…")
         bottom.addWidget(self.apply_button)
+        self.presets_button = QToolButton()
+        self.presets_button.setText("Presets")
+        self.presets_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.presets_menu = QMenu(self.presets_button)
+        self.presets_button.setMenu(self.presets_menu)
+        bottom.addWidget(self.presets_button)
+        session.presets_changed.connect(self._rebuild_presets_menu)
+        session.site_opened.connect(self._rebuild_presets_menu)
+        self._rebuild_presets_menu()
         bottom.addStretch(1)
         layout.addLayout(bottom)
         self.status = QLabel("")
@@ -211,7 +228,7 @@ class ProcessingDock(QgsDockWidget):
         finally:
             self._updating -= 1
         has_line = key is not None
-        for w in (self.add_button, self.apply_button):
+        for w in (self.add_button, self.apply_button, self.presets_button):
             w.setEnabled(has_line)
         self._update_row_buttons()
         self.step_selected.emit(self.list.currentRow())
@@ -226,6 +243,40 @@ class ProcessingDock(QgsDockWidget):
     def _on_stack_changed(self, key: str) -> None:
         if key == self.key():
             self.rebuild()
+
+    # ---- difference ----------------------------------------------------
+    def _emit_difference(self, checked: bool) -> None:
+        self.difference_toggled.emit(self.list.currentRow() if checked else -1)
+
+    # ---- presets ---------------------------------------------------------
+    def _rebuild_presets_menu(self) -> None:
+        self.presets_menu.clear()
+        self.presets_menu.addAction("Save current stack as…", self._save_preset_prompt)
+        names = self.session.preset_names() if self.session.is_open else []
+        if names:
+            self.presets_menu.addSeparator()
+            for name in names:
+                self.presets_menu.addAction(
+                    name, lambda checked=False, n=name: self.apply_preset_named(n)
+                )
+            delete = self.presets_menu.addMenu("Delete")
+            for name in names:
+                delete.addAction(name, lambda checked=False, n=name: self.session.delete_preset(n))
+
+    def _save_preset_prompt(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
+        if ok and name.strip():
+            self.save_preset_named(name)
+
+    def save_preset_named(self, name: str) -> None:
+        key = self.key()
+        if key is not None:
+            self.session.save_preset(name, key)
+
+    def apply_preset_named(self, name: str) -> None:
+        key = self.key()
+        if key is not None:
+            self.session.apply_preset(name, key)
 
     # ---- form ---------------------------------------------------------
     def _show_form(self, row: int) -> None:
@@ -287,6 +338,8 @@ class ProcessingDock(QgsDockWidget):
         if not self._updating:
             self._update_row_buttons()
             self.step_selected.emit(row)
+            if self.diff_button.isChecked():
+                self._emit_difference(True)
 
     def _on_rows_moved(self, _parent: Any, start: int, _end: int, _dest: Any, row: int) -> None:
         if self._updating:
