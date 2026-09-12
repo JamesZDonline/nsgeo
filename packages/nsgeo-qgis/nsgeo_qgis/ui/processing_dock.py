@@ -309,13 +309,31 @@ class ProcessingDock(QgsDockWidget):
         self.list.setCurrentRow(self.list.count() - 1)
 
     def time_axis(self) -> tuple[float, float, int]:
-        """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
-        when loaded, else the header."""
+        """(t0_ns, dt_ns, n_samples) of the input a step appended right now
+        would actually receive: the stack's own `result()` when it
+        evaluates cleanly, so a step already in the stack that changes the
+        axis (`time_zero` crops both `t0_ns` and `n_samples` -- see
+        `nsgeo.processing.timezero`) is accounted for, exactly as the new
+        step's own `apply()` will see it. Only used today to seed a new
+        curve step's identity default (see `add_step_with_dialog`), so the
+        distinction only bites once something ahead of it in the stack
+        changes the sample axis.
+
+        `result()` can raise `ValueError` when some OTHER step already in
+        the stack is misconfigured (a bandpass whose high cut exceeds
+        Nyquist, say) -- that is a problem with that step, not a reason
+        this method should raise too: it falls back to the stack's raw
+        source instead, same as before this method looked at `result()` at
+        all, and to the line's header when nothing has loaded yet."""
         key = self.key()
         assert key is not None
-        source = self.session.stack_for(key).source
-        if source is not None:
-            return source.t0_ns, source.dt_ns, source.n_samples
+        stack = self.session.stack_for(key)
+        if stack.source is not None:
+            try:
+                rg = stack.result()
+            except ValueError:
+                rg = stack.source
+            return rg.t0_ns, rg.dt_ns, rg.n_samples
         h = self.session.line_for_key(key).header
         return h.position_ns, h.dt_ns, h.n_samples
 

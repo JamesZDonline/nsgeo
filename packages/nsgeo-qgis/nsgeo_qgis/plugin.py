@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
+from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog
@@ -97,6 +98,21 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
+        # (key, row) and step identity of the very last step _on_gain_points
+        # itself wrote, mirroring ProcessingDock's own _shown/_shown_step
+        # (see that class's docstring for the general reasoning). Every
+        # session.replace_step here triggers stack_changed -> rebuild() ->
+        # step_selected, which reaches _sync_gain_strip as an echo of our
+        # own edit; without recognising it, that echo would call
+        # show_gain_strip() -> GainStrip.set_points(), which re-sorts by
+        # time -- remapping GainStrip._drag's index to a *different* point
+        # the instant a drag crosses a neighbouring control point's time,
+        # silently overwriting that neighbour instead of the point actually
+        # being dragged (verified directly with a multi-step synthetic
+        # drag). -2 is a sentinel no real row index is, matching
+        # ProcessingDock's own choice.
+        self._gain_echo_pos: tuple[str | None, int] = (None, -2)
+        self._gain_echo_step: Any = None
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
@@ -142,6 +158,9 @@ class NsgeoPlugin:
         self.processing_dock = ProcessingDock(self.session, main)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.processing_dock)
         self.docks.append(self.processing_dock)
+
+        self.processing_dock.step_selected.connect(self._sync_gain_strip)
+        self.profile_dock.gain_points_changed.connect(self._on_gain_points)
 
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
@@ -243,6 +262,61 @@ class NsgeoPlugin:
                     act.setEnabled(is_open)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not update the toolbar: {exc}", Qgis.MessageLevel.Warning)
+
+    @staticmethod
+    def _curve_param_name(step: Any) -> str | None:
+        """The name of a step's curve-kind parameter, if it has one. Decided
+        by the schema's kind, never by the step's name."""
+        for spec in type(step).schema():
+            if spec.kind == "curve":
+                return str(spec.name)
+        return None
+
+    def _sync_gain_strip(self, row: int) -> None:
+        assert self.session is not None and self.profile_dock is not None
+        key = self.session.current_key
+        if key is None or row < 0:
+            self.profile_dock.show_gain_strip(None)
+            return
+        entries = self.session.stack_for(key).entries
+        if row >= len(entries):
+            self.profile_dock.show_gain_strip(None)
+            return
+        step = entries[row][0]
+        # An echo of _on_gain_points' own replace_step (stack_changed ->
+        # ProcessingDock.rebuild() -> this same step_selected), not a real
+        # selection change: see this attribute's own comment in __init__
+        # for why resyncing here would corrupt an in-progress drag.
+        if (key, row) == self._gain_echo_pos and step is self._gain_echo_step:
+            return
+        name = self._curve_param_name(step)
+        self.profile_dock.show_gain_strip(step.params[name] if name else None)
+
+    def _on_gain_points(self, points: list) -> None:
+        assert self.session is not None and self.processing_dock is not None
+        key = self.session.current_key
+        row = self.processing_dock.current_row()
+        if key is None or row < 0:
+            return
+        step = self.session.stack_for(key).entries[row][0]
+        name = self._curve_param_name(step)
+        if name is None:
+            return
+        params = dict(step.params)
+        params[name] = points
+        try:
+            new = build_step(step.name, **params)
+            # Set before replace_step, the same way ProcessingDock._on_form_
+            # committed does for its own form: the stack_changed ->
+            # rebuild() -> step_selected echo this triggers reports this
+            # exact object back to _sync_gain_strip, which then recognises
+            # it as the edit it just made and skips resyncing the strip's
+            # own live points.
+            self._gain_echo_pos, self._gain_echo_step = (key, row), new
+            self.session.replace_step(key, row, new)
+        except ValueError as exc:
+            self._gain_echo_pos, self._gain_echo_step = (None, -2), None
+            self.message(str(exc), Qgis.MessageLevel.Warning)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

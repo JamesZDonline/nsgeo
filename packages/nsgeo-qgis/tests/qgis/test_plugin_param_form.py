@@ -331,6 +331,55 @@ def test_dock_seeds_a_curve_step_with_the_identity(opened):
     assert t0 == pytest.approx(-11.086, abs=1e-3)
 
 
+def test_time_axis_follows_a_preceding_step_that_changes_the_sample_axis(opened):
+    """A `time_zero` step ahead of a new curve step changes both `t0_ns`
+    and `n_samples` (nsgeo.processing.timezero crops the leading rows), so
+    the axis a step appended now will actually run against is the stack's
+    post-crop *result*, not its raw, pre-crop source. Task 18's brief
+    parked exactly this mismatch (a gain_curve seeded on the wrong axis
+    when a time_zero precedes it) as a design decision for this task; this
+    pins the fix directly against ground truth computed independently of
+    `time_axis()` itself: `source.t0_ns + 5 * source.dt_ns`, not a second
+    call to the method under test.
+
+    mode="sample", sample=5 crops exactly 5 rows regardless of the
+    synthetic data's own content, so this does not depend on where a
+    first-break picker would land.
+    """
+    session, dock, key = opened
+    source = session.stack_for(key).source
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    t0, dt, n = dock.time_axis()
+    assert dt == source.dt_ns
+    assert n == source.n_samples - 5
+    assert t0 == pytest.approx(source.t0_ns + 5 * source.dt_ns)
+    # Reverting time_axis() to read stack.source directly (this task's
+    # `ProcessingDock.time_axis` before the fix) would report the RAW,
+    # pre-crop source's own t0 here instead of the cropped one.
+    assert t0 != pytest.approx(source.t0_ns)
+
+
+def test_time_axis_falls_back_to_source_when_evaluating_the_stack_would_raise(opened):
+    """`StepStack.result()` raises `ValueError` when ANY step already in
+    the stack is misconfigured -- a bandpass whose high cut exceeds
+    Nyquist, here (the exact scenario `ProfileDock`'s own docstring names
+    for `current_radargram()`). That is a problem with the bandpass step,
+    not a reason `time_axis()` -- used only to seed a brand-new step's
+    identity default -- should raise too and block adding one: it must
+    fall back to the stack's raw source, exactly as it did before this
+    task looked at `result()` at all.
+    """
+    session, dock, key = opened
+    source = session.stack_for(key).source
+    session.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=5000.0))
+    with pytest.raises(ValueError):
+        session.stack_for(key).result()  # confirms the stack really is broken
+    t0, dt, n = dock.time_axis()
+    assert (t0, dt, n) == (source.t0_ns, source.dt_ns, source.n_samples)
+    dock.add_step_with_dialog("gain_curve")  # must not raise
+    assert [s.name for s, _ in session.stack_for(key).entries] == ["bandpass", "gain_curve"]
+
+
 def test_add_step_with_dialog_opens_a_real_modal_and_accepts(opened, drive_dialog):
     """`add_step_with_dialog` on a step whose REQUIRED params are not all
     curves (`bandpass`, unlike `gain_curve`) opens a real `AddStepDialog`

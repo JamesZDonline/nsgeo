@@ -59,7 +59,8 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.profile_view import ProfileView
+from nsgeo_qgis.ui.gain_strip import GainStrip
+from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 
 
 def velocity_source(session: SiteSession, key: str) -> str:
@@ -105,6 +106,7 @@ def velocity_source(session: SiteSession, key: str) -> str:
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
+    gain_points_changed = pyqtSignal(list)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
@@ -164,9 +166,18 @@ class ProfileDock(QgsDockWidget):
         layout.addLayout(bar)
         # Parented to `body`, which this dock owns via setWidget() below --
         # not a top-level, parentless widget the way a naive test fixture
-        # might build one (see the module docstring).
+        # might build one (see the module docstring). The strip sits beside
+        # the viewer in its own row so both share the same vertical space
+        # and the strip can borrow the viewer's own ViewTransform for its
+        # time axis (see _sync_strip_mapping).
+        viewer_row = QHBoxLayout()
+        viewer_row.setSpacing(0)
         self.view = ProfileView(body)
-        layout.addWidget(self.view, 1)
+        viewer_row.addWidget(self.view, 1)
+        self.gain_strip = GainStrip(body)
+        self.gain_strip.hide()
+        viewer_row.addWidget(self.gain_strip)
+        layout.addLayout(viewer_row, 1)
         self.setWidget(body)
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
@@ -177,6 +188,8 @@ class ProfileDock(QgsDockWidget):
         self.view.trace_hovered.connect(self._hovered)
         self.view.range_selected.connect(self._range_selected)
         self.view.pick_requested.connect(self._pick)
+        self.view.view_changed.connect(self._sync_strip_mapping)
+        self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
 
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
@@ -371,6 +384,22 @@ class ProfileDock(QgsDockWidget):
             entries = self.session.stack_for(self._key).entries
             step_text = f"Difference: {entries[self._difference_index][0].name}"
         self.difference_label.setText(step_text)
+        self._sync_strip_mapping()
+
+    def _sync_strip_mapping(self) -> None:
+        if self.view.transform is not None:
+            self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
+
+    def show_gain_strip(self, points: list[list[float]] | None) -> None:
+        """Show the strip editing `points`, or hide it (`points is None`, the
+        selected step is not a curve, or nothing has rendered yet so there
+        is no axis to share)."""
+        if points is None or self.view.transform is None:
+            self.gain_strip.hide()
+            return
+        self._sync_strip_mapping()
+        self.gain_strip.set_points(points)
+        self.gain_strip.show()
 
     def _refresh_velocity(self, *_: Any) -> None:
         # I4: both halves of this guard matter, even though only the first
