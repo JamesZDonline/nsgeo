@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing import available_steps, build_step, default_params, required_params
+from nsgeo.processing import available_steps, build_step, default_params, get_step, required_params
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -26,7 +27,10 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
+from nsgeo_qgis.ui.param_form import ParamForm
 
 
 def dest_index(start: int, row: int) -> int:
@@ -72,6 +76,24 @@ class ProcessingDock(QgsDockWidget):
         # guard while the outer frame is still mid-rebuild; a counter
         # only reaches zero when the outermost call finishes.
         self._updating = 0
+        # (key, row) `_show_form` last actually displayed. `rebuild()` emits
+        # `step_selected` unconditionally every time it runs, including the
+        # echo that comes back from this very form's own commits
+        # (`_on_form_committed` -> `session.replace_step` -> `stack_changed`
+        # -> `rebuild()`) and the second of `add_step()`'s two emissions
+        # (once from `rebuild()`, once from its own `setCurrentRow`). Rows in
+        # this class only ever change identity in place through that commit
+        # path -- nothing else replaces a step at a fixed index -- so when a
+        # `step_selected(row)` reports the same row this form is already
+        # showing, its content is already exactly what the user has on
+        # screen and `_show_form` skips rebuilding it: rebuilding
+        # unconditionally would call `self.form.clear()` and tear down every
+        # editor, including the very one whose `editingFinished` just fired,
+        # and discard whatever the user has typed into any other field that
+        # has not been committed yet. -2 is a sentinel no real row index is,
+        # so the very first `step_selected` (row -1, nothing open yet) is
+        # never mistaken for an echo.
+        self._shown: tuple[str | None, int] = (None, -2)
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -107,6 +129,11 @@ class ProcessingDock(QgsDockWidget):
 
         self.form_area = QVBoxLayout()
         layout.addLayout(self.form_area)
+        self.form = ParamForm(body)
+        self.form_area.addWidget(self.form)
+        self.form.committed.connect(self._on_form_committed)
+        self.step_selected.connect(self._show_form)
+        self.add_step_requested.connect(self.add_step_with_dialog)
 
         bottom = QHBoxLayout()
         self.apply_button = QPushButton("Apply to grid…")
@@ -190,6 +217,29 @@ class ProcessingDock(QgsDockWidget):
         if key == self.key():
             self.rebuild()
 
+    # ---- form ---------------------------------------------------------
+    def _show_form(self, row: int) -> None:
+        key = self.key()
+        shown = (key, row)
+        if shown == self._shown:
+            return  # an echo of our own commit, or add_step()'s second emit
+        self._shown = shown
+        if key is None or row < 0:
+            self.form.clear()
+            return
+        step, _ = self.session.stack_for(key).entries[row]
+        self.form.set_step(step.name, step.params)
+
+    def _on_form_committed(self, params: dict[str, Any]) -> None:
+        key = self.key()
+        row = self.list.currentRow()
+        if key is None or row < 0 or self.form.step_name is None:
+            return
+        current = self.session.stack_for(key).entries[row][0]
+        if current.params == params:
+            return
+        self.session.replace_step(key, row, build_step(self.form.step_name, **params))
+
     # ---- list events ------------------------------------------------------
     def _on_item_changed(self, item: QListWidgetItem) -> None:
         if self._updating:
@@ -227,6 +277,51 @@ class ProcessingDock(QgsDockWidget):
             return
         self.session.append_step(key, build_step(name, **default_params(name)))
         self.list.setCurrentRow(self.list.count() - 1)
+
+    def time_axis(self) -> tuple[float, float, int]:
+        """(t0_ns, dt_ns, n_samples) of the current line: the stack's source
+        when loaded, else the header."""
+        key = self.key()
+        assert key is not None
+        source = self.session.stack_for(key).source
+        if source is not None:
+            return source.t0_ns, source.dt_ns, source.n_samples
+        h = self.session.line_for_key(key).header
+        return h.position_ns, h.dt_ns, h.n_samples
+
+    def build_add_dialog(self, name: str) -> AddStepDialog:
+        key = self.key()
+        assert key is not None
+        line = self.session.line_for_key(key)
+        return AddStepDialog(
+            name, header=line.header, radargram=self.session.stack_for(key).source, parent=self
+        )
+
+    def append_from_dialog(self, dialog: AddStepDialog) -> None:
+        key = self.key()
+        step = dialog.result_step()
+        if key is None or step is None:
+            return
+        self.session.append_step(key, step)
+        self.list.setCurrentRow(self.list.count() - 1)
+
+    def add_step_with_dialog(self, name: str) -> None:
+        key = self.key()
+        if key is None:
+            return
+        specs = get_step(name).schema()
+        required = [s for s in specs if s.required]
+        if required and all(s.kind == "curve" for s in required):
+            # The identity curve is not a guess: seed it and let the strip edit it.
+            t0, dt, n = self.time_axis()
+            params = {s.name: identity_curve(t0, dt, n) for s in required}
+            params.update(default_params(name))
+            self.session.append_step(key, build_step(name, **params))
+            self.list.setCurrentRow(self.list.count() - 1)
+            return
+        dialog = self.build_add_dialog(name)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.append_from_dialog(dialog)
 
     def remove_selected(self) -> None:
         key = self.key()
