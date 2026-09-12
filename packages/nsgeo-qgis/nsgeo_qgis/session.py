@@ -21,7 +21,7 @@ from typing import Any
 from nsgeo.geometry.grid import Grid
 from nsgeo.model.survey import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
-from nsgeo.project import ProjectError, _line_key, load_site, save_site
+from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
@@ -181,9 +181,15 @@ class SiteSession(QObject):
 
     # ---- keys and lookups -------------------------------------------------
     def line_key(self, line: Line) -> str:
+        # The `line_key` called here is `nsgeo.project`'s module-level
+        # function, not this method: a class attribute never shadows a
+        # global inside a method body. Sharing the name is the point --
+        # the session must key by exactly what `save_site` writes and
+        # `load_site` reads back, and there is one function for all three.
+        #
         # Always computable; whether an absolute key may be *saved* is
         # decided in save() via allow_absolute.
-        return _line_key(line.path, self.root, allow_absolute=True)
+        return line_key(line.path, self.root, allow_absolute=True)
 
     def keys(self) -> list[str]:
         self._require_site()

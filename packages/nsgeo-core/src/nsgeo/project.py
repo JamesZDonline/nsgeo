@@ -13,6 +13,7 @@ absolute paths (see `save_site`).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -93,16 +94,51 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
     )
 
 
-def _line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
-    """The string a line is stored and keyed by.
+def line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
+    """The one string a line is stored, keyed and looked up by.
+
+    Save, load and the front end's session all derive their key from this
+    function and from nothing else. That is the whole point of it being
+    public: `save_site` keying by a canonicalised path while `load_site`
+    keyed by the raw stored string agreed only when the stored string was
+    already in canonical form, and where they disagreed the saved
+    processing stack became invisible in the UI and the project could never
+    be saved again.
 
     Relative POSIX when the file is under `root`, which keeps the project
     portable. For a file outside `root`: its absolute POSIX path when
     `allow_absolute` is set, otherwise a ProjectError.
+
+    "Under `root`" is decided lexically first -- `os.path.normpath`, which
+    collapses `.` and `..` without following symlinks -- and only then by
+    `Path.resolve()`. That order is deliberate. A `data/` subdirectory
+    symlinked onto an external disk is an ordinary arrangement when GPR
+    data runs to gigabytes, and resolving first would call such a line
+    out-of-tree: the next plain save is refused outright, and the
+    `allow_absolute` fallback rewrites a deliberately portable
+    `data/L0.DZT` into a path tied to this machine's mount points, which
+    then fails to open anywhere else. Keeping it lexical leaves the stored
+    form exactly as the user wrote it, so a save is also idempotent -- the
+    survey file stays diffable rather than churning its paths.
+
+    The `resolve()` fallback still covers the reverse case: a path that
+    reaches inside `root` by a route that is not lexically under it -- a
+    symlinked project directory, or macOS's `/tmp` -> `/private/tmp` --
+    which would otherwise be misread as out of tree.
+
+    `root` is expected to be absolute (every caller passes
+    `json_path.parent.resolve()`); a relative `line_path` is taken against
+    the current directory, as `resolve()` has always done.
     """
-    resolved = Path(line_path).resolve()
+    path = Path(line_path)
+    lexical = Path(os.path.normpath(path if path.is_absolute() else Path.cwd() / path))
     try:
-        return resolved.relative_to(root).as_posix()
+        return lexical.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         if allow_absolute:
             return resolved.as_posix()
@@ -128,7 +164,7 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     lines_data = []
     keys_written: list[str] = []
     for line in site.lines:
-        key = _line_key(line.path, root, allow_absolute=allow_absolute)
+        key = line_key(line.path, root, allow_absolute=allow_absolute)
         keys_written.append(key)
         entry: dict[str, Any] = {
             "path": key,
@@ -183,6 +219,16 @@ def load_site(path: str | Path) -> Site:
             raise ProjectError(
                 f"referenced file does not exist: {dzt} (stored as {entry['path']!r})"
             )
+        # Keyed through `line_key`, not by the raw stored string: the two
+        # agree only when the file already happens to hold the canonical
+        # spelling. A hand-edited "./L0.DZT" -- or a `data/` symlinked onto
+        # an external disk -- otherwise loads a stack under a key no save
+        # and no session lookup will ever compute, which shows the line as
+        # unprocessed and then refuses every later save as an orphan.
+        # `allow_absolute` is not a policy decision here: a project saved
+        # with the out-of-tree opt-in must still load. Whether an absolute
+        # path may be *written* stays `save_site`'s call.
+        key = line_key(dzt, root, allow_absolute=True)
         velocity = None
         if "velocity" in entry:
             try:
@@ -192,7 +238,7 @@ def load_site(path: str | Path) -> Site:
         lines.append(Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity))
         if "stack" in entry:
             try:
-                stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+                stacks[key] = StepStack.from_dicts(entry["stack"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(
                     f"invalid processing stack for line {entry['path']!r}: {exc}"
