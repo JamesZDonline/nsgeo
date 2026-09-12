@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
@@ -39,4 +41,22 @@ def test_invalid_preset_is_a_project_error(tmp_path):
     site.presets["bad"] = [{"step": "no_such_step", "params": {}}]
     save_site(site, out)
     with pytest.raises(ProjectError, match="bad"):
+        load_site(out)
+
+
+def test_malformed_top_level_presets_is_a_project_error(tmp_path):
+    """A hand-edited file can put anything under "presets". A list (or any
+    other non-object) reaching `presets.items()` unchecked would raise a
+    raw AttributeError with no mention of the file or the key -- unlike
+    every other malformed-input case `load_site` handles. This is
+    deliberately a *list*, not a dict with a bad value: the latter is
+    already caught per-preset by `test_invalid_preset_is_a_project_error`
+    above; this is the layer above that."""
+    site = _site(tmp_path)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["presets"] = ["not", "an", "object"]
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="presets"):
         load_site(out)

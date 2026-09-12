@@ -202,6 +202,10 @@ def load_site(path: str | Path) -> Site:
     site.stacks = stacks
 
     presets = doc.get("presets", {})
+    if not isinstance(presets, dict):
+        raise ProjectError(
+            f"{path}: 'presets' must be an object keyed by name, got {type(presets).__name__}"
+        )
     for name, dicts in presets.items():
         try:
             StepStack.from_dicts(dicts)

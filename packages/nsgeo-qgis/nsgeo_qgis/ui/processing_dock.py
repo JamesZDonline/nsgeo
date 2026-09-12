@@ -228,7 +228,7 @@ class ProcessingDock(QgsDockWidget):
         finally:
             self._updating -= 1
         has_line = key is not None
-        for w in (self.add_button, self.apply_button, self.presets_button):
+        for w in (self.add_button, self.apply_button, self.presets_button, self.diff_button):
             w.setEnabled(has_line)
         self._update_row_buttons()
         self.step_selected.emit(self.list.currentRow())
@@ -268,10 +268,26 @@ class ProcessingDock(QgsDockWidget):
         if ok and name.strip():
             self.save_preset_named(name)
 
-    def save_preset_named(self, name: str) -> None:
+    def save_preset_named(self, name: str, confirm: bool = True) -> None:
         key = self.key()
-        if key is not None:
-            self.session.save_preset(name, key)
+        if key is None:
+            return
+        # Same shape as apply_to_grid's own confirm parameter just below:
+        # save_preset() itself has no way to tell "new name" from
+        # "overwrite" apart -- it is a plain dict assignment -- so
+        # unprompted data loss (a preset saved over another one, its old
+        # stack simply gone) is a UI-layer decision, made here rather
+        # than pushed into the pure session.
+        if confirm and name.strip() in self.session.preset_names():
+            answer = QMessageBox.question(
+                self,
+                "Overwrite preset",
+                f"A preset named {name.strip()!r} already exists. Replace it with "
+                "the current stack?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.session.save_preset(name, key)
 
     def apply_preset_named(self, name: str) -> None:
         key = self.key()

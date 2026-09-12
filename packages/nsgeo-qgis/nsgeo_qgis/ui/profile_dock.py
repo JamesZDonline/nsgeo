@@ -31,9 +31,10 @@ tree for the same reason; here it just means "no distance axis, fall back
 to trace index" -- see `_safe_distance`) -- vanish silently.
 
 `current_radargram()` is the one place a *processing* failure (a bad step,
-e.g. a bandpass whose high cut exceeds Nyquist) is turned into the `error`
-signal instead of an exception, so a bad step leaves the previous render
-on screen with a message rather than blanking the view.
+e.g. a bandpass whose high cut exceeds Nyquist, or a difference view whose
+step index no longer exists, or changes the sample count) is turned into
+the `error` signal instead of an exception, so a bad step leaves the
+previous render on screen with a message rather than blanking the view.
 """
 
 from __future__ import annotations
@@ -245,9 +246,26 @@ class ProfileDock(QgsDockWidget):
             )
 
     def _open(self, key: str) -> None:
-        self._key = key or None
+        # Opening ANY line -- including re-opening the same one, or none at
+        # all -- always leaves the difference view off: the previous line's
+        # step index means nothing on a different stack. Emitted only when
+        # a difference view was actually showing (matches the symmetric
+        # guard in current_radargram()'s except branch below), and before
+        # `self._key` changes, so `diff_button`'s own uncheck -- routed
+        # through `difference_toggled` back into `set_difference_index` --
+        # still resolves against the line that was just showing a
+        # difference, not whatever `key` is about to become. Left
+        # unemitted (as before this fix), `diff_button` stayed checked
+        # across a line switch while the view underneath had already gone
+        # back to `result()`: the button claimed a mode that was off, and
+        # the very next stack_changed re-armed it against a step index
+        # that could belong to an entirely different stack.
+        was_diff = self._difference_index >= 0
         self._difference_index = -1
         self.difference_label.setText("")
+        if was_diff:
+            self.difference_cleared.emit()
+        self._key = key or None
         if not key:
             self._clear_view_only()
             return
@@ -351,7 +369,18 @@ class ProfileDock(QgsDockWidget):
             if self._difference_index >= 0:
                 return stack.difference(self._difference_index)
             return stack.result()
-        except ValueError as exc:
+        except (ValueError, IndexError) as exc:
+            # ValueError: the differenced step changes the sample count
+            # (StepStack.difference's own guard). IndexError: the
+            # differenced index no longer exists at all -- StepStack.
+            # difference/intermediate both raise it for an out-of-range
+            # index (stack.py), which is exactly what applying a shorter
+            # preset, or removing the differenced step, produces. Left
+            # uncaught here, it escaped into the render slots' broad
+            # `except Exception`: logged Critical, the image frozen on the
+            # stale render, `diff_button` still checked, and
+            # `difference_label` still naming a step that no longer
+            # exists -- no visible crash, just silently wrong.
             self.error.emit(str(exc))
             if self._difference_index >= 0:
                 self._difference_index = -1
