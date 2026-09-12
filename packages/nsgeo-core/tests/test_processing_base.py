@@ -10,6 +10,7 @@ from nsgeo.processing.base import (
     available_steps,
     build_step,
     get_step,
+    nyquist_mhz,
     register,
 )
 
@@ -86,6 +87,17 @@ def test_registry_round_trip(clean_registry):
 def test_unknown_step_name_lists_alternatives():
     with pytest.raises(KeyError, match="available"):
         get_step("no_such_step")
+
+
+def test_nyquist_mhz_pins_the_constant():
+    """Every existing call site (the real DZT test fixtures' dt_ns, and
+    Bandpass's own guard against them) happens to still hold for roughly
+    any constant in (130, 1083) substituted for 500.0 -- so those alone
+    pin neither the factor nor the units. A value picked specifically to
+    fail under a wrong constant: 500.0 / 0.2 is 2500.0, not (say) 500 / 0.2
+    rounded, or a units slip of 1/(2*dt_ns) without the 1e-9/1e6 rescale.
+    """
+    assert nyquist_mhz(0.2) == 2500.0
 
 
 def test_running_mean_of_constant_is_constant():

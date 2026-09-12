@@ -4,8 +4,9 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import build_step
+from nsgeo.processing import REQUIRED, ParamSpec, build_step
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui import param_form as param_form_module
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
@@ -105,8 +106,111 @@ def test_set_value_reports_an_unknown_combo_choice_instead_of_guessing(qgis_app)
     """
     f = ParamForm()
     f.set_step("time_zero")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="is not one of this field's choices"):
         f.set_value("mode", "not_a_real_mode")
+
+
+def test_non_finite_float_is_rejected_not_silently_accepted(qgis_app):
+    """`float("nan")`/`float("inf")` succeed in plain Python but are not
+    valid values for a physical parameter: confirmed directly against the
+    real step (not assumed) that `Bandpass(low_mhz=nan, high_mhz=600)`
+    raises nothing at all and produces different, finite, arbitrary
+    output rather than an error -- so the parser, the one place already
+    reporting every other kind of bad input, is the right boundary to
+    refuse it instead of quietly forwarding it into a step.
+
+    Fails under a one-line reversion: removing the `math.isfinite(value)`
+    check from `_parse_number`'s float branch.
+    """
+    f = ParamForm()
+    f.set_step("dewow")
+    errors = []
+    f.error.connect(errors.append)
+    f.set_value("window_ns", "nan")
+    f.commit()
+    assert errors and "finite" in errors[0].lower()
+
+
+def test_non_finite_int_is_rejected_not_silently_accepted(qgis_app):
+    """Same hazard as the float case above, on the `int`-kind path: `int("inf")`
+    fails, but the whole-number probe (`float(text)`) that produces the
+    friendlier "must be a whole number" message also succeeds on `"inf"`
+    -- without a finiteness check there, an `int` field would report the
+    wrong reason (or none) for a non-finite value.
+
+    Fails under a one-line reversion: removing the `math.isfinite(probe)`
+    check from `_parse_number`'s int branch.
+    """
+    f = ParamForm()
+    f.set_step("time_zero")
+    errors = []
+    f.error.connect(errors.append)
+    f.set_value("sample", "inf")
+    f.commit()
+    assert errors and "finite" in errors[0].lower()
+
+
+def test_updating_guard_survives_a_nested_clear(qgis_app):
+    """`ParamForm._updating` is a depth counter, not a bool, matching
+    `ProcessingDock._updating` (Task 16 paid for this exact lesson in that
+    class) for the same reason: `set_step()` calls `clear()` before taking
+    its own guard, so the two are already nested within one call today. A
+    plain set/clear bool would let `clear()`'s own `finally` drop the guard
+    while `set_step()`'s surrounding frame still expects it up. Simulated
+    directly: mark the guard already up (as an outer caller would leave
+    it), run a real `set_step()` through it, and check it is still up
+    afterward.
+
+    Fails under a one-line reversion: changing `self._updating += 1` /
+    `-= 1` back to `= True` / `= False` in `clear()`.
+    """
+    f = ParamForm()
+    f._updating += 1  # simulate: already inside an outer guarded section
+    try:
+        f.set_step("dewow")
+        assert f._updating  # outer guard must still be active
+    finally:
+        f._updating -= 1  # tidy up so a later assertion doesn't see a wedged form
+
+
+def test_curve_values_are_kept_independent_per_parameter(qgis_app, monkeypatch):
+    """`_curve_values` used to be `_curve_value`, a single slot shared by
+    every curve-kind spec -- a step with two curve params (none exist in
+    the real registry today) would silently let the second overwrite the
+    first. Faking a two-curve schema and monkeypatching it into `get_step`
+    *as imported into `param_form.py`'s own module namespace* drives
+    `set_step()`/`values()` end to end without touching the real, global
+    `_REGISTRY` at all (no fake step leaks into `available_steps()` for
+    any other test) -- and `values()` alone is enough to prove
+    independence; nothing here needs a real, buildable step.
+
+    Fails under a one-line reversion: replacing
+    `self._curve_values[spec.name] = ...` with a single shared
+    `self._curve_value = ...`, so the second spec processed overwrites the
+    first's value under both keys.
+    """
+
+    class FakeTwoCurveStep:
+        name = "fake_two_curves"
+
+        @classmethod
+        def schema(cls) -> tuple[ParamSpec, ...]:
+            return (
+                ParamSpec(name="curve_a", kind="curve", label="Curve A", default=REQUIRED),
+                ParamSpec(name="curve_b", kind="curve", label="Curve B", default=REQUIRED),
+            )
+
+    monkeypatch.setattr(param_form_module, "get_step", lambda name: FakeTwoCurveStep)
+
+    f = ParamForm()
+    f.set_step(
+        "fake_two_curves",
+        {"curve_a": [[0.0, 0.0], [1.0, 0.0]], "curve_b": [[0.0, 5.0], [1.0, 5.0]]},
+    )
+    assert f.values() == {
+        "curve_a": [[0.0, 0.0], [1.0, 0.0]],
+        "curve_b": [[0.0, 5.0], [1.0, 5.0]],
+    }
 
 
 def test_validate_disables_ok_on_any_exception_not_just_valueerror(opened, monkeypatch):

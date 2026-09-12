@@ -18,6 +18,7 @@ moment it touches `self.message` again.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from nsgeo.processing import REQUIRED, ParamSpec, Step, build_step, get_step
@@ -58,7 +59,15 @@ class ParamForm(QWidget):
         # would otherwise silently overwrite one's value with the other's.
         self._curve_values: dict[str, Any] = {}
         self.step_name: str | None = None
-        self._updating = False
+        # A depth counter, not a bool (matching ProcessingDock._updating, for
+        # the same reason): set_step() calls clear() before taking its own
+        # guard, so the two are already nested in one call today, and a
+        # plain set/clear flag would let clear()'s own `finally` drop the
+        # guard while set_step()'s surrounding frame still expects it up --
+        # only harmless right now because clear() runs *before* set_step()
+        # takes its guard, not after or during. A counter only reaches zero
+        # when the outermost caller finishes, regardless of ordering.
+        self._updating = 0
 
     # ---- building ---------------------------------------------------------
     def clear(self) -> None:
@@ -66,7 +75,7 @@ class ParamForm(QWidget):
         # combo box mid-teardown can fire currentIndexChanged, which is
         # wired to _on_edited/commit -- without this guard those would run
         # against a half-cleared self.editors/self._specs.
-        self._updating = True
+        self._updating += 1
         try:
             while self._layout.rowCount():
                 self._layout.removeRow(0)
@@ -76,13 +85,13 @@ class ParamForm(QWidget):
             self.step_name = None
             self.message.setText("")
         finally:
-            self._updating = False
+            self._updating -= 1
 
     def set_step(self, name: str, params: dict[str, Any] | None = None) -> None:
         self.clear()
         self.step_name = name
         self._specs = get_step(name).schema()
-        self._updating = True
+        self._updating += 1
         try:
             for spec in self._specs:
                 value = params[spec.name] if params and spec.name in params else spec.default
@@ -92,7 +101,7 @@ class ParamForm(QWidget):
                 editor.setToolTip(spec.help)
                 self._layout.addRow(label, editor)
         finally:
-            self._updating = False
+            self._updating -= 1
 
     def _make_editor(self, spec: ParamSpec, value: Any) -> QWidget:
         if spec.kind == "choice":
@@ -167,22 +176,40 @@ class ParamForm(QWidget):
         # European decimal comma), and silently picking one reading is
         # exactly the kind of guess this form otherwise never makes. A
         # comma is reported as bad input, same as any other non-numeral.
-        try:
-            if spec.kind == "int":
-                return int(text)
-            return float(text)
-        except ValueError:
-            pass
         if spec.kind == "int":
             try:
-                float(text)
+                return int(text)
+            except ValueError:
+                pass
+            try:
+                probe = float(text)
             except ValueError:
                 pass
             else:
+                if not math.isfinite(probe):
+                    # nan/inf/-inf all parse as a "number" via float() but
+                    # are not whole numbers either -- report the more
+                    # useful reason, not "must be a whole number".
+                    raise ValueError(
+                        f"{spec.label} must be a finite number, got {text!r}"
+                    ) from None
                 # A real number, just not a whole one -- "is not a number"
                 # would be actively wrong here.
                 raise ValueError(f"{spec.label} must be a whole number, got {text!r}") from None
-        raise ValueError(f"{spec.label}: {text!r} is not a number") from None
+            raise ValueError(f"{spec.label}: {text!r} is not a number") from None
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError(f"{spec.label}: {text!r} is not a number") from None
+        if not math.isfinite(value):
+            # `float("nan")`/`float("inf")` succeed in Python but are not
+            # valid values for a physical parameter: nan silently slips
+            # past a step's own validation entirely (confirmed directly
+            # against Bandpass: low_mhz=nan raises nothing, and produces
+            # different, finite, arbitrary output rather than an error) --
+            # the parser is the right place to refuse it instead.
+            raise ValueError(f"{spec.label} must be a finite number, got {text!r}") from None
+        return value
 
     def build(self) -> Step | None:
         """The step, or None with `message` and `error` set."""

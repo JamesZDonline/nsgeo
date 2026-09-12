@@ -249,11 +249,16 @@ class ProcessingDock(QgsDockWidget):
             return
         current = self.session.stack_for(key).entries[row][0]
         # Second line of defence: if the row this form is bound to no
-        # longer holds the step the form was built from (it shouldn't,
-        # given `_show_form`'s identity check above, but this is cheap and
-        # turns any residual desync into a no-op instead of corrupting the
-        # wrong step), bail rather than write the new params onto it.
-        if current.name != self.form.step_name:
+        # longer holds the exact step object the form was built from (it
+        # shouldn't, given `_show_form`'s identity check above, but this is
+        # cheap and turns any residual desync into a no-op instead of
+        # corrupting the wrong step), bail rather than write the new params
+        # onto it. Identity, not just `.name`: two steps of the same kind
+        # (e.g. `[dewow_a, dewow_b]`, remove row 0) would share a name but
+        # are still the wrong step to overwrite -- `_show_form` keeps
+        # `self._shown_step` in lockstep with what this form displays, so
+        # comparing against that is strictly stronger than comparing names.
+        if current is not self._shown_step:
             return
         if current.params == params:
             return
