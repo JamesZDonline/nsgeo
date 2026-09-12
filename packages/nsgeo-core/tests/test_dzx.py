@@ -56,6 +56,46 @@ def test_missing_sidecar_returns_none(tmp_path):
     assert read_dzx(dzt) is None
 
 
+@pytest.mark.parametrize("on_disk", [".DZX", ".dzx"])
+def test_sidecar_is_named_the_way_the_directory_entry_is(tmp_path, on_disk):
+    """The returned path must name a file that really exists under that name.
+
+    `Path.exists()` is not a case-accurate probe: on macOS APFS and Windows
+    NTFS, `a.DZX`.exists() is True when the entry on disk is `a.dzx`, so a
+    probe-and-return walks away with a spelling nobody's directory listing
+    shows -- and `read_dzx` puts exactly that spelling in front of the user
+    when a sidecar is malformed. Matching against `iterdir()` is
+    case-sensitive in Python everywhere, so this holds on every platform.
+
+    Both parameters pass on Linux today only because its filesystem is
+    case-sensitive; on macOS the `.dzx` leg is the one that was failing CI.
+    """
+    dzt = tmp_path / "a.dzt"
+    dzt.write_bytes(b"")
+    side = tmp_path / f"a{on_disk}"
+    side.write_text(XML)
+
+    found = sidecar_for(dzt)
+    assert found is not None
+    assert found.name in {entry.name for entry in tmp_path.iterdir()}
+    assert found.name == side.name
+
+
+def test_uppercase_sidecar_wins_when_both_spellings_exist(tmp_path):
+    """`.DZX` is the GSSI convention, so it is preferred where a
+    case-sensitive filesystem can hold both. (On a case-insensitive one the
+    two writes are the same file, created as `a.DZX`, and the preference is
+    the same answer for a different reason.)"""
+    dzt = tmp_path / "a.dzt"
+    dzt.write_bytes(b"")
+    (tmp_path / "a.DZX").write_text(XML)
+    (tmp_path / "a.dzx").write_text(XML)
+
+    found = sidecar_for(dzt)
+    assert found is not None
+    assert found.name == "a.DZX"
+
+
 def test_path_may_point_at_the_sidecar_itself(tmp_path):
     side = tmp_path / "x.DZX"
     side.write_text(XML)

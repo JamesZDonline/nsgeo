@@ -34,14 +34,38 @@ class DzxInfo:
 
 
 def sidecar_for(path: str | Path) -> Path | None:
-    """The .DZX beside a .DZT (either case), or the path itself if it is one."""
+    """The .DZX beside a .DZT (either case), or the path itself if it is one.
+
+    Matched against the real directory entries rather than probed with
+    `Path.exists()`. On a case-insensitive filesystem -- macOS APFS,
+    Windows NTFS -- `a.DZX`.exists() is True when the entry on disk is
+    actually `a.dzx`, so an exists() probe hands back a path whose spelling
+    is not the file's own. That spelling then escapes into user-facing text
+    (`read_dzx` reports `side.name` when a sidecar is malformed), telling
+    the user about an `a.DZX` their own directory listing does not show.
+    Comparing names against `iterdir()` is case-sensitive in Python on
+    every platform, so the returned path always names a file that is
+    really there under that name.
+
+    `.DZX` is still tried before `.dzx`, so a case-sensitive filesystem
+    holding both prefers the GSSI-conventional spelling. A path that is
+    already a sidecar keeps its own spelling when that is what is on disk,
+    and otherwise falls through to the same two candidates.
+    """
     path = Path(path)
+    parent = path.parent
+    try:
+        names = {entry.name for entry in parent.iterdir()}
+    except OSError:
+        # An unreadable or absent directory holds no sidecar, and a missing
+        # sidecar is normal rather than an error (see the module docstring).
+        return None
+    candidates = (path.with_suffix(".DZX").name, path.with_suffix(".dzx").name)
     if path.suffix.lower() == ".dzx":
-        return path if path.exists() else None
-    for suffix in (".DZX", ".dzx"):
-        candidate = path.with_suffix(suffix)
-        if candidate.exists():
-            return candidate
+        candidates = (path.name, *candidates)
+    for name in candidates:
+        if name in names:
+            return parent / name
     return None
 
 
