@@ -10,7 +10,7 @@ from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
-from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
     QgsCategorizedSymbolRenderer,
@@ -750,3 +750,117 @@ def test_real_files_build_plausible_lines_and_marks(qgis_app, tmp_path):
     finally:
         layers.detach()
         project.clear()
+
+
+def test_renaming_the_site_folder_does_not_orphan_authored_picks(qgis_app, tmp_path, message_log):
+    """Final review, I5, end to end: the pick has to come back.
+
+    The session-level tests pin the path and the adoption; this one is
+    the reason both exist. Author a pick in Site1/, rename the folder to
+    Kavusan2026/ once the fieldwork has a name, reopen -- and read the
+    picks table straight off disk with a fresh QgsVectorLayer rather than
+    through `layers`, so a stale registry could not fake the result.
+    Before the fix `gpkg_path` resolved to a file that did not exist,
+    ensure_tables() created a fresh empty package, and the pick was
+    orphaned under the old filename with no message at all.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    old = tmp_path / "Site1"
+    old.mkdir()
+    session = SiteSession()
+    session.new_site(old)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    line = Line.open(
+        synthetic_dzt(old / "raw", "FILE__001.DZT", n_traces=60),
+        GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__001"),
+    )
+    session.add_lines([line])
+    session.save()
+
+    picks = layers.layers["picks"]
+    feat = QgsFeature(picks.fields())
+    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    feat.setAttribute("line_key", "raw/FILE__001.DZT")
+    feat.setAttribute("note", "an hour of depth picks")
+    ok, _ = picks.dataProvider().addFeatures([feat])
+    assert ok
+    assert layers.feature_count("picks") == 1
+    old_package = session.gpkg_path
+    assert old_package.is_file()
+
+    layers.detach()
+    session.close_site()
+    project.clear()
+
+    new = tmp_path / "Kavusan2026"
+    old.rename(new)
+
+    session2 = SiteSession()
+    layers2 = SiteLayers(session2, project=project)
+    session2.open_site(new / SURVEY_FILE)
+
+    on_disk = QgsVectorLayer(f"{session2.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    rows = list(on_disk.getFeatures())
+    assert len(rows) == 1
+    assert rows[0]["note"] == "an hour of depth picks"
+
+    layers2.detach()
+    project.clear()
+
+
+def test_a_package_written_under_the_old_name_is_adopted_with_its_picks(
+    qgis_app, tmp_path, message_log
+):
+    """Final review, I5, the migration, with a real GeoPackage.
+
+    Every package already written in the field carries the folder name it
+    was created under, which no rule can re-derive once the folder is
+    renamed -- so a site directory holding only `Site1.nsgeo.gpkg` must
+    not come up with an empty picks layer. Simulated exactly: author a
+    pick, rename the package to the pre-fix spelling, rename the folder,
+    reopen. Read back off disk with a fresh QgsVectorLayer, not through
+    `layers`.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    old = tmp_path / "Site1"
+    old.mkdir()
+    session = SiteSession()
+    session.new_site(old)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    session.save()
+
+    picks = layers.layers["picks"]
+    feat = QgsFeature(picks.fields())
+    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    feat.setAttribute("note", "authored before the fix")
+    ok, _ = picks.dataProvider().addFeatures([feat])
+    assert ok
+    package = session.gpkg_path
+    layers.detach()
+    session.close_site()
+    project.clear()
+
+    legacy = old / "Site1.nsgeo.gpkg"  # what a pre-fix package is called
+    package.rename(legacy)
+    new = tmp_path / "Kavusan2026"
+    old.rename(new)
+
+    session2 = SiteSession()
+    layers2 = SiteLayers(session2, project=project)
+    session2.open_site(new / SURVEY_FILE)
+
+    assert not (new / "Site1.nsgeo.gpkg").exists()  # adopted, not copied
+    assert any("Site1.nsgeo.gpkg" in m for m in message_log), message_log
+    on_disk = QgsVectorLayer(f"{session2.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    rows = list(on_disk.getFeatures())
+    assert len(rows) == 1
+    assert rows[0]["note"] == "authored before the fix"
+
+    layers2.detach()
+    project.clear()

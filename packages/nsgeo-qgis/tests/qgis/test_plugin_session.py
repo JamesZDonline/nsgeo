@@ -10,7 +10,7 @@ from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import session as session_module
-from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
 from plugin_testing import synthetic_dzt
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -39,17 +39,116 @@ def session(qgis_app, tmp_path):
     return s
 
 
-def test_new_site_writes_the_survey_file_and_derives_the_gpkg_name(qgis_app, tmp_path):
+def test_new_site_writes_the_survey_file_and_names_the_gpkg_for_the_site(qgis_app, tmp_path):
     s = SiteSession()
     opened = Spy(s.site_opened)
     s.new_site(tmp_path)
     assert (tmp_path / SURVEY_FILE).is_file()
     assert s.site_name == tmp_path.name
-    assert s.gpkg_path == tmp_path / f"{tmp_path.name}.nsgeo.gpkg"
+    # Final review, I5: the package name must NOT be derived from the
+    # folder name -- see test_the_package_name_survives_renaming_the_site
+    # _folder below. site_name stays the folder's, because that is a
+    # display label (the legend group, the survey tree's root) and is
+    # meant to follow a rename.
+    assert s.gpkg_path == tmp_path / GPKG_FILE
+    assert s.gpkg_path.name == "site.nsgeo.gpkg"
     assert s.is_open and not s.dirty
     assert opened.calls == [()]
     with pytest.raises(ProjectError, match="already"):
         s.new_site(tmp_path)
+
+
+def test_the_package_name_survives_renaming_the_site_folder(qgis_app, tmp_path):
+    # Final review, I5: `gpkg_path` used to be root / f"{root.name}.nsgeo
+    # .gpkg". Create the site as Site1/, rename the folder once the
+    # fieldwork has a name, and the package path resolved to a file that
+    # did not exist -- so ensure_tables() built a fresh empty one and
+    # every authored pick was orphaned under the old filename with no
+    # message at all.
+    old = tmp_path / "Site1"
+    old.mkdir()
+    s = SiteSession()
+    s.new_site(old)
+    before = s.gpkg_path.name
+    s.close_site()
+
+    new = tmp_path / "Kavusan2026"
+    old.rename(new)
+    s.open_site(new / SURVEY_FILE)
+
+    assert s.site_name == "Kavusan2026"  # the display label does follow
+    assert s.gpkg_path == new / before  # the package name does not
+
+
+def test_opening_a_site_adopts_a_package_left_under_the_old_folder_name(
+    qgis_app, tmp_path, message_log
+):
+    # The migration path. A package written before this fix is named
+    # after whatever the folder was called then, so a site renamed since
+    # holds e.g. Site1.nsgeo.gpkg in Kavusan2026/ -- a name no rule can
+    # re-derive. Left alone it comes up as an empty picks table with the
+    # user's picks still on disk and nothing saying so.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    legacy = root / "Site1.nsgeo.gpkg"
+    legacy.write_bytes(b"not a real GeoPackage, but a real filename")
+
+    s.open_site(root / SURVEY_FILE)
+
+    assert not legacy.exists()
+    assert s.gpkg_path.is_file()
+    assert s.gpkg_path.read_bytes() == b"not a real GeoPackage, but a real filename"
+    assert any("Site1.nsgeo.gpkg" in m and GPKG_FILE in m for m in message_log)
+
+
+def test_an_old_style_package_is_named_not_adopted_when_the_fixed_name_exists(
+    qgis_app, tmp_path, message_log
+):
+    # Both names present: adopting would have to overwrite a package that
+    # is already the site's, so neither file is touched. The stray is
+    # named in the log rather than ignored -- it may hold picks, and
+    # nothing else would ever mention it.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    (root / GPKG_FILE).write_bytes(b"the site's own package")
+    legacy = root / "Site1.nsgeo.gpkg"
+    legacy.write_bytes(b"an older one, left behind")
+
+    s.open_site(root / SURVEY_FILE)
+
+    assert legacy.read_bytes() == b"an older one, left behind"  # untouched
+    assert s.gpkg_path.read_bytes() == b"the site's own package"  # and so is this
+    assert any("Site1.nsgeo.gpkg" in m for m in message_log)
+
+
+def test_two_old_style_packages_are_reported_rather_than_guessed_between(
+    qgis_app, tmp_path, message_log
+):
+    # Ambiguous: renaming the wrong one is worse than renaming neither,
+    # because the adopted package is the one the site then writes into.
+    # Both are named so the user can pick by hand.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    (root / "Site1.nsgeo.gpkg").write_bytes(b"one")
+    (root / "Trench3.nsgeo.gpkg").write_bytes(b"two")
+
+    s.open_site(root / SURVEY_FILE)
+
+    assert (root / "Site1.nsgeo.gpkg").read_bytes() == b"one"
+    assert (root / "Trench3.nsgeo.gpkg").read_bytes() == b"two"
+    assert not s.gpkg_path.exists()
+    assert any("Site1.nsgeo.gpkg" in m and "Trench3.nsgeo.gpkg" in m for m in message_log), (
+        message_log
+    )
 
 
 def test_grids_and_lines_mark_dirty_and_round_trip(session, tmp_path):

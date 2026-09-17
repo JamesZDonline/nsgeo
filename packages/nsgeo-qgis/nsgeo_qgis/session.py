@@ -23,9 +23,24 @@ from nsgeo.model.survey import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.velocity import VelocityModel, resolve_velocity
+from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 SURVEY_FILE = "survey.nsgeo.json"
+# Fixed, not derived from the folder name. Final review, I5: the survey
+# JSON is deliberately portable -- save_site()'s docstring says the
+# project directory can be moved intact -- and naming the package after
+# the directory broke that for the one table the JSON is not the source
+# of truth for. Renaming Site1/ to Kavusan2026/ once the fieldwork had a
+# name left every authored pick in Site1.nsgeo.gpkg, unreachable and
+# unmentioned. See _adopt_legacy_package() for the packages already
+# written under the old rule.
+GPKG_FILE = "site.nsgeo.gpkg"
+_GPKG_SUFFIX = ".nsgeo.gpkg"
+
+
+def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
+    QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
 class SiteSession(QObject):
@@ -81,7 +96,12 @@ class SiteSession(QObject):
 
     @property
     def gpkg_path(self) -> Path:
-        return self.root / f"{self.site_name}.nsgeo.gpkg"
+        """The site's GeoPackage: one fixed name inside the project
+        directory, deliberately independent of what the directory is
+        called. `site_name` above is a *display* label (the legend group,
+        the survey tree's root) and is meant to follow a rename; this is a
+        file path and must not."""
+        return self.root / GPKG_FILE
 
     @property
     def dirty(self) -> bool:
@@ -148,7 +168,90 @@ class SiteSession(QObject):
         self._current_trace = -1
         self._selection = (-1, -1)
         self._allow_absolute = False
+        self._adopt_legacy_package()
         self._set_dirty(False)
+
+    def _adopt_legacy_package(self) -> None:
+        """Rename a package left under the pre-I5 `<folder>.nsgeo.gpkg`.
+
+        Every package already written in the field carries whatever the
+        folder was called when it was created, and once that folder has
+        been renamed no rule can re-derive the name -- which is the defect
+        itself. So this globs for it rather than guessing: any
+        `*.nsgeo.gpkg` that is not `GPKG_FILE`.
+
+        A rename, never a copy or a delete: nothing here can destroy a
+        package, at worst it leaves one where it was and says so. The
+        three cases are deliberate.
+
+        * One legacy package and no `GPKG_FILE`: adopt it. This is the
+          reported scenario and the only one that gets the picks back.
+        * `GPKG_FILE` already exists: adopting would have to overwrite the
+          site's own package, so nothing is touched -- but the stray is
+          named at Warning, because it may hold picks and nothing else in
+          the UI would ever mention it.
+        * More than one legacy package: do not guess. The adopted one is
+          the file the site then writes into, so picking the wrong one is
+          worse than picking none; both names go to the log at Critical
+          for the user to sort out by hand.
+
+        Runs from `_install()`, i.e. for `new_site()` too. One behaviour
+        rather than two: `new_site()` refuses a folder that already holds
+        a survey file, so a legacy package there belongs to a project
+        whose JSON is gone, and adopting it hands those picks back instead
+        of stranding them beside a fresh empty package.
+
+        The alternative considered and rejected was recording the package
+        filename in the survey JSON. That is `nsgeo.project`'s format --
+        portable, human-readable, and shared with anything else that ever
+        reads a site -- so it would push a QGIS-plugin-private detail into
+        the core's contract, and leave a recorded name that can itself go
+        stale when the file is renamed by hand. A fixed basename cannot.
+        """
+        root = self._root
+        if root is None:
+            return
+        target = root / GPKG_FILE
+        try:
+            legacy = sorted(
+                p for p in root.glob(f"*{_GPKG_SUFFIX}") if p.name != GPKG_FILE and p.is_file()
+            )
+        except OSError as exc:
+            # Opening a site must not fail because its directory could not
+            # be listed; the package itself is created on demand later.
+            _log(f"could not check {root} for an older site package: {exc}")
+            return
+        if not legacy:
+            return
+        names = ", ".join(p.name for p in legacy)
+        if target.exists():
+            _log(
+                f"{root} also holds {names}, which this site does not use; "
+                f"its data is only reachable by renaming it to {GPKG_FILE} by hand"
+            )
+            return
+        if len(legacy) > 1:
+            _log(
+                f"{root} holds more than one older site package ({names}) and none "
+                f"named {GPKG_FILE}; not guessing which one belongs to this site -- "
+                f"rename the right one to {GPKG_FILE} by hand",
+                Qgis.MessageLevel.Critical,
+            )
+            return
+        try:
+            legacy[0].rename(target)
+        except OSError as exc:
+            _log(
+                f"could not rename {legacy[0].name} to {GPKG_FILE}: {exc}; "
+                "this site's picks are in that file and will not be loaded",
+                Qgis.MessageLevel.Critical,
+            )
+            return
+        _log(
+            f"adopted {legacy[0].name} as {GPKG_FILE}: a site package is no longer "
+            "named after its folder, so a renamed folder no longer orphans its picks",
+            Qgis.MessageLevel.Info,
+        )
 
     def save(self, *, allow_absolute: bool | None = None) -> None:
         if allow_absolute is not None:
