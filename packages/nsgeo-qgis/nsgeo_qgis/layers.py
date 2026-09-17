@@ -181,6 +181,7 @@ class SiteLayers(QObject):
 
     def detach(self) -> None:
         if self.layers:
+            self._commit_pending_edits()
             ids = [lyr.id() for lyr in self.layers.values() if not sip.isdeleted(lyr)]
             if ids:
                 self.project.removeMapLayers(ids)
@@ -191,6 +192,90 @@ class SiteLayers(QObject):
                 if parent is not None:
                     parent.removeChildNode(self.group)
             self.group = None
+
+    def _commit_pending_edits(self) -> None:
+        """Save anything still sitting in a layer's edit buffer.
+
+        Final review, I6: `detach()` removed every layer unconditionally,
+        and it runs on `site_closed` -- i.e. on every "Open site..." and
+        on `unload()`. `picks` is deliberately writable (see
+        `ensure_tables`: `setReadOnly(name in DERIVED)`), so a user can
+        toggle editing on it in QGIS today. Verified: a layer with
+        `isEditable()` and `isModified()` true and one buffered feature
+        was destroyed by `removeMapLayers` with no prompt, no signal and
+        no exception -- QGIS's own unsaved-edits prompt lives in the
+        application's layer-removal *action*, not in
+        `QgsProject::removeMapLayers`. Toggle editing, digitise twenty
+        depth picks over an hour, forget "Save Layer Edits", click "Open
+        site...": silently gone.
+
+        Commit rather than refuse-and-report, which the review allowed
+        instead. Refusing would mean keeping a layer bound to a package
+        the session no longer owns, in a legend group `detach()` has
+        already removed, while the next site opens on top of it -- a
+        silent inconsistency traded for a silent loss. And there is no
+        prompt to offer: this is a signal slot with no user in it, and by
+        the time it runs the decision to close has been taken (the survey
+        JSON's own save prompt happens before it, in `new_site`/
+        `open_site`/`unload`). Committing is also the recoverable
+        direction: a pick the user did not want is still visible and
+        deletable, whereas a discarded one is gone.
+
+        Every held layer, not just `picks`, so a future writable table
+        gets this for free. The derived three are `setReadOnly(True)`, so
+        in practice they can never be in this state.
+
+        If the commit fails there is nothing further to do -- the site is
+        closing either way, the same "QGIS cannot be told no here"
+        `unload()`'s prompt already reasons from -- so the one thing that
+        must not happen is silence: it reports at `Critical`, naming the
+        layer and how many edits are being lost.
+        """
+        for name, layer in self.layers.items():
+            try:
+                if sip.isdeleted(layer) or not (layer.isEditable() and layer.isModified()):
+                    continue
+                pending = self._pending_edit_count(layer)
+                if layer.commitChanges():
+                    _log(
+                        f"saved {pending} unsaved edit(s) to {name!r} while closing the site",
+                        Qgis.MessageLevel.Info,
+                    )
+                else:
+                    errors = "; ".join(layer.commitErrors()) or "no reason given"
+                    _log(
+                        f"could not save {pending} unsaved edit(s) to {name!r} "
+                        f"before closing the site; they will be lost: {errors}",
+                        Qgis.MessageLevel.Critical,
+                    )
+            except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+                # detach() is itself a signal slot (site_closed), so an
+                # escape here would be swallowed and the site would half
+                # close. One layer's commit failing must not stop the
+                # others being tried, nor the teardown below.
+                _log(
+                    f"could not save unsaved edit(s) to {name!r} before closing "
+                    f"the site; they will be lost: {exc}",
+                    Qgis.MessageLevel.Critical,
+                )
+
+    @staticmethod
+    def _pending_edit_count(layer: QgsVectorLayer) -> int:
+        """How many buffered edits are about to be committed (or lost).
+
+        Only ever used in a message, so it must not be the thing that
+        raises: a provider with no edit buffer reports 0 rather than
+        breaking the report it exists to fill in.
+        """
+        buf = layer.editBuffer()
+        if buf is None:
+            return 0
+        return (
+            len(buf.addedFeatures())
+            + len(buf.deletedFeatureIds())
+            + len(buf.changedGeometries())
+            + len(buf.changedAttributeValues())
+        )
 
     def crs(self) -> QgsCoordinateReferenceSystem | None:
         site = self.session.site

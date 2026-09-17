@@ -13,6 +13,7 @@ from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
+    Qgis,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -864,3 +865,89 @@ def test_a_package_written_under_the_old_name_is_adopted_with_its_picks(
 
     layers2.detach()
     project.clear()
+
+
+# --- final review, I6: detach() runs on site_closed -- i.e. on every "Open
+# site..." and on unload() -- and called removeMapLayers() unconditionally.
+# `picks` is deliberately writable (setReadOnly(name in DERIVED)), so a
+# layer with isEditable() and isModified() true was destroyed with no
+# prompt, no signal and no exception. QGIS's own unsaved-edits prompt lives
+# in the application's layer-removal *action*, not in
+# QgsProject::removeMapLayers. ---
+
+
+def _buffer_a_pick(layers, note="an hour of depth picks"):
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    feat = QgsFeature(picks.fields())
+    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    feat.setAttribute("line_key", "raw/FILE__001.DZT")
+    feat.setAttribute("note", note)
+    assert picks.addFeature(feat)
+    assert picks.isEditable() and picks.isModified()
+    return picks
+
+
+def test_detach_saves_buffered_pick_edits_rather_than_destroying_them(populated, message_log):
+    session, layers, project = populated
+    _buffer_a_pick(layers)
+    path = session.gpkg_path
+
+    layers.detach()
+
+    # Read back off disk with a fresh layer, not through `layers`: the
+    # registry entry is exactly what detach() just removed, so anything
+    # going through it would prove nothing about the file.
+    on_disk = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    rows = list(on_disk.getFeatures())
+    assert len(rows) == 1
+    assert rows[0]["note"] == "an hour of depth picks"
+    assert any("picks" in m for m in message_log)
+
+
+def test_closing_the_site_saves_buffered_pick_edits(populated):
+    # The reported path, through the real signal: toggle editing,
+    # digitise picks for an hour, forget "Save Layer Edits", click "Open
+    # site..." -- which closes the current site, which is what reaches
+    # detach(). Driven through session.close_site() so the wiring
+    # (site_closed -> detach) is part of what is pinned.
+    session, layers, project = populated
+    _buffer_a_pick(layers, note="closed without saving")
+    path = session.gpkg_path
+
+    session.close_site()
+
+    assert layers.layers == {}  # the site really did close
+    on_disk = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    rows = list(on_disk.getFeatures())
+    assert len(rows) == 1
+    assert rows[0]["note"] == "closed without saving"
+
+
+def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, monkeypatch, qgis_app):
+    # If the commit itself fails there is nothing left to do -- the site
+    # is closing either way, exactly as unload()'s own prompt has no
+    # Cancel -- so the one thing that must not happen is silence.
+    from qgis.core import QgsApplication
+
+    session, layers, project = populated
+    _buffer_a_pick(layers)
+    monkeypatch.setattr(QgsVectorLayer, "commitChanges", lambda self, *a, **kw: False)
+
+    seen: list[tuple[str, int]] = []
+    log = QgsApplication.messageLog()
+
+    def _on_message(msg, tag, level):
+        seen.append((msg, int(level)))
+
+    log.messageReceived.connect(_on_message)
+    try:
+        layers.detach()
+    finally:
+        log.messageReceived.disconnect(_on_message)
+
+    critical = int(Qgis.MessageLevel.Critical)
+    assert any("picks" in msg and "1" in msg and level == critical for msg, level in seen), seen
+    assert layers.layers == {}  # still torn down; the site is closing regardless
