@@ -6,13 +6,14 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+from qgis.PyQt.QtWidgets import QFileDialog, QMenu, QMessageBox
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -512,3 +513,172 @@ def test_open_site_saves_the_old_site_first_when_the_user_chooses_save(
     assert plugin.session.root == (tmp_path / "second").resolve()
     assert _grid_ids_on_disk(tmp_path / "first") == ["A"]
     plugin.unload()
+
+
+# ---- final review, I8: the survey tree's context menu was dead to the
+# suite. `menu.exec` could be replaced with `pass` and all 364 tests
+# passed, so which actions appear for a site, a grid or a line, and the
+# lambda wiring each one to its slot, were unverified -- the same defect
+# class as this branch's own "menu whose entire click path was dead while
+# 22 tests passed", except that here the path was never even entered.
+# Both destructive confirmations survived removal too (364 passed each):
+# every existing test calls remove_line_action/remove_grid_action with
+# confirm=False, which bypasses the gate outright, so answering anything
+# but Yes still removed the line -- and session.remove_line drops the
+# line's processing stack with it. ------------------------------------
+
+
+def _action(menu, text):
+    return next(a for a in menu.actions() if a.text() == text)
+
+
+def _texts(menu):
+    return [a.text() for a in menu.actions() if not a.isSeparator()]
+
+
+def _right_click(dock, item):
+    """Right-click `item` (or empty space, for None) and return the menu
+    that was built for it.
+
+    Goes through the real `customContextMenuRequested` signal rather than
+    calling the slot, so the connection is pinned too; the caller must
+    have installed `answer_modal(QMenu, "exec", None)` first, since this
+    tier forbids the real `QMenu.exec` (it would block forever offscreen).
+    """
+    pos = dock.tree.visualItemRect(item).center() if item is not None else QPoint(0, 10_000)
+    dock.tree.customContextMenuRequested.emit(pos)
+    return dock.context_menu
+
+
+def test_the_context_menu_offers_the_right_actions_for_each_kind_of_item(
+    dock, answer_modal, message_log
+):
+    session, dock = dock
+    exec_calls = answer_modal(QMenu, "exec", None)
+    root = dock.tree.topLevelItem(0)
+    grid_item, line_item = root.child(0), root.child(0).child(0)
+    menu = dock.context_menu
+
+    assert _texts(_right_click(dock, root)) == ["Add grid…"]
+    # Empty space below the tree is the site's menu too -- there is
+    # nowhere else to reach "Add grid…" from when the site has no grids.
+    assert _texts(_right_click(dock, None)) == ["Add grid…"]
+
+    assert _texts(_right_click(dock, grid_item)) == [
+        "Edit grid…",
+        "Import DZT files…",
+        "Set velocity…",
+        "Remove grid",
+    ]
+    assert menu.actions()[-2].isSeparator()  # the destructive one stands apart
+
+    assert _texts(_right_click(dock, line_item)) == [
+        "Open",
+        "Set velocity override…",
+        "Remove line from site",
+    ]
+    assert menu.actions()[-2].isSeparator()
+
+    # exec() was actually reached, at the right place, once per
+    # right-click: replacing it with `pass` leaves the menu built and
+    # correct but never shown, which is exactly how this path stayed dead.
+    assert len(exec_calls) == 4
+    assert exec_calls[-1][0] == (
+        dock.tree.viewport().mapToGlobal(dock.tree.visualItemRect(line_item).center()),
+    )
+    # One menu throughout, not one per right-click (see its comment in
+    # __init__), and nothing was swallowed: _on_context_menu wraps its
+    # whole body in `except Exception -> _log`, so a failure in there --
+    # including this tier's own forbidden-modal AssertionError -- would be
+    # written to the message log instead of reaching this test.
+    assert dock.context_menu is menu
+    assert message_log == []
+
+
+def test_every_context_menu_action_is_wired_to_the_slot_it_names(dock, answer_modal, message_log):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    # Both destructive actions are triggered for real below; No is the
+    # answer, so this test proves the wiring and the next two prove the
+    # gate.
+    questions = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    root = dock.tree.topLevelItem(0)
+    grid_item, line_item = root.child(0), root.child(0).child(0)
+    key = dock.key_of(line_item)
+    fired: list[tuple[str, object]] = []
+    dock.add_grid_requested.connect(lambda: fired.append(("add_grid", None)))
+    dock.edit_grid_requested.connect(lambda g: fired.append(("edit_grid", g)))
+    dock.import_requested.connect(lambda g: fired.append(("import", g)))
+    dock.grid_velocity_requested.connect(lambda g: fired.append(("grid_velocity", g)))
+    dock.line_velocity_requested.connect(lambda k: fired.append(("line_velocity", k)))
+
+    _action(_right_click(dock, root), "Add grid…").trigger()
+    menu = _right_click(dock, grid_item)
+    for text in ("Edit grid…", "Import DZT files…", "Set velocity…", "Remove grid"):
+        _action(menu, text).trigger()
+    menu = _right_click(dock, line_item)
+    for text in ("Open", "Set velocity override…", "Remove line from site"):
+        _action(menu, text).trigger()
+
+    assert fired == [
+        ("add_grid", None),
+        ("edit_grid", "A"),
+        ("import", "A"),
+        ("grid_velocity", "A"),
+        ("line_velocity", key),
+    ]
+    assert session.current_key == key  # "Open" went through _open_line
+    assert len(questions) == 2  # "Remove grid" and "Remove line from site"
+    assert [g.id for g in session.site.grids] == ["A"]
+    assert key in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    assert message_log == []
+
+
+def test_removing_a_line_from_the_menu_takes_no_for_an_answer(dock, answer_modal, message_log):
+    session, dock = dock
+    key = "raw/FILE__001.DZT"
+    session.append_step(key, build_step("dewow"))
+    answer_modal(QMenu, "exec", None)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+
+    _action(_right_click(dock, dock.item_for_key(key)), "Remove line from site").trigger()
+
+    assert len(no) == 1
+    assert key in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    # The stack matters as much as the line: session.remove_line() drops
+    # the line's processing stack with it, and a stack is authored work
+    # that nothing else on disk holds until the next save.
+    assert [entry[0].name for entry in session.stack_for(key).entries] == ["dewow"]
+    assert message_log == []
+
+    # ...and Yes still removes it, so the assertions above are about the
+    # answer rather than about the action never doing anything.
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _action(_right_click(dock, dock.item_for_key(key)), "Remove line from site").trigger()
+    assert len(yes) == 1
+    assert key not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    assert key not in session.site.stacks
+
+
+def test_removing_a_grid_from_the_menu_takes_no_for_an_answer(dock, answer_modal, message_log):
+    session, dock = dock
+    # A grid with no lines in it: remove_grid refuses one that still has
+    # lines for an unrelated reason, which would make "nothing was
+    # removed" true whatever the answer was.
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 1.0, 1.0, "EPSG:32616", 0.5))
+    answer_modal(QMenu, "exec", None)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    b_item = dock.tree.topLevelItem(0).child(1)
+    assert dock.grid_id_of(b_item) == "B"
+
+    _action(_right_click(dock, b_item), "Remove grid").trigger()
+
+    assert len(no) == 1
+    assert [g.id for g in session.site.grids] == ["A", "B"]
+    assert message_log == []
+
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    b_item = dock.tree.topLevelItem(0).child(1)
+    _action(_right_click(dock, b_item), "Remove grid").trigger()
+    assert len(yes) == 1
+    assert [g.id for g in session.site.grids] == ["A"]

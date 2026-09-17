@@ -69,6 +69,20 @@ class SurveyDock(QgsDockWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.itemClicked.connect(self._on_item_clicked)
         self.tree.customContextMenuRequested.connect(self._on_context_menu)
+        # One menu, repopulated per right-click, rather than a fresh
+        # QMenu(self) each time -- the same shape ProcessingDock's
+        # `presets_menu` uses, and for both of its reasons. It is what
+        # makes the menu assertable at all: QMenu.exec() runs a nested
+        # event loop and is forbidden outright in the qgis test tier (it
+        # blocks forever offscreen), so without a handle on the built menu
+        # nothing could check which actions appear for a site, a grid or a
+        # line, or fire one without going through exec. It also stops a
+        # QMenu accumulating per right-click: the old local menu was
+        # parented to this dock and nothing ever deleted it, so one leaked
+        # on every right-click for the dock's whole life. QMenu.clear()
+        # deletes the actions it owns, and there are no submenus here, so
+        # the reuse leaves nothing behind either.
+        self.context_menu = QMenu(self)
         layout.addWidget(self.tree)
         self.status = QLabel(body)
         layout.addWidget(self.status)
@@ -284,7 +298,8 @@ class SurveyDock(QgsDockWidget):
         # remove_grid_action already do; _open_line already does).
         try:
             item = self.tree.itemAt(pos)
-            menu = QMenu(self)
+            menu = self.context_menu
+            menu.clear()
             kind = self.kind_of(item)
             if kind == "site" or item is None:
                 menu.addAction("Add grid…", self.add_grid_requested.emit)
