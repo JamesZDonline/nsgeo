@@ -522,11 +522,18 @@ def test_a_stack_reorder_mid_drag_never_writes_onto_the_step_that_took_the_row(
     dragged curve onto the reordered step exactly as the `Key_Down`
     reproduction does.
 
-    Not reachable by a human today -- reordering needs the pointer the
-    strip has grabbed -- so this is a barrier against a future path, the
-    same kind `test_a_shrunk_point_list_mid_drag_does_not_raise` exists
-    for. `session.move_step` is a real, public session call, driven here
-    exactly as `ProcessingDock`'s own ↑/↓ buttons drive it.
+    Reachable by hand today, by the same focus mechanism as the
+    `Key_Down` reproduction above -- an earlier draft of this docstring
+    said it was not, and the controller disproved it directly. The strip
+    has `focusPolicy() == NoFocus` (0) while `ProcessingDock`'s ↑/↓
+    buttons have `StrongFocus` (11), so pressing the strip never takes
+    the keyboard from a button that already holds it, and a `Key_Space`
+    on the focused ↓ button fires `move_selected(1)` with the drag still
+    live. Probed end to end on the real plugin: stack rows
+    `[[[0,0],[30,10]], [[0,0],[40,-12]]]` came back swapped while
+    `strip._drag` was 1. `session.move_step` is driven directly here
+    rather than through the button only to keep the test's failure
+    pointing at the barrier instead of at Qt's focus handling.
     """
     import nsgeo_qgis
     from nsgeo.processing import build_step
