@@ -56,6 +56,7 @@ from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
@@ -71,6 +72,35 @@ from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
+
+
+def _finish_with_digitise_tool(tool: DigitiseGridTool) -> None:
+    """Release a DigitiseGridTool nobody will use again.
+
+    Final review, I4: `unsetMapTool()` -- all any of the three finalisers
+    below used to do -- frees neither the tool nor the `QgsRubberBand` its
+    constructor handed to the canvas's `QGraphicsScene`, so every
+    "Digitise on map" click left one more of each behind for the life of
+    the QGIS session. `dispose()` takes the band back (see its docstring
+    for why that cannot live in `deactivate()`); `deleteLater()` covers
+    the tool itself, which `QgsMapTool` parents to the canvas.
+
+    Idempotent and safe to call from any of the three finalisers,
+    including more than once for the same tool: `dispose()` is idempotent
+    on its own, and the `sip.isdeleted` guard is what makes a second
+    `deleteLater()` on an already-destroyed C++ object a no-op rather
+    than a RuntimeError out of a signal slot.
+
+    Deliberately does not touch the canvas: `cancelled` is emitted from
+    inside `deactivate()`, i.e. while the canvas is part-way through
+    switching tools, so calling `unsetMapTool()` from there would
+    re-enter it. Each caller unsets the tool itself, where that is the
+    right thing to do.
+    """
+    if sip.isdeleted(tool):
+        return
+    tool.dispose()
+    tool.deleteLater()
 
 
 class NsgeoPlugin:
@@ -639,6 +669,10 @@ class NsgeoPlugin:
                     # band) run without re-triggering show_dialog().
                     tool.blockSignals(True)
                     canvas.unsetMapTool(tool)
+                    # blockSignals() above is exactly why this cannot
+                    # lean on the `cancelled` connection's disposal:
+                    # that signal is suppressed here on purpose.
+                    _finish_with_digitise_tool(tool)
                 # Fix round 1, Finding 3: `dialog` is parented to the
                 # main window and nothing else ever deleted it, so
                 # every grid dialog opened stayed alive (with its full
@@ -704,7 +738,16 @@ class NsgeoPlugin:
                 )
             finally:
                 canvas.unsetMapTool(tool)
+                _finish_with_digitise_tool(tool)
                 show_dialog()
+
+        def cancelled() -> None:
+            # `cancelled` fires from the tool's own deactivate(), by
+            # which point the canvas has already moved off this tool --
+            # so, unlike done() above, there is nothing to unset here,
+            # only the tool and its band to release.
+            _finish_with_digitise_tool(tool)
+            show_dialog()
 
         tool.points_picked.connect(done)
         # A right-click (QGIS's universal "abort this tool" gesture) or
@@ -713,10 +756,10 @@ class NsgeoPlugin:
         # restored the dialog, and the user's only way out was killing
         # QGIS (Task 10 fix round 1, Finding 4). DigitiseGridTool emits
         # `cancelled` from deactivate() for exactly this case, and by
-        # then the canvas has already moved off this tool, so only the
-        # dialog needs restoring here -- unlike `done()` above, which
-        # must still release the tool itself.
-        tool.cancelled.connect(show_dialog)
+        # then the canvas has already moved off this tool, so this path
+        # only restores the dialog and disposes of the tool -- unlike
+        # `done()` above, which must unset the tool from the canvas too.
+        tool.cancelled.connect(cancelled)
         # dialog.hide() here is exactly what a modal exec() could never
         # survive (round 4, Finding 1): hiding the dialog that owns the
         # running exec() loop ends that loop immediately. GridDialog is

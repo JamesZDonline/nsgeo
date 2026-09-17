@@ -1286,3 +1286,131 @@ def test_finished_reports_when_a_different_site_was_opened_under_the_dialog(
     assert item is not None and "different site" in item.text().lower()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
+
+
+def _scene_bands(canvas: Any) -> list:
+    """Every QgsRubberBand currently parked in the canvas's QGraphicsScene.
+
+    Counted off the scene rather than off the tool deliberately: the band
+    is a QgsMapCanvasItem, so the scene -- not the tool, and not Python --
+    is what actually owns it. Dropping the tool's Python reference and
+    collecting proves nothing; only the scene's own item list does.
+    """
+    from qgis.gui import QgsRubberBand
+
+    return [item for item in canvas.scene().items() if isinstance(item, QgsRubberBand)]
+
+
+def test_completed_digitise_picks_do_not_pile_rubber_bands_into_the_scene(
+    fake_iface, tmp_path, answer_modal
+):
+    # Final review, I4: DigitiseGridTool.__init__ builds a
+    # QgsRubberBand(canvas), which the canvas's QGraphicsScene owns.
+    # _start_digitise() builds a fresh tool per attempt and the old code
+    # only ever called unsetMapTool(), which frees neither. Three
+    # digitise attempts left three bands behind -- invisible (reset()
+    # clears their geometry) but exactly the object this file's own
+    # round-1 note implicates in a shutdown segfault "once enough of
+    # them pile up alongside a QgsMapCanvas".
+    import gc
+
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+    baseline = len(_scene_bands(canvas))
+
+    for _ in range(3):
+        dialog = _open(plugin)
+        dialog.digitise_button.click()
+        tool = canvas.mapTool()
+        assert isinstance(tool, DigitiseGridTool)
+        tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
+        tool.canvasClicked.emit(QgsPointXY(2.0, 3.0), Qt.MouseButton.LeftButton)
+        dialog.reject()
+        del tool
+        gc.collect()
+
+    assert len(_scene_bands(canvas)) == baseline
+    plugin.unload()
+
+
+def test_an_aborted_digitise_pick_gives_its_rubber_band_back(fake_iface, tmp_path):
+    # The right-click abort reaches the tool through `cancelled`, not
+    # through done(): a separate finaliser, so it needs the disposal of
+    # its own. Same for a plain map-tool switch, which arrives at the
+    # same signal.
+    import gc
+
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+    baseline = len(_scene_bands(canvas))
+
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    tool = canvas.mapTool()
+    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
+    tool.canvasClicked.emit(QgsPointXY(2.0, 2.0), Qt.MouseButton.RightButton)  # abort
+
+    assert not dialog.isHidden()  # round 1, Finding 4 still holds
+    del tool
+    gc.collect()
+    assert len(_scene_bands(canvas)) == baseline
+
+    dialog.reject()
+    plugin.unload()
+
+
+def test_a_dialog_closed_mid_pick_gives_the_rubber_band_back(fake_iface, tmp_path):
+    # The third finaliser: open_grid_dialog()'s finished() teardown,
+    # which blockSignals(True)s the tool precisely so `cancelled` does
+    # NOT run (round 3, Finding 3) -- so it cannot lean on the cancelled
+    # path's disposal and must do its own.
+    import gc
+
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+    baseline = len(_scene_bands(canvas))
+
+    dialog = _open(plugin)
+    dialog.digitise_button.click()
+    assert isinstance(canvas.mapTool(), DigitiseGridTool)
+    dialog.reject()  # gives up on the pick outright, tool still active
+
+    assert canvas.mapTool() is None
+    gc.collect()
+    assert len(_scene_bands(canvas)) == baseline
+    plugin.unload()
+
+
+def test_a_disposed_digitise_tool_is_disposable_again_and_still_usable(qgis_app, fake_iface):
+    # Disposal has to be idempotent -- more than one finaliser can reach
+    # the same tool -- and it must NOT live in deactivate(), which fires
+    # on every tool switch and leaves the tool legitimately
+    # reactivatable. A tool whose band is gone must therefore still
+    # reset() and take clicks without raising: both touch self._band,
+    # and an exception out of canvasClicked is swallowed by Qt.
+    canvas = fake_iface.mapCanvas()
+    tool = DigitiseGridTool(canvas)
+    assert len(_scene_bands(canvas)) == 1
+
+    tool.dispose()
+    tool.dispose()  # idempotent
+    assert _scene_bands(canvas) == []
+
+    tool.reset()  # must not raise
+    picked = []
+    tool.points_picked.connect(lambda a, b: picked.append((a, b)))
+    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
+    tool.canvasClicked.emit(QgsPointXY(2.0, 3.0), Qt.MouseButton.LeftButton)
+    assert len(picked) == 1  # still a working tool, just without its band
