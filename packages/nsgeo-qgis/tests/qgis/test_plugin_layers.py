@@ -1190,3 +1190,63 @@ def test_a_legacy_package_with_a_hot_journal_is_used_where_it_is_and_adopted_lat
 
     layers3.detach()
     project.clear()
+
+
+def test_discarding_the_site_still_saves_pick_edits_and_the_log_says_why(
+    fake_iface, tmp_path, monkeypatch, answer_modal, message_log
+):
+    """One prompt, two stores -- flagged by the review of I6 vs C4.
+
+    "Save the site before continuing?" is about the survey JSON. Buffered
+    layer edits live in the GeoPackage, and `detach()` commits them
+    (I6) whichever button was pressed -- so a user who answers Discard
+    still gets their picks written. That reads as a contradiction.
+
+    The behaviour is deliberate and unchanged: I6 commits rather than
+    discards because an unwanted pick is visible and deletable while a
+    discarded one is gone, and `detach()` has no user in it to ask. What
+    was missing is that nothing said so. This pins that the log now does.
+    """
+    import nsgeo_qgis
+    from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+
+    project = QgsProject.instance()
+    project.clear()
+    first = tmp_path / "first"
+    first.mkdir()
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(first)
+    plugin.session.add_grid(GRID)  # dirty, and enough for the tables to exist
+    assert plugin.session.dirty
+    package = plugin.session.gpkg_path
+
+    picks = plugin.layers.layers["picks"]
+    assert picks.startEditing()
+    feat = QgsFeature(picks.fields())
+    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    feat.setAttribute("note", "an hour of depth picks")
+    assert picks.addFeature(feat)
+
+    second = tmp_path / "second"
+    second.mkdir()
+    other = SiteSession()
+    other.new_site(second)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        staticmethod(lambda *a, **k: (str(second / SURVEY_FILE), "")),
+    )
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+
+    plugin.open_site()
+
+    assert len(calls) == 1  # the site prompt really was answered Discard
+    on_disk = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert [f["note"] for f in on_disk.getFeatures()] == ["an hour of depth picks"]
+    del on_disk
+    assert any("picks" in m and "save prompt does not cover" in m for m in message_log), message_log
+
+    plugin.unload()
+    project.clear()

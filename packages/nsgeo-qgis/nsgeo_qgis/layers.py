@@ -230,6 +230,21 @@ class SiteLayers(QObject):
         `unload()`'s prompt already reasons from -- so the one thing that
         must not happen is silence: it reports at `Critical`, naming the
         layer and how many edits are being lost.
+
+        One prompt, two stores, and they do not agree -- deliberately.
+        "Save the site before continuing?" (`plugin.save_with_prompt`) is
+        about the survey JSON. Answering **Discard** to it still gets
+        buffered pick edits committed here, because `site_closed` fires
+        either way and this runs on it. That reads as a contradiction and
+        is not one: the prompt's Discard means "do not write my grid and
+        line changes to survey.nsgeo.json", not "throw away the layer I
+        was editing", and the two stores fail in opposite directions --
+        an unwanted pick is visible and deletable, a discarded one is
+        gone. Giving `detach()` a prompt of its own is not available
+        either: it is a signal slot with no user in it, reached after the
+        decision to close has been taken. What was missing was that
+        nothing said so, which is why the success message above spells
+        out that the site's save prompt does not cover layer edits.
         """
         for name, layer in self.layers.items():
             try:
@@ -238,7 +253,9 @@ class SiteLayers(QObject):
                 pending = self._pending_edit_count(layer)
                 if layer.commitChanges():
                     _log(
-                        f"saved {pending} unsaved edit(s) to {name!r} while closing the site",
+                        f"saved {pending} unsaved edit(s) to {name!r} while closing the "
+                        "site; layer edits live in the GeoPackage, not the survey file, "
+                        "so the site's own save prompt does not cover them",
                         Qgis.MessageLevel.Info,
                     )
                 else:
