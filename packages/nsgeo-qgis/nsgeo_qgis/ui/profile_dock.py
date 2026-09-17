@@ -465,15 +465,29 @@ class ProfileDock(QgsDockWidget):
         if self.view.transform is not None:
             self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-    def show_gain_strip(self, points: list[list[float]] | None) -> None:
+    def show_gain_strip(self, points: list[list[float]] | None, owner: Any = None) -> None:
         """Show the strip editing `points`, or hide it (`points is None`, the
         selected step is not a curve, or nothing has rendered yet so there
-        is no axis to share)."""
+        is no axis to share).
+
+        `owner` says whose curve `points` is and goes straight through to
+        `GainStrip.set_points`, which needs it to tell an echo of the
+        strip's own edit (refused mid-drag) from a payload belonging to a
+        different curve (the gesture ends and the payload is accepted) --
+        see the gain strip module docstring's fourth invariant. It is
+        defaulted here, unlike on `set_points` itself, only so the three
+        hide calls need not invent a token for a payload that is never
+        delivered -- the `points is None` branch returns without reaching
+        `set_points` at all. A `None` owner alongside real points would
+        still be honoured, and ends any gesture in progress -- the safe
+        direction: the corrupting one is keeping a gesture alive across a
+        change of curve.
+        """
         if points is None or self.view.transform is None:
             self.gain_strip.hide()
             return
         self._sync_strip_mapping()
-        self.gain_strip.set_points(points)
+        self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
 
     def _refresh_velocity(self, *_: Any) -> None:

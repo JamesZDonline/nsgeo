@@ -4,8 +4,8 @@ Control points are (two-way time ns, gain dB). Vertical position is the
 viewer's own mapping, so a point sits exactly beside the sample it affects.
 Drag to move, double-click to add, right-click to remove (never below two).
 
-Two invariants a drag gesture depends on, both enforced here rather than by
-a caller at a distance:
+Four invariants a drag gesture depends on, all enforced here rather than
+by a caller at a distance:
 
 `set_points` ignores an incoming payload while `_drag is not None`. An
 external caller (this widget's own `points_changed` echoing back through
@@ -53,6 +53,30 @@ buttons()` check at the top of `mouseMoveEvent` is a second, independent
 barrier for the same failure, kept even though `hideEvent` alone would
 suffice, because this specific failure is silent -- a loud one is worth
 fixing once, a silent one is worth two barriers against.
+
+A fourth invariant, and the whole reason `set_points` takes an `owner` at
+all: the first invariant's refusal is right for an echo of this strip's
+own edit and wrong for a payload belonging to a *different* curve, and
+the strip had no way to tell the two apart. So it kept step A's points
+while `plugin.py`'s `_on_gain_points` resolved its write target from
+`processing_dock.current_row()` at write time -- a different source --
+and a row change mid-drag (a plain `Key_Down`: this widget sets no focus
+policy, so pressing it never takes the keyboard from the processing
+list) sent every later move of A's gesture into step B. Reproduced
+directly: B's authored `[[0.0, 0.0], [40.0, -12.0]]` came back as the
+dragged A curve, with no error, no log, no undo, and the strip still
+displaying A -- no visual cue at all -- while `replace_step` dirtied the
+session so the corrupted curve reached `survey.json` on the next save.
+The third invariant's `hideEvent` cannot cover this: a curve -> curve
+change never hides the strip. An `owner` that differs from the one on
+screen therefore *ends* the gesture instead of refusing the payload --
+that drag belongs to a curve that is no longer displayed, nothing will
+deliver its release either, and refusing would leave it live to write
+somewhere it does not belong. The token is opaque here and compared only
+for equality; `plugin.py` decides what makes two curves the same one,
+and re-checks step identity before every write as the matching second
+barrier, the same shape `ProcessingDock._show_form`/`_on_form_committed`
+already use for the parameter form.
 """
 
 from __future__ import annotations
@@ -87,6 +111,9 @@ class GainStrip(QWidget):
         # The db range at the moment the current drag started, or None
         # between gestures: see the module docstring's second invariant.
         self._drag_db_range: tuple[float, float] | None = None
+        # Whose curve is on screen: an opaque token from whoever last
+        # called set_points. See the module docstring's fourth invariant.
+        self._owner: Any = None
 
     # ---- mappings ---------------------------------------------------------
     def set_time_mapping(self, transform: ViewTransform, top_px: float) -> None:
@@ -94,8 +121,27 @@ class GainStrip(QWidget):
         self._top = float(top_px)
         self.update()
 
-    def set_points(self, points: list[list[float]]) -> None:
-        if self._drag is not None:
+    def set_points(self, points: list[list[float]], owner: Any) -> None:
+        """Replace the displayed curve. `owner` says whose curve it is: an
+        opaque token, compared only for equality, that the caller keeps
+        stable for as long as the same curve is being edited.
+
+        Required rather than defaulted, even though `ProfileDock.
+        show_gain_strip` is its only production caller: the two payloads
+        this widget must tell apart (see the module docstring's first and
+        fourth invariants) are distinguished by nothing else, so a caller
+        that forgets to say whose curve it is has no safe answer to fall
+        back on.
+        """
+        if owner != self._owner:
+            # A different curve. The gesture in progress belongs to one
+            # that is no longer on screen and can no longer be delivered a
+            # release, so end it here and accept the payload rather than
+            # refuse it below: see the module docstring's fourth invariant.
+            self._owner = owner
+            self._drag = None
+            self._drag_db_range = None
+        elif self._drag is not None:
             # See the module docstring's first invariant: an external
             # payload arriving mid-drag would re-sort under a fixed index
             # a real drag deliberately does not re-sort until release.

@@ -98,6 +98,16 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
+        # What the gain strip was last given, kept in lockstep with what it
+        # actually displays -- the same shape ProcessingDock keeps
+        # `_shown`/`_shown_step` in for the parameter form. `_gain_owner`
+        # is the opaque token the strip compares (see `_sync_gain_strip`
+        # for why it is (key, row, generation) and not the step itself);
+        # `_gain_step` is the exact object a write must still find at that
+        # row (see `_on_gain_points`).
+        self._gain_owner: tuple[str, int, int] | None = None
+        self._gain_step: Any = None
+        self._gain_generation = 0
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
@@ -287,7 +297,28 @@ class NsgeoPlugin:
             return
         step = entries[row][0]
         name = self._curve_param_name(step)
-        self.profile_dock.show_gain_strip(step.params[name] if name else None)
+        if name is None:
+            self.profile_dock.show_gain_strip(None)
+            return
+        # The owner token the strip compares against the one already on
+        # screen, so it can end a gesture that belongs to a curve no
+        # longer displayed (see the gain strip module docstring's fourth
+        # invariant). It cannot simply be the step object: every move of a
+        # drag replaces the step, so the token has to stay stable across
+        # this strip's *own* edits or the very first move would end its
+        # own gesture. It cannot be (key, row) alone either: a stack
+        # mutation that swaps a different step into the same row leaves
+        # that pair unchanged, and the payload would then be refused
+        # mid-drag while the write target had already moved -- exactly the
+        # failure this fixes, one row along. So: (key, row) plus a
+        # generation bumped whenever a genuinely different step object
+        # arrives. `_on_gain_points` records the object it is about to
+        # write *before* writing it, which is what keeps a drag's own echo
+        # from reading as a different step here.
+        if step is not self._gain_step:
+            self._gain_generation += 1
+        self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
+        self.profile_dock.show_gain_strip(step.params[name], self._gain_owner)
 
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
@@ -309,6 +340,22 @@ class NsgeoPlugin:
         if key is None or row < 0:
             return
         step = self.session.stack_for(key).entries[row][0]
+        # The second barrier against writing one curve onto another. The
+        # first is the strip's own owner check, which ends a gesture whose
+        # curve has left the screen; this one refuses the write itself
+        # unless the selected row still holds the very step object
+        # `_sync_gain_strip` built the strip from. Identity, not name: two
+        # `gain_curve` steps in one stack share a name and are not the
+        # same step. Kept even though the first barrier should make it
+        # unreachable, for the reason the module docstring gives for
+        # `mouseMoveEvent`'s buttons() check -- this failure is silent
+        # (no error, no log, no undo, and the strip goes on displaying the
+        # curve it did not write), and a silent one is worth two barriers.
+        # It is also the only barrier that covers `points_changed` being a
+        # public signal on a public widget: an emit that never came from a
+        # gesture at all never passes through the strip's owner check.
+        if step is not self._gain_step:
+            return
         name = self._curve_param_name(step)
         if name is None:
             return
@@ -323,9 +370,19 @@ class NsgeoPlugin:
             # never made.
             return
         try:
-            self.session.replace_step(key, row, build_step(step.name, **params))
+            new = build_step(step.name, **params)
         except ValueError as exc:
             self.message(str(exc), Qgis.MessageLevel.Warning)
+            return
+        # Recorded before replace_step, exactly as
+        # ProcessingDock._on_form_committed records `_shown_step`: the
+        # stack_changed -> rebuild() -> step_selected echo this triggers
+        # runs synchronously and reports this very object back to
+        # _sync_gain_strip, which must recognise it as the curve already
+        # on screen rather than bump the generation and end the drag that
+        # is still in progress.
+        self._gain_step = new
+        self.session.replace_step(key, row, new)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

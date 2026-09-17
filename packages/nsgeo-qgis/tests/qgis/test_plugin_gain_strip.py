@@ -35,7 +35,7 @@ def strip(qgis_app):
     s.show()
     t = ViewTransform.fit(100, 200, 0.0, 0.5, 600, 300)
     s.set_time_mapping(t, MARGIN_TOP)
-    s.set_points([[0.0, 0.0], [100.0, 20.0]])
+    s.set_points([[0.0, 0.0], [100.0, 20.0]], "fixture")
     yield s
     s.hide()
     s.deleteLater()
@@ -155,14 +155,14 @@ def test_profile_dock_shows_the_strip_only_when_asked(qgis_app, tmp_path):
     session.set_profiles(key, line.load())
     session.open_line(key)
     assert dock.gain_strip.isHidden()
-    dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]])
+    dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]], "curve-A")
     assert not dock.gain_strip.isHidden()
     assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(
         MARGIN_TOP + dock.view.transform.y_of_time(-11.0)
     )
     changed = []
     dock.gain_points_changed.connect(changed.append)
-    dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]])
+    dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]], "curve-A")
     dock.gain_strip.points_changed.emit(dock.gain_strip.points())
     assert changed and changed[0][1][1] == 12.0
     dock.show_gain_strip(None)
@@ -189,7 +189,11 @@ def test_plugin_routes_strip_edits_through_replace_step(fake_iface, tmp_path, an
     plugin.processing_dock.add_step_with_dialog("gain_curve")
     plugin.processing_dock.list.setCurrentRow(1)
     assert not plugin.profile_dock.gain_strip.isHidden()
-    plugin.profile_dock.gain_strip.set_points([[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]])
+    # The owner _sync_gain_strip gave the strip when row 1 was selected:
+    # a payload from the curve already on screen, not from another one.
+    plugin.profile_dock.gain_strip.set_points(
+        [[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]], plugin._gain_owner
+    )
     plugin.profile_dock.gain_strip.points_changed.emit(plugin.profile_dock.gain_strip.points())
     assert s.stack_for(key).entries[1][0].params["points"][1] == [50.0, 6.0]
     plugin.processing_dock.list.setCurrentRow(0)
@@ -403,7 +407,11 @@ def test_reselecting_a_curve_row_after_an_edit_still_shows_the_strip(
     plugin.processing_dock.list.setCurrentRow(1)
     assert not plugin.profile_dock.gain_strip.isHidden()
 
-    plugin.profile_dock.gain_strip.set_points([[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]])
+    # The owner _sync_gain_strip gave the strip when row 1 was selected:
+    # a payload from the curve already on screen, not from another one.
+    plugin.profile_dock.gain_strip.set_points(
+        [[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]], plugin._gain_owner
+    )
     plugin.profile_dock.gain_strip.points_changed.emit(plugin.profile_dock.gain_strip.points())
     assert s.stack_for(key).entries[1][0].params["points"][1] == [50.0, 6.0]
 
@@ -412,6 +420,212 @@ def test_reselecting_a_curve_row_after_an_edit_still_shows_the_strip(
 
     plugin.processing_dock.list.setCurrentRow(1)  # BACK to the same, unchanged gain_curve step
     assert not plugin.profile_dock.gain_strip.isHidden()
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_a_row_change_mid_drag_never_writes_onto_the_newly_selected_step(
+    fake_iface, tmp_path, answer_modal
+):
+    """Fix round 3, Critical 2. `GainStrip.set_points` refused *any*
+    incoming payload while `self._drag is not None` -- right for an echo
+    of the strip's own edit, wrong for a payload belonging to a
+    *different* step, which the strip had no way to tell apart.
+    Meanwhile `NsgeoPlugin._on_gain_points` resolved its write target
+    from `processing_dock.current_row()` at write time, a different
+    source from the one the strip was loaded from. The strip takes no
+    focus (it sets no focus policy, so pressing it never steals the
+    keyboard from the processing list), so a plain arrow key moves the
+    selection onto another row mid-drag -- and when that row also holds a
+    curve step, the strip kept step A's points while every later write
+    went to step B. Reproduced exactly, with a real `Qt.Key_Down`:
+
+        row after Key_Down: 1  hidden: False  drag: 1
+        B before: [[0.0, 0.0], [40.0, -12.0]]
+        B after:  [[0.0, 0.0], [39.067, 6.632]]   <- B's curve replaced by A's
+
+    No error, no log, no undo, and the strip still displayed A, so there
+    was no visual cue either; `replace_step` then dirtied the session and
+    the corrupted curve reached `survey.json` on save. `hideEvent`'s own
+    end-the-gesture rule (the third invariant) cannot cover this: a
+    curve -> curve change never hides the strip.
+    """
+    import nsgeo_qgis
+    from nsgeo.processing import build_step
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    # Two curve steps, so the row change below lands on another curve --
+    # the one case hideEvent cannot catch. Times stay inside this real
+    # line's own visible range (roughly [-11, 100) ns) so nothing is
+    # clamped back onto a neighbour.
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [30.0, 10.0]]))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, -12.0]]))
+    dock = plugin.processing_dock
+    strip = plugin.profile_dock.gain_strip
+    dock.list.setCurrentRow(0)
+    assert not strip.isHidden()
+    b_before = [list(pt) for pt in s.stack_for(key).entries[1][0].params["points"]]
+
+    x = int(strip.x_of_db(10.0))  # the dragged point's dB never changes below
+    press = QPoint(x, int(strip.y_of_time(30.0)))
+    assert strip.handle_at(press) == 1  # step A's second control point
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, press)
+    assert strip._drag == 1
+
+    QTest.keyClick(dock.list, Qt.Key.Key_Down)  # the list still has the keyboard
+    assert dock.current_row() == 1  # step B is selected now, mid-gesture
+
+    for t in (35.0, 45.0, 55.0):
+        _send_move_while_pressed(strip, QPoint(x, int(strip.y_of_time(t))))
+    QTest.mouseRelease(
+        strip,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, int(strip.y_of_time(55.0))),
+    )
+
+    after = s.stack_for(key).entries[1][0].params["points"]
+    assert after == b_before, f"step B's authored curve was overwritten with step A's: {after}"
+    # The gesture ended when the selection left step A, so the moves after
+    # the row change wrote nowhere at all -- not onto A either.
+    assert s.stack_for(key).entries[0][0].params["points"] == [[0.0, 0.0], [30.0, 10.0]]
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_a_stack_reorder_mid_drag_never_writes_onto_the_step_that_took_the_row(
+    fake_iface, tmp_path, answer_modal
+):
+    """Fix round 3, Critical 2, the owner token's generation. The row
+    change above is the reproduction that was reported; it is not the only
+    way a different curve can arrive under a live gesture. A stack
+    mutation that swaps another step into the *same* row leaves `(key,
+    row)` unchanged, so an owner spelled as that pair alone would compare
+    equal, `set_points` would refuse the payload as if it were the
+    strip's own echo, and every later move of the gesture would go to the
+    step that took the row -- the same corruption, one row along, with
+    the plugin-side identity barrier unable to catch it (`_sync_gain_strip`
+    has by then correctly recorded the new step as the one at that row).
+    Verified: with the generation bump removed, this test writes the
+    dragged curve onto the reordered step exactly as the `Key_Down`
+    reproduction does.
+
+    Not reachable by a human today -- reordering needs the pointer the
+    strip has grabbed -- so this is a barrier against a future path, the
+    same kind `test_a_shrunk_point_list_mid_drag_does_not_raise` exists
+    for. `session.move_step` is a real, public session call, driven here
+    exactly as `ProcessingDock`'s own ↑/↓ buttons drive it.
+    """
+    import nsgeo_qgis
+    from nsgeo.processing import build_step
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [30.0, 10.0]]))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, -12.0]]))
+    dock = plugin.processing_dock
+    strip = plugin.profile_dock.gain_strip
+    dock.list.setCurrentRow(0)  # step A
+    assert not strip.isHidden()
+
+    x = int(strip.x_of_db(10.0))
+    press = QPoint(x, int(strip.y_of_time(30.0)))
+    assert strip.handle_at(press) == 1
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, press)
+    assert strip._drag == 1
+
+    s.move_step(key, 0, 1)  # step B takes row 0; the selected row does not move
+    assert dock.current_row() == 0
+    assert strip._drag is None  # the gesture ended: its curve is no longer on screen
+    assert strip.points() == [[0.0, 0.0], [40.0, -12.0]]  # B's curve, accepted not refused
+
+    for t in (35.0, 45.0, 55.0):
+        _send_move_while_pressed(strip, QPoint(x, int(strip.y_of_time(t))))
+    QTest.mouseRelease(
+        strip,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, int(strip.y_of_time(55.0))),
+    )
+
+    rows = [e[0].params["points"] for e in s.stack_for(key).entries]
+    assert rows == [[[0.0, 0.0], [40.0, -12.0]], [[0.0, 0.0], [30.0, 10.0]]], rows
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_a_gain_write_is_refused_when_the_row_no_longer_holds_the_strips_step(
+    fake_iface, tmp_path, answer_modal
+):
+    """Fix round 3, Critical 2, second barrier. The first barrier lives in
+    `GainStrip.set_points`: a payload carrying a different owner token
+    ends the gesture instead of being refused, so no later move of that
+    gesture can reach a step that is no longer on screen. This is the
+    matching plugin-side check, the same belt-and-braces shape
+    `ProcessingDock._on_form_committed` already uses against
+    `_shown_step`: before writing, the row must still hold the very step
+    object `_sync_gain_strip` handed the strip. Identity, not name --
+    two `gain_curve` steps in one stack share a name and are not the same
+    step.
+
+    `points_changed` is a public signal on a public widget, and
+    `_gain_step` is plugin state no invariant of this widget protects, so
+    the desync is manufactured here directly (the same way
+    `test_a_shrunk_point_list_mid_drag_does_not_raise` manufactures its
+    own) rather than via a route today's code happens to make
+    unreachable -- the point of a second barrier is that it holds when
+    the first one does not.
+    """
+    import nsgeo_qgis
+    from nsgeo.processing import build_step
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [30.0, 10.0]]))
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, -12.0]]))
+    dock = plugin.processing_dock
+    dock.list.setCurrentRow(1)
+    assert not plugin.profile_dock.gain_strip.isHidden()
+    before = s.stack_for(key).entries[1][0]
+
+    # The strip was built from row 1's step; pretend a desync left the
+    # plugin holding row 0's step instead -- same name, different object.
+    plugin._gain_step = s.stack_for(key).entries[0][0]
+    plugin.profile_dock.gain_points_changed.emit([[0.0, 0.0], [70.0, 21.0]])
+
+    assert s.stack_for(key).entries[1][0] is before  # unchanged object: no replace_step ran
+    assert s.stack_for(key).entries[0][0].params["points"] == [[0.0, 0.0], [30.0, 10.0]]
 
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
@@ -545,7 +759,11 @@ def test_hiding_mid_drag_ends_the_gesture(strip):
 
     assert strip._drag is None
     assert strip._drag_db_range is None
-    strip.set_points([[0.0, 0.0], [50.0, 5.0]])  # must be honoured now, not refused
+    # The fixture's own owner, unchanged: this must be honoured because
+    # hideEvent ended the gesture, not because the payload belongs to a
+    # different curve (the fourth invariant's own route, pinned by
+    # test_a_row_change_mid_drag_never_writes_onto_the_newly_selected_step).
+    strip.set_points([[0.0, 0.0], [50.0, 5.0]], "fixture")  # honoured now, not refused
     assert strip.points() == [[0.0, 0.0], [50.0, 5.0]]
     # This test's own press is deliberately never followed by a real
     # release (that's the whole scenario: nothing delivers one to a
