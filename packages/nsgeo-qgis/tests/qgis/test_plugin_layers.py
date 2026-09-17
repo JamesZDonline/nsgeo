@@ -495,6 +495,108 @@ def test_picks_survive_a_failure_during_the_swap(populated, monkeypatch):
     assert layers.feature_count("picks") == 1
 
 
+# --- final review, C3: the migration's own verification step. The three
+# tests above all inject a failure that *raises*; nothing covered the one
+# failure mode that does not -- a migration that reports success while
+# having written fewer rows than it was given. With the row-count gate
+# disabled the whole qgis tier stayed green (356 passed), and in the field
+# that silence runs straight on into renameVectorTable + dropVectorTable
+# on the original: authored picks, permanently gone. ---------------------
+
+
+class ShortWritingProvider:
+    """A data provider that drops the last feature it is handed and still
+    reports success -- the `addFeatures` returning `ok=True` after a short
+    write that C3 is about.
+
+    Wrapping the one layer rather than patching
+    `QgsVectorDataProvider.addFeatures` on the class: measured directly,
+    calling the unbound `QgsVectorDataProvider.addFeatures(provider, ...)`
+    from a class-level patch does *not* reach the OGR provider's override
+    -- it runs the base-class implementation, which returns False for
+    every provider in the package, so the rebuild would have failed at
+    the `if not ok` branch above the gate and never reached it at all.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def addFeatures(self, features, *args):
+        return self._real.addFeatures(list(features)[:-1], *args)
+
+
+class ShortWritingLayer:
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def dataProvider(self):
+        return ShortWritingProvider(self._real.dataProvider())
+
+
+def test_a_short_migration_refuses_the_swap_rather_than_losing_picks(
+    populated, monkeypatch, message_log
+):
+    """A migration that writes fewer rows than it was handed must be
+    caught by the row-count check, not by whatever raises next.
+
+    `addFeatures` is made to genuinely drop a row and still report
+    success, rather than `featureCount` being made to lie: the count then
+    under-reports because the temporary table really is short, which is
+    the failure the guard exists for and the one that costs data. Faking
+    the count instead would leave a complete migrated table on disk, so
+    the swap it prevents would have been harmless and the test would
+    prove nothing about the consequence.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    feats = []
+    for i, time_ns in enumerate((11.0, 12.0)):
+        f = QgsFeature(picks.fields())
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0 + i, 700.0 + i)))
+        f["line_key"] = f"raw/FILE__00{i + 1}.DZT"
+        f["time_ns"] = time_ns
+        feats.append(f)
+    assert picks.dataProvider().addFeatures(feats)[0]
+
+    real_layer_class = layers_module.QgsVectorLayer
+
+    def only_the_rebuild_table_writes_short(uri, name, provider):
+        layer = real_layer_class(uri, name, provider)
+        return ShortWritingLayer(layer) if name == _PICKS_REBUILD else layer
+
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", only_the_rebuild_table_writes_short)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # ensure_tables() contains a per-table failure (see its own comment),
+    # so the RuntimeError is reported through the log rather than raised
+    # out of the signal -- the count it names is the whole point.
+    assert any("picks migration wrote 1 of 2 rows" in m for m in message_log), message_log
+
+    # The original table was never touched: read it back with a brand-new
+    # QgsVectorLayer rather than through `layers`, in case a failed
+    # rebuild left its registry stale (the same reason
+    # test_picks_survive_a_failure_while_building_the_temporary_table
+    # does it this way).
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"  # unchanged: never rebuilt
+    rows = sorted((f["line_key"], f["time_ns"]) for f in on_disk.getFeatures())
+    assert rows == [
+        ("raw/FILE__001.DZT", pytest.approx(11.0)),
+        ("raw/FILE__002.DZT", pytest.approx(12.0)),
+    ]
+    # The swap never began, so there is no renamed-out original either.
+    backup = QgsVectorLayer(f"{session.gpkg_path}|layername={_PICKS_BACKUP}", _PICKS_BACKUP, "ogr")
+    assert not backup.isValid()
+
+
 # --- fix round 2: an untransformable CRS pair (measured with a projected
 # CRS on Earth and a geographic one on Mars) leaves QgsCoordinateTransform
 # invalid and short-circuited -- both the point- and geometry-based
