@@ -37,6 +37,11 @@ SURVEY_FILE = "survey.nsgeo.json"
 # written under the old rule.
 GPKG_FILE = "site.nsgeo.gpkg"
 _GPKG_SUFFIX = ".nsgeo.gpkg"
+# SQLite finds these by the database's *current* filename, so renaming the
+# database alone orphans them. See _adopt_legacy_package(). `-shm` is not
+# even movable in principle -- it is shared memory backing a live `-wal`,
+# meaningless once detached from it.
+_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -194,6 +199,14 @@ class SiteSession(QObject):
           the file the site then writes into, so picking the wrong one is
           worse than picking none; both names go to the log at Critical
           for the user to sort out by hand.
+        * The package has a hot SQLite journal (`-wal`/`-shm`/`-journal`)
+          beside it: refuse, and say how to clear it. A GeoPackage is a
+          SQLite database and SQLite resolves those from the database's
+          *current* name, so renaming the .gpkg alone orphans them and
+          discards every commit since the last checkpoint. Recoverable,
+          not permanent: opening the package once in any SQLite client and
+          closing it cleanly checkpoints and removes them, and the next
+          open adopts.
 
         Runs from `_install()`, i.e. for `new_site()` too. One behaviour
         rather than two: `new_site()` refuses a folder that already holds
@@ -238,17 +251,41 @@ class SiteSession(QObject):
                 Qgis.MessageLevel.Critical,
             )
             return
+        found = legacy[0]
+        hot = [sfx for sfx in _SQLITE_SIDECARS if found.with_name(found.name + sfx).exists()]
+        if hot:
+            # A GeoPackage is a SQLite database, and SQLite resolves its
+            # journal files from the database's current name. Renaming the
+            # .gpkg alone leaves them behind under the old one, and
+            # everything committed since the last checkpoint goes with
+            # them. Reproduced: a package holding a checkpointed pick and
+            # one uncheckpointed commit came back, after the rename, with
+            # the pick and without the commit -- no error, no warning.
+            # A hot journal persists whenever the last writer did not
+            # close cleanly (a QGIS crash or kill), and this runs
+            # automatically on the first open after upgrade, so adopting
+            # here would let the upgrade destroy the very picks it exists
+            # to rescue.
+            _log(
+                f"{found.name} has {', '.join(found.name + sfx for sfx in hot)} beside it, so "
+                "the process that last wrote it did not close cleanly; renaming a SQLite "
+                "database away from its journal discards everything committed since the "
+                f"last checkpoint. Not adopting it as {GPKG_FILE}. Open {found.name} once "
+                "in QGIS (or any SQLite client) and close it cleanly, then reopen this "
+                "site and it will be adopted."
+            )
+            return
         try:
-            legacy[0].rename(target)
+            found.rename(target)
         except OSError as exc:
             _log(
-                f"could not rename {legacy[0].name} to {GPKG_FILE}: {exc}; "
+                f"could not rename {found.name} to {GPKG_FILE}: {exc}; "
                 "this site's picks are in that file and will not be loaded",
                 Qgis.MessageLevel.Critical,
             )
             return
         _log(
-            f"adopted {legacy[0].name} as {GPKG_FILE}: a site package is no longer "
+            f"adopted {found.name} as {GPKG_FILE}: a site package is no longer "
             "named after its folder, so a renamed folder no longer orphans its picks",
             Qgis.MessageLevel.Info,
         )

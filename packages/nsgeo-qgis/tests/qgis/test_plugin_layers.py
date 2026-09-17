@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import nsgeo_qgis.layers as layers_module
@@ -951,3 +952,119 @@ def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, mon
     critical = int(Qgis.MessageLevel.Critical)
     assert any("picks" in msg and "1" in msg and level == critical for msg, level in seen), seen
     assert layers.layers == {}  # still torn down; the site is closing regardless
+
+
+# --- controller review of I5: _adopt_legacy_package() renamed the .gpkg
+# alone. A SQLite database left by a process that did not close cleanly --
+# a QGIS crash or kill, which is not rare -- keeps a hot `-wal`/`-shm`
+# beside it, and SQLite finds those by the database's *current* name.
+# Renaming the database out from under them silently discards every commit
+# since the last checkpoint. The migration runs automatically on the first
+# open after upgrade, so the upgrade itself could destroy the picks it
+# exists to rescue. ---
+
+_LEAVE_A_HOT_WAL = """
+import os, sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("PRAGMA journal_mode=WAL")
+con.execute("CREATE TABLE uncheckpointed (note TEXT)")
+con.execute("INSERT INTO uncheckpointed VALUES ('the last hour of picks')")
+con.commit()
+os._exit(0)  # killed: no close(), so no checkpoint and the sidecars stay
+"""
+
+
+def _leave_a_hot_wal(package):
+    """Put a real, committed-but-uncheckpointed write into `package`.
+
+    A subprocess, because a hot WAL is by definition what a process that
+    never closed leaves behind: `os._exit` skips SQLite's own cleanup
+    exactly as a `kill -9` does. Plain `sqlite3`, not OGR, so the state is
+    deterministic -- OGR's SyncToDisk checkpoints, and whether sidecars
+    survive a given write path is a driver detail no test should depend on.
+    The write is its own table rather than a row in `picks` only because
+    GeoPackage's rtree triggers need spatialite functions that stock
+    `sqlite3` does not have; what it stands for is the picks authored in
+    the minutes before QGIS was killed.
+    """
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", _LEAVE_A_HOT_WAL, str(package)], check=True)
+    assert package.with_name(package.name + "-wal").exists()
+    assert package.with_name(package.name + "-shm").exists()
+
+
+def _wal_only_rows(package):
+    con = sqlite3.connect(package)
+    try:
+        return [row[0] for row in con.execute("SELECT note FROM uncheckpointed")]
+    except sqlite3.DatabaseError as exc:
+        return f"GONE -- {exc}"
+    finally:
+        # A clean close checkpoints and removes the sidecars, which is
+        # precisely the recovery the refusal below tells the user to do.
+        con.close()
+
+
+def test_a_legacy_package_with_a_hot_wal_is_not_renamed_out_from_under_it(
+    qgis_app, tmp_path, message_log
+):
+    project = QgsProject.instance()
+    project.clear()
+    root = tmp_path / "Site1"
+    root.mkdir()
+    session = SiteSession()
+    session.new_site(root)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    session.save()
+    picks = layers.layers["picks"]
+    feat = QgsFeature(picks.fields())
+    feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    feat.setAttribute("note", "checkpointed pick")
+    ok, _ = picks.dataProvider().addFeatures([feat])
+    assert ok
+    package = session.gpkg_path
+    layers.detach()
+    session.close_site()
+    project.clear()
+
+    legacy = root / "Site1.nsgeo.gpkg"  # a package written before I5
+    package.rename(legacy)
+    _leave_a_hot_wal(legacy)  # ... whose QGIS was then killed
+
+    session2 = SiteSession()
+    session2.open_site(root / SURVEY_FILE)
+
+    # The assertion that matters, and the one none of I5's six original
+    # tests made: whatever the migration decided, the package this site
+    # will use must still open AND still hold everything that was
+    # committed to it. Asserted before the "was it adopted" checks below
+    # so a regression fails on readability, not on a filename.
+    used = session2.gpkg_path if session2.gpkg_path.exists() else legacy
+    on_disk = QgsVectorLayer(f"{used}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid(), f"{used.name} will not open"
+    assert [f["note"] for f in on_disk.getFeatures()] == ["checkpointed pick"]
+    del on_disk
+    assert _wal_only_rows(used) == ["the last hour of picks"]
+
+    # Not adopted, and said so in terms the user can act on.
+    assert legacy.is_file()
+    assert any("Site1.nsgeo.gpkg" in m and "-wal" in m and "close it" in m for m in message_log), (
+        message_log
+    )
+
+    # And the refusal is recoverable, not permanent: _wal_only_rows above
+    # closed the database cleanly, which is exactly what the message asks
+    # the user to do, so the sidecars are gone and the next open adopts.
+    assert not legacy.with_name(legacy.name + "-wal").exists()
+    session3 = SiteSession()
+    session3.open_site(root / SURVEY_FILE)
+    assert session3.gpkg_path.is_file()
+    assert not legacy.exists()
+    adopted = QgsVectorLayer(f"{session3.gpkg_path}|layername=picks", "picks", "ogr")
+    assert adopted.isValid()
+    assert [f["note"] for f in adopted.getFeatures()] == ["checkpointed pick"]
+    del adopted
+    project.clear()

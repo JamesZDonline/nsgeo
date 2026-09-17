@@ -12,6 +12,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import session as session_module
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
 from plugin_testing import synthetic_dzt
+from qgis.core import Qgis, QgsApplication
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -519,3 +520,47 @@ def test_save_out_of_tree_line_needs_allow_absolute(qgis_app, tmp_path):
     assert doc["lines"][0]["path"].startswith("/")
     s.add_grid(Grid("B", (0.0, 0.0), 0.0, 1.0, 1.0, "EPSG:32616", 0.5))
     s.save()  # the opt-in is remembered for the session
+
+
+@pytest.mark.parametrize("sidecar", ["-wal", "-shm", "-journal"])
+def test_a_legacy_package_with_a_sqlite_sidecar_is_refused(qgis_app, tmp_path, sidecar):
+    # Controller review of I5. All three spellings, because each one means
+    # the same thing -- a database whose last writer did not close cleanly
+    # -- and SQLite looks for every one of them under the database's
+    # *current* name. Renaming the .gpkg alone orphans them and silently
+    # discards everything committed since the last checkpoint; the
+    # end-to-end proof, with a real hot WAL, is in test_plugin_layers.py.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    legacy = root / "Site1.nsgeo.gpkg"
+    legacy.write_bytes(b"a package whose QGIS was killed")
+    (root / f"Site1.nsgeo.gpkg{sidecar}").write_bytes(b"the journal that goes with it")
+
+    # Captured with the level, not through `message_log`: this is a
+    # recoverable condition the user is told how to clear, so it is a
+    # Warning -- not the Critical the unrecoverable branches use, which
+    # would otherwise cry wolf, and not below Warning either.
+    seen: list[tuple[str, int]] = []
+    log = QgsApplication.messageLog()
+
+    def _on_message(msg, tag, level):
+        seen.append((msg, int(level)))
+
+    log.messageReceived.connect(_on_message)
+    try:
+        s.open_site(root / SURVEY_FILE)
+    finally:
+        log.messageReceived.disconnect(_on_message)
+
+    assert legacy.read_bytes() == b"a package whose QGIS was killed"  # untouched
+    assert not s.gpkg_path.exists()
+    assert any(
+        "Site1.nsgeo.gpkg" in msg
+        and sidecar in msg
+        and "close it" in msg
+        and level == int(Qgis.MessageLevel.Warning)
+        for msg, level in seen
+    ), seen
