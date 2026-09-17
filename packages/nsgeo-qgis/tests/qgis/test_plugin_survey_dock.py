@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt import sip
@@ -337,3 +339,176 @@ def test_unload_warns_explicitly_when_the_chosen_save_then_fails(
     assert plugin.survey_dock is None  # unload still proceeded
     item = fake_iface.messageBar().currentItem()
     assert item is not None and "unsaved changes will be lost" in item.text()
+
+
+# ---- final review, C4: "New site" and "Open site" must protect unsaved
+# work the way unload() already does. Deleting each of their
+# `if self.session.dirty and not self.save_with_prompt(ask_first=True)`
+# guards left the whole qgis tier green at 357 passed, and so did
+# deleting save_with_prompt()'s own `allow_cancel and answer == Cancel ->
+# return False`. open_site() had no test at all; new_site()'s one test ran
+# against a clean session, so the guard short-circuited before it was ever
+# exercised. What is lost is grids, line placements and processing stacks
+# -- the survey source of truth. Six tests, mirroring the unload trio
+# above: Cancel aborts, Discard proceeds without saving, Save writes
+# first. -------------------------------------------------------------
+
+
+def _plugin_with_a_dirty_site(fake_iface, root):
+    """The unload trio's own setup, factored out: a plugin with a real
+    site open and one unsaved grid in it."""
+    import nsgeo_qgis
+
+    root.mkdir(parents=True, exist_ok=True)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(root)  # writes survey.nsgeo.json with no grids
+    plugin.session.add_grid(GRID)
+    assert plugin.session.dirty
+    return plugin
+
+
+def _grid_ids_on_disk(root):
+    return [g["id"] for g in json.loads((root / SURVEY_FILE).read_text())["grids"]]
+
+
+def test_new_site_cancelled_leaves_the_dirty_site_exactly_as_it_was(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path)
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Cancel)
+
+    plugin.new_site()
+
+    # Cancel means cancel: the same site is still open, still dirty, still
+    # holding the grid that made it dirty, and nothing was written.
+    assert plugin.session.root == tmp_path.resolve()
+    assert plugin.session.dirty
+    assert [g.id for g in plugin.session.site.grids] == ["A"]
+    assert _grid_ids_on_disk(tmp_path) == []
+    # And the folder chooser was never reached. That assertion is free
+    # rather than absent: conftest's `_no_unhandled_modals` turns an
+    # unexpected `QFileDialog.getExistingDirectory` into an AssertionError,
+    # and new_site() calls it outside its own try/except, so a guard that
+    # let execution through would come straight back out of the call above
+    # instead of being caught and reported as "could not create the new
+    # site".
+    assert len(calls) == 1
+    buttons = calls[0][0][3]
+    assert buttons & QMessageBox.StandardButton.Save
+    assert buttons & QMessageBox.StandardButton.Discard
+    # Unlike unload()'s prompt (pinned above as *not* offering Cancel),
+    # this one genuinely can abort its own action, so Cancel belongs here.
+    assert buttons & QMessageBox.StandardButton.Cancel
+    plugin.unload()
+
+
+def test_new_site_discarding_abandons_the_old_site_without_saving_it(
+    fake_iface, tmp_path, monkeypatch, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path / "first")
+    fresh = tmp_path / "second"
+    fresh.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(fresh))
+    )
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+
+    plugin.new_site()
+
+    assert len(calls) == 1
+    assert plugin.session.root == fresh.resolve()
+    assert [g.id for g in plugin.session.site.grids] == []
+    # Discard has to mean discard just as literally as Cancel means
+    # cancel: the abandoned site must not have been quietly saved on the
+    # way out.
+    assert _grid_ids_on_disk(tmp_path / "first") == []
+    plugin.unload()
+
+
+def test_new_site_saves_the_old_site_first_when_the_user_chooses_save(
+    fake_iface, tmp_path, monkeypatch, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path / "first")
+    fresh = tmp_path / "second"
+    fresh.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(fresh))
+    )
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Save)
+
+    plugin.new_site()
+
+    assert plugin.session.root == fresh.resolve()
+    # The grid reached disk before the switch, not after it: the old
+    # session object is gone by now, so this is the only place it could
+    # have been written.
+    assert _grid_ids_on_disk(tmp_path / "first") == ["A"]
+    plugin.unload()
+
+
+def test_open_site_cancelled_leaves_the_dirty_site_exactly_as_it_was(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path / "first")
+    other = SiteSession()
+    (tmp_path / "second").mkdir()
+    other.new_site(tmp_path / "second")
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Cancel)
+
+    plugin.open_site()
+
+    assert plugin.session.root == (tmp_path / "first").resolve()
+    assert plugin.session.dirty
+    assert [g.id for g in plugin.session.site.grids] == ["A"]
+    assert _grid_ids_on_disk(tmp_path / "first") == []
+    # As in the new_site case above: `QFileDialog.getOpenFileName` is
+    # forbidden by default in this tier, so "the file chooser was never
+    # reached" is asserted by the call not raising.
+    assert len(calls) == 1
+    buttons = calls[0][0][3]
+    assert buttons & QMessageBox.StandardButton.Save
+    assert buttons & QMessageBox.StandardButton.Discard
+    assert buttons & QMessageBox.StandardButton.Cancel
+    plugin.unload()
+
+
+def test_open_site_discarding_abandons_the_old_site_without_saving_it(
+    fake_iface, tmp_path, monkeypatch, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path / "first")
+    other = SiteSession()
+    (tmp_path / "second").mkdir()
+    other.new_site(tmp_path / "second")
+    target = tmp_path / "second" / SURVEY_FILE
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+
+    plugin.open_site()
+
+    assert len(calls) == 1
+    assert plugin.session.root == (tmp_path / "second").resolve()
+    assert _grid_ids_on_disk(tmp_path / "first") == []
+    plugin.unload()
+
+
+def test_open_site_saves_the_old_site_first_when_the_user_chooses_save(
+    fake_iface, tmp_path, monkeypatch, answer_modal
+):
+    plugin = _plugin_with_a_dirty_site(fake_iface, tmp_path / "first")
+    other = SiteSession()
+    (tmp_path / "second").mkdir()
+    other.new_site(tmp_path / "second")
+    target = tmp_path / "second" / SURVEY_FILE
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Save)
+
+    plugin.open_site()
+
+    assert plugin.session.root == (tmp_path / "second").resolve()
+    assert _grid_ids_on_disk(tmp_path / "first") == ["A"]
+    plugin.unload()

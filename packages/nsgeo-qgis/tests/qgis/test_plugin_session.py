@@ -468,6 +468,39 @@ def test_close_site_emits_line_opened_empty_and_resets_allow_absolute_when_a_lin
     assert session._allow_absolute is False
 
 
+def test_new_site_refuses_an_occupied_folder_without_touching_what_is_there(qgis_app, tmp_path):
+    """The guard is the only thing between "New site..." on an existing
+    project folder and `save_site` writing an empty Site over it.
+
+    test_new_site_writes_the_survey_file_and_names_the_gpkg_for_the_site
+    above already pins that a second `new_site` on the same folder
+    *raises* -- deleting the guard outright fails it. What nothing pinned
+    is the half that matters: that the survey file on disk is still the
+    one that was there. Moving `save_site` above the guard leaves that
+    test green (it still raises, just after the damage) and fails this
+    one, which is the shape a reordering or an early write would
+    actually take.
+    """
+    first = SiteSession()
+    first.new_site(tmp_path)
+    first.add_grid(GRID)
+    first.save()
+    before = (tmp_path / SURVEY_FILE).read_bytes()
+
+    second = SiteSession()
+    opened = Spy(second.site_opened)
+    with pytest.raises(ProjectError, match="already holds"):
+        second.new_site(tmp_path)
+
+    assert (tmp_path / SURVEY_FILE).read_bytes() == before
+    assert not second.is_open  # nothing installed, so nothing to save over it later
+    assert opened.calls == []
+    # And the site that was already there still opens, with its grid.
+    reopened = SiteSession()
+    reopened.open_site(tmp_path / SURVEY_FILE)
+    assert [g.id for g in reopened.site.grids] == ["A"]
+
+
 def test_new_site_does_not_install_when_the_initial_save_fails(qgis_app, tmp_path, monkeypatch):
     # Review round 1, Finding 7: new_site() installed the site before
     # writing it, so a failed initial save (e.g. a read-only folder) left
