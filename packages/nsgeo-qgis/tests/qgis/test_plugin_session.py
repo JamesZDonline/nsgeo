@@ -609,3 +609,33 @@ def test_a_legacy_package_with_a_sqlite_journal_is_used_where_it_is(qgis_app, tm
         "Site1.nsgeo.gpkg" in msg and journal in msg and level == int(Qgis.MessageLevel.Warning)
         for msg, level in seen
     ), seen
+
+
+@pytest.mark.parametrize("journal", ["-wal", "-shm", "-journal"])
+def test_a_journal_beside_the_destination_name_also_blocks_adoption(qgis_app, tmp_path, journal):
+    # Controller re-review, Important 2: the guard checked the source name
+    # and never the destination. Renaming ONTO a name that already has a
+    # journal beside it hands the rescued package a foreign one, which
+    # SQLite then replays over it. The plugin cannot create that
+    # precondition by itself -- but Important 1 is exactly what pushes a
+    # user into `mv Site1.nsgeo.gpkg site.nsgeo.gpkg` by hand, and that
+    # touches no sidecars.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    legacy = root / "Site1.nsgeo.gpkg"
+    legacy.write_bytes(b"this site's real package, cleanly closed")
+    stray = root / f"{GPKG_FILE}{journal}"
+    stray.write_bytes(b"a journal belonging to something else entirely")
+
+    seen = _capture_log(lambda: s.open_site(root / SURVEY_FILE))
+
+    assert legacy.read_bytes() == b"this site's real package, cleanly closed"
+    assert s.gpkg_path == legacy  # used where it is, so nothing meets that journal
+    assert not (root / GPKG_FILE).exists()
+    assert stray.exists()  # never ours to remove
+    assert any(
+        stray.name in msg and level == int(Qgis.MessageLevel.Warning) for msg, level in seen
+    ), seen

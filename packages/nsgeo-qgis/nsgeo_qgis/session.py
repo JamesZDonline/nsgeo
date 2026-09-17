@@ -254,6 +254,15 @@ class SiteSession(QObject):
         handle on the package to decide what "empty" means, and then a
         two-step rename that can half-complete).
 
+        Both names are checked, not just the legacy one: renaming *onto* a
+        name that already has a journal beside it hands the rescued
+        package a foreign one, which SQLite then replays over it --
+        observed as an adopted package that logged success and then would
+        not open, showing only the unrelated journal's tables. Nothing in
+        the plugin can create that state on its own, but the bug fixed
+        just above is exactly what pushed users into renaming by hand, and
+        `mv` touches no sidecars.
+
         The alternative to a fixed basename, considered and rejected, was
         recording the package filename in the survey JSON. That is
         `nsgeo.project`'s format -- portable, human-readable, and shared
@@ -296,7 +305,7 @@ class SiteSession(QObject):
             )
             return target
         found = legacy[0]
-        journals = self._sqlite_journals(found)
+        journals = self._sqlite_journals(found) + self._sqlite_journals(target)
         if journals:
             _log(
                 f"{', '.join(j.name for j in journals)} is present, so a SQLite database "
