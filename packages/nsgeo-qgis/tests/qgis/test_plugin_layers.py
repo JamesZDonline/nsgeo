@@ -11,7 +11,7 @@ from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
-from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
     Qgis,
@@ -1109,9 +1109,24 @@ def _wal_only_rows(package):
         con.close()
 
 
-def test_a_legacy_package_with_a_hot_wal_is_not_renamed_out_from_under_it(
+def test_a_legacy_package_with_a_hot_journal_is_used_where_it_is_and_adopted_later(
     qgis_app, tmp_path, message_log
 ):
+    """The whole loop, with SiteLayers attached as it always is in production.
+
+    Controller re-review of I5, Important 1. The first version of this
+    test drove a bare SiteSession with no SiteLayers, so nothing ever
+    created GPKG_FILE and it passed for the wrong reason. In the real
+    plugin `site_opened` reaches `SiteLayers.refresh()` -> `ensure_tables()`
+    seconds later, which creates an empty `site.nsgeo.gpkg`; from then on
+    the "a package by the right name already exists" branch fires forever
+    and the legacy package could never be adopted -- so refusing to adopt
+    made the loss permanent and the advice we printed impossible to act on.
+
+    What this pins now: the picks are visible on the very first open, no
+    competing package is created, the journal is cleared by the ordinary
+    clean close, and the next open adopts.
+    """
     project = QgsProject.instance()
     project.clear()
     root = tmp_path / "Site1"
@@ -1132,41 +1147,46 @@ def test_a_legacy_package_with_a_hot_wal_is_not_renamed_out_from_under_it(
     session.close_site()
     project.clear()
 
-    legacy = root / "Site1.nsgeo.gpkg"  # a package written before I5
+    legacy = root / "Site1.nsgeo.gpkg"  # a package written before I5 ...
     package.rename(legacy)
     _leave_a_hot_wal(legacy)  # ... whose QGIS was then killed
 
+    # --- first open: used where it is, nothing renamed, nothing created ---
     session2 = SiteSession()
+    layers2 = SiteLayers(session2, project=project)
     session2.open_site(root / SURVEY_FILE)
 
-    # The assertion that matters, and the one none of I5's six original
-    # tests made: whatever the migration decided, the package this site
-    # will use must still open AND still hold everything that was
-    # committed to it. Asserted before the "was it adopted" checks below
-    # so a regression fails on readability, not on a filename.
-    used = session2.gpkg_path if session2.gpkg_path.exists() else legacy
-    on_disk = QgsVectorLayer(f"{used}|layername=picks", "picks", "ogr")
-    assert on_disk.isValid(), f"{used.name} will not open"
+    # The point of the whole branch: the user's pick is on screen now, not
+    # after a manual remedy -- opening a database with a hot journal is
+    # what SQLite recovery is for. It was renaming it that was unsafe.
+    assert session2.gpkg_path == legacy
+    assert layers2.feature_count("picks") == 1
+    # ... and no empty competing package appeared beside it, which is what
+    # would wedge the adoption shut for good.
+    assert not (root / GPKG_FILE).exists()
+    assert legacy.is_file()
+    assert _wal_only_rows(legacy) == ["the last hour of picks"]
+    assert any("Site1.nsgeo.gpkg" in m and "-wal" in m for m in message_log), message_log
+
+    # --- an ordinary clean close checkpoints the journal away ---
+    layers2.detach()
+    session2.close_site()
+    project.clear()
+    assert not legacy.with_name(legacy.name + "-wal").exists()
+    assert not legacy.with_name(legacy.name + "-shm").exists()
+
+    # --- so the next open adopts, with the pick intact ---
+    session3 = SiteSession()
+    layers3 = SiteLayers(session3, project=project)
+    session3.open_site(root / SURVEY_FILE)
+
+    assert session3.gpkg_path == root / GPKG_FILE
+    assert not legacy.exists()
+    assert layers3.feature_count("picks") == 1
+    on_disk = QgsVectorLayer(f"{session3.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
     assert [f["note"] for f in on_disk.getFeatures()] == ["checkpointed pick"]
     del on_disk
-    assert _wal_only_rows(used) == ["the last hour of picks"]
 
-    # Not adopted, and said so in terms the user can act on.
-    assert legacy.is_file()
-    assert any("Site1.nsgeo.gpkg" in m and "-wal" in m and "close it" in m for m in message_log), (
-        message_log
-    )
-
-    # And the refusal is recoverable, not permanent: _wal_only_rows above
-    # closed the database cleanly, which is exactly what the message asks
-    # the user to do, so the sidecars are gone and the next open adopts.
-    assert not legacy.with_name(legacy.name + "-wal").exists()
-    session3 = SiteSession()
-    session3.open_site(root / SURVEY_FILE)
-    assert session3.gpkg_path.is_file()
-    assert not legacy.exists()
-    adopted = QgsVectorLayer(f"{session3.gpkg_path}|layername=picks", "picks", "ogr")
-    assert adopted.isValid()
-    assert [f["note"] for f in adopted.getFeatures()] == ["checkpointed pick"]
-    del adopted
+    layers3.detach()
     project.clear()

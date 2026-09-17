@@ -33,15 +33,15 @@ SURVEY_FILE = "survey.nsgeo.json"
 # the directory broke that for the one table the JSON is not the source
 # of truth for. Renaming Site1/ to Kavusan2026/ once the fieldwork had a
 # name left every authored pick in Site1.nsgeo.gpkg, unreachable and
-# unmentioned. See _adopt_legacy_package() for the packages already
+# unmentioned. See _resolve_package() for the packages already
 # written under the old rule.
 GPKG_FILE = "site.nsgeo.gpkg"
 _GPKG_SUFFIX = ".nsgeo.gpkg"
 # SQLite finds these by the database's *current* filename, so renaming the
-# database alone orphans them. See _adopt_legacy_package(). `-shm` is not
-# even movable in principle -- it is shared memory backing a live `-wal`,
+# database alone orphans them. See _resolve_package(). `-shm` is not even
+# movable in principle -- it is shared memory backing a live `-wal`,
 # meaningless once detached from it.
-_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+_SQLITE_JOURNALS = ("-wal", "-shm", "-journal")
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -67,6 +67,7 @@ class SiteSession(QObject):
         self._site: Site | None = None
         self._json_path: Path | None = None
         self._root: Path | None = None
+        self._gpkg_path: Path | None = None
         self._lines_by_key: dict[str, Line] = {}
         self._dirty = False
         self._allow_absolute = False
@@ -101,12 +102,23 @@ class SiteSession(QObject):
 
     @property
     def gpkg_path(self) -> Path:
-        """The site's GeoPackage: one fixed name inside the project
-        directory, deliberately independent of what the directory is
-        called. `site_name` above is a *display* label (the legend group,
-        the survey tree's root) and is meant to follow a rename; this is a
-        file path and must not."""
-        return self.root / GPKG_FILE
+        """The site's GeoPackage, resolved once when the site was opened.
+
+        Normally `root / GPKG_FILE`: one fixed name, deliberately
+        independent of what the directory is called. `site_name` above is
+        a *display* label (the legend group, the survey tree's root) and
+        is meant to follow a rename; this is a file path and must not.
+
+        Resolved rather than recomputed because `_resolve_package()` can
+        legitimately land on a package still carrying its pre-I5 name --
+        see there. Recomputing would mean re-running that decision on
+        every access, including after `ensure_tables()` has created files
+        under the directory, which is precisely how the first version of
+        this got stuck.
+        """
+        self._require_path()
+        assert self._gpkg_path is not None  # set by _install whenever a path is
+        return self._gpkg_path
 
     @property
     def dirty(self) -> bool:
@@ -173,57 +185,89 @@ class SiteSession(QObject):
         self._current_trace = -1
         self._selection = (-1, -1)
         self._allow_absolute = False
-        self._adopt_legacy_package()
+        self._gpkg_path = self._resolve_package(self._root)
         self._set_dirty(False)
 
-    def _adopt_legacy_package(self) -> None:
-        """Rename a package left under the pre-I5 `<folder>.nsgeo.gpkg`.
+    @staticmethod
+    def _sqlite_journals(package: Path) -> list[Path]:
+        """Journal files SQLite would resolve from `package`'s current name.
 
-        Every package already written in the field carries whatever the
-        folder was called when it was created, and once that folder has
-        been renamed no rule can re-derive the name -- which is the defect
-        itself. So this globs for it rather than guessing: any
-        `*.nsgeo.gpkg` that is not `GPKG_FILE`.
-
-        A rename, never a copy or a delete: nothing here can destroy a
-        package, at worst it leaves one where it was and says so. The
-        three cases are deliberate.
-
-        * One legacy package and no `GPKG_FILE`: adopt it. This is the
-          reported scenario and the only one that gets the picks back.
-        * `GPKG_FILE` already exists: adopting would have to overwrite the
-          site's own package, so nothing is touched -- but the stray is
-          named at Warning, because it may hold picks and nothing else in
-          the UI would ever mention it.
-        * More than one legacy package: do not guess. The adopted one is
-          the file the site then writes into, so picking the wrong one is
-          worse than picking none; both names go to the log at Critical
-          for the user to sort out by hand.
-        * The package has a hot SQLite journal (`-wal`/`-shm`/`-journal`)
-          beside it: refuse, and say how to clear it. A GeoPackage is a
-          SQLite database and SQLite resolves those from the database's
-          *current* name, so renaming the .gpkg alone orphans them and
-          discards every commit since the last checkpoint. Recoverable,
-          not permanent: opening the package once in any SQLite client and
-          closing it cleanly checkpoints and removes them, and the next
-          open adopts.
-
-        Runs from `_install()`, i.e. for `new_site()` too. One behaviour
-        rather than two: `new_site()` refuses a folder that already holds
-        a survey file, so a legacy package there belongs to a project
-        whose JSON is gone, and adopting it hands those picks back instead
-        of stranding them beside a fresh empty package.
-
-        The alternative considered and rejected was recording the package
-        filename in the survey JSON. That is `nsgeo.project`'s format --
-        portable, human-readable, and shared with anything else that ever
-        reads a site -- so it would push a QGIS-plugin-private detail into
-        the core's contract, and leave a recorded name that can itself go
-        stale when the file is renamed by hand. A fixed basename cannot.
+        A GeoPackage is a SQLite database, and SQLite derives `-wal`,
+        `-shm` and `-journal` from whatever the database file is called
+        *now*. That is the whole reason the package cannot simply be
+        renamed: the journals do not follow it, and everything committed
+        since the last checkpoint lives in them.
         """
-        root = self._root
-        if root is None:
-            return
+        found = []
+        for suffix in _SQLITE_JOURNALS:
+            journal = package.with_name(package.name + suffix)
+            if journal.exists():
+                found.append(journal)
+        return found
+
+    def _resolve_package(self, root: Path) -> Path:
+        """Which file is this site's GeoPackage, adopting a legacy one when safe.
+
+        Packages already written carry whatever the folder was called when
+        they were created, and once that folder has been renamed no rule
+        can re-derive the name -- which is the I5 defect itself. So this
+        globs for `*.nsgeo.gpkg` rather than guessing, and renames a single
+        find into place. It never copies and never deletes: the worst it
+        does is leave a package where it is and use it there.
+
+        The outcomes, in the order they are decided:
+
+        * No legacy package: `GPKG_FILE`, created on demand by
+          `SiteLayers.ensure_tables()`.
+        * `GPKG_FILE` already exists: use it. Adopting would have to
+          overwrite the site's own package, so nothing is touched -- but
+          the stray is named at Warning, because it may hold picks and
+          nothing else in the UI would ever mention it.
+        * More than one legacy package: do not guess, and say so at
+          Critical. The adopted one is the file the site then writes into,
+          so choosing wrong is worse than choosing none.
+        * Either name has a SQLite journal beside it: **use the legacy
+          package where it is**, under its old name, without renaming
+          anything. See below.
+        * Otherwise: adopt it, by renaming it to `GPKG_FILE`.
+
+        The journal case is the subtle one, and the first version of it was
+        wrong in a way worth recording. It *declined* -- resolved to
+        `GPKG_FILE` and told the user to clear the journal by hand. But
+        `site_opened` reaches `SiteLayers.ensure_tables()` in the same
+        open, which creates an empty `GPKG_FILE`; from then on the
+        "already exists" branch above fires forever and the legacy package
+        could never be adopted, even by a user who did exactly what the
+        message said. The branch written to protect the picks made losing
+        them permanent, and printed advice that could not work.
+
+        Using the package where it is fixes that at the root, because no
+        competing file is ever created. It is also simply more correct:
+        *opening* a database with a hot journal is what SQLite recovery is
+        for, and only *renaming* it was ever unsafe. The user's picks are
+        on screen on the first open, the ordinary clean close checkpoints
+        the journal away, and the next open adopts with nothing asked of
+        anyone. Rejected alongside it: suppressing the on-demand creation
+        for that open (the site comes up with no layers at all, which is a
+        worse answer to "your package is fine, we just cannot rename it");
+        and treating an empty `GPKG_FILE` as adoptable (it needs a second
+        handle on the package to decide what "empty" means, and then a
+        two-step rename that can half-complete).
+
+        The alternative to a fixed basename, considered and rejected, was
+        recording the package filename in the survey JSON. That is
+        `nsgeo.project`'s format -- portable, human-readable, and shared
+        with anything else that ever reads a site -- so it would push a
+        QGIS-plugin-private detail into the core's contract, and leave a
+        recorded name that can itself go stale when the file is renamed by
+        hand. A fixed basename cannot.
+
+        Runs for `new_site()` too. One behaviour rather than two:
+        `new_site()` refuses a folder that already holds a survey file, so
+        a legacy package there belongs to a project whose JSON is gone, and
+        adopting it hands those picks back instead of stranding them beside
+        a fresh empty package.
+        """
         target = root / GPKG_FILE
         try:
             legacy = sorted(
@@ -233,16 +277,16 @@ class SiteSession(QObject):
             # Opening a site must not fail because its directory could not
             # be listed; the package itself is created on demand later.
             _log(f"could not check {root} for an older site package: {exc}")
-            return
+            return target
         if not legacy:
-            return
+            return target
         names = ", ".join(p.name for p in legacy)
         if target.exists():
             _log(
                 f"{root} also holds {names}, which this site does not use; "
                 f"its data is only reachable by renaming it to {GPKG_FILE} by hand"
             )
-            return
+            return target
         if len(legacy) > 1:
             _log(
                 f"{root} holds more than one older site package ({names}) and none "
@@ -250,45 +294,36 @@ class SiteSession(QObject):
                 f"rename the right one to {GPKG_FILE} by hand",
                 Qgis.MessageLevel.Critical,
             )
-            return
+            return target
         found = legacy[0]
-        hot = [sfx for sfx in _SQLITE_SIDECARS if found.with_name(found.name + sfx).exists()]
-        if hot:
-            # A GeoPackage is a SQLite database, and SQLite resolves its
-            # journal files from the database's current name. Renaming the
-            # .gpkg alone leaves them behind under the old one, and
-            # everything committed since the last checkpoint goes with
-            # them. Reproduced: a package holding a checkpointed pick and
-            # one uncheckpointed commit came back, after the rename, with
-            # the pick and without the commit -- no error, no warning.
-            # A hot journal persists whenever the last writer did not
-            # close cleanly (a QGIS crash or kill), and this runs
-            # automatically on the first open after upgrade, so adopting
-            # here would let the upgrade destroy the very picks it exists
-            # to rescue.
+        journals = self._sqlite_journals(found)
+        if journals:
             _log(
-                f"{found.name} has {', '.join(found.name + sfx for sfx in hot)} beside it, so "
-                "the process that last wrote it did not close cleanly; renaming a SQLite "
-                "database away from its journal discards everything committed since the "
-                f"last checkpoint. Not adopting it as {GPKG_FILE}. Open {found.name} once "
-                "in QGIS (or any SQLite client) and close it cleanly, then reopen this "
-                "site and it will be adopted."
+                f"{', '.join(j.name for j in journals)} is present, so a SQLite database "
+                f"here was not closed cleanly; renaming one away from its journal discards "
+                f"everything committed since the last checkpoint. Using {found.name} where "
+                f"it is for now -- your picks are all there. It will be renamed to "
+                f"{GPKG_FILE} automatically the next time this site is opened after a "
+                f"clean close."
             )
-            return
+            return found
         try:
             found.rename(target)
         except OSError as exc:
+            # Still readable where it is, so use it there rather than
+            # resolving to a name that does not exist and coming up empty.
             _log(
                 f"could not rename {found.name} to {GPKG_FILE}: {exc}; "
-                "this site's picks are in that file and will not be loaded",
+                f"using it where it is instead",
                 Qgis.MessageLevel.Critical,
             )
-            return
+            return found
         _log(
             f"adopted {found.name} as {GPKG_FILE}: a site package is no longer "
             "named after its folder, so a renamed folder no longer orphans its picks",
             Qgis.MessageLevel.Info,
         )
+        return target
 
     def save(self, *, allow_absolute: bool | None = None) -> None:
         if allow_absolute is not None:
@@ -305,6 +340,7 @@ class SiteSession(QObject):
         self._site = None
         self._json_path = None
         self._root = None
+        self._gpkg_path = None
         self._lines_by_key = {}
         self._profiles.clear()
         self._channel.clear()

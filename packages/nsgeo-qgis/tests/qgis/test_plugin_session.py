@@ -555,27 +555,13 @@ def test_save_out_of_tree_line_needs_allow_absolute(qgis_app, tmp_path):
     s.save()  # the opt-in is remembered for the session
 
 
-@pytest.mark.parametrize("sidecar", ["-wal", "-shm", "-journal"])
-def test_a_legacy_package_with_a_sqlite_sidecar_is_refused(qgis_app, tmp_path, sidecar):
-    # Controller review of I5. All three spellings, because each one means
-    # the same thing -- a database whose last writer did not close cleanly
-    # -- and SQLite looks for every one of them under the database's
-    # *current* name. Renaming the .gpkg alone orphans them and silently
-    # discards everything committed since the last checkpoint; the
-    # end-to-end proof, with a real hot WAL, is in test_plugin_layers.py.
-    root = tmp_path / "Kavusan2026"
-    root.mkdir()
-    s = SiteSession()
-    s.new_site(root)
-    s.close_site()
-    legacy = root / "Site1.nsgeo.gpkg"
-    legacy.write_bytes(b"a package whose QGIS was killed")
-    (root / f"Site1.nsgeo.gpkg{sidecar}").write_bytes(b"the journal that goes with it")
+def _capture_log(fn):
+    """Run `fn`, returning the (message, level) pairs it logged.
 
-    # Captured with the level, not through `message_log`: this is a
-    # recoverable condition the user is told how to clear, so it is a
-    # Warning -- not the Critical the unrecoverable branches use, which
-    # would otherwise cry wolf, and not below Warning either.
+    Levels matter here: the journal branch is a recoverable, temporary
+    condition, and must not shout with the same Critical the
+    unrecoverable ones use.
+    """
     seen: list[tuple[str, int]] = []
     log = QgsApplication.messageLog()
 
@@ -584,16 +570,42 @@ def test_a_legacy_package_with_a_sqlite_sidecar_is_refused(qgis_app, tmp_path, s
 
     log.messageReceived.connect(_on_message)
     try:
-        s.open_site(root / SURVEY_FILE)
+        fn()
     finally:
         log.messageReceived.disconnect(_on_message)
+    return seen
+
+
+@pytest.mark.parametrize("journal", ["-wal", "-shm", "-journal"])
+def test_a_legacy_package_with_a_sqlite_journal_is_used_where_it_is(qgis_app, tmp_path, journal):
+    # Controller review of I5: renaming a SQLite database away from its
+    # journal discards everything committed since the last checkpoint, so
+    # the adoption must not happen while one is present. All three
+    # spellings, because each means the same thing and SQLite looks for
+    # every one of them under the database's *current* name.
+    #
+    # Controller re-review, Important 1: the answer is to USE the package
+    # where it is, not to decline and leave the site with nothing. Opening
+    # a database with a hot journal is exactly what SQLite recovery is
+    # for; only renaming it was ever unsafe. Declining also created a
+    # second, empty package on the same open (SiteLayers.ensure_tables),
+    # which wedged the adoption shut permanently -- see
+    # test_plugin_layers.py for that loop end to end.
+    root = tmp_path / "Kavusan2026"
+    root.mkdir()
+    s = SiteSession()
+    s.new_site(root)
+    s.close_site()
+    legacy = root / "Site1.nsgeo.gpkg"
+    legacy.write_bytes(b"a package whose QGIS was killed")
+    (root / f"Site1.nsgeo.gpkg{journal}").write_bytes(b"the journal that goes with it")
+
+    seen = _capture_log(lambda: s.open_site(root / SURVEY_FILE))
 
     assert legacy.read_bytes() == b"a package whose QGIS was killed"  # untouched
-    assert not s.gpkg_path.exists()
+    assert s.gpkg_path == legacy  # and used, not abandoned
+    assert not (root / GPKG_FILE).exists()
     assert any(
-        "Site1.nsgeo.gpkg" in msg
-        and sidecar in msg
-        and "close it" in msg
-        and level == int(Qgis.MessageLevel.Warning)
+        "Site1.nsgeo.gpkg" in msg and journal in msg and level == int(Qgis.MessageLevel.Warning)
         for msg, level in seen
     ), seen
