@@ -486,21 +486,41 @@ class SiteSession(QObject):
         self._profiles.pop(key, None)
         self._channel.pop(key, None)
         self._set_dirty(True)
-        if self._current_key == key:
+        # The removed line can be current, previewed, or both at once --
+        # the session never forbids preview_key == current_key, that is a
+        # UI-level convention (ProfileDock's), not a rule enforced here.
+        # Both fields are reset here directly rather than through
+        # clear_preview(): that helper couples its reset to its own
+        # emission, and when a line is both current and previewed,
+        # clearing one field at a time would leave the OTHER still naming
+        # a line already gone from _lines_by_key while its signal fires.
+        # So both resets happen first, and only then does anything emit.
+        dropped_current = self._current_key == key
+        dropped_preview = self._preview_key == key
+        if dropped_current:
             self._current_key = None
             self._current_trace = -1
             self._selection = (-1, -1)
+        if dropped_preview:
+            self._preview_key = None
+            self._preview_trace = -1
+        # Every field is reset BEFORE any emission. A slot reading
+        # display_key during either signal must never see the key that was
+        # just deleted.
+        #
+        # Order between the two is load-bearing, not arbitrary: line_opened
+        # first, THEN preview_changed. ProfileDock (Task 2) keeps its own
+        # _working_key and, on preview_changed telling it the preview
+        # ended, re-renders that key. If preview_changed fired first, that
+        # would run while the dock's _working_key still named the line
+        # being deleted here -> line_for_key(deleted) -> KeyError inside a
+        # slot -> qFatal() in the LTR container. Emitting line_opened("")
+        # first makes the dock drop _working_key before anything asks it
+        # to render.
+        if dropped_current:
             self.line_opened.emit("")
-        if self._preview_key == key:
-            # The removed line can also be the preview target -- the
-            # session never forbids preview_key == current_key, that is a
-            # UI-level convention (ProfileDock's), not a rule enforced
-            # here. Reset through clear_preview() so there is one place
-            # that knows what clearing means, and do it AFTER the
-            # current-key reset above: that way, if a preview_changed
-            # listener reads display_key/current_key while handling this
-            # emit, it never sees the just-deleted key still installed.
-            self.clear_preview()
+        if dropped_preview:
+            self.preview_changed.emit("", -1)
         self.lines_changed.emit()
 
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:

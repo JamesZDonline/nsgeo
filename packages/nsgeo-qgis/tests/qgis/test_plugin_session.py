@@ -829,3 +829,41 @@ def test_reopening_the_current_line_still_ends_a_preview(previewable):
     assert session.preview_key is None
     assert session.display_key == keys[0]
     assert seen == [("", -1)]
+
+
+def test_removing_a_line_that_is_both_current_and_previewed(previewable):
+    """The reset must cover BOTH fields before EITHER signal: a slot that
+    reads display_key during line_opened("") must not see the dead key."""
+    session, keys = previewable
+    session.set_preview(keys[0], 5)  # keys[0] is already the current line
+    assert session.display_key == keys[0]
+    seen = []
+
+    def _probe(*_):
+        # Whatever a listener asks during either emission must be answerable.
+        seen.append((session.display_key, session.preview_key, session.current_key))
+        if session.display_key is not None:
+            session.line_for_key(session.display_key)
+
+    session.line_opened.connect(_probe)
+    session.preview_changed.connect(_probe)
+    session.lines_changed.connect(_probe)
+
+    session.remove_line(keys[0])
+
+    assert seen == [(None, None, None)] * 3
+    assert session.display_key is None
+
+
+def test_removing_a_line_emits_line_opened_before_preview_changed(previewable):
+    """Order matters: ProfileDock renders its own _working_key when a
+    preview ends, so the working key must be dropped first."""
+    session, keys = previewable
+    session.set_preview(keys[0], 5)
+    order = []
+    session.line_opened.connect(lambda k: order.append("line_opened"))
+    session.preview_changed.connect(lambda k, t: order.append("preview_changed"))
+
+    session.remove_line(keys[0])
+
+    assert order == ["line_opened", "preview_changed"]
