@@ -551,7 +551,17 @@ class ProfileDock(QgsDockWidget):
 
     def _pick(self, trace: int, time_ns: float) -> None:
         # I6: guarded like every other slot here, even though nothing
-        # connects to `pick_requested` yet (Task 18/19 will). Verified
+        # connects to `pick_requested` yet. Nothing in Plan 2 does: the
+        # pick tool is M8, in Plan 3 ("Pick tool, picks layer, marks
+        # layer"), and this signal plus `ProfileView.set_pick_mode()` are
+        # the half of it that already exists. Until then a shift-click on
+        # the profile emits into nothing, and `set_pick_mode()` has no
+        # control wired to it -- picks are authored by editing the
+        # `picks` layer on the map canvas with QGIS's own tools. An
+        # earlier draft of this comment said "Task 18/19 will"; those
+        # tasks were re-scoped to the gain strip and the difference
+        # view/presets and never touched picking, and the stale note sent
+        # a reader looking for a pick mode that was never built. Verified
         # directly: an exception raised by a *downstream* subscriber of
         # `pick_requested` is swallowed by PyQt at the point that
         # subscriber is invoked, and never propagates back into this
