@@ -1,0 +1,278 @@
+diff --git a/packages/nsgeo-qgis/nsgeo_qgis/plugin.py b/packages/nsgeo-qgis/nsgeo_qgis/plugin.py
+index f3a5b9a..c81f3af 100644
+--- a/packages/nsgeo-qgis/nsgeo_qgis/plugin.py
++++ b/packages/nsgeo-qgis/nsgeo_qgis/plugin.py
+@@ -98,6 +98,11 @@ class NsgeoPlugin:
+         self.act_import: QAction | None = None
+         self._grid_dialog: GridDialog | None = None
+         self._import_dialog: ImportDialog | None = None
++        # What the gain strip was last given: the (key, row) it belongs to
++        # and the exact step object it was built from. Both are needed --
++        # see _on_gain_points.
++        self._gain_owner: tuple[str, int] | None = None
++        self._gain_step: Any = None
+ 
+     # ---- QGIS entry points ------------------------------------------------
+     def initGui(self) -> None:  # noqa: N802
+@@ -279,15 +284,33 @@ class NsgeoPlugin:
+             return
+         key = self.session.current_key
+         if key is None or row < 0:
++            self._forget_gain_owner()
+             self.profile_dock.show_gain_strip(None)
+             return
+         entries = self.session.stack_for(key).entries
+         if row >= len(entries):
++            self._forget_gain_owner()
+             self.profile_dock.show_gain_strip(None)
+             return
+         step = entries[row][0]
+         name = self._curve_param_name(step)
+-        self.profile_dock.show_gain_strip(step.params[name] if name else None)
++        if name is None:
++            self._forget_gain_owner()
++            self.profile_dock.show_gain_strip(None)
++            return
++        # Recorded before the strip is told, and kept in lockstep with what
++        # it displays, exactly as ProcessingDock._show_form keeps
++        # _shown_step: these two are what _on_gain_points checks a write
++        # against. The owner is (key, row) and not the step object, because
++        # every move of a drag replaces the step -- the owner has to be
++        # stable across this strip's own edits, or the first move would end
++        # its own gesture.
++        self._gain_owner, self._gain_step = (key, row), step
++        self.profile_dock.show_gain_strip(step.params[name], (key, row))
++
++    def _forget_gain_owner(self) -> None:
++        self._gain_owner = None
++        self._gain_step = None
+ 
+     def _resync_gain_strip(self, key: str) -> None:
+         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
+@@ -308,7 +331,29 @@ class NsgeoPlugin:
+         row = self.processing_dock.current_row()
+         if key is None or row < 0:
+             return
+-        step = self.session.stack_for(key).entries[row][0]
++        # Two barriers against writing one step's curve onto another. The
++        # write target used to be resolved from current_row() alone, at
++        # write time -- a different source from the one the strip was
++        # loaded from -- so a row change mid-drag sent the rest of that
++        # gesture into whatever step now sat at the selected row (verified:
++        # a real Key_Down, which reaches the processing list because the
++        # strip takes no focus, replaced the newly selected step's authored
++        # curve with the one still on screen).
++        #
++        # First barrier: the strip must be editing this exact (key, row).
++        # Second: that row must still hold the very step object the strip
++        # was given. Identity, not name -- two curve steps in one stack
++        # share a name but are not the same step. The pair mirrors
++        # ProcessingDock._show_form/_on_form_committed, where the same two
++        # checks made the parameter form's equivalent fix robust.
++        if self._gain_owner != (key, row):
++            return
++        entries = self.session.stack_for(key).entries
++        if row >= len(entries):
++            return
++        step = entries[row][0]
++        if step is not self._gain_step:
++            return
+         name = self._curve_param_name(step)
+         if name is None:
+             return
+@@ -323,9 +368,17 @@ class NsgeoPlugin:
+             # never made.
+             return
+         try:
+-            self.session.replace_step(key, row, build_step(step.name, **params))
++            new = build_step(step.name, **params)
+         except ValueError as exc:
+             self.message(str(exc), Qgis.MessageLevel.Warning)
++            return
++        # Set before replace_step, like _on_form_committed does: the
++        # stack_changed -> rebuild -> step_selected echo this triggers
++        # reports this exact object back to _sync_gain_strip, which must
++        # recognise it as the step already on screen rather than treat it
++        # as a new owner and end the drag that is still in progress.
++        self._gain_step = new
++        self.session.replace_step(key, row, new)
+ 
+     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
+         """Tell the user something through the message bar, and log it too
+diff --git a/packages/nsgeo-qgis/nsgeo_qgis/ui/gain_strip.py b/packages/nsgeo-qgis/nsgeo_qgis/ui/gain_strip.py
+index 0d73214..c038350 100644
+--- a/packages/nsgeo-qgis/nsgeo_qgis/ui/gain_strip.py
++++ b/packages/nsgeo-qgis/nsgeo_qgis/ui/gain_strip.py
+@@ -35,6 +35,26 @@ without it, a handle dragged past `MARGIN_TOP` or the strip's edges paints
+ off-widget, where `handle_at` can never find it again to re-drag or
+ right-click-remove.
+ 
++A fourth invariant, and the reason `set_points` takes an owner at all: the
++first invariant's refusal is right for an echo of this strip's own edit and
++wrong for a payload belonging to a *different* step, and the strip could
++not tell the two apart. It kept step A's points while `plugin.py`'s
++`_on_gain_points` resolved its write target from
++`processing_dock.current_row()` at write time -- a different source -- so a
++row change mid-drag (`Key_Down` reaches the processing list, which keeps
++the keyboard: this widget sets no focus policy, so pressing it never takes
++focus) sent every later move of A's gesture into step B. Reproduced
++directly: B's authored `[[0.0, 0.0], [40.0, -12.0]]` came back as A's
++curve, with no error, no log, no undo, and the strip still displaying A --
++no visual cue at all -- and `replace_step` then dirtied the session so the
++corrupted curve reached `survey.json` on save. `hideEvent` covers a
++curve -> non-curve change; it cannot cover curve -> curve, because the
++strip never hides. Ending the gesture when the owner changes is what makes
++the payload acceptable: the drag belongs to a step that is no longer on
++screen, and nothing will deliver its release either. `plugin.py` re-checks
++step identity before every write as the matching second barrier, the same
++shape `ProcessingDock._show_form`/`_on_form_committed` already use.
++
+ A third invariant, added after a real reproduction: nothing delivers
+ `mouseReleaseEvent` to a widget that is hidden mid-gesture (a line load
+ completing mid-drag, or an arrow-key row change stealing focus away --
+@@ -87,6 +107,9 @@ class GainStrip(QWidget):
+         # The db range at the moment the current drag started, or None
+         # between gestures: see the module docstring's second invariant.
+         self._drag_db_range: tuple[float, float] | None = None
++        # Whose curve is on screen: an opaque token from whoever called
++        # set_points. See the module docstring's fourth invariant.
++        self._owner: Any = None
+ 
+     # ---- mappings ---------------------------------------------------------
+     def set_time_mapping(self, transform: ViewTransform, top_px: float) -> None:
+@@ -94,8 +117,19 @@ class GainStrip(QWidget):
+         self._top = float(top_px)
+         self.update()
+ 
+-    def set_points(self, points: list[list[float]]) -> None:
+-        if self._drag is not None:
++    def set_points(self, points: list[list[float]], owner: Any) -> None:
++        """Replace the displayed curve. `owner` says whose curve it is.
++
++        See the module docstring's first and fourth invariants: a payload
++        from the step currently being edited is refused mid-drag, and a
++        payload from a *different* step ends the drag instead, because that
++        drag belongs to a step no longer on screen.
++        """
++        if owner != self._owner:
++            self._owner = owner
++            self._drag = None
++            self._drag_db_range = None
++        elif self._drag is not None:
+             # See the module docstring's first invariant: an external
+             # payload arriving mid-drag would re-sort under a fixed index
+             # a real drag deliberately does not re-sort until release.
+@@ -103,6 +137,12 @@ class GainStrip(QWidget):
+         self._points = sorted([[float(t), float(db)] for t, db in points], key=lambda p: p[0])
+         self.update()
+ 
++    def owner(self) -> Any:
++        """Whose curve the strip is currently showing; None before the first
++        `set_points`. A caller writing an edit back must check this against
++        its own idea of the write target -- see the fourth invariant."""
++        return self._owner
++
+     def points(self) -> list[list[float]]:
+         return [list(p) for p in self._points]
+ 
+diff --git a/packages/nsgeo-qgis/nsgeo_qgis/ui/profile_dock.py b/packages/nsgeo-qgis/nsgeo_qgis/ui/profile_dock.py
+index 24353a6..0378eb2 100644
+--- a/packages/nsgeo-qgis/nsgeo_qgis/ui/profile_dock.py
++++ b/packages/nsgeo-qgis/nsgeo_qgis/ui/profile_dock.py
+@@ -465,15 +465,26 @@ class ProfileDock(QgsDockWidget):
+         if self.view.transform is not None:
+             self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
+ 
+-    def show_gain_strip(self, points: list[list[float]] | None) -> None:
++    def show_gain_strip(self, points: list[list[float]] | None, owner: Any = None) -> None:
+         """Show the strip editing `points`, or hide it (`points is None`, the
+         selected step is not a curve, or nothing has rendered yet so there
+-        is no axis to share)."""
++        is no axis to share).
++
++        `owner` identifies whose curve `points` is, and is passed straight
++        through to `GainStrip.set_points`: the strip needs it to tell an
++        echo of its own edit (refuse it mid-drag) from a payload belonging
++        to a different step (end the drag and accept it). See the gain
++        strip module docstring's fourth invariant. It defaults to None so a
++        caller that is hiding the strip need not invent one; a payload that
++        arrives without an owner is always accepted and ends any gesture in
++        progress, which is the safe direction to fail in -- the corrupting
++        one is keeping a gesture alive across a change of step.
++        """
+         if points is None or self.view.transform is None:
+             self.gain_strip.hide()
+             return
+         self._sync_strip_mapping()
+-        self.gain_strip.set_points(points)
++        self.gain_strip.set_points(points, owner)
+         self.gain_strip.show()
+ 
+     def _refresh_velocity(self, *_: Any) -> None:
+diff --git a/packages/nsgeo-qgis/tests/qgis/test_plugin_gain_strip.py b/packages/nsgeo-qgis/tests/qgis/test_plugin_gain_strip.py
+index 0962b2a..1106fdc 100644
+--- a/packages/nsgeo-qgis/tests/qgis/test_plugin_gain_strip.py
++++ b/packages/nsgeo-qgis/tests/qgis/test_plugin_gain_strip.py
+@@ -35,7 +35,7 @@ def strip(qgis_app):
+     s.show()
+     t = ViewTransform.fit(100, 200, 0.0, 0.5, 600, 300)
+     s.set_time_mapping(t, MARGIN_TOP)
+-    s.set_points([[0.0, 0.0], [100.0, 20.0]])
++    s.set_points([[0.0, 0.0], [100.0, 20.0]], "fixture")
+     yield s
+     s.hide()
+     s.deleteLater()
+@@ -155,14 +155,14 @@ def test_profile_dock_shows_the_strip_only_when_asked(qgis_app, tmp_path):
+     session.set_profiles(key, line.load())
+     session.open_line(key)
+     assert dock.gain_strip.isHidden()
+-    dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]])
++    dock.show_gain_strip([[-11.0, 0.0], [99.0, 0.0]], "curve-A")
+     assert not dock.gain_strip.isHidden()
+     assert dock.gain_strip.y_of_time(-11.0) == pytest.approx(
+         MARGIN_TOP + dock.view.transform.y_of_time(-11.0)
+     )
+     changed = []
+     dock.gain_points_changed.connect(changed.append)
+-    dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]])
++    dock.gain_strip.set_points([[-11.0, 0.0], [99.0, 12.0]], "curve-A")
+     dock.gain_strip.points_changed.emit(dock.gain_strip.points())
+     assert changed and changed[0][1][1] == 12.0
+     dock.show_gain_strip(None)
+@@ -189,7 +189,11 @@ def test_plugin_routes_strip_edits_through_replace_step(fake_iface, tmp_path, an
+     plugin.processing_dock.add_step_with_dialog("gain_curve")
+     plugin.processing_dock.list.setCurrentRow(1)
+     assert not plugin.profile_dock.gain_strip.isHidden()
+-    plugin.profile_dock.gain_strip.set_points([[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]])
++    # The owner _sync_gain_strip gave the strip when row 1 was selected:
++    # a payload from the step already on screen, not from another one.
++    plugin.profile_dock.gain_strip.set_points(
++        [[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]], (key, 1)
++    )
+     plugin.profile_dock.gain_strip.points_changed.emit(plugin.profile_dock.gain_strip.points())
+     assert s.stack_for(key).entries[1][0].params["points"][1] == [50.0, 6.0]
+     plugin.processing_dock.list.setCurrentRow(0)
+@@ -403,7 +407,11 @@ def test_reselecting_a_curve_row_after_an_edit_still_shows_the_strip(
+     plugin.processing_dock.list.setCurrentRow(1)
+     assert not plugin.profile_dock.gain_strip.isHidden()
+ 
+-    plugin.profile_dock.gain_strip.set_points([[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]])
++    # The owner _sync_gain_strip gave the strip when row 1 was selected:
++    # a payload from the step already on screen, not from another one.
++    plugin.profile_dock.gain_strip.set_points(
++        [[-11.0, 0.0], [50.0, 6.0], [99.0, 0.0]], (key, 1)
++    )
+     plugin.profile_dock.gain_strip.points_changed.emit(plugin.profile_dock.gain_strip.points())
+     assert s.stack_for(key).entries[1][0].params["points"][1] == [50.0, 6.0]
+ 
+@@ -545,7 +553,9 @@ def test_hiding_mid_drag_ends_the_gesture(strip):
+ 
+     assert strip._drag is None
+     assert strip._drag_db_range is None
+-    strip.set_points([[0.0, 0.0], [50.0, 5.0]])  # must be honoured now, not refused
++    # The fixture's own owner: this must be honoured because the gesture
++    # ended, not because the payload came from a different step.
++    strip.set_points([[0.0, 0.0], [50.0, 5.0]], "fixture")  # honoured now, not refused
+     assert strip.points() == [[0.0, 0.0], [50.0, 5.0]]
+     # This test's own press is deliberately never followed by a real
+     # release (that's the whole scenario: nothing delivers one to a
