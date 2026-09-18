@@ -565,6 +565,156 @@ def test_refresh_velocity_returns_silently_once_the_site_is_closed(opened, messa
     """
     session, dock, key, line = opened
     session.close_site()
-    dock._key = key  # force the otherwise-unreachable state directly
+    dock._working_key = key  # force the otherwise-unreachable state directly
     dock._refresh_velocity()
     assert not message_log
+
+
+# ---- preview rendering (M7, spec §3.3) --------------------------------------
+
+
+@pytest.fixture
+def previewing(qgis_app, tmp_path):
+    """Two lines on one grid, the first open. `opened` has only one line,
+    and a preview needs somewhere else to point."""
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=240)
+        session.add_lines([Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, -1, p.stem))])
+    keys = session.keys()
+    session.open_line(keys[0])
+    yield dock, session, keys
+    # Parentless top-level widget: torn down explicitly rather than left
+    # for Python's GC to race Qt's widget teardown. See `opened`.
+    dock.hide()
+    dock.deleteLater()
+
+
+def test_preview_renders_the_previewed_line_not_the_working_one(previewing):
+    dock, session, keys = previewing
+
+    session.set_preview(keys[1], 5)
+
+    assert dock._key == keys[1]
+    assert session.current_key == keys[0]
+    label = session.line_for_key(keys[1]).path.stem
+    assert label in dock.windowTitle()
+
+
+def test_the_banner_names_the_previewed_line_and_clears_on_snap_back(previewing):
+    dock, session, keys = previewing
+    assert dock.preview_label.text() == ""
+
+    session.set_preview(keys[1], 5)
+    assert session.line_for_key(keys[1]).path.stem in dock.preview_label.text()
+
+    session.clear_preview()
+    assert dock.preview_label.text() == ""
+    assert dock._key == keys[0]
+
+
+def test_the_gain_strip_hides_during_a_preview_and_comes_back(previewing):
+    dock, session, keys = previewing
+    dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("x", 0, 0))
+    assert dock.gain_strip.isVisible()
+
+    session.set_preview(keys[1], 5)
+    assert not dock.gain_strip.isVisible()
+
+    session.clear_preview()
+    assert dock.gain_strip.isVisible()
+
+
+def test_a_hidden_gain_strip_stays_hidden_after_a_preview(previewing):
+    dock, session, keys = previewing
+    assert not dock.gain_strip.isVisible()
+
+    session.set_preview(keys[1], 5)
+    session.clear_preview()
+
+    assert not dock.gain_strip.isVisible()
+
+
+def test_the_difference_index_survives_a_preview_round_trip(previewing):
+    dock, session, keys = previewing
+    session.append_step(keys[0], build_step("dewow", window_ns=4.0))
+    dock.set_difference_index(0)
+    assert dock._difference_index == 0
+
+    session.set_preview(keys[1], 5)
+    assert dock._effective_difference_index == -1  # not computed on someone else's stack
+    assert dock._difference_index == 0  # but remembered
+
+    session.clear_preview()
+    assert dock._effective_difference_index == 0
+
+
+def test_snap_back_restores_the_working_lines_cursor_and_selection(previewing):
+    dock, session, keys = previewing
+    session.set_trace(keys[0], 9)
+    session.set_selection(keys[0], 3, 11)
+
+    session.set_preview(keys[1], 5)
+    session.clear_preview()
+
+    assert dock.view._cursor == 9
+    assert dock.view._selection == (3, 11)
+
+
+def test_hovering_the_profile_during_a_preview_does_not_move_the_working_trace(
+    previewing,
+):
+    """The C2 guard at the widget level."""
+    dock, session, keys = previewing
+    session.set_trace(keys[0], 9)
+    session.set_preview(keys[1], 5)
+
+    dock.view.trace_hovered.emit(40)
+
+    assert session.current_trace == 9
+    assert session.current_key == keys[0]
+
+
+def test_previewing_the_working_line_is_not_a_preview(previewing):
+    dock, session, keys = previewing
+
+    session.set_preview(keys[0], 5)
+
+    assert dock.preview_label.text() == ""
+    assert dock._key == keys[0]
+
+
+def test_opening_a_line_while_previewing_ends_the_preview(previewing):
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+
+    session.open_line(keys[1])
+
+    assert dock.preview_label.text() == ""
+    assert dock._key == keys[1]
+
+
+def test_closing_the_site_while_previewing_clears_the_banner(previewing):
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+
+    session.close_site()
+
+    assert dock.preview_label.text() == ""
+    assert dock._key is None
+
+
+def test_a_shift_click_on_a_preview_authors_no_pick(previewing):
+    dock, session, keys = previewing
+    emitted = []
+    dock.pick_requested.connect(lambda k, t, ns: emitted.append((k, t, ns)))
+    session.set_preview(keys[1], 5)
+
+    dock.view.pick_requested.emit(20, 15.0)
+
+    assert emitted == []

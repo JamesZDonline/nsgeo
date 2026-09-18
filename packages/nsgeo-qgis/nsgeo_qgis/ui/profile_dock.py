@@ -119,7 +119,9 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
-        self._key: str | None = None
+        self._working_key: str | None = None
+        self._preview_key: str | None = None
+        self._strip_was_visible = False
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -155,6 +157,8 @@ class ProfileDock(QgsDockWidget):
         bar.addWidget(self.colormap_combo)
         self.difference_label = QLabel("")
         bar.addWidget(self.difference_label)
+        self.preview_label = QLabel("")
+        bar.addWidget(self.preview_label)
         self.fit_button = QPushButton("Fit")
         self.one_to_one_button = QPushButton("1:1")
         bar.addWidget(self.fit_button)
@@ -201,6 +205,7 @@ class ProfileDock(QgsDockWidget):
         session.lines_changed.connect(self._refresh_velocity)
         session.grids_changed.connect(self._refresh_velocity)
         session.site_closed.connect(self._clear)
+        session.preview_changed.connect(self._on_preview_changed)
 
     # ---- display settings ---------------------------------------------
     @property
@@ -210,6 +215,29 @@ class ProfileDock(QgsDockWidget):
     @property
     def colormap_name(self) -> str:
         return self.colormap_combo.currentText()
+
+    @property
+    def _key(self) -> str | None:
+        """The line being DISPLAYED -- the preview when there is one.
+
+        Every read site in this file wants this: a stack_changed on the
+        line currently on screen should re-render it whether that line is
+        the working one or a preview, and `_on_trace_changed`'s key filter
+        should reject the working line's cursor while a preview is up.
+        The two assignment sites became `_working_key` instead.
+        """
+        return self._preview_key or self._working_key
+
+    @property
+    def _effective_difference_index(self) -> int:
+        """`-1` while previewing: the difference view is a property of a
+        step in the WORKING line's stack, and `_difference_index` indexes
+        that stack. Computing it against a previewed line's stack would be
+        an index into the wrong list -- at best an IndexError, at worst a
+        plausible-looking image of the wrong subtraction. Kept separate
+        from `_difference_index` itself so the mode is remembered and
+        returns intact when the view snaps back (spec §3.3)."""
+        return -1 if self._preview_key is not None else self._difference_index
 
     def _display_changed(self, *_: Any) -> None:
         self.percentile_label.setText(f"{self.percentile:.1f} %")
@@ -265,15 +293,12 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText("")
         if was_diff:
             self.difference_cleared.emit()
-        self._key = key or None
+        self._working_key = key or None
+        self._preview_key = None
+        self.preview_label.setText("")
         if not key:
             self._clear_view_only()
             return
-        line = self.session.line_for_key(key)
-        label = getattr(line.placement, "label", None) or line.path.stem
-        self.setWindowTitle(f"nsgeo Profile · {label} · {line.n_traces} traces")
-        self.view.set_direction(int(getattr(line.placement, "direction", 1)))
-        self.image = None
         # C1: `SiteSession.open_line` resets `_current_trace`/`_selection`
         # to their cleared sentinels but emits neither `trace_changed` nor
         # `selection_changed` for that reset (only `line_opened`), and
@@ -287,6 +312,19 @@ class ProfileDock(QgsDockWidget):
         # of whether its profiles are loaded yet.
         self.view.set_cursor(-1)
         self.view.clear_selection()
+        self._show_line(key)
+
+    def _show_line(self, key: str) -> None:
+        """Configure the view for `key`: title, direction, axes, image,
+        channels, velocity. Shared by `_open` (the working line) and
+        `_enter_preview`. Deliberately does NOT touch the difference view
+        or the cursor/selection: those differ between the two callers,
+        which is the whole reason this is a separate method."""
+        line = self.session.line_for_key(key)
+        label = getattr(line.placement, "label", None) or line.path.stem
+        self.setWindowTitle(f"nsgeo Profile · {label} · {line.n_traces} traces")
+        self.view.set_direction(int(getattr(line.placement, "direction", 1)))
+        self.image = None
         profiles = self.session.profiles_for(key)
         if profiles:
             self._configure_channels(len(profiles))
@@ -347,7 +385,9 @@ class ProfileDock(QgsDockWidget):
         # `current_radargram()`'s own `self._key is None` check and
         # returns cleanly -- no re-entrant render to guard against here,
         # unlike `_open`'s ordering.
-        self._key = None
+        self._working_key = None
+        self._preview_key = None
+        self.preview_label.setText("")
         was_diff = self._difference_index >= 0
         self._difference_index = -1
         self.difference_label.setText("")
@@ -364,6 +404,53 @@ class ProfileDock(QgsDockWidget):
         self.setWindowTitle("nsgeo Profile")
         self.velocity_label.setText("")
         self.channel_combo.hide()
+
+    # ---- preview (M7, spec §3.3) ----------------------------------------
+    def _on_preview_changed(self, key: str, trace: int) -> None:
+        try:
+            if key and key != self._working_key:
+                self._enter_preview(key, trace)
+            else:
+                # Either the preview was cleared, or the pointer is over
+                # the line already being worked on -- which is not a
+                # preview at all: showing a banner and hiding the gain
+                # strip for the line the user is editing would be pure
+                # noise, and a re-render of what is already on screen.
+                self._exit_preview()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
+
+    def _enter_preview(self, key: str, trace: int) -> None:
+        if self._preview_key is None:
+            self._strip_was_visible = self.gain_strip.isVisible()
+        self._preview_key = key
+        self.gain_strip.hide()
+        self.difference_label.setText("")
+        line = self.session.line_for_key(key)
+        label = getattr(line.placement, "label", None) or line.path.stem
+        self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
+        self._show_line(key)
+        self.view.clear_selection()
+        self.view.set_cursor(trace)
+
+    def _exit_preview(self) -> None:
+        if self._preview_key is None:
+            return
+        self._preview_key = None
+        self.preview_label.setText("")
+        if self._working_key is None:
+            self._clear_view_only()
+            return
+        self._show_line(self._working_key)
+        self.view.set_cursor(self.session.current_trace)
+        start, end = self.session.selection
+        if start < 0 or end < 0:
+            self.view.clear_selection()
+        else:
+            self.view.set_selection(start, end)
+        if self._strip_was_visible:
+            self.gain_strip.show()
+        self._strip_was_visible = False
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
@@ -395,8 +482,8 @@ class ProfileDock(QgsDockWidget):
         if stack.source is None:
             return None
         try:
-            if self._difference_index >= 0:
-                return stack.difference(self._difference_index)
+            if self._effective_difference_index >= 0:
+                return stack.difference(self._effective_difference_index)
             return stack.result()
         except ValueError as exc:
             # The differenced step changes the sample count
@@ -455,9 +542,9 @@ class ProfileDock(QgsDockWidget):
         )
         self.view.set_image(self.image.image)
         step_text = ""
-        if self._difference_index >= 0 and self._key is not None:
+        if self._effective_difference_index >= 0 and self._key is not None:
             entries = self.session.stack_for(self._key).entries
-            step_text = f"Difference: {entries[self._difference_index][0].name}"
+            step_text = f"Difference: {entries[self._effective_difference_index][0].name}"
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
 
@@ -550,6 +637,14 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not update the selection: {exc}", Qgis.MessageLevel.Critical)
 
     def _pick(self, trace: int, time_ns: float) -> None:
+        if self._preview_key is not None:
+            # A preview never authors data (spec §3.3, §4.3). `self._key`
+            # is the DISPLAYED line, so without this a shift-click on a
+            # previewed radargram would emit a pick for a line the user
+            # only hovered. Nothing consumes pick_requested until M8 --
+            # this is guarded here, in the change that makes `_key` mean
+            # "displayed", rather than left for M8 to discover.
+            return
         # I6: guarded like every other slot here, even though nothing
         # connects to `pick_requested` yet. Nothing in Plan 2 does: the
         # pick tool is M8, in Plan 3 ("Pick tool, picks layer, marks
