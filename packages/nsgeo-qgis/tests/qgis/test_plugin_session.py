@@ -795,3 +795,37 @@ def test_close_site_clears_the_preview(previewable):
 
     assert session.preview_key is None
     assert session.preview_trace == -1
+
+
+def test_removing_the_previewed_line_clears_the_preview(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.remove_line(keys[1])
+
+    assert session.preview_key is None
+    assert seen == [("", -1)]
+
+
+def test_removing_another_line_leaves_the_preview_alone(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+
+    session.remove_line(keys[0])
+
+    assert session.preview_key == keys[1]
+
+
+def test_reopening_the_current_line_still_ends_a_preview(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.open_line(keys[0])  # already the working line -- early return
+
+    assert session.preview_key is None
+    assert session.display_key == keys[0]
+    assert seen == [("", -1)]

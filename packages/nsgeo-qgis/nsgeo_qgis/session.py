@@ -491,6 +491,16 @@ class SiteSession(QObject):
             self._current_trace = -1
             self._selection = (-1, -1)
             self.line_opened.emit("")
+        if self._preview_key == key:
+            # The removed line can also be the preview target -- the
+            # session never forbids preview_key == current_key, that is a
+            # UI-level convention (ProfileDock's), not a rule enforced
+            # here. Reset through clear_preview() so there is one place
+            # that knows what clearing means, and do it AFTER the
+            # current-key reset above: that way, if a preview_changed
+            # listener reads display_key/current_key while handling this
+            # emit, it never sees the just-deleted key still installed.
+            self.clear_preview()
         self.lines_changed.emit()
 
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
@@ -608,6 +618,16 @@ class SiteSession(QObject):
     def open_line(self, key: str) -> None:
         self.line_for_key(key)
         if key == self._current_key:
+            # Re-selecting the line already open -- reachable in normal
+            # use, not just a defensive corner case: Task 5 promotes a
+            # line from the attribute table's selectionChanged, which
+            # fires there too, with the pointer nowhere near the map. A
+            # stale preview must not survive this. Unlike the main path
+            # below, there is no line_opened to follow and drive a
+            # render, so THIS branch emits -- clear_preview() is exactly
+            # right. Do not "tidy" the two branches to match; the
+            # asymmetry is deliberate.
+            self.clear_preview()
             return
         self._current_key = key
         self._current_trace = -1
