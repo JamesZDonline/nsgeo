@@ -122,6 +122,7 @@ class ProfileDock(QgsDockWidget):
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
+        self._deferred_strip: tuple[list[list[float]], Any] | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -296,6 +297,12 @@ class ProfileDock(QgsDockWidget):
         self._working_key = key or None
         self._preview_key = None
         self.preview_label.setText("")
+        # A preview may have disabled the channel combo (see
+        # `_enter_preview`); opening ANY line -- including via promotion,
+        # which is how a preview ends without `_exit_preview` ever
+        # running -- means no preview is up any more, so re-enable it
+        # unconditionally rather than leave it stuck disabled.
+        self.channel_combo.setEnabled(True)
         if not key:
             self._clear_view_only()
             return
@@ -425,6 +432,13 @@ class ProfileDock(QgsDockWidget):
             self._strip_was_visible = self.gain_strip.isVisible()
         self._preview_key = key
         self.gain_strip.hide()
+        # Spec §3.3: a preview is never a write target. Unlike
+        # set_trace/set_selection, session.set_channel has no current_key
+        # guard of its own, so this is the only thing standing between a
+        # hovered line's channel combo and a permanent change to which
+        # channel it renders. Re-enabled in `_open` (promotion, or any
+        # later line-open) and in `_exit_preview`.
+        self.channel_combo.setEnabled(False)
         self.difference_label.setText("")
         line = self.session.line_for_key(key)
         label = getattr(line.placement, "label", None) or line.path.stem
@@ -438,6 +452,7 @@ class ProfileDock(QgsDockWidget):
             return
         self._preview_key = None
         self.preview_label.setText("")
+        self.channel_combo.setEnabled(True)
         if self._working_key is None:
             self._clear_view_only()
             return
@@ -448,7 +463,10 @@ class ProfileDock(QgsDockWidget):
             self.view.clear_selection()
         else:
             self.view.set_selection(start, end)
-        if self._strip_was_visible:
+        deferred, self._deferred_strip = self._deferred_strip, None
+        if deferred is not None:
+            self.show_gain_strip(*deferred)  # not previewing now: takes the normal path
+        elif self._strip_was_visible:
             self.gain_strip.show()
         self._strip_was_visible = False
 
@@ -569,7 +587,20 @@ class ProfileDock(QgsDockWidget):
         still be honoured, and ends any gesture in progress -- the safe
         direction: the corrupting one is keeping a gesture alive across a
         change of curve.
+
+        While a preview is up this is deferred rather than acted on: the
+        strip edits a step in the WORKING line's stack and writes on
+        drag, so a strip whose curve belongs to a line that is not on
+        screen is precisely the C2 configuration (spec §3.3). Deferred
+        rather than dropped, because the request can carry a NEW curve
+        (the working line finishing a load mid-preview) that
+        `_exit_preview` must still honour once the preview ends, rather
+        than re-showing whatever was on screen before it started.
         """
+        if self._preview_key is not None:
+            self._deferred_strip = None if points is None else (points, owner)
+            self.gain_strip.hide()
+            return
         if points is None or self.view.transform is None:
             self.gain_strip.hide()
             return
@@ -612,6 +643,16 @@ class ProfileDock(QgsDockWidget):
         self.channel_combo.setVisible(n > 1)
 
     def _channel_changed(self, index: int) -> None:
+        if self._preview_key is not None:
+            # Spec §3.3: a preview is never a write target. Unlike
+            # set_trace/set_selection, session.set_channel has no
+            # current_key guard of its own, so this is the only thing
+            # standing between a hovered line and a permanent change to
+            # which channel it renders. The combo is also disabled while
+            # previewing (see `_enter_preview`) so this is a second line
+            # of defence, not the only one -- the same shape as every
+            # other guard in this file.
+            return
         if self._key is None or index < 0:
             return
         try:

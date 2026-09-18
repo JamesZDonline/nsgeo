@@ -575,19 +575,32 @@ def test_refresh_velocity_returns_silently_once_the_site_is_closed(opened, messa
 
 @pytest.fixture
 def previewing(qgis_app, tmp_path):
-    """Two lines on one grid, the first open. `opened` has only one line,
-    and a preview needs somewhere else to point."""
+    """Two lines on one grid, both loaded, the first open. `opened` has
+    only one line, and a preview needs somewhere else to point.
+
+    Both lines are loaded (`set_profiles`, the same idiom `opened`-based
+    tests use) rather than left with an empty stack: a preview over a
+    line with nothing to render would never reach `_render()`, and could
+    not exercise the one hazard `_effective_difference_index` exists to
+    guard -- `stack.difference(i)` evaluated against a previewed line's
+    stack that does not have `i` steps on it.
+    """
     session = SiteSession()
     dock = ProfileDock(session)
     dock.resize(900, 360)
     dock.show()
     session.new_site(tmp_path)
     session.add_grid(GRID)
+    lines = []
     for i in range(2):
         p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=240)
-        session.add_lines([Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, -1, p.stem))])
+        line = Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, -1, p.stem))
+        session.add_lines([line])
+        lines.append(line)
     keys = session.keys()
     session.open_line(keys[0])
+    for key, line in zip(keys, lines):
+        session.set_profiles(key, line.load())
     yield dock, session, keys
     # Parentless top-level widget: torn down explicitly rather than left
     # for Python's GC to race Qt's widget teardown. See `opened`.
@@ -597,11 +610,13 @@ def previewing(qgis_app, tmp_path):
 
 def test_preview_renders_the_previewed_line_not_the_working_one(previewing):
     dock, session, keys = previewing
+    before = dock.image
 
     session.set_preview(keys[1], 5)
 
     assert dock._key == keys[1]
     assert session.current_key == keys[0]
+    assert dock.image is not None and dock.image is not before
     label = session.line_for_key(keys[1]).path.stem
     assert label in dock.windowTitle()
 
@@ -645,13 +660,20 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.append_step(keys[0], build_step("dewow", window_ns=4.0))
     dock.set_difference_index(0)
     assert dock._difference_index == 0
+    assert "dewow" in dock.difference_label.text()
 
+    # keys[1] has an EMPTY stack, so index 0 does not exist on it. If the
+    # render used the stored index instead of the effective one this would
+    # raise IndexError inside a slot -- qFatal() in the LTR container.
     session.set_preview(keys[1], 5)
-    assert dock._effective_difference_index == -1  # not computed on someone else's stack
-    assert dock._difference_index == 0  # but remembered
+    assert dock._effective_difference_index == -1
+    assert dock._difference_index == 0
+    assert dock.difference_label.text() == ""
+    assert dock.image is not None
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
+    assert "dewow" in dock.difference_label.text()
 
 
 def test_snap_back_restores_the_working_lines_cursor_and_selection(previewing):
@@ -718,3 +740,44 @@ def test_a_shift_click_on_a_preview_authors_no_pick(previewing):
     dock.view.pick_requested.emit(20, 15.0)
 
     assert emitted == []
+
+
+def test_a_channel_change_is_refused_while_previewing(previewing):
+    """Review finding 1 (M7 Task 2): `session.set_channel` has no
+    `current_key` guard of its own, unlike `set_trace`/`set_selection` --
+    before `_key` meant "displayed", this path could never reach a line
+    that was not the working one, so nothing guarded it here. Checks both
+    halves of the fix: the session is untouched, and the control that
+    would have caused it is disabled, not just silently ignored.
+    """
+    dock, session, keys = previewing
+    before = session.channel(keys[1])
+
+    session.set_preview(keys[1], 5)
+    assert not dock.channel_combo.isEnabled()
+    dock._channel_changed(0)
+
+    assert session.channel(keys[1]) == before
+
+    session.clear_preview()
+    assert dock.channel_combo.isEnabled()
+
+
+def test_a_gain_strip_request_mid_preview_is_deferred_and_honoured_on_exit(previewing):
+    """Review finding 2 (M7 Task 2): the strip writes on drag, so showing
+    a curve that belongs to a line not on screen is the C2 configuration
+    -- reachable when the working line's own curve arrives (via
+    `show_gain_strip`) while a preview is up. The request must not show
+    the strip early, but must not be lost either: `_exit_preview` has to
+    honour the newest points once the preview ends.
+    """
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+
+    dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("x", 0, 0))
+    assert not dock.gain_strip.isVisible()
+
+    session.clear_preview()
+
+    assert dock.gain_strip.isVisible()
+    assert dock.gain_strip.points() == [[0.0, 1.0], [1.0, 2.0]]
