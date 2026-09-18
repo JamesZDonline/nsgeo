@@ -58,6 +58,11 @@ class SiteSession(QObject):
     line_loaded = pyqtSignal(str)
     trace_changed = pyqtSignal(str, int)
     selection_changed = pyqtSignal(str, int, int)  # (-1, -1) when cleared
+    # Spec §3.3: the WEAK notion of "what the pointer is over". It drives
+    # the profile view and the trace cursor and nothing else, ever. It is
+    # never a write target and never dirties the session -- see
+    # set_preview() for why that distinction is load bearing.
+    preview_changed = pyqtSignal(str, int)  # ("", -1) when cleared
     stack_changed = pyqtSignal(str)
     picks_changed = pyqtSignal()
     presets_changed = pyqtSignal()
@@ -76,6 +81,8 @@ class SiteSession(QObject):
         self._current_key: str | None = None
         self._current_trace = -1
         self._selection: tuple[int, int] = (-1, -1)
+        self._preview_key: str | None = None
+        self._preview_trace = -1
 
     # ---- state ------------------------------------------------------------
     @property
@@ -135,6 +142,28 @@ class SiteSession(QObject):
     @property
     def selection(self) -> tuple[int, int]:
         return self._selection
+
+    @property
+    def preview_key(self) -> str | None:
+        return self._preview_key
+
+    @property
+    def preview_trace(self) -> int:
+        return self._preview_trace
+
+    @property
+    def display_key(self) -> str | None:
+        """The line the profile should be SHOWING -- the preview when there
+        is one, otherwise the working line.
+
+        Deliberately distinct from `current_key`, which is the line every
+        write resolves through. A caller that is about to change data wants
+        `current_key`; a caller that is about to draw wants this. Getting
+        those two confused is exactly the C2 defect class (a write target
+        resolved from a different source than the thing the user believes
+        they are editing), so they do not share a name.
+        """
+        return self._preview_key or self._current_key
 
     def _require_site(self) -> Site:
         if self._site is None:
@@ -356,6 +385,8 @@ class SiteSession(QObject):
         self._current_key = None
         self._current_trace = -1
         self._selection = (-1, -1)
+        self._preview_key = None
+        self._preview_trace = -1
         self._allow_absolute = False
         self._set_dirty(False)
         if had_current_line:
@@ -581,6 +612,14 @@ class SiteSession(QObject):
         self._current_key = key
         self._current_trace = -1
         self._selection = (-1, -1)
+        # Promotion ends the preview. Reset WITHOUT emitting
+        # preview_changed: a listener told "preview cleared" would snap the
+        # view back to the OLD working line, and be told to render the new
+        # one an instant later by line_opened -- two renders and a visible
+        # flash for one user gesture. line_opened is the single signal that
+        # drives that render, and ProfileDock clears its own preview on it.
+        self._preview_key = None
+        self._preview_trace = -1
         self.line_opened.emit(key)
 
     def profiles_for(self, key: str) -> list[Profile] | None:
@@ -633,3 +672,36 @@ class SiteSession(QObject):
         if self._selection != (-1, -1) and self._current_key is not None:
             self._selection = (-1, -1)
             self.selection_changed.emit(self._current_key, -1, -1)
+
+    # ---- preview (spec §3.3) ----------------------------------------------
+    def set_preview(self, key: str | None, trace: int = -1) -> None:
+        """Set what the pointer is over. NOT a write target, ever.
+
+        `current_key` is not merely what is displayed: `replace_step`,
+        `apply_to_grid`, `apply_preset` and `remove_step` all resolve
+        their target through it, and the processing dock binds to it. If
+        hovering the map moved `current_key`, moving the pointer would
+        silently repoint every destructive operation in the plugin -- edit
+        a parameter, and it lands on a line the user only passed over,
+        with no error and no cue. That is C2's defect class exactly, and
+        C2 is already on this codebase's record. Hence a second, weaker
+        notion that cannot reach any of those paths.
+
+        Never sets dirty: a preview is a view state, not an edit. Never
+        touches `_current_key`, `_current_trace` or `_selection`.
+        """
+        if key is None:
+            self.clear_preview()
+            return
+        line = self.line_for_key(key)  # raises KeyError before anything changes
+        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+        if (key, index) == (self._preview_key, self._preview_trace):
+            return  # loop guard: a marker update that round-trips is a no-op
+        self._preview_key, self._preview_trace = key, index
+        self.preview_changed.emit(key, index)
+
+    def clear_preview(self) -> None:
+        if self._preview_key is None and self._preview_trace == -1:
+            return
+        self._preview_key, self._preview_trace = None, -1
+        self.preview_changed.emit("", -1)

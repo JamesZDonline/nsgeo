@@ -639,3 +639,159 @@ def test_a_journal_beside_the_destination_name_also_blocks_adoption(qgis_app, tm
     assert any(
         stray.name in msg and level == int(Qgis.MessageLevel.Warning) for msg, level in seen
     ), seen
+
+
+# ---- preview key (M7, spec §3.3) --------------------------------------------
+
+
+@pytest.fixture
+def previewable(qgis_app, tmp_path):
+    """A session with two lines placed on one grid."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from plugin_testing import synthetic_dzt
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    lines = []
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    keys = session.keys()
+    session.open_line(keys[0])
+    return session, keys
+
+
+def test_set_preview_records_the_key_and_trace_and_emits_once(previewable):
+    session, keys = previewable
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.set_preview(keys[1], 12)
+
+    assert session.preview_key == keys[1]
+    assert session.preview_trace == 12
+    assert seen == [(keys[1], 12)]
+
+
+def test_preview_never_moves_the_working_line(previewable):
+    """The C2 guard. current_key is what every write resolves through."""
+    session, keys = previewable
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    session.set_preview(keys[1], 12)
+
+    assert session.current_key == keys[0]
+    assert session.current_trace == -1
+    assert opened == []
+
+
+def test_preview_never_dirties_the_session(previewable):
+    session, keys = previewable
+    session.save()
+    assert not session.dirty
+
+    session.set_preview(keys[1], 12)
+    session.clear_preview()
+
+    assert not session.dirty
+
+
+def test_repeating_the_same_preview_emits_nothing(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.set_preview(keys[1], 12)
+
+    assert seen == []
+
+
+def test_clear_preview_emits_the_cleared_sentinel_once(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.clear_preview()
+    session.clear_preview()
+
+    assert seen == [("", -1)]
+    assert session.preview_key is None
+    assert session.preview_trace == -1
+
+
+def test_display_key_is_the_preview_while_previewing(previewable):
+    session, keys = previewable
+    assert session.display_key == keys[0]
+
+    session.set_preview(keys[1], 3)
+    assert session.display_key == keys[1]
+
+    session.clear_preview()
+    assert session.display_key == keys[0]
+
+
+def test_preview_trace_is_clamped_to_the_previewed_line(previewable):
+    session, keys = previewable
+    n = session.line_for_key(keys[1]).n_traces
+
+    session.set_preview(keys[1], 10_000)
+    assert session.preview_trace == n - 1
+
+    session.set_preview(keys[1], -5)
+    assert session.preview_trace == -1
+
+
+def test_preview_of_an_unknown_key_raises_and_changes_nothing(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 4)
+
+    with pytest.raises(KeyError):
+        session.set_preview("no/such/line", 0)
+
+    assert session.preview_key == keys[1]
+    assert session.preview_trace == 4
+
+
+def test_set_trace_still_refuses_a_previewed_line(previewable):
+    """set_trace is keyed to the WORKING line; a preview is not one."""
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.trace_changed.connect(lambda k, i: seen.append((k, i)))
+
+    session.set_trace(keys[1], 20)
+
+    assert seen == []
+    assert session.current_trace == -1
+
+
+def test_open_line_ends_the_preview_without_a_second_emission(previewable):
+    """Promotion is one render, not two: line_opened drives it."""
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+    seen = []
+    session.preview_changed.connect(lambda k, t: seen.append((k, t)))
+
+    session.open_line(keys[1])
+
+    assert session.preview_key is None
+    assert session.current_key == keys[1]
+    assert seen == []
+
+
+def test_close_site_clears_the_preview(previewable):
+    session, keys = previewable
+    session.set_preview(keys[1], 12)
+
+    session.close_site()
+
+    assert session.preview_key is None
+    assert session.preview_trace == -1
