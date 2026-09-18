@@ -892,6 +892,19 @@ def test_the_marker_follows_the_preview_not_the_working_line(linked):
     assert link._marker.center().distance(want) < 1e-6
 
 
+def test_hovering_the_working_line_keeps_its_own_selection_band(linked):
+    """`preview_key == current_key` is reachable and emits, and it means
+    the pointer is over the line already being worked on -- not a preview.
+    Testing `preview_key is not None` alone blanks that line's own band."""
+    link, session, _layers, _canvas, keys = linked
+    session.set_selection(keys[0], 4, 9)
+
+    session.set_preview(keys[0], 3)
+
+    assert link._band.numberOfVertices() == 6
+    assert link._marker.isVisible()
+
+
 def test_a_preview_shows_no_selection_band(linked):
     link, session, _layers, _canvas, keys = linked
     session.set_selection(keys[0], 4, 9)
@@ -1149,7 +1162,15 @@ class MapLink(QObject):
             self._marker.setVisible(False)
             self._band.reset(QgsWkbTypes.LineGeometry)
             return
-        if self.session.preview_key is not None:
+        # `preview_key == current_key` is reachable -- the session allows
+        # it and emits for it -- and it means the pointer is over the line
+        # already being worked on, which is not a preview at all. Testing
+        # `preview_key is not None` alone would blank that line's own
+        # selection band the moment the pointer crossed it. ProfileDock
+        # draws the same distinction in `_on_preview_changed`; the two must
+        # agree or the map and the profile disagree about what is showing.
+        previewing = self.session.preview_key not in (None, self.session.current_key)
+        if previewing:
             self._set_marker(key, self.session.preview_trace)
             # A preview has no selection of its own, and the working
             # line's selection belongs to a line that is not on screen.
