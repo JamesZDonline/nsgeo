@@ -9,7 +9,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing import StepStack, build_step
-from nsgeo.project import ProjectError, load_site, save_site
+from nsgeo.project import ProjectError, line_key, load_site, save_site
 
 from tests.synthetic import write_dzt
 
@@ -231,6 +231,69 @@ def test_stack_for_an_absolute_line_is_keyed_by_the_absolute_string(tmp_path):
     out = project / "survey.nsgeo.json"
     save_site(Site(grids=[_grid()], lines=[line], stacks={key: st}), out, allow_absolute=True)
     assert load_site(out).stacks[key].to_dicts() == st.to_dicts()
+
+
+def test_a_symlinked_data_directory_keeps_its_stacks_and_stays_saveable(tmp_path):
+    """Survey data on an external disk, symlinked into the project as `data/`.
+
+    An ordinary arrangement when GPR data runs to gigabytes, and one the
+    relative-path format is meant to support. It used to open, show none of
+    its saved processing, and then refuse every save: `save_site` keyed by a
+    resolved path (the external disk, out of tree) while `load_site` keyed by
+    the raw stored string, so the stack was loaded under a key nothing would
+    ever ask for, the plain save was refused as out-of-tree, and the
+    `allow_absolute` fallback the plugin offers next failed too -- the stack
+    was now an orphan matching no line.
+
+    Asserts all three halves: the key a session would look up hits, the
+    stack behind it is the one that was saved, and a plain save still
+    works and still stores the portable relative path.
+    """
+    project = tmp_path / "project"
+    line = _line_at(project / "data" / "L0.DZT")
+    stack = StepStack()
+    stack.append(build_step("dewow", window_ns=4.0))
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[line], stacks={"data/L0.DZT": stack}), out)
+
+    external = tmp_path / "external"
+    (project / "data").rename(external)
+    (project / "data").symlink_to(external, target_is_directory=True)
+    assert (project / "data").is_symlink()
+
+    back = load_site(out)
+    # Exactly what SiteSession.line_key() computes for this line.
+    key = line_key(back.lines[0].path, project.resolve(), allow_absolute=True)
+    assert key in back.stacks
+    assert back.stacks[key].to_dicts() == stack.to_dicts()
+
+    save_site(back, out)
+    assert [ln["path"] for ln in json.loads(out.read_text())["lines"]] == ["data/L0.DZT"]
+
+
+def test_a_non_canonical_stored_path_is_keyed_the_way_a_save_keys_it(tmp_path):
+    """The format is advertised as human-readable and hand-editable, so a
+    path that is correct but not canonical must behave like the canonical
+    one. `data/../data/L0.DZT` is such a path -- pathlib collapses a `.`
+    segment on its own but never a `..` one -- and keying a loaded stack by
+    the raw string made it an orphan that no save would accept again."""
+    project = tmp_path / "project"
+    line = _line_at(project / "data" / "L0.DZT")
+    stack = StepStack()
+    stack.append(build_step("dewow", window_ns=4.0))
+    out = project / "survey.nsgeo.json"
+    save_site(Site(grids=[_grid()], lines=[line], stacks={"data/L0.DZT": stack}), out)
+
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["path"] = "data/../data/L0.DZT"
+    out.write_text(json.dumps(doc, indent=2) + "\n")
+
+    back = load_site(out)
+    assert "data/L0.DZT" in back.stacks
+    assert back.stacks["data/L0.DZT"].to_dicts() == stack.to_dicts()
+
+    save_site(back, out)
+    assert [ln["path"] for ln in json.loads(out.read_text())["lines"]] == ["data/L0.DZT"]
 
 
 def test_out_of_tree_error_names_the_opt_in(tmp_path):

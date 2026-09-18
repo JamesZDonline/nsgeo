@@ -16,6 +16,22 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -e "./packages/nsgeo-core[dev]"
       - run: python -m pytest packages/nsgeo-core/tests -v
+      - run: python -m pytest packages/nsgeo-qgis/tests/pure -v
+
+  plugin-qgis:
+    runs-on: ubuntu-latest
+    container: qgis/qgis:ltr
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QGIS_PREFIX_PATH: /usr
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          python3 -m pip --version || (apt-get update && apt-get install -y python3-pip)
+          python3 -m pip install --break-system-packages pytest
+      - name: assert QGIS bindings are actually importable
+        run: python3 -c "from qgis.core import Qgis; print(Qgis.QGIS_VERSION)"
+      - run: python3 -m pytest packages/nsgeo-qgis/tests -v
 
   lint:
     runs-on: ubuntu-latest
@@ -27,4 +43,7 @@ jobs:
       - run: python -m pip install ruff mypy numpy
       - run: ruff check .
       - run: ruff format --check .
-      - run: mypy --config-file packages/nsgeo-core/pyproject.toml packages/nsgeo-core/src/nsgeo
+      - run: |
+          mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent \
+            packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py \
+            packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py

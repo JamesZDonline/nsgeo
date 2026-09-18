@@ -6,8 +6,10 @@ A cross-platform toolstack for GPR, magnetometry, conductivity, and resistivity
 data — built as an independent core library with thin front-end layers, starting
 with a QGIS plugin.
 
-> **Status: early development.** The design is settled; implementation is
-> starting. Nothing here works yet.
+> **Status: early development.** The core library (DZT reader, survey model,
+> processing) is complete and tested. The QGIS plugin loads sites, imports
+> lines onto the map, and shows and processes profiles. Map↔profile cursor
+> sync, picking, and a release zip are next.
 
 ## Why
 

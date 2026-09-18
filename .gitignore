@@ -33,6 +33,7 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-qgis/
 venv/
 .pytest_cache/
 .mypy_cache/
@@ -51,3 +52,6 @@ htmlcov/
 
 # Git worktrees for isolated feature work
 .worktrees/
+
+# Lavish review artifacts (local HTML mockups; may embed rendered survey data)
+.lavish/

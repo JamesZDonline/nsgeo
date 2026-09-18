@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 
 from nsgeo.processing._util import running_mean
-from nsgeo.processing.base import Radargram, register
+from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
 @register
@@ -25,6 +25,10 @@ class BackgroundMean:
     @property
     def params(self) -> dict[str, Any]:
         return {}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return ()
 
     def apply(self, rg: Radargram) -> Radargram:
         return rg.replace(data=rg.data - rg.data.mean(axis=1, keepdims=True))
@@ -42,6 +46,14 @@ class BackgroundSliding:
     @property
     def params(self) -> dict[str, Any]:
         return {"window_traces": self.window_traces}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="window_traces", kind="int", label="Window", default=200, unit="traces", min=1
+            ),
+        )
 
     def apply(self, rg: Radargram) -> Radargram:
         if self.window_traces < 1:
@@ -66,6 +78,14 @@ class BackgroundSvd:
     @property
     def params(self) -> dict[str, Any]:
         return {"n_components": self.n_components}
+
+    @classmethod
+    def schema(cls) -> tuple[ParamSpec, ...]:
+        return (
+            ParamSpec(
+                name="n_components", kind="int", label="Components removed", default=1, min=0
+            ),
+        )
 
     def apply(self, rg: Radargram) -> Radargram:
         n = self.n_components

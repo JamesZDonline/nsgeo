@@ -13,6 +13,7 @@ absolute paths (see `save_site`).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
+from nsgeo.velocity import VelocityModel
 
 SCHEMA_VERSION = 1
 
@@ -29,7 +31,7 @@ class ProjectError(Exception):
 
 
 def _grid_to_dict(grid: Grid) -> dict[str, Any]:
-    return {
+    doc: dict[str, Any] = {
         "id": grid.id,
         "origin": list(grid.origin),
         "azimuth": grid.azimuth,
@@ -38,9 +40,20 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
         "crs": grid.crs,
         "default_spacing": grid.default_spacing,
     }
+    if grid.velocity is not None:
+        doc["velocity"] = grid.velocity.to_dict()
+    return doc
 
 
 def _grid_from_dict(doc: dict[str, Any]) -> Grid:
+    velocity = None
+    if "velocity" in doc:
+        try:
+            velocity = VelocityModel.from_dict(doc["velocity"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(
+                f"invalid velocity for grid {doc.get('id', '<unknown>')!r}: {exc}"
+            ) from exc
     return Grid(
         id=doc["id"],
         origin=(float(doc["origin"][0]), float(doc["origin"][1])),
@@ -49,6 +62,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         size_y=float(doc["size_y"]),
         crs=doc["crs"],
         default_spacing=float(doc["default_spacing"]),
+        velocity=velocity,
     )
 
 
@@ -80,16 +94,51 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
     )
 
 
-def _line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
-    """The string a line is stored and keyed by.
+def line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
+    """The one string a line is stored, keyed and looked up by.
+
+    Save, load and the front end's session all derive their key from this
+    function and from nothing else. That is the whole point of it being
+    public: `save_site` keying by a canonicalised path while `load_site`
+    keyed by the raw stored string agreed only when the stored string was
+    already in canonical form, and where they disagreed the saved
+    processing stack became invisible in the UI and the project could never
+    be saved again.
 
     Relative POSIX when the file is under `root`, which keeps the project
     portable. For a file outside `root`: its absolute POSIX path when
     `allow_absolute` is set, otherwise a ProjectError.
+
+    "Under `root`" is decided lexically first -- `os.path.normpath`, which
+    collapses `.` and `..` without following symlinks -- and only then by
+    `Path.resolve()`. That order is deliberate. A `data/` subdirectory
+    symlinked onto an external disk is an ordinary arrangement when GPR
+    data runs to gigabytes, and resolving first would call such a line
+    out-of-tree: the next plain save is refused outright, and the
+    `allow_absolute` fallback rewrites a deliberately portable
+    `data/L0.DZT` into a path tied to this machine's mount points, which
+    then fails to open anywhere else. Keeping it lexical leaves the stored
+    form exactly as the user wrote it, so a save is also idempotent -- the
+    survey file stays diffable rather than churning its paths.
+
+    The `resolve()` fallback still covers the reverse case: a path that
+    reaches inside `root` by a route that is not lexically under it -- a
+    symlinked project directory, or macOS's `/tmp` -> `/private/tmp` --
+    which would otherwise be misread as out of tree.
+
+    `root` is expected to be absolute (every caller passes
+    `json_path.parent.resolve()`); a relative `line_path` is taken against
+    the current directory, as `resolve()` has always done.
     """
-    resolved = Path(line_path).resolve()
+    path = Path(line_path)
+    lexical = Path(os.path.normpath(path if path.is_absolute() else Path.cwd() / path))
     try:
-        return resolved.relative_to(root).as_posix()
+        return lexical.relative_to(root).as_posix()
+    except ValueError:
+        pass
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(Path(root).resolve()).as_posix()
     except ValueError:
         if allow_absolute:
             return resolved.as_posix()
@@ -115,7 +164,7 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     lines_data = []
     keys_written: list[str] = []
     for line in site.lines:
-        key = _line_key(line.path, root, allow_absolute=allow_absolute)
+        key = line_key(line.path, root, allow_absolute=allow_absolute)
         keys_written.append(key)
         entry: dict[str, Any] = {
             "path": key,
@@ -124,6 +173,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         stack = site.stacks.get(key)
         if stack is not None:
             entry["stack"] = stack.to_dicts()
+        if line.velocity is not None:
+            entry["velocity"] = line.velocity.to_dict()
         lines_data.append(entry)
 
     orphans = sorted(set(site.stacks) - set(keys_written))
@@ -138,6 +189,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
+    if site.presets:
+        doc["presets"] = site.presets
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -166,11 +219,45 @@ def load_site(path: str | Path) -> Site:
             raise ProjectError(
                 f"referenced file does not exist: {dzt} (stored as {entry['path']!r})"
             )
-        lines.append(Line.open(dzt, _placement_from_dict(entry["placement"])))
+        # Keyed through `line_key`, not by the raw stored string: the two
+        # agree only when the file already happens to hold the canonical
+        # spelling. A hand-edited "./L0.DZT" -- or a `data/` symlinked onto
+        # an external disk -- otherwise loads a stack under a key no save
+        # and no session lookup will ever compute, which shows the line as
+        # unprocessed and then refuses every later save as an orphan.
+        # `allow_absolute` is not a policy decision here: a project saved
+        # with the out-of-tree opt-in must still load. Whether an absolute
+        # path may be *written* stays `save_site`'s call.
+        key = line_key(dzt, root, allow_absolute=True)
+        velocity = None
+        if "velocity" in entry:
+            try:
+                velocity = VelocityModel.from_dict(entry["velocity"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(f"invalid velocity for line {entry['path']!r}: {exc}") from exc
+        lines.append(Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity))
         if "stack" in entry:
-            stacks[entry["path"]] = StepStack.from_dicts(entry["stack"])
+            try:
+                stacks[key] = StepStack.from_dicts(entry["stack"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(
+                    f"invalid processing stack for line {entry['path']!r}: {exc}"
+                ) from exc
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
+
+    presets = doc.get("presets", {})
+    if not isinstance(presets, dict):
+        raise ProjectError(
+            f"{path}: 'presets' must be an object keyed by name, got {type(presets).__name__}"
+        )
+    for name, dicts in presets.items():
+        try:
+            StepStack.from_dicts(dicts)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
+    site.presets = dict(presets)
+
     site.validate()
     return site

@@ -18,6 +18,7 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.velocity import VelocityModel
 
 #: How many lines' sample arrays stay resident. A 30x30 m grid at 0.5 m
 #: spacing is about 100 MB in total, so a bound of 16 lines is generous
@@ -70,9 +71,10 @@ class Line:
     header: DztHeader
     placement: Placement
     n_traces: int
+    velocity: VelocityModel | None = None
 
     @classmethod
-    def open(cls, path: Path, placement: Placement) -> Line:
+    def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:
         """Read the header and derive the trace count. Reads 1024 bytes plus
         a stat, regardless of file size."""
         path = Path(path)
@@ -82,6 +84,7 @@ class Line:
             header=header,
             placement=placement,
             n_traces=trace_count(path, header),
+            velocity=velocity,
         )
 
     def load(self) -> list[Profile]:
@@ -101,6 +104,11 @@ class Site:
     grids: list[Grid] = field(default_factory=list)
     lines: list[Line] = field(default_factory=list)
     stacks: dict[str, Any] = field(default_factory=dict)
+    #: Named stacks, saved as (step, params, enabled) dicts -- the same
+    #: shape `StepStack.to_dicts()` produces -- so applying one is a plain
+    #: `StepStack.from_dicts()` with no extra conversion. Keyed by name,
+    #: not by line: unlike `stacks`, a preset is not tied to any one line.
+    presets: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     @property
     def frames(self) -> dict[str, Grid]:
