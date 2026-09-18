@@ -718,6 +718,37 @@ Connect it in `__init__` beside the other session connections:
         session.preview_changed.connect(self._on_preview_changed)
 ```
 
+- [ ] **Step 6b: Refuse to author a pick while previewing**
+
+`_pick` (profile_dock.py:578) emits `self.pick_requested.emit(self._key, trace, time_ns)`, and `self._key` is now the *displayed* line. Nothing consumes that signal today, so M7 ships no defect — but M8 connects it to `session.add_pick`, and it would then author a pick on a line the user only hovered over. Spec §4.3: "Picking targets the **working line**, never a preview." Guard it in the task that creates the hazard, not in the one that would trip over it.
+
+Add as the first statement of `_pick`'s body, before the existing guard:
+
+```python
+        if self._preview_key is not None:
+            # A preview never authors data (spec §3.3, §4.3). `self._key`
+            # is the DISPLAYED line, so without this a shift-click on a
+            # previewed radargram would emit a pick for a line the user
+            # only hovered. Nothing consumes pick_requested until M8 --
+            # this is guarded here, in the change that makes `_key` mean
+            # "displayed", rather than left for M8 to discover.
+            return
+```
+
+And the test:
+
+```python
+def test_a_shift_click_on_a_preview_authors_no_pick(previewing):
+    dock, session, keys = previewing
+    emitted = []
+    dock.pick_requested.connect(lambda k, t, ns: emitted.append((k, t, ns)))
+    session.set_preview(keys[1], 5)
+
+    dock.view.pick_requested.emit(20, 15.0)
+
+    assert emitted == []
+```
+
 **Note — no guard is needed on `_hovered`.** Hovering the profile during a preview calls `session.set_trace(self._key, trace)` with `_key` = the previewed line, and `set_trace` returns early because that is not `current_key`. The safety is structural, not a check that could be forgotten. The test asserts it anyway.
 
 - [ ] **Step 7: Run the tests to verify they pass**
@@ -1321,19 +1352,27 @@ def test_the_dwell_timer_really_fires_on_its_own(linked):
     assert session.preview_key == keys[1]
 
 
-def test_the_tolerance_is_compared_against_a_squared_distance(linked):
-    """closestVertexWithContext returns a SQUARED distance. Comparing it to
-    an unsquared tolerance makes the hit radius 12x too generous, which is
-    invisible in a test that only ever hovers exactly on the line."""
+def test_the_tolerance_is_a_distance_not_a_squared_distance(linked):
+    """closestVertexWithContext returns a SQUARED distance, so the tolerance
+    must be squared to match it.
+
+    The discriminating probe is a HIT, not a miss. With mapUnitsPerPixel()
+    == 1.0 the tolerance is 12 map units and 12 > sqrt(12), so comparing
+    the squared distance against a RAW tolerance is *stricter* than
+    correct, not looser: it rejects past 3.46 m where the correct
+    comparison rejects past 12 m. A miss test therefore passes under both
+    spellings and proves nothing. Hovering inside the real tolerance but
+    outside sqrt(tolerance) separates them."""
     link, session, _layers, canvas, keys = linked
     tol = canvas.mapUnitsPerPixel() * link.HOVER_TOLERANCE_PX
+    assert tol > 1.0, "the discriminating band exists only while tol > sqrt(tol)"
     on = link._geometries()[keys[1]].vertexAt(7)
-    outside = QgsPointXY(on.x() + tol * 3.0, on.y())
+    near = QgsPointXY(on.x() + tol * 0.8, on.y())
 
-    canvas.xyCoordinates.emit(outside)
+    canvas.xyCoordinates.emit(near)
     _fire_dwell(link)
 
-    assert session.preview_key is None
+    assert session.preview_key is not None
 
 
 def test_hover_with_no_site_open_does_nothing(qgis_app, tmp_path):
@@ -1401,7 +1440,7 @@ def test_a_previewed_line_is_requested_from_the_loader(linked, monkeypatch):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/tests/qgis/test_plugin_map_link.py -q -p no:xonsh -k "hover or dwell or tolerance or loader or sweep or working"`
+Run: `QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/tests/qgis/test_plugin_map_link.py -q -p no:xonsh -k "hover or dwell or tolerance or loader or sweep or working or real"`
 
 Expected: FAIL — `AttributeError: 'MapLink' object has no attribute '_dwell'`.
 
@@ -1670,12 +1709,23 @@ from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[2] / "nsgeo_qgis"
 
-# Declared, deliberately not yet consumed, with the milestone that adopts
-# them. M8 (the pick tool) turns both into working features; spec §4.1
-# names them explicitly. Anything NOT in this list must have a connect.
-ADOPTED_BY_M8 = {
-    "picks_changed",   # SiteSession -- session.add_pick will emit it
-    "pick_requested",  # ProfileDock -- connects to session.add_pick
+# Declared with no consumer anywhere, each with the reason it survives.
+# Anything NOT listed here must have a connect.
+#
+# NOTE: spec §1's orphan table is incomplete and partly wrong. It lists
+# three orphans; the real set is the four below, and `pick_requested` --
+# which it lists -- is NOT a name-level orphan at all (see
+# test_profile_docks_pick_signal_is_still_unconsumed).
+KNOWN_UNCONSUMED = {
+    # Adopted by M8, the pick tool (spec §4.1): session.add_pick emits it.
+    "picks_changed",
+    # Dead API from Plan 2: plugin.py's toolbar actions do New, Open and
+    # Save, and SurveyDock's own signals for them were never wired to
+    # anything. Deleting them is Plan 2 cleanup, not M7 work -- pulling it
+    # in here is the scope creep the 3-6 task rule exists to prevent.
+    "new_site_requested",
+    "open_site_requested",
+    "save_requested",
 }
 
 
@@ -1699,35 +1749,54 @@ def _declared_signals(sources: dict[Path, str]) -> dict[str, Path]:
     return found
 
 
+def _connect_count(blob: str, name: str) -> int:
+    return len(re.findall(rf"\.{re.escape(name)}\s*\.connect\s*\(", blob))
+
+
 def test_every_declared_signal_has_a_connect() -> None:
     sources = _sources()
     blob = "\n".join(sources.values())
     orphans = {
         name: path.name
         for name, path in _declared_signals(sources).items()
-        if name not in ADOPTED_BY_M8
-        and not re.search(rf"\.{re.escape(name)}\s*\.connect\s*\(", blob)
+        if name not in KNOWN_UNCONSUMED and not _connect_count(blob, name)
     }
     assert not orphans, (
         "signals declared with no consumer anywhere in the plugin: "
         f"{orphans}. A signal nothing connects to reads like a working "
         "feature from the emitting side. Either connect it, delete it, or "
-        "-- if a later milestone adopts it -- add it to ADOPTED_BY_M8 with "
-        "the milestone named."
+        "-- if a later milestone adopts it -- add it to KNOWN_UNCONSUMED "
+        "with the reason."
     )
 
 
-def test_the_deferred_signals_are_still_genuinely_unconsumed() -> None:
-    """Keeps ADOPTED_BY_M8 honest: once M8 connects one, it must leave the
-    list, or the list quietly stops being a to-do and starts being a
-    permanent exemption."""
+def test_the_known_unconsumed_signals_are_still_unconsumed() -> None:
+    """Keeps KNOWN_UNCONSUMED honest: once one is connected it must leave
+    the list, or the list stops being a to-do and becomes a permanent
+    exemption nobody rereads."""
     blob = "\n".join(_sources().values())
-    stale = [
-        name
-        for name in ADOPTED_BY_M8
-        if re.search(rf"\.{re.escape(name)}\s*\.connect\s*\(", blob)
-    ]
-    assert not stale, f"now consumed -- remove from ADOPTED_BY_M8: {stale}"
+    stale = [name for name in KNOWN_UNCONSUMED if _connect_count(blob, name)]
+    assert not stale, f"now consumed -- remove from KNOWN_UNCONSUMED: {stale}"
+
+
+def test_profile_docks_pick_signal_is_still_unconsumed() -> None:
+    """`pick_requested` is declared TWICE -- on ProfileView and on
+    ProfileDock -- and only ProfileView's is connected (profile_dock.py
+    wires it to `_pick`). A name-keyed check cannot tell them apart, so
+    ProfileDock's, which is the real orphan, would be invisible to the
+    test above and listing it in KNOWN_UNCONSUMED would make the honesty
+    test fail outright.
+
+    Pin the count instead. M8 connecting ProfileDock's signal to
+    `session.add_pick` makes it two and trips this test -- which is
+    exactly the notification an allowlist entry would have given.
+    """
+    blob = "\n".join(_sources().values())
+    assert _connect_count(blob, "pick_requested") == 1, (
+        "the pick_requested connect count changed. If M8 wired "
+        "ProfileDock.pick_requested to session.add_pick, that is the "
+        "orphan being adopted: raise the expected count to 2 and say so."
+    )
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1884,7 +1953,9 @@ for name in set_preview clear_preview display_key preview_key preview_trace disp
 done
 ```
 
-Every one must have at least one hit outside its own definition. Record the result in the task report. Confirm too that the three Plan 2 orphans are unchanged in status: `picks_changed` and `pick_requested` still deferred to M8 (and listed in `ADOPTED_BY_M8`), `ProfileView.set_pick_mode` still uncalled — M7 does not adopt any of them, and must not have quietly added a fourth.
+Every one must have at least one hit outside its own definition. Record the result in the task report. Confirm too that the pre-existing orphans are unchanged in status: `picks_changed` still deferred to M8, `ProfileDock.pick_requested` still unconsumed (pinned at one connect), the three dead `SurveyDock` signals still listed, and `ProfileView.set_pick_mode` still uncalled. M7 adopts none of them and must not have quietly added another.
+
+**Report back for the user:** spec §1's orphan table and §6's "the three existing orphans" are both wrong — the real set is `picks_changed`, `ProfileDock.pick_requested`, `ProfileView.set_pick_mode`, plus `SurveyDock.new_site_requested` / `open_site_requested` / `save_requested`. The three `SurveyDock` signals are dead API from Plan 2 and want an issue.
 
 - [ ] **Step 8: Commit and push**
 
