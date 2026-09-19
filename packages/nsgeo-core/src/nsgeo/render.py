@@ -82,6 +82,22 @@ class UnipolarClip:
     themselves rather than their magnitudes, because they are already
     non-negative. NaN is nodata, not a value, and is excluded before the
     percentile so an unsurveyed corner cannot decide the stretch.
+
+    For slice display, the shared stretch is a property of (cube,
+    thickness), not of the cube alone: `limit()` must be computed over
+    slices actually taken at the display thickness, never over
+    `cube.mean` (the raw, per-level array). A window mean has far lower
+    variance than the individual levels it averages, so a limit taken
+    over raw levels is systematically too low for a multi-level window --
+    on one realistic cube, `UnipolarClip().limit(cube.mean)` returned 2.59
+    where the correct limit for the displayed 10-level slice was 0.87.
+    Because that bias is uniform across depth, it does not look like a
+    bug: every slice renders at roughly a third of its intended
+    brightness, identically at every depth, so it reads as "the data is
+    dim" rather than as a wrong limit. This class does not compute the
+    slice itself -- that is the caller's job, with the thickness the
+    viewer actually has selected -- so this is a caller obligation this
+    docstring records rather than a defect this class can check.
     """
 
     percentile: float = 99.0

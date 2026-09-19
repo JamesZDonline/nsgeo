@@ -112,6 +112,23 @@ class Site:
     #: Cube recipes, keyed by cube id, each pointing at a `.npz` beside the
     #: survey file. Plain dicts for the same reason `presets` are: the JSON
     #: is the definition, and the array it names is derived and rebuildable.
+    #: Each record's keys: `grid_id` (the Grid the cube's frame was built
+    #: over), `preset` (the name of the preset applied before binning),
+    #: `transform` (the amplitude transform, e.g. "amp_envelope"), `cell`
+    #: (the frame's cell size in metres), and `array` (the path to the
+    #: `.npz`, relative to the survey file). This shape exists today only
+    #: as a literal inside test_project.py; it is recorded here so it has
+    #: one normative source.
+    #:
+    #: Unlike every line path elsewhere in a Site, `save_site` does not
+    #: route a record's `array` through `project.line_key` -- it writes
+    #: `site.cubes` verbatim. `line_key` is what keeps a line's path
+    #: relative and inside the project tree (and rejects an absolute path
+    #: unless the caller opts in); bypassing it means an absolute `array`
+    #: path would round-trip silently and make the survey file
+    #: non-portable. No M10 code writes a `cubes` record, so this has no
+    #: caller yet to catch it: routing `array` through `line_key` is M11's
+    #: job, to be done when it writes the first real record.
     cubes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
