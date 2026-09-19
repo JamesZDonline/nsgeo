@@ -402,8 +402,13 @@ class MapLink(QObject):
         pointing at dead wrappers would fail exactly the way this method
         exists to prevent, just less visibly.
         """
-        for name in self.SELECTABLE:
-            slot = self._selection_slots[name]
+        # Iterates `_selection_slots` itself, not `SELECTABLE`: a name
+        # `SELECTABLE` lists but `_selection_slots` does not would raise
+        # `KeyError` looking the slot up separately, and `dispose()` runs
+        # this same shape of loop with a promise that nothing here may
+        # abort before its scene-removal loop -- a `KeyError` would be
+        # exactly that failure, just reached a different way than Item I4.
+        for name, slot in self._selection_slots.items():
             old = self._bound.get(name)
             if old is not None and not sip.isdeleted(old):
                 # Same two exceptions dispose() suppresses around this
@@ -675,13 +680,18 @@ class MapLink(QObject):
         # _rebind_layer), so disposal has to release whichever instances
         # are currently bound -- guarded the same way as the canvas above,
         # and for the same reason: nothing here may abort before the
-        # scene-removal loop below.
-        for name in self.SELECTABLE:
+        # scene-removal loop below. Iterates `_selection_slots` itself,
+        # not `SELECTABLE`, for that same reason: looking a slot up
+        # separately by name could raise `KeyError` for a name
+        # `SELECTABLE` lists but `_selection_slots` does not, which would
+        # abort this method before `_marker`/`_band` come off the scene --
+        # the Item I4 leak this method exists to prevent.
+        for name, slot in self._selection_slots.items():
             layer = self._bound.get(name)
             self._bound[name] = None
             if layer is not None and not sip.isdeleted(layer):
                 with contextlib.suppress(TypeError, RuntimeError):
-                    layer.selectionChanged.disconnect(self._selection_slots[name])
+                    layer.selectionChanged.disconnect(slot)
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

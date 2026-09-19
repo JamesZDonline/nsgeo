@@ -970,40 +970,50 @@ def test_jumping_from_a_pick_still_works_after_the_site_is_reopened(linked):
 
 @needs_real_data
 def test_selecting_a_real_files_mark_jumps_to_its_own_scan(qgis_app, tmp_path):
-    """Spec §7: real data is the primary validation. The DZX above is a
-    three-line fixture; a real GSSI sidecar carries its own scan numbers
-    against its own trace count, and `refill_marks` clamps a scan into
-    that count. Only a real pair proves the scan a mark reports is the
-    trace the profile lands on.
+    """Spec §7: real data is the primary validation. `FILE__007.DZT` is
+    the one real file in this dataset whose DZX sidecar carries a mark (a
+    single WayPt at its own last trace) -- `refill_marks` clamps a scan
+    into the line's trace count, and only a real file proves the scan a
+    mark reports is the trace the profile actually lands on.
+
+    A second, unmarked real line is opened FIRST and stays `keys[0]`,
+    deliberately: with only one marked file in the whole dataset, a
+    fallback that tolerated the marked line already being the open one
+    would pass trivially -- the key would never have had to move. Picking
+    the files explicitly and asserting the jump changes `current_key`
+    (rather than falling back to `marks[0]` when nothing else matched) is
+    what makes this a real jump instead of a no-op that happens to satisfy
+    the assertion.
     """
+    marked_path = next((p for p in REAL_DZT if p.name == "FILE__007.DZT"), None)
+    other_path = next((p for p in REAL_DZT if p != marked_path), None)
+    if marked_path is None or other_path is None:
+        pytest.skip("need FILE__007.DZT (the one real file with a mark) and a second real DZT")
     project = QgsProject.instance()
     project.clear()
     session = SiteSession()
     session.new_site(tmp_path)
     layers = SiteLayers(session, project=project)
     session.add_grid(GRID)
-    marked = [p for p in REAL_DZT if p.with_suffix(".DZX").exists()]
-    if not marked:
-        pytest.skip("no real DZT has a DZX sidecar")
     lines = [
-        Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, 1, p.stem))
-        for i, p in enumerate(marked[:2])
+        Line.open(other_path, GridPlacement("A", "y", 0.0, 0.0, 1, other_path.stem)),
+        Line.open(marked_path, GridPlacement("A", "y", 2.0, 0.0, 1, marked_path.stem)),
     ]
     session.add_lines(lines)
     canvas = QgsMapCanvas()
     canvas.setDestinationCrs(layers.crs())
     link = MapLink(session, layers, canvas)
     keys = session.keys()
-    session.open_line(keys[0])
-    marks = list(layers.layers["marks"].getFeatures())
-    if not marks:
-        pytest.skip("the real DZX sidecars carry no marks")
-    feat = next((f for f in marks if str(f["line_key"]) != keys[0]), marks[0])
-    want_key, want_scan = str(feat["line_key"]), int(feat["scan"])
+    session.open_line(keys[0])  # the UNMARKED line -- see docstring
+    marked_key = keys[1]
+    assert session.current_key != marked_key
 
-    layers.layers["marks"].selectByIds([feat.id()])
+    feat_id = _feature_with(layers, "marks", "line_key", marked_key)
+    want_scan = int(layers.layers["marks"].getFeature(feat_id)["scan"])
 
-    assert session.current_key == want_key
+    layers.layers["marks"].selectByIds([feat_id])
+
+    assert session.current_key == marked_key
     assert session.current_trace == want_scan
     link.dispose()
     layers.detach()

@@ -781,6 +781,11 @@ class SiteSession(QObject):
     # ---- picks (spec §4) --------------------------------------------------
     @property
     def pick_store(self) -> Any | None:
+        # The read half of set_pick_store. Observed by tests, no production
+        # caller: the write path reaches the store through _pick_store
+        # directly. Kept anyway -- it is the symmetric public counterpart
+        # to a public setter, and it is what lets the registration test
+        # assert without reaching into the private attribute.
         return self._pick_store
 
     def set_pick_store(self, store: Any) -> None:
