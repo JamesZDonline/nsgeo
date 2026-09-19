@@ -308,8 +308,37 @@ overlap, and with a single direction it is a no-op that costs memory.
 ### 6.6 Slice extraction
 
 A slice is `mean[k0:k1].mean(axis=0)` reshaped to `(ny, nx)` — or, streaming, the same window
-binned directly. Thickness is `k1 - k0`; step and overlap are how the UI walks `k0`. Depth
-labels come from the velocity model.
+binned directly. Depth labels come from the velocity model.
+
+**Thickness and step are independent, and nothing here assumes slices tile.** Thickness is
+`k1 - k0`; step is how far `k0` advances between slices. Discrete abutting slices
+(0–5, 5–10, 10–15 ns) are simply the case `step == thickness`; overlapping slices
+(0–5, 2.5–7.5, 5–10 ns) are `step < thickness`, and cost nothing extra because both are views
+onto the same fine-dz cube.
+
+Overlap is the standard practice and is worth defaulting to, for three reasons:
+
+1. **A reflector on a boundary is halved in both neighbours.** With abutting slices, a feature at
+   exactly 5 ns appears weakly in 0–5 and weakly in 5–10 and strongly in neither. With 50%
+   overlap there is always a window centred within a quarter-thickness of any depth.
+2. **Thickness and step answer different questions.** Thickness is set by physics — at least one
+   pulse width, so that variation in the transmitted pulse does not bias the average, and no
+   thicker than the smallest expected target. Step is set by how finely the interpreter wants to
+   look. Forcing them equal conflates a constraint with a preference.
+3. **Stepping through a stack reads better.** A feature emerging and fading across overlapping
+   slices is legible; across abutting ones it flickers.
+
+The cost is interpretive rather than computational, and the UI should not hide it: **overlapping
+slices are not independent observations.** Three consecutive slices sharing data are not three
+confirmations, and a stack stepped at 1 ns with 5 ns windows does not have 1 ns vertical
+resolution — resolution is set by thickness, and ultimately by the pulse width. The depth
+readout therefore always shows the window's full range rather than its centre, so what is being
+averaged stays visible.
+
+GPRSLICE reaches the same place by a different route: its layers tile by construction, but
+`box_Zsize` widens the sampling window independently of the layer, so "a horizontal slice between
+10 and 20 ns" with `box_Zsize = 20` actually averages 5–25 ns. Our `(thickness, step)` pair is
+that decoupling stated directly.
 
 ---
 
@@ -460,10 +489,22 @@ fill inventing a feature between two lines?" — by pointing at it.
 
 ### 9.4 Layers and export
 
-One **multi-band GeoTIFF per cube**, band per z-level, float32 with NaN nodata, written north-up
-by resampling out of the grid-local frame once at export. Everyone else writes a file per slice;
-one file per cube lets a band slider drive it and keeps the artefact coherent. Written band by
-band so export never requires a resident cube.
+One **multi-band GeoTIFF per cube, a band per slice** — not per z-level — float32 with NaN
+nodata, written north-up by resampling out of the grid-local frame once at export. Everyone else
+writes a file per slice; one file lets a band slider drive it and keeps the artefact coherent.
+Written band by band, so export never requires a resident cube.
+
+**Bands are slices, which is where `step` finally matters.** Exploration in the dock is
+continuous: drag the depth slider at a fixed thickness and there is no stepping at all. Export
+has to choose discrete bands, so it is the moment the `(thickness, step)` pair becomes a finite
+set — `n_bands = (z_range − thickness) / step + 1`. Halving the step doubles the file.
+
+Each band carries its own description recording the window it averages, in both ns and m, so the
+overlap is legible from the file itself rather than only from the dialog that made it. A reader
+opening the GeoTIFF in five years can see that band 7 is 15.0–20.0 ns and band 8 is 17.5–22.5 ns,
+and that they therefore share half their data.
+
+The raw cube is not what is exported: it stays in the `.npz`, which is what a rebuild reads.
 
 The layer joins the site's layer group. Coverage exports as a companion single-band raster when
 asked. Existing GeoPackage rules are untouched: rasters live beside it, never inside it.
