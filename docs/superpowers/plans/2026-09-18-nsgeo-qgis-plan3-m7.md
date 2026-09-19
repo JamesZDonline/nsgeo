@@ -1291,7 +1291,13 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `packages/nsgeo-qgis/tests/qgis/test_plugin_map_link.py`:
+**First, restore two imports.** Task 3 legitimately removed `REAL_DZT` and `needs_real_data` from this module — nothing there used them, and ruff flagged them. The real-data test below is their first consumer, so put them back:
+
+```python
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+```
+
+Then append to `packages/nsgeo-qgis/tests/qgis/test_plugin_map_link.py`:
 
 ```python
 # ---- ambient hover (spec §3.2) ----------------------------------------------
@@ -1325,6 +1331,35 @@ def test_hover_never_moves_the_working_line(linked):
 
     assert session.current_key == keys[0]
     assert opened == []
+
+
+def test_hovering_the_working_line_moves_its_cursor_not_a_preview(linked):
+    """Ruling 12: the working line's cursor IS `current_trace`. Routing a
+    hover over it through `set_preview` would give one line two sources of
+    truth for one cursor, and the map marker would stop following a drag
+    in the profile."""
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[0]].vertexAt(11))
+
+    canvas.xyCoordinates.emit(target)
+    _fire_dwell(link)
+
+    assert session.preview_key is None
+    assert session.current_trace == 11
+    assert session.current_key == keys[0]
+
+
+def test_hovering_the_working_line_ends_a_preview_of_another(linked):
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[0]].vertexAt(11)))
+    _fire_dwell(link)
+
+    assert session.preview_key is None
+    assert session.current_trace == 11
 
 
 def test_hovering_away_from_every_line_clears_the_preview(linked):
@@ -1524,8 +1559,19 @@ And the slots:
                 # crossing a gap between two lines does not flicker the
                 # profile back to the working line and out again.
                 self.session.clear_preview()
+                return
+            key, trace = hit
+            if key == self.session.current_key:
+                # The pointer is over the line already being worked on,
+                # which is NOT a preview. The working line's cursor is
+                # `current_trace`; routing it through `set_preview` would
+                # give one line two sources of truth for one cursor, and
+                # the map marker would then stop following a drag in the
+                # profile. Any preview in progress ends here.
+                self.session.clear_preview()
+                self.session.set_trace(key, trace)
             else:
-                self.session.set_preview(*hit)
+                self.session.set_preview(key, trace)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
