@@ -76,17 +76,31 @@ class CubeFrame:
         trace that missed the frame is not evidence about the nearest cell,
         and clipping would pile a whole excluded line onto one border row.
 
-        A point exactly on a frame's near edge -- e.g. one `for_points` sized
-        the frame around -- can land a hair below 0.0 in local coordinates:
-        `to_local` reaches it by a different chain of floating-point
-        rotations than whatever produced the origin, so the two need not
-        cancel to the bit. `eps` absorbs that round-off without opening the
-        door to real misses, which in practice sit whole cells away.
+        A point exactly on the frame's own OUTER edge can land a hair on
+        the wrong side of it: `to_local`'s `world - origin` subtraction,
+        and (for a `for_points` frame) the origin's own construction by
+        re-projecting a local coordinate back through the same rotation,
+        take different chains of floating-point operations to reach the
+        same point, so they need not cancel to the bit. The error this
+        leaves scales with the coordinate magnitude, not with the cell --
+        a UTM easting or northing (~1e6) carries far more absolute
+        round-off than a toy coordinate does, and can exceed a realistic
+        GPR cell size (0.05 m) outright. `tol` is sized to that magnitude
+        and applied only to points that already floor to -1 or nx/ny: an
+        interior cell boundary is never touched, and a point that floors
+        inside the frame -- however close to an edge -- is left alone.
         """
+        world = np.asarray(world, dtype=float)
         local = self.to_local(world)
-        eps = 1e-9 * self.cell
-        ix = np.floor((local[:, 0] + eps) / self.cell).astype(np.intp)
-        iy = np.floor((local[:, 1] + eps) / self.cell).astype(np.intp)
+        ix = np.floor(local[:, 0] / self.cell).astype(np.intp)
+        iy = np.floor(local[:, 1] / self.cell).astype(np.intp)
+
+        tol = 8.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(world).max(axis=1))
+        ix = np.where((ix == -1) & (local[:, 0] >= -tol), 0, ix)
+        iy = np.where((iy == -1) & (local[:, 1] >= -tol), 0, iy)
+        ix = np.where((ix == self.nx) & (local[:, 0] <= self.nx * self.cell + tol), self.nx - 1, ix)
+        iy = np.where((iy == self.ny) & (local[:, 1] <= self.ny * self.cell + tol), self.ny - 1, iy)
+
         inside = (ix >= 0) & (ix < self.nx) & (iy >= 0) & (iy < self.ny)
         return np.where(inside, iy * self.nx + ix, -1)
 
@@ -139,8 +153,8 @@ class CubeFrame:
         hi_x = float(px.max()) + margin
         hi_y = float(py.max()) + margin
         origin = lo_x * x_hat + lo_y * y_hat
-        # nextafter keeps a point exactly on the far edge inside the frame:
-        # floor((hi - lo) / cell) would otherwise index one cell past the end.
+        # `+ 1`: nx/ny counts cells inclusively across lo..hi, not just the
+        # (possibly fractional) number of whole cells floor() gives back.
         return cls(
             origin=(float(origin[0]), float(origin[1])),
             azimuth=azimuth,
@@ -188,7 +202,16 @@ class ZAxis:
             raise ValueError(f"dz_ns must be positive, got {dz_ns}")
         if not t1_ns > t0_ns:
             raise ValueError(f"t1_ns must exceed t0_ns, got {t0_ns} .. {t1_ns}")
-        return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=int(math.floor((t1_ns - t0_ns) / dz_ns)) + 1)
+        span = (t1_ns - t0_ns) / dz_ns
+        # `span` need not land exactly on an integer even when t1_ns - t0_ns
+        # is an exact multiple of dz_ns (0.3 / 0.1 in double precision does
+        # not) -- plain floor() would then silently drop the final level
+        # this method's own name promises to include. Snap to the nearest
+        # integer only when the division is within float rounding of one;
+        # a genuinely fractional span is never close enough to be affected.
+        nearest = round(span)
+        n_steps = nearest if math.isclose(span, nearest, rel_tol=1e-9) else math.floor(span)
+        return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=n_steps + 1)
 
     def level_range(self, top_ns: float, thickness_ns: float) -> tuple[int, int]:
         """Half-open [k0, k1) for a window, clamped to the axis.

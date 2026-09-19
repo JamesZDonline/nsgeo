@@ -79,6 +79,35 @@ def test_for_points_contains_every_point_it_was_built_from():
     assert (f.cell_index(pts) >= 0).all()
 
 
+def test_for_points_contains_every_point_at_utm_magnitudes():
+    """Regression: a boundary tolerance sized to the cell, not to the
+    coordinate magnitude, is many orders of magnitude too small once
+    coordinates are UTM-sized (~1e6). The round-off in for_points' own
+    origin round-trip grows with that magnitude and can exceed a
+    realistic GPR cell (0.05 m) outright, silently dropping the very
+    points a frame was built to contain. Sweeps the seeds and azimuths
+    of the toy-coordinate test above, translated to UTM magnitude, over
+    three cell sizes down to 0.05 m."""
+    offset = np.array([500_000.0, 4_500_000.0])
+    for cell in (0.5, 0.1, 0.05):
+        for seed in range(50):
+            rng = np.random.default_rng(seed)
+            pts = rng.uniform(-5.0, 15.0, size=(200, 2)) + offset
+            for az in (0.0, 17.0, 33.3, 90.0, 123.4, -45.0):
+                f = CubeFrame.for_points(pts, cell=cell, crs="EPSG:32633", azimuth=az)
+                assert (f.cell_index(pts) >= 0).all(), (cell, seed, az)
+
+
+def test_cell_index_keeps_a_point_a_hair_below_the_far_edge():
+    """A point genuinely inside, one float ulp short of the frame's outer
+    edge, must stay inside: a boundary tolerance that nudges every
+    near-edge point rather than only ones that already floor outside
+    would push this one across instead of rescuing it."""
+    f = frame()
+    ids = f.cell_index(np.array([[4.0 - 1e-12, 0.5]]))
+    assert list(ids) == [3]
+
+
 def test_for_points_rejects_an_empty_array():
     with pytest.raises(ValueError, match="non-empty"):
         CubeFrame.for_points(np.empty((0, 2)), cell=0.5, crs="EPSG:32633")
@@ -99,6 +128,15 @@ def test_z_axis_from_range_includes_the_end():
     z = ZAxis.from_range(0.0, 50.0, 0.5)
     assert z.nz == 101
     assert z.t_end_ns == pytest.approx(50.0)
+
+
+def test_z_axis_from_range_includes_the_end_when_the_division_is_not_exact_in_float():
+    """Regression: 0.3 / 0.1 is a hair below 3.0 in double precision, so a
+    plain floor() on an exactly-divisible (t1 - t0, dz) pair silently drops
+    the final level that from_range's own name promises to include."""
+    z = ZAxis.from_range(0.0, 0.3, 0.1)
+    assert z.nz == 4
+    assert z.t_end_ns == pytest.approx(0.3)
 
 
 def test_z_axis_depths_use_the_velocity_model():
