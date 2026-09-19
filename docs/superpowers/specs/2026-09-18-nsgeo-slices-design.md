@@ -462,22 +462,29 @@ about 0.9 s for 24 lines — and it depends on the preset and the transform and 
 Every geometric parameter became a live slider, so there is no longer a moment worth naming
 "build".
 
-What remains deliberate is **choosing what goes in**, and that is the dialog:
+What remains deliberate is **choosing what goes in**. A draft put grid, preset, transform and the
+line table together behind one `Edit…` button, and review rejected the button: a control named
+for the act of editing rather than for what it edits leaves the user to guess its scope, and it
+had none — it opened four unrelated things.
 
-- Grid, preset, transform.
-- A table of the lines that will contribute. A line carrying its own saved stack is listed and
-  explicitly marked as **using the preset instead**, because a cube built from mixed recipes has
-  no comparable amplitudes and the user should see that decision being made rather than discover
-  it later.
+So grid, preset and transform are **combo boxes in the dock** (§9.2, Source), each naming what
+it changes. The dialog keeps the one thing that genuinely needs a table and cannot fit a narrow
+panel:
 
-Accepting it runs the preparation as a `QgsTask` with per-line progress, following `loader.py`'s
-established pattern and its recorded traps (task references, exception handling in slots). This
-does not violate "nothing runs automatically": the user chose a grid, a preset and a transform,
-and preparation is the execution of that choice, not an inference about it.
+- **The contributing lines.** Every line in the grid, includable or not, with any line carrying
+  its own saved stack marked as **using the preset instead** — because a cube built from mixed
+  recipes has no comparable amplitudes, and the user should watch that decision being made rather
+  than discover it later.
 
-The dialog keeps a readout of what the resulting residency level and memory will be, because
-that is decided by the line count and the chosen resolution and the user should see it before
-committing 0.9 s — but it warns, and never hard-caps (§7.4).
+Its button is therefore `Choose…`, next to a summary reading `24 of 26 included`.
+
+Changing the grid, preset or transform re-runs the preparation as a `QgsTask` with per-line
+progress, following `loader.py`'s established pattern and its recorded traps (task references,
+exception handling in slots). This does not violate "nothing runs automatically": the user chose
+a preset, and preparation is the execution of that choice, not an inference about it.
+
+Before committing the 0.9 s the dock reports what the resulting memory will be, because it is
+decided by the line count and the chosen resolution — but it warns and never hard-caps (§7.4).
 
 ### 9.2 The Slices dock
 
@@ -490,7 +497,7 @@ Four groups, ordered by how often they are touched and what each costs:
 
 | Group | Holds | Cost of a change |
 |---|---|---|
-| **Source** | grid, preset and transform as a summary, an `Edit…` back to §9.1, and a prepared/stale status | ~0.9 s, a task |
+| **Source** | grid, preset and transform as combo boxes; `24 of 26 included` with `Choose…` for the line table; a prepared/stale status | ~0.9 s, a task |
 | **Position** | the slice slider, the window readout fused beneath it, thickness and step | 0.6–4 ms |
 | **Resolution** | dz, cell size, fill radius, z range | 44 ms (§7.2) |
 | **Display** | stretch scope, palette, legend, coverage toggle | free |
@@ -499,10 +506,24 @@ Everything outside Source is a **live slider**, with `shift + scroll` on the can
 depth — the convention users of other packages already have. There is no "Top" field: the
 position slider *is* the top of the window.
 
-A **residency line** above the export buttons reports the current mode, the memory held and the
-measured per-slice cost — `streaming · 28 MB held · 3.6 ms per slice` — with `Pin cube…` as the
-opt-in to the resident mode. It is there because §7.2 found memory, not time, to be the binding
-constraint, and a constraint the user cannot see is one they cannot act on.
+A status line above the export buttons reports **what is being held and how fast slices redraw**,
+in plain language: `24 lines held in memory, 28 MB · slices redraw in 4 ms`. It is there because
+§7.2 found memory, not time, to be the binding constraint, and a constraint the user cannot see
+is one they cannot act on.
+
+**Residency is not a user-facing choice.** A draft offered a `Pin cube…` button, and review
+found it unintelligible — correctly. The measurements say why: a resident cube redraws a slice
+in 0.56 ms against streaming's 3.6 ms, and **nobody can perceive that difference**. It only
+begins to matter on a large site during a continuous drag, where 17 ms at 120 lines starts
+costing frames against a 16 ms budget. That is a performance detail, not a workflow decision, and
+asking the user to understand the word "residency" to make it is asking them to do the plugin's
+job.
+
+So the plugin chooses, from the line count, the resolution and a memory budget — promoting to a
+resident cube when dragging would otherwise drop frames, and saying so in the same status line
+when it does, since the memory is the user's to know about. The override lives in settings,
+worded for what it buys rather than what it is: *"keep the whole volume in memory for faster
+dragging (uses N MB)"*.
 
 **The window readout sits directly under the position slider**, not among the numeric fields. It
 reads `slice 14 / 40 · 12.0–16.0 ns · 0.60–0.80 m`: the control that moves the window and the
