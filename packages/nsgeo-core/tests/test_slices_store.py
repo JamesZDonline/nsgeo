@@ -9,10 +9,10 @@ from nsgeo.slices.frame import CubeFrame, ZAxis
 from nsgeo.slices.store import CubeStoreError, load_cube, save_cube
 
 
-def make_cube():
+def make_cube(seed=0):
     frame = CubeFrame(origin=(10.0, 20.0), azimuth=37.5, cell=0.1, nx=5, ny=4, crs="EPSG:32633")
     z = ZAxis(t0_ns=-1.5, dz_ns=0.2165, nz=6)
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(seed)
     mean = rng.random((6, 20)).astype(np.float32)
     count = rng.integers(0, 3, size=20).astype(np.int32)
     mean[:, count == 0] = np.nan
@@ -76,6 +76,16 @@ def test_loading_a_missing_file_fails_clearly(tmp_path):
         load_cube(tmp_path / "absent.npz")
 
 
+@pytest.mark.parametrize("degenerate", ["", "."])
+def test_loading_a_degenerate_path_fails_clearly(degenerate):
+    """A hand-edited survey JSON with `"array": ""` is a realistic way to
+    reach this. Path normalisation itself raises a bare ValueError for a
+    name-less path -- that must come back as CubeStoreError like any other
+    unusable path, not escape as an internal implementation detail."""
+    with pytest.raises(CubeStoreError):
+        load_cube(degenerate)
+
+
 def test_save_narrows_a_wider_input_dtype(tmp_path):
     """SliceCube itself does not enforce a dtype, so a caller could hand
     save_cube a float64 mean or an int64 count. The store must still not
@@ -118,6 +128,63 @@ def test_save_and_load_agree_on_a_path_without_the_npz_suffix(tmp_path):
     path = tmp_path / "grid-a"  # deliberately no suffix
     save_cube(cube, path)
     assert (tmp_path / "grid-a.npz").exists()
+    back = load_cube(path)
+    assert back.frame == cube.frame
+
+
+@pytest.mark.parametrize(
+    ("stem", "expected"),
+    [
+        ("grid.v2", "grid.v2.npz"),
+        ("Grid A v1.2", "Grid A v1.2.npz"),
+        ("2026-09-18.grid", "2026-09-18.grid.npz"),
+        ("cube.tar.gz", "cube.tar.gz.npz"),
+        ("cube.bin", "cube.bin.npz"),
+    ],
+)
+def test_save_appends_npz_rather_than_replacing_a_dot_in_the_name(tmp_path, stem, expected):
+    """`np.savez_compressed` APPENDS `.npz` unless the name already ends
+    with it; `Path.with_suffix` REPLACES the last suffix instead. A
+    version tag, a date, or a decimal in a user-typed cube name all
+    contain a dot that is not an extension, and replacing it would
+    silently rename the file to something the caller never asked for."""
+    cube = make_cube()
+    path = tmp_path / stem
+    save_cube(cube, path)
+    assert (tmp_path / expected).exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [expected]
+    back = load_cube(path)
+    assert back.frame == cube.frame
+
+
+def test_save_does_not_alias_two_dotted_names_onto_one_file(tmp_path):
+    """The concrete failure mode of the `with_suffix` bug: saving
+    "grid.v1" and then "grid.v2" must not collapse onto a single
+    "grid.npz" -- that would make the second save silently destroy the
+    first cube, with no error anywhere."""
+    cube_v1 = make_cube(seed=1)
+    cube_v2 = make_cube(seed=2)
+    save_cube(cube_v1, tmp_path / "grid.v1")
+    save_cube(cube_v2, tmp_path / "grid.v2")
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["grid.v1.npz", "grid.v2.npz"]
+
+    back_v1 = load_cube(tmp_path / "grid.v1")
+    back_v2 = load_cube(tmp_path / "grid.v2")
+    np.testing.assert_array_equal(back_v1.mean, cube_v1.mean)
+    np.testing.assert_array_equal(back_v2.mean, cube_v2.mean)
+    assert not np.array_equal(back_v1.mean, back_v2.mean)  # genuinely different cubes
+
+
+def test_a_dot_in_a_directory_name_is_unaffected(tmp_path):
+    """A dot belongs to a path segment other than the final name in a
+    directory called e.g. "a.b" -- that must keep working exactly as
+    before; only the final component's own dot was ever ambiguous."""
+    cube = make_cube()
+    directory = tmp_path / "a.b"
+    path = directory / "cube"
+    save_cube(cube, path)
+    assert (directory / "cube.npz").exists()
     back = load_cube(path)
     assert back.frame == cube.frame
 
@@ -198,6 +265,30 @@ def test_loading_an_unsupported_store_version_fails_clearly(tmp_path):
     path = tmp_path / "future-version.npz"
     np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
     with pytest.raises(CubeStoreError, match="version"):
+        load_cube(path)
+
+
+def test_loading_a_zero_byte_file_fails_clearly(tmp_path):
+    """A killed or disk-full `save_cube` can leave exactly this -- the
+    limiting case of the truncated-file finding. `np.load` raises
+    `EOFError` for it, not `OSError`, so it needs its own place in the
+    except tuple."""
+    path = tmp_path / "empty.npz"
+    path.write_bytes(b"")
+    with pytest.raises(CubeStoreError):
+        load_cube(path)
+
+
+def test_loading_a_file_with_a_too_short_origin_fails_clearly(tmp_path):
+    """`origin` is unpacked as a 2-element list; a metadata blob with only
+    one element raises a bare IndexError from store.py's own indexing,
+    which must not escape either -- the same class of bug the `KeyError`
+    case beside it already covers."""
+    mean, count, meta = _good_parts(tmp_path)
+    meta["frame"]["origin"] = [1.0]
+    path = tmp_path / "short-origin.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError):
         load_cube(path)
 
 

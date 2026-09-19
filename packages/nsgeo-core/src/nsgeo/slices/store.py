@@ -30,15 +30,19 @@ class CubeStoreError(Exception):
 
 
 def _npz_path(path: str | Path) -> Path:
-    """Normalise to the `.npz` name `save_cube` actually writes.
+    """Normalise to the `.npz` name `np.savez_compressed` actually writes.
 
-    `np.savez_compressed` appends `.npz` on its own when the given path
-    lacks it. Without this, an extensionless path handed to `save_cube`
-    and the same path handed to `load_cube` would silently disagree about
-    where the file is: the former writes `name.npz`, the latter looks for
-    a file named literally `name` and reports it missing.
+    `np.savez_compressed` APPENDS `.npz` unless the name already ends with
+    it -- it never touches an existing suffix. `Path.with_suffix` REPLACES
+    the last suffix instead, which is a different rule: it silently
+    aliased "grid.v1" and "grid.v2" onto the same "grid.npz", so a second
+    save destroyed the first cube with no error anywhere. A version tag, a
+    date, or a decimal in a user-typed cube name all contain a dot that is
+    not an extension, so this must mirror numpy's own append rule, not
+    Path's replace rule.
     """
-    return Path(path).with_suffix(".npz")
+    p = Path(path)
+    return p if p.suffix == ".npz" else p.with_name(p.name + ".npz")
 
 
 def _meta(cube: SliceCube) -> dict[str, Any]:
@@ -80,7 +84,10 @@ def load_cube(path: str | Path) -> SliceCube:
     escaping here would reach that caller with no way to tell "corrupt"
     from "not built yet".
     """
-    path = _npz_path(path)
+    try:
+        path = _npz_path(path)
+    except ValueError as exc:
+        raise CubeStoreError(f"{path!r} is not a usable cube path: {exc}") from exc
     if not path.exists():
         raise CubeStoreError(f"no cube file at {path}")
     try:
@@ -121,8 +128,10 @@ def load_cube(path: str | Path) -> SliceCube:
         raise
     except (
         OSError,
+        EOFError,
         ValueError,
         KeyError,
+        IndexError,
         TypeError,
         json.JSONDecodeError,
         zipfile.BadZipFile,
