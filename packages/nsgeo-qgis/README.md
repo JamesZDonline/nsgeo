@@ -18,6 +18,28 @@ edits a stack stay pointed at the working line, and the profile says so
 while a preview is showing. To work on a previewed line, select it with
 QGIS's Select tool.
 
+### Picking
+
+Turn **Pick** on in the nsgeo toolbar and click the radargram, or Shift+click
+with it off. A pick records the trace and the two-way time — the time is the
+truth; the distance along the line, the depth and the velocity are recorded
+alongside it as conveniences that can be recomputed.
+
+Picks are authored data. They live in the site GeoPackage's `picks` table,
+which is the one table `survey.nsgeo.json` cannot regenerate, and they are
+written the moment you make them — there is nothing to save. The table is
+editable in QGIS like any other layer, so a pick can be given a note, moved,
+or deleted with the ordinary tools.
+
+Picks go on the **working line** — the one the processing dock is bound to —
+never on a line you are only previewing by hovering the map. Shift+clicking a
+preview says so rather than doing nothing. Select the line on the map first if
+you meant to pick on it.
+
+Selecting a pick or a DZX mark on the map opens its line and moves the profile
+cursor to its trace. Marks are derived from the DZX sidecar and stay read-only;
+picks are yours.
+
 ## Development install
 
 ```bash

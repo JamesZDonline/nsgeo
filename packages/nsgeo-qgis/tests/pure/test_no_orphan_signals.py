@@ -20,8 +20,7 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[2] / "nsgeo_qgis"
 
 # Declared with no consumer anywhere, each with the reason it survives.
-# Anything NOT listed here, and not in SHADOWED_CONNECT_COUNTS below, must
-# have a connect.
+# Anything NOT listed here, and not in SHADOWED below, must have a connect.
 #
 # NOTE: spec §1's orphan table and §6's "the three existing orphans" are
 # both wrong. `ProfileDock.pick_requested` gained its consumer in M8's

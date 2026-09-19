@@ -10,7 +10,7 @@ from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.core import QgsPointXY, QgsProject
+from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsProject
 from qgis.gui import QgsMapCanvas
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -807,3 +807,204 @@ def test_a_disposed_link_does_not_re_arm_itself_on_the_next_lines_signal(linked)
     layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
 
     assert session.current_key == keys[0]
+
+
+# ---- selecting a pick or a mark jumps to it (M8, spec §3.4, §4.4) ----------
+
+
+MARK_DZX = """<?xml version="1.0" encoding="UTF-8"?>
+<DZX xmlns="www.geophysical.com/DZX/1.02"><File><name>FILE__003.DZT</name>
+<Profile><WayPt><scan>27</scan><mark>User</mark><name>Mark1</name></WayPt></Profile></File></DZX>"""
+
+
+def _feature_with(layers, name, field, value):
+    """The id of the one feature in `name` whose `field` equals `value`."""
+    ids = [f.id() for f in layers.layers[name].getFeatures() if f[field] == value]
+    assert len(ids) == 1, f"expected exactly one {name} with {field}={value!r}, got {len(ids)}"
+    return ids[0]
+
+
+def _add_a_marked_line(session, tmp_path):
+    """A third line carrying a DZX mark at scan 27. `add_lines` emits
+    lines_changed, which refills `marks` -- the `linked` fixture's own
+    two lines have no sidecar, so without this the marks table is
+    empty. Returns (key, scan)."""
+    p = synthetic_dzt(tmp_path / "raw", "FILE__003.DZT", n_traces=60)
+    (tmp_path / "raw" / "FILE__003.DZX").write_text(MARK_DZX)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 4.0, 0.0, 1, p.stem))])
+    return "raw/FILE__003.DZT", 27
+
+
+def test_selecting_a_pick_opens_its_line_and_moves_the_trace(linked):
+    """Spec §3.4's closing promise: "the same mechanism serves picks
+    later: selecting a pick feature jumps to its line and trace." One
+    gesture, QGIS's own Select tool, no map tool of ours."""
+    link, session, layers, canvas, keys = linked
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 33, 21.0)
+    session.open_line(keys[0])
+    assert session.current_key == keys[0]
+
+    layers.layers["picks"].selectByIds([_feature_with(layers, "picks", "trace", 33)])
+
+    assert session.current_key == keys[1]
+    assert session.current_trace == 33
+
+
+def test_selecting_a_mark_opens_its_line_and_moves_the_trace(linked, tmp_path):
+    """Spec §4.4: `marks` stays derived and read-only, but a mark has to
+    be navigable or it is decoration."""
+    link, session, layers, canvas, keys = linked
+    marked_key, scan = _add_a_marked_line(session, tmp_path)
+    assert layers.feature_count("marks") == 1
+    session.open_line(keys[0])
+
+    layers.layers["marks"].selectByIds([_feature_with(layers, "marks", "scan", scan)])
+
+    assert session.current_key == marked_key
+    assert session.current_trace == scan
+
+
+def test_the_marks_layer_stays_read_only(linked, tmp_path):
+    """§4.4: M8 confirms marks render and are read-only; it does not make
+    them editable. `marks` is derived from the DZX and refilled on every
+    grid or line change, so an edit would be silently discarded."""
+    link, session, layers, canvas, keys = linked
+    _add_a_marked_line(session, tmp_path)
+    assert layers.feature_count("marks") == 1  # it renders
+    assert layers.layers["marks"].readOnly() is True
+    assert layers.layers["picks"].readOnly() is False
+
+
+def test_selecting_several_picks_at_once_jumps_nowhere(linked):
+    """Same rule as a multi-selection of lines (spec §3.4): there is no
+    single answer and guessing one is worse than doing nothing."""
+    link, session, layers, canvas, keys = linked
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 10, 12.0)
+    session.add_pick(keys[1], 40, 25.0)
+    session.open_line(keys[0])
+
+    layers.layers["picks"].selectByIds(
+        [
+            _feature_with(layers, "picks", "trace", 10),
+            _feature_with(layers, "picks", "trace", 40),
+        ]
+    )
+
+    assert session.current_key == keys[0]
+
+
+def test_a_pick_with_no_trace_jumps_to_the_line_and_stops_there(linked):
+    """The picks layer is editable, so a hand-digitised row can carry a
+    line_key and nothing else. Opening the line is still the right
+    answer; `int(NULL)` inside this slot would abort the CI container."""
+    link, session, layers, canvas, keys = linked
+    layer = layers.layers["picks"]
+    f = QgsFeature(layer.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = keys[1]
+    assert layer.dataProvider().addFeatures([f])[0]
+    session.open_line(keys[0])
+
+    layer.selectByIds([_feature_with(layers, "picks", "line_key", keys[1])])
+
+    assert session.current_key == keys[1]
+    assert session.current_trace == -1
+
+
+def test_a_disposed_link_stops_jumping_from_picks_and_marks(linked, tmp_path):
+    """M7 Finding I1: `_on_lines_changed` re-armed a disposed link by
+    calling `_rebind_layer` again. Three layers now, so the same failure
+    has three ways to happen."""
+    link, session, layers, canvas, keys = linked
+    marked_key, scan = _add_a_marked_line(session, tmp_path)
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 33, 21.0)
+    session.open_line(keys[0])
+    link.dispose()
+
+    layers.layers["picks"].selectByIds([_feature_with(layers, "picks", "trace", 33)])
+    assert session.current_key == keys[0]
+    layers.layers["marks"].selectByIds([_feature_with(layers, "marks", "scan", scan)])
+    assert session.current_key == keys[0]
+
+
+def test_a_disposed_link_stays_disposed_when_the_layers_are_rebuilt(linked):
+    """The disposal sentinel in `_on_lines_changed` covers all three
+    bindings, not only `lines`."""
+    link, session, layers, canvas, keys = linked
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 33, 21.0)
+    session.open_line(keys[0])
+    link.dispose()
+
+    session.lines_changed.emit()
+    layers.layers["picks"].selectByIds([_feature_with(layers, "picks", "trace", 33)])
+
+    assert session.current_key == keys[0]
+
+
+def test_jumping_from_a_pick_still_works_after_the_site_is_reopened(linked):
+    """A site reopen replaces every layer object (`detach()` empties the
+    registry, `ensure_tables()` builds new ones), so a connection made
+    once at construction would point at three dead wrappers and jumping
+    would stop with no error at all -- the worst kind of stop. `lines`
+    already has this test; picks need their own binding proved too."""
+    link, session, layers, canvas, keys = linked
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 33, 21.0)
+    session.save()
+    path = session.json_path
+
+    session.close_site()
+    session.open_site(path)
+    keys = session.keys()
+    session.open_line(keys[0])
+
+    layers.layers["picks"].selectByIds([_feature_with(layers, "picks", "trace", 33)])
+
+    assert session.current_key == keys[1]
+    assert session.current_trace == 33
+
+
+@needs_real_data
+def test_selecting_a_real_files_mark_jumps_to_its_own_scan(qgis_app, tmp_path):
+    """Spec §7: real data is the primary validation. The DZX above is a
+    three-line fixture; a real GSSI sidecar carries its own scan numbers
+    against its own trace count, and `refill_marks` clamps a scan into
+    that count. Only a real pair proves the scan a mark reports is the
+    trace the profile lands on.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    marked = [p for p in REAL_DZT if p.with_suffix(".DZX").exists()]
+    if not marked:
+        pytest.skip("no real DZT has a DZX sidecar")
+    lines = [
+        Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, 1, p.stem))
+        for i, p in enumerate(marked[:2])
+    ]
+    session.add_lines(lines)
+    canvas = QgsMapCanvas()
+    canvas.setDestinationCrs(layers.crs())
+    link = MapLink(session, layers, canvas)
+    keys = session.keys()
+    session.open_line(keys[0])
+    marks = list(layers.layers["marks"].getFeatures())
+    if not marks:
+        pytest.skip("the real DZX sidecars carry no marks")
+    feat = next((f for f in marks if str(f["line_key"]) != keys[0]), marks[0])
+    want_key, want_scan = str(feat["line_key"]), int(feat["scan"])
+
+    layers.layers["marks"].selectByIds([feat.id()])
+
+    assert session.current_key == want_key
+    assert session.current_trace == want_scan
+    link.dispose()
+    layers.detach()
+    project.clear()
