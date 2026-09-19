@@ -1061,7 +1061,15 @@ python - <<'EOF'
 import re, pathlib
 p = pathlib.Path("packages/nsgeo-qgis/nsgeo_qgis/session.py")
 s = p.read_text()
-s = s.replace('        if key != self._current_key:\n', '        if False:\n', 1)
+# Target add_pick's guard SPECIFICALLY. `if key != self._current_key:` appears
+# THREE times in this file -- set_trace's and set_selection's come first -- so a
+# plain replace(..., count=1) mutates set_trace instead and the mutation check
+# reports a false pass. Anchor on the line that follows only add_pick's guard.
+guard = '''        if key != self._current_key:
+            raise ValueError('''
+assert s.count(guard) == 1, "the anchor is no longer unique -- re-derive it"
+s = s.replace(guard, '''        if False:
+            raise ValueError(''', 1)
 p.write_text(s)
 EOF
 QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 .venv-qgis/bin/python -m pytest \
@@ -2426,7 +2434,9 @@ Automated tests do not cover the thing M8 is for. Deploy and run these by hand i
 9. Select a DZX mark on the map — same jump. Try to edit the `marks` layer — QGIS refuses; it is read-only.
 10. Close the site — the **Pick** action greys out, and the crosshair is gone when you open a new line.
 11. Add a note to a pick in the attribute table and save the layer edits — the note persists.
-12. Unload the plugin with picks on screen — no crash, nothing left on the canvas.
+12. **Toggle Editing on the `picks` layer, then author a pick from the profile.** `write_pick` goes straight through the data provider, which the layer's open edit buffer knows nothing about. Check whether the new pick appears on the canvas immediately, only after you end the edit session, or not at all — and whether committing the buffer afterwards disturbs it. The write reaches disk either way; what is unknown is the visibility. (Task 1 review, Ruling 10.)
+13. **Look at `depth_m` on a pick made near the very top of a real radargram.** Real GSSI files here carry `position_ns = -11.0864` — the record starts *before* time zero — so a pick clamped to the start of the record gets a **negative depth**, measured at −0.44 m on this data. That is honest (time is the truth; depth is derived from it), but it will look wrong in an attribute table. Confirm it is what you want recorded, rather than a floor at zero. (Task 2 review, Ruling 12.)
+14. Unload the plugin with picks on screen — no crash, nothing left on the canvas.
 
 **Open the site package from before this branch** (a site created under M7) at least once during the walkthrough. That exercises `_rebuild_picks` on real authored rows, which is the one irreversible thing this milestone does. Confirm the pick count is unchanged and the two new columns are empty.
 
