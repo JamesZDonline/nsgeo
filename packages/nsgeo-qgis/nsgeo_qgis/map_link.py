@@ -262,15 +262,26 @@ class MapLink(QObject):
     def _rebind_layer(self) -> None:
         """Follow the `lines` layer across rebuilds.
 
-        `SiteLayers.refresh()` replaces the layer object, so a connection
-        made once at construction would point at a dead wrapper after the
-        first refresh and promotion would silently stop working -- with no
+        A site reopen (`SiteLayers.detach()` clearing its registry, then
+        `refresh()` rebuilding it -- the sequence `_on_site_opened` runs on
+        every `site_closed`/`site_opened` pair) replaces the layer object
+        outright: `ensure_tables()` only reuses `self.layers[name]` when
+        the name is already present, and `detach()` empties that dict
+        first. A plain `refresh()` on its own does not -- it truncates and
+        refills the existing table in place -- so that path alone would
+        not have caught a connection gone stale. A connection made once at
+        construction and never renewed would point at a dead wrapper after
+        such a reopen and promotion would silently stop working -- with no
         error, which is the worst kind of stop.
         """
         old = self._lines_layer_bound
         if old is not None and not sip.isdeleted(old):
-            # already gone; disconnect raises rather than no-ops
-            with contextlib.suppress(TypeError):
+            # Same two exceptions dispose() suppresses around this same
+            # disconnect call, and for the same reason: a RuntimeError from
+            # a wrapper that reports as not-deleted but whose underlying
+            # C++ object is gone regardless must not abort this method
+            # before the new layer is bound below.
+            with contextlib.suppress(TypeError, RuntimeError):
                 old.selectionChanged.disconnect(self._on_selection)
         layer = self._lines_layer()
         self._lines_layer_bound = layer
@@ -307,6 +318,14 @@ class MapLink(QObject):
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
         try:
+            if self._marker is None or self._band is None:
+                # disposed. Without this, a lines/grids/site signal landing
+                # after dispose() would call _rebind_layer() again and
+                # reconnect selectionChanged, silently undoing dispose()'s
+                # own unbind and letting a disposed link start promoting
+                # again -- the same class of leak _on_dwell and _refresh
+                # already guard against below.
+                return
             self._rebind_layer()
             self._invalidate()
             self._refresh()
@@ -451,11 +470,11 @@ class MapLink(QObject):
         if not canvas_gone:
             with contextlib.suppress(TypeError, RuntimeError):
                 self.canvas.xyCoordinates.disconnect(self._on_xy)
-        # The lines layer is rebound across every SiteLayers.refresh()
-        # (see _rebind_layer), so disposal has to release whichever
-        # instance is currently bound -- guarded the same way as the
-        # canvas above, and for the same reason: nothing here may abort
-        # before the scene-removal loop below.
+        # The lines layer is rebound across every site reopen (see
+        # _rebind_layer), so disposal has to release whichever instance is
+        # currently bound -- guarded the same way as the canvas above, and
+        # for the same reason: nothing here may abort before the
+        # scene-removal loop below.
         layer = self._lines_layer_bound
         self._lines_layer_bound = None
         if layer is not None and not sip.isdeleted(layer):

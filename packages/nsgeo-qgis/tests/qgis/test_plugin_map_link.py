@@ -524,10 +524,27 @@ def test_deselecting_everything_promotes_nothing(linked):
 
 
 def test_promotion_still_works_after_the_lines_layer_is_rebuilt(linked):
-    """refill_lines replaces the layer's features; a connection made once
-    at construction and never renewed would silently stop promoting."""
+    """A site reopen -- `SiteLayers.detach()` clearing its layer registry,
+    then `refresh()` rebuilding it, the exact sequence `_on_site_opened`
+    runs on every close/open pair -- replaces the `lines` layer object
+    outright: `ensure_tables()` only reuses `self.layers[name]` when the
+    name is already present, and `detach()` empties that dict first.
+
+    A plain `refresh()` on its own (what this test used to call) cannot
+    exercise this at all: it truncates and refills the *same* table in
+    place, so the layer object never changes and a connection made once at
+    construction stays valid regardless of whether `_rebind_layer` ever
+    runs again -- the test passed for the wrong reason. Closing and
+    reopening the site is the real replacement path, and it is also the
+    only one of the two that fires the `site_closed`/`site_opened` signals
+    `_on_lines_changed` actually listens for, so it exercises the fix in
+    the same way production does."""
     link, session, layers, _canvas, keys = linked
-    layers.refresh()
+    json_path = session.json_path
+    session.save()  # add_grid/add_lines only staged the site in memory
+
+    session.close_site()
+    session.open_site(json_path)
 
     layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
 
@@ -538,6 +555,24 @@ def test_a_disposed_link_stops_promoting_on_selection(linked):
     link, session, layers, _canvas, keys = linked
     link.dispose()
 
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[0]
+
+
+def test_a_disposed_link_does_not_re_arm_itself_on_the_next_lines_signal(linked):
+    """`_on_lines_changed` calls `_rebind_layer()`, which reconnects
+    `selectionChanged` -- so without its own disposal sentinel, a
+    lines/grids/site signal landing after dispose() would silently undo
+    dispose()'s own unbind and let a disposed link start promoting again.
+    Distinct from test_a_disposed_link_stops_promoting_on_selection above,
+    which never exercises this: nothing there fires a signal between
+    dispose() and the selection, so that test cannot tell a real unbind
+    apart from one that was quietly reinstated."""
+    link, session, layers, _canvas, keys = linked
+    link.dispose()
+
+    session.lines_changed.emit()
     layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
 
     assert session.current_key == keys[0]
