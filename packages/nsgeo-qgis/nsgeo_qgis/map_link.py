@@ -48,8 +48,14 @@ MARKER_SIZE_PX = 9
 BAND_WIDTH_PX = 3
 
 # Sweeping the map must not thrash the renderer: a preview commits only
-# once the pointer has settled for this long.
-HOVER_DWELL_MS = 100
+# once the pointer has settled for this long. Halved from 100 ms after a
+# hands-on pass called that "too slow... about half that might be right" --
+# 100 ms was a guess, this is a measurement of one person's hand. The
+# renderer-thrash risk it guards against is much lower than it was: moving
+# ALONG a displayed line no longer waits for this at all (see
+# _track_displayed_line), so the dwell now governs only the switch to a
+# different line, which is the one case that costs a load and a render.
+HOVER_DWELL_MS = 50
 # How close the pointer must come to a line before it counts as hovering
 # it, in SCREEN pixels -- converted to map units per event, so the feel
 # does not change with zoom.
