@@ -523,10 +523,21 @@ def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     widget whose preferred size changed, so only a real geometry
     assertion -- at the width where it actually bites -- can tell a real
     fix from one that merely reorders widgets.
+
+    Finding 6 (M7 walkthrough re-review, second round): a plain
+    `dock.resize(900, 360)` here was vacuous once the labels held a fixed
+    260px + 180px reservation -- that raised the DOCK's own
+    `minimumSizeHint` past 900px, so `resize()` could not actually make
+    the dock 900px wide (a free-standing top-level widget cannot be
+    resized below its own minimum size hint), and the squeeze this test
+    means to detect never had room to happen. `dock.setFixedWidth(900)`
+    is the real constraint -- both a minimum AND a maximum -- and the
+    explicit `dock.width() == 900` assertion right after is what stops
+    that particular vacuous-pass from ever slipping back in unnoticed.
     """
     session = SiteSession()
     dock = ProfileDock(session)
-    dock.resize(900, 360)
+    dock.setFixedWidth(900)
     dock.show()
     session.new_site(tmp_path)
     session.add_grid(GRID)
@@ -544,26 +555,32 @@ def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     session.open_line(keys[0])
     for key, line in zip(keys, lines):
         session.set_profiles(key, line.load())
-    # QTest.qWait, not a bare processEvents(): this offscreen QPA build
-    # warns "This plugin does not support propagateSizeHints()" on every
-    # dock construction, and a box layout's cross-widget geometry here
-    # measurably needs a real trip through the event loop to settle --
-    # confirmed directly: a single processEvents() call left fit_button.x()
-    # at a stale, already-squeezed position from before the labels got
-    # their fixed width, in both the failing-before-the-fix and the
-    # passing-after-the-fix runs alike.
+    # QTest.qWait, not a bare processEvents() and not no wait at all: this
+    # offscreen QPA build warns "This plugin does not support
+    # propagateSizeHints()" on every dock construction, and a box
+    # layout's cross-widget geometry here measurably needs a real trip
+    # through the event loop to settle -- confirmed directly, twice: a
+    # single processEvents() (and separately, qWait(0)) both read a
+    # stale, pre-settle geometry and passed for the wrong reason, and
+    # reading immediately with no wait at all reads a degenerate,
+    # not-yet-laid-out geometry and also passes vacuously. qWait(50) was
+    # stable over repeated local reruns.
     QTest.qWait(50)
+    assert dock.width() == 900, f"the width constraint did not take: {dock.width()}"
     before_fit = dock.fit_button.x()
     before_one_to_one = dock.one_to_one_button.x()
-    before_velocity_width = dock.velocity_label.width()
-    assert before_velocity_width > 0  # sanity: really populated, like production
+    velocity_text_width = dock.velocity_label.fontMetrics().horizontalAdvance(
+        dock.velocity_label.text()
+    )
+    assert velocity_text_width > 0  # sanity: really populated, like production
+    assert dock.velocity_label.width() >= velocity_text_width  # not squeezed, even before
 
     session.set_preview(keys[1], 5)
     QTest.qWait(50)
 
     assert dock.fit_button.x() == before_fit
     assert dock.one_to_one_button.x() == before_one_to_one
-    assert dock.velocity_label.width() == before_velocity_width
+    assert dock.velocity_label.width() >= velocity_text_width  # still not squeezed
     dock.hide()
     dock.deleteLater()
 
