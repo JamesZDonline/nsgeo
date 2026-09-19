@@ -13,6 +13,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QStyle
 
 GRID = Grid(
@@ -505,22 +506,66 @@ def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
     assert t.trace_lo == pytest.approx(0.0)
 
 
-def test_the_preview_and_difference_labels_sit_after_the_buttons(opened):
+def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):
     """The author's walkthrough: 'The preview label text should be on the
     right of the fit and 1:1 buttons so it doesn't shift them around when
-    it loads.' `difference_label` has the identical defect two widgets
-    away and is fixed alongside it -- both must sit after `channel_combo`
-    (the last fixed-width control in the row) and before the stretch, so
-    growing text pushes into empty space instead of the buttons.
+    it loads.'
 
-    Asserted via `bar.indexOf(...)` -- the toolbar's actual widget order --
-    rather than pixel geometry, so this stays true across any resize.
+    Finding 2 (M7 walkthrough re-review): this replaces an earlier version
+    of this test that only asserted `bar.indexOf(...)` order, which cannot
+    see the actual defect. At a 900px dock width -- the width the author
+    actually uses -- with a real velocity label populated, a long enough
+    preview banner still forced Qt's box-layout shrink algorithm to steal
+    space from widgets EARLIER in the row than the label that grew:
+    `colormap_combo` shrank, pulling `fit_button`/`one_to_one_button` left
+    by 26px, and `velocity_label`'s own width dropped from 180 to 134.
+    Qt's shrink distribution is not confined to whatever sits after the
+    widget whose preferred size changed, so only a real geometry
+    assertion -- at the width where it actually bites -- can tell a real
+    fix from one that merely reorders widgets.
     """
-    _, dock, _, _ = opened
-    bar = dock.widget().layout().itemAt(0).layout()
-    assert bar.indexOf(dock.one_to_one_button) < bar.indexOf(dock.channel_combo)
-    assert bar.indexOf(dock.channel_combo) < bar.indexOf(dock.difference_label)
-    assert bar.indexOf(dock.difference_label) < bar.indexOf(dock.preview_label)
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    # The second line's label is deliberately far longer than any real
+    # file stem this plugin has ever opened, so the test does not depend
+    # on a particular name happening to fit.
+    labels = ["FILE__001", "a genuinely very long survey line name indeed"]
+    lines = []
+    for i, label in enumerate(labels):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=240)
+        line = Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, -1, label))
+        session.add_lines([line])
+        lines.append(line)
+    keys = session.keys()
+    session.open_line(keys[0])
+    for key, line in zip(keys, lines):
+        session.set_profiles(key, line.load())
+    # QTest.qWait, not a bare processEvents(): this offscreen QPA build
+    # warns "This plugin does not support propagateSizeHints()" on every
+    # dock construction, and a box layout's cross-widget geometry here
+    # measurably needs a real trip through the event loop to settle --
+    # confirmed directly: a single processEvents() call left fit_button.x()
+    # at a stale, already-squeezed position from before the labels got
+    # their fixed width, in both the failing-before-the-fix and the
+    # passing-after-the-fix runs alike.
+    QTest.qWait(50)
+    before_fit = dock.fit_button.x()
+    before_one_to_one = dock.one_to_one_button.x()
+    before_velocity_width = dock.velocity_label.width()
+    assert before_velocity_width > 0  # sanity: really populated, like production
+
+    session.set_preview(keys[1], 5)
+    QTest.qWait(50)
+
+    assert dock.fit_button.x() == before_fit
+    assert dock.one_to_one_button.x() == before_one_to_one
+    assert dock.velocity_label.width() == before_velocity_width
+    dock.hide()
+    dock.deleteLater()
 
 
 def test_pick_requested_relays_key_trace_and_time(opened):
