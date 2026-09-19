@@ -22,6 +22,7 @@ on, and the CI container routes it to qFatal(). See `session.py`.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from qgis.core import (
@@ -193,6 +194,14 @@ class MapLink(QObject):
 
     def _on_dwell(self) -> None:
         try:
+            # dispose()'s signal disconnect stops new xyCoordinates
+            # emissions from reaching _on_xy, but a QTimer.timeout queued
+            # before dispose() ran can still land after it -- the same
+            # disposal sentinel _refresh() checks, since the canvas item
+            # this slot's session writes would otherwise drive may already
+            # be gone by the time it fires.
+            if self._marker is None:
+                return  # disposed
             point = self._last_point
             if point is None or not self.session.is_open:
                 return
@@ -276,11 +285,16 @@ class MapLink(QObject):
             return
         # `preview_key == current_key` is reachable -- the session allows
         # it and emits for it -- and it means the pointer is over the line
-        # already being worked on, which is not a preview at all. Testing
-        # `preview_key is not None` alone would blank that line's own
-        # selection band the moment the pointer crossed it. ProfileDock
-        # draws the same distinction in `_on_preview_changed`; the two must
-        # agree or the map and the profile disagree about what is showing.
+        # already being worked on, which is not a preview at all. This
+        # module's own `_on_dwell` never produces that state (it routes a
+        # hover over the working line through `clear_preview` + `set_trace`
+        # instead, per Ruling 12), but `set_preview` is public and any
+        # other caller can still reach it, so this stays defensive rather
+        # than dead: testing `preview_key is not None` alone would blank
+        # that line's own selection band the moment such a call landed.
+        # ProfileDock draws the same distinction in `_on_preview_changed`;
+        # the two must agree or the map and the profile disagree about
+        # what is showing.
         previewing = self.session.preview_key not in (None, self.session.current_key)
         if previewing:
             self._set_marker(key, self.session.preview_trace)
@@ -350,8 +364,19 @@ class MapLink(QObject):
         link. `item.scene()` rather than `self.canvas.scene()`: it removes
         the item from whatever scene actually holds it, and does not
         assume the canvas is still alive.
+
+        Stopping the dwell timer is not enough on its own: the
+        `canvas.xyCoordinates` connection made in `__init__` outlives
+        disposal and would otherwise restart the timer on the very next
+        mouse move, so it is disconnected here too. `disconnect()` raises
+        `TypeError` rather than no-op on a connection that is already
+        gone (a second `dispose()` call, or one made after the canvas
+        itself tore its signals down) -- idempotency needs that caught,
+        the same way the item removal below tolerates being called twice.
         """
         self._dwell.stop()
+        with contextlib.suppress(TypeError):  # already disconnected
+            self.canvas.xyCoordinates.disconnect(self._on_xy)
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

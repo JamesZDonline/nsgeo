@@ -349,6 +349,25 @@ def test_the_tolerance_is_a_distance_not_a_squared_distance(linked):
     assert session.preview_key is not None
 
 
+def test_a_disposed_link_stops_tracking_the_pointer(linked):
+    """dispose() must stop the link writing to a session the plugin has
+    finished with -- the same class of leak as the canvas items.
+
+    The target vertex is captured before dispose(): `_geometries()` is
+    unusable afterwards (its layer lookup goes through `self.layers`,
+    which a disposed link is not guaranteed to still have working)."""
+    link, session, _layers, canvas, keys = linked
+    before = session.current_trace
+    target = QgsPointXY(link._geometries()[keys[0]].vertexAt(11))
+
+    link.dispose()
+    canvas.xyCoordinates.emit(target)  # disconnected: must not restart the dwell
+    link._dwell.timeout.emit()  # a queued timeout landing late: must not act either
+
+    assert session.current_trace == before
+    assert not link._dwell.isActive()
+
+
 def test_hover_with_no_site_open_does_nothing(qgis_app, tmp_path):
     project = QgsProject.instance()
     project.clear()
