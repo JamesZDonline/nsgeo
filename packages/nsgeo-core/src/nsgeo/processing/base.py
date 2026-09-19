@@ -134,6 +134,18 @@ class Step(Protocol):
     def apply(self, rg: Radargram) -> Radargram: ...
 
 
+def is_unipolar(step: Any) -> bool:
+    """Whether a step's output has no negative side.
+
+    Read with `getattr` rather than declared on the `Step` protocol: every
+    existing step is structurally a Step without the attribute, and adding
+    a required one would break that silently at type-check time for no
+    gain. Absent means bipolar, which is the correct default for every
+    step that filters or gains a signed wiggle.
+    """
+    return bool(getattr(step, "unipolar", False))
+
+
 _REGISTRY: dict[str, type[Any]] = {}
 
 

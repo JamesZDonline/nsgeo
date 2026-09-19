@@ -94,6 +94,9 @@ _STEP_PARAMS = {
     "background_mean": {},
     "background_sliding": {"window_traces": 20},
     "background_svd": {"n_components": 1},
+    "amp_abs": {},
+    "amp_square": {},
+    "amp_envelope": {},
 }
 
 

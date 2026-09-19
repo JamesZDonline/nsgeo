@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing.base import Radargram, build_step
+from nsgeo.processing.base import Radargram, build_step, is_unipolar
 
 
 class StepStack:
@@ -43,6 +43,19 @@ class StepStack:
     @property
     def cache_size(self) -> int:
         return len(self._cache)
+
+    @property
+    def output_unipolar(self) -> bool:
+        """Whether `result()` has no negative side.
+
+        The last *enabled* step decides, because a disabled transform is
+        not applied. Consulted by front ends choosing a colour table: a
+        bipolar table on unipolar data wastes half its range.
+        """
+        for step, enabled in reversed(self._entries):
+            if enabled:
+                return is_unipolar(step)
+        return False
 
     def __len__(self) -> int:
         return len(self._entries)
