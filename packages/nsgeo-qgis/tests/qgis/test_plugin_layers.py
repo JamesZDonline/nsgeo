@@ -1467,3 +1467,158 @@ def test_the_layers_register_themselves_as_the_sessions_pick_store(populated):
     must happen in the constructor, before any site_opened could fire."""
     session, layers, _ = populated
     assert session.pick_store is layers
+
+
+# ---- picks: fix round 1 (review findings) ----------------------------------
+
+
+def test_write_pick_reports_an_unknown_line_key_as_a_runtime_error(populated):
+    """`_pick_point` calls `session.line_for_key`, which raises
+    `KeyError` for a key that names no line. `write_pick`'s own contract
+    is `RuntimeError` on any failure to write; it must not depend on
+    `add_pick`'s WORKING-line guard (a later task) to keep that promise.
+    """
+    session, layers, _ = populated
+    with pytest.raises(RuntimeError, match="raw/FILE__999.DZT"):
+        layers.write_pick(_a_pick(key="raw/FILE__999.DZT"))
+
+
+def test_picks_for_reads_a_hand_edited_row_with_blank_optional_fields(populated):
+    """`_as_float`/`_as_str`'s NULL branches are otherwise never
+    exercised: every pick `_a_pick()` writes has every optional field
+    filled in, and the one hand-edited row the sibling test covers is
+    discarded by the trace/time gate before any converter runs. A row
+    with a trace and a time but a blank `distance_m` and `note` must
+    still come back as a `Pick`, not raise -- the trap Fact 3 in the
+    brief names: `float(NULL)` raises, and `value is not None` would not
+    have caught it."""
+    session, layers, _ = populated
+    layer = layers.layers["picks"]
+    f = QgsFeature(layer.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["trace"] = 12
+    f["time_ns"] = 15.0
+    assert layer.dataProvider().addFeatures([f])[0]
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert len(got) == 1
+    assert got[0].distance_m is None
+    assert got[0].note == ""
+
+
+def test_picks_for_survives_a_failed_rebuild_leaving_pre_m8_fields_missing(
+    qgis_app, tmp_path, monkeypatch, message_log
+):
+    """`_ensure_table` routes a schema-mismatched `picks` table through
+    `_rebuild_picks`; if that raises -- any of the five ways its own
+    docstring names it can (an invalid temp layer, a provider
+    `addFeatures` failure, the row-count gate, a bad transform, a locked
+    rename) -- `ensure_tables` catches it, Critical-logs it, and
+    *continues* (layers.py's per-table containment). The loop right
+    after opens the still-pre-M8 table straight into
+    `self.layers["picks"]`, with no `feature_id`/`seq` fields at all.
+    `picks_for` must not then raise `KeyError` reading them -- proven
+    here by making the rebuild actually fail, not merely asserted from
+    the guard's presence.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    # Rewrite `picks` with the pre-M8 field set and one authored row,
+    # exactly as the migration test does.
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    f = QgsFeature(old.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["trace"] = 4
+    f["time_ns"] = 11.0
+    assert old.dataProvider().addFeatures([f])[0]
+    del old
+
+    # Force the migration to fail; ensure_tables catches it, logs
+    # Critical, and moves on -- the disk table stays pre-M8.
+    monkeypatch.setattr(
+        SiteLayers,
+        "_rebuild_picks",
+        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated rebuild failure")),
+    )
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    assert any("could not prepare table 'picks'" in m for m in message_log)
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert "feature_id" not in names  # proves the rebuild really did not run
+
+    got = layers2.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(4, 11.0)]
+    assert got[0].feature_id is None
+    assert got[0].seq is None
+    layers2.detach()
+
+
+def test_write_pick_refuses_when_the_picks_layer_predates_a_grid_crs_change(populated, monkeypatch):
+    """`_ensure_table`'s own docstring names this exact scenario: a
+    grid's CRS changing (`replace_grid`) means every table should be
+    rebuilt, but if `_rebuild_picks` fails, `ensure_tables` logs
+    Critical and moves on *without* reloading the already-open `picks`
+    layer -- so it keeps declaring its old CRS while `self.crs()` (the
+    package CRS, taken from the first grid) now returns the new one.
+    `_pick_point` computes a point in the new CRS via the same
+    `_line_points` -> `_points` path `_refill` already guards for the
+    derived tables; `picks` needs the identical guard, not a milder one,
+    because unlike them it is never regenerated on the next refresh.
+    """
+    session, layers, _ = populated
+    monkeypatch.setattr(
+        SiteLayers,
+        "_rebuild_picks",
+        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated rebuild failure")),
+    )
+
+    session.replace_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32615", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:32616"
+    assert layers.crs().authid() == "EPSG:32615"
+    with pytest.raises(RuntimeError, match="picks"):
+        layers.write_pick(_a_pick())
+    assert layers.feature_count("picks") == 0  # refused, not written

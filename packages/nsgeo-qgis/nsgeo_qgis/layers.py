@@ -162,6 +162,21 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+def _attr(feature: QgsFeature, name: str) -> Any:
+    """The raw value of `name` on `feature`, or `NULL` if the layer's own
+    field set doesn't have that field at all.
+
+    `write_pick` already has to know this (`if name in names`) because a
+    failed `_rebuild_picks` -- any of the five ways it documents itself
+    as able to raise -- is caught and Critical-logged by `ensure_tables`,
+    which then *continues*: the loop right after opens the still-pre-M8
+    table straight into `self.layers["picks"]`, missing `feature_id`/
+    `seq` entirely. Plain `feature[name]` raises `KeyError` for a field
+    that isn't there; reading needs the same guard writing already has.
+    """
+    return feature[name] if feature.fields().indexOf(name) >= 0 else NULL
+
+
 def _as_float(value: Any) -> float | None:
     """A nullable numeric attribute. A QGIS NULL reads back as a
     `QVariant` for which `value is None` is False but `value == NULL` is
@@ -810,7 +825,35 @@ class SiteLayers(QObject):
         layer = self._picks_layer()
         if layer is None:
             raise RuntimeError("the picks table is not open; no site is loaded")
-        point = self._pick_point(pick)
+        target = self.crs()
+        # Mirrors `_refill`'s identical guard, and for the identical
+        # reason: `_pick_point` computes through `_line_points` ->
+        # `_points`, which puts the point in `target`, so writing it into
+        # a layer still declaring a stale CRS would silently mislabel it.
+        # A grid's CRS changing (`replace_grid`) rebuilds every table;
+        # if `_rebuild_picks` fails partway, `ensure_tables` logs
+        # Critical and moves on, leaving exactly this stale-CRS layer
+        # open here. The derived tables recover on their next refresh;
+        # `picks` never does, so it needs the check `_refill` already
+        # has, not a milder one.
+        if target is not None and layer.crs() != target:
+            raise RuntimeError(
+                f"refusing to write to 'picks': its CRS ({layer.crs().authid()}) does not "
+                f"match the package CRS ({target.authid()}); its own preparation must have "
+                f"failed this cycle"
+            )
+        try:
+            point = self._pick_point(pick)
+        except KeyError:
+            # `_pick_point` calls `session.line_for_key`, which raises
+            # `KeyError` for a key that names no line. `add_pick` (M8
+            # task 2) is expected to enforce "a pick targets the WORKING
+            # line" before ever calling here, but this method's own
+            # contract is "raises RuntimeError on any failure to write";
+            # it must not depend on a caller's guard holding to keep it.
+            raise RuntimeError(
+                f"could not write the pick: no line with key {pick.line_key!r}"
+            ) from None
         if point is None:
             # Time is the truth and the pick is authored data with no
             # other source: a line with no geometry (a time-triggered
@@ -888,23 +931,30 @@ class SiteLayers(QObject):
         the whole job. Skipping the row and naming it is the only safe
         answer; refusing to read the layer at all would hide every good
         pick because of one bad one.
+
+        Every read goes through `_attr`, not `feature[name]` directly, for
+        the same reason `write_pick` checks `if name in names`: a layer
+        opened onto a pre-M8 `picks` table (see `_attr`'s own docstring)
+        has no `feature_id`/`seq` fields at all, and this must degrade to
+        "unknown", not `KeyError`.
         """
-        trace, time_ns = feature["trace"], feature["time_ns"]
+        trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
         if trace == NULL or time_ns == NULL:
             _log(f"a pick on {key} has no trace or time and was skipped; edit or delete it")
             return None
+        seq = _attr(feature, "seq")
         return Pick(
             line_key=key,
             trace=int(trace),
             time_ns=float(time_ns),
-            distance_m=_as_float(feature["distance_m"]),
-            depth_m=_as_float(feature["depth_m"]),
-            velocity_m_ns=_as_float(feature["velocity_m_ns"]),
-            stack_json=_as_str(feature["stack_json"]),
-            note=_as_str(feature["note"]),
-            created=_as_str(feature["created"]),
-            feature_id=_as_opt_str(feature["feature_id"]),
-            seq=None if feature["seq"] == NULL else int(feature["seq"]),
+            distance_m=_as_float(_attr(feature, "distance_m")),
+            depth_m=_as_float(_attr(feature, "depth_m")),
+            velocity_m_ns=_as_float(_attr(feature, "velocity_m_ns")),
+            stack_json=_as_str(_attr(feature, "stack_json")),
+            note=_as_str(_attr(feature, "note")),
+            created=_as_str(_attr(feature, "created")),
+            feature_id=_as_opt_str(_attr(feature, "feature_id")),
+            seq=None if seq == NULL else int(seq),
         )
 
     # ---- derived tables ---------------------------------------------------
