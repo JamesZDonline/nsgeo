@@ -200,7 +200,7 @@ class MapLink(QObject):
             # disposal sentinel _refresh() checks, since the canvas item
             # this slot's session writes would otherwise drive may already
             # be gone by the time it fires.
-            if self._marker is None:
+            if self._marker is None or self._band is None:
                 return  # disposed
             point = self._last_point
             if point is None or not self.session.is_open:
@@ -373,10 +373,30 @@ class MapLink(QObject):
         gone (a second `dispose()` call, or one made after the canvas
         itself tore its signals down) -- idempotency needs that caught,
         the same way the item removal below tolerates being called twice.
+
+        That disconnect is itself guarded, in layers, because this
+        method's own promise above -- it "does not assume the canvas is
+        still alive" -- has to hold for `self.canvas` too, not just for
+        the items: `sip.isdeleted` catches the cheap common case, a
+        `TypeError` from `sip.isdeleted` itself means `self.canvas` is
+        not even a sip-wrapped object any more (treated the same as
+        "gone" -- this is the shape a test double standing in for an
+        unreachable canvas takes), and `RuntimeError` is suppressed
+        around the disconnect call for a wrapper that reports as
+        not-deleted but whose underlying C++ object is gone regardless.
+        In every case, a canvas that cannot be reached must never abort
+        this method before the scene-removal loop below runs -- that
+        would leave `_marker` and `_band` on the scene forever, which is
+        exactly the Item I4 leak this method exists to prevent.
         """
         self._dwell.stop()
-        with contextlib.suppress(TypeError):  # already disconnected
-            self.canvas.xyCoordinates.disconnect(self._on_xy)
+        try:
+            canvas_gone = sip.isdeleted(self.canvas)
+        except TypeError:
+            canvas_gone = True
+        if not canvas_gone:
+            with contextlib.suppress(TypeError, RuntimeError):
+                self.canvas.xyCoordinates.disconnect(self._on_xy)
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

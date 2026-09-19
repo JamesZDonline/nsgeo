@@ -368,6 +368,50 @@ def test_a_disposed_link_stops_tracking_the_pointer(linked):
     assert not link._dwell.isActive()
 
 
+def test_a_disposed_link_ignores_a_dwell_that_was_already_queued(linked):
+    """The guard's own case: dispose() stops the timer and disconnects, but
+    an emission already in flight can still land. Distinct from
+    test_a_disposed_link_stops_tracking_the_pointer above, which pins the
+    disconnect -- with the disconnect in place `_last_point` is never set,
+    so that test cannot pin this guard: an unguarded `_on_dwell` would
+    still return early at its own `point is None` check, and the test
+    would pass either way. Arming the dwell BEFORE dispose() (so
+    `_last_point` is set and the timer running) and then firing the
+    timeout manually reproduces the real case instead: a QTimer.timeout
+    already queued on the Qt event loop when dispose() ran."""
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[0]].vertexAt(11))
+    canvas.xyCoordinates.emit(target)  # arms the dwell and sets _last_point
+    before = session.current_trace
+
+    link.dispose()
+    link._dwell.timeout.emit()  # the queued emission landing after teardown
+
+    assert session.current_trace == before
+
+
+def test_dispose_still_removes_the_items_when_the_canvas_is_gone(linked):
+    """Item I4's lesson, again: dispose() must take the marker and band off
+    the scene even when it cannot reach the canvas to disconnect from it.
+    A real deleted QgsMapCanvas is awkward to construct safely while the
+    marker/band still reference it, so this substitutes a stub whose every
+    attribute access raises RuntimeError -- the same shape a genuinely
+    deleted sip wrapper presents to anything that touches it."""
+    link, _session, _layers, canvas, _keys = linked
+    before = len(canvas.scene().items()) - 2  # the two this link added
+
+    class _Dead:
+        def __getattr__(self, name):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+    link.canvas = _Dead()
+    link.dispose()
+
+    assert len(canvas.scene().items()) == before
+    assert link._marker is None
+    assert link._band is None
+
+
 def test_hover_with_no_site_open_does_nothing(qgis_app, tmp_path):
     project = QgsProject.instance()
     project.clear()
