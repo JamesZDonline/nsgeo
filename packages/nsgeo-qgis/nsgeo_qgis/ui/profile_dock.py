@@ -205,6 +205,7 @@ class ProfileDock(QgsDockWidget):
         self.channel_combo.currentIndexChanged.connect(self._channel_changed)
         self.view.trace_hovered.connect(self._hovered)
         self.view.range_selected.connect(self._range_selected)
+        self.view.selection_cleared.connect(self._selection_cleared)
         self.view.pick_requested.connect(self._pick)
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
@@ -742,6 +743,27 @@ class ProfileDock(QgsDockWidget):
             self.session.set_selection(self._key, a, b)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not update the selection: {exc}", Qgis.MessageLevel.Critical)
+
+    def _selection_cleared(self) -> None:
+        # Spec §3.3: a preview is never a write target. `_hovered` and
+        # `_range_selected` above reach the session with `self._key` --
+        # the DISPLAYED key, preview or working -- and let the session's
+        # own `current_key` check structurally no-op a write that arrives
+        # while a preview is up. `SiteSession.clear_selection()` cannot be
+        # routed the same way: it takes no key argument at all, and
+        # unconditionally clears whichever line IS `current_key` -- so
+        # calling it while previewing would not be rejected, it would
+        # reach past the previewed line and clear the WORKING line's real
+        # selection from a click the user only meant for the line they
+        # were glancing at. Guarded explicitly instead, the same way
+        # `_channel_changed` already guards `session.set_channel` (which
+        # has the identical gap for the identical reason).
+        if self._preview_key is not None or self._working_key is None:
+            return
+        try:
+            self.session.clear_selection()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the selection: {exc}", Qgis.MessageLevel.Critical)
 
     def _pick(self, trace: int, time_ns: float) -> None:
         if self._preview_key is not None:

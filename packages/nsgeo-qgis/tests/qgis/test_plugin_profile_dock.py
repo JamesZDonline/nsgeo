@@ -258,6 +258,22 @@ def test_cursor_and_selection_follow_the_session_and_vice_versa(opened):
     assert dock.view._selection == (40, 45)
 
 
+def test_a_plain_click_on_the_view_clears_the_session_selection(opened):
+    """The author's walkthrough (a FAILED check): clearing the QGIS map
+    selection did not clear the profile's own range selection, because
+    nothing in the UI called `SiteSession.clear_selection()`.
+    `ProfileView.selection_cleared` -- a plain click, no drag -- closes
+    that gap."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.set_selection(key, 5, 9)
+    assert session.selection == (5, 9)  # sanity: really set
+
+    dock.view.selection_cleared.emit()
+
+    assert session.selection == (-1, -1)
+
+
 def test_channel_combo_hidden_for_single_channel_files(opened):
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
@@ -718,6 +734,24 @@ def test_hovering_the_profile_during_a_preview_does_not_move_the_working_trace(
 
     assert session.current_trace == 9
     assert session.current_key == keys[0]
+
+
+def test_a_click_while_previewing_does_not_disturb_the_working_lines_selection(previewing):
+    """Spec §3.3: a preview is never a write target. `clear_selection()`
+    has no key argument of its own to structurally reject a call arriving
+    while a different line is on screen -- unlike `set_trace`/
+    `set_selection`, which `_hovered`/`_range_selected` route through with
+    `self._key` and let the session's own `current_key` check no-op them
+    (see `_selection_cleared`'s own reasoning) -- so this is guarded
+    explicitly instead, the same way `_channel_changed` already is."""
+    dock, session, keys = previewing
+    session.set_selection(keys[0], 3, 11)
+    session.set_preview(keys[1], 5)
+    assert dock._key == keys[1]  # sanity: really previewing
+
+    dock.view.selection_cleared.emit()
+
+    assert session.selection == (3, 11)  # the working line's selection, untouched
 
 
 def test_previewing_the_working_line_is_not_a_preview(previewing):

@@ -976,6 +976,77 @@ def test_right_button_release_does_not_end_or_commit_a_left_drag(view):
     assert sel == [(28, 86)]  # the left button that actually started it still commits it
 
 
+# ---- clearing the selection (walkthrough Tweak 3) --------------------------
+
+
+def test_a_plain_click_clears_an_existing_selection(view):
+    """The author's walkthrough: 'I can't get the band to disappear ... I
+    haven't figured out how to clear the profile selection. I assumed it'd
+    be right click but no luck.' A plain left-click -- press and release
+    with no drag in between -- is the conventional gesture in a viewer
+    like this one, and `mousePressEvent`/`mouseReleaseEvent` are already
+    positioned to tell it apart from a drag via `_dragging`.
+    """
+    v, rg = view
+    cleared = []
+    v.selection_cleared.connect(lambda: cleared.append(True))
+    v.set_selection(20, 40)
+    assert v._selection == (20, 40)  # sanity: really set
+    r = v.image_rect()
+    p = QPoint(r.left() + 100, r.top() + 50)
+
+    QTest.mouseClick(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p)
+
+    assert v._selection == (-1, -1)
+    assert len(cleared) == 1
+
+
+def test_a_drag_still_commits_a_range_and_does_not_clear(view):
+    """The click-to-clear gesture must not swallow the drag-to-select one:
+    a real drag still commits a range exactly as before, and does not also
+    fire `selection_cleared`."""
+    v, rg = view
+    sel = []
+    cleared = []
+    v.range_selected.connect(lambda a, b: sel.append((a, b)))
+    v.selection_cleared.connect(lambda: cleared.append(True))
+    r = v.image_rect()
+    QTest.mousePress(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 100, r.top() + 50),
+    )
+    _send_move_while_pressed(v, QPoint(r.left() + 300, r.top() + 50))
+    QTest.mouseRelease(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 300, r.top() + 50),
+    )
+
+    assert sel == [(28, 86)]
+    assert cleared == []
+
+
+def test_a_pick_click_does_not_clear_the_selection(view):
+    """`mousePressEvent` returns early when `_pick_mode` or Shift is held,
+    so a pick never arms `_press` -- the click-to-clear branch in
+    `mouseReleaseEvent` is gated on `_press is not None` and so never runs
+    for a pick either."""
+    v, rg = view
+    cleared = []
+    v.selection_cleared.connect(lambda: cleared.append(True))
+    v.set_selection(20, 40)
+    r = v.image_rect()
+    p = QPoint(r.left() + 100, r.top() + 50)
+
+    QTest.mouseClick(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, p)
+
+    assert v._selection == (20, 40)
+    assert cleared == []
+
+
 def test_depth_axis_uses_the_velocity_model(view):
     """I7: the brief's own probe here, corrected for the and/or precedence
     bug (see the note kept below), still only checked `labels[0] == "0"` --

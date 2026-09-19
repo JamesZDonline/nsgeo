@@ -52,6 +52,7 @@ DRAG_THRESHOLD_PX = 3
 class ProfileView(QWidget):
     trace_hovered = pyqtSignal(int)
     range_selected = pyqtSignal(int, int)
+    selection_cleared = pyqtSignal()
     pick_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
     view_changed = pyqtSignal()
 
@@ -512,6 +513,20 @@ class ProfileView(QWidget):
             if self._dragging:
                 a, b = self._selection
                 self.range_selected.emit(a, b)
+            else:
+                # A plain click -- press and release with no drag in
+                # between -- clears the selection. The conventional
+                # gesture in a viewer like this one, and the author's own
+                # walkthrough finding: nothing in the UI called
+                # `SiteSession.clear_selection()`, so once a range was
+                # dragged its band was permanent for the life of the
+                # line. `range_selected` cannot express this itself:
+                # `SiteSession.set_selection` clamps both ends into range
+                # and can never produce the `(-1, -1)` cleared sentinel,
+                # precisely so a caller cannot forge it by dragging off an
+                # edge -- clearing gets its own signal instead.
+                self.clear_selection()
+                self.selection_cleared.emit()
             self._press = None
             self._dragging = False
 
