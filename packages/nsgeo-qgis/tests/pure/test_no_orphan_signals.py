@@ -24,15 +24,13 @@ PACKAGE = Path(__file__).resolve().parents[2] / "nsgeo_qgis"
 # have a connect.
 #
 # NOTE: spec §1's orphan table and §6's "the three existing orphans" are
-# both wrong. The real set is SEVEN: the four below, plus
-# `ProfileDock.pick_requested` and `ParamForm.error` (both invisible to a
-# name-keyed check -- see SHADOWED_CONNECT_COUNTS) and
-# `ProfileView.set_pick_mode`, an uncalled method rather than a signal, so
-# it is outside what this automated check can see at all (spec §6's manual
-# half -- Task 5's brief, Step 7).
+# both wrong. `ProfileDock.pick_requested` gained its consumer in M8's
+# Task 3 (plugin.py wires it to `_on_pick_requested`); `SiteSession.
+# picks_changed` gained its in Task 4 (`ProfileDock._on_picks_changed`,
+# see profile_dock.py) and has left this set entirely. What is left is
+# `ParamForm.error` (invisible to a name-keyed check -- see SHADOWED,
+# below) plus the three dead `SurveyDock` signals this set still holds.
 KNOWN_UNCONSUMED = {
-    # Adopted by M8, the pick tool (spec §4.1): session.add_pick emits it.
-    "picks_changed",
     # Dead API from Plan 2: plugin.py's toolbar actions do New, Open and
     # Save, and SurveyDock's own signals for them were never wired to
     # anything. Deleting them is Plan 2 cleanup, not M7 work -- pulling it

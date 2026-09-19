@@ -1098,3 +1098,103 @@ def test_a_pick_while_previewing_is_refused_out_loud(previewing):
     assert emitted == []
     assert len(errors) == 1
     assert "preview" in errors[0].lower()
+
+
+# ---- picks on the profile (M8, spec §4.3) ----------------------------------
+
+
+@pytest.fixture
+def dock_with_picks(qgis_app, tmp_path):
+    """A ProfileDock over a session that can actually store picks."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.layers import SiteLayers
+    from plugin_testing import synthetic_dzt
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    keys = session.keys()
+    dock = ProfileDock(session)
+    session.open_line(keys[0])
+    yield dock, session, layers, keys
+    dock.deleteLater()
+    layers.detach()
+    project.clear()
+
+
+def test_a_new_pick_appears_on_the_profile_without_reopening_the_line(dock_with_picks):
+    """`picks_changed` was declared in Plan 2, never emitted and never
+    connected (spec §1). This is its first consumer, and the reason it
+    exists: a pick the user just made has to show up where they made
+    it."""
+    dock, session, layers, keys = dock_with_picks
+    assert dock.view._picks == []
+
+    session.add_pick(keys[0], 12, 18.0)
+
+    assert dock.view._picks == [(12, 18.0)]
+
+
+def test_opening_a_line_shows_the_picks_already_on_it(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    session.open_line(keys[1])
+    assert dock.view._picks == []
+
+    session.open_line(keys[0])
+
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_a_preview_shows_the_previewed_lines_own_picks(dock_with_picks):
+    """Reading is not authoring. The view follows `display_key`, so a
+    preview shows the hovered line's picks -- the point of a preview is
+    to see what is on that line, interpretation included -- while
+    `add_pick` still refuses to write there."""
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 44, 33.0)
+    session.open_line(keys[0])
+
+    session.set_preview(keys[1], 20)
+    assert dock.view._picks == [(44, 33.0)]
+
+    session.clear_preview()
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_closing_the_site_clears_the_picks_from_the_view(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+
+    session.close_site()
+
+    assert dock.view._picks == []
+
+
+def test_a_failing_pick_read_is_logged_not_escaped(dock_with_picks, monkeypatch, message_log):
+    """`picks_changed` is a Qt signal, so this slot's body runs under
+    C++: an exception escaping it reaches qFatal() in the LTR container.
+    The conftest's `_no_swallowed_slot_exceptions` fixture is what turns
+    a regression here into a local red test."""
+    dock, session, layers, keys = dock_with_picks
+
+    def boom(key):
+        raise RuntimeError("the picks table went away")
+
+    monkeypatch.setattr(session, "picks_for", boom)
+    session.picks_changed.emit()
+
+    assert any("the picks table went away" in m for m in message_log)

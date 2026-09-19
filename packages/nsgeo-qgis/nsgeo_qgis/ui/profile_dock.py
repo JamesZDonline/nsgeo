@@ -214,6 +214,7 @@ class ProfileDock(QgsDockWidget):
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
         session.stack_changed.connect(self._on_stack_changed)
+        session.picks_changed.connect(self._on_picks_changed)
         session.trace_changed.connect(self._on_trace_changed)
         session.selection_changed.connect(self._on_selection_changed)
         session.lines_changed.connect(self._refresh_velocity)
@@ -412,6 +413,7 @@ class ProfileDock(QgsDockWidget):
             )
             self.view.set_image(None)
         self._refresh_velocity()
+        self._refresh_picks()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -430,6 +432,29 @@ class ProfileDock(QgsDockWidget):
             self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not re-render after a stack change: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_picks_changed(self) -> None:
+        try:
+            self._refresh_picks()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not refresh the picks on the profile: {exc}", Qgis.MessageLevel.Critical)
+
+    def _refresh_picks(self) -> None:
+        """Put the DISPLAYED line's picks on the view.
+
+        `self._key`, not `_working_key`: a preview shows the hovered
+        line's own picks, because seeing what has been interpreted on a
+        line is most of the point of glancing at it. That is not a breach
+        of spec §3.3 -- reading is not authoring, and `session.add_pick`
+        refuses a preview independently. `picks_changed` carries no key
+        (it is a "something changed" signal), so this recomputes from
+        whatever is on screen rather than filtering on one.
+        """
+        key = self._key
+        if key is None:
+            self.view.set_picks([])
+            return
+        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
