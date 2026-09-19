@@ -1047,6 +1047,30 @@ def test_a_pick_click_does_not_clear_the_selection(view):
     assert cleared == []
 
 
+def test_a_shift_held_release_does_not_clear_a_plain_press(view):
+    """Finding 4 (M7 walkthrough re-review): a plain press (no modifier)
+    followed by a release with Shift held -- no drag in between -- used
+    to clear the selection anyway, because `mouseReleaseEvent` never
+    checked the modifier at all; only `mousePressEvent` did. Shift is
+    pick territory (see `mousePressEvent`'s own `_pick_mode or shift`
+    guard) -- the release path must treat it the same way, or releasing
+    Shift a moment too late after an ordinary click turns an accidental
+    modifier into data loss.
+    """
+    v, rg = view
+    cleared = []
+    v.selection_cleared.connect(lambda: cleared.append(True))
+    v.set_selection(20, 40)
+    r = v.image_rect()
+    p = QPoint(r.left() + 100, r.top() + 50)
+
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, p)
+    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, p)
+
+    assert v._selection == (20, 40)
+    assert cleared == []
+
+
 def test_depth_axis_uses_the_velocity_model(view):
     """I7: the brief's own probe here, corrected for the and/or precedence
     bug (see the note kept below), still only checked `labels[0] == "0"` --

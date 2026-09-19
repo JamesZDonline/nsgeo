@@ -513,7 +513,7 @@ class ProfileView(QWidget):
             if self._dragging:
                 a, b = self._selection
                 self.range_selected.emit(a, b)
-            else:
+            elif not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
                 # A plain click -- press and release with no drag in
                 # between -- clears the selection. The conventional
                 # gesture in a viewer like this one, and the author's own
@@ -525,6 +525,22 @@ class ProfileView(QWidget):
                 # and can never produce the `(-1, -1)` cleared sentinel,
                 # precisely so a caller cannot forge it by dragging off an
                 # edge -- clearing gets its own signal instead.
+                #
+                # Finding 4 (M7 walkthrough re-review): Shift is pick
+                # territory (`mousePressEvent`'s own `_pick_mode or shift`
+                # guard), but that guard only ever looks at the modifier
+                # at PRESS time -- a plain press (no modifier, so `_press`
+                # got armed) followed by a release with Shift now held
+                # used to fall straight into this branch and clear the
+                # selection anyway. Checking the modifier here too keeps
+                # the release path consistent with the press path: a
+                # Shift held at the moment of release is declined the
+                # same way a Shift held at the moment of press is, rather
+                # than let releasing it a moment too late turn an
+                # accidental modifier into data loss. No pick is fired
+                # here either -- `mousePressEvent` already decided this
+                # gesture was not a pick when it armed `_press`, and nothing
+                # about the release should relitigate that.
                 self.clear_selection()
                 self.selection_cleared.emit()
             self._press = None
