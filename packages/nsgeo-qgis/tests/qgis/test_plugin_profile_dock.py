@@ -781,3 +781,43 @@ def test_a_gain_strip_request_mid_preview_is_deferred_and_honoured_on_exit(previ
 
     assert dock.gain_strip.isVisible()
     assert dock.gain_strip.points() == [[0.0, 1.0], [1.0, 2.0]]
+
+
+def test_a_deferred_strip_is_dropped_when_the_preview_is_promoted(previewing):
+    """Review finding 4 (M7 Task 2): the deferred payload belongs to the
+    line that WAS working. Replaying it after promotion puts another
+    line's curve on the strip, and a drag there writes through
+    session.current_key."""
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+    dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("a", 0, 0))
+    assert not dock.gain_strip.isVisible()
+
+    session.open_line(keys[1])  # promotion -- _open, not _exit_preview
+    assert dock._deferred_strip is None
+
+    session.set_preview(keys[0], 3)  # a later, unrelated preview
+    session.clear_preview()
+    assert not dock.gain_strip.isVisible()
+
+
+def test_a_deferred_strip_is_dropped_when_the_site_closes(previewing):
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+    dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("a", 0, 0))
+
+    session.close_site()
+
+    assert dock._deferred_strip is None
+
+
+def test_a_hide_arriving_mid_preview_is_honoured_on_exit(previewing):
+    dock, session, keys = previewing
+    dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("a", 0, 0))
+    assert dock.gain_strip.isVisible()
+    session.set_preview(keys[1], 5)
+
+    dock.show_gain_strip(None)
+    session.clear_preview()
+
+    assert not dock.gain_strip.isVisible()

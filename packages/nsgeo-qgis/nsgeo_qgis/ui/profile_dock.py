@@ -303,6 +303,14 @@ class ProfileDock(QgsDockWidget):
         # running -- means no preview is up any more, so re-enable it
         # unconditionally rather than leave it stuck disabled.
         self.channel_combo.setEnabled(True)
+        # A deferred strip payload belongs to the line that was working
+        # when it arrived. Promotion and a site close both change which
+        # line that is, so the payload is not merely stale, it is wrong:
+        # replaying it later would put another line's curve on the strip,
+        # and a drag there writes through session.current_key. Dropped,
+        # never replayed. (_exit_preview is the ONLY path that may replay
+        # one, because there the working line has not changed.)
+        self._deferred_strip = None
         if not key:
             self._clear_view_only()
             return
@@ -395,6 +403,14 @@ class ProfileDock(QgsDockWidget):
         self._working_key = None
         self._preview_key = None
         self.preview_label.setText("")
+        # A deferred strip payload belongs to the line that was working
+        # when it arrived. Promotion and a site close both change which
+        # line that is, so the payload is not merely stale, it is wrong:
+        # replaying it later would put another line's curve on the strip,
+        # and a drag there writes through session.current_key. Dropped,
+        # never replayed. (_exit_preview is the ONLY path that may replay
+        # one, because there the working line has not changed.)
+        self._deferred_strip = None
         was_diff = self._difference_index >= 0
         self._difference_index = -1
         self.difference_label.setText("")
@@ -599,6 +615,12 @@ class ProfileDock(QgsDockWidget):
         """
         if self._preview_key is not None:
             self._deferred_strip = None if points is None else (points, owner)
+            if points is None:
+                # An explicit "hide" that arrives mid-preview is still an
+                # instruction: without this, _exit_preview's
+                # _strip_was_visible branch re-shows the previous curve for
+                # a step that is no longer selected.
+                self._strip_was_visible = False
             self.gain_strip.hide()
             return
         if points is None or self.view.transform is None:
