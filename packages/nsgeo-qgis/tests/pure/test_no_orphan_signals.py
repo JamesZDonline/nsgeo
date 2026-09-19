@@ -48,19 +48,29 @@ KNOWN_UNCONSUMED = {
 # unconsumed, invisible to `test_every_declared_signal_has_a_connect`.
 # `pick_requested` was the first case found; `error` was a second,
 # discovered only because Task 5's review generalised the check instead of
-# special-casing the first one. Every name pinned here is checked instead
-# for an EXACT connect count, and `test_every_shadowed_signal_name_is_pinned`
-# below is what stops a third one slipping in unpinned the way `error` did.
-SHADOWED_CONNECT_COUNTS = {
+# special-casing the first one.
+#
+# Pinning only the connect count (an earlier round of this check did
+# exactly that) leaves a gap one level up: nothing stops a THIRD class
+# declaring the same name, unconnected, on top of an already-pinned entry
+# -- the connect count the table already expects would not move, so the
+# suite would stay green. Pinning `declared` (how many classes declare the
+# name) alongside `connects` (how many connects exist) closes that: either
+# number changing means the shadowing itself changed shape, which is
+# exactly when someone needs to look. `test_every_shadowed_signal_name_is_pinned`
+# is what stops a *new* shadowed name slipping in unpinned in the first
+# place; `test_shadowed_signals_match_their_pinned_shape` is what stops an
+# *already-pinned* one drifting undetected.
+SHADOWED = {
     # ProfileView.pick_requested is connected (profile_dock.py wires it to
     # `_pick`). ProfileDock's own pick_requested -- a separate declaration
     # that happens to share the name -- is not: the real orphan.
-    "pick_requested": 1,
+    "pick_requested": {"declared": 2, "connects": 1},
     # ProfileDock.error is connected (plugin.py wires it to `self.message`).
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is
     # built by both ProcessingDock and AddStepDialog; neither connects it.
-    "error": 1,
+    "error": {"declared": 2, "connects": 1},
 }
 
 
@@ -118,8 +128,8 @@ class _SignalVisitor(ast.NodeVisitor):
 def _declared_signals(sources: dict[Path, str]) -> dict[str, list[tuple[str, Path]]]:
     """name -> [(owning class name, file), ...], one entry per declaration
     site. A name with more than one entry is declared by more than one
-    class and must be handled by SHADOWED_CONNECT_COUNTS, not by a plain
-    connect-count check -- see its docstring."""
+    class and must be handled by SHADOWED, not by a plain connect-count
+    check -- see its docstring."""
     found: dict[str, list[tuple[str, Path]]] = {}
     for path, text in sources.items():
         _SignalVisitor(path, found).visit(ast.parse(text, filename=str(path)))
@@ -136,9 +146,7 @@ def test_every_declared_signal_has_a_connect() -> None:
     orphans = {
         name: sites[0][1].name
         for name, sites in _declared_signals(sources).items()
-        if name not in KNOWN_UNCONSUMED
-        and name not in SHADOWED_CONNECT_COUNTS
-        and not _connect_count(blob, name)
+        if name not in KNOWN_UNCONSUMED and name not in SHADOWED and not _connect_count(blob, name)
     }
     assert not orphans, (
         "signals declared with no consumer anywhere in the plugin: "
@@ -160,42 +168,54 @@ def test_the_known_unconsumed_signals_are_still_unconsumed() -> None:
 
 def test_every_shadowed_signal_name_is_pinned() -> None:
     """Any signal name declared by more than one class must appear in
-    SHADOWED_CONNECT_COUNTS. This is the part that actually matters: it is
-    what stops a second `pick_requested`-shaped duplicate slipping in
-    unpinned and invisible, which is exactly how `error` got in undetected
-    until this review."""
+    SHADOWED. This is what stops a second `pick_requested`-shaped
+    duplicate slipping in unpinned and invisible, which is exactly how
+    `error` got in undetected the first time this check existed."""
     sources = _sources()
     declared = _declared_signals(sources)
     shadowed = {name for name, sites in declared.items() if len({owner for owner, _ in sites}) > 1}
-    missing = shadowed - set(SHADOWED_CONNECT_COUNTS)
+    missing = shadowed - set(SHADOWED)
     assert not missing, (
-        "signal names declared by more than one class must be pinned in "
-        f"SHADOWED_CONNECT_COUNTS with their current connect count: {missing}. "
+        f"signal names declared by more than one class must be pinned in SHADOWED: {missing}. "
         "A name-keyed connect count cannot tell two same-named signals "
         "apart, so one class's connect can hide the other's genuine orphan."
     )
 
 
-def test_shadowed_connect_counts_match_reality() -> None:
-    """Keeps SHADOWED_CONNECT_COUNTS honest, the same way
-    test_the_known_unconsumed_signals_are_still_unconsumed keeps
-    KNOWN_UNCONSUMED honest: if a pinned count changes, the shadowed
-    signal's orphan status just changed and someone needs to say so, not
-    have this check quietly stop meaning anything.
+def test_shadowed_signals_match_their_pinned_shape() -> None:
+    """Keeps SHADOWED honest in both dimensions, not just the connect
+    count.
+
+    A round of this check that pinned only the connect count let a THIRD
+    class declare an already-pinned name, unconnected, with the suite
+    still green: the connect count the table already expected never
+    moved, so nothing noticed a brand new orphan had joined the shadow.
+    Checking `declared` (how many classes declare the name) alongside
+    `connects` (how many connects exist) closes that -- either number
+    changing means the shadowing itself changed shape, which is exactly
+    when someone needs to look, the same way
+    `test_the_known_unconsumed_signals_are_still_unconsumed` keeps
+    KNOWN_UNCONSUMED honest.
 
     e.g. M8 wiring ProfileDock.pick_requested to session.add_pick raises
-    that entry's count from 1 to 2 and trips this test -- exactly the
+    that entry's `connects` from 1 to 2 and trips this test -- exactly the
     notification an allowlist entry would have given.
     """
-    blob = "\n".join(_sources().values())
+    sources = _sources()
+    declared = _declared_signals(sources)
+    blob = "\n".join(sources.values())
     mismatched = {
-        name: (expected, _connect_count(blob, name))
-        for name, expected in SHADOWED_CONNECT_COUNTS.items()
-        if _connect_count(blob, name) != expected
+        name: {
+            "declared": (expected["declared"], len(declared.get(name, []))),
+            "connects": (expected["connects"], _connect_count(blob, name)),
+        }
+        for name, expected in SHADOWED.items()
+        if len(declared.get(name, [])) != expected["declared"]
+        or _connect_count(blob, name) != expected["connects"]
     }
     assert not mismatched, (
-        f"connect counts changed for shadowed signal names (expected, actual): "
-        f"{mismatched}. If a new connect appeared, that shadowed signal's "
-        "orphan may have just been adopted -- update the expected count and "
-        "say so; if one disappeared, something was deleted or renamed."
+        "shadowed signals no longer match their pinned shape, as (expected, actual) "
+        f"pairs: {mismatched}. A `declared` mismatch means a class was added or "
+        "removed for that name; a `connects` mismatch means a connect was added or "
+        "removed. Either way the shadowing changed -- update SHADOWED and say why."
     )
