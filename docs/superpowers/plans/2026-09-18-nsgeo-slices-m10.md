@@ -24,7 +24,7 @@ Every task's requirements implicitly include all of these.
   - `python -m pytest packages/nsgeo-core/tests -v`
   - `ruff check . && ruff format --check .`
   - `mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent packages/nsgeo-core/src`
-- **Commit messages** end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
+- **Commit messages** end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`. (amended during execution: this fixed string was superseded -- implementers use whatever attribution their own harness instructs at commit time, not this literal trailer.)
 - **Measured facts** this plan relies on, from the real files: 512 samples, 110.86 ns range, `dt = 0.2165 ns`, `t0 = -11.086 ns`, ε_r 14; after the four-step preset `time_zero → dewow → background_mean → gain_agc` the array is 463 × 608, and **463 is prime**.
 
 ## File Structure
@@ -265,7 +265,7 @@ class CubeFrame:
     straight across.
     """
 
-    origin: Tuple[float, float]
+    origin: tuple[float, float]  # amended during execution (ruff UP)
     azimuth: float
     cell: float
     nx: int
@@ -282,7 +282,7 @@ class CubeFrame:
     def n_cells(self) -> int:
         return self.nx * self.ny
 
-    def axes(self) -> Tuple[np.ndarray, np.ndarray]:
+    def axes(self) -> tuple[np.ndarray, np.ndarray]:  # amended during execution (ruff UP)
         """Unit vectors of frame-local +X and +Y in world coordinates."""
         a = math.radians(self.azimuth)
         y_hat = np.array([math.sin(a), math.cos(a)])
@@ -412,7 +412,7 @@ class ZAxis:
             raise ValueError(f"t1_ns must exceed t0_ns, got {t0_ns} .. {t1_ns}")
         return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=int(math.floor((t1_ns - t0_ns) / dz_ns)) + 1)
 
-    def level_range(self, top_ns: float, thickness_ns: float) -> Tuple[int, int]:
+    def level_range(self, top_ns: float, thickness_ns: float) -> tuple[int, int]:  # amended during execution (ruff UP)
         """Half-open [k0, k1) for a window, clamped to the axis.
 
         Never returns an empty range: a window entirely off the end still
@@ -456,6 +456,8 @@ The z axis is two-way time, with depth derived through VelocityModel.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -664,11 +666,11 @@ class _NoParams:
         pass
 
     @property
-    def params(self) -> Dict[str, Any]:
+    def params(self) -> dict[str, Any]:  # amended during execution (ruff UP)
         return {}
 
     @classmethod
-    def schema(cls) -> Tuple[ParamSpec, ...]:
+    def schema(cls) -> tuple[ParamSpec, ...]:  # amended during execution (ruff UP)
         return ()
 
 
@@ -798,6 +800,8 @@ surfaced as StepStack.output_unipolar for front ends choosing a palette.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
+
 ---
 
 ### Task 3: Unipolar rendering
@@ -814,6 +818,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   - `UnipolarClip(percentile: float = 99.0, max_samples: int = 200_000)` with `.limit(data) -> float`
   - `to_index8_unipolar(data: np.ndarray, limit: float) -> np.ndarray`
   - `to_rgba8(data, limit, lut, *, unipolar: bool) -> np.ndarray` — `(H, W, 4)` uint8, alpha 0 where the input is not finite
+    (amended during execution: only for `unipolar=True`. The bipolar path, `unipolar=False`, is fully opaque regardless of `data` — a radargram has no nodata, and `to_index8` deliberately maps a NaN sample to the neutral middle of the table rather than a transparent hole, so making that pixel see-through would be worse, not better.)
   - `UNIPOLAR_COLORMAPS: frozenset[str]`, and `colormap_names(unipolar: bool | None = None)`
   - New tables `"amp_black_high"`, `"amp_white_high"`, `"amp_heat"`
 
@@ -875,11 +880,10 @@ def test_unipolar_colormaps_are_listed_separately():
     assert set(render.colormap_names()) >= set(render.UNIPOLAR_COLORMAPS)
 
 
-def test_every_colormap_is_a_valid_table():
-    for name in render.colormap_names():
-        lut = render.colormap(name)
-        assert lut.shape == (256, 3)
-        assert lut.dtype == np.uint8
+# (amended during execution: `test_every_colormap_is_a_valid_table` was dropped
+# before landing -- it is a duplicate of the pre-existing
+# `test_every_colormap_is_a_256_by_3_uint8_table`, which already asserts the
+# same (256, 3) uint8 shape for every name in `colormap_names()`.)
 
 
 def test_amp_black_high_runs_white_to_black():
@@ -1034,6 +1038,8 @@ rather than a reserved index.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -1235,15 +1241,15 @@ class Provenance:
     and may be read by a front end that never loaded the site.
     """
 
-    line_keys: Tuple[str, ...]
+    line_keys: tuple[str, ...]  # amended during execution (ruff UP)
     preset_name: str
-    steps: Tuple[Dict[str, Any], ...]
+    steps: tuple[dict[str, Any], ...]  # amended during execution (ruff UP)
     transform: str
-    velocity: Optional[Dict[str, Any]]
+    velocity: dict[str, Any] | None  # amended during execution (ruff UP)
     built_utc: str
     core_version: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # amended during execution (ruff UP)
         return {
             "line_keys": list(self.line_keys),
             "preset_name": self.preset_name,
@@ -1255,7 +1261,7 @@ class Provenance:
         }
 
     @classmethod
-    def from_dict(cls, doc: Dict[str, Any]) -> Provenance:
+    def from_dict(cls, doc: dict[str, Any]) -> Provenance:  # amended during execution (ruff UP)
         return cls(
             line_keys=tuple(doc["line_keys"]),
             preset_name=doc["preset_name"],
@@ -1433,16 +1439,20 @@ def resample_window(line: PreparedLine, plan: LinePlan, k0: int, k1: int) -> np.
     return (lower * (1.0 - weight) + upper * weight).astype(np.float32, copy=False)
 
 
+# (amended during execution: `accumulate` no longer takes `k0`/`k1`. It takes
+# the level count from `total.shape[0]` instead: `build_cube` is its only
+# caller and always covers the full axis, and a partial window here would
+# silently double-count `count` if ever called more than once per line.
+# `resample_window` still takes an explicit window, for the caller --
+# `stream_slice` -- that legitimately wants one.)
 def accumulate(
     total: np.ndarray,
     count: np.ndarray,
     line: PreparedLine,
     plan: LinePlan,
-    k0: int,
-    k1: int,
 ) -> None:
-    """Add one line's contribution, in place."""
-    block = resample_window(line, plan, k0, k1)
+    """Add one line's contribution over the whole axis, in place."""
+    block = resample_window(line, plan, 0, total.shape[0])
     total[:, plan.cells] += np.add.reduceat(block, plan.starts, axis=1)
     count[plan.cells] += plan.counts
 
@@ -1460,17 +1470,16 @@ def build_cube(
     total = np.zeros((z.nz, frame.n_cells), dtype=np.float32)
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
-        accumulate(total, count, line, plan, 0, z.nz)
+        accumulate(total, count, line, plan)  # amended during execution: no k0/k1
     mean = np.divide(
         total, count, out=np.full_like(total, np.nan), where=count > 0
     )
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
 
 
-def slice_extent(frame: CubeFrame) -> Tuple[float, float, float, float]:
-    """(min_x, min_y, max_x, max_y) of the frame in its own local metres."""
-    return (0.0, 0.0, frame.nx * frame.cell, frame.ny * frame.cell)
 ```
+
+(amended during execution: `slice_extent` was dropped rather than shipped. M10 wrote no caller for it -- a helper with no caller in this milestone is exactly what this plan's own review flagged elsewhere as a mistake to avoid repeating -- and M11's north-up GeoTIFF export is its actual caller. It should return in M11 written together with that caller and a real test, not ahead of either.)
 
 - [ ] **Step 5: Export from the package**
 
@@ -1514,6 +1523,8 @@ count as data and read as a dead zone.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -1702,7 +1713,7 @@ def stream_slice(
     z: ZAxis,
     k0: int,
     k1: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:  # amended during execution (ruff UP)
     """One slice, binned straight from the lines, holding no cube.
 
     This is the default residency. It is the same algorithm as `build_cube`
@@ -1858,6 +1869,8 @@ NaN rather than being invented.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -2232,6 +2245,8 @@ bin, slice, stream, save and reload.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
+
 ---
 
 ## What M10 deliberately does not do
@@ -2242,6 +2257,7 @@ Named here so a reviewer does not flag them as gaps:
 - **No GeoTIFF, no GDAL, no temporal encoding.** M11.
 - **No directional de-striping** (spec §6.5) and **no site mosaic** (§10). M12.
 - **No on-disk residency tier.** Spec §7.4 flags it as unmeasured; the spike runs before anything commits to memory-mapping, and nothing in this plan depends on it.
+- **No `coarsen`.** (amended during execution: this was missing from the plan entirely -- the spec names `coarsen` in three places, including its required-property list, and this plan mentioned it zero times, neither implementing it nor acknowledging the gap. M10 ships `build_cube`, `stream_slice` and `fill` at the cube's native cell size only; block-averaging a resident cube down to a coarser grid for a zoomed-out view is deferred to M11, alongside the on-disk residency tier it would most naturally pair with.)
 
 ## Plan Self-Review
 
