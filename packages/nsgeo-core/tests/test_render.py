@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from nsgeo import render
 from nsgeo.io.dzt import read_samples
 from nsgeo.render import (
     DEFAULT_COLORMAP,
@@ -222,3 +223,62 @@ def test_real_file_renders_with_both_extremes_present():
     assert idx.min() == 0 and idx.max() == 255
     rgb = to_rgb8(data, PercentileClip().limit(data), colormap(DEFAULT_COLORMAP))
     assert rgb.shape == data.shape + (3,)
+
+
+def test_unipolar_index_puts_zero_at_the_bottom_not_the_middle():
+    """The whole point: a bipolar table would floor an |A| slice at grey."""
+    out = render.to_index8_unipolar(np.array([[0.0, 0.5, 1.0]]), limit=1.0)
+    assert list(out[0]) == [0, 128, 255]
+
+
+def test_unipolar_index_clips_above_the_limit():
+    out = render.to_index8_unipolar(np.array([[2.0, -1.0]]), limit=1.0)
+    assert list(out[0]) == [255, 0]
+
+
+def test_unipolar_clip_uses_the_percentile_of_the_values_themselves():
+    """Not of their magnitudes: the data is already non-negative, so a
+    percentile over |x| would be the same number computed twice."""
+    data = np.concatenate([np.zeros(99), [100.0]])[None, :]
+    assert render.UnipolarClip(percentile=100.0).limit(data) == pytest.approx(100.0)
+    assert render.UnipolarClip(percentile=90.0).limit(data) == 1.0  # median is 0 -> fallback
+
+
+def test_unipolar_clip_ignores_nan_nodata():
+    data = np.array([[1.0, np.nan, 3.0]])
+    assert render.UnipolarClip(percentile=100.0).limit(data) == pytest.approx(3.0)
+
+
+def test_unipolar_clip_falls_back_when_everything_is_nodata():
+    assert render.UnipolarClip().limit(np.full((4, 4), np.nan)) == 1.0
+
+
+def test_rgba_makes_nodata_transparent_and_data_opaque():
+    """A slice cell with no traces under it must not paint as a value."""
+    data = np.array([[0.0, np.nan]])
+    lut = render.colormap("amp_black_high")
+    out = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=True)
+    assert out.shape == (1, 2, 4)
+    assert out[0, 0, 3] == 255
+    assert out[0, 1, 3] == 0
+
+
+def test_rgba_bipolar_path_matches_the_existing_rgb_mapping():
+    data = np.array([[-1.0, 0.0, 1.0]])
+    lut = render.colormap("seismic")
+    rgba = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=False)
+    rgb = render.to_rgb8(data, limit=1.0, lut=lut)
+    np.testing.assert_array_equal(rgba[..., :3], rgb)
+
+
+def test_unipolar_colormaps_are_listed_separately():
+    assert set(render.colormap_names(unipolar=True)) == set(render.UNIPOLAR_COLORMAPS)
+    assert "seismic" not in render.colormap_names(unipolar=True)
+    assert "amp_heat" not in render.colormap_names(unipolar=False)
+    assert set(render.colormap_names()) >= set(render.UNIPOLAR_COLORMAPS)
+
+
+def test_amp_black_high_runs_white_to_black():
+    lut = render.colormap("amp_black_high")
+    assert tuple(lut[0]) == (255, 255, 255)
+    assert tuple(lut[255]) == (0, 0, 0)
