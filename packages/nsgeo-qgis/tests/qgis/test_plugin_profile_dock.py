@@ -489,6 +489,24 @@ def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
     assert t.trace_lo == pytest.approx(0.0)
 
 
+def test_the_preview_and_difference_labels_sit_after_the_buttons(opened):
+    """The author's walkthrough: 'The preview label text should be on the
+    right of the fit and 1:1 buttons so it doesn't shift them around when
+    it loads.' `difference_label` has the identical defect two widgets
+    away and is fixed alongside it -- both must sit after `channel_combo`
+    (the last fixed-width control in the row) and before the stretch, so
+    growing text pushes into empty space instead of the buttons.
+
+    Asserted via `bar.indexOf(...)` -- the toolbar's actual widget order --
+    rather than pixel geometry, so this stays true across any resize.
+    """
+    _, dock, _, _ = opened
+    bar = dock.widget().layout().itemAt(0).layout()
+    assert bar.indexOf(dock.one_to_one_button) < bar.indexOf(dock.channel_combo)
+    assert bar.indexOf(dock.channel_combo) < bar.indexOf(dock.difference_label)
+    assert bar.indexOf(dock.difference_label) < bar.indexOf(dock.preview_label)
+
+
 def test_pick_requested_relays_key_trace_and_time(opened):
     """I2/I6: `view.pick_requested.connect(self._pick)` and `_pick`'s own
     re-emission of `self.pick_requested` are both wired but nothing in the

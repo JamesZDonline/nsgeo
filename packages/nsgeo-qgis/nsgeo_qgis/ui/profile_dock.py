@@ -156,10 +156,6 @@ class ProfileDock(QgsDockWidget):
         self.colormap_combo.addItems(colormap_names())
         self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
         bar.addWidget(self.colormap_combo)
-        self.difference_label = QLabel("")
-        bar.addWidget(self.difference_label)
-        self.preview_label = QLabel("")
-        bar.addWidget(self.preview_label)
         self.fit_button = QPushButton("Fit")
         self.one_to_one_button = QPushButton("1:1")
         bar.addWidget(self.fit_button)
@@ -167,6 +163,21 @@ class ProfileDock(QgsDockWidget):
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)
+        # Both labels sit after every fixed-width control and before the
+        # stretch, deliberately: a label whose text grows (or clears) is
+        # the only thing in this row that changes width at runtime, and
+        # anything to its RIGHT gets shoved along with it. Putting them
+        # first (as this row used to) meant a preview banner or a
+        # difference-view label loading in shoved the Fit/1:1/channel
+        # controls sideways every time -- the author's own walkthrough
+        # finding for preview_label; difference_label has the identical
+        # defect two widgets away and is fixed alongside it here. With
+        # both AFTER the stretch's only remaining neighbour is empty
+        # space, so growing text pushes into that instead of a button.
+        self.difference_label = QLabel("")
+        bar.addWidget(self.difference_label)
+        self.preview_label = QLabel("")
+        bar.addWidget(self.preview_label)
         bar.addStretch(1)
         self.velocity_label = QLabel("")
         bar.addWidget(self.velocity_label)
