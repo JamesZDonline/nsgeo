@@ -612,6 +612,87 @@ def test_moving_off_every_line_still_only_clears_the_preview_on_the_dwell(linked
     assert session.preview_key is None
 
 
+def _shrink_tolerance(canvas: QgsMapCanvas) -> None:
+    """Set `canvas` to a small, known extent so 12 SCREEN pixels (the
+    hover tolerance) corresponds to a small MAP-unit distance.
+
+    Finding 3 (M7 walkthrough re-review): `mapUnitsPerPixel()` defaults to
+    1.0 on a bare, unresized `QgsMapCanvas()` (verified directly), giving
+    a 12.0-unit tolerance -- six times the `linked` fixture's own 2.0-unit
+    inter-line spacing. Nothing built on that fixture's geometry alone can
+    ever fall outside tolerance, so a test that deletes
+    `_track_displayed_line`'s tolerance check entirely, or compares an
+    unsquared distance against it, still passed: verified by deliberately
+    breaking the check both ways and rerunning this file, twice, before
+    this fix. Shrinking the tolerance (not the geometry) is what actually
+    separates "close enough to hit" from "genuinely too far", at
+    0.01 x 12 = 0.12 map units -- well under the fixture's own spacing.
+    """
+    from qgis.core import QgsRectangle
+
+    canvas.resize(400, 400)
+    canvas.setExtent(QgsRectangle(0.0, 0.0, 4.0, 4.0))  # mapUnitsPerPixel() == 0.01
+
+
+def test_the_tolerance_check_rejects_a_hover_on_a_genuinely_different_line(linked):
+    """Finding 3 (M7 walkthrough re-review): under the DEFAULT tolerance,
+    hovering exactly on line 1's own vertex 7 also counts as hovering line
+    0 (the displayed line) -- the two are only 2.0 map units apart, well
+    inside the default 12.0-unit tolerance -- so `_track_displayed_line`
+    silently moved line 0's cursor to whatever vertex on IT is nearest,
+    before the dwell ever ran. `test_moving_onto_a_different_line_still_
+    waits_for_the_dwell` above never noticed, because it only checks
+    `preview_key`/the dwell, never `current_trace`.
+
+    `_shrink_tolerance` makes the same kind of assertion meaningful: with
+    the pointer genuinely out of tolerance, the working line's own trace
+    must not move at all, and only the dwell may still decide whether to
+    preview the other line. Verified by mutation: deleting
+    `_track_displayed_line`'s `if index < 0 or sq_dist > tolerance *
+    tolerance: return` guard entirely makes this fail (`current_trace`
+    changes to line 0's own nearest vertex regardless of distance).
+    """
+    link, session, _layers, canvas, keys = linked
+    session.set_trace(keys[0], 3)
+    _shrink_tolerance(canvas)
+    target = QgsPointXY(link._geometries()[keys[1]].vertexAt(7))
+
+    canvas.xyCoordinates.emit(target)
+
+    assert session.current_trace == 3  # unchanged -- genuinely out of tolerance now
+    assert session.preview_key is None  # not yet -- the timer has not fired
+    assert link._dwell.isActive()
+
+
+def test_track_displayed_line_tolerance_is_a_distance_not_a_squared_distance(linked):
+    """The same hazard `_hit_test`'s own
+    `test_the_tolerance_is_a_distance_not_a_squared_distance` guards
+    against, for `_track_displayed_line`'s own SEPARATE tolerance check
+    (map_link.py, inside `_track_displayed_line`) -- `closestVertexWithContext`
+    returns a squared distance, so the tolerance must be squared to match
+    it, and a miss test cannot tell a correct comparison from a backwards
+    one (see that other test's docstring for why: with the default
+    mapUnitsPerPixel() of 1.0, tol=12 > sqrt(tol)=3.46, so comparing the
+    squared distance against a raw, unsquared tolerance is *stricter*
+    than correct, not looser -- a hit inside the real tolerance but
+    outside its square root is the only probe that separates them.
+
+    Verified by mutation: changing this check's `tolerance * tolerance`
+    to a bare `tolerance` makes this fail (the perturbed point is then
+    treated as a miss, and `current_trace` stays at the sentinel).
+    """
+    link, session, _layers, canvas, keys = linked
+    session.set_trace(keys[0], 3)
+    tol = canvas.mapUnitsPerPixel() * link.HOVER_TOLERANCE_PX
+    assert tol > 1.0, "the discriminating band exists only while tol > sqrt(tol)"
+    on = link._geometries()[keys[0]].vertexAt(11)
+    near = QgsPointXY(on.x() + tol * 0.8, on.y())
+
+    canvas.xyCoordinates.emit(near)
+
+    assert session.current_trace != 3  # a real hit under the correct (squared) comparison
+
+
 def test_a_previewed_line_is_requested_from_the_loader(linked, monkeypatch):
     from nsgeo_qgis.loader import LineLoader
 
