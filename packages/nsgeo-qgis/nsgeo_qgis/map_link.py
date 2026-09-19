@@ -194,12 +194,52 @@ class MapLink(QObject):
     def _on_xy(self, point: QgsPointXY) -> None:
         """Fired on every mouse move over the canvas, whatever tool is
         active -- that is the whole reason this feature needs no tool slot.
-        Cheap on purpose: it records a position and restarts the dwell."""
+        Records a position, restarts the dwell (which still governs
+        switching to a DIFFERENT line -- see `_track_displayed_line`), and
+        moves the cursor along whichever line is already on screen, which
+        is free and must not wait for the dwell."""
         try:
             self._last_point = QgsPointXY(point)
             self._dwell.start(self.HOVER_DWELL_MS)
+            self._track_displayed_line(self._last_point)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
+
+    def _track_displayed_line(self, point: QgsPointXY) -> None:
+        """Move the cursor along the line already on screen, without
+        waiting for the dwell.
+
+        The dwell exists to stop a sweep across the map loading line after
+        line (spec §3.5). Moving along a line that is already displayed
+        costs nothing -- its samples are loaded and its geometry is
+        cached -- so making that wait for the dwell just made the cursor
+        lurch. Only switching to a DIFFERENT line still pays the dwell,
+        which is what the dwell was for.
+
+        Leaving the dwell running (see `_on_xy`) is deliberate even though
+        this method itself never clears anything: moving OFF the displayed
+        line must still clear the preview on the dwell, not immediately,
+        so that crossing a gap between two lines does not flicker the
+        profile back to the working line and out again -- exactly the
+        reason `_on_dwell` already routes its own "nothing hit" case
+        through `clear_preview()` rather than clearing on every miss.
+        """
+        if self._marker is None or not self.session.is_open:
+            return
+        key = self.session.display_key
+        if key is None:
+            return
+        geom = self._geometries().get(key)
+        if geom is None or geom.isEmpty():
+            return
+        sq_dist, index = geom.closestVertexWithContext(point)
+        tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
+        if index < 0 or sq_dist > tolerance * tolerance:
+            return  # off this line; the dwell decides what happens next
+        if key == self.session.current_key:
+            self.session.set_trace(key, index)
+        else:
+            self.session.set_preview(key, index)
 
     def _on_dwell(self) -> None:
         try:

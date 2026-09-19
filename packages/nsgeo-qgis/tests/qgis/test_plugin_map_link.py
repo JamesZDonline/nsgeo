@@ -550,6 +550,68 @@ def test_hovering_a_real_line_previews_its_real_trace(qgis_app, tmp_path):
     project.clear()
 
 
+# ---- moving along the displayed line (walkthrough Tweak 1) -----------------
+
+
+def test_moving_along_the_working_line_updates_the_cursor_without_the_dwell(linked):
+    """The author's walkthrough: 'the cursor jumps a long way as you move
+    unless you move really slowly'. The dwell exists to stop a sweep
+    across the map loading line after line (spec §3.5) -- moving along a
+    line already on screen costs nothing and must not wait for it. No
+    `_fire_dwell()` call here on purpose: this is the whole point."""
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[0]].vertexAt(11))
+
+    canvas.xyCoordinates.emit(target)
+
+    assert session.current_trace == 11
+    assert session.current_key == keys[0]
+
+
+def test_moving_along_a_previewed_line_updates_the_preview_without_the_dwell(linked):
+    """The other half of `_track_displayed_line`: the DISPLAYED line is the
+    preview, not the working line, whenever one is up, and moving further
+    along it must be just as immediate."""
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1] and session.preview_trace == 7
+
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(20)))
+
+    assert session.preview_trace == 20  # updated immediately, no _fire_dwell() call
+    assert session.current_key == keys[0]  # still not promoted
+
+
+def test_moving_onto_a_different_line_still_waits_for_the_dwell(linked):
+    """Only switching to a DIFFERENT line still pays the dwell -- that is
+    what the dwell is for, and this fix must not remove it."""
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[1]].vertexAt(7))
+
+    canvas.xyCoordinates.emit(target)
+
+    assert session.preview_key is None  # not yet -- the timer has not fired
+    assert link._dwell.isActive()
+
+
+def test_moving_off_every_line_still_only_clears_the_preview_on_the_dwell(linked):
+    """Leaving the dwell running is deliberate: moving OFF the displayed
+    line must still clear the preview on the dwell, not immediately, so
+    crossing a gap between two lines does not flicker the profile back to
+    the working line and out again."""
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    canvas.xyCoordinates.emit(QgsPointXY(999_999.0, 999_999.0))
+
+    assert session.preview_key == keys[1]  # unchanged until the dwell fires
+    _fire_dwell(link)
+    assert session.preview_key is None
+
+
 def test_a_previewed_line_is_requested_from_the_loader(linked, monkeypatch):
     from nsgeo_qgis.loader import LineLoader
 
