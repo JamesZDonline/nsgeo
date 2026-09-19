@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 from nsgeo.geometry.grid import Grid
@@ -11,7 +12,7 @@ from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import session as session_module
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
-from plugin_testing import synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import Qgis, QgsApplication
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -933,3 +934,243 @@ def test_removing_a_line_emits_line_opened_before_preview_changed(previewable):
     session.remove_line(keys[0])
 
     assert order == ["line_opened", "preview_changed"]
+
+
+# ---- add_pick (M8, spec §4.1, §4.3) ----------------------------------------
+
+
+@pytest.fixture
+def pickable(qgis_app, tmp_path):
+    """A session with two placed lines, a real GeoPackage behind it, and
+    the first line open as the working line."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.layers import SiteLayers
+    from plugin_testing import synthetic_dzt
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    keys = session.keys()
+    session.open_line(keys[0])
+    yield session, layers, keys
+    layers.detach()
+    project.clear()
+
+
+def test_add_pick_writes_the_pick_and_says_so_once(pickable):
+    session, layers, keys = pickable
+    seen = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    pick = session.add_pick(keys[0], 12, 18.0)
+
+    assert pick.line_key == keys[0]
+    assert pick.trace == 12
+    assert pick.time_ns == pytest.approx(18.0)
+    assert layers.feature_count("picks") == 1
+    assert seen == [1]
+
+
+def test_add_pick_refuses_a_line_that_is_not_the_working_line(pickable):
+    """Spec §4.3: picking targets the working line, never a preview. The
+    guard is here, in the session, for the same reason set_trace's and
+    set_selection's are -- so no caller can forget it. M7's reviews found
+    three separate attempts by a preview to reach a write; this is the
+    structural answer rather than a fourth guard in a widget."""
+    session, layers, keys = pickable
+    session.set_preview(keys[1], 5)
+    seen = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    with pytest.raises(ValueError, match="working line"):
+        session.add_pick(keys[1], 5, 18.0)
+
+    assert layers.feature_count("picks") == 0
+    assert seen == []
+    assert session.preview_key == keys[1]  # the refusal changed nothing
+
+
+def test_add_pick_does_not_dirty_the_session(pickable):
+    """A pick is written straight to the GeoPackage; survey.nsgeo.json is
+    not involved and there is nothing for `Save site` to do. Marking the
+    session dirty would prompt for a save that would write nothing."""
+    session, layers, keys = pickable
+    session.save()
+    assert session.dirty is False
+
+    session.add_pick(keys[0], 3, 10.0)
+
+    assert session.dirty is False
+
+
+def test_add_pick_clamps_the_trace_and_the_time_into_the_record(pickable):
+    """ProfileView emits a pick for any left click in the widget, and
+    `ViewTransform.time_of_y` does not clamp -- a click in the top margin
+    yields a time before the record starts. The trace is clamped the same
+    way `set_trace` clamps it."""
+    session, layers, keys = pickable
+    line = session.line_for_key(keys[0])
+    t0 = line.header.position_ns
+    t_end = t0 + (line.header.n_samples - 1) * line.header.dt_ns
+
+    low = session.add_pick(keys[0], -5, t0 - 50.0)
+    high = session.add_pick(keys[0], 9999, t_end + 50.0)
+
+    assert low.trace == 0
+    assert low.time_ns == pytest.approx(t0)
+    assert high.trace == line.n_traces - 1
+    assert high.time_ns == pytest.approx(t_end)
+
+
+def test_add_pick_refuses_a_non_finite_time(pickable):
+    session, layers, keys = pickable
+    with pytest.raises(ValueError, match="finite"):
+        session.add_pick(keys[0], 3, float("nan"))
+    assert layers.feature_count("picks") == 0
+
+
+def test_add_pick_derives_distance_depth_velocity_and_the_stack(pickable):
+    session, layers, keys = pickable
+    from nsgeo.processing import build_step
+
+    session.append_step(keys[0], build_step("dewow", window_ns=4.0))
+    line = session.line_for_key(keys[0])
+    model = session.resolved_velocity(keys[0])
+
+    pick = session.add_pick(keys[0], 30, 20.0)
+
+    assert pick.distance_m == pytest.approx(float(line.distance_along()[30]))
+    assert pick.depth_m == pytest.approx(float(model.depth_at([20.0])[0]))
+    assert pick.velocity_m_ns == pytest.approx(float(model.velocity_at([20.0])[0]))
+    assert json.loads(pick.stack_json)[0]["step"] == "dewow"
+    assert pick.note == ""
+    assert pick.feature_id is None
+    assert pick.seq is None
+    # An ISO-8601 UTC stamp, parseable rather than merely non-empty.
+    assert datetime.fromisoformat(pick.created).tzinfo is not None
+
+
+def test_add_pick_leaves_distance_null_for_a_line_with_no_distance_axis(pickable, tmp_path):
+    """A time-triggered acquisition (traces_per_metre <= 0) has no
+    distance axis at all -- `Line.distance_along()` raises. Time is the
+    truth, so the pick is still authored; distance is simply absent."""
+    session, layers, keys = pickable
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from plugin_testing import synthetic_dzt
+
+    p = synthetic_dzt(tmp_path / "raw", "FILE__003.DZT", n_traces=40, traces_per_metre=0.0)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 1.5, 0.0, 1, p.stem))])
+    session.open_line("raw/FILE__003.DZT")
+
+    pick = session.add_pick("raw/FILE__003.DZT", 3, 15.0)
+
+    assert pick.distance_m is None
+    assert pick.depth_m is not None  # time -> depth needs no geometry
+
+
+def test_add_pick_does_not_announce_a_write_that_failed(pickable, monkeypatch):
+    """picks_changed is what tells the profile and the map to redraw. If
+    the provider refused the feature, emitting it would show a pick that
+    is not on disk -- the worst possible report for the one table with no
+    other source of truth."""
+    session, layers, keys = pickable
+    seen = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    def boom(pick):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(layers, "write_pick", boom)
+    with pytest.raises(RuntimeError, match="disk full"):
+        session.add_pick(keys[0], 3, 10.0)
+
+    assert seen == []
+
+
+def test_add_pick_without_a_store_says_so_rather_than_silently_dropping_it(qgis_app, tmp_path):
+    """A SiteSession built with no SiteLayers -- which most tests in this
+    file do -- has nowhere to put a pick. Silence would look exactly like
+    a successful pick."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from plugin_testing import synthetic_dzt
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.open_line("raw/FILE__001.DZT")
+
+    with pytest.raises(RuntimeError, match="pick store"):
+        session.add_pick("raw/FILE__001.DZT", 3, 10.0)
+
+
+def test_picks_for_reads_back_through_the_store(pickable):
+    session, layers, keys = pickable
+    session.add_pick(keys[0], 40, 30.0)
+    session.add_pick(keys[0], 5, 10.0)
+
+    assert [(p.trace, p.time_ns) for p in session.picks_for(keys[0])] == [(5, 10.0), (40, 30.0)]
+    assert session.picks_for(keys[1]) == []
+
+
+def test_picks_for_is_empty_with_no_store_rather_than_raising(qgis_app, tmp_path):
+    """Reading is not authoring: a dock asking "what picks are on this
+    line" before any layers exist gets an honest empty answer, where
+    add_pick would raise. A read that raised would abort the CI container
+    from inside a render slot."""
+    session = SiteSession()
+    assert session.picks_for("raw/FILE__001.DZT") == []
+
+
+@needs_real_data
+def test_a_pick_on_a_real_line_lands_in_that_files_own_time_window(qgis_app, tmp_path):
+    """Spec §7: real data is the primary validation. Every synthetic
+    fixture above shares one header; a real GSSI file has its own
+    `position_ns`, `dt_ns`, `n_samples` and dielectric, and those four
+    are exactly what turn a click position into a clamped time and a
+    depth. A clamp computed against the synthetic header would pass all
+    of the above and be wrong on every real file.
+    """
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.layers import SiteLayers
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)  # module-level constant, not a fresh Grid
+    line = Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, 1, "real"))
+    session.add_lines([line])  # an absolute path is fine here; only save() cares
+    key = session.keys()[0]
+    session.open_line(key)
+    header = session.line_for_key(key).header
+    t_end = header.position_ns + (header.n_samples - 1) * header.dt_ns
+
+    middle = session.add_pick(key, line.n_traces // 2, t_end / 2.0)
+    past_the_end = session.add_pick(key, line.n_traces + 500, t_end * 10.0)
+
+    assert middle.time_ns == pytest.approx(t_end / 2.0)
+    assert middle.depth_m is not None and middle.depth_m > 0.0
+    assert past_the_end.trace == line.n_traces - 1
+    assert past_the_end.time_ns == pytest.approx(t_end)
+    assert layers.feature_count("picks") == 2
+    layers.detach()
+    project.clear()
