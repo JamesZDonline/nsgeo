@@ -109,6 +109,10 @@ class Site:
     #: `StepStack.from_dicts()` with no extra conversion. Keyed by name,
     #: not by line: unlike `stacks`, a preset is not tied to any one line.
     presets: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: Cube recipes, keyed by cube id, each pointing at a `.npz` beside the
+    #: survey file. Plain dicts for the same reason `presets` are: the JSON
+    #: is the definition, and the array it names is derived and rebuildable.
+    cubes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def frames(self) -> dict[str, Grid]:

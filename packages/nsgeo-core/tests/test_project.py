@@ -302,3 +302,32 @@ def test_out_of_tree_error_names_the_opt_in(tmp_path):
     line = _line_at(tmp_path / "elsewhere" / "L9.DZT")
     with pytest.raises(ProjectError, match="allow_absolute=True"):
         save_site(Site(grids=[_grid()], lines=[line]), project / "survey.nsgeo.json")
+
+
+def test_cubes_round_trip_through_the_survey_json(tmp_path):
+    site = Site()
+    site.cubes = {
+        "grid-a-standard": {
+            "grid_id": "A",
+            "preset": "slice-standard",
+            "transform": "amp_envelope",
+            "cell": 0.1,
+            "array": "slices/grid-a-standard.npz",
+        }
+    }
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert load_site(path).cubes == site.cubes
+
+
+def test_a_site_with_no_cubes_writes_no_cubes_key(tmp_path):
+    """Same rule presets already follow: absent, not an empty object."""
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(Site(), path)
+    assert "cubes" not in json.loads(path.read_text())
+
+
+def test_an_older_file_without_cubes_still_loads(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": []}))
+    assert load_site(path).cubes == {}

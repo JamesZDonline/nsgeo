@@ -81,3 +81,61 @@ def test_a_full_stack_runs_on_a_real_profile():
 
     removed = stack.difference(3)  # what background removal took
     assert removed.data.shape == out.data.shape
+
+
+def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
+    """End to end on real data: preset, transform, bin, slice, save, reload."""
+    from nsgeo.slices.binning import PreparedLine, build_cube, plan_line, stream_slice
+    from nsgeo.slices.cube import Provenance
+    from nsgeo.slices.frame import CubeFrame, ZAxis
+    from nsgeo.slices.store import load_cube, save_cube
+
+    prepared = []
+    for i, path in enumerate(FILES[:4]):
+        header = read_header(path)
+        rg = Radargram(
+            data=np.asarray(read_samples(path, header)[0], dtype=float),
+            dt_ns=header.dt_ns,
+            t0_ns=header.position_ns,
+        )
+        for name in ("time_zero", "dewow", "background_mean", "gain_agc", "amp_envelope"):
+            rg = build_step(name).apply(rg)
+        n_traces = rg.data.shape[1]
+        coords = np.column_stack(
+            [np.linspace(0.0, 19.99, n_traces), np.full(n_traces, 0.25 + i * 0.5)]
+        )
+        prepared.append(
+            PreparedLine(
+                key=path.name,
+                data=rg.data.astype(np.float32),
+                dt_ns=rg.dt_ns,
+                t0_ns=rg.t0_ns,
+                coords=coords,
+            )
+        )
+
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=0.0, cell=0.2, nx=100, ny=12, crs="EPSG:32633")
+    z = ZAxis.from_range(1.0, 40.0, 0.2165)
+    plans = [plan_line(p, frame, z) for p in prepared]
+    prov = Provenance(
+        line_keys=tuple(p.key for p in prepared),
+        preset_name="test",
+        steps=(),
+        transform="amp_envelope",
+        velocity=None,
+        built_utc="2026-09-18T00:00:00Z",
+        core_version="0.1.0.dev0",
+    )
+    cube = build_cube(prepared, plans, frame, z, prov)
+
+    assert cube.coverage().sum() == sum(p.data.shape[1] for p in prepared)
+    covered = cube.slice_levels(10, 28)[cube.coverage() > 0]
+    assert np.isfinite(covered).all()
+    assert (covered >= 0.0).all()  # the envelope is unipolar
+
+    streamed, _ = stream_slice(prepared, plans, frame, z, 10, 28)
+    np.testing.assert_allclose(streamed[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5)
+
+    out = tmp_path / "real.npz"
+    save_cube(cube, out)
+    assert load_cube(out).provenance == prov

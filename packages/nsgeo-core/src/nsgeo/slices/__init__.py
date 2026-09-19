@@ -17,3 +17,4 @@ from nsgeo.slices.binning import (  # noqa: F401
 from nsgeo.slices.cube import Provenance, SliceCube  # noqa: F401
 from nsgeo.slices.fill import disc_kernel, fill  # noqa: F401
 from nsgeo.slices.frame import CubeFrame, ZAxis  # noqa: F401
+from nsgeo.slices.store import CubeStoreError, load_cube, save_cube  # noqa: F401

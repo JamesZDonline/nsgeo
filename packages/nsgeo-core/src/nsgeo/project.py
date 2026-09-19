@@ -191,6 +191,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     }
     if site.presets:
         doc["presets"] = site.presets
+    if site.cubes:
+        doc["cubes"] = site.cubes
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -258,6 +260,7 @@ def load_site(path: str | Path) -> Site:
         except (KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
     site.presets = dict(presets)
+    site.cubes = doc.get("cubes", {})
 
     site.validate()
     return site
