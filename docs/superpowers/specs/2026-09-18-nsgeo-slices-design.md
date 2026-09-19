@@ -509,6 +509,61 @@ The raw cube is not what is exported: it stays in the `.npz`, which is what a re
 The layer joins the site's layer group. Coverage exports as a companion single-band raster when
 asked. Existing GeoPackage rules are untouched: rasters live beside it, never inside it.
 
+### 9.5 Creation options are not incidental
+
+A fine step produces a lot of bands — 19 at 5 ns thickness and 2.5 ns step, 95 at one pulse
+width and 0.5 ns, 230 if the raw cube is ever dumped. Measured on a 300 × 300 float32 cube with
+GDAL 3.8.4, band count turns out not to be the problem. **The defaults are.**
+
+| Option | 19 bands | 95 bands | 230 bands |
+|---|---|---|---|
+| `INTERLEAVE=PIXEL` (GDAL default), read one band | 15.3 ms | 105.7 ms | 54.5 ms |
+| `INTERLEAVE=BAND`, read one band | **0.32 ms** | **0.45 ms** | **0.86 ms** |
+
+Pixel interleaving forces a read of every band to reach one of them, which is precisely the
+access pattern a slice viewer has. Band interleaving makes the cost flat in band count. This one
+option is the difference between a 230-band export being unusable and being free.
+
+Two more, measured on 95 bands (34.2 MB raw):
+
+| Option | file | read one band |
+|---|---|---|
+| `TILED=YES` (256 × 256 default blocks) | 99.6 MB | 1.14 ms |
+| `TILED=NO` | **34.2 MB** | **0.47 ms** |
+| `TILED=NO`, `COMPRESS=DEFLATE` | 0.9 MB | 1.01 ms |
+
+Tiling a raster barely larger than one tile pads it to 512 × 512 and wastes 2.9×. Stripped is
+exact and fastest. Compression is dramatic on spatially smooth data — though that test used
+synthetic smooth data and is an upper bound; real slices will land between the two, and
+`PREDICTOR=3` for floating point is untested and likely better still.
+
+So: **`INTERLEAVE=BAND`, `TILED=NO`, `COMPRESS=DEFLATE`, `PREDICTOR=3`, `BIGTIFF=IF_SAFER`.**
+The last costs nothing and removes the 4 GB cliff entirely.
+
+**Navigating many bands without our plugin.** QGIS 3.44 has
+`Qgis.RasterTemporalMode.FixedRangePerBand` and `QgsRasterLayerTemporalProperties`
+`setFixedRangePerBand` / `bandForTemporalRange` — verified present in the environment this was
+written in. Setting a per-band range lets the Temporal Controller step through slices with a
+real slider, so a 95-band export is navigable by someone who has only QGIS. It maps depth onto a
+time axis, which is a mild abuse of the mechanism, but it is the native one and the alternative
+is a 95-entry band dropdown.
+
+### 9.6 Other raster models, considered
+
+| Model | Verdict |
+|---|---|
+| **GeoTIFF, multi-band** | **Chosen.** With the options above, one band reads in under a millisecond regardless of band count, and every GIS opens it. |
+| **netCDF, classic GDAL raster API** | **Rejected, measured.** GDAL writes *one 2-D variable per band*: a 95-band write reopens as `RasterCount: 0` and **95 subdatasets** named `Band1…Band95`. That is worse than a multi-band GeoTIFF, not better. |
+| **netCDF, GDAL multidimensional API** | **Designed for, not built.** This is the one that gives a genuine 3-D variable with named dimensions, units and CF metadata — the right archival and interchange format, readable by xarray. But QGIS cannot load it as an ordinary raster layer, so it is an *additional* export for data deposition, never a replacement. The writer interface below makes it additive. |
+| **Zarr** | **Rejected for now.** Reads a band in 0.7 ms and chunks well, but it is a directory rather than a file, wrote 230 bands in 1200 ms against GeoTIFF's 146 ms, and buys nothing over band-interleaved GeoTIFF at these sizes. Revisit if cubes ever go cloud-hosted. |
+| **HDF5** | Read-only in this GDAL build. Not available as an export. |
+| **ENVI BSQ** | **Interesting, rejected.** A raw band-sequential array plus an ASCII header — which numpy alone could write, so the *core* could emit a georeferenced, GDAL-readable cube with no new dependency. Rejected because `.npz` already carries mean, count and metadata in one file where ENVI would need several, and because the format is unfamiliar to this audience. Worth remembering if the core ever needs to write something QGIS can open directly. |
+| **COG** | A GeoTIFF profile, not a different model. Worth offering for web sharing; its overviews cost size on a float cube, so not the default. |
+
+Because more than one of these may eventually be wanted, **export is a writer interface** taking
+a cube and a slice plan, not a function that knows about GeoTIFF. Adding the netCDF multidim
+writer later is then a new implementation rather than a refactor.
+
 ---
 
 ## 10. Site level: many grids, one interpretation
@@ -548,8 +603,9 @@ Unchanged in structure from Plan 2 and Plan 3, which is deliberate:
 
 ## 12. Out of scope
 
-**Designed for, not built:** elevation-referenced (topographically corrected) cubes; per-(level,
-cell) coverage for mixed time ranges; vertical sections cut across lines; cross-slice anomaly
+**Designed for, not built:** a netCDF export through GDAL's multidimensional API, for archival
+and for readers using xarray (§9.6); elevation-referenced (topographically corrected) cubes;
+per-(level, cell) coverage for mixed time ranges; vertical sections cut across lines; cross-slice anomaly
 extraction into a single synchronic map, as De Angeli et al. (2022) do for Falerii Novi;
 isosurfaces and any 3-D rendering.
 
