@@ -1,0 +1,27 @@
+- Task 1: minor (deferred): `_install` resets current key/trace/selection but not the preview
+- Task 1: minor (deferred): untested holes inherited from the brief — `set_preview(None)`
+- Task 1: minor (deferred): MapLink's `_set_marker`/`_set_band` use `.get(key)`, so the only
+- Task 1: minor (deferred): `close_site` resets the preview silently, so a listener bound
+- Task 2: minor (deferred): no test exercises two consecutive `_enter_preview` calls (the
+- Task 2: minor (deferred): `_enter_preview` sets `_preview_key` before `line_for_key` can
+- Task 2: minor (deferred): `test_a_deferred_strip_is_dropped_when_the_site_closes` survives
+- Task 2: minor (deferred): `_strip_was_visible` is not reset in `_open`/`_clear`; a stale
+- Task 3: minor (deferred): `__init__` never calls `_refresh()`, so a MapLink built over an
+- Task 3: minor (deferred): module docstring references `_on_selection`/`xyCoordinates`, which
+- Task 3: minor (deferred): `geom.transform()` inside the build loop sits outside the try, so
+- Task 4: minor (deferred): `clear_preview()` + `set_trace()` gives two refreshes, so crossing
+- Task 4: minor (deferred): `_hit_test` breaks exact distance ties by `getFeatures()` order —
+- Task 4: minor (deferred): `loading_changed` still has no consumer outside `loader.wait_for`,
+- Task 4: minor (folded into round 2): `_on_dwell` checks `_marker` only where `_refresh`
+- Task 4: minor (deferred): `MapLink` still has no caller outside its own module; `unload()`
+- Task 4: minor (deferred): the `sip.isdeleted` layer is redundant — `suppress(TypeError,
+- Task 4: minor (deferred): `self._dwell.stop()` precedes the guard, so a deleted MapLink C++
+- Task 5: minor (folded): `_rebind_layer` suppresses only TypeError where dispose() suppresses
+- Task 5: minor (folded): `test_promotion_still_works_after_the_lines_layer_is_rebuilt` does not
+- Task 5: minor (folded): the AST walk handles `Assign` but not `AnnAssign`.
+- Task 5: minor (deferred): shadow detection keys on class NAME only; two same-named classes in
+- Task 5: minor (deferred): `dispose()` leaves `canvas.destinationCrsChanged` and the session
+- Task 5: minor (deferred): eb2e2a5's commit message names the wrong layer-replacement
+- Task 5: minor (deferred): one construction still slips — delete the CONNECTED ProfileDock.error
+- Task 5: minor (deferred): class-name-keyed shadow detection still misses a same-named class in
+- Task 5: minor (deferred): the `declared` comment says "how many classes" where the code counts
