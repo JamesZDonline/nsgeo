@@ -540,13 +540,34 @@ synthetic smooth data and is an upper bound; real slices will land between the t
 So: **`INTERLEAVE=BAND`, `TILED=NO`, `COMPRESS=DEFLATE`, `PREDICTOR=3`, `BIGTIFF=IF_SAFER`.**
 The last costs nothing and removes the 4 GB cliff entirely.
 
-**Navigating many bands without our plugin.** QGIS 3.44 has
-`Qgis.RasterTemporalMode.FixedRangePerBand` and `QgsRasterLayerTemporalProperties`
-`setFixedRangePerBand` / `bandForTemporalRange` — verified present in the environment this was
-written in. Setting a per-band range lets the Temporal Controller step through slices with a
-real slider, so a 95-band export is navigable by someone who has only QGIS. It maps depth onto a
-time axis, which is a mild abuse of the mechanism, but it is the native one and the alternative
-is a 95-entry band dropdown.
+**Navigating many bands without our plugin.** `Qgis.RasterTemporalMode.FixedRangePerBand` with
+`QgsRasterLayerTemporalProperties.setFixedRangePerBand(dict[int, QgsDateTimeRange])` — added in
+QGIS **3.38**, and `metadata.txt` already declares `qgisMinimumVersion=3.40`, so it is inside the
+supported range with no fallback path to write. Giving each band its own range lets the Temporal
+Controller step through slices on a real slider, so a 95-band export is navigable by someone who
+has only QGIS rather than presenting a 95-entry band dropdown.
+
+**This is not a misuse of the temporal axis.** GPR measures two-way travel time; depth is the
+derived quantity, and §5.2 already makes the cube's z-axis time for exactly that reason. Putting
+nanoseconds on a time axis is putting a duration where a duration belongs — the dimension is
+right.
+
+What does not match is the **encoding**. QGIS's axis is wall-clock datetime: an instant on a
+calendar, at millisecond resolution, where ours is a duration from time zero in nanoseconds. So
+the export needs a declared epoch and scale, and the choice is not free:
+
+| Mapping | native dz = 0.2165 ns becomes | usable? |
+|---|---|---|
+| 1 ns → 1 ms | 0.2165 ms → rounds to 0 | **no** — adjacent bands collapse to identical ranges |
+| 1 ns → 1 s | 216.5 ms | **yes**, and the seconds field reads as nanoseconds directly |
+
+**1 ns → 1 s from a 1970-01-01T00:00:00Z epoch.** A band covering 23.5–26.4 ns then displays as
+`00:00:23.500 .. 00:00:26.400`, so the controller can be read as nanoseconds without conversion.
+
+The trap is worth naming because it is the obvious choice: ns → ms pairs two small units and
+looks right, silently collapses every band at native dz into the same millisecond, and fails by
+producing a layer whose slider does nothing. The band descriptions carry the true ns and m
+ranges regardless, so they remain the authority and the temporal encoding is only navigation.
 
 ### 9.6 Other raster models, considered
 
