@@ -54,7 +54,15 @@ class PreparedLine:
 
 @dataclass(frozen=True)
 class LinePlan:
-    """Everything about one line that does not change when the window moves."""
+    """Everything about one line that does not change when the window moves.
+
+    `frame` and `z` are the two inputs the plan was built against, carried
+    along purely so `build_cube` and `stream_slice` can catch a stale plan.
+    Neither is used for anything else here -- the arrays above are already
+    the fully-resolved result of resampling against `z` and binning against
+    `frame`, so recomputing from these fields would be redundant, not an
+    alternative source of truth.
+    """
 
     z_index: np.ndarray
     z_weight: np.ndarray
@@ -62,6 +70,8 @@ class LinePlan:
     starts: np.ndarray
     cells: np.ndarray
     counts: np.ndarray
+    frame: CubeFrame
+    z: ZAxis
 
 
 def plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan:
@@ -102,6 +112,8 @@ def plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan:
         starts=starts,
         cells=sorted_ids[starts],
         counts=(run_ends - starts).astype(np.int32),
+        frame=frame,
+        z=z,
     )
 
 
@@ -135,6 +147,42 @@ def accumulate(
     count[plan.cells] += plan.counts
 
 
+def _check_plans_current(
+    lines: Sequence[PreparedLine],
+    plans: Sequence[LinePlan],
+    frame: CubeFrame,
+    z: ZAxis,
+) -> None:
+    """Reject any plan not built against this exact (frame, z).
+
+    Compares `frame` and `z` individually rather than the whole `LinePlan`:
+    a `LinePlan` carries ndarrays, and comparing those with `==` raises
+    "truth value of an array is ambiguous" instead of a clean answer.
+    `CubeFrame` and `ZAxis` are frozen, all-scalar dataclasses, so `!=` on
+    either is cheap, total, and exactly the comparison that matters -- a
+    plan's arrays are a function of these two objects and nothing else, so
+    if both still match, the arrays are still correct.
+
+    This is the only guard against a live cell-size or z-range slider in
+    the plugin reusing a plan computed for the frame or axis before the
+    drag: a stale `cell` silently rebins every trace into the wrong cell
+    (never raising, because a stale-but-in-bounds id looks like a real
+    one), and a stale `t0_ns` silently mislabels every returned time.
+    """
+    for line, plan in zip(lines, plans):
+        if plan.frame != frame or plan.z != z:
+            mismatches = []
+            if plan.frame != frame:
+                mismatches.append(f"frame {plan.frame!r} != current {frame!r}")
+            if plan.z != z:
+                mismatches.append(f"z {plan.z!r} != current {z!r}")
+            raise ValueError(
+                f"line {line.key!r}: plan is stale ({'; '.join(mismatches)}) -- "
+                f"call plan_line() again against the current frame and z axis "
+                f"before binning"
+            )
+
+
 def build_cube(
     lines: Sequence[PreparedLine],
     plans: Sequence[LinePlan],
@@ -145,6 +193,7 @@ def build_cube(
     """Bin every line into a resident cube."""
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
+    _check_plans_current(lines, plans, frame, z)
     total = np.zeros((z.nz, frame.n_cells), dtype=np.float32)
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
@@ -173,13 +222,7 @@ def stream_slice(
     """
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
-    for line, plan in zip(lines, plans):
-        if plan.z_index.shape[0] != z.nz:
-            raise ValueError(
-                f"line {line.key!r}: plan has {plan.z_index.shape[0]} levels, but z has "
-                f"{z.nz} -- the plan was built against a different z axis and must be "
-                f"replanned before streaming against this one"
-            )
+    _check_plans_current(lines, plans, frame, z)
     if not 0 <= k0 < k1 <= z.nz:
         raise ValueError(f"level window must satisfy 0 <= k0 < k1 <= {z.nz}, got {k0}..{k1}")
     n_levels = k1 - k0

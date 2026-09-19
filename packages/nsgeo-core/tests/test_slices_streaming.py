@@ -101,7 +101,7 @@ def test_streaming_rejects_a_plan_built_for_a_different_z_axis():
     short_z = ZAxis(t0_ns=0.0, dz_ns=0.5, nz=16)
     long_z = ZAxis(t0_ns=0.0, dz_ns=0.5, nz=32)
     plans = [plan_line(ln, frame, short_z) for ln in lines]
-    with pytest.raises(ValueError, match="different z axis"):
+    with pytest.raises(ValueError, match="plan is stale"):
         stream_slice(lines, plans, frame, long_z, 0, 32)
 
 

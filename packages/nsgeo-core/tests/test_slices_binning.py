@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from nsgeo.slices.binning import CoverageError, PreparedLine, build_cube, plan_line
+from nsgeo.slices.binning import CoverageError, PreparedLine, build_cube, plan_line, stream_slice
 from nsgeo.slices.cube import Provenance, SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis
 
@@ -135,6 +135,78 @@ def test_a_line_whose_time_range_misses_the_window_is_rejected_by_name():
     z = ZAxis(t0_ns=0.0, dz_ns=1.0, nz=40)
     with pytest.raises(CoverageError, match="short.dzt"):
         plan_line(line(key="short.dzt", n_samples=8), f, z)
+
+
+def test_build_cube_rejects_a_plan_built_for_a_different_cell_size():
+    """The silent case: at x = 0.5/1.5/2.5 m a plan for cell=1.0 puts the
+    traces in cells 0/1/2; rebinning with cell=0.5 (nx/ny doubled to keep
+    the frame the same size) puts the correct answer in cells 1/3/5
+    instead. A stale cell id stays in-bounds either way, so nothing but an
+    explicit frame check catches this -- no shape mismatch, no exception,
+    just a wrong cube."""
+    stale = plan_line(line(), frame(cell=1.0, nx=4, ny=3), axis())
+    finer = frame(cell=0.5, nx=8, ny=6)
+    with pytest.raises(ValueError, match="plan is stale"):
+        build_cube([line()], [stale], finer, axis(), prov())
+
+
+def test_stream_slice_rejects_a_plan_built_for_a_different_cell_size():
+    stale = plan_line(line(), frame(cell=1.0, nx=4, ny=3), axis())
+    finer = frame(cell=0.5, nx=8, ny=6)
+    z = axis()
+    with pytest.raises(ValueError, match="plan is stale"):
+        stream_slice([line()], [stale], finer, z, 0, z.nz)
+
+
+def test_build_cube_rejects_a_plan_built_for_a_different_t0_at_the_same_nz():
+    """Same `nz`, so the old `z_index.shape[0] != z.nz` guard this replaces
+    would have missed it entirely: with t0_ns=20 instead of 0, the correct
+    times are [20, 21, 22] but a plan built for t0_ns=0 would report
+    [0, 1, 2] with no error."""
+    f = frame()
+    stale = plan_line(line(), f, axis(nz=3, t0=0.0))
+    shifted = axis(nz=3, t0=20.0)
+    with pytest.raises(ValueError, match="plan is stale"):
+        build_cube([line()], [stale], f, shifted, prov())
+
+
+def test_stream_slice_rejects_a_plan_built_for_a_different_t0_at_the_same_nz():
+    f = frame()
+    stale = plan_line(line(), f, axis(nz=3, t0=0.0))
+    shifted = axis(nz=3, t0=20.0)
+    with pytest.raises(ValueError, match="plan is stale"):
+        stream_slice([line()], [stale], f, shifted, 0, 3)
+
+
+def test_binning_at_utm_magnitude_and_a_rotated_azimuth_drops_no_traces():
+    """Every test above uses origin=(0, 0), cell=1.0 -- toy magnitude. A
+    stale-plan bug (Task 1) dropped up to 61% of edge traces once
+    coordinates reach UTM magnitude, because `cell_index`'s edge tolerance
+    scales with the coordinate value, not with the cell, so the binner is
+    where a dropped trace becomes a wrong cube. Pin it directly: every
+    trace placed safely inside a UTM-scale, non-zero-azimuth frame must
+    land in some cell -- coverage().sum() (every count, over every cell)
+    must equal the number of traces, none silently dropped.
+    """
+    f = CubeFrame(
+        origin=(500000.0, 4500000.0), azimuth=33.0, cell=0.05, nx=20, ny=20, crs="EPSG:32617"
+    )
+    x_hat, y_hat = f.axes()
+    lx = np.linspace(0.05, 0.95, 11)
+    ly = np.linspace(0.05, 0.95, 7)
+    local = np.array([[x, y] for y in ly for x in lx])
+    world = np.asarray(f.origin) + local[:, [0]] * x_hat + local[:, [1]] * y_hat
+    n_traces = world.shape[0]
+    z = axis()
+    ln = PreparedLine(
+        key="utm.dzt",
+        data=np.ones((8, n_traces), dtype=np.float32),
+        dt_ns=1.0,
+        t0_ns=0.0,
+        coords=world,
+    )
+    cube = build_cube([ln], [plan_line(ln, f, z)], f, z, prov())
+    assert cube.coverage().sum() == n_traces
 
 
 def test_resampling_interpolates_between_source_samples():
