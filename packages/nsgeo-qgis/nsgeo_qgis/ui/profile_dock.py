@@ -47,11 +47,13 @@ from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QFontMetrics
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -102,6 +104,55 @@ def velocity_source(session: SiteSession, key: str) -> str:
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
+
+
+class _ElidingLabel(QLabel):
+    """A label that yields rather than pushes.
+
+    Finding 5 (M7 walkthrough re-review, second round): `difference_label`
+    and `preview_label` sit in a toolbar row beside controls (Fit, 1:1,
+    the channel combo, the velocity label) that must not move when either
+    appears. A plain `QLabel` demands its full text width, which either
+    shoves those controls along (the original walkthrough complaint) or,
+    given a fixed width instead, raises the whole DOCK's own
+    `minimumSizeHint` and permanently clips its neighbours even with no
+    banner showing at all -- measured directly: a 260px + 180px
+    reservation took the dock's minimum width from ~1098px to well past
+    what a 900px-docked user ever sees, clipping `colormap_combo` and
+    `velocity_label` continuously, not just during a preview. That is a
+    worse outcome than the 26px shift it replaced.
+
+    This takes whatever space the layout leaves it and elides its text to
+    fit, so the row's minimum width never depends on the text at all --
+    neither a push nor a permanent reservation. The untruncated text
+    stays available as a tooltip and via `fullText()`; `text()` itself
+    returns the elided, currently-displayed string, so any caller that
+    wants the real value (not what fits on screen right now) must use
+    `fullText()` instead.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+
+    def setText(self, text: str) -> None:  # noqa: N802 -- Qt's own name
+        self._full = text
+        self.setToolTip(text)
+        self._apply()
+
+    def fullText(self) -> str:  # noqa: N802 -- matches Qt's camelCase neighbours
+        return self._full
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 -- Qt's own name
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self) -> None:
+        metrics = QFontMetrics(self.font())
+        elided = metrics.elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
+        super().setText(elided)
 
 
 class ProfileDock(QgsDockWidget):
@@ -171,34 +222,28 @@ class ProfileDock(QgsDockWidget):
         # the row's total demand exceeds the available width, it
         # redistributes across every shrinkable item in the WHOLE row.
         # Measured at a 900px dock width (the width the author actually
-        # uses) with the full, un-elided preview banner: `colormap_combo`
-        # (well BEFORE either label) shrank, pulling `fit_button` and
+        # uses) with the full preview banner: `colormap_combo` (well
+        # BEFORE either label) shrank, pulling `fit_button` and
         # `one_to_one_button` left by 26px, and `velocity_label` (after
         # the stretch) had its own width squeezed from 180 to 134 -- a
-        # single stretch's slack was simply not enough. Also confirmed
-        # `setMaximumWidth` alone does not fix it either: the DEMAND that
-        # forces the squeeze is not "how much wider did the label get" but
-        # "how much wider than its EMPTY state" -- an empty label costs
-        # nothing, so a capped-but-nonzero one is still a net increase
-        # that has to come from somewhere if there was no slack to begin
-        # with. `setFixedWidth` closes that: the label reserves the same
-        # width whether its text is empty or full, so showing or clearing
-        # a banner never changes the row's total demand at all, and a
-        # stretch on both sides gives that reserved width somewhere to
-        # sit without touching a fixed control on either side. Text
-        # longer than the reservation is elided, with the full text kept
-        # as a tooltip (see `_set_banner_text`).
+        # single stretch's slack was simply not enough.
+        #
+        # Finding 5 (M7 walkthrough re-review, second round): a
+        # `setFixedWidth` reservation "fixed" that by raising the DOCK's
+        # own `minimumSizeHint` instead -- traded a 26px shift during a
+        # preview for `colormap_combo`/`velocity_label` clipped
+        # PERMANENTLY, banner or no banner, on any dock narrower than the
+        # reservation. `_ElidingLabel` (see its own docstring) is what
+        # actually closes this without a new trade: it never asks for
+        # more than the layout leaves it, so it can neither push a
+        # neighbour nor raise the row's (or the dock's) minimum width.
+        # Both labels still sit between two stretches so their growth --
+        # now bounded by whatever is actually free -- has somewhere
+        # accommodating on either side to draw from.
         bar.addStretch(1)
-        self.difference_label = QLabel("")
-        # Wide enough for the longest real step name today ("Difference:
-        # background_sliding" measures 248px in the default font) without
-        # eliding it -- eliding a difference-view label is a much worse
-        # trade than eliding a preview banner, since the step name IS the
-        # information, not a hint repeated in a tooltip.
-        self.difference_label.setFixedWidth(260)
+        self.difference_label = _ElidingLabel()
         bar.addWidget(self.difference_label)
-        self.preview_label = QLabel("")
-        self.preview_label.setFixedWidth(180)
+        self.preview_label = _ElidingLabel()
         bar.addWidget(self.preview_label)
         bar.addStretch(1)
         self.velocity_label = QLabel("")
@@ -284,28 +329,6 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the display change: {exc}", Qgis.MessageLevel.Critical)
 
-    def _set_banner_text(self, label: QLabel, text: str, tooltip: str | None = None) -> None:
-        """Set `difference_label` or `preview_label`'s visible text,
-        elided to fit the `setFixedWidth` reservation given each of them
-        in `__init__`, with the untruncated `tooltip` (or `text` itself,
-        when no `tooltip` is given) attached as a tooltip.
-
-        Finding 2 (M7 walkthrough re-review): the fixed width is what
-        actually keeps showing or clearing a banner from changing the
-        toolbar row's total layout demand, regardless of how long a step
-        name or line label is -- see `__init__`'s own comment for the
-        measured defect this closes. Routing every assignment (including
-        the `""` clears) through here, rather than `label.setText(...)`
-        directly, is what keeps a stale tooltip from surviving a clear.
-        """
-        label.setToolTip(text if tooltip is None else tooltip)
-        # `maximumWidth()`, not `width()`: `setFixedWidth()` sets both the
-        # minimum and maximum immediately, but the actual `width()` is not
-        # authoritative until a layout pass has run at least once, which a
-        # banner set right after construction cannot assume.
-        cap = label.maximumWidth()
-        label.setText(label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, cap))
-
     # ---- placement safety ----------------------------------------------
     def _safe_distance(self, line: Any) -> Any:
         """`Line.distance_along()` raises `ValueError` for a time-triggered
@@ -347,7 +370,7 @@ class ProfileDock(QgsDockWidget):
         # that could belong to an entirely different stack.
         was_diff = self._difference_index >= 0
         self._difference_index = -1
-        self._set_banner_text(self.difference_label, "")
+        self.difference_label.setText("")
         if was_diff:
             self.difference_cleared.emit()
         self._working_key = key or None
@@ -370,7 +393,7 @@ class ProfileDock(QgsDockWidget):
         still_previewing = not key and self.session.is_open and self.session.preview_key is not None
         if not still_previewing:
             self._preview_key = None
-            self._set_banner_text(self.preview_label, "")
+            self.preview_label.setText("")
             # A preview may have disabled the channel combo (see
             # `_enter_preview`); opening ANY line -- including via
             # promotion, which is how a preview ends without
@@ -484,7 +507,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
-        self._set_banner_text(self.preview_label, "")
+        self.preview_label.setText("")
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -495,7 +518,7 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip = None
         was_diff = self._difference_index >= 0
         self._difference_index = -1
-        self._set_banner_text(self.difference_label, "")
+        self.difference_label.setText("")
         try:
             self._clear_view_only()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -556,13 +579,17 @@ class ProfileDock(QgsDockWidget):
         # channel it renders. Re-enabled in `_open` (promotion, or any
         # later line-open) and in `_exit_preview`.
         self.channel_combo.setEnabled(False)
-        self._set_banner_text(self.difference_label, "")
+        self.difference_label.setText("")
         line = self.session.line_for_key(key)
         label = getattr(line.placement, "label", None) or line.path.stem
-        text = f"Preview: {label}"
-        self._set_banner_text(
-            self.preview_label, text, tooltip=f"{text} — select it on the map to work on it"
-        )
+        # Finding 5 (M7 walkthrough re-review, second round): shortened
+        # to "Preview: <name>" only while difference_label/preview_label
+        # were a rigid setFixedWidth reservation that could not hold the
+        # full string. _ElidingLabel degrades gracefully -- eliding the
+        # tail rather than shoving a neighbour -- so the full banner the
+        # plan asked for is the right thing to set again; `text()` shows
+        # whatever fits, `fullText()`/the tooltip still carry all of it.
+        self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
         self._show_line(key)
         self.view.clear_selection()
         self.view.set_cursor(trace)
@@ -571,7 +598,7 @@ class ProfileDock(QgsDockWidget):
         if self._preview_key is None:
             return
         self._preview_key = None
-        self._set_banner_text(self.preview_label, "")
+        self.preview_label.setText("")
         self.channel_combo.setEnabled(True)
         if self._working_key is None:
             self._clear_view_only()
@@ -660,7 +687,7 @@ class ProfileDock(QgsDockWidget):
         self.error.emit(message)
         if self._difference_index >= 0:
             self._difference_index = -1
-            self._set_banner_text(self.difference_label, "")
+            self.difference_label.setText("")
             self.difference_cleared.emit()
         return None
 
@@ -690,7 +717,7 @@ class ProfileDock(QgsDockWidget):
         if self._effective_difference_index >= 0 and self._key is not None:
             entries = self.session.stack_for(self._key).entries
             step_text = f"Difference: {entries[self._effective_difference_index][0].name}"
-        self._set_banner_text(self.difference_label, step_text)
+        self.difference_label.setText(step_text)
         self._sync_strip_mapping()
 
     def _sync_strip_mapping(self) -> None:

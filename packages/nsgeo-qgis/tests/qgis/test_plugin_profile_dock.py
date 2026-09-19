@@ -435,11 +435,11 @@ def test_set_difference_index_shows_what_a_step_actually_removed(opened):
     expected_diff = before_data - after_data
 
     dock.set_difference_index(0)
-    assert dock.difference_label.text() == "Difference: dewow"
+    assert dock.difference_label.fullText() == "Difference: dewow"
     np.testing.assert_array_equal(dock.image.rg.data, expected_diff)
 
     dock.set_difference_index(-1)
-    assert dock.difference_label.text() == ""
+    assert dock.difference_label.fullText() == ""
     np.testing.assert_array_equal(dock.image.rg.data, after_data)
 
 
@@ -702,13 +702,13 @@ def test_preview_renders_the_previewed_line_not_the_working_one(previewing):
 
 def test_the_banner_names_the_previewed_line_and_clears_on_snap_back(previewing):
     dock, session, keys = previewing
-    assert dock.preview_label.text() == ""
+    assert dock.preview_label.fullText() == ""
 
     session.set_preview(keys[1], 5)
-    assert session.line_for_key(keys[1]).path.stem in dock.preview_label.text()
+    assert session.line_for_key(keys[1]).path.stem in dock.preview_label.fullText()
 
     session.clear_preview()
-    assert dock.preview_label.text() == ""
+    assert dock.preview_label.fullText() == ""
     assert dock._key == keys[0]
 
 
@@ -769,7 +769,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.append_step(keys[0], build_step("dewow", window_ns=4.0))
     dock.set_difference_index(0)
     assert dock._difference_index == 0
-    assert "dewow" in dock.difference_label.text()
+    assert "dewow" in dock.difference_label.fullText()
 
     # keys[1] has an EMPTY stack, so index 0 does not exist on it. If the
     # render used the stored index instead of the effective one this would
@@ -777,12 +777,12 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.set_preview(keys[1], 5)
     assert dock._effective_difference_index == -1
     assert dock._difference_index == 0
-    assert dock.difference_label.text() == ""
+    assert dock.difference_label.fullText() == ""
     assert dock.image is not None
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
-    assert "dewow" in dock.difference_label.text()
+    assert "dewow" in dock.difference_label.fullText()
 
 
 def test_snap_back_restores_the_working_lines_cursor_and_selection(previewing):
@@ -834,7 +834,7 @@ def test_previewing_the_working_line_is_not_a_preview(previewing):
 
     session.set_preview(keys[0], 5)
 
-    assert dock.preview_label.text() == ""
+    assert dock.preview_label.fullText() == ""
     assert dock._key == keys[0]
 
 
@@ -844,7 +844,7 @@ def test_opening_a_line_while_previewing_ends_the_preview(previewing):
 
     session.open_line(keys[1])
 
-    assert dock.preview_label.text() == ""
+    assert dock.preview_label.fullText() == ""
     assert dock._key == keys[1]
 
 
@@ -854,7 +854,7 @@ def test_closing_the_site_while_previewing_clears_the_banner(previewing):
 
     session.close_site()
 
-    assert dock.preview_label.text() == ""
+    assert dock.preview_label.fullText() == ""
     assert dock._key is None
 
 
@@ -875,7 +875,7 @@ def test_removing_the_current_line_while_previewing_another_keeps_the_dock_in_sy
 
     assert session.display_key == keys[1]
     assert dock._key == keys[1]
-    assert dock.preview_label.text() != ""
+    assert dock.preview_label.fullText() != ""
 
 
 def test_a_shift_click_on_a_preview_authors_no_pick(previewing):
