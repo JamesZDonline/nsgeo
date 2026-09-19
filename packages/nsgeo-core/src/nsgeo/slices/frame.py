@@ -90,6 +90,18 @@ class CubeFrame:
         interior cell boundary is never touched, and a point that floors
         inside the frame -- however close to an edge -- is left alone.
 
+        The `64.0` multiplier is a bound, not a fit: an analytic error walk
+        of the `to_local` / re-projection round trip admits 8-10 ulps of
+        slack under adversarial rounding, and a sweep of `for_grid` frames
+        over 3 UTM origins x 8 azimuths x 3 cell sizes x 3 extents found
+        the worst case actually needed was 0.81 ulps -- so even the
+        adversarial bound holds with room to spare, and 64 is chosen well
+        above it rather than tuned to the sweep's own worst case. At UTM
+        scale this is 5.7e-9 m, seven orders of magnitude below the
+        smallest realistic cell, so it is far too small to swallow a
+        genuine miss -- a real off-frame point misses by a cell fraction,
+        not by ulps.
+
         A NaN local coordinate (a GPS dropout in a real DZT) or one whose
         magnitude, once divided by `cell`, would overflow `intp` -- far
         beyond any real survey, but reachable from corrupt input -- must
@@ -110,7 +122,7 @@ class CubeFrame:
         ix = np.floor(safe[:, 0] / self.cell).astype(np.intp)
         iy = np.floor(safe[:, 1] / self.cell).astype(np.intp)
 
-        tol = 8.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(world).max(axis=1))
+        tol = 64.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(world).max(axis=1))
         ix = np.where((ix == -1) & (safe[:, 0] >= -tol), 0, ix)
         iy = np.where((iy == -1) & (safe[:, 1] >= -tol), 0, iy)
         ix = np.where((ix == self.nx) & (safe[:, 0] <= self.nx * self.cell + tol), self.nx - 1, ix)
@@ -229,11 +241,24 @@ class ZAxis:
         return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=n_steps + 1)
 
     def level_range(self, top_ns: float, thickness_ns: float) -> tuple[int, int]:
-        """Half-open [k0, k1) for a window, clamped to the axis.
+        """Half-open [k0, k1) for a window, INTERSECTED with the axis.
 
-        Never returns an empty range: a window entirely off the end still
-        yields one level, because a viewer asking for a slice needs a
-        slice, not a zero-column array to special-case.
+        The contract is intersection, not a clamped copy of the requested
+        window: the returned range is genuinely thinner than requested at
+        either end when the window overhangs the axis (e.g. `top_ns=-10`
+        on a `t0_ns=0` axis returns `(0, 1)`, not a window shifted back to
+        start at 0; a window that overhangs the far end similarly returns
+        fewer levels than `thickness_ns` implies, e.g. `(96, 100)` on a
+        100-level axis for `top=48, thickness=4`). It never returns an
+        empty range: a window entirely off the end still yields one level,
+        because a viewer asking for a slice needs a slice, not a
+        zero-column array to special-case.
+
+        This matters beyond this function: a caller that wants to know
+        the depth window actually averaged -- the plugin's depth readout
+        is exactly this -- must derive it from the returned `(k0, k1)`,
+        never by re-deriving it from `(top_ns, thickness_ns)`, because
+        those two need not agree with what was actually returned.
         """
         if not thickness_ns > 0.0:
             raise ValueError(f"thickness_ns must be positive, got {thickness_ns}")

@@ -188,6 +188,26 @@ def test_level_range_clamps_to_the_axis_and_never_empties():
     assert k1 == 10 and k1 > k0
 
 
+def test_level_range_is_a_genuine_intersection_not_a_clamped_copy():
+    """The contract is intersection, not a window shifted to fit: a
+    request that overhangs either end of the axis must come back
+    genuinely thinner than requested, pinned on `k1 - k0` itself rather
+    than only on `k0` (the previous test) -- a caller that derived the
+    depth window from `(top_ns, thickness_ns)` instead of the returned
+    `(k0, k1)` would otherwise silently claim more levels were averaged
+    than actually were."""
+    z = ZAxis(t0_ns=0.0, dz_ns=1.0, nz=100)
+    # 10 levels requested, starting 5 before the axis begins: only 5 exist.
+    k0, k1 = z.level_range(top_ns=-5.0, thickness_ns=10.0)
+    assert (k0, k1) == (0, 5)
+    assert k1 - k0 == 5
+
+    # 10 levels requested, starting 5 before the axis ends: only 5 exist.
+    k0, k1 = z.level_range(top_ns=95.0, thickness_ns=10.0)
+    assert (k0, k1) == (95, 100)
+    assert k1 - k0 == 5
+
+
 def test_z_axis_rejects_a_non_positive_dz():
     with pytest.raises(ValueError, match="dz_ns must be positive"):
         ZAxis(t0_ns=0.0, dz_ns=0.0, nz=5)
