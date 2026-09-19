@@ -1059,7 +1059,7 @@ The resident build: prepared lines in, a z-major cube of means plus a per-cell c
   - `Provenance(line_keys, preset_name, steps, transform, velocity, built_utc, core_version)`, frozen, with `.to_dict()` / `.from_dict()`
   - `SliceCube(frame, z, mean, count, provenance)`, frozen, with `.slice_levels(k0, k1) -> np.ndarray` (shape `(ny, nx)`) and `.coverage() -> np.ndarray` (shape `(ny, nx)`, int32)
   - `PreparedLine(key: str, data: np.ndarray, dt_ns: float, t0_ns: float, coords: np.ndarray)`
-  - `LinePlan(z_index, z_weight, order, starts, cells, counts)`
+  - `LinePlan(z_index, z_weight, order, starts, cells, counts)` (amended during execution: also carries `frame: CubeFrame` and `z: ZAxis` so that `build_cube` and `stream_slice` can reject a plan built against a different frame or axis)
   - `CoverageError(Exception)`
   - `plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan`
   - `build_cube(lines, plans, frame, z, provenance) -> SliceCube`
@@ -1387,6 +1387,9 @@ class LinePlan:
     starts: np.ndarray
     cells: np.ndarray
     counts: np.ndarray
+    # amended during execution: adds frame and z fields below, as implemented:
+    frame: CubeFrame
+    z: ZAxis
 
 
 def plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan:
@@ -1724,6 +1727,9 @@ def stream_slice(
     Returns (values, coverage), both shaped (ny, nx); values is NaN where
     coverage is zero.
     """
+    # amended during execution: call `_check_plans_current(lines, plans, frame, z)`
+    # after the len check and before array work to reject plans built against a
+    # different frame or z axis, as `build_cube` does
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
     if not 0 <= k0 < k1 <= z.nz:
@@ -1813,12 +1819,19 @@ def fill(
     r = int(radius_cells)
     ny, nx = values.shape
     kernel = disc_kernel(r)
-    numerator = np.where(np.isfinite(values), values, 0.0) * counts
+    finite = np.isfinite(values)
+    numerator = np.where(finite, values, 0.0) * counts
+    # amended during execution: denominator must convolve the SAME masked counts
+    # the numerator uses, not raw `counts`. A NaN value with non-zero count would
+    # otherwise contribute 0 to the numerator but full weight to the denominator,
+    # returning 1.2 instead of the correct 6.0 on a 3x3 with NaN at count 4
+    # and 6.0 at count 1.
+    counts_for_denominator = np.where(finite, counts, 0.0)
 
     shape = (ny + 2 * r, nx + 2 * r)
     spectrum = np.fft.rfft2(kernel, s=shape)
     num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)
-    den = np.fft.irfft2(np.fft.rfft2(counts, s=shape) * spectrum, s=shape)
+    den = np.fft.irfft2(np.fft.rfft2(counts_for_denominator, s=shape) * spectrum, s=shape)
     num = num[r : r + ny, r : r + nx]
     den = den[r : r + ny, r : r + nx]
 
@@ -2037,7 +2050,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any
 
 import numpy as np
 
@@ -2051,7 +2064,7 @@ class CubeStoreError(Exception):
     """Raised when a cube file is missing, unreadable, or not a cube."""
 
 
-def _meta(cube: SliceCube) -> Dict[str, Any]:
+def _meta(cube: SliceCube) -> dict[str, Any]:  # amended during execution (ruff UP)
     return {
         "store_version": STORE_VERSION,
         "frame": {
@@ -2067,7 +2080,7 @@ def _meta(cube: SliceCube) -> Dict[str, Any]:
     }
 
 
-def save_cube(cube: SliceCube, path: Union[str, Path]) -> None:
+def save_cube(cube: SliceCube, path: str | Path) -> None:  # amended during execution (ruff UP)
     """Write `cube` to `path`, creating parent directories as needed."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2079,7 +2092,7 @@ def save_cube(cube: SliceCube, path: Union[str, Path]) -> None:
     )
 
 
-def load_cube(path: Union[str, Path]) -> SliceCube:
+def load_cube(path: str | Path) -> SliceCube:  # amended during execution (ruff UP)
     """Read a cube written by `save_cube`."""
     path = Path(path)
     if not path.exists():
@@ -2108,7 +2121,7 @@ def load_cube(path: Union[str, Path]) -> SliceCube:
             cell=float(frame_doc["cell"]),
             nx=int(frame_doc["nx"]),
             ny=int(frame_doc["ny"]),
-            crs=frame_doc["crs"],
+            crs=frame_doc["crs"],  # amended during execution: implemented with validation that crs is a string, rejecting None with CubeStoreError to prevent silent failure in GeoTIFF export
         ),
         z=ZAxis(
             t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])
@@ -2261,7 +2274,7 @@ Named here so a reviewer does not flag them as gaps:
 
 ## Plan Self-Review
 
-**Spec coverage.** §5.1 `CubeFrame` → Task 1. §5.2 `ZAxis` → Task 1. §5.3 `SliceCube`, z-major layout, per-cell count and the rejection rule → Tasks 4. §5.4 `.npz` and the JSON `cubes` list → Task 6. §6.2 transforms and the no-padding rule → Task 2. §6.3 binning and the precomputed plans → Task 4. §6.4 the fill → Task 5. §6.6 `slice_levels` and `level_range` → Tasks 1 and 4. §7.4 streaming → Task 5. §8 unipolar rendering → Task 3. §6.5, §9, §10 are M11/M12 and are listed above as out of scope for this plan.
+**Spec coverage.** §5.1 `CubeFrame` → Task 1. §5.2 `ZAxis` → Task 1. §5.3 `SliceCube`, z-major layout, per-cell count and the rejection rule → Tasks 4. §5.4 `.npz` and the `cubes` dict → Task 6. §6.2 transforms and the no-padding rule → Task 2. §6.3 binning and the precomputed plans → Task 4. §6.4 the fill → Task 5. §6.6 `slice_levels` and `level_range` → Tasks 1 and 4. §7.4 streaming → Task 5. §8 unipolar rendering → Task 3. §6.5, §9, §10 are M11/M12 and are listed above as out of scope for this plan.
 
 **Type consistency, checked across tasks.** `CubeFrame.cell_index` returns flat `iy * nx + ix` in Task 1 and is consumed with that meaning by `plan_line` in Task 4 and `SliceCube.coverage`'s reshape in Task 4. `ZAxis.level_range` returns the half-open pair that `slice_levels` and `stream_slice` both validate as `0 <= k0 < k1 <= nz`. `PreparedLine.data` is float32 in Tasks 4–6. `Provenance.to_dict` / `from_dict` in Task 4 are what `store.py` calls in Task 6. `is_unipolar` is defined in Task 2 and consumed by `StepStack.output_unipolar` in the same task; `to_rgba8(..., unipolar=...)` in Task 3 takes the bool that property produces.
 
