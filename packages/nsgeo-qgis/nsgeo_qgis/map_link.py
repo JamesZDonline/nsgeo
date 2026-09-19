@@ -71,12 +71,6 @@ class MapLink(QObject):
     HOVER_DWELL_MS = HOVER_DWELL_MS
     HOVER_TOLERANCE_PX = HOVER_TOLERANCE_PX
 
-    # Selecting a feature in any of these is a deliberate gesture that
-    # navigates (spec §3.4). `lines` promotes; `picks` and `marks` jump to
-    # a line AND a trace. QGIS's own Select tool, no tool slot of ours, no
-    # stolen clicks.
-    SELECTABLE = ("lines", "picks", "marks")
-
     def __init__(
         self,
         session: SiteSession,
@@ -129,18 +123,30 @@ class MapLink(QObject):
         session.site_closed.connect(self._on_lines_changed)
         canvas.destinationCrsChanged.connect(self._on_lines_changed)
 
+        # Selecting a feature in any of these is a deliberate gesture that
+        # navigates (spec §3.4). `lines` promotes; `picks` and `marks`
+        # jump to a line AND a trace. QGIS's own Select tool, no tool
+        # slot of ours, no stolen clicks. This dict is the single place
+        # that list is written down -- a `SELECTABLE` class constant used
+        # to duplicate it, but both loops that matter (`_rebind_layer`,
+        # `dispose`) already iterated `_selection_slots` itself rather
+        # than the constant, which left `SELECTABLE` a second,
+        # unchecked copy with only the `dict.fromkeys` seed below still
+        # reading it. Final review, Minor 5: deleted, and `_bound` is now
+        # seeded from this dict directly, so the two can never drift
+        # apart again.
+        self._selection_slots = {
+            "lines": self._on_selection,
+            "picks": self._on_pick_selection,
+            "marks": self._on_mark_selection,
+        }
         # None means "not yet bound"; tracked per layer, and separately
         # from each `layers.layers[...]` lookup, for the reason
         # _rebind_layer gives. One NAMED slot per layer rather than a
         # lambda or `self.sender()`: a bound method is what
         # `disconnect()` can reliably take back off, and dispose() has to
         # be able to.
-        self._bound: dict[str, QgsVectorLayer | None] = dict.fromkeys(self.SELECTABLE)
-        self._selection_slots = {
-            "lines": self._on_selection,
-            "picks": self._on_pick_selection,
-            "marks": self._on_mark_selection,
-        }
+        self._bound: dict[str, QgsVectorLayer | None] = dict.fromkeys(self._selection_slots)
         self._rebind_layer()
 
     # ---- cache ------------------------------------------------------------
@@ -402,12 +408,14 @@ class MapLink(QObject):
         pointing at dead wrappers would fail exactly the way this method
         exists to prevent, just less visibly.
         """
-        # Iterates `_selection_slots` itself, not `SELECTABLE`: a name
-        # `SELECTABLE` lists but `_selection_slots` does not would raise
-        # `KeyError` looking the slot up separately, and `dispose()` runs
-        # this same shape of loop with a promise that nothing here may
-        # abort before its scene-removal loop -- a `KeyError` would be
-        # exactly that failure, just reached a different way than Item I4.
+        # Iterates `_selection_slots` itself -- the single source of
+        # truth for which layers are selectable (see its own comment in
+        # __init__) -- rather than looking each slot up by name from some
+        # separate list: a name missing from `_selection_slots` would
+        # raise `KeyError` here, and `dispose()` runs this same shape of
+        # loop with a promise that nothing here may abort before its
+        # scene-removal loop -- a `KeyError` would be exactly that
+        # failure, just reached a different way than Item I4.
         for name, slot in self._selection_slots.items():
             old = self._bound.get(name)
             if old is not None and not sip.isdeleted(old):
@@ -490,6 +498,18 @@ class MapLink(QObject):
         feature = layer.getFeature(ids[0])
         key = str(feature["line_key"])
         if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+            # Reachable by design, not just corruption: `remove_line`
+            # deliberately leaves a line's picks and marks in place
+            # rather than deleting authored data along with the line
+            # that produced it, so selecting one of those orphans is an
+            # ordinary consequence of removing a line, not a bug.
+            # Returning bare here would be the same "silence is
+            # indistinguishable from success" complaint this milestone
+            # fixed for a refused pick write (`write_pick` logs when a
+            # line cannot be placed) -- a click that visibly selected a
+            # feature and then did nothing looks exactly like a working
+            # jump that happened to land nowhere.
+            _log(f"the selected {name[:-1]} names line {key!r}, which is no longer in the site")
             return
         self.session.open_line(key)
         trace = feature[trace_field]
@@ -681,11 +701,12 @@ class MapLink(QObject):
         # are currently bound -- guarded the same way as the canvas above,
         # and for the same reason: nothing here may abort before the
         # scene-removal loop below. Iterates `_selection_slots` itself,
-        # not `SELECTABLE`, for that same reason: looking a slot up
-        # separately by name could raise `KeyError` for a name
-        # `SELECTABLE` lists but `_selection_slots` does not, which would
-        # abort this method before `_marker`/`_band` come off the scene --
-        # the Item I4 leak this method exists to prevent.
+        # the single source of truth for which layers are selectable (see
+        # its own comment in __init__), rather than looking each slot up
+        # by name from some separate list -- that could raise `KeyError`
+        # for a name the two disagreed about, which would abort this
+        # method before `_marker`/`_band` come off the scene -- the Item
+        # I4 leak this method exists to prevent.
         for name, slot in self._selection_slots.items():
             layer = self._bound.get(name)
             self._bound[name] = None

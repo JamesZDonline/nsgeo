@@ -2444,6 +2444,8 @@ Automated tests do not cover the thing M8 is for. Deploy and run these by hand i
 10. Close the site — the **Pick** action greys out, and the crosshair is gone when you open a new line.
 11. Add a note to a pick in the attribute table and save the layer edits — the note persists.
 12. **Toggle Editing on the `picks` layer, then author a pick from the profile.** `write_pick` goes straight through the data provider, which the layer's open edit buffer knows nothing about. Check whether the new pick appears on the canvas immediately, only after you end the edit session, or not at all — and whether committing the buffer afterwards disturbs it. The write reaches disk either way; what is unknown is the visibility. (Task 1 review, Ruling 10.)
+
+    **Exit criterion (added in the final fix wave):** if the pick is invisible until the edit session ends, the answer is not to document that in this file — it is for `write_pick` to refuse the write outright while `layer.isEditable()` is true, with a message saying so. A pick that reports success and cannot be seen is exactly the silence this milestone spent its effort eliminating everywhere else; writing it down would preserve the defect, not close it.
 13. **Look at `depth_m` on a pick made near the very top of a real radargram.** Real GSSI files here carry `position_ns = -11.0864` — the record starts *before* time zero — so a pick clamped to the start of the record gets a **negative depth**, measured at −0.44 m on this data. That is honest (time is the truth; depth is derived from it), but it will look wrong in an attribute table. Confirm it is what you want recorded, rather than a floor at zero. (Task 2 review, Ruling 12.)
 14. Unload the plugin with picks on screen — no crash, nothing left on the canvas.
 

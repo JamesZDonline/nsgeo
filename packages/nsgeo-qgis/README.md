@@ -40,6 +40,15 @@ Selecting a pick or a DZX mark on the map opens its line and moves the profile
 cursor to its trace. Marks are derived from the DZX sidecar and stay read-only;
 picks are yours.
 
+A pick's position on the map is fixed at the moment you make it. Moving,
+resizing or reorienting a grid afterwards does **not** move any pick already
+recorded against a line on that grid — the line itself redraws in its new
+place, but the pick does not follow, and the plugin logs a warning rather
+than silently re-placing it (re-placing on every refresh could just as
+easily overwrite a pick you moved by hand). Changing a grid's CRS is the
+exception: that re-projects every pick, the same way it re-projects
+everything else in the package.
+
 ## Development install
 
 ```bash

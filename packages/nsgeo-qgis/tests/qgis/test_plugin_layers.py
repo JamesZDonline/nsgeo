@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 import nsgeo_qgis.layers as layers_module
@@ -596,6 +597,161 @@ def test_a_short_migration_refuses_the_swap_rather_than_losing_picks(
     # The swap never began, so there is no renamed-out original either.
     backup = QgsVectorLayer(f"{session.gpkg_path}|layername={_PICKS_BACKUP}", _PICKS_BACKUP, "ogr")
     assert not backup.isValid()
+
+
+# --- final review, Important 1: two related holes in the migration's
+# safety net, both found on the whole-branch review rather than any
+# per-task review, and both of which silently destroy every authored
+# pick while reporting a successful migration.
+#
+# (a) `_read_picks_rows` used to return `[]` when the on-disk table
+# would not open at all -- indistinguishable from "opened and genuinely
+# has zero rows". The swap's own row-count gate then compares the
+# migrated count against `len(old_rows)`, i.e. 0 == 0, passes trivially,
+# and the real (never actually read) table is renamed out and dropped
+# while an empty one takes its place.
+#
+# (b) `_table_schema` used to return the identical `(None, [])` for
+# "no table by this name exists yet" and "a table by this name exists
+# but will not open" -- so `_ensure_table` could not tell a
+# present-but-broken `picks` table apart from a brand-new site, and
+# routed it into `_create_table`'s `CreateOrOverwriteLayer`, the same
+# path a genuinely fresh package takes. ----------------------------------
+
+
+def test_picks_survive_a_failure_to_open_the_table_before_a_migration(
+    populated, monkeypatch, message_log
+):
+    """Important 1a. `_read_picks_rows` is only ever called from
+    `_rebuild_picks`, itself only reached once `_table_schema` has just
+    opened `picks` successfully in this same `_ensure_table` call -- so
+    a SECOND open of that same table failing means something changed in
+    between (a lock, a permissions change, momentary corruption), not an
+    empty table.
+
+    Simulated by making `_read_picks_rows`'s OWN construction of the
+    `picks` `QgsVectorLayer` come back invalid, identified by inspecting
+    the immediate caller's frame rather than by call order or count.
+    `_table_schema`'s own probe inside `_ensure_table` builds the
+    textually identical `QgsVectorLayer(path, "picks", "ogr")` call, so
+    the two cannot be told apart by their arguments at all -- and
+    `replace_grid` below drives TWO refreshes (`grids_changed` then
+    `lines_changed`, both connected to `SiteLayers.refresh`), so a fault
+    keyed on call order or count would have to land on a different call
+    each time and would either mis-fire or stop firing on the second
+    refresh. A fault keyed on the caller's function name fires
+    identically and persistently on every attempt regardless -- the same
+    property the two sibling tests above rely on by keying their own
+    injected faults on a stable name (`_PICKS_REBUILD`, a rename's own
+    arguments) rather than a count. Monkeypatching `QgsVectorLayer.isValid`
+    on the class instead was ruled out for the same reason those two
+    call sites cannot be told apart by arguments: it would blind
+    `_table_schema`'s probe too, and `_rebuild_picks` would never be
+    reached at all -- the very path this hole is in.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 5.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_layer_class = layers_module.QgsVectorLayer
+
+    class Unopenable:
+        def isValid(self):
+            return False
+
+        def __getattr__(self, attr):
+            raise AssertionError(f"_read_picks_rows touched {attr!r} on a layer that never opened")
+
+    def picks_wont_open_for_read_picks_rows(uri, name, provider):
+        caller = sys._getframe(1).f_code.co_name
+        if name == "picks" and provider == "ogr" and caller == "_read_picks_rows":
+            return Unopenable()
+        return real_layer_class(uri, name, provider)
+
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", picks_wont_open_for_read_picks_rows)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # ensure_tables() contains a per-table failure, the same as the two
+    # sibling failure-injection tests above: the RuntimeError is logged,
+    # not raised out of the signal.
+    assert any("picks" in m and "untouched" in m for m in message_log), message_log
+
+    # Nothing was ever migrated or swapped: read the ORIGINAL table back
+    # with a brand-new, unpatched QgsVectorLayer -- not through `layers`,
+    # in case a failed rebuild left its registry stale, the same reason
+    # the sibling tests above do it this way.
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"  # unchanged: never rebuilt
+    survivor = next(on_disk.getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(5.0)
+
+
+def test_an_unopenable_picks_table_is_refused_not_overwritten(populated, monkeypatch, message_log):
+    """Important 1b. Before this fix, a `picks` table that is present on
+    disk but will not open through `QgsVectorLayer` right now (a lock, a
+    permissions problem, anything short-lived) was indistinguishable
+    from a table that has never existed at all -- `_ensure_table` would
+    route it straight into `_create_table`'s `CreateOrOverwriteLayer`
+    and destroy it, the same path a genuinely new site takes.
+
+    Simulated by making EVERY construction of the `picks`
+    `QgsVectorLayer` come back invalid, unconditionally -- no call-order
+    tricks are needed here, because this test drives exactly ONE
+    `refresh()` by calling it directly rather than through a signal, so
+    there is only ever one attempt to open `picks` per table probe.
+    `_table_schema`'s presence check goes through
+    `QgsProviderRegistry`'s own connection instead of `QgsVectorLayer`
+    (see its docstring), which this test never touches, so it genuinely
+    finds the real table sitting there. No grid or schema change is
+    involved -- this is deliberately a plain `refresh()`, because the
+    defect is that `_ensure_table` could not tell "broken" from
+    "absent" even when NOTHING about the table's own required shape had
+    changed.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 6.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_layer_class = layers_module.QgsVectorLayer
+
+    class Unopenable:
+        def isValid(self):
+            return False
+
+        def __getattr__(self, attr):
+            raise AssertionError(f"an unopenable picks layer should not be asked for {attr!r}")
+
+    def picks_wont_open(uri, name, provider):
+        if name == "picks" and provider == "ogr":
+            return Unopenable()
+        return real_layer_class(uri, name, provider)
+
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", picks_wont_open)
+
+    layers.refresh()
+
+    assert any("picks" in m and "could not" in m for m in message_log), message_log
+
+    # The real table -- seeded row included -- was never touched: read
+    # it back with a brand-new, unpatched QgsVectorLayer, not through
+    # `layers` (whose registry may not even still hold "picks").
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"
+    survivor = next(on_disk.getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(6.0)
 
 
 # --- fix round 2: an untransformable CRS pair (measured with a projected

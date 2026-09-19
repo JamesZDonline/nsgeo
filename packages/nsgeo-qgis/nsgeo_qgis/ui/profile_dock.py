@@ -862,28 +862,29 @@ class ProfileDock(QgsDockWidget):
                 "select the line on the map to work on it"
             )
             return
-        # I6: guarded like every other slot here, even though nothing
-        # connects to `pick_requested` yet. Nothing in Plan 2 does: the
-        # pick tool is M8, in Plan 3 ("Pick tool, picks layer, marks
-        # layer"), and this signal plus `ProfileView.set_pick_mode()` are
-        # the half of it that already exists. Until then a shift-click on
-        # the profile emits into nothing, and `set_pick_mode()` has no
-        # control wired to it -- picks are authored by editing the
-        # `picks` layer on the map canvas with QGIS's own tools. An
-        # earlier draft of this comment said "Task 18/19 will"; those
-        # tasks were re-scoped to the gain strip and the difference
-        # view/presets and never touched picking, and the stale note sent
-        # a reader looking for a pick mode that was never built. Verified
-        # directly: an exception raised by a *downstream* subscriber of
-        # `pick_requested` is swallowed by PyQt at the point that
-        # subscriber is invoked, and never propagates back into this
-        # `try` at all -- so this cannot catch a future picking dock's own
-        # bug. What it does guard is this method's own body, which is
-        # exactly the "every slot guards its body" rule this file's
-        # docstring states, and the one place that will matter if this
-        # method ever grows logic ahead of the `emit()` call. A pick is
-        # authored data with no other source of truth; failing loudly
-        # here is cheap insurance for what this line can control.
+        # I6: guarded like every other slot in this file, for the reason
+        # this file's own docstring states -- not because there is
+        # nothing downstream: `pick_requested` IS connected now, to
+        # `plugin.py`'s `_on_pick_requested`, which relays into
+        # `session.add_pick` and reports a failure on the message bar,
+        # and `set_pick_mode` has a real control wired to it, the Pick
+        # toolbar toggle (`plugin.py`'s `_toggle_pick_mode`). Picks are
+        # authored by clicking (Pick mode on) or Shift-clicking (off) the
+        # profile; hand-editing the `picks` layer on the map canvas with
+        # QGIS's own tools still works (the layer stays writable on
+        # purpose) but is no longer the only way in.
+        #
+        # Verified directly: an exception raised by a *downstream*
+        # subscriber of `pick_requested` is swallowed by PyQt at the
+        # point that subscriber is invoked, and never propagates back
+        # into this `try` at all -- so this cannot catch that relay's own
+        # bug, or `session.add_pick`'s. What it does guard is this
+        # method's own body, which is exactly the "every slot guards its
+        # body" rule this file's docstring states, and the one place
+        # that will matter if this method ever grows logic ahead of the
+        # `emit()` call. A pick is authored data with no other source of
+        # truth; failing loudly here is cheap insurance for what this
+        # line can control.
         if self._key is None:
             return
         try:

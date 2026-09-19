@@ -845,6 +845,15 @@ class SiteSession(QObject):
         # ViewTransform.time_of_y does not clamp -- a click in the top
         # margin yields a time before the record starts. Clamped into the
         # line's own recorded window, the same way the trace is.
+        #
+        # Final review, Minor 8: `t_end` here is `t0 + (n_samples - 1) *
+        # dt_ns` -- the time of the LAST sample -- while
+        # `ViewTransform.t_end` is `t0 + n_samples * dt_ns`, one whole
+        # sample interval later. That is deliberate, not a mismatch to
+        # reconcile: a pick names a sample, and `n_samples - 1` is the
+        # last one that actually exists, so this errs inward rather than
+        # clamping to a time no sample was ever recorded at. Do not
+        # "fix" the two to match.
         t0 = float(line.header.position_ns)
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)

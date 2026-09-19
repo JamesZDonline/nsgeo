@@ -150,6 +150,17 @@ _GRID_OUTLINE_OFFSET = len(GRID_COLOURS) // 2
 _PICKS_REBUILD = "picks__rebuild"
 _PICKS_BACKUP = "picks__before_rebuild"
 
+# Sentinel returned by `_table_schema` in place of a CRS when a table by
+# that name is present in the GeoPackage but `QgsVectorLayer` could not
+# open it -- distinct from `None` (the table does not exist at all).
+# Final review, Important 1b: the two used to collapse onto the same
+# `(None, [])`, so `_ensure_table` treated "broken" exactly like "absent"
+# and routed a present-but-unopenable `picks` table into
+# `CreateOrOverwriteLayer`, silently destroying it. See `_table_schema`'s
+# own docstring for the full defect and `_ensure_table`'s use of this for
+# the fix.
+_TABLE_UNREADABLE = object()
+
 
 def _fields(spec: list[tuple[str, str]]) -> QgsFields:
     fields = QgsFields()
@@ -207,6 +218,13 @@ class SiteLayers(QObject):
         self.project = project or QgsProject.instance()
         self.layers: dict[str, QgsVectorLayer] = {}
         self.group: Any = None
+        # Final review, Important 2: each placed grid's own origin/
+        # azimuth/size, as of the last successful refresh -- see
+        # `_warn_if_a_placed_grid_moved`, the only reader. Starts empty so
+        # the very first refresh of a freshly opened site (which may
+        # already have picks on disk) compares against nothing and stays
+        # quiet, rather than reporting every grid as newly "moved".
+        self._last_grid_placements: dict[str, tuple[Any, ...]] = {}
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
@@ -246,6 +264,12 @@ class SiteLayers(QObject):
                 if parent is not None:
                     parent.removeChildNode(self.group)
             self.group = None
+        # A closing site's grids must not be compared against the NEXT
+        # site's: two unrelated sites can reuse a grid id (e.g. "A"), and
+        # without this reset `_warn_if_a_placed_grid_moved` would read
+        # that as the same grid having moved the instant the new site's
+        # first refresh runs.
+        self._last_grid_placements = {}
 
     def _commit_pending_edits(self) -> None:
         """Save anything still sitting in a layer's edit buffer.
@@ -360,7 +384,14 @@ class SiteLayers(QObject):
             return
         if not site.grids:
             self._clear_derived_tables()
+            self._last_grid_placements = {}
             return
+        try:
+            self._warn_if_a_placed_grid_moved(site)
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            # A diagnostic, not a write: it must never be the reason the
+            # rest of this refresh (which DOES write) fails to run.
+            _log(f"could not check whether a grid moved: {exc}", Qgis.MessageLevel.Critical)
         try:
             self.ensure_tables()
         except Exception as exc:  # noqa: BLE001 -- see rule 4 above
@@ -380,6 +411,76 @@ class SiteLayers(QObject):
                 fn()
             except Exception as exc:  # noqa: BLE001 -- see rule 4 above
                 _log(f"could not refill {name!r}: {exc}", Qgis.MessageLevel.Critical)
+        self._last_grid_placements = self._grid_placements(site)
+
+    @staticmethod
+    def _grid_placements(site: Any) -> dict[str, tuple[Any, ...]]:
+        """Each grid's placement-relevant fields, keyed by grid id:
+        `origin`, `azimuth`, `size_x`, `size_y` -- exactly what
+        `_line_points` (by way of `Line.trace_coords`/`Grid.to_world`)
+        actually uses to put a trace somewhere in the world. Not
+        `velocity` or `default_spacing`, neither of which moves anything
+        on the map, and not `crs`: a CRS change is a different signal
+        entirely, one `_rebuild_picks` already re-projects every pick
+        through, so it must not also trip the warning below.
+        """
+        return {g.id: (g.origin, g.azimuth, g.size_x, g.size_y) for g in site.grids}
+
+    def _warn_if_a_placed_grid_moved(self, site: Any) -> None:
+        """Important 2 (M8 final fix wave): `_pick_point` computes a
+        pick's map position once, at write time, and nothing ever
+        re-derives it (see its own docstring for why that is deliberate).
+        `replace_grid` changing an existing grid's origin, azimuth or
+        size moves every line drawn against that grid -- `refill_lines`/
+        `refill_marks`, called later in this same `refresh()`, redraw
+        them in their new place -- but a pick already written against the
+        old placement keeps the position it was authored at and drifts
+        off its line. A CRS change, by contrast, DOES reach picks, via
+        `_rebuild_picks`'s transform, so only half of "the grid changed"
+        was ever handled; this names the other half instead of silently
+        leaving it be.
+
+        Detected by comparing this refresh's grid placements against the
+        ones cached from the last successful refresh (`_grid_placements`,
+        cached as `_last_grid_placements`), for any grid id common to
+        both. A ruling from the same review explicitly forbids re-placing
+        a pick automatically -- doing so on every refresh would silently
+        overwrite a pick the user moved by hand in QGIS, which the README
+        invites them to do -- so this only ever logs.
+
+        Deliberately NOT "warn on every `grids_changed`": `add_grid`
+        (a new id, absent from the cache) and `remove_grid` (an id
+        missing from the current site) both fire that same signal without
+        moving any EXISTING grid's own fields, and a refresh with no
+        grid geometry change must stay quiet. Comparing placements by id
+        is what tells "moved" apart from "added" or "removed" without
+        needing a payload on `grids_changed` itself, which is public and
+        bound elsewhere (map_link.py, survey_dock.py) -- widening it was
+        judged more risk than this warning is worth in a fix wave whose
+        scope is picks, not the signal graph. The first refresh of a
+        freshly opened site (the cache starts empty, see __init__) also
+        stays quiet by the same comparison: nothing "moved" relative to
+        nothing, even though that site's `picks` table may already hold
+        rows from before this session opened it.
+        """
+        moved = sorted(
+            grid_id
+            for grid_id, placement in self._grid_placements(site).items()
+            if grid_id in self._last_grid_placements
+            and placement != self._last_grid_placements[grid_id]
+        )
+        if not moved:
+            return
+        layer = self.layers.get("picks")
+        if layer is None or sip.isdeleted(layer) or self.feature_count("picks") == 0:
+            return
+        _log(
+            f"grid(s) {', '.join(moved)} changed position, orientation or size; "
+            "picks already recorded against lines on them keep the map position "
+            "they were authored at and will no longer sit on their line -- picks "
+            "are not re-placed automatically (see the Picking section of the README)",
+            Qgis.MessageLevel.Warning,
+        )
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
@@ -456,6 +557,16 @@ class SiteLayers(QObject):
         copy exists elsewhere. The derived tables are about to be fully
         refilled by refill_grids/lines/marks right after this returns, so
         a plain overwrite is safe for them.
+
+        Final review, Important 1b: `_table_schema` can now come back
+        with `_TABLE_UNREADABLE` in place of a CRS -- present in the
+        GeoPackage, but `QgsVectorLayer` would not open it. For `picks`
+        that is refused outright rather than falling through to the
+        overwrite below: `picks` has no other source of truth, so a
+        table this method cannot even read must be investigated, not
+        replaced. The derived tables are fully regenerable, so for them
+        "broken" is still treated exactly like "absent" -- overwriting is
+        the correct recovery, the same as it always was.
         """
         existing_crs, existing_fields = self._table_schema(path, name)
         if name == "picks" and existing_crs is None and self._recover_picks_backup(path):
@@ -466,6 +577,14 @@ class SiteLayers(QObject):
             # not still need the rebuild that was interrupted -- re-probe
             # rather than assume, and let the normal logic below decide.
             existing_crs, existing_fields = self._table_schema(path, name)
+        if name == "picks" and existing_crs is _TABLE_UNREADABLE:
+            raise RuntimeError(
+                f"the picks table in {path} is present but could not be opened; "
+                "refusing to overwrite it -- picks has no other source of truth, "
+                "so a broken open must be investigated, not replaced"
+            )
+        if existing_crs is _TABLE_UNREADABLE:
+            existing_crs = None  # any other table: regenerable, recover by overwriting
         up_to_date = existing_crs is not None and existing_crs == crs
         if up_to_date and existing_fields == [f for f, _ in spec]:
             return  # up to date; nothing to rebuild
@@ -488,6 +607,14 @@ class SiteLayers(QObject):
         again (and, if the CRS/schema mismatch that started the
         interrupted rebuild is still there, `_rebuild_picks` runs again
         from a fully consistent starting point rather than from nothing).
+
+        `is None` here means exactly "nothing named `_PICKS_BACKUP` is
+        there" -- `_table_schema` can also come back with
+        `_TABLE_UNREADABLE` (present but unopenable), which is not
+        `None` and so still attempts the rename below rather than
+        skipping it: a backup that is merely hard to open right now is
+        still worth trying to restore, and the rename itself fails
+        loudly on its own account if that turns out to be impossible.
         """
         if self._table_schema(path, _PICKS_BACKUP)[0] is None:
             return False
@@ -501,17 +628,46 @@ class SiteLayers(QObject):
         return True
 
     @staticmethod
-    def _table_schema(
-        path: str, name: str
-    ) -> tuple[QgsCoordinateReferenceSystem | None, list[str]]:
-        """The on-disk table's CRS and field names, or (None, []) when the
-        table doesn't exist yet."""
+    def _table_schema(path: str, name: str) -> tuple[Any, list[str]]:
+        """The on-disk table's CRS and field names.
+
+        Three distinguishable results in the first element:
+        - `None`: no table named `name` exists in the GeoPackage at all
+          (or the file itself doesn't exist yet). Safe for `_ensure_table`
+          to create over.
+        - a real `QgsCoordinateReferenceSystem`: the table opened fine.
+        - `_TABLE_UNREADABLE`: a table named `name` IS present in the
+          GeoPackage -- confirmed independently of `QgsVectorLayer`, via
+          the OGR connection's own `tableExists`, which is a plain
+          catalogue lookup rather than an attempt to open the layer -- but
+          `QgsVectorLayer` could not open it.
+
+        Final review, Important 1b: the first and third used to collapse
+        onto the same `(None, [])`, so `_ensure_table` could not tell "no
+        table yet" from "the table is broken" and treated a
+        present-but-unopenable `picks` table exactly like an absent one,
+        routing it into `CreateOrOverwriteLayer` and silently destroying
+        it. `_ensure_table` now refuses instead, for `picks` specifically
+        -- the derived tables stay recovered by overwrite either way,
+        since they are fully regenerable from survey.nsgeo.json.
+
+        Any failure probing `tableExists` itself (a connection the OGR
+        provider cannot even open) is treated as `_TABLE_UNREADABLE`
+        rather than `None`: guessing "broken" costs one extra Critical
+        log for a table that turns out to be genuinely absent; guessing
+        "absent" costs the one table with no other source of truth.
+        """
         if not Path(path).exists():
             return None, []
         layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
-        if not layer.isValid():
-            return None, []
-        return layer.crs(), [f.name() for f in layer.fields() if f.name() != "fid"]
+        if layer.isValid():
+            return layer.crs(), [f.name() for f in layer.fields() if f.name() != "fid"]
+        try:
+            conn = QgsProviderRegistry.instance().providerMetadata("ogr").createConnection(path, {})
+            present = conn is not None and conn.tableExists("", name)
+        except Exception:  # noqa: BLE001 -- see the docstring: fail toward "unreadable"
+            present = True
+        return (_TABLE_UNREADABLE, []) if present else (None, [])
 
     @staticmethod
     def _drop_table_if_exists(conn: Any, name: str) -> None:
@@ -658,10 +814,30 @@ class SiteLayers(QObject):
         mis-transformed. Kept as plain dicts rather than `QgsFeature`
         objects tied to the old schema, since the new table's field set
         (and its implicit `fid` column) may not match.
+
+        Final review, Important 1a: raises rather than returning `[]`
+        when the on-disk table will not open at all. This is only ever
+        reached from `_rebuild_picks`, which is only ever called when
+        `_ensure_table`'s own `_table_schema` probe *just* opened this
+        same table successfully (`existing_crs is not None`) -- so a
+        failure to open it here means something changed between the two
+        opens, and that is a real problem, not an empty table. Returning
+        `[]` used to make the two indistinguishable: `_rebuild_picks`'s
+        safety gate compares the migrated row count against
+        `len(old_rows)`, so `[]` here made that compare 0 == 0, pass
+        trivially, and go on to rename the real (unread) table out to the
+        backup, rename an empty table into its place, and drop the
+        backup -- every pick gone, reported as a successful migration. A
+        table that genuinely opens and genuinely has no rows still
+        correctly returns `[]` below; only "could not open it at all" now
+        raises.
         """
         old_layer = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
         if not old_layer.isValid():
-            return []
+            raise RuntimeError(
+                f"could not open the existing picks table in {path} to read it before "
+                "migrating it; the original picks table is untouched"
+            )
         transform = None
         if existing_crs != target_crs:
             transform = self._require_transform(existing_crs, target_crs)
@@ -798,6 +974,21 @@ class SiteLayers(QObject):
         reason: the trace index IS the vertex index, so the pick lands
         exactly where the line is drawn rather than somewhere
         independently computed that could disagree with it.
+
+        Called once, at `write_pick` time, and never again -- unlike
+        `refill_lines`/`refill_marks`, which recompute from the session
+        on every `refresh()`, nothing calls this a second time for a
+        pick that already exists. So a `replace_grid` that moves,
+        resizes or reorients the grid a pick's line sits on moves that
+        line (and its marks) on the very next refresh, but leaves the
+        pick's own, already-written geometry exactly where it was: half
+        of "the grid changed" is handled (a CRS change IS re-projected,
+        through `_rebuild_picks`), half is not. Deliberate, not a gap to
+        close here -- re-deriving a pick's position from `line_key`/
+        `trace` on every refresh would silently overwrite a pick the
+        user has since moved by hand in QGIS, which the README invites
+        them to do. `refresh()`'s `_warn_if_a_placed_grid_moved` names
+        this instead of fixing it.
         """
         site = self.session.site
         if site is None:
@@ -907,13 +1098,24 @@ class SiteLayers(QObject):
         a quote, and the quoting bug that would cause is silent and
         occasional. Picks number in the handful to the low thousands, so
         the scan is not a cost worth that risk.
+
+        Final review, Minor 4: this read went through `feature["line_key"]`
+        directly, the one read in the pick path not routed through
+        `_attr` -- a table opened onto a pre-M8 schema still has
+        `line_key` (it isn't one of the two M8-added columns), but
+        `_row_to_pick` right below already reads every field through
+        `_attr` for the general case, and a plain `feature[name]` raises
+        `KeyError` for ANY field the layer's schema doesn't happen to
+        carry. Routed through `_attr` for the same reason and for
+        consistency with its neighbour, not because a concrete failure
+        was found here.
         """
         layer = self._picks_layer()
         if layer is None:
             return []
         picks = []
         for feature in layer.getFeatures():
-            if _as_str(feature["line_key"]) != key:
+            if _as_str(_attr(feature, "line_key")) != key:
                 continue
             pick = self._row_to_pick(feature, key)
             if pick is not None:

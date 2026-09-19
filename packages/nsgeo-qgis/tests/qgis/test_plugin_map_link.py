@@ -972,9 +972,18 @@ def test_jumping_from_a_pick_still_works_after_the_site_is_reopened(linked):
 def test_selecting_a_real_files_mark_jumps_to_its_own_scan(qgis_app, tmp_path):
     """Spec §7: real data is the primary validation. `FILE__007.DZT` is
     the one real file in this dataset whose DZX sidecar carries a mark (a
-    single WayPt at its own last trace) -- `refill_marks` clamps a scan
-    into the line's trace count, and only a real file proves the scan a
-    mark reports is the trace the profile actually lands on.
+    single WayPt at its own last trace, scan 634 of 635) -- selecting it
+    must jump the working line AND the cursor to a real file's own
+    trace, not a synthetic one built to already agree with the code.
+
+    Final review, Minor 9: this docstring used to claim it proves
+    `refill_marks`'s scan-clamp -- it does not. Scan 634 on 635 traces
+    (indices 0..634) is already in range and exercises no clamp, and
+    neither does the synthetic fixture `test_selecting_a_mark_opens_its_line_and_moves_the_trace`
+    uses above (scan 27 on 60 traces). What this test genuinely is, and
+    the reason it earns its `needs_real_data` mark, is a real-data
+    *jump*: proof that selecting a real mark moves `current_key` and
+    `current_trace` together, on a file this project did not construct.
 
     A second, unmarked real line is opened FIRST and stays `keys[0]`,
     deliberately: with only one marked file in the whole dataset, a

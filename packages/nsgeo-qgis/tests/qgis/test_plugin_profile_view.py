@@ -1301,6 +1301,14 @@ def test_a_shift_click_outside_the_image_rect_is_not_a_pick(view):
     MARGIN_LEFT is 56 and MARGIN_TOP is 8 (profile_view.py:42), so both
     out-of-rect points below are real widget coordinates, not clamped to
     zero.
+
+    Final review, Minor 7: the guard in `mousePressEvent` is
+    `0 <= x < width and 0 <= y < height`, and only the low side (negative
+    x, negative y) had a test -- `x >= width`/`y >= height` is a
+    beyond-spec addition (nothing in the plan asked for the right/bottom
+    margins to refuse a pick too) with nothing else pinning it. Added a
+    point in the right margin, `r.right() + 5`, alongside the pre-existing
+    ones.
     """
     v, _rg = view
     picks = []
@@ -1317,10 +1325,12 @@ def test_a_shift_click_outside_the_image_rect_is_not_a_pick(view):
     )
     assert len(picks) == 1
 
-    # In the left margin (the time axis) and above the top edge: not picks.
+    # In the left margin (the time axis), above the top edge, and in the
+    # right margin (the depth axis): not picks.
     for pos in (
         QPoint(r.left() - 5, r.top() + 10),
         QPoint(r.left() + 10, r.top() - 5),
+        QPoint(r.right() + 5, r.top() + 10),
     ):
         QTest.mouseClick(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos)
     assert len(picks) == 1
