@@ -417,7 +417,7 @@ The level is chosen from a RAM budget, the line count and the cube size, reporte
 overridable. **The mode changes latency, never what is adjustable** — only the third tier gives
 up live sliders, and it converts them to apply-on-release rather than removing them.
 
-Because streaming is the default, the build dialog **warns and requires confirmation** above the
+Because streaming is the default, the source dialog (§9.1) **warns and requires confirmation** above the
 budget rather than hard-capping: a user with 64 GB should not be blocked by a default, and an
 over-budget cube degrades to streaming instead of failing.
 
@@ -453,16 +453,31 @@ streaming mode the shared limit is one extra full pass at build time, and two nu
 
 GPL side. No signal processing; the AST boundary test applies to everything here.
 
-### 9.1 The build dialog
+### 9.1 The source dialog — and why there is no Build button
 
-Grid, preset, transform, cell size, z-range, dz, and a table of the lines that will contribute.
-A line carrying its own saved stack is listed and explicitly marked as **using the preset
-instead**, because a cube built from mixed recipes has no comparable amplitudes and the user
-should see that decision being made rather than discover it later.
+An earlier draft of this design had a **Build** dialog carrying grid, preset, transform, cell
+size, z-range and dz, because a cube was a thing you committed to before you could look at it.
+§7 dissolved that. The one expensive step is preparing the **lines** — load, preset, transform,
+about 0.9 s for 24 lines — and it depends on the preset and the transform and on nothing else.
+Every geometric parameter became a live slider, so there is no longer a moment worth naming
+"build".
 
-A live readout of cube dimensions, memory and the residency level that will result. Build runs
-as a `QgsTask` with per-line progress, following `loader.py`'s established pattern and its
-recorded traps (task references, exception handling in slots).
+What remains deliberate is **choosing what goes in**, and that is the dialog:
+
+- Grid, preset, transform.
+- A table of the lines that will contribute. A line carrying its own saved stack is listed and
+  explicitly marked as **using the preset instead**, because a cube built from mixed recipes has
+  no comparable amplitudes and the user should see that decision being made rather than discover
+  it later.
+
+Accepting it runs the preparation as a `QgsTask` with per-line progress, following `loader.py`'s
+established pattern and its recorded traps (task references, exception handling in slots). This
+does not violate "nothing runs automatically": the user chose a grid, a preset and a transform,
+and preparation is the execution of that choice, not an inference about it.
+
+The dialog keeps a readout of what the resulting residency level and memory will be, because
+that is decided by the line count and the chosen resolution and the user should see it before
+committing 0.9 s — but it warns, and never hard-caps (§7.4).
 
 ### 9.2 The Slices dock
 
@@ -471,10 +486,23 @@ screen space — a sub-ten-step stack leaves room below it. A separate widget ra
 inside `processing_dock.py`, so it can be torn off to see both at once and because issue #21
 already records that file as overloaded.
 
-Contents: the cube and its provenance in one place; slice position, thickness and step; cell size
-and fill radius; stretch scope and palette; a coverage toggle; export. Position, thickness, cell
-size, radius and dz are **live sliders**, with `shift + scroll` on the canvas cycling depth — the
-convention users of other packages already have.
+Four groups, ordered by how often they are touched and what each costs:
+
+| Group | Holds | Cost of a change |
+|---|---|---|
+| **Source** | grid, preset and transform as a summary, an `Edit…` back to §9.1, and a prepared/stale status | ~0.9 s, a task |
+| **Position** | the slice slider, the window readout fused beneath it, thickness and step | 0.6–4 ms |
+| **Resolution** | dz, cell size, fill radius, z range | 44 ms (§7.2) |
+| **Display** | stretch scope, palette, legend, coverage toggle | free |
+
+Everything outside Source is a **live slider**, with `shift + scroll` on the canvas cycling
+depth — the convention users of other packages already have. There is no "Top" field: the
+position slider *is* the top of the window.
+
+A **residency line** above the export buttons reports the current mode, the memory held and the
+measured per-slice cost — `streaming · 28 MB held · 3.6 ms per slice` — with `Pin cube…` as the
+opt-in to the resident mode. It is there because §7.2 found memory, not time, to be the binding
+constraint, and a constraint the user cannot see is one they cannot act on.
 
 **The window readout sits directly under the position slider**, not among the numeric fields. It
 reads `slice 14 / 40 · 12.0–16.0 ns · 0.60–0.80 m`: the control that moves the window and the
@@ -654,7 +682,7 @@ was built rather than what was predicted.
 | | Milestone | Ends with |
 |---|---|---|
 | M10 | `CubeFrame`, `ZAxis`, `SliceCube`, transform steps, binning and streaming, unipolar render, `.npz` | The core can turn a grid into slices, with no UI |
-| M11 | Build dialog, Slices dock, live navigation, coverage, the profile band, multi-band GeoTIFF | An archaeologist can make and read a slice |
+| M11 | Source dialog, Slices dock, live navigation, coverage, the profile band, multi-band GeoTIFF | An archaeologist can make and read a slice |
 | M12 | Site mosaic, grid-to-grid normalisation, directional de-striping, export polish | A site reads as one interpretation |
 
 The on-disk residency spike (§7.4) runs before M10 commits to an implementation.
