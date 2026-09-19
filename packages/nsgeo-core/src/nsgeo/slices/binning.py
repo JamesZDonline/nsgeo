@@ -173,6 +173,13 @@ def stream_slice(
     """
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
+    for line, plan in zip(lines, plans):
+        if plan.z_index.shape[0] != z.nz:
+            raise ValueError(
+                f"line {line.key!r}: plan has {plan.z_index.shape[0]} levels, but z has "
+                f"{z.nz} -- the plan was built against a different z axis and must be "
+                f"replanned before streaming against this one"
+            )
     if not 0 <= k0 < k1 <= z.nz:
         raise ValueError(f"level window must satisfy 0 <= k0 < k1 <= {z.nz}, got {k0}..{k1}")
     n_levels = k1 - k0

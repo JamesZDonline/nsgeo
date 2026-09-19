@@ -57,12 +57,37 @@ def test_fill_leaves_cells_beyond_every_observation_as_nodata():
     assert np.isnan(out[8, 8])
 
 
-def test_fill_preserves_a_fully_covered_slice():
+def test_fill_at_zero_radius_leaves_a_fully_covered_slice_unchanged():
+    """Renamed from `..._preserves_a_fully_covered_slice`: at r=0 this is
+    the same pass-through path `test_zero_radius_is_a_no_op` already pins,
+    just on a dense fixture with no NaNs -- it does NOT mean fill acts as
+    an identity in general. See the r=1 case below, where it manifestly
+    does not: the smear rewrites already-observed cells too."""
     rng = np.random.default_rng(0)
     values = rng.random((8, 8)).astype(np.float32)
     counts = np.ones((8, 8), dtype=np.float32)
     out = fill(values, counts, radius_cells=0)
     np.testing.assert_allclose(out, values)
+
+
+def test_fill_smooths_a_fully_covered_slice_rather_than_preserving_it():
+    """At any radius >= 1, fill is a genuine neighbourhood smear, not an
+    identity: an already-observed cell is rewritten by the disc-weighted
+    mean of its neighbourhood, itself included. That is a deliberate
+    trade-off -- it is what GPRSLICE's oversized search box does too --
+    not an oversight, so it is pinned here rather than left for M11's
+    radius slider to rediscover by surprise.
+    """
+    rng = np.random.default_rng(0)
+    values = rng.random((8, 8)).astype(np.float32)
+    counts = np.ones((8, 8), dtype=np.float32)
+    out = fill(values, counts, radius_cells=1)
+    assert not np.allclose(out, values)
+    assert np.isfinite(out).all()
+    # A disc-weighted mean over a subset of `values` is a convex
+    # combination of them, so it can never land outside their global range.
+    assert out.min() >= values.min() - 1e-6
+    assert out.max() <= values.max() + 1e-6
 
 
 def test_fill_rejects_a_negative_radius():
