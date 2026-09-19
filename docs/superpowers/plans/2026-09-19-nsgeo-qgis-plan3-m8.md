@@ -1215,6 +1215,13 @@ def test_a_pick_while_previewing_is_refused_out_loud(previewing):
     from a pick that landed -- the user shift-clicks a previewed line and
     nothing whatever happens. The guard stays; it just says why now."""
     dock, session, keys = previewing
+    # The `previewing` fixture supplies two LOADED lines -- it does not
+    # itself enter a preview. `ProfileDock._preview_key` is set only by
+    # `_enter_preview`, which the session's preview signal drives, so
+    # without this call the dock is not previewing at all and `_pick`
+    # takes its ordinary path. Every sibling preview test in this file
+    # makes the same call for the same reason.
+    session.set_preview(keys[1], 5)
     emitted = []
     errors = []
     dock.pick_requested.connect(lambda k, t, ns: emitted.append((k, t, ns)))
@@ -1358,6 +1365,8 @@ def test_a_pick_that_cannot_be_written_is_reported_not_swallowed(
 ```
 
 Note the `try/finally` around every one: `unload()` must run even on a failing assertion, or a leaked dock and toolbar follow the failure into every later test in the tier.
+
+**`unload()` on a dirty session raises a modal, and the conftest forbids it.** `_plugin_with_one_line` dirties the session (`add_grid`, `add_lines`) and never closes it, so `unload()` reaches `save_with_prompt(ask_first=True, allow_cancel=False)` → `QMessageBox.question`. Any test here that ends with the session still dirty must install `answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)` first — that is three of the five tests above. The two that call `session.close_site()` in their body do not need it: `close_site` clears the dirty flag and the site before emitting, so `unload()` short-circuits.
 
 Finally, update the pin in `packages/nsgeo-qgis/tests/pure/test_no_orphan_signals.py`:
 
