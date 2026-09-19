@@ -295,14 +295,33 @@ class ProfileDock(QgsDockWidget):
         if was_diff:
             self.difference_cleared.emit()
         self._working_key = key or None
-        self._preview_key = None
-        self.preview_label.setText("")
-        # A preview may have disabled the channel combo (see
-        # `_enter_preview`); opening ANY line -- including via promotion,
-        # which is how a preview ends without `_exit_preview` ever
-        # running -- means no preview is up any more, so re-enable it
-        # unconditionally rather than leave it stuck disabled.
-        self.channel_combo.setEnabled(True)
+        # Finding 2 (M7 final review): remove_line() resets ONLY the
+        # dropped key's own current/preview fields (see its own docstring)
+        # -- if the CURRENT line is removed while a DIFFERENT line is
+        # being previewed, session.preview_key survives untouched, and
+        # remove_line still emits line_opened("") (its ordering: current
+        # first, THEN preview). Dropping `_preview_key` unconditionally
+        # here used to blank the view and clear the banner while
+        # session.display_key -- and the map marker -- kept naming the
+        # previewed line: this dock desyncing from the very session it
+        # mirrors. Every OTHER caller of line_opened has already reset
+        # session.preview_key to None before emitting (open_line always
+        # does, and remove_line does too whenever the removed line IS the
+        # preview), so `key` is only ever falsy here WITH a live session
+        # preview in exactly that one case -- checking the session instead
+        # of assuming "opened means no preview" fixes it without touching
+        # any other path.
+        still_previewing = not key and self.session.is_open and self.session.preview_key is not None
+        if not still_previewing:
+            self._preview_key = None
+            self.preview_label.setText("")
+            # A preview may have disabled the channel combo (see
+            # `_enter_preview`); opening ANY line -- including via
+            # promotion, which is how a preview ends without
+            # `_exit_preview` ever running -- means no preview is up any
+            # more, so re-enable it unconditionally rather than leave it
+            # stuck disabled.
+            self.channel_combo.setEnabled(True)
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -312,6 +331,13 @@ class ProfileDock(QgsDockWidget):
         # one, because there the working line has not changed.)
         self._deferred_strip = None
         if not key:
+            if still_previewing:
+                # The view, banner and disabled channel combo are already
+                # showing exactly the surviving preview -- untouched above
+                # -- so there is nothing left to do beyond the working
+                # line's own bookkeeping (difference index, deferred
+                # strip), already cleared.
+                return
             self._clear_view_only()
             return
         # C1: `SiteSession.open_line` resets `_current_trace`/`_selection`
@@ -512,7 +538,14 @@ class ProfileDock(QgsDockWidget):
     def current_radargram(self) -> Radargram | None:
         if self._key is None:
             return None
-        stack: StepStack = self.session.stack_for(self._key)
+        # Finding 4 (M7 final review): while previewing, `self._key` is the
+        # previewed line, not the working one -- and a preview must not
+        # persist an empty StepStack for a line the user only hovered
+        # (spec §3.3). insert=False builds and returns the same usable
+        # stack (source attached) without keeping it; see stack_for's own
+        # docstring and SiteSession.set_profiles, which needs the same
+        # treatment for the same reason.
+        stack: StepStack = self.session.stack_for(self._key, insert=self._preview_key is None)
         if stack.source is None:
             return None
         try:

@@ -731,6 +731,26 @@ def test_closing_the_site_while_previewing_clears_the_banner(previewing):
     assert dock._key is None
 
 
+def test_removing_the_current_line_while_previewing_another_keeps_the_dock_in_sync(previewing):
+    """Finding 2 (M7 final review): remove_line() resets ONLY the dropped
+    key's own current/preview fields, so removing the CURRENT line while a
+    DIFFERENT line is being previewed leaves session.preview_key (and the
+    map marker) still naming that other line. Before this fix, `_open("")`
+    dropped `_preview_key` unconditionally regardless, so the dock went
+    blank and the banner vanished while session.display_key -- what the
+    map still shows -- kept naming the previewed line: this dock desyncing
+    from the session it is supposed to mirror."""
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+    assert dock._key == keys[1]
+
+    session.remove_line(keys[0])
+
+    assert session.display_key == keys[1]
+    assert dock._key == keys[1]
+    assert dock.preview_label.text() != ""
+
+
 def test_a_shift_click_on_a_preview_authors_no_pick(previewing):
     dock, session, keys = previewing
     emitted = []
@@ -821,3 +841,30 @@ def test_a_hide_arriving_mid_preview_is_honoured_on_exit(previewing):
     session.clear_preview()
 
     assert not dock.gain_strip.isVisible()
+
+
+def test_a_preview_that_triggers_a_load_does_not_persist_an_empty_stack(opened):
+    """Finding 4 (M7 final review): verified by experiment that
+    `current_radargram`'s own `stack_for(preview_key)` call is, in every
+    reachable path, a re-fetch of an entry `SiteSession.set_profiles`
+    already created -- set_profiles is where a hover-triggered background
+    load actually lands, synchronously before `line_loaded` (and so
+    `_render()`) ever fires for that key. Adds a second, never-loaded
+    line, previews it (no set_profiles yet: `_show_line` takes its
+    axes-only branch since `profiles_for()` is still None, so nothing is
+    inserted merely by hovering), then completes its load exactly as
+    `LineLoader` would -- both call sites need the fix together for the
+    empty stack to never land in `site.stacks` at all."""
+    session, dock, key, line = opened
+    p2 = synthetic_dzt(session.root / "raw", "FILE__002.DZT", n_traces=240)
+    line2 = Line.open(p2, GridPlacement("A", "y", 0.5, 0.0, 1, "FILE__002"))
+    session.add_lines([line2])
+    key2 = next(k for k in session.keys() if k != key)  # noqa: SIM118 -- SiteSession.keys(), not a dict
+
+    session.set_preview(key2, 3)
+    assert key2 not in session.site.stacks  # sanity: hovering alone plants nothing
+
+    session.set_profiles(key2, line2.load())  # the background load "finishing"
+
+    assert dock.image is not None  # sanity: the preview really rendered
+    assert key2 not in session.site.stacks

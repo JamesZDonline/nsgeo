@@ -401,6 +401,72 @@ def test_set_profiles_with_an_empty_list_clears_a_previously_attached_source(ses
     assert session.stack_for(key).source is None
 
 
+def test_stack_for_with_insert_false_builds_without_storing(session, tmp_path):
+    """Finding 4 (M7 final review): a read used by a rendering path (a
+    preview) must be able to get a fully usable stack -- source attached,
+    same as the default -- without planting an empty StepStack into
+    site.stacks for a line nobody has actually edited."""
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.set_profiles(key, lines[0].load())
+    site_stack = session.stack_for(key)
+    del session.site.stacks[key]  # back to "never touched", for this test only
+
+    peeked = session.stack_for(key, insert=False)
+
+    assert peeked.source is not None
+    assert key not in session.site.stacks
+    # The default behaviour is completely unchanged: a later real access
+    # still creates and keeps its own stack, distinct from the peek.
+    kept = session.stack_for(key)
+    assert key in session.site.stacks
+    assert kept is not peeked
+    assert kept is not site_stack  # the original was deleted above, not reused
+
+
+def test_set_profiles_on_a_preview_only_key_does_not_persist_an_empty_stack(session, tmp_path):
+    """Finding 4 (M7 final review): set_profiles is where a hover-triggered
+    background load actually lands -- verified by experiment that THIS
+    call, not current_radargram's later one, is what plants the stray
+    entry in every currently reachable path. A key that is only being
+    previewed (not also the current line) must not get one purely because
+    its data finished loading."""
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 2)
+    session.add_lines(lines)
+    keys = session.keys()
+    session.open_line(keys[0])
+    session.set_preview(keys[1], 3)
+
+    session.set_profiles(keys[1], lines[1].load())
+
+    assert keys[1] not in session.site.stacks
+    assert session.stack_for(keys[1]).source is not None  # still fully usable for rendering
+
+    # Once the key stops being preview-only -- promoted here -- the next
+    # real stack_for() call persists it normally, same as any other line.
+    session.open_line(keys[1])
+    session.stack_for(keys[1])
+    assert keys[1] in session.site.stacks
+
+
+def test_set_profiles_on_the_current_line_still_persists_its_stack(session, tmp_path):
+    """The ordinary case must not regress: loading the WORKING line's data
+    keeps creating its stacks entry immediately, exactly as before this
+    fix -- only a bare preview (not also current) skips it."""
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.open_line(key)
+
+    session.set_profiles(key, lines[0].load())
+
+    assert key in session.site.stacks
+
+
 def test_line_index_stays_correct_across_every_list_changing_operation(session, tmp_path):
     # Review round 1, Finding 4: line_for_key()/keys() now read a cached
     # key -> Line map instead of re-resolving every line's path on every

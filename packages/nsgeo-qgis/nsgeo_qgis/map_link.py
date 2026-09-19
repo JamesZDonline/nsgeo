@@ -36,7 +36,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas, QgsRubberBand, QgsVertexMarker
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QObject, QTimer
+from qgis.PyQt.QtCore import QEvent, QObject, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from .layers import SiteLayers
@@ -99,6 +99,10 @@ class MapLink(QObject):
         self._dwell.setSingleShot(True)
         self._dwell.timeout.connect(self._on_dwell)
         canvas.xyCoordinates.connect(self._on_xy)
+        # See eventFilter()'s own docstring for why this watches the
+        # VIEWPORT, not the canvas widget itself, and why that is not the
+        # click interception the module docstring rules out.
+        canvas.viewport().installEventFilter(self)
 
         for signal in (
             session.trace_changed,
@@ -232,6 +236,58 @@ class MapLink(QObject):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
 
+    def eventFilter(self, _obj: QObject, event: Any) -> bool:  # noqa: N802 -- Qt's own name
+        """Clear a stuck preview when the pointer leaves the canvas.
+
+        Without this, nothing responds to the pointer leaving: a preview
+        started near the canvas edge and then carried onto, say, the
+        processing dock left the profile showing that line -- gain strip
+        hidden, channel combo greyed -- until the pointer happened to come
+        back over the map and a fresh dwell overwrote it. No wrong WRITE
+        happens meanwhile (the banner stays up, which is the cue the spec
+        asks for), but the view is stuck on a line nobody is pointing at
+        any more.
+
+        This is NOT the click interception the module docstring rules
+        out. That prohibition is about adjudicating mouse BUTTON events
+        against whatever map tool happens to be active -- one gesture,
+        two claimants. `QEvent.Type.Leave` is not a click, is not a
+        button event at all, and nothing else on the canvas is contesting
+        it, so there is no adjudication to lose here.
+
+        Installed on `canvas.viewport()`, not `canvas` itself (see the
+        `installEventFilter` call in `__init__`). Verified by experiment
+        against this Qt build (a QgsMapCanvas is a QGraphicsView, hence a
+        QAbstractScrollArea): both the canvas widget and its viewport
+        actually receive a real Enter/Leave pair when the pointer moves
+        from inside the canvas to an entirely different dock -- Qt sends
+        Enter/Leave to every widget between the old and new "under the
+        pointer" leaf, ancestors included, not just the leaf itself. The
+        viewport is still the right object to watch: it is inset from the
+        canvas's own rect by that widget's 1px frame, and it is the
+        viewport's own mouse tracking that `xyCoordinates` is built on, so
+        a Leave here fires in the same instant `xyCoordinates` stops
+        producing new positions -- filtering on `canvas` instead would
+        leave a hairline gap (the pointer sitting in that 1px frame,
+        still "in" the canvas, already producing no coordinates) where
+        the preview would stay wrongly alive a moment longer.
+
+        Stops the dwell too, not just clears the preview: a dwell already
+        queued when the pointer left would otherwise fire right after and
+        re-establish the very preview this just cleared.
+
+        Returns `False` unconditionally: this only watches, it never
+        consumes, so the event still reaches its ordinary handler.
+        """
+        try:
+            if event.type() == QEvent.Type.Leave:
+                self._dwell.stop()
+                self._last_point = None
+                self.session.clear_preview()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the preview on pointer leave: {exc}", Qgis.MessageLevel.Critical)
+        return False
+
     def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
         """The (line_key, trace) under `point`, or None if nothing is close
         enough. `point` is in canvas CRS, and so is the geometry cache.
@@ -362,9 +418,22 @@ class MapLink(QObject):
         # other caller can still reach it, so this stays defensive rather
         # than dead: testing `preview_key is not None` alone would blank
         # that line's own selection band the moment such a call landed.
-        # ProfileDock draws the same distinction in `_on_preview_changed`;
-        # the two must agree or the map and the profile disagree about
-        # what is showing.
+        # ProfileDock reaches the same `preview_key == current_key` case in
+        # its own `_on_preview_changed` (it takes the `_exit_preview()`
+        # branch there, since a preview only ever ENTERS when
+        # `key != self._working_key`) -- but the two do NOT agree on what
+        # to show, deliberately: `_exit_preview()` leaves the cursor at
+        # `current_trace`, not the fresher `preview_trace` this method
+        # draws the marker at (verified directly: `set_preview(current_key,
+        # 30)` on a line whose `current_trace` was 5 puts the map marker on
+        # trace 30 and leaves the profile's cursor on trace 5). That is not
+        # a bug to fix here: nothing on the hover path that drives this in
+        # practice (`_on_dwell` above) ever calls `set_preview` with
+        # `key == current_key` -- it always routes that case through
+        # `clear_preview()` + `set_trace()` instead -- so this divergence
+        # is reachable only by a caller that invokes
+        # `session.set_preview(current_key, ...)` directly, which nothing
+        # in this plugin does today.
         previewing = self.session.preview_key not in (None, self.session.current_key)
         if previewing:
             self._set_marker(key, self.session.preview_trace)
@@ -445,7 +514,13 @@ class MapLink(QObject):
         the same way the item removal below tolerates being called twice.
         The `lines` layer's `selectionChanged` connection (see
         `_rebind_layer`) is released the same way, so disposal stops the
-        link promoting as well as drawing.
+        link promoting as well as drawing. The Leave-event filter
+        installed on `canvas.viewport()` (see `eventFilter`) is removed
+        the same way too: left in place, it would go on calling
+        `session.clear_preview()` after disposal -- `session` is not
+        something this method tears down, so that call would still land
+        and could clear a preview that some other, still-live part of the
+        plugin has since taken an interest in.
 
         That disconnect is itself guarded, in layers, because this
         method's own promise above -- it "does not assume the canvas is
@@ -470,6 +545,8 @@ class MapLink(QObject):
         if not canvas_gone:
             with contextlib.suppress(TypeError, RuntimeError):
                 self.canvas.xyCoordinates.disconnect(self._on_xy)
+            with contextlib.suppress(TypeError, RuntimeError):
+                self.canvas.viewport().removeEventFilter(self)
         # The lines layer is rebound across every site reopen (see
         # _rebind_layer), so disposal has to release whichever instance is
         # currently bound -- guarded the same way as the canvas above, and

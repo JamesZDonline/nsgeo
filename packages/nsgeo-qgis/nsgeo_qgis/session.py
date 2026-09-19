@@ -537,13 +537,27 @@ class SiteSession(QObject):
         return resolve_velocity(line, self.grid_for_line(line))
 
     # ---- stacks -----------------------------------------------------------
-    def stack_for(self, key: str) -> StepStack:
+    def stack_for(self, key: str, *, insert: bool = True) -> StepStack:
+        """The `StepStack` for `key`, building an empty one (with its
+        source attached from whatever profiles are cached for `key`) the
+        first time anything asks for it.
+
+        `insert=False` builds and returns that same stack WITHOUT storing
+        it in `site.stacks` -- for a read that must not otherwise plant an
+        empty stack for a line nobody has actually edited (Finding 4, M7
+        final review: `set_profiles` and `ProfileDock.current_radargram`
+        both use it on the preview path, which spec §3.3 says must touch
+        nothing). Every write path here (`append_step` and its siblings)
+        keeps calling with the default `insert=True`, exactly as before
+        this parameter existed.
+        """
         site = self._require_site()
         stack = site.stacks.get(key)
         if stack is None:
             self.line_for_key(key)  # KeyError for unknown lines
             stack = StepStack()
-            site.stacks[key] = stack
+            if insert:
+                site.stacks[key] = stack
             self._attach_source(key, stack)
         return stack
 
@@ -666,7 +680,21 @@ class SiteSession(QObject):
         return self._profiles.get(key)
 
     def set_profiles(self, key: str, profiles: list[Profile]) -> None:
-        stack = self.stack_for(key)  # validates the key before anything is cached
+        # Finding 4 (M7 final review): this is where a hover-triggered
+        # background load actually lands -- verified by experiment that
+        # THIS call, not ProfileDock.current_radargram's later one, is
+        # what plants the empty StepStack in every currently reachable
+        # path (current_radargram only ever runs once profiles_for(key)
+        # is already truthy, which requires set_profiles to have run
+        # first). A key that is ONLY previewed right now, and is not also
+        # the working line, must not persist one purely because its data
+        # finished loading -- spec §3.3's promise that a preview touches
+        # nothing. The moment that stops being true -- promoted to
+        # current, or a real edit lands -- the next stack_for() call
+        # (default insert=True) creates it for real, same as any other
+        # line.
+        insert = key == self._current_key or key != self._preview_key
+        stack = self.stack_for(key, insert=insert)  # validates the key before anything is cached
         self._profiles[key] = list(profiles)
         self._channel.setdefault(key, 0)
         self._attach_source(key, stack)  # the only build: stack_for saw no profiles yet

@@ -349,6 +349,94 @@ def test_the_tolerance_is_a_distance_not_a_squared_distance(linked):
     assert session.preview_key is not None
 
 
+# ---- the pointer leaving the canvas (M7 final review, Finding 1) -----------
+
+
+def test_the_pointer_leaving_the_canvas_clears_an_active_preview(linked):
+    """Before this fix, nothing handled the pointer leaving the canvas: a
+    preview started near the edge and then carried onto another dock left
+    the profile stuck showing it. Experiment (see the fix report) found
+    that a QgsMapCanvas's Leave event lands on BOTH the canvas widget and
+    `canvas.viewport()` -- `MapLink` installs its filter on the viewport,
+    since that is the object whose own mouse tracking backs
+    `xyCoordinates`, so this sends the event there."""
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent
+
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    QCoreApplication.sendEvent(canvas.viewport(), QEvent(QEvent.Type.Leave))
+
+    assert session.preview_key is None
+
+
+def test_the_pointer_leaving_the_canvas_stops_the_pending_dwell(linked):
+    """The filter must also stop the dwell, not just clear the preview: a
+    dwell already queued when the pointer left would otherwise fire right
+    after and silently re-establish the very preview the leave just
+    cleared."""
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent
+
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    assert link._dwell.isActive()
+
+    QCoreApplication.sendEvent(canvas.viewport(), QEvent(QEvent.Type.Leave))
+
+    assert not link._dwell.isActive()
+    link._dwell.timeout.emit()  # a timeout already queued when the leave fired
+    assert session.preview_key is None
+
+
+def test_leaving_the_canvas_with_no_preview_up_is_a_silent_no_op(linked):
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent
+
+    link, session, _layers, canvas, keys = linked
+    assert session.preview_key is None
+
+    QCoreApplication.sendEvent(canvas.viewport(), QEvent(QEvent.Type.Leave))  # must not raise
+
+    assert session.preview_key is None
+
+
+def test_a_disposed_link_no_longer_clears_the_preview_on_leave(linked):
+    """dispose() removes the Leave filter (guarded exactly like the
+    existing canvas disconnect there) so a disposed link cannot go on
+    calling `session.clear_preview()` after teardown."""
+    from qgis.PyQt.QtCore import QCoreApplication, QEvent
+
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    link.dispose()
+    QCoreApplication.sendEvent(canvas.viewport(), QEvent(QEvent.Type.Leave))
+
+    assert session.preview_key == keys[1]  # unchanged: the filter is gone
+
+
+def test_a_disposed_link_still_removes_the_leave_filter_when_the_canvas_is_gone(linked):
+    """Same shape as test_dispose_still_removes_the_items_when_the_canvas_is_gone:
+    dispose() must not abort before the scene-removal loop just because it
+    cannot reach the canvas to remove the Leave filter either."""
+    link, _session, _layers, canvas, _keys = linked
+    before = len(canvas.scene().items()) - 2  # the two this link added
+
+    class _Dead:
+        def __getattr__(self, name):
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+    link.canvas = _Dead()
+    link.dispose()  # must not raise, and must still remove the marker/band
+
+    assert len(canvas.scene().items()) == before
+    assert link._marker is None
+    assert link._band is None
+
+
 def test_a_disposed_link_stops_tracking_the_pointer(linked):
     """dispose() must stop the link writing to a session the plugin has
     finished with -- the same class of leak as the canvas items.
