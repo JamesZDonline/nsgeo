@@ -172,15 +172,47 @@ def test_geometries_are_transformed_into_canvas_crs(linked):
 
     Asserting against a DIFFERENT canvas CRS is the only version of this
     test that can fail: with the canvas on the layer's own CRS the
-    transform is a no-op and an untransformed cache looks identical."""
+    transform is a no-op and an untransformed cache looks identical.
+
+    No manual `link._invalidate()` here: the whole point is to exercise
+    `canvas.destinationCrsChanged` -> `_on_lines_changed` -> `_invalidate`,
+    the one connection nothing else in this suite reaches (a rewrite in
+    Task 4/5 that drops that `connect()` call must fail here)."""
     from qgis.core import QgsCoordinateReferenceSystem
 
     link, _session, layers, canvas, keys = linked
     in_layer_crs = QgsPointXY(link._geometries()[keys[0]].vertexAt(0))
 
     canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
-    link._invalidate()
     in_wgs84 = QgsPointXY(link._geometries()[keys[0]].vertexAt(0))
 
     assert abs(in_wgs84.x()) <= 180.0 and abs(in_wgs84.y()) <= 90.0
     assert in_wgs84.distance(in_layer_crs) > 1.0
+
+
+def test_a_canvas_crs_unreachable_from_the_layer_produces_no_untransformed_geometry(
+    linked, message_log
+):
+    """`QgsCoordinateTransform.transform()` does not raise when PROJ has no
+    path between two CRSs -- it reports success and leaves the geometry
+    untouched, which would otherwise relabel raw layer-CRS coordinates as
+    canvas-CRS ones with nothing downstream able to tell.
+
+    A projected Earth CRS (the grid's own EPSG:32616) against a
+    geographic Mars CRS is a genuinely invalid transform on this build
+    (`QgsCoordinateTransform(...).isValid()` is False) -- the same pairing
+    `SiteLayers._require_transform`'s docstring uses -- so this is a real
+    failure, not a stubbed one."""
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    link, session, _layers, canvas, keys = linked
+    session.set_trace(keys[0], 10)
+    session.set_selection(keys[0], 4, 9)
+    assert link._marker.isVisible()
+
+    canvas.setDestinationCrs(QgsCoordinateReferenceSystem("ESRI:104905"))  # GCS_Mars_2000
+
+    assert not link._marker.isVisible()
+    assert link._band.numberOfVertices() == 0
+    assert link._geometries() == {}
+    assert any("no coordinate transform" in m for m in message_log)

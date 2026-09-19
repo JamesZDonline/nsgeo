@@ -30,7 +30,6 @@ from qgis.core import (
     QgsGeometry,
     QgsMessageLog,
     QgsPointXY,
-    QgsProject,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -105,7 +104,22 @@ class MapLink(QObject):
         geoms: dict[str, QgsGeometry] = {}
         layer = self._lines_layer()
         if layer is not None:
-            tr = self._transform(layer)
+            try:
+                tr = self._transform(layer)
+            except RuntimeError as exc:
+                # Cache empty rather than half-built: a mix of transformed
+                # and (because we bailed partway through the loop)
+                # untransformed geometries would be worse than none, since
+                # nothing downstream could tell the two apart. An empty
+                # cache reads as "line not found" everywhere it is
+                # consulted, which hides the marker and empties the band
+                # instead of drawing either at the wrong scale.
+                _log(
+                    f"could not build the map link's geometry cache: {exc}",
+                    Qgis.MessageLevel.Critical,
+                )
+                self._geoms = geoms
+                return geoms
             for feature in layer.getFeatures():
                 # A copy: the QgsFeature the iterator yields is reused, so
                 # its geometry must not be held by reference.
@@ -123,11 +137,31 @@ class MapLink(QObject):
         return layer
 
     def _transform(self, layer: QgsVectorLayer) -> QgsCoordinateTransform | None:
+        """`None` means "already in the canvas CRS, do not transform" --
+        never "could not transform". `QgsCoordinateTransform.transform()`
+        does not raise on an invalid transform (no PROJ path between the
+        two CRSs): it reports success and leaves the geometry unchanged,
+        which would relabel raw layer-CRS coordinates as canvas-CRS ones
+        with nothing downstream able to tell. `SiteLayers._require_transform`
+        hit this same defect class first; this follows its shape.
+
+        `self.layers.project`, not `QgsProject.instance()`: `SiteLayers`
+        was constructed with a specific (possibly non-default) project,
+        and a transform built against the global singleton instead would
+        silently disagree with it under any test or embedding that passes
+        one in.
+        """
         dest = self.canvas.mapSettings().destinationCrs()
         source = layer.crs()
         if not dest.isValid() or not source.isValid() or source == dest:
             return None
-        return QgsCoordinateTransform(source, dest, QgsProject.instance())
+        transform = QgsCoordinateTransform(source, dest, self.layers.project)
+        if not transform.isValid():
+            raise RuntimeError(
+                f"no coordinate transform from {source.authid() or source.toWkt()} to "
+                f"{dest.authid() or dest.toWkt()}; refusing to draw untransformed geometry"
+            )
+        return transform
 
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
@@ -175,15 +209,17 @@ class MapLink(QObject):
         # Not a preview, but the pointer can still be sitting on the
         # working line itself (preview_key == current_key == key): that is
         # a live mouse position, strictly fresher than whatever trace
-        # navigation last set, so prefer it for the marker. When there is
-        # no hover at all `preview_key` is None and this falls back to
-        # `current_trace`, same as before. The band is unaffected either
-        # way -- it is always the working line's own selection here.
-        trace = (
-            self.session.preview_trace
-            if self.session.preview_key == key
-            else self.session.current_trace
-        )
+        # navigation last set, so prefer it for the marker. session.py
+        # guarantees preview_trace == -1 whenever preview_key is None, so
+        # this one fallback also covers "no hover at all" -> current_trace,
+        # same as before. The band is unaffected either way -- it is
+        # always the working line's own selection here.
+        trace = self.session.preview_trace
+        if trace < 0:
+            # set_preview(key) defaults trace to -1. On the working line
+            # current_trace is still a real answer, so fall back to it
+            # rather than hiding a cursor we know the position of.
+            trace = self.session.current_trace
         self._set_marker(key, trace)
         self._set_band(key, *self.session.selection)
 
