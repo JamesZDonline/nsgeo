@@ -1927,26 +1927,37 @@ In `map_link.py`'s `__init__`, add `self._lines_layer_bound: QgsVectorLayer | No
             _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
 ```
 
-`dispose()` reaches its final form here. Replace the whole method body's first statement with the unbind, so the link stops promoting as well as stops drawing:
+`dispose()` gains the layer unbind, so the link stops promoting as well as drawing.
+
+**Do NOT retype the method.** Tasks 3 and 4 hardened it across four review rounds and it is longer and more careful than this plan originally anticipated: it tolerates a deleted canvas wrapper, a canvas that is not a sip object at all, and a `disconnect` that raises, and in every one of those cases it still reaches the scene-removal loop. Replacing it with a shorter version reintroduces the Item I4 leak the method exists to prevent — that regression has already happened once in this task's history.
+
+Read the method as it stands, then **insert only** the unbind, immediately after the existing canvas-disconnect guard and before the `items, self._marker, self._band = ...` line:
 
 ```python
-    def dispose(self) -> None:
-        """...docstring unchanged from Task 3..."""
-        self._dwell.stop()
+        # The lines layer is rebound across every SiteLayers.refresh()
+        # (see _rebind_layer), so disposal has to release whichever
+        # instance is currently bound -- guarded the same way as the
+        # canvas above, and for the same reason: nothing here may abort
+        # before the scene-removal loop below.
         layer = self._lines_layer_bound
         self._lines_layer_bound = None
         if layer is not None and not sip.isdeleted(layer):
-            try:
+            with contextlib.suppress(TypeError, RuntimeError):
                 layer.selectionChanged.disconnect(self._on_selection)
-            except TypeError:
-                pass
-        items, self._marker, self._band = (self._marker, self._band), None, None
-        for item in items:
-            if item is None or sip.isdeleted(item):
-                continue
-            scene = item.scene()
-            if scene is not None:
-                scene.removeItem(item)
+```
+
+Extend the existing docstring by a sentence naming the layer connection; do not rewrite what is there.
+
+Then add to the disposal test that a `selectionChanged` after `dispose()` promotes nothing:
+
+```python
+def test_a_disposed_link_stops_promoting_on_selection(linked):
+    link, session, layers, _canvas, keys = linked
+    link.dispose()
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[0]
 ```
 
 - [ ] **Step 4: Wire it into the plugin**
