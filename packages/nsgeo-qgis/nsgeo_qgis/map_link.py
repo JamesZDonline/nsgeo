@@ -112,6 +112,11 @@ class MapLink(QObject):
         session.site_closed.connect(self._on_lines_changed)
         canvas.destinationCrsChanged.connect(self._on_lines_changed)
 
+        # None means "not yet bound"; see _rebind_layer for why this is
+        # tracked separately from `_lines_layer()`'s own lookup.
+        self._lines_layer_bound: QgsVectorLayer | None = None
+        self._rebind_layer()
+
     # ---- cache ------------------------------------------------------------
     def _invalidate(self) -> None:
         self._geoms = None
@@ -254,9 +259,55 @@ class MapLink(QObject):
                 best = (sq_dist, key, index)
         return None if best is None else (best[1], best[2])
 
+    def _rebind_layer(self) -> None:
+        """Follow the `lines` layer across rebuilds.
+
+        `SiteLayers.refresh()` replaces the layer object, so a connection
+        made once at construction would point at a dead wrapper after the
+        first refresh and promotion would silently stop working -- with no
+        error, which is the worst kind of stop.
+        """
+        old = self._lines_layer_bound
+        if old is not None and not sip.isdeleted(old):
+            # already gone; disconnect raises rather than no-ops
+            with contextlib.suppress(TypeError):
+                old.selectionChanged.disconnect(self._on_selection)
+        layer = self._lines_layer()
+        self._lines_layer_bound = layer
+        if layer is not None:
+            layer.selectionChanged.connect(self._on_selection)
+
+    def _on_selection(self, *_: Any) -> None:
+        """A preview becomes the working line when the user selects the
+        line feature with QGIS's ordinary Select tool.
+
+        No event filter, no tool of our own, no stolen clicks, and it
+        composes with everything else QGIS does with selection. Promotion
+        goes through `session.open_line` -- the same path the survey tree
+        uses -- so opening from the map and opening from the tree cannot
+        diverge.
+        """
+        try:
+            layer = self._lines_layer()
+            if layer is None or not self.session.is_open:
+                return
+            ids = layer.selectedFeatureIds()
+            if len(ids) != 1:
+                # A multi-selection has no single answer, and guessing one
+                # is worse than doing nothing (spec §3.4). An empty
+                # selection is the ordinary result of clicking empty map
+                # and must not close the line the user is working on.
+                return
+            key = str(layer.getFeature(ids[0])["line_key"])
+            if key in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+                self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
+
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
         try:
+            self._rebind_layer()
             self._invalidate()
             self._refresh()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -373,6 +424,9 @@ class MapLink(QObject):
         gone (a second `dispose()` call, or one made after the canvas
         itself tore its signals down) -- idempotency needs that caught,
         the same way the item removal below tolerates being called twice.
+        The `lines` layer's `selectionChanged` connection (see
+        `_rebind_layer`) is released the same way, so disposal stops the
+        link promoting as well as drawing.
 
         That disconnect is itself guarded, in layers, because this
         method's own promise above -- it "does not assume the canvas is
@@ -397,6 +451,16 @@ class MapLink(QObject):
         if not canvas_gone:
             with contextlib.suppress(TypeError, RuntimeError):
                 self.canvas.xyCoordinates.disconnect(self._on_xy)
+        # The lines layer is rebound across every SiteLayers.refresh()
+        # (see _rebind_layer), so disposal has to release whichever
+        # instance is currently bound -- guarded the same way as the
+        # canvas above, and for the same reason: nothing here may abort
+        # before the scene-removal loop below.
+        layer = self._lines_layer_bound
+        self._lines_layer_bound = None
+        if layer is not None and not sip.isdeleted(layer):
+            with contextlib.suppress(TypeError, RuntimeError):
+                layer.selectionChanged.disconnect(self._on_selection)
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

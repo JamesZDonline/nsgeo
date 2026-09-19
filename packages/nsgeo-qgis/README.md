@@ -3,6 +3,21 @@
 GPL-2.0-or-later. Consumes the MIT `nsgeo` core from `../nsgeo-core`; contains no
 signal processing (a test enforces it).
 
+## Features
+
+### The map ↔ profile link
+
+Hovering a line on the map canvas previews its radargram in the profile
+dock, and the profile's trace cursor and selected range draw back onto the
+map. Hovering is ambient — it does not take over the canvas, so pan,
+identify and select all keep working while it is on.
+
+A preview is **not** the line you are working on. It drives the view and
+nothing else: the processing dock, the gain strip and every operation that
+edits a stack stay pointed at the working line, and the profile says so
+while a preview is showing. To work on a previewed line, select it with
+QGIS's Select tool.
+
 ## Development install
 
 ```bash

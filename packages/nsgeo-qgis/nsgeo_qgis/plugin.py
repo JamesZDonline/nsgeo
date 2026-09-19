@@ -63,6 +63,7 @@ from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 from nsgeo_qgis import plugin_version
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
+from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
@@ -118,6 +119,7 @@ class NsgeoPlugin:
         self.session: SiteSession | None = None
         self.layers: SiteLayers | None = None
         self.loader: LineLoader | None = None
+        self.map_link: Any = None
         self.survey_dock: SurveyDock | None = None
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
@@ -150,6 +152,10 @@ class NsgeoPlugin:
             self.session,
             on_error=lambda key, msg: self.message(f"{key}: {msg}", Qgis.MessageLevel.Critical),
         )
+        # Constructed here, with `layers`, because it reads the `lines`
+        # layer's geometry and must be connected before the first
+        # site_opened fires -- same reason SiteLayers is built this early.
+        self.map_link = MapLink(self.session, self.layers, self.iface.mapCanvas())
         main = self.iface.mainWindow()
 
         self.toolbar = self.iface.addToolBar("nsgeo")
@@ -269,6 +275,14 @@ class NsgeoPlugin:
             self.toolbar.setParent(None)
             self.toolbar.deleteLater()
             self.toolbar = None
+        if self.map_link is not None:
+            # Before layers.detach(): the link holds geometry copied from
+            # the `lines` layer and disposal only touches its own canvas
+            # items, but ordering teardown outside-in keeps the link from
+            # observing a half-dismantled layer set through the signals it
+            # is still connected to.
+            self.map_link.dispose()
+            self.map_link = None
         if self.layers is not None:
             self.layers.detach()
             self.layers = None

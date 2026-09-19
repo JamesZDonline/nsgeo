@@ -473,3 +473,71 @@ def test_a_previewed_line_is_requested_from_the_loader(linked, monkeypatch):
     session.set_preview(keys[1], 7)
 
     assert asked == [keys[1]]
+
+
+# ---- selection promotes (spec §3.4) -----------------------------------------
+
+
+def _feature_id(layers, key):
+    layer = layers.layers["lines"]
+    for f in layer.getFeatures():
+        if str(f["line_key"]) == key:
+            return f.id()
+    raise AssertionError(f"no feature for {key!r}")
+
+
+def test_selecting_one_line_makes_it_the_working_line(linked):
+    link, session, layers, _canvas, keys = linked
+    assert session.current_key == keys[0]
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[1]
+
+
+def test_promotion_goes_through_open_line_so_it_cannot_diverge(linked):
+    link, session, layers, _canvas, keys = linked
+    opened = []
+    session.line_opened.connect(opened.append)
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert opened == [keys[1]]
+
+
+def test_selecting_several_lines_promotes_none(linked):
+    link, session, layers, _canvas, keys = linked
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[0]), _feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[0]
+
+
+def test_deselecting_everything_promotes_nothing(linked):
+    link, session, layers, _canvas, keys = linked
+    layer = layers.layers["lines"]
+    layer.selectByIds([_feature_id(layers, keys[1])])
+
+    layer.removeSelection()
+
+    assert session.current_key == keys[1]  # unchanged by the deselect
+
+
+def test_promotion_still_works_after_the_lines_layer_is_rebuilt(linked):
+    """refill_lines replaces the layer's features; a connection made once
+    at construction and never renewed would silently stop promoting."""
+    link, session, layers, _canvas, keys = linked
+    layers.refresh()
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[1]
+
+
+def test_a_disposed_link_stops_promoting_on_selection(linked):
+    link, session, layers, _canvas, keys = linked
+    link.dispose()
+
+    layers.layers["lines"].selectByIds([_feature_id(layers, keys[1])])
+
+    assert session.current_key == keys[0]
