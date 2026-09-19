@@ -563,6 +563,18 @@ class ProfileDock(QgsDockWidget):
             self.gain_strip.show()
         self._strip_was_visible = False
 
+    def set_pick_mode(self, flag: bool) -> None:
+        """Turn the profile's pick mode on or off.
+
+        A passthrough, deliberately: `plugin.py` owns the toolbar toggle
+        and must not reach into `self.view` past the dock that owns it.
+        `ProfileView.set_pick_mode` shipped in Plan 2 with no caller
+        anywhere -- a manual tester found it, went looking for a pick
+        mode, and concluded the build was broken rather than that the
+        feature was unbuilt (spec §1, §6). This is its first consumer.
+        """
+        self.view.set_pick_mode(bool(flag))
+
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
         # `_open` and `current_radargram`'s except branch both already
@@ -809,9 +821,21 @@ class ProfileDock(QgsDockWidget):
             # A preview never authors data (spec §3.3, §4.3). `self._key`
             # is the DISPLAYED line, so without this a shift-click on a
             # previewed radargram would emit a pick for a line the user
-            # only hovered. Nothing consumes pick_requested until M8 --
-            # this is guarded here, in the change that makes `_key` mean
-            # "displayed", rather than left for M8 to discover.
+            # only hovered.
+            #
+            # M8: this used to return silently, which was right while
+            # nothing consumed `pick_requested` -- there was no pick to
+            # miss. Now there is, and silence is indistinguishable from a
+            # pick that worked: the user shift-clicks a previewed line
+            # and nothing whatever happens, which is the same complaint
+            # issue #33 records about steps that "disappear". The guard
+            # is unchanged; it says why now. `session.add_pick` refuses
+            # the same write independently -- this is the message, not
+            # the protection.
+            self.error.emit(
+                "picks are authored on the working line; this is a preview — "
+                "select the line on the map to work on it"
+            )
             return
         # I6: guarded like every other slot here, even though nothing
         # connects to `pick_requested` yet. Nothing in Plan 2 does: the

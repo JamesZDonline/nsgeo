@@ -13,6 +13,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QStyle
 
@@ -1051,3 +1052,49 @@ def test_a_preview_that_triggers_a_load_does_not_persist_an_empty_stack(opened):
 
     assert dock.image is not None  # sanity: the preview really rendered
     assert key2 not in session.site.stacks
+
+
+# ---- pick mode and pick refusal (M8, spec §4.1, §4.3) ----------------------
+
+
+def test_set_pick_mode_reaches_the_view(opened):
+    """`ProfileView.set_pick_mode` shipped in Plan 2 with no caller at
+    all -- a manual tester found it, went looking for a pick mode, and
+    concluded the build was broken rather than that the feature was
+    unbuilt (spec §1). This is its first consumer."""
+    session, dock, key, line = opened
+    dock.set_pick_mode(True)
+    assert dock.view.cursor().shape() == Qt.CursorShape.CrossCursor
+    dock.set_pick_mode(False)
+    assert dock.view.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_a_pick_while_previewing_is_refused_out_loud(previewing):
+    """M7 guarded this and returned silently, because nothing consumed
+    the signal yet. Now that a pick is real, silence is indistinguishable
+    from a pick that landed -- the user shift-clicks a previewed line and
+    nothing whatever happens. The guard stays; it just says why now.
+
+    NOTE on the brief's test: as given, this test never entered a preview
+    at all -- the `previewing` fixture only loads two lines and opens the
+    first as the WORKING line (see `test_preview_renders_the_previewed_
+    line_not_the_working_one`, which calls `session.set_preview` itself to
+    get there). Without that call, `dock._preview_key` stays `None` and
+    the emitted pick landed on the working line -- confirmed directly: run
+    as the brief wrote it, `emitted` held one tuple and the test failed on
+    `assert emitted == []`, not on the guard this test means to exercise.
+    Added the same `session.set_preview(keys[1], 5)` call the sibling test
+    uses to actually reach the previewing state before picking.
+    """
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+    emitted = []
+    errors = []
+    dock.pick_requested.connect(lambda k, t, ns: emitted.append((k, t, ns)))
+    dock.error.connect(errors.append)
+
+    dock.view.pick_requested.emit(20, 15.0)
+
+    assert emitted == []
+    assert len(errors) == 1
+    assert "preview" in errors[0].lower()

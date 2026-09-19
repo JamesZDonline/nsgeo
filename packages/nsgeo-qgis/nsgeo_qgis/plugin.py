@@ -128,6 +128,7 @@ class NsgeoPlugin:
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
+        self.act_pick: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -166,6 +167,12 @@ class NsgeoPlugin:
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
         self.act_import = self._toolbar_action("Import DZT…", lambda: self.open_import_dialog(None))
+        self.toolbar.addSeparator()
+        self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
+        self.act_pick.setCheckable(True)
+        self.act_pick.setToolTip(
+            "Pick mode: click the profile to author a pick. Shift+click works with this off."
+        )
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -183,6 +190,7 @@ class NsgeoPlugin:
 
         self.profile_dock = ProfileDock(self.session, main)
         self.profile_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.profile_dock.pick_requested.connect(self._on_pick_requested)
         self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.profile_dock)
         self.docks.append(self.profile_dock)
 
@@ -208,6 +216,10 @@ class NsgeoPlugin:
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
         self.session.site_closed.connect(self._update_enabled)
+        # The pick action follows the WORKING LINE, not merely the site
+        # (see _update_enabled), so it has to be re-evaluated when that
+        # changes -- line_opened carries "" when there is none.
+        self.session.line_opened.connect(self._update_enabled)
 
     def unload(self) -> None:
         # Fix round 4, Finding 1: GridDialog is modeless (see
@@ -271,6 +283,7 @@ class NsgeoPlugin:
         self.act_save = None
         self.act_add_grid = None
         self.act_import = None
+        self.act_pick = None
         if self.toolbar is not None:
             self.toolbar.setParent(None)
             self.toolbar.deleteLater()
@@ -305,12 +318,23 @@ class NsgeoPlugin:
         self.toolbar_actions.append(action)
         return action
 
-    def _update_enabled(self) -> None:
+    def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
             for act in (self.act_save, self.act_add_grid, self.act_import):
                 if act is not None:
                     act.setEnabled(is_open)
+            # A crosshair over an empty profile invites a click that can
+            # do nothing, so this one needs a working line and not merely
+            # an open site. Turning it off also has to turn the MODE off:
+            # a checked-but-disabled action leaves the view in pick mode
+            # with no control left to switch it back.
+            has_line = is_open and self.session.current_key is not None
+            if self.act_pick is not None:
+                self.act_pick.setEnabled(has_line)
+                if not has_line and self.act_pick.isChecked():
+                    self.act_pick.setChecked(False)
+                    self._toggle_pick_mode(False)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not update the toolbar: {exc}", Qgis.MessageLevel.Warning)
 
@@ -427,6 +451,35 @@ class NsgeoPlugin:
         # is still in progress.
         self._gain_step = new
         self.session.replace_step(key, row, new)
+
+    def _toggle_pick_mode(self, checked: bool) -> None:
+        """The Pick toolbar toggle. Drives the dock, never the view
+        directly: `ProfileDock` owns `ProfileView`."""
+        try:
+            if self.profile_dock is None:
+                return
+            self.profile_dock.set_pick_mode(bool(checked))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
+        """Relay a pick from the profile to the session.
+
+        `session.add_pick` is NEVER connected to a signal directly. It
+        raises by design -- on a non-working line, on a non-finite time,
+        on a failed provider write -- and an exception escaping a slot
+        prints and passes on this build but reaches `qFatal()` in the
+        `qgis/qgis:ltr` container and aborts the whole job. It also has
+        somewhere better to go: a pick is authored data with no other
+        source of truth, so the reason it did not land belongs on the
+        message bar, not in a log the user is not reading.
+        """
+        try:
+            if self.session is None:
+                return
+            self.session.add_pick(key, trace, time_ns)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

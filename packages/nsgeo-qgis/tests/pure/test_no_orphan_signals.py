@@ -63,9 +63,13 @@ KNOWN_UNCONSUMED = {
 # *already-pinned* one drifting undetected.
 SHADOWED = {
     # ProfileView.pick_requested is connected (profile_dock.py wires it to
-    # `_pick`). ProfileDock's own pick_requested -- a separate declaration
-    # that happens to share the name -- is not: the real orphan.
-    "pick_requested": {"declared": 2, "connects": 1},
+    # `_pick`). ProfileDock's own pick_requested is connected too as of
+    # M8: plugin.py wires it to `_on_pick_requested`, which calls
+    # session.add_pick. Both declarations now have a consumer, so this
+    # entry no longer hides an orphan -- it stays pinned because a
+    # name-keyed count still cannot tell the two apart, and dropping to
+    # one connect again would mean one of them had been orphaned.
+    "pick_requested": {"declared": 2, "connects": 2},
     # ProfileDock.error is connected (plugin.py wires it to `self.message`).
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is

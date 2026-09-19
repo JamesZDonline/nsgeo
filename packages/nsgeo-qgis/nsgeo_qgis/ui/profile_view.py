@@ -434,6 +434,18 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
+                # Only inside the radargram itself. This handler runs for
+                # the whole widget, axis margins included, and
+                # `time_of_y` does not clamp -- a shift click on the
+                # depth-axis label reaches here with a negative local y
+                # and would author a pick at a time before the record
+                # starts. `add_pick` clamps such a time into the record,
+                # which is precisely what makes the bad pick look
+                # plausible once written. Hover already applies the same
+                # bound (`_handle_mouse_move`'s `0 <= x < width`); this
+                # is that rule for the other axis and the other gesture.
+                if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
+                    return
                 self.pick_requested.emit(
                     self.transform.trace_index_at(x), self.transform.time_of_y(y)
                 )

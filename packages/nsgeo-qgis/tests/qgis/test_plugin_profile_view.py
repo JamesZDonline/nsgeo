@@ -1283,3 +1283,71 @@ def test_real_file_renders_at_full_resolution(make_view):
     v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns)
     v.set_image(ri.image)
     v.grab_image()
+
+
+# ---- picking: only inside the radargram (M8) -------------------------------
+
+
+def test_a_shift_click_outside_the_image_rect_is_not_a_pick(view):
+    """M8 adopts `pick_requested`, so where it fires is now load bearing.
+    The press handler runs for the whole widget, including the axis
+    margins, and `ViewTransform.time_of_y` does not clamp -- a shift
+    click on the time-axis labels reaches it with a negative local y and
+    used to emit a pick at a time before the record starts.
+    `session.add_pick` clamps such a time into the record, which is
+    exactly what would make the bad pick look plausible once written;
+    refusing it here is what keeps it from being authored at all.
+
+    MARGIN_LEFT is 56 and MARGIN_TOP is 8 (profile_view.py:42), so both
+    out-of-rect points below are real widget coordinates, not clamped to
+    zero.
+    """
+    v, _rg = view
+    picks = []
+    v.pick_requested.connect(lambda t, ns: picks.append((t, ns)))
+    r = v.image_rect()
+    assert r.left() >= 10 and r.top() >= 5, "the margins must be wide enough to click in"
+
+    # Inside the radargram: a pick.
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        QPoint(r.left() + 10, r.top() + 10),
+    )
+    assert len(picks) == 1
+
+    # In the left margin (the time axis) and above the top edge: not picks.
+    for pos in (
+        QPoint(r.left() - 5, r.top() + 10),
+        QPoint(r.left() + 10, r.top() - 5),
+    ):
+        QTest.mouseClick(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos)
+    assert len(picks) == 1
+
+
+def test_pick_mode_also_ignores_a_click_outside_the_radargram(view):
+    """The same bound applies to the mode, not only to Shift+click --
+    with pick mode on, the whole widget is a crosshair, so the margins
+    are the easiest place to click by accident."""
+    v, _rg = view
+    picks = []
+    v.pick_requested.connect(lambda t, ns: picks.append((t, ns)))
+    v.set_pick_mode(True)
+    r = v.image_rect()
+
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() - 5, r.top() + 10),
+    )
+    assert picks == []
+
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 10, r.top() + 10),
+    )
+    assert len(picks) == 1
