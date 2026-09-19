@@ -49,13 +49,13 @@ def test_difference_view_shows_what_a_step_removed(plugin):
     pd.add_step("background_mean")
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert "background_mean" in prd.difference_label.fullText()
+    assert "background_mean" in prd.difference_label.text()
     diff = prd.current_radargram()
     result = s.stack_for(key).result()
     assert diff is not result
     np.testing.assert_allclose(diff.data, s.stack_for(key).intermediate(0).data - result.data)
     pd.diff_button.setChecked(False)
-    assert prd.difference_label.fullText() == ""
+    assert prd.difference_label.text() == ""
 
 
 def test_difference_view_declines_sample_count_changing_steps(plugin):
@@ -68,7 +68,7 @@ def test_difference_view_declines_sample_count_changing_steps(plugin):
     pd.diff_button.setChecked(True)
     assert messages and "sample count" in messages[0]
     assert not pd.diff_button.isChecked()
-    assert prd.difference_label.fullText() == ""
+    assert prd.difference_label.text() == ""
 
 
 def _menu_action(menu, text):
@@ -205,13 +205,13 @@ def test_difference_view_clears_when_switching_lines(plugin):
     pd.add_step("background_mean")
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert prd.difference_label.fullText() != ""
+    assert prd.difference_label.text() != ""
 
     other = s.keys()[1]
     s.open_line(other)
 
     assert not pd.diff_button.isChecked()
-    assert prd.difference_label.fullText() == ""
+    assert prd.difference_label.text() == ""
 
 
 def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
@@ -231,7 +231,7 @@ def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
     pd.add_step("background_mean")
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert prd.difference_label.fullText() != ""
+    assert prd.difference_label.text() != ""
 
     messages = []
     prd.error.connect(messages.append)
@@ -239,7 +239,7 @@ def test_difference_view_recovers_when_the_differenced_step_disappears(plugin):
 
     assert messages and "no longer exists" in messages[0]
     assert not pd.diff_button.isChecked()
-    assert prd.difference_label.fullText() == ""
+    assert prd.difference_label.text() == ""
 
 
 def test_diff_button_is_disabled_with_no_line_open(plugin):
@@ -300,7 +300,7 @@ def test_closing_the_site_while_differencing_logs_nothing(plugin, message_log):
     pd.add_step("background_mean")
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert prd.difference_label.fullText() != ""
+    assert prd.difference_label.text() != ""
 
     s.close_site()
 

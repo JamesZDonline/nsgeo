@@ -435,11 +435,11 @@ def test_set_difference_index_shows_what_a_step_actually_removed(opened):
     expected_diff = before_data - after_data
 
     dock.set_difference_index(0)
-    assert dock.difference_label.fullText() == "Difference: dewow"
+    assert dock.difference_label.text() == "Difference: dewow"
     np.testing.assert_array_equal(dock.image.rg.data, expected_diff)
 
     dock.set_difference_index(-1)
-    assert dock.difference_label.fullText() == ""
+    assert dock.difference_label.text() == ""
     np.testing.assert_array_equal(dock.image.rg.data, after_data)
 
 
@@ -506,34 +506,25 @@ def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
     assert t.trace_lo == pytest.approx(0.0)
 
 
-def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):
+def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):
     """The author's walkthrough: 'The preview label text should be on the
     right of the fit and 1:1 buttons so it doesn't shift them around when
     it loads.'
 
-    Finding 2 (M7 walkthrough re-review): this replaces an earlier version
-    of this test that only asserted `bar.indexOf(...)` order, which cannot
-    see the actual defect. At a 900px dock width -- the width the author
-    actually uses -- with a real velocity label populated, a long enough
-    preview banner still forced Qt's box-layout shrink algorithm to steal
-    space from widgets EARLIER in the row than the label that grew:
-    `colormap_combo` shrank, pulling `fit_button`/`one_to_one_button` left
-    by 26px, and `velocity_label`'s own width dropped from 180 to 134.
-    Qt's shrink distribution is not confined to whatever sits after the
-    widget whose preferred size changed, so only a real geometry
-    assertion -- at the width where it actually bites -- can tell a real
-    fix from one that merely reorders widgets.
-
-    Finding 6 (M7 walkthrough re-review, second round): a plain
-    `dock.resize(900, 360)` here was vacuous once the labels held a fixed
-    260px + 180px reservation -- that raised the DOCK's own
-    `minimumSizeHint` past 900px, so `resize()` could not actually make
-    the dock 900px wide (a free-standing top-level widget cannot be
-    resized below its own minimum size hint), and the squeeze this test
-    means to detect never had room to happen. `dock.setFixedWidth(900)`
-    is the real constraint -- both a minimum AND a maximum -- and the
-    explicit `dock.width() == 900` assertion right after is what stops
-    that particular vacuous-pass from ever slipping back in unnoticed.
+    Finding 7 (M7 walkthrough re-review, third round): Findings 2 and 5
+    both tried to fit a preview label INSIDE this row -- reordered past a
+    stretch, it still shifted the buttons at a realistic dock width;
+    given a fixed width instead, it raised the dock's own minimum width
+    and clipped its neighbours permanently; made to elide gracefully
+    (`_ElidingLabel`), it elided all the way to an EMPTY STRING at 900px,
+    silently dropping the spec §3.3 cue the whole feature exists to give.
+    There was never room in this row for it, at any width worth using.
+    The preview marker moved to the window title instead (see
+    `test_the_title_marks_a_preview_and_clears_on_snap_back`), which costs
+    the row nothing -- so this test's job shrinks to confirming exactly
+    that: with the toolbar back to its pre-M7 widget set, nothing in it
+    moves when a preview starts, at the 900px width the author actually
+    uses.
     """
     session = SiteSession()
     dock = ProfileDock(session)
@@ -543,7 +534,8 @@ def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     session.add_grid(GRID)
     # The second line's label is deliberately far longer than any real
     # file stem this plugin has ever opened, so the test does not depend
-    # on a particular name happening to fit.
+    # on a particular name happening to fit -- it now names the WINDOW
+    # TITLE, which can hold it regardless, rather than a toolbar label.
     labels = ["FILE__001", "a genuinely very long survey line name indeed"]
     lines = []
     for i, label in enumerate(labels):
@@ -574,6 +566,7 @@ def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     )
     assert velocity_text_width > 0  # sanity: really populated, like production
     assert dock.velocity_label.width() >= velocity_text_width  # not squeezed, even before
+    assert "PREVIEW" not in dock.windowTitle()
 
     session.set_preview(keys[1], 5)
     QTest.qWait(50)
@@ -581,6 +574,29 @@ def test_the_preview_banner_does_not_shift_the_toolbar_buttons(qgis_app, tmp_pat
     assert dock.fit_button.x() == before_fit
     assert dock.one_to_one_button.x() == before_one_to_one
     assert dock.velocity_label.width() >= velocity_text_width  # still not squeezed
+    # The cue spec §3.3 requires is visible -- not merely "a method was
+    # called" -- and it is the actual, un-elided line name: the whole
+    # point of moving it out of the toolbar row.
+    assert "PREVIEW" in dock.windowTitle()
+    assert "a genuinely very long survey line name indeed" in dock.windowTitle()
+    dock.hide()
+    dock.deleteLater()
+
+
+def test_the_toolbar_minimum_width_is_back_to_pre_m7(qgis_app):
+    """Findings 2 and 5's fixed-width/eliding-label machinery is gone
+    entirely now (Finding 7) -- `minimumSizeHint().width()` should be
+    close to the ~658px Finding 5 already measured with `_ElidingLabel`
+    in place (measured here: 662px -- a plain, empty `QLabel("")` costs a
+    few px more than `_ElidingLabel`'s `Ignored` policy did, which is
+    expected and harmless), and nowhere near the ~1098px either
+    `setFixedWidth` version reached. The toolbar's widget set is now
+    IDENTICAL to what it was before any of this episode:
+    `difference_label` is back to a plain, unreserved `QLabel`, and there
+    is no preview label in the row at all any more."""
+    session = SiteSession()
+    dock = ProfileDock(session)
+    assert dock.minimumSizeHint().width() <= 700
     dock.hide()
     dock.deleteLater()
 
@@ -717,16 +733,39 @@ def test_preview_renders_the_previewed_line_not_the_working_one(previewing):
     assert label in dock.windowTitle()
 
 
-def test_the_banner_names_the_previewed_line_and_clears_on_snap_back(previewing):
+def test_the_title_marks_a_preview_and_clears_on_snap_back(previewing):
+    """Finding 7 (M7 walkthrough re-review, third round): the preview
+    marker lives in the window title now, not a toolbar label -- spec
+    §3.3 only requires that the profile state which line it is showing
+    and whether that is a preview, and the title already does both, at
+    no layout cost."""
     dock, session, keys = previewing
-    assert dock.preview_label.fullText() == ""
+    assert "PREVIEW" not in dock.windowTitle()
 
     session.set_preview(keys[1], 5)
-    assert session.line_for_key(keys[1]).path.stem in dock.preview_label.fullText()
+    assert "PREVIEW" in dock.windowTitle()
+    assert session.line_for_key(keys[1]).path.stem in dock.windowTitle()
 
     session.clear_preview()
-    assert dock.preview_label.fullText() == ""
+    assert "PREVIEW" not in dock.windowTitle()
     assert dock._key == keys[0]
+
+
+def test_the_tooltip_carries_the_preview_hint_and_clears_with_it(previewing):
+    """Finding 7(e) (M7 walkthrough re-review, third round): '— select it
+    on the map to work on it' does not belong in a title -- a title is
+    read at a glance, that hint is read on purpose -- so it lives as the
+    dock's tooltip instead, set only while a preview is showing and
+    cleared the instant it ends, the same lifecycle as the `PREVIEW`
+    title marker itself."""
+    dock, session, keys = previewing
+    assert dock.toolTip() == ""
+
+    session.set_preview(keys[1], 5)
+    assert "select it on the map to work on it" in dock.toolTip()
+
+    session.clear_preview()
+    assert dock.toolTip() == ""
 
 
 def test_moving_along_a_previewed_line_does_not_rerender_per_move(previewing, monkeypatch):
@@ -786,7 +825,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.append_step(keys[0], build_step("dewow", window_ns=4.0))
     dock.set_difference_index(0)
     assert dock._difference_index == 0
-    assert "dewow" in dock.difference_label.fullText()
+    assert "dewow" in dock.difference_label.text()
 
     # keys[1] has an EMPTY stack, so index 0 does not exist on it. If the
     # render used the stored index instead of the effective one this would
@@ -794,12 +833,12 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.set_preview(keys[1], 5)
     assert dock._effective_difference_index == -1
     assert dock._difference_index == 0
-    assert dock.difference_label.fullText() == ""
+    assert dock.difference_label.text() == ""
     assert dock.image is not None
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
-    assert "dewow" in dock.difference_label.fullText()
+    assert "dewow" in dock.difference_label.text()
 
 
 def test_snap_back_restores_the_working_lines_cursor_and_selection(previewing):
@@ -851,7 +890,7 @@ def test_previewing_the_working_line_is_not_a_preview(previewing):
 
     session.set_preview(keys[0], 5)
 
-    assert dock.preview_label.fullText() == ""
+    assert "PREVIEW" not in dock.windowTitle()
     assert dock._key == keys[0]
 
 
@@ -861,17 +900,17 @@ def test_opening_a_line_while_previewing_ends_the_preview(previewing):
 
     session.open_line(keys[1])
 
-    assert dock.preview_label.fullText() == ""
+    assert "PREVIEW" not in dock.windowTitle()
     assert dock._key == keys[1]
 
 
-def test_closing_the_site_while_previewing_clears_the_banner(previewing):
+def test_closing_the_site_while_previewing_clears_the_preview_marker(previewing):
     dock, session, keys = previewing
     session.set_preview(keys[1], 5)
 
     session.close_site()
 
-    assert dock.preview_label.fullText() == ""
+    assert "PREVIEW" not in dock.windowTitle()
     assert dock._key is None
 
 
@@ -892,7 +931,7 @@ def test_removing_the_current_line_while_previewing_another_keeps_the_dock_in_sy
 
     assert session.display_key == keys[1]
     assert dock._key == keys[1]
-    assert dock.preview_label.fullText() != ""
+    assert "PREVIEW" in dock.windowTitle()
 
 
 def test_a_shift_click_on_a_preview_authors_no_pick(previewing):

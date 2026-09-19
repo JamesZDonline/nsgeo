@@ -47,13 +47,11 @@ from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QFontMetrics
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -104,55 +102,6 @@ def velocity_source(session: SiteSession, key: str) -> str:
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
-
-
-class _ElidingLabel(QLabel):
-    """A label that yields rather than pushes.
-
-    Finding 5 (M7 walkthrough re-review, second round): `difference_label`
-    and `preview_label` sit in a toolbar row beside controls (Fit, 1:1,
-    the channel combo, the velocity label) that must not move when either
-    appears. A plain `QLabel` demands its full text width, which either
-    shoves those controls along (the original walkthrough complaint) or,
-    given a fixed width instead, raises the whole DOCK's own
-    `minimumSizeHint` and permanently clips its neighbours even with no
-    banner showing at all -- measured directly: a 260px + 180px
-    reservation took the dock's minimum width from ~1098px to well past
-    what a 900px-docked user ever sees, clipping `colormap_combo` and
-    `velocity_label` continuously, not just during a preview. That is a
-    worse outcome than the 26px shift it replaced.
-
-    This takes whatever space the layout leaves it and elides its text to
-    fit, so the row's minimum width never depends on the text at all --
-    neither a push nor a permanent reservation. The untruncated text
-    stays available as a tooltip and via `fullText()`; `text()` itself
-    returns the elided, currently-displayed string, so any caller that
-    wants the real value (not what fits on screen right now) must use
-    `fullText()` instead.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._full = ""
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setMinimumWidth(0)
-
-    def setText(self, text: str) -> None:  # noqa: N802 -- Qt's own name
-        self._full = text
-        self.setToolTip(text)
-        self._apply()
-
-    def fullText(self) -> str:  # noqa: N802 -- matches Qt's camelCase neighbours
-        return self._full
-
-    def resizeEvent(self, event: Any) -> None:  # noqa: N802 -- Qt's own name
-        super().resizeEvent(event)
-        self._apply()
-
-    def _apply(self) -> None:
-        metrics = QFontMetrics(self.font())
-        elided = metrics.elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width()))
-        super().setText(elided)
 
 
 class ProfileDock(QgsDockWidget):
@@ -207,6 +156,22 @@ class ProfileDock(QgsDockWidget):
         self.colormap_combo.addItems(colormap_names())
         self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
         bar.addWidget(self.colormap_combo)
+        # Finding 7 (M7 walkthrough re-review, third round): the preview
+        # marker moved out of this row entirely -- see `_show_line`'s
+        # `is_preview` parameter, which marks it in the window title
+        # instead (`nsgeo Profile · PREVIEW: <name> · N traces`). Findings
+        # 2 and 5 chased a label that could not both fit here AND stay
+        # visible: reordered past a stretch, it still shifted the buttons
+        # at a realistic dock width; given a fixed width instead, it
+        # raised the dock's own minimum width and clipped its neighbours
+        # permanently; made to elide gracefully, it elided to an empty
+        # string at 900px -- there was simply no room in this row to hold
+        # it, visibly, ever. The title bar already names the line and
+        # costs no layout at all. `difference_label` was never part of
+        # the complaint -- it goes back to exactly where it sat before
+        # any of this: a plain `QLabel`, immediately before `fit_button`.
+        self.difference_label = QLabel("")
+        bar.addWidget(self.difference_label)
         self.fit_button = QPushButton("Fit")
         self.one_to_one_button = QPushButton("1:1")
         bar.addWidget(self.fit_button)
@@ -214,37 +179,6 @@ class ProfileDock(QgsDockWidget):
         self.channel_combo = QComboBox()
         self.channel_combo.hide()
         bar.addWidget(self.channel_combo)
-        # Finding 2 (M7 walkthrough re-review): putting the two labels
-        # after every fixed-width control and before a single trailing
-        # stretch (an earlier fix here) is not enough on its own. Qt's
-        # box-layout shrink algorithm does not confine a shortfall to
-        # whatever sits after the widget whose preferred size grew -- when
-        # the row's total demand exceeds the available width, it
-        # redistributes across every shrinkable item in the WHOLE row.
-        # Measured at a 900px dock width (the width the author actually
-        # uses) with the full preview banner: `colormap_combo` (well
-        # BEFORE either label) shrank, pulling `fit_button` and
-        # `one_to_one_button` left by 26px, and `velocity_label` (after
-        # the stretch) had its own width squeezed from 180 to 134 -- a
-        # single stretch's slack was simply not enough.
-        #
-        # Finding 5 (M7 walkthrough re-review, second round): a
-        # `setFixedWidth` reservation "fixed" that by raising the DOCK's
-        # own `minimumSizeHint` instead -- traded a 26px shift during a
-        # preview for `colormap_combo`/`velocity_label` clipped
-        # PERMANENTLY, banner or no banner, on any dock narrower than the
-        # reservation. `_ElidingLabel` (see its own docstring) is what
-        # actually closes this without a new trade: it never asks for
-        # more than the layout leaves it, so it can neither push a
-        # neighbour nor raise the row's (or the dock's) minimum width.
-        # Both labels still sit between two stretches so their growth --
-        # now bounded by whatever is actually free -- has somewhere
-        # accommodating on either side to draw from.
-        bar.addStretch(1)
-        self.difference_label = _ElidingLabel()
-        bar.addWidget(self.difference_label)
-        self.preview_label = _ElidingLabel()
-        bar.addWidget(self.preview_label)
         bar.addStretch(1)
         self.velocity_label = QLabel("")
         bar.addWidget(self.velocity_label)
@@ -393,7 +327,6 @@ class ProfileDock(QgsDockWidget):
         still_previewing = not key and self.session.is_open and self.session.preview_key is not None
         if not still_previewing:
             self._preview_key = None
-            self.preview_label.setText("")
             # A preview may have disabled the channel combo (see
             # `_enter_preview`); opening ANY line -- including via
             # promotion, which is how a preview ends without
@@ -411,11 +344,11 @@ class ProfileDock(QgsDockWidget):
         self._deferred_strip = None
         if not key:
             if still_previewing:
-                # The view, banner and disabled channel combo are already
-                # showing exactly the surviving preview -- untouched above
-                # -- so there is nothing left to do beyond the working
-                # line's own bookkeeping (difference index, deferred
-                # strip), already cleared.
+                # The view, title/tooltip and disabled channel combo are
+                # already showing exactly the surviving preview --
+                # untouched above -- so there is nothing left to do beyond
+                # the working line's own bookkeeping (difference index,
+                # deferred strip), already cleared.
                 return
             self._clear_view_only()
             return
@@ -434,15 +367,34 @@ class ProfileDock(QgsDockWidget):
         self.view.clear_selection()
         self._show_line(key)
 
-    def _show_line(self, key: str) -> None:
+    def _show_line(self, key: str, *, is_preview: bool = False) -> None:
         """Configure the view for `key`: title, direction, axes, image,
         channels, velocity. Shared by `_open` (the working line) and
         `_enter_preview`. Deliberately does NOT touch the difference view
         or the cursor/selection: those differ between the two callers,
-        which is the whole reason this is a separate method."""
+        which is the whole reason this is a separate method.
+
+        Finding 7 (M7 walkthrough re-review, third round): `is_preview`
+        marks the window title -- `nsgeo Profile · PREVIEW: <name> · N
+        traces`, the marker at the FRONT of the name so it cannot be lost
+        to truncation on a narrow or tabbed dock -- and, alongside it,
+        sets the dock's tooltip to the "select it on the map to work on
+        it" hint (cleared otherwise). This is an explicit parameter, not
+        a re-derivation from `self._preview_key`: at the moment
+        `_enter_preview` calls this, `_preview_key` is already set to
+        `key`, so re-deriving "is this a preview" from it here would
+        still give the right answer today, but only by coupling this
+        method to an assignment ordering that has already changed twice
+        in this milestone. The caller already knows which case it is;
+        saying so directly is the honest version.
+        """
         line = self.session.line_for_key(key)
         label = getattr(line.placement, "label", None) or line.path.stem
-        self.setWindowTitle(f"nsgeo Profile · {label} · {line.n_traces} traces")
+        shown = f"PREVIEW: {label}" if is_preview else label
+        self.setWindowTitle(f"nsgeo Profile · {shown} · {line.n_traces} traces")
+        self.setToolTip(
+            f"Preview: {label} — select it on the map to work on it" if is_preview else ""
+        )
         self.view.set_direction(int(getattr(line.placement, "direction", 1)))
         self.image = None
         profiles = self.session.profiles_for(key)
@@ -507,7 +459,6 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
-        self.preview_label.setText("")
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -530,6 +481,7 @@ class ProfileDock(QgsDockWidget):
         self.image = None
         self.view.clear()
         self.setWindowTitle("nsgeo Profile")
+        self.setToolTip("")
         self.velocity_label.setText("")
         self.channel_combo.hide()
 
@@ -549,8 +501,8 @@ class ProfileDock(QgsDockWidget):
                     # previewed 1300-trace line, 16.8 ms/move (4.9 ms at
                     # 240 traces) -- the exact renderer thrash the dwell
                     # exists to prevent, moved from the dwell's side to
-                    # ours. _enter_preview's other effects (banner text,
-                    # gain strip hidden, channel combo disabled,
+                    # ours. _enter_preview's other effects (window title/
+                    # tooltip, gain strip hidden, channel combo disabled,
                     # _strip_was_visible capture) were all already set
                     # when the preview first entered, and nothing about a
                     # trace move should disturb any of them.
@@ -560,9 +512,10 @@ class ProfileDock(QgsDockWidget):
             else:
                 # Either the preview was cleared, or the pointer is over
                 # the line already being worked on -- which is not a
-                # preview at all: showing a banner and hiding the gain
-                # strip for the line the user is editing would be pure
-                # noise, and a re-render of what is already on screen.
+                # preview at all: marking the title as a preview and
+                # hiding the gain strip for the line the user is editing
+                # would be pure noise, and a re-render of what is already
+                # on screen.
                 self._exit_preview()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not show the preview of {key!r}: {exc}", Qgis.MessageLevel.Critical)
@@ -580,17 +533,11 @@ class ProfileDock(QgsDockWidget):
         # later line-open) and in `_exit_preview`.
         self.channel_combo.setEnabled(False)
         self.difference_label.setText("")
-        line = self.session.line_for_key(key)
-        label = getattr(line.placement, "label", None) or line.path.stem
-        # Finding 5 (M7 walkthrough re-review, second round): shortened
-        # to "Preview: <name>" only while difference_label/preview_label
-        # were a rigid setFixedWidth reservation that could not hold the
-        # full string. _ElidingLabel degrades gracefully -- eliding the
-        # tail rather than shoving a neighbour -- so the full banner the
-        # plan asked for is the right thing to set again; `text()` shows
-        # whatever fits, `fullText()`/the tooltip still carry all of it.
-        self.preview_label.setText(f"Preview: {label} — select it on the map to work on it")
-        self._show_line(key)
+        # Finding 7 (M7 walkthrough re-review, third round): the preview
+        # marker is the window title/tooltip now (see `_show_line`'s
+        # `is_preview` parameter) -- there is no toolbar label left here
+        # to set.
+        self._show_line(key, is_preview=True)
         self.view.clear_selection()
         self.view.set_cursor(trace)
 
@@ -598,7 +545,6 @@ class ProfileDock(QgsDockWidget):
         if self._preview_key is None:
             return
         self._preview_key = None
-        self.preview_label.setText("")
         self.channel_combo.setEnabled(True)
         if self._working_key is None:
             self._clear_view_only()
