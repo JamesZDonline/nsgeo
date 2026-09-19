@@ -151,3 +151,42 @@ def build_cube(
         accumulate(total, count, line, plan)
     mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
+
+
+def stream_slice(
+    lines: Sequence[PreparedLine],
+    plans: Sequence[LinePlan],
+    frame: CubeFrame,
+    z: ZAxis,
+    k0: int,
+    k1: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One slice, binned straight from the lines, holding no cube.
+
+    This is the default residency. It is the same algorithm as `build_cube`
+    restricted to the levels in the window, and a property test asserts the
+    two agree -- if they ever diverge, the mode a user is in would change
+    what they see.
+
+    Returns (values, coverage), both shaped (ny, nx); values is NaN where
+    coverage is zero.
+    """
+    if len(lines) != len(plans):
+        raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
+    if not 0 <= k0 < k1 <= z.nz:
+        raise ValueError(f"level window must satisfy 0 <= k0 < k1 <= {z.nz}, got {k0}..{k1}")
+    n_levels = k1 - k0
+    total = np.zeros(frame.n_cells, dtype=np.float32)
+    count = np.zeros(frame.n_cells, dtype=np.int64)
+    for line, plan in zip(lines, plans):
+        block = resample_window(line, plan, k0, k1)
+        total[plan.cells] += np.add.reduceat(block, plan.starts, axis=1).sum(axis=0)
+        count[plan.cells] += plan.counts.astype(np.int64) * n_levels
+    values = np.divide(
+        total, count, out=np.full(frame.n_cells, np.nan, dtype=np.float32), where=count > 0
+    )
+    coverage = (count // n_levels).astype(np.int32)
+    return (
+        values.reshape(frame.ny, frame.nx),
+        coverage.reshape(frame.ny, frame.nx),
+    )

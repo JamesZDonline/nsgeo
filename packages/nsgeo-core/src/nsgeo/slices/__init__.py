@@ -12,6 +12,8 @@ from nsgeo.slices.binning import (  # noqa: F401
     PreparedLine,
     build_cube,
     plan_line,
+    stream_slice,
 )
 from nsgeo.slices.cube import Provenance, SliceCube  # noqa: F401
+from nsgeo.slices.fill import disc_kernel, fill  # noqa: F401
 from nsgeo.slices.frame import CubeFrame, ZAxis  # noqa: F401
