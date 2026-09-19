@@ -66,6 +66,54 @@ def test_envelope_is_not_the_zero_padded_approximation():
     assert not np.allclose(exact, padded, rtol=1e-3)
 
 
+def test_envelope_of_an_odd_length_sinusoid_is_its_amplitude():
+    """463 is the production length. k = (n - 1) // 2 is the top positive bin --
+    the one and only bin where the odd weighting's upper bound sits, so a
+    lower-frequency sinusoid cannot discriminate an off-by-one there."""
+    n = 463
+    k = (n - 1) // 2
+    wave = 3.0 * np.sin(2.0 * np.pi * k * np.arange(n) / n)
+    env = analytic_envelope(wave[:, None])[:, 0]
+    np.testing.assert_allclose(env, 3.0, rtol=1e-6)
+
+
+def test_envelope_energy_identity_pins_every_bin_weight():
+    """For the analytic signal z of a real x, mean(|z|**2) == 2*mean(x**2) -
+    mean(x)**2 exactly when there is no Nyquist bin (odd n): DC plus the
+    doubled positive bins account for the whole spectrum. An even n has a
+    second self-conjugate bin -- Nyquist, real and unpaired like DC -- that
+    contributes its own energy term: mean(x * (-1)**arange(n))**2, the mean
+    of x against the alternating +1/-1 sequence that IS the Nyquist basis
+    function. (The plan's proposed test used the odd-n identity unmodified
+    for n=512 too; that is off by exactly this term and fails against the
+    *correct* implementation -- see the fix report.) Checked over an odd and
+    an even length, on broadband noise rather than one frequency, so this
+    pins every bin's weight at once rather than whichever bin a sinusoid
+    happens to sit on."""
+    rng = np.random.default_rng(2)
+    for n in (463, 512):
+        x = rng.standard_normal((n, 3))
+        env = analytic_envelope(x)
+        lhs = np.mean(env**2, axis=0)
+        mean_x = np.mean(x, axis=0)
+        mean_x2 = np.mean(x**2, axis=0)
+        if n % 2 == 0:
+            alt = (-1.0) ** np.arange(n)
+            mean_alt = np.mean(x * alt[:, None], axis=0)
+        else:
+            mean_alt = 0.0
+        rhs = 2.0 * mean_x2 - mean_x**2 - mean_alt**2
+        np.testing.assert_allclose(lhs, rhs, atol=1e-9)
+
+
+def test_envelope_even_length_nyquist_bin_is_not_doubled():
+    """The even branch's Nyquist bin is real and unpaired, like DC -- weight
+    1, not 2. cos(pi*n) sits exactly on that bin, so doubling it doubles the
+    envelope."""
+    env = analytic_envelope(np.cos(np.pi * np.arange(64))[:, None])
+    np.testing.assert_allclose(env, 1.0, rtol=1e-6)
+
+
 def test_all_three_transforms_declare_themselves_unipolar():
     for name in ("amp_abs", "amp_square", "amp_envelope"):
         assert is_unipolar(build_step(name)) is True
