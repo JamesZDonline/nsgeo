@@ -6,4 +6,12 @@ preset, the same rule the step stack follows.
 
 from __future__ import annotations
 
+from nsgeo.slices.binning import (  # noqa: F401
+    CoverageError,
+    LinePlan,
+    PreparedLine,
+    build_cube,
+    plan_line,
+)
+from nsgeo.slices.cube import Provenance, SliceCube  # noqa: F401
 from nsgeo.slices.frame import CubeFrame, ZAxis  # noqa: F401
