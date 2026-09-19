@@ -474,7 +474,16 @@ already records that file as overloaded.
 Contents: the cube and its provenance in one place; slice position, thickness and step; cell size
 and fill radius; stretch scope and palette; a coverage toggle; export. Position, thickness, cell
 size, radius and dz are **live sliders**, with `shift + scroll` on the canvas cycling depth — the
-convention users of other packages already have. Depth is labelled in both ns and m.
+convention users of other packages already have.
+
+**The window readout sits directly under the position slider**, not among the numeric fields. It
+reads `slice 14 / 40 · 12.0–16.0 ns · 0.60–0.80 m`: the control that moves the window and the
+statement of where the window now is are one unit, because they are read together on every tick.
+The velocity that produced the depth is a separate, quieter line — it is provenance, not state.
+
+The readout always shows the window's **full range** in both ns and m rather than its centre,
+for the reason in §6.6: with overlapping slices the extent of what is being averaged is the
+thing a reader can otherwise mistake for vertical resolution.
 
 ### 9.3 The link is already built
 
