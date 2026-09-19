@@ -213,7 +213,7 @@ def to_index8_unipolar(data: np.ndarray, limit: float) -> np.ndarray:
     """Map 0..limit to 0..255, clipping outside.
 
     Non-finite samples land at 0 here and are handled properly by
-    `to_rgba8`, which makes them transparent -- index 8 has no spare
+    `to_rgba8`, which makes them transparent -- an 8-bit index has no spare
     entry to mean "no data", so nodata is an alpha question.
     """
     if not limit > 0.0:

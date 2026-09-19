@@ -253,6 +253,31 @@ def test_unipolar_clip_falls_back_when_everything_is_nodata():
     assert render.UnipolarClip().limit(np.full((4, 4), np.nan)) == 1.0
 
 
+def test_unipolar_clip_validates_its_arguments():
+    """Mirrors test_percentile_clip_validates_its_arguments: UnipolarClip
+    passed all four of its other tests with __post_init__ deleted, so
+    validation itself was untested."""
+    with pytest.raises(ValueError):
+        render.UnipolarClip(percentile=0.0)
+    with pytest.raises(ValueError):
+        render.UnipolarClip(max_samples=0)
+
+
+def test_unipolar_clip_subsamples_large_arrays_deterministically():
+    """Mirrors test_percentile_clip_subsamples_large_arrays_deterministically:
+    the max_samples stride branch runs on every real slice (a resident
+    cube's mean is exactly this shape) but was never exercised by a test."""
+    rng = np.random.default_rng(1)
+    data = rng.random(size=(512, 3000))  # non-negative, unlike PercentileClip's normal draw
+    clip = render.UnipolarClip(percentile=99.0, max_samples=10_000)
+    lim = clip.limit(data)
+    step = int(np.ceil(data.size / 10_000))
+    expected = float(np.percentile(data.ravel()[::step], 99.0))
+    assert lim == expected
+    full = float(np.percentile(data, 99.0))
+    assert abs(lim - full) / full < 0.05
+
+
 def test_rgba_makes_nodata_transparent_and_data_opaque():
     """A slice cell with no traces under it must not paint as a value."""
     data = np.array([[0.0, np.nan]])
@@ -298,3 +323,21 @@ def test_amp_black_high_runs_white_to_black():
     lut = render.colormap("amp_black_high")
     assert tuple(lut[0]) == (255, 255, 255)
     assert tuple(lut[255]) == (0, 0, 0)
+
+
+def test_amp_heat_runs_black_through_red_and_orange_to_white():
+    """Endpoints alone do not pin this table: at t=0 every channel formula
+    clips to 0 and at t=1 every channel formula clips to 1, regardless of
+    which channel each formula was assigned to -- a version with its
+    channels permuted (blue -> cyan -> white instead of black -> red ->
+    orange -> white) would still land on black at index 0 and white at
+    index 255. The midpoint is what tells them apart: on the real table
+    it is a saturated orange-red (red already maxed, blue still zero),
+    which a blue-first permutation would report as the mirror image."""
+    lut = render.colormap("amp_heat")
+    assert tuple(lut[0]) == (0, 0, 0)
+    assert tuple(lut[255]) == (255, 255, 255)
+    r, g, b = (int(v) for v in lut[128])
+    assert r == 255
+    assert b == 0
+    assert 100 <= g <= 160
