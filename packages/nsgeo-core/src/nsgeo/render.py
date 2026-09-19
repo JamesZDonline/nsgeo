@@ -129,12 +129,6 @@ def _seismic() -> np.ndarray:
     return np.round(np.stack([r, g, b], axis=1) * 255.0).astype(np.uint8)
 
 
-def _amp_grey(black_high: bool) -> np.ndarray:
-    ramp = np.linspace(255.0, 0.0, 256) if black_high else np.linspace(0.0, 255.0, 256)
-    g = np.round(ramp).astype(np.uint8)
-    return np.stack([g, g, g], axis=1)
-
-
 def _amp_heat() -> np.ndarray:
     """Black through red and orange to white: the unipolar table that reads
     as intensity rather than as a signed deviation."""
@@ -149,8 +143,12 @@ _COLORMAPS: dict[str, np.ndarray] = {
     "grey_black_high": _grey(black_high=True),
     "grey_white_high": _grey(black_high=False),
     "seismic": _seismic(),
-    "amp_black_high": _amp_grey(black_high=True),
-    "amp_white_high": _amp_grey(black_high=False),
+    # Deliberately the same ramp as the grey_* pair above -- amp_black_high
+    # and amp_white_high exist as separate names only so a slice can be
+    # offered a unipolar-only choice; UNIPOLAR_COLORMAPS membership is the
+    # real distinction, the bytes are identical on purpose.
+    "amp_black_high": _grey(black_high=True),
+    "amp_white_high": _grey(black_high=False),
     "amp_heat": _amp_heat(),
 }
 
@@ -229,20 +227,31 @@ def to_index8_unipolar(data: np.ndarray, limit: float) -> np.ndarray:
 
 
 def to_rgba8(data: np.ndarray, limit: float, lut: np.ndarray, *, unipolar: bool) -> np.ndarray:
-    """(H, W, 4) uint8 with alpha 0 where `data` is not finite.
+    """(H, W, 4) uint8.
 
     Slices need real nodata: a cell with no traces under it must not paint
-    as an amplitude, and zero is a perfectly ordinary amplitude. A
-    radargram has no nodata, so `unipolar=False` simply reproduces
-    `to_rgb8` with a fully opaque alpha channel.
+    as an amplitude, and zero is a perfectly ordinary amplitude, so for
+    `unipolar=True` alpha is 0 wherever `data` is not finite.
+
+    A radargram has no nodata: `to_index8` deliberately maps a NaN sample
+    (e.g. an AGC divide-by-zero on an all-zero leading trace) to the
+    neutral middle of the table so a processing artifact never reads as a
+    reflector, and making that pixel transparent would punch a see-through
+    stripe through the radargram instead of the neutral grey it paints
+    today -- worse, not better. So `unipolar=False` simply reproduces
+    `to_rgb8` with a fully opaque alpha channel, regardless of `data`.
     """
     lut = np.asarray(lut)
     if lut.shape != (256, 3) or lut.dtype != np.uint8:
         raise ValueError(f"lut must be a (256, 3) uint8 table, got {lut.shape} {lut.dtype}")
     values = np.asarray(data, dtype=float)
-    index = to_index8_unipolar(values, limit) if unipolar else to_index8(values, limit)
+    if unipolar:
+        index = to_index8_unipolar(values, limit)
+        alpha = np.where(np.isfinite(values), 255, 0).astype(np.uint8)
+    else:
+        index = to_index8(values, limit)
+        alpha = np.full(values.shape, 255, dtype=np.uint8)
     rgb = lut.take(index, axis=0)
-    alpha = np.where(np.isfinite(values), 255, 0).astype(np.uint8)
     return np.ascontiguousarray(np.concatenate([rgb, alpha[..., None]], axis=-1))
 
 

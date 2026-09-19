@@ -269,6 +269,22 @@ def test_rgba_bipolar_path_matches_the_existing_rgb_mapping():
     rgba = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=False)
     rgb = render.to_rgb8(data, limit=1.0, lut=lut)
     np.testing.assert_array_equal(rgba[..., :3], rgb)
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_rgba_bipolar_path_is_opaque_even_where_the_input_is_nan():
+    """A radargram has no nodata: `to_index8` maps NaN to the neutral
+    middle of the table so an AGC divide-by-zero artifact never reads as a
+    reflector, and making that pixel transparent would punch a see-through
+    stripe through the radargram instead -- worse than the neutral grey it
+    paints today. Alpha must stay opaque there, and the RGB must still
+    match `to_rgb8`."""
+    data = np.array([[-1.0, np.nan, 1.0]])
+    lut = render.colormap("seismic")
+    rgba = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=False)
+    rgb = render.to_rgb8(data, limit=1.0, lut=lut)
+    np.testing.assert_array_equal(rgba[..., :3], rgb)
+    assert (rgba[..., 3] == 255).all()
 
 
 def test_unipolar_colormaps_are_listed_separately():
