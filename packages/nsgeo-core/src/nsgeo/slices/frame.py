@@ -89,19 +89,34 @@ class CubeFrame:
         and applied only to points that already floor to -1 or nx/ny: an
         interior cell boundary is never touched, and a point that floors
         inside the frame -- however close to an edge -- is left alone.
+
+        A NaN local coordinate (a GPS dropout in a real DZT) or one whose
+        magnitude, once divided by `cell`, would overflow `intp` -- far
+        beyond any real survey, but reachable from corrupt input -- must
+        never reach the `floor().astype(intp)` cast below: numpy leaves
+        that cast undefined outside its range, so depending on the
+        platform it can wrap into a small, VALID-looking cell id instead
+        of landing safely outside the frame. `finite` masks such rows out
+        deterministically, before the cast, so correctness never depends
+        on which undefined behaviour a platform happens to choose.
         """
         world = np.asarray(world, dtype=float)
         local = self.to_local(world)
-        ix = np.floor(local[:, 0] / self.cell).astype(np.intp)
-        iy = np.floor(local[:, 1] / self.cell).astype(np.intp)
+        position = local / self.cell
+        bound = np.iinfo(np.intp).max / 4.0
+        finite = (np.isfinite(position) & (np.abs(position) < bound)).all(axis=1)
+        safe = np.where(finite[:, None], local, 0.0)
+
+        ix = np.floor(safe[:, 0] / self.cell).astype(np.intp)
+        iy = np.floor(safe[:, 1] / self.cell).astype(np.intp)
 
         tol = 8.0 * np.finfo(float).eps * np.maximum(1.0, np.abs(world).max(axis=1))
-        ix = np.where((ix == -1) & (local[:, 0] >= -tol), 0, ix)
-        iy = np.where((iy == -1) & (local[:, 1] >= -tol), 0, iy)
-        ix = np.where((ix == self.nx) & (local[:, 0] <= self.nx * self.cell + tol), self.nx - 1, ix)
-        iy = np.where((iy == self.ny) & (local[:, 1] <= self.ny * self.cell + tol), self.ny - 1, iy)
+        ix = np.where((ix == -1) & (safe[:, 0] >= -tol), 0, ix)
+        iy = np.where((iy == -1) & (safe[:, 1] >= -tol), 0, iy)
+        ix = np.where((ix == self.nx) & (safe[:, 0] <= self.nx * self.cell + tol), self.nx - 1, ix)
+        iy = np.where((iy == self.ny) & (safe[:, 1] <= self.ny * self.cell + tol), self.ny - 1, iy)
 
-        inside = (ix >= 0) & (ix < self.nx) & (iy >= 0) & (iy < self.ny)
+        inside = finite & (ix >= 0) & (ix < self.nx) & (iy >= 0) & (iy < self.ny)
         return np.where(inside, iy * self.nx + ix, -1)
 
     @classmethod

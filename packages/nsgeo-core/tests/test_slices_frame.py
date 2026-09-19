@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -106,6 +107,33 @@ def test_cell_index_keeps_a_point_a_hair_below_the_far_edge():
     f = frame()
     ids = f.cell_index(np.array([[4.0 - 1e-12, 0.5]]))
     assert list(ids) == [3]
+
+
+def test_cell_index_drops_non_finite_and_astronomically_large_coordinates():
+    """A GPS dropout (NaN) or a corrupt, astronomically large coordinate
+    must resolve to -1 deterministically, never through the undefined
+    float->int cast that would otherwise decide the answer -- and never
+    with a warning, so a future regression back to relying on the cast is
+    caught by simplefilter('error') rather than silently reappearing.
+    """
+    f = CubeFrame(
+        origin=(500_000.0, 4_500_000.0), azimuth=0.0, cell=0.05, nx=40, ny=20, crs="EPSG:32617"
+    )
+    world = np.array(
+        [
+            [500_000.5, 4_500_000.5],  # ordinary, inside
+            [np.nan, 4_500_000.5],  # GPS dropout
+            [1e20, 4_500_000.5],  # astronomically large, still finite
+            [500_000.7, 4_500_000.7],  # ordinary, inside
+        ]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        ids = f.cell_index(world)
+    assert ids[1] == -1
+    assert ids[2] == -1
+    assert ids[0] >= 0
+    assert ids[3] >= 0
 
 
 def test_for_points_rejects_an_empty_array():

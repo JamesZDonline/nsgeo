@@ -67,11 +67,60 @@ def test_two_lines_in_one_cell_average_rather_than_sum():
     np.testing.assert_allclose(cube.slice_levels(0, 5)[0, 0], 3.0)
 
 
+def test_two_distinct_traces_in_one_cell_average_within_the_line():
+    """The within-line reduceat must SUM the cell's segment, not pick one
+    column of it: two same-value lines (above) exercise the accumulator
+    loop across build_cube calls but never the reduceat itself, since
+    every trace in the segment already agrees. Distinct values close the
+    gap, and mean x count reconstructing the sum is the exact invariant
+    Task 5's fill depends on.
+    """
+    xs = (0.2, 0.4, 1.5)
+    coords = np.column_stack([np.asarray(xs, dtype=float), np.full(len(xs), 0.5)])
+    data = np.empty((8, 3), dtype=np.float32)
+    data[:, 0] = 2.0
+    data[:, 1] = 8.0
+    data[:, 2] = 100.0
+    ln = PreparedLine(key="a.dzt", data=data, dt_ns=1.0, t0_ns=0.0, coords=coords)
+    f, z = frame(), axis()
+    cube = build_cube([ln], [plan_line(ln, f, z)], f, z, prov())
+    assert cube.coverage()[0, 0] == 2
+    np.testing.assert_allclose(cube.slice_levels(0, 5)[0, 0], 5.0)
+    np.testing.assert_allclose(cube.mean[0, 0] * cube.count[0], 10.0)
+
+
 def test_traces_outside_the_frame_are_dropped_not_clipped():
     """Clipping would pile an excluded line onto one border row."""
     cube = cube_of([line(xs=(0.5, 99.0))])
     assert cube.coverage()[0, 0] == 1
     assert cube.coverage().sum() == 1
+
+
+def test_a_dropped_trace_preceding_kept_ones_does_not_corrupt_the_grid():
+    """`order` must remap the sorted-by-cell positions back through `keep`
+    to ORIGINAL trace columns. In every other test the dropped trace comes
+    last, where a missing remap is numerically invisible (`keep[argsort]`
+    and plain `argsort` agree on a prefix). Put it first instead: a bug
+    that skips the remap scatters the dropped trace's amplitude into a
+    real cell while silently losing a kept one -- the wrong-corner
+    failure `frame.py`'s docstring and `test_traces_outside_the_frame_are_
+    dropped_not_clipped` both exist to prevent, but only catch when the
+    drop comes first.
+    """
+    xs = (99.0, 0.5, 1.5, 2.5)
+    coords = np.column_stack([np.asarray(xs, dtype=float), np.full(len(xs), 0.5)])
+    data = np.empty((8, 4), dtype=np.float32)
+    data[:, 0] = 999.0  # outside the frame; must never land in any cell
+    data[:, 1] = 20.0
+    data[:, 2] = 30.0
+    data[:, 3] = 40.0
+    ln = PreparedLine(key="a.dzt", data=data, dt_ns=1.0, t0_ns=0.0, coords=coords)
+    f, z = frame(), axis()
+    cube = build_cube([ln], [plan_line(ln, f, z)], f, z, prov())
+    row0 = cube.slice_levels(0, 5)[0]
+    np.testing.assert_allclose(row0[:3], [20.0, 30.0, 40.0])
+    assert np.isnan(row0[3])
+    np.testing.assert_array_equal(cube.coverage()[0], [1, 1, 1, 0])
 
 
 def test_a_line_wholly_outside_the_frame_is_an_error():

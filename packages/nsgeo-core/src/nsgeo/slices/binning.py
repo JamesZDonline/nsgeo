@@ -119,11 +119,18 @@ def accumulate(
     count: np.ndarray,
     line: PreparedLine,
     plan: LinePlan,
-    k0: int,
-    k1: int,
 ) -> None:
-    """Add one line's contribution, in place."""
-    block = resample_window(line, plan, k0, k1)
+    """Add one line's contribution over the whole axis, in place.
+
+    Takes the level count from `total.shape[0]` rather than a caller-given
+    (k0, k1): `build_cube` is the only caller and always covers the full
+    axis, and a partial window here would silently double-count `count` if
+    ever called more than once per line. A parameter that produces a wrong
+    count when used as its name suggests is worse than no parameter, so
+    there is none -- `resample_window` still takes an explicit window for
+    the caller that legitimately wants one.
+    """
+    block = resample_window(line, plan, 0, total.shape[0])
     total[:, plan.cells] += np.add.reduceat(block, plan.starts, axis=1)
     count[plan.cells] += plan.counts
 
@@ -141,6 +148,6 @@ def build_cube(
     total = np.zeros((z.nz, frame.n_cells), dtype=np.float32)
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
-        accumulate(total, count, line, plan, 0, z.nz)
+        accumulate(total, count, line, plan)
     mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
