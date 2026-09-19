@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from nsgeo.slices.cube import Provenance, SliceCube
@@ -98,11 +100,104 @@ def test_save_narrows_a_wider_input_dtype(tmp_path):
 
 
 def test_loading_a_file_missing_one_required_array_fails_clearly(tmp_path):
-    """`mean` and `meta` alone are not a cube either -- every one of the
+    """`mean` and `count` alone are not a cube either -- every one of the
     three arrays is required, not just at least one of them."""
     path = tmp_path / "partial.npz"
     np.savez(path, mean=np.zeros((2, 3), dtype=np.float32), count=np.zeros(3, dtype=np.int32))
     with pytest.raises(CubeStoreError, match="not a cube"):
+        load_cube(path)
+
+
+def test_save_and_load_agree_on_a_path_without_the_npz_suffix(tmp_path):
+    """`np.savez_compressed` appends `.npz` on its own when a path lacks
+    it. If `save_cube` did not also normalise, it would write
+    "grid-a.npz" while `load_cube`, given the same extensionless
+    "grid-a", would look for a file named literally that and report "no
+    cube file" for one sitting right next to it."""
+    cube = make_cube()
+    path = tmp_path / "grid-a"  # deliberately no suffix
+    save_cube(cube, path)
+    assert (tmp_path / "grid-a.npz").exists()
+    back = load_cube(path)
+    assert back.frame == cube.frame
+
+
+def _good_parts(tmp_path):
+    """A good cube's raw (mean, count, meta-dict) triple, for tests that
+    tamper with just one part of an otherwise-valid file."""
+    path = tmp_path / "seed.npz"
+    save_cube(make_cube(), path)
+    with np.load(path, allow_pickle=False) as bundle:
+        return bundle["mean"], bundle["count"], json.loads(str(bundle["meta"].item()))
+
+
+def test_loading_a_truncated_file_fails_clearly(tmp_path):
+    """A half-copied file from a shared drive is the single most likely
+    real-world corruption for this format. `np.load` raises
+    `zipfile.BadZipFile` for it -- a plain `Exception` subclass, not an
+    `OSError` or `ValueError` -- which must not escape load_cube's guard."""
+    cube = make_cube()
+    good = tmp_path / "good.npz"
+    save_cube(cube, good)
+    data = good.read_bytes()
+    truncated = tmp_path / "truncated.npz"
+    truncated.write_bytes(data[: len(data) // 2])
+    with pytest.raises(CubeStoreError):
+        load_cube(truncated)
+
+
+def test_loading_a_file_with_a_zip_magic_number_but_garbage_fails_clearly(tmp_path):
+    """Not every corrupt file was ever a real cube -- a file that merely
+    starts with the zip signature must be refused the same way."""
+    junk = tmp_path / "junk.npz"
+    junk.write_bytes(b"PK\x03\x04" + b"not a real zip" * 20)
+    with pytest.raises(CubeStoreError):
+        load_cube(junk)
+
+
+def test_loading_a_file_with_metadata_missing_a_key_fails_clearly(tmp_path):
+    """Arrays present and readable, but the metadata blob itself is
+    incomplete -- a bare KeyError must not escape."""
+    mean, count, meta = _good_parts(tmp_path)
+    del meta["z"]
+    path = tmp_path / "bad-meta.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError):
+        load_cube(path)
+
+
+def test_loading_a_file_with_null_metadata_fails_clearly(tmp_path):
+    """Valid arrays, but the metadata blob decodes to JSON `null` rather
+    than an object -- subscripting `None` raises a bare TypeError, which
+    must not escape either."""
+    mean, count, _ = _good_parts(tmp_path)
+    path = tmp_path / "null-meta.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(None)))
+    with pytest.raises(CubeStoreError):
+        load_cube(path)
+
+
+def test_loading_a_file_whose_metadata_disagrees_with_its_arrays_fails_clearly(tmp_path):
+    """The metadata says a different grid shape than the `mean` array
+    actually has -- SliceCube.__post_init__ raises a bare ValueError for
+    the mismatch, which must come back as CubeStoreError like every other
+    bad-file case, not as a construction error from deep inside."""
+    mean, count, meta = _good_parts(tmp_path)
+    meta["frame"]["nx"] = meta["frame"]["nx"] + 2  # no longer matches mean's cell count
+    path = tmp_path / "shape-mismatch.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError):
+        load_cube(path)
+
+
+def test_loading_an_unsupported_store_version_fails_clearly(tmp_path):
+    """A future format change must be detected, not parsed as if it were
+    the version this build understands."""
+    mean, count, meta = _good_parts(tmp_path)
+    meta["store_version"] = 99
+    path = tmp_path / "future-version.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError, match="version"):
         load_cube(path)
 
 

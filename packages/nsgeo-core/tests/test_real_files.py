@@ -138,4 +138,9 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
 
     out = tmp_path / "real.npz"
     save_cube(cube, out)
-    assert load_cube(out).provenance == prov
+    reloaded = load_cube(out)
+    assert reloaded.provenance == prov
+    np.testing.assert_array_equal(reloaded.count, cube.count)
+    np.testing.assert_allclose(
+        reloaded.slice_levels(10, 28)[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
+    )

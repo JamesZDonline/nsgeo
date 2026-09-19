@@ -331,3 +331,15 @@ def test_an_older_file_without_cubes_still_loads(tmp_path):
     path = tmp_path / "survey.nsgeo.json"
     path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": []}))
     assert load_site(path).cubes == {}
+
+
+@pytest.mark.parametrize("bad_cubes", [["x"], 5, "slices/a.npz"], ids=["list", "int", "str"])
+def test_cubes_must_be_an_object_keyed_by_id(tmp_path, bad_cubes):
+    """Mirrors the presets guard immediately above it in load_site: every
+    other collection here (grids, presets, stacks) is validated the same
+    way, and a non-dict cubes value would otherwise survive a load/save
+    cycle intact and surface later wherever M11 does `site.cubes.items()`."""
+    path = tmp_path / "survey.nsgeo.json"
+    path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": [], "cubes": bad_cubes}))
+    with pytest.raises(ProjectError, match="'cubes' must be an object"):
+        load_site(path)
