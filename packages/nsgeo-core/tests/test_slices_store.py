@@ -173,7 +173,11 @@ def test_save_does_not_alias_two_dotted_names_onto_one_file(tmp_path):
     back_v2 = load_cube(tmp_path / "grid.v2")
     np.testing.assert_array_equal(back_v1.mean, cube_v1.mean)
     np.testing.assert_array_equal(back_v2.mean, cube_v2.mean)
-    assert not np.array_equal(back_v1.mean, back_v2.mean)  # genuinely different cubes
+    # equal_nan=True: `mean` carries NaNs, and without it np.array_equal
+    # returns False for any NaN-bearing array regardless of the other
+    # array's content, so this would pass even on the aliasing bug it
+    # claims to guard against (both cubes byte-identical).
+    assert not np.array_equal(back_v1.mean, back_v2.mean, equal_nan=True)  # genuinely different
 
 
 def test_a_dot_in_a_directory_name_is_unaffected(tmp_path):
@@ -289,6 +293,20 @@ def test_loading_a_file_with_a_too_short_origin_fails_clearly(tmp_path):
     path = tmp_path / "short-origin.npz"
     np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
     with pytest.raises(CubeStoreError):
+        load_cube(path)
+
+
+def test_loading_a_file_with_a_null_crs_fails_clearly(tmp_path):
+    """`CubeFrame` does not validate `crs` at all, so a hand-edited or
+    corrupted survey JSON with `"crs": null` would otherwise load with
+    `frame.crs is None` and no complaint -- and reach M11's GeoTIFF export
+    as a silently unreferenced raster. load_cube must reject a non-string
+    crs itself."""
+    mean, count, meta = _good_parts(tmp_path)
+    meta["frame"]["crs"] = None
+    path = tmp_path / "null-crs.npz"
+    np.savez_compressed(path, mean=mean, count=count, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError, match="crs"):
         load_cube(path)
 
 

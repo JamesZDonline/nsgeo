@@ -110,6 +110,13 @@ def load_cube(path: str | Path) -> SliceCube:
 
         frame_doc = meta["frame"]
         z_doc = meta["z"]
+        crs = frame_doc["crs"]
+        if not isinstance(crs, str):
+            raise CubeStoreError(
+                f"{path}: frame.crs must be a string, got {crs!r} -- a cube with no CRS "
+                f"would load silently unreferenced and reach a GeoTIFF export with no "
+                f"way to tell a real CRS from a missing one"
+            )
         return SliceCube(
             frame=CubeFrame(
                 origin=(float(frame_doc["origin"][0]), float(frame_doc["origin"][1])),
@@ -117,7 +124,7 @@ def load_cube(path: str | Path) -> SliceCube:
                 cell=float(frame_doc["cell"]),
                 nx=int(frame_doc["nx"]),
                 ny=int(frame_doc["ny"]),
-                crs=frame_doc["crs"],
+                crs=crs,
             ),
             z=ZAxis(t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])),
             mean=mean,
