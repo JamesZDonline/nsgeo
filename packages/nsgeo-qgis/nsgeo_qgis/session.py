@@ -44,6 +44,36 @@ _GPKG_SUFFIX = ".nsgeo.gpkg"
 _SQLITE_JOURNALS = ("-wal", "-shm", "-journal")
 
 
+@dataclasses.dataclass(frozen=True)
+class Pick:
+    """One authored pick: a trace and a two-way time on one line.
+
+    Time is the truth. `distance_m`, `depth_m` and `velocity_m_ns` are
+    conveniences that can be recomputed from the line's geometry and its
+    resolved velocity model, and are `None` when the line cannot supply
+    them (a time-triggered acquisition has no distance axis).
+
+    `feature_id` and `seq` are written null by M8 and exist now so that a
+    horizon later is an ordered run of existing picks sharing a
+    `feature_id`, needing no migration of an authored table (spec §4.2).
+    `picks` is the one table `survey.nsgeo.json` cannot regenerate, and
+    this project has already had to repair its storage twice; the cheap
+    time to add these columns is before there are horizons to migrate.
+    """
+
+    line_key: str
+    trace: int
+    time_ns: float
+    distance_m: float | None
+    depth_m: float | None
+    velocity_m_ns: float | None
+    stack_json: str
+    note: str
+    created: str
+    feature_id: str | None = None
+    seq: int | None = None
+
+
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
@@ -83,6 +113,10 @@ class SiteSession(QObject):
         self._selection: tuple[int, int] = (-1, -1)
         self._preview_key: str | None = None
         self._preview_trace = -1
+        # Set by SiteLayers' own constructor (see set_pick_store). None
+        # until then, which is the normal state of a session built by a
+        # test that has no layers at all.
+        self._pick_store: Any | None = None
 
     # ---- state ------------------------------------------------------------
     @property
@@ -740,6 +774,28 @@ class SiteSession(QObject):
         if self._selection != (-1, -1) and self._current_key is not None:
             self._selection = (-1, -1)
             self.selection_changed.emit(self._current_key, -1, -1)
+
+    # ---- picks (spec §4) --------------------------------------------------
+    @property
+    def pick_store(self) -> Any | None:
+        return self._pick_store
+
+    def set_pick_store(self, store: Any) -> None:
+        """Register the object that actually writes picks.
+
+        Spec §4.1 names `session.add_pick`, and the invariant it enforces
+        (a pick targets the WORKING line) belongs here beside
+        `set_trace`'s and `set_selection`'s identical guards. The *write*
+        cannot be here: this object holds no `QgsVectorLayer`, and the
+        parent spec §4.3 rule 2 forbids opening a second OGR handle on a
+        GeoPackage QGIS already has open. `SiteLayers` holds the loaded
+        layer and registers itself from its own constructor.
+
+        This makes the reference cycle session <-> layers explicit.
+        Deliberate: neither class defines `__del__`, so Python's cycle
+        collector handles it, and `plugin.unload()` drops both together.
+        """
+        self._pick_store = store
 
     # ---- preview (spec §3.3) ----------------------------------------------
     def set_preview(self, key: str | None, trace: int = -1) -> None:

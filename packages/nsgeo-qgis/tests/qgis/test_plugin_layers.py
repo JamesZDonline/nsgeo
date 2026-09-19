@@ -11,9 +11,10 @@ from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
-from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
+from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
@@ -1250,3 +1251,219 @@ def test_discarding_the_site_still_saves_pick_edits_and_the_log_says_why(
 
     plugin.unload()
     project.clear()
+
+
+# ---- picks: the store (M8, spec §4.1, §4.2) --------------------------------
+
+
+def _a_pick(key="raw/FILE__001.DZT", trace=7, time_ns=12.5, **kw):
+    """A fully-populated Pick, so a test that cares about one field does
+    not have to spell out the other ten."""
+    fields = dict(
+        line_key=key,
+        trace=trace,
+        time_ns=time_ns,
+        distance_m=0.117,
+        depth_m=0.25,
+        velocity_m_ns=0.04,
+        stack_json='[{"step": "dewow", "params": {}, "enabled": true}]',
+        note="",
+        created="2026-09-19T10:00:00+00:00",
+    )
+    fields.update(kw)
+    return Pick(**fields)
+
+
+def test_the_picks_table_carries_the_two_grouping_fields(populated):
+    """Spec §4.2: `feature_id` and `seq` exist from M8 and are written
+    null, so a horizon later is an ordered run of existing picks and
+    needs no migration of an authored table."""
+    session, layers, _ = populated
+    names = [f.name() for f in layers.layers["picks"].fields() if f.name() != "fid"]
+    assert names[-2:] == ["feature_id", "seq"]
+
+
+def test_write_pick_stores_every_field_and_places_it_on_the_line(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=0))
+
+    assert layers.feature_count("picks") == 1
+    feat = next(layers.layers["picks"].getFeatures())
+    assert feat["line_key"] == "raw/FILE__001.DZT"
+    assert feat["trace"] == 0
+    assert feat["time_ns"] == pytest.approx(12.5)
+    assert feat["distance_m"] == pytest.approx(0.117)
+    assert feat["depth_m"] == pytest.approx(0.25)
+    assert feat["velocity_m_ns"] == pytest.approx(0.04)
+    assert "dewow" in feat["stack_json"]
+    assert feat["created"] == "2026-09-19T10:00:00+00:00"
+    assert feat["feature_id"] == NULL
+    assert feat["seq"] == NULL
+    # Trace 0 of the first line sits at the grid origin, in the package CRS.
+    point = feat.geometry().asPoint()
+    assert (point.x(), point.y()) == pytest.approx((500.0, 700.0), abs=1e-6)
+
+
+def test_write_pick_places_a_later_trace_further_along_the_line(populated):
+    """The geometry is the trace's own world position, not the line's
+    start: a pick's whole value on the map is where along the line it
+    is."""
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=0))
+    layers.write_pick(_a_pick(trace=59))
+
+    points = [f.geometry().asPoint() for f in layers.layers["picks"].getFeatures()]
+    a, b = sorted(points, key=lambda p: (p.x(), p.y()))
+    assert a.distance(b) == pytest.approx(59 / 60, abs=1e-6)
+
+
+def test_write_pick_refuses_rather_than_dropping_the_pick_when_the_table_is_gone(populated):
+    session, layers, _ = populated
+    layers.detach()
+    with pytest.raises(RuntimeError, match="picks"):
+        layers.write_pick(_a_pick())
+
+
+def test_a_pick_on_an_unplaceable_line_is_stored_without_geometry(populated, tmp_path, message_log):
+    """A time-triggered acquisition has no geometry (`trace_coords`
+    raises), so the pick cannot be drawn -- but time is the truth and the
+    pick is authored data with no other source. It is stored with a null
+    geometry and the log says why, rather than being refused."""
+    session, layers, _ = populated
+    p = synthetic_dzt(tmp_path / "raw", "FILE__004.DZT", n_traces=40, traces_per_metre=0.0)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 1.5, 0.0, 1, p.stem))])
+
+    layers.write_pick(_a_pick(key="raw/FILE__004.DZT", trace=3))
+
+    feat = next(layers.layers["picks"].getFeatures())
+    assert feat["line_key"] == "raw/FILE__004.DZT"
+    assert feat.geometry().isNull()
+    assert any("cannot be placed" in m for m in message_log)
+
+
+def test_picks_for_returns_only_that_lines_picks_in_trace_order(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=40, time_ns=30.0))
+    layers.write_pick(_a_pick(trace=5, time_ns=10.0))
+    layers.write_pick(_a_pick(key="raw/FILE__002.DZT", trace=9, time_ns=20.0))
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(5, 10.0), (40, 30.0)]
+    assert all(p.line_key == "raw/FILE__001.DZT" for p in got)
+    assert got[0].feature_id is None
+    assert got[0].seq is None
+    assert got[0].note == ""
+
+
+def test_picks_for_is_empty_rather_than_raising_with_no_site_open(populated):
+    session, layers, _ = populated
+    layers.detach()
+    assert layers.picks_for("raw/FILE__001.DZT") == []
+
+
+def test_picks_for_skips_a_hand_edited_row_with_no_trace_or_time(populated, message_log):
+    """The `picks` layer is deliberately editable in QGIS, so a user can
+    digitise a point into it with the ordinary tools and leave the
+    attributes blank. `float(NULL)` inside a slot would abort the CI
+    container; such a row is skipped and named instead."""
+    session, layers, _ = populated
+    layer = layers.layers["picks"]
+    f = QgsFeature(layer.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    assert layer.dataProvider().addFeatures([f])[0]
+    layers.write_pick(_a_pick(trace=2, time_ns=8.0))
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(2, 8.0)]
+    assert any("no trace or time" in m for m in message_log)
+
+
+def test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact(
+    qgis_app, tmp_path, message_log
+):
+    """The one migration in M8. `picks` is the only table that cannot be
+    regenerated, and this project has already had to repair its storage
+    twice -- so the rows, their attributes and their geometry must all
+    survive the two new columns arriving, with the new columns null.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    # Rewrite `picks` with the pre-M8 field set and put two authored rows
+    # in it, exactly as a site created before this milestone would have.
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    rows = []
+    for i, (trace, time_ns) in enumerate([(4, 11.0), (33, 26.5)]):
+        f = QgsFeature(old.fields())
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0 + i, 700.0 + i)))
+        f["line_key"] = "raw/FILE__001.DZT"
+        f["trace"] = trace
+        f["time_ns"] = time_ns
+        f["note"] = f"note {i}"
+        rows.append(f)
+    assert old.dataProvider().addFeatures(rows)[0]
+    del old
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert names == [name for name, _ in TABLES["picks"][1]]
+    assert layers2.feature_count("picks") == 2
+    got = sorted(layers2.layers["picks"].getFeatures(), key=lambda f: f["trace"])
+    assert [(f["trace"], f["time_ns"], f["note"]) for f in got] == [
+        (4, 11.0, "note 0"),
+        (33, 26.5, "note 1"),
+    ]
+    assert [f["feature_id"] for f in got] == [NULL, NULL]
+    assert [f["seq"] for f in got] == [NULL, NULL]
+    assert not got[0].geometry().isNull()
+    layers2.detach()
+
+
+def test_the_layers_register_themselves_as_the_sessions_pick_store(populated):
+    """Spec §4.1 names `session.add_pick`, but the session holds no
+    layers and the parent spec forbids a second OGR handle on a package
+    QGIS already has open -- so the write is delegated. The registration
+    must happen in the constructor, before any site_opened could fire."""
+    session, layers, _ = populated
+    assert session.pick_store is layers

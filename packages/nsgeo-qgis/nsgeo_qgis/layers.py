@@ -33,6 +33,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.io.dzx import DzxError, read_dzx
 from nsgeo.model.survey import Line
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
@@ -55,7 +56,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
-from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.session import Pick, SiteSession
 
 _KIND = {
     "str": QMetaType.Type.QString,
@@ -107,6 +108,19 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             ("stack_json", "str"),
             ("note", "str"),
             ("created", "str"),
+            # M8, spec §4.2: written null now. A horizon later is an
+            # ordered run of existing picks sharing a `feature_id`, so
+            # adding them here -- while `picks` holds at most a handful of
+            # authored rows -- costs one migration now instead of a
+            # migration of real interpretations later. `_ensure_table`
+            # sees the field-set mismatch on any pre-M8 package and routes
+            # it through `_rebuild_picks`, whose migrate-by-field-name
+            # loop leaves both columns NULL on every existing row with no
+            # code change needed (verified by experiment before this was
+            # written, and by
+            # `test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact`).
+            ("feature_id", "str"),
+            ("seq", "int"),
         ],
     ),
 }
@@ -148,6 +162,27 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+def _as_float(value: Any) -> float | None:
+    """A nullable numeric attribute. A QGIS NULL reads back as a
+    `QVariant` for which `value is None` is False but `value == NULL` is
+    True, so identity checks silently fail here."""
+    return None if value == NULL else float(value)
+
+
+def _as_str(value: Any) -> str:
+    """A text attribute, with NULL flattened to the empty string. `note`
+    and `stack_json` are always written, but a hand-edited row may not
+    have them."""
+    return "" if value == NULL else str(value)
+
+
+def _as_opt_str(value: Any) -> str | None:
+    """`feature_id` specifically: null and empty are different states
+    here. Null means "not grouped"; an empty string would be a group
+    whose name is empty."""
+    return None if value == NULL else str(value)
+
+
 class SiteLayers(QObject):
     def __init__(
         self, session: SiteSession, project: QgsProject | None = None, parent: QObject | None = None
@@ -166,6 +201,10 @@ class SiteLayers(QObject):
         # registry so the next refresh reopens it, rather than holding a
         # Python wrapper around a since-deleted C++ object.
         self.project.layersWillBeRemoved.connect(self._on_layers_removed)
+        # Registered here, in the constructor, for the same reason the
+        # session signals above are: this must be in place before the
+        # first site_opened could fire, not whenever someone remembers.
+        session.set_pick_store(self)
 
     # ---- lifecycle --------------------------------------------------------
     def _on_site_opened(self) -> None:
@@ -728,6 +767,145 @@ class SiteLayers(QObject):
             # to a few thousand rows, never a reason to avoid it.
             count = sum(1 for _ in layer.getFeatures())
         return int(count)
+
+    # ---- picks (authored; spec §4) ----------------------------------------
+    def _picks_layer(self) -> QgsVectorLayer | None:
+        layer = self.layers.get("picks")
+        if layer is None or sip.isdeleted(layer):
+            return None
+        return layer
+
+    def _pick_point(self, pick: Pick) -> QgsPointXY | None:
+        """The pick's position in the package CRS, or None when the line
+        cannot be placed at all.
+
+        Same path `refill_marks` uses for a mark, and for the same
+        reason: the trace index IS the vertex index, so the pick lands
+        exactly where the line is drawn rather than somewhere
+        independently computed that could disagree with it.
+        """
+        site = self.session.site
+        if site is None:
+            return None
+        line = self.session.line_for_key(pick.line_key)
+        grid = self.session.grid_for_line(line)
+        if grid is None:
+            return None
+        coords = self._line_points(line, grid, site.frames)
+        if coords is None:
+            return None
+        return coords[max(0, min(pick.trace, len(coords) - 1))]
+
+    def write_pick(self, pick: Pick) -> None:
+        """Write one authored pick through the loaded layer's data
+        provider (parent spec §4.3 rule 2: never a second OGR handle on a
+        package QGIS already has open).
+
+        Raises rather than returning a flag. `picks` is the one table
+        `survey.nsgeo.json` cannot regenerate, so a write that fails must
+        say so loudly enough to reach the user -- `SiteSession.add_pick`
+        deliberately does not emit `picks_changed` if this raises, and
+        `plugin.py`'s relay puts the message on the bar.
+        """
+        layer = self._picks_layer()
+        if layer is None:
+            raise RuntimeError("the picks table is not open; no site is loaded")
+        point = self._pick_point(pick)
+        if point is None:
+            # Time is the truth and the pick is authored data with no
+            # other source: a line with no geometry (a time-triggered
+            # acquisition, or one whose grid is gone) still gets its pick
+            # recorded, with a null geometry, and the log says why it
+            # will not appear on the canvas. Refusing the write would
+            # lose the one thing that cannot be recomputed.
+            _log(
+                f"{pick.line_key} cannot be placed on the map; its pick is recorded "
+                f"but will not appear on the canvas"
+            )
+        feature = QgsFeature(layer.fields())
+        if point is not None:
+            feature.setGeometry(QgsGeometry.fromPointXY(point))
+        # By field NAME against the layer's own fields, never positionally
+        # against `_fields(spec)`: a GPKG table carries an implicit
+        # leading "fid" that `spec` does not list, and attributes keyed
+        # off a Fields object one short of the provider's own silently
+        # land one column over. That was measured on this very table
+        # during the package-naming migration -- a pick's `line_key` came
+        # back as its `time_ns`.
+        names = {f.name() for f in layer.fields()}
+        for name, value in (
+            ("line_key", pick.line_key),
+            ("trace", int(pick.trace)),
+            ("distance_m", pick.distance_m),
+            ("time_ns", float(pick.time_ns)),
+            ("depth_m", pick.depth_m),
+            ("velocity_m_ns", pick.velocity_m_ns),
+            ("stack_json", pick.stack_json),
+            ("note", pick.note),
+            ("created", pick.created),
+            ("feature_id", pick.feature_id),
+            ("seq", pick.seq),
+        ):
+            if name in names:
+                feature[name] = value  # None writes NULL
+        ok, _ = layer.dataProvider().addFeatures([feature])
+        if not ok:
+            raise RuntimeError(
+                f"could not write the pick: {layer.dataProvider().error().message()}"
+            )
+        layer.updateExtents()
+        layer.triggerRepaint()
+
+    def picks_for(self, key: str) -> list[Pick]:
+        """Every pick on `key`, ordered by (trace, time).
+
+        A plain scan rather than a `QgsFeatureRequest` filter expression:
+        a line key is a relative POSIX path and can legitimately contain
+        a quote, and the quoting bug that would cause is silent and
+        occasional. Picks number in the handful to the low thousands, so
+        the scan is not a cost worth that risk.
+        """
+        layer = self._picks_layer()
+        if layer is None:
+            return []
+        picks = []
+        for feature in layer.getFeatures():
+            if _as_str(feature["line_key"]) != key:
+                continue
+            pick = self._row_to_pick(feature, key)
+            if pick is not None:
+                picks.append(pick)
+        picks.sort(key=lambda p: (p.trace, p.time_ns))
+        return picks
+
+    def _row_to_pick(self, feature: QgsFeature, key: str) -> Pick | None:
+        """One `picks` row as a `Pick`, or None if the row cannot be one.
+
+        `picks` is deliberately editable in QGIS, so a user can digitise a
+        point into it with the ordinary tools and leave the attributes
+        blank. `float(NULL)` raises, and this is read from a Qt slot --
+        which means the CI container turns it into `qFatal()` and aborts
+        the whole job. Skipping the row and naming it is the only safe
+        answer; refusing to read the layer at all would hide every good
+        pick because of one bad one.
+        """
+        trace, time_ns = feature["trace"], feature["time_ns"]
+        if trace == NULL or time_ns == NULL:
+            _log(f"a pick on {key} has no trace or time and was skipped; edit or delete it")
+            return None
+        return Pick(
+            line_key=key,
+            trace=int(trace),
+            time_ns=float(time_ns),
+            distance_m=_as_float(feature["distance_m"]),
+            depth_m=_as_float(feature["depth_m"]),
+            velocity_m_ns=_as_float(feature["velocity_m_ns"]),
+            stack_json=_as_str(feature["stack_json"]),
+            note=_as_str(feature["note"]),
+            created=_as_str(feature["created"]),
+            feature_id=_as_opt_str(feature["feature_id"]),
+            seq=None if feature["seq"] == NULL else int(feature["seq"]),
+        )
 
     # ---- derived tables ---------------------------------------------------
     def refill_grids(self) -> None:
