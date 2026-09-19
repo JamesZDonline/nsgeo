@@ -470,6 +470,25 @@ class ProfileDock(QgsDockWidget):
     def _on_preview_changed(self, key: str, trace: int) -> None:
         try:
             if key and key != self._working_key:
+                if key == self._preview_key:
+                    # Only the trace moved. MapLink (Tweak 1) now emits
+                    # session.set_preview on every mouse move so the
+                    # cursor tracks a previewed line smoothly without
+                    # waiting for the dwell -- re-entering _enter_preview
+                    # here on every one of those would rebuild the whole
+                    # radargram per move (_show_line's `self.image = None`
+                    # then `_render()`), even though the key has not
+                    # changed. Measured end to end: 50 moves along a
+                    # previewed 1300-trace line, 16.8 ms/move (4.9 ms at
+                    # 240 traces) -- the exact renderer thrash the dwell
+                    # exists to prevent, moved from the dwell's side to
+                    # ours. _enter_preview's other effects (banner text,
+                    # gain strip hidden, channel combo disabled,
+                    # _strip_was_visible capture) were all already set
+                    # when the preview first entered, and nothing about a
+                    # trace move should disturb any of them.
+                    self.view.set_cursor(trace)
+                    return
                 self._enter_preview(key, trace)
             else:
                 # Either the preview was cleared, or the pointer is over

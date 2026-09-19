@@ -667,6 +667,36 @@ def test_the_banner_names_the_previewed_line_and_clears_on_snap_back(previewing)
     assert dock._key == keys[0]
 
 
+def test_moving_along_a_previewed_line_does_not_rerender_per_move(previewing, monkeypatch):
+    """Finding 1 (M7 walkthrough re-review, Important -- blocks): Tweak 1
+    makes MapLink emit session.set_preview on every mouse move so the
+    cursor tracks a previewed line smoothly, without waiting for the
+    dwell. Before this fix, `_on_preview_changed` routed EVERY one of
+    those into `_enter_preview` -> `_show_line` -> a full radargram
+    rebuild (`self.image = None` then `_render()`), even when the key had
+    not changed and only the trace moved. Measured end to end: 50 moves
+    along a previewed 1300-trace line, 16.8 ms/move -- the exact renderer
+    thrash the dwell exists to prevent, now happening on our side
+    instead.
+
+    Counts renders (via `_render`), not merely the cursor moving -- a
+    test that only asserts the cursor tracked would pass with the bug
+    present, since `_enter_preview` also moves the cursor on its way to
+    rebuilding everything else.
+    """
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)  # first entry: one real render, expected
+    assert dock._preview_key == keys[1]
+    renders = []
+    monkeypatch.setattr(dock, "_render", lambda: renders.append(1))
+
+    for trace in range(10, 20):
+        session.set_preview(keys[1], trace)
+
+    assert renders == []  # zero rebuilds for ten more moves on the same line
+    assert dock.view._cursor == 19  # but the cursor tracked every one of them
+
+
 def test_the_gain_strip_hides_during_a_preview_and_comes_back(previewing):
     dock, session, keys = previewing
     dock.show_gain_strip([[0.0, 1.0], [1.0, 2.0]], owner=("x", 0, 0))
