@@ -9,7 +9,7 @@ from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
-from plugin_testing import synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import QgsPointXY, QgsProject
 from qgis.gui import QgsMapCanvas
 
@@ -216,3 +216,197 @@ def test_a_canvas_crs_unreachable_from_the_layer_produces_no_untransformed_geome
     assert link._band.numberOfVertices() == 0
     assert link._geometries() == {}
     assert any("no coordinate transform" in m for m in message_log)
+
+
+# ---- ambient hover (spec §3.2) ----------------------------------------------
+
+
+def _fire_dwell(link):
+    """Drive the dwell timer deterministically instead of waiting on it."""
+    link._dwell.timeout.emit()
+
+
+def test_hovering_a_line_previews_it_at_the_hovered_trace(linked):
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[1]].vertexAt(7))
+
+    canvas.xyCoordinates.emit(target)
+    _fire_dwell(link)
+
+    assert session.preview_key == keys[1]
+    assert session.preview_trace == 7
+
+
+def test_hover_never_moves_the_working_line(linked):
+    """The headline guard of the whole design (spec §3.3)."""
+    link, session, _layers, canvas, keys = linked
+    opened = []
+    session.line_opened.connect(opened.append)
+    target = QgsPointXY(link._geometries()[keys[1]].vertexAt(7))
+
+    canvas.xyCoordinates.emit(target)
+    _fire_dwell(link)
+
+    assert session.current_key == keys[0]
+    assert opened == []
+
+
+def test_hovering_the_working_line_moves_its_cursor_not_a_preview(linked):
+    """Ruling 12: the working line's cursor IS `current_trace`. Routing a
+    hover over it through `set_preview` would give one line two sources of
+    truth for one cursor, and the map marker would stop following a drag
+    in the profile."""
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[0]].vertexAt(11))
+
+    canvas.xyCoordinates.emit(target)
+    _fire_dwell(link)
+
+    assert session.preview_key is None
+    assert session.current_trace == 11
+    assert session.current_key == keys[0]
+
+
+def test_hovering_the_working_line_ends_a_preview_of_another(linked):
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[0]].vertexAt(11)))
+    _fire_dwell(link)
+
+    assert session.preview_key is None
+    assert session.current_trace == 11
+
+
+def test_hovering_away_from_every_line_clears_the_preview(linked):
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+    assert session.preview_key == keys[1]
+
+    canvas.xyCoordinates.emit(QgsPointXY(999_999.0, 999_999.0))
+    _fire_dwell(link)
+
+    assert session.preview_key is None
+
+
+def test_the_preview_waits_for_the_dwell(linked):
+    link, session, _layers, canvas, keys = linked
+    target = QgsPointXY(link._geometries()[keys[1]].vertexAt(7))
+
+    canvas.xyCoordinates.emit(target)
+
+    assert session.preview_key is None  # not yet -- the timer has not fired
+    assert link._dwell.isActive()
+
+
+def test_only_the_last_position_of_a_sweep_is_used(linked):
+    link, session, _layers, canvas, keys = linked
+
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[0]].vertexAt(2)))
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+    _fire_dwell(link)
+
+    assert session.preview_key == keys[1]
+    assert session.preview_trace == 7
+
+
+def test_the_dwell_timer_really_fires_on_its_own(linked):
+    """The other hover tests drive the timer by hand; this one proves the
+    timer is actually started and connected."""
+    from qgis.PyQt.QtTest import QTest
+
+    link, session, _layers, canvas, keys = linked
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[keys[1]].vertexAt(7)))
+
+    QTest.qWait(link.HOVER_DWELL_MS * 4)
+
+    assert session.preview_key == keys[1]
+
+
+def test_the_tolerance_is_a_distance_not_a_squared_distance(linked):
+    """closestVertexWithContext returns a SQUARED distance, so the tolerance
+    must be squared to match it.
+
+    The discriminating probe is a HIT, not a miss. With mapUnitsPerPixel()
+    == 1.0 the tolerance is 12 map units and 12 > sqrt(12), so comparing
+    the squared distance against a RAW tolerance is *stricter* than
+    correct, not looser: it rejects past 3.46 m where the correct
+    comparison rejects past 12 m. A miss test therefore passes under both
+    spellings and proves nothing. Hovering inside the real tolerance but
+    outside sqrt(tolerance) separates them."""
+    link, session, _layers, canvas, keys = linked
+    tol = canvas.mapUnitsPerPixel() * link.HOVER_TOLERANCE_PX
+    assert tol > 1.0, "the discriminating band exists only while tol > sqrt(tol)"
+    on = link._geometries()[keys[1]].vertexAt(7)
+    near = QgsPointXY(on.x() + tol * 0.8, on.y())
+
+    canvas.xyCoordinates.emit(near)
+    _fire_dwell(link)
+
+    assert session.preview_key is not None
+
+
+def test_hover_with_no_site_open_does_nothing(qgis_app, tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    layers = SiteLayers(session, project=project)
+    canvas = QgsMapCanvas()
+    link = MapLink(session, layers, canvas)
+
+    canvas.xyCoordinates.emit(QgsPointXY(1.0, 2.0))
+    link._dwell.timeout.emit()  # must not raise
+
+    assert session.preview_key is None
+    link.dispose()
+    project.clear()
+
+
+@needs_real_data
+def test_hovering_a_real_line_previews_its_real_trace(qgis_app, tmp_path):
+    """Spec §7: real data is the primary validation. The synthetic fixtures
+    above all use one synthetic header; a real GSSI file has its own
+    traces_per_metre and trace count, and those are what turn a pointer
+    position into a trace index."""
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    line = Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, 1, "real"))
+    session.add_lines([line])
+    canvas = QgsMapCanvas()
+    canvas.setDestinationCrs(layers.crs())
+    link = MapLink(session, layers, canvas)
+    key = session.keys()[0]
+    session.open_line(key)
+
+    want = line.n_traces // 3
+    canvas.xyCoordinates.emit(QgsPointXY(link._geometries()[key].vertexAt(want)))
+    link._dwell.timeout.emit()
+
+    # The working line is the only line, so the preview is a no-op on the
+    # dock -- what is being asserted is that the hit test resolved a real
+    # file's geometry to the right trace index.
+    assert link._hit_test(QgsPointXY(link._geometries()[key].vertexAt(want))) == (key, want)
+    assert session.current_key == key
+    link.dispose()
+    layers.detach()
+    project.clear()
+
+
+def test_a_previewed_line_is_requested_from_the_loader(linked, monkeypatch):
+    from nsgeo_qgis.loader import LineLoader
+
+    link, session, _layers, canvas, keys = linked
+    asked: list[str] = []
+    loader = LineLoader(session, on_error=lambda k, m: None)
+    monkeypatch.setattr(loader, "request", asked.append)
+
+    session.set_preview(keys[1], 7)
+
+    assert asked == [keys[1]]

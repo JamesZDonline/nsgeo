@@ -35,7 +35,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas, QgsRubberBand, QgsVertexMarker
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QObject
+from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from .layers import SiteLayers
@@ -46,12 +46,23 @@ BAND_COLOUR = QColor("#e67e22")
 MARKER_SIZE_PX = 9
 BAND_WIDTH_PX = 3
 
+# Sweeping the map must not thrash the renderer: a preview commits only
+# once the pointer has settled for this long.
+HOVER_DWELL_MS = 100
+# How close the pointer must come to a line before it counts as hovering
+# it, in SCREEN pixels -- converted to map units per event, so the feel
+# does not change with zoom.
+HOVER_TOLERANCE_PX = 12
+
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
 class MapLink(QObject):
+    HOVER_DWELL_MS = HOVER_DWELL_MS
+    HOVER_TOLERANCE_PX = HOVER_TOLERANCE_PX
+
     def __init__(
         self,
         session: SiteSession,
@@ -81,6 +92,12 @@ class MapLink(QObject):
         # tolerance -- which is a pixel count times mapUnitsPerPixel -- is
         # in the same units as the distances it is compared against.
         self._geoms: dict[str, QgsGeometry] | None = None
+
+        self._last_point: QgsPointXY | None = None
+        self._dwell = QTimer(self)
+        self._dwell.setSingleShot(True)
+        self._dwell.timeout.connect(self._on_dwell)
+        canvas.xyCoordinates.connect(self._on_xy)
 
         for signal in (
             session.trace_changed,
@@ -162,6 +179,71 @@ class MapLink(QObject):
                 f"{dest.authid() or dest.toWkt()}; refusing to draw untransformed geometry"
             )
         return transform
+
+    # ---- ambient hover ------------------------------------------------------
+    def _on_xy(self, point: QgsPointXY) -> None:
+        """Fired on every mouse move over the canvas, whatever tool is
+        active -- that is the whole reason this feature needs no tool slot.
+        Cheap on purpose: it records a position and restarts the dwell."""
+        try:
+            self._last_point = QgsPointXY(point)
+            self._dwell.start(self.HOVER_DWELL_MS)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not track the pointer: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_dwell(self) -> None:
+        try:
+            point = self._last_point
+            if point is None or not self.session.is_open:
+                return
+            hit = self._hit_test(point)
+            if hit is None:
+                # Clearing goes through the same dwell as previewing, so
+                # crossing a gap between two lines does not flicker the
+                # profile back to the working line and out again.
+                self.session.clear_preview()
+                return
+            key, trace = hit
+            if key == self.session.current_key:
+                # The pointer is over the line already being worked on,
+                # which is NOT a preview. The working line's cursor is
+                # `current_trace`; routing it through `set_preview` would
+                # give one line two sources of truth for one cursor, and
+                # the map marker would then stop following a drag in the
+                # profile. Any preview in progress ends here.
+                self.session.clear_preview()
+                self.session.set_trace(key, trace)
+            else:
+                self.session.set_preview(key, trace)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not preview the hovered line: {exc}", Qgis.MessageLevel.Critical)
+
+    def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
+        """The (line_key, trace) under `point`, or None if nothing is close
+        enough. `point` is in canvas CRS, and so is the geometry cache.
+
+        `closestVertexWithContext` returns a SQUARED distance, so the
+        tolerance is squared to match rather than the distance rooted --
+        getting this backwards silently widens the hit radius by 12x and
+        is invisible to any test that hovers exactly on a line.
+
+        Nearest *vertex* rather than nearest point on the segment: the
+        vertex index is the trace index, which is the answer being asked
+        for, and traces are centimetres apart, so the two differ by less
+        than the pointer's own precision.
+        """
+        tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
+        limit = tolerance * tolerance
+        best: tuple[float, str, int] | None = None
+        for key, geom in self._geometries().items():
+            if geom.isEmpty():
+                continue
+            sq_dist, index = geom.closestVertexWithContext(point)
+            if index < 0 or sq_dist > limit:
+                continue
+            if best is None or sq_dist < best[0]:
+                best = (sq_dist, key, index)
+        return None if best is None else (best[1], best[2])
 
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
@@ -269,6 +351,7 @@ class MapLink(QObject):
         the item from whatever scene actually holds it, and does not
         assume the canvas is still alive.
         """
+        self._dwell.stop()
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

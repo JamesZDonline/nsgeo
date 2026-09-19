@@ -84,6 +84,7 @@ class LineLoader(QObject):
         # once _tasks (site-scoped bookkeeping) has forgotten about it.
         self._pending: set[QgsTask] = set()
         session.line_opened.connect(self._on_line_opened)
+        session.preview_changed.connect(self._on_preview_changed)
         session.site_closed.connect(self._on_site_closed)
 
     def _on_site_closed(self) -> None:
@@ -114,6 +115,13 @@ class LineLoader(QObject):
         except Exception as exc:  # noqa: BLE001 -- see the comment above
             if self.on_error is not None:
                 self.on_error(key, str(exc))
+
+    def _on_preview_changed(self, key: str, _trace: int) -> None:
+        """A previewed line needs its samples too -- the first preview of a
+        line pays the async load, and the session's profile cache makes
+        every later one instant. Same guarded path as an opened line: the
+        empty key is the cleared sentinel and asks for nothing."""
+        self._on_line_opened(key)
 
     def request(self, key: str) -> None:
         """Start loading `key`'s samples in the background, unless a load
