@@ -61,12 +61,20 @@ def fill(
     r = int(radius_cells)
     ny, nx = values.shape
     kernel = disc_kernel(r)
-    numerator = np.where(np.isfinite(values), values, 0.0) * counts
+    finite = np.isfinite(values)
+    numerator = np.where(finite, values, 0.0) * counts
+    # The denominator must convolve the SAME masked counts the numerator
+    # uses, not raw `counts`: a NaN value with a non-zero count would
+    # otherwise contribute 0 to the numerator but full weight to the
+    # denominator, dragging the weighted mean toward zero. `cube.py`
+    # documents NaN iff count 0 as an invariant, but nothing here enforces
+    # it, so this must hold even if that invariant is ever violated.
+    counts_for_denominator = np.where(finite, counts, 0.0)
 
     shape = (ny + 2 * r, nx + 2 * r)
     spectrum = np.fft.rfft2(kernel, s=shape)
     num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)
-    den = np.fft.irfft2(np.fft.rfft2(counts, s=shape) * spectrum, s=shape)
+    den = np.fft.irfft2(np.fft.rfft2(counts_for_denominator, s=shape) * spectrum, s=shape)
     num = num[r : r + ny, r : r + nx]
     den = den[r : r + ny, r : r + nx]
 

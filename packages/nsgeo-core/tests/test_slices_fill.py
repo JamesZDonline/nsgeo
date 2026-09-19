@@ -90,6 +90,48 @@ def test_fill_smooths_a_fully_covered_slice_rather_than_preserving_it():
     assert out.max() <= values.max() + 1e-6
 
 
+def test_fill_at_r1_includes_the_cells_own_value_in_its_smoothed_value():
+    """Whether a cell's own value participates in its own smoothed value
+    is a real, undecided question -- `test_fill_smooths_a_fully_covered_
+    slice_rather_than_preserving_it` above only checks that the result
+    changes, stays finite, and stays in range, all of which a
+    centre-excluded kernel (`kernel[r, r] = 0.0`) satisfies just as well.
+    Decided here as: the cell's own value participates, matching what
+    `disc_kernel` already produces (its centre entry is 1.0, not 0.0).
+
+    `disc_kernel(1)` is a plus-shaped 5-cell neighbourhood (the 4 diagonal
+    corners are excluded, `(xx**2 + yy**2) <= 1` fails for them). With all
+    five weights equal to 1 (count 1 everywhere here), the centre-included
+    mean is (100 + 1 + 2 + 3 + 4) / 5 = 22.0; a centre-excluded kernel
+    would instead average only the four neighbours, (1 + 2 + 3 + 4) / 4 =
+    2.5 -- different enough that the two are not a rounding question."""
+    values = np.zeros((3, 3), dtype=np.float32)
+    counts = np.ones((3, 3), dtype=np.float32)
+    values[1, 1] = 100.0  # centre
+    values[0, 1] = 1.0  # up
+    values[2, 1] = 2.0  # down
+    values[1, 0] = 3.0  # left
+    values[1, 2] = 4.0  # right
+    out = fill(values, counts, radius_cells=1)
+    assert out[1, 1] == pytest.approx(22.0)
+
+
+def test_fill_denominator_masks_out_a_nan_value_with_a_nonzero_count():
+    """A cell can carry a NaN value alongside a non-zero count if the
+    documented "NaN iff count 0" invariant is ever violated upstream --
+    nothing in this module enforces it. The denominator must mask that
+    cell out exactly as the numerator does, or the NaN cell's real count
+    dilutes the weighted mean toward zero even though it contributes no
+    value: here (NaN, count 4) beside (6.0, count 1) must land on the
+    unbiased 6.0, not a value dragged toward zero by the phantom weight."""
+    values = np.full((3, 3), np.nan, dtype=np.float32)
+    counts = np.zeros((3, 3), dtype=np.float32)
+    values[1, 0], counts[1, 0] = np.nan, 4.0
+    values[1, 2], counts[1, 2] = 6.0, 1.0
+    out = fill(values, counts, radius_cells=1)
+    assert out[1, 1] == pytest.approx(6.0)
+
+
 def test_fill_rejects_a_negative_radius():
     with pytest.raises(ValueError, match="radius_cells"):
         fill(np.zeros((3, 3)), np.ones((3, 3)), radius_cells=-1)
