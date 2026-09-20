@@ -180,3 +180,17 @@ def test_a_source_change_clears_the_stale_slice_from_the_map(
         answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     finally:
         plugin.unload()
+
+
+def test_the_profile_band_follows_the_slice_window(fake_iface, qgis_app, tmp_path):
+    """The one thing spec 9.3 adds to the profile view, end to end through
+    the plugin's own wiring rather than by calling the dock directly."""
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        plugin.slices_dock.window_changed.emit(12.0, 16.0)
+        assert plugin.profile_dock.view._slice_band == (12.0, 16.0)
+        plugin.slices_dock.window_cleared.emit()
+        assert plugin.profile_dock.view._slice_band is None
+    finally:
+        plugin.unload()

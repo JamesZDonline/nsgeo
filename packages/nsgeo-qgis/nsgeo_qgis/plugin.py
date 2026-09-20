@@ -72,7 +72,7 @@ from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock
-from nsgeo_qgis.ui.slices_dock import SlicesDock
+from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
@@ -128,6 +128,7 @@ class NsgeoPlugin:
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
         self.slice_layer: SliceLayer | None = None
+        self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -214,6 +215,9 @@ class NsgeoPlugin:
         # outside-in in `unload()`, before `self.layers.detach()`.
         self.slice_layer = SliceLayer(self.session, self.layers)
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
+        self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
+        self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
+        self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
@@ -296,6 +300,9 @@ class NsgeoPlugin:
             # disconnects them (and frees the kernel cache) deterministically,
             # before the session it is connected to is torn down below.
             self.slices_dock.engine.dispose()
+        if self.depth_scroll is not None:
+            self.depth_scroll.dispose()
+            self.depth_scroll = None
         for dock in self.docks:
             self.iface.removeDockWidget(dock)
             dock.deleteLater()

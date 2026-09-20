@@ -591,6 +591,12 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not render the difference view: {exc}", Qgis.MessageLevel.Critical)
 
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        self.view.set_slice_band(lo_ns, hi_ns)
+
+    def clear_slice_band(self) -> None:
+        self.view.clear_slice_band()
+
     def current_radargram(self) -> Radargram | None:
         if self._key is None:
             return None

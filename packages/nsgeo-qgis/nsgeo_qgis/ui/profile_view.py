@@ -26,6 +26,7 @@ value rather than let the widget silently stop responding to input.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,13 @@ SELECTION_EDGE = QColor(48, 140, 198)
 PICK_COLOUR = QColor(224, 66, 27)
 DRAG_THRESHOLD_PX = 3
 
+# Spec 9.3's one overlay. Distinct from SELECTION_COLOUR, which is a
+# vertical trace range: these two can be on screen together and must not
+# read as the same thing.
+SLICE_BAND_COLOUR = QColor(80, 200, 255, 48)
+SLICE_BAND_EDGE = QColor(80, 200, 255, 170)
+MIN_BAND_PX = 2.0
+
 
 class ProfileView(QWidget):
     trace_hovered = pyqtSignal(int)
@@ -68,6 +76,7 @@ class ProfileView(QWidget):
         self._cursor = -1
         self._selection = (-1, -1)
         self._picks: list[tuple[int, float]] = []
+        self._slice_band: tuple[float, float] | None = None
         self._pick_mode = False
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
@@ -149,6 +158,24 @@ class ProfileView(QWidget):
     def clear_selection(self) -> None:
         self.set_selection(-1, -1)
 
+    def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
+        """Draw the active slice's time window across this radargram.
+
+        Spec 9.3: the only new thing the slice adds to the profile view.
+        It answers "is this anomaly real, or is the fill inventing a
+        feature between two lines?" by pointing at the depths the slice
+        averaged, on data that was never filled.
+        """
+        if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+            self._slice_band = None
+        else:
+            self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
+        self.update()
+
+    def clear_slice_band(self) -> None:
+        self._slice_band = None
+        self.update()
+
     def set_picks(self, picks: list[tuple[int, float]]) -> None:
         self._picks = list(picks)
         self.update()
@@ -163,6 +190,7 @@ class ProfileView(QWidget):
         self._cursor = -1
         self._selection = (-1, -1)
         self._picks = []
+        self._slice_band = None
         self._message = "no line open"
         self.update()
 
@@ -265,6 +293,7 @@ class ProfileView(QWidget):
                 painter.setPen(AXIS_COLOUR)
                 painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
             painter.setClipRect(r)
+            self._paint_slice_band(painter, r, t)
             self._paint_selection(painter, r, t)
             self._paint_picks(painter, r, t)
             self._paint_cursor(painter, r, t)
@@ -302,6 +331,36 @@ class ProfileView(QWidget):
         p.setPen(QPen(SELECTION_EDGE, 1, Qt.PenStyle.DashLine))
         p.drawLine(QPointF(x0, r.top()), QPointF(x0, r.bottom()))
         p.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
+
+    def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
+        """Local (unoffset) y-bounds of the band, or None when there is
+        none. Factored out the same way `_selection_bounds` is, and for
+        the same reason: a plain pair a test can assert on without
+        rendering a pixel.
+
+        A one-level window has zero time extent -- it averages a single
+        sample, and saying otherwise would overstate what was averaged --
+        so the floor is applied HERE, in pixels, rather than by widening
+        the window the readout reports.
+        """
+        if self._slice_band is None:
+            return None
+        y0 = t.y_of_time(self._slice_band[0])
+        y1 = t.y_of_time(self._slice_band[1])
+        if y1 - y0 < MIN_BAND_PX:
+            centre = (y0 + y1) / 2.0
+            y0, y1 = centre - MIN_BAND_PX / 2.0, centre + MIN_BAND_PX / 2.0
+        return y0, y1
+
+    def _paint_slice_band(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        bounds = self._slice_band_bounds(t)
+        if bounds is None:
+            return
+        y0, y1 = r.top() + bounds[0], r.top() + bounds[1]
+        p.fillRect(QRectF(r.left(), y0, r.width(), y1 - y0), SLICE_BAND_COLOUR)
+        p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
+        p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
 
     def _pick_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
         """Local (unoffset) (x, y) of each pick marker's centre. Factored

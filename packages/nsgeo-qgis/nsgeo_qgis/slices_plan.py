@@ -204,3 +204,20 @@ def format_status(
         what = f"{n_lines} {noun} held in memory"
     speed = "—" if redraw_ms is None else f"{max(1, round(redraw_ms))} ms"
     return f"{what}, {format_bytes(held)} · slices redraw in {speed}"
+
+
+def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
+    """-1, 0 or +1 slice steps for one wheel event.
+
+    Kept here, away from Qt, for two reasons: the plugin's boundary rule
+    keeps arithmetic out of widgets, and `QWheelEvent`'s constructor
+    differs between Qt 5 and Qt 6, so a rule pinned only through a
+    synthesised event would be pinned only on one of them.
+
+    Without shift this returns 0 and the event is not consumed: plain
+    scrolling stays the map's zoom, because spec 9.3 is explicit that the
+    slice introduces no new tool and takes no gesture away.
+    """
+    if not shift_held or angle_delta_y == 0:
+        return 0
+    return 1 if angle_delta_y < 0 else -1

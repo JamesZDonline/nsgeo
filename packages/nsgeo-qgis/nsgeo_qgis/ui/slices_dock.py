@@ -25,10 +25,11 @@ from typing import Any
 
 import numpy as np
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
-from nsgeo.slices import CubeFrame, SliceWindow, fill, plan_windows, window_label
+from nsgeo.slices import CubeFrame, SliceWindow, fill, plan_windows, window_label, window_times_ns
 from nsgeo.velocity import VelocityModel
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -50,6 +51,7 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     Resolution,
     SourceChoice,
+    depth_scroll_delta,
     estimate_memory,
     format_bytes,
     transform_names,
@@ -67,6 +69,8 @@ class SlicesDock(QgsDockWidget):
     #: /`current_frame()`/`display_limit()` are worth reading again --
     #: `plugin.py` connects this to redraw `SliceLayer` (Task 4).
     slice_changed = pyqtSignal()
+    window_changed = pyqtSignal(float, float)  # (lo_ns, hi_ns) of the averaged window
+    window_cleared = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -927,6 +931,7 @@ class SlicesDock(QgsDockWidget):
                 # without it the map kept showing the PREVIOUS source's
                 # slice, indefinitely if the new one never prepares.
                 self.slice_changed.emit()
+                self.window_cleared.emit()
                 return
             values, coverage = self.engine.slice_at(window)
             if self.coverage_check.isChecked():
@@ -937,6 +942,8 @@ class SlicesDock(QgsDockWidget):
             self._values = shown
             self._window = window
             self._update_readout(window)
+            lo_ns, hi_ns = window_times_ns(self.engine.z, window)
+            self.window_changed.emit(lo_ns, hi_ns)
             self.status_label.setText(self.engine.status_text())
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
@@ -947,10 +954,17 @@ class SlicesDock(QgsDockWidget):
             # range `z1` that a prepared line no longer covers), and a
             # message bar warning appears beside a map and readout that
             # both still claim the OLD window is what is on screen.
+            #
+            # Task 5: the profile band is exactly the same kind of stale
+            # state -- left pointing at the tick before this one, on a
+            # radargram that may not even cover it any more -- so it is
+            # cleared here for the same reason `_values`/`_window` are,
+            # not left to the brief's one call site alone.
             self._values = None
             self._window = None
             self.readout.setText(f"error: {exc}")
             self.slice_changed.emit()
+            self.window_cleared.emit()
             self.error.emit(str(exc))
 
     def _update_readout(self, window: SliceWindow) -> None:
@@ -1072,3 +1086,47 @@ class SlicesDock(QgsDockWidget):
         if self.coverage_check.isChecked():
             return True
         return self.engine.output_unipolar
+
+
+class CanvasDepthScroll(QObject):
+    """Shift + scroll on the map canvas cycles depth (spec 9.2).
+
+    An event filter rather than a map tool: spec 9.3 is explicit that the
+    slice introduces no new tool, and taking over the canvas would break
+    the ambient hover and the Select-to-promote gesture M7 already built.
+    Without shift the event is not consumed, so plain scrolling remains
+    the map's zoom.
+
+    `eventFilter` is a Qt-invoked virtual, the same hazard class as
+    `paintEvent`: an exception escaping it is swallowed locally and
+    reaches `qFatal()` in the CI container, so the body is guarded.
+    """
+
+    def __init__(self, canvas: Any, dock: Any, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+        self._dock = dock
+        canvas.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802
+        try:
+            if event.type() != QEvent.Type.Wheel:
+                return False
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            delta = depth_scroll_delta(int(event.angleDelta().y()), shift)
+            if delta == 0:
+                return False
+            self._dock.step_slice(delta)
+            return True  # consumed: the map must not also zoom
+        except Exception as exc:  # noqa: BLE001 -- see the class docstring
+            _log(f"could not step the slice from the canvas: {exc}")
+            return False
+
+    def dispose(self) -> None:
+        try:
+            if self._canvas is not None and not sip.isdeleted(self._canvas):
+                self._canvas.viewport().removeEventFilter(self)
+        except (RuntimeError, AttributeError):
+            pass
+        self._canvas = None
+        self._dock = None

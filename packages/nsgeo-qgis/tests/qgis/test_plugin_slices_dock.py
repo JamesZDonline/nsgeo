@@ -677,3 +677,31 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
     assert dock.current_values() is None
     assert dock.readout.text() != old_readout
     assert changed, "the map must be told to clear, not left showing the stale slice"
+
+
+def test_moving_the_slider_announces_the_window_it_averaged(docked):
+    dock, _ = docked
+    _ready(dock)
+    seen: list[tuple[float, float]] = []
+    dock.window_changed.connect(lambda lo, hi: seen.append((lo, hi)))
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(12)
+    assert seen
+    lo, hi = seen[-1]
+    window = dock.current_window()
+    assert (lo, hi) == pytest.approx(window_times_ns(dock.engine.z, window))
+
+
+def test_step_slice_moves_by_the_step_not_by_one_level(docked):
+    """Spec 6.6: thickness and step answer different questions. Stepping
+    by one level would make shift+scroll take dozens of turns to cross a
+    slice at native dz."""
+    dock, _ = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(5.0)
+    dock.step_spin.setValue(2.5)
+    start = dock.slice_slider.value()
+    dock.step_slice(1)
+    moved = dock.slice_slider.value() - start
+    assert moved == round(2.5 / dock.engine.z.dz_ns)
+    assert moved > 1

@@ -129,3 +129,17 @@ def test_the_value_objects_validate_themselves():
     assert ok.cell == 0.1
     choice = SourceChoice(grid_id="A", preset="p", transform="amp_abs", line_keys=("a", "b"))
     assert choice.line_keys == ("a", "b")
+
+
+def test_shift_scroll_steps_deeper_downward_and_is_inert_without_shift():
+    """Spec 9.2: shift + scroll on the canvas cycles depth, which is the
+    convention users of other packages already have. The direction is the
+    one the world uses -- scrolling down goes deeper -- and the rule is a
+    plain function so it is pinned without synthesising a Qt event, whose
+    constructor signature differs between Qt 5 and Qt 6."""
+    from nsgeo_qgis.slices_plan import depth_scroll_delta
+
+    assert depth_scroll_delta(-120, shift_held=True) == 1  # down: deeper
+    assert depth_scroll_delta(120, shift_held=True) == -1  # up: shallower
+    assert depth_scroll_delta(-120, shift_held=False) == 0  # plain scroll is a map zoom
+    assert depth_scroll_delta(0, shift_held=True) == 0  # a horizontal-only wheel
