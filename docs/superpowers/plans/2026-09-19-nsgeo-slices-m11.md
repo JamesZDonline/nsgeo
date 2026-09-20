@@ -738,7 +738,7 @@ def test_limit_over_slices_refuses_an_empty_sequence():
 
 - [ ] **Step 14: Run them and watch them fail**
 
-Run: `./.venv/bin/python -m pytest packages/nsgeo-core/tests/test_slices_display.py -q -k limit or shared`
+Run: `./.venv/bin/python -m pytest packages/nsgeo-core/tests/test_slices_display.py -q -k "limit or shared"`
 Expected: FAIL — `ImportError` for `limit_over_slices` / `shared_limit`.
 
 - [ ] **Step 15: Implement the stretch half**
@@ -1355,7 +1355,8 @@ mypy.
   - `slices_plan.DEFAULT_BUDGET_BYTES`, `STREAM_MS_PER_LINE`, `FRAME_BUDGET_MS`, `NO_TRANSFORM`
   - `slices_engine.SliceEngine(session, on_prepared=None, on_error=None, on_progress=None,
     parent=None)` with `set_source`, `set_resolution`, `clear`, `dispose`, `is_prepared`,
-    `frame`, `z`, `mode`, `line_count`, `estimate`, `slice_at(window) -> (values, coverage)`,
+    `frame`, `z`, `mode`, `line_count`, `estimate`, `choice`, `has_cube`,
+    `slice_at(window) -> (values, coverage)`,
     `shared_limit(thickness_levels, clip) -> float`, `cube() -> SliceCube`,
     `provenance() -> Provenance`, `status_text() -> str`, `wait_for_preparation(timeout_ms)`.
 
@@ -2142,6 +2143,23 @@ class SliceEngine(QObject):
         return self._mode
 
     @property
+    def choice(self) -> SourceChoice | None:
+        """What this engine was last pointed at. The exporter needs it to
+        write a recipe; nothing may reach past this for `_choice`."""
+        return self._choice
+
+    @property
+    def has_cube(self) -> bool:
+        """Whether a resident cube is currently held.
+
+        Public because "did this operation quietly build a cube?" is a
+        contract, not an implementation detail: spec 7.4 makes a resident
+        cube a latency optimisation and never a capability, and export is
+        the operation most tempted to forget that.
+        """
+        return self._cube is not None
+
+    @property
     def output_unipolar(self) -> bool:
         """Whether a slice from this source has no negative side.
 
@@ -2918,6 +2936,24 @@ def test_choosing_a_preset_that_carries_a_transform_is_refused_visibly(docked):
     assert not dock.engine.is_prepared
 
 
+def test_refilling_the_combos_does_not_re_prepare(docked):
+    """Refilling a QComboBox emits currentTextChanged. Without the
+    _updating guard the dock re-prepares on construction and on every
+    grids_changed / lines_changed / presets_changed — ~0.9 s of work per
+    unrelated session signal, which IS the "nothing runs automatically"
+    the design forbids."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    prepared: list[int] = []
+    dock.engine.on_prepared = lambda: prepared.append(1)
+    session.site.presets["another"] = list(PRESET)
+    session.presets_changed.emit()
+    session.lines_changed.emit()
+    assert dock.engine.wait_for_preparation(2_000)
+    assert prepared == [], "refilling the combos must not have re-prepared"
+
+
 def test_preparing_reports_progress_and_then_reports_prepared(docked):
     dock, session = docked
     dock.prepare()  # the dock prepares on construction too; this is the retry path
@@ -3015,7 +3051,13 @@ Behaviour the tests above pin:
   the headers, before `time_zero` crops rows (512 samples against 463 after a four-step preset),
   so it overestimates by roughly a tenth. An honest approximation beats a precise-looking number
   that is wrong in the other direction.
-- `_on_source_changed` calls `self.prepare()`. Spec 9.1 is explicit that changing the grid, preset
+- `_on_source_changed` returns immediately while `self._updating` is non-zero, and otherwise
+  calls `self.prepare()`. **The guard is load-bearing, not defensive.** `rebuild_source` refills
+  the grid and preset combos, and refilling a `QComboBox` emits `currentTextChanged`; without the
+  guard the dock would re-prepare on its own construction and again on every `grids_changed`,
+  `lines_changed` and `presets_changed` — roughly 0.9 s of work per unrelated session signal, and
+  the one thing "nothing runs automatically" really does forbid. §9.1's auto-preparation is the
+  execution of a choice *the user made*; the dock refilling its own combos is not one. Spec 9.1 is explicit that changing the grid, preset
   or transform re-runs the preparation as a `QgsTask`, and equally explicit that this is not the
   "nothing runs automatically" the design forbids: the user chose a preset, and preparation is the
   execution of that choice rather than an inference about it. **Do not add a `Prepare` button.**
@@ -4267,7 +4309,7 @@ def test_export_never_needs_a_resident_cube(exportable, tmp_path):
     engine.set_always_resident(False)
     assert engine.mode == "streaming"
     export_slices(engine, tmp_path / "cube.tif", 10, 5, None, radius_cells=0)
-    assert engine._cube is None, "export must not have built a cube behind the user's back"
+    assert not engine.has_cube, "export must not have built a cube behind the user's back"
 
 
 def test_the_temporal_mapping_is_one_nanosecond_to_one_second(exportable, tmp_path):
@@ -4300,7 +4342,7 @@ def test_the_survey_record_keeps_the_cube_path_relative(exportable_with_session,
     the one that has to do it."""
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
-    record = cube_record(engine.session, engine._choice, engine.frame, npz)
+    record = cube_record(engine.session, engine.choice, engine.frame, engine.z, _VIEW, npz)
     assert record["array"] == "slices/A__default.npz"
     assert not Path(record["array"]).is_absolute()
     assert set(record) == {"grid_id", "preset", "transform", "cell", "array", "lines", "z", "view"}
@@ -4316,13 +4358,13 @@ def test_a_cube_written_outside_the_project_tree_is_refused(exportable_with_sess
     outside.parent.mkdir(exist_ok=True)
     npz = save_cube_npz(engine, outside)
     with pytest.raises(ProjectError, match="portable"):
-        cube_record(engine.session, engine._choice, engine.frame, npz)
+        cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
 
 
 def test_the_record_survives_a_save_and_reload_of_the_survey(exportable_with_session, tmp_path):
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
-    session.site.cubes["A__default"] = cube_record(session, engine._choice, engine.frame, npz)
+    session.site.cubes["A__default"] = cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
     session.save()
     reloaded = load_site(session.json_path)
     assert reloaded.cubes["A__default"]["array"] == "slices/A__default.npz"
@@ -4579,7 +4621,7 @@ def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_sessio
         thickness_ns=5.0, step_ns=2.5, radius_m=0.75,
         palette="amp_heat", stretch="shared", coverage=False,
     )
-    record = cube_record(session, engine._choice, engine.frame, engine.z, view, npz)
+    record = cube_record(session, engine.choice, engine.frame, engine.z, view, npz)
     session.site.cubes["A__first"] = record
     session.save()
 
@@ -4610,7 +4652,7 @@ def test_a_recipe_restores_the_exact_line_set_not_the_whole_grid(exportable_with
     assert engine.wait_for_preparation(20_000)
     engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
     npz = save_cube_npz(engine, session.root / "slices" / "A__subset.npz")
-    record = cube_record(session, engine._choice, engine.frame, engine.z, _VIEW, npz)
+    record = cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
 
     recipe = recipe_from_record(record)
     assert recipe.choice.line_keys == subset
