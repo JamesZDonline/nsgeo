@@ -88,7 +88,7 @@ class UnipolarClip:
     slices actually taken at the display thickness, never over
     `cube.mean` (the raw, per-level array). A window mean has far lower
     variance than the individual levels it averages, so a limit taken
-    over raw levels is systematically too low for a multi-level window --
+    over raw levels is systematically too high for a multi-level window --
     on one realistic cube, `UnipolarClip().limit(cube.mean)` returned 2.59
     where the correct limit for the displayed 10-level slice was 0.87.
     Because that bias is uniform across depth, it does not look like a

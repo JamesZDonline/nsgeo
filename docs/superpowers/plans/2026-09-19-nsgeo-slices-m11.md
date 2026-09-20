@@ -808,6 +808,15 @@ FAILS. Then mutate `plan_windows(cube.z, thickness_levels, thickness_levels)` to
 `test_the_shared_limit_covers_every_level_exactly_once` FAILS. Revert both; record the measured
 ratio `over_slices / over_levels` in the task report.
 
+(Amended during execution: this plan originally also predicted
+`test_the_shared_limit_covers_every_level_exactly_once` would fail against the second mutant. It
+cannot — that test never calls `shared_limit`; it calls `plan_windows(cube.z, 10, 10)` directly
+with literal arguments, so a mutation inside `shared_limit`'s own body is invisible to it. The
+mutant *is* caught, by the percentile cross-check inside
+`test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels`: the step-1 windows
+over-weight the axis's middle and shift the measured percentile away from the abutting-window
+value the test independently recomputes.)
+
 - [ ] **Step 18: Commit**
 
 ```bash

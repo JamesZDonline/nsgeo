@@ -157,9 +157,21 @@ def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> fl
     the Slices dock.
 
     Windows abut (`step == thickness`), so every level contributes exactly
-    once and no depth is weighted more heavily than another.
+    once and no depth is weighted more heavily than another -- including
+    the tail: `plan_windows` emits whole windows only, because its output
+    is also the GeoTIFF's bands and bands of unequal thickness are not
+    comparable (spec 9.4). A stretch is a measurement rather than an
+    export, so the tail gets a final, thinner window instead of being
+    dropped: at nz=181 and thickness=23 that is 20 levels -- and on a
+    real cube those were the BRIGHTEST levels in it, so excluding them
+    would leave a deep reflector clipped against a stretch it never
+    contributed to. A thin end window is also exactly what the viewer
+    produces there: `ZAxis.level_range` returns a genuinely thinner
+    window at either end of the axis.
     """
-    windows = plan_windows(cube.z, thickness_levels, thickness_levels)
+    windows = list(plan_windows(cube.z, thickness_levels, thickness_levels))
+    if windows[-1].k1 < cube.z.nz:
+        windows.append(SliceWindow(windows[-1].k1, cube.z.nz))
     return limit_over_slices((cube.slice_levels(w.k0, w.k1) for w in windows), clip)
 
 
@@ -204,8 +216,26 @@ def to_north_up(
         )
     xmin, ymin, xmax, ymax = slice_extent(frame)
     cell = frame.cell
-    width = max(1, int(math.ceil((xmax - xmin) / cell)))
-    height = max(1, int(math.ceil((ymax - ymin) / cell)))
+    # `(xmax - xmin) / cell` is an exact integer for an axis-aligned frame,
+    # but in floating point it lands a few ulps above one, so a plain
+    # ceil() adds a phantom all-nodata row and column. Snap the ratio --
+    # scale-free, unlike a tolerance in metres. Measured before the fix: a
+    # cell=0.1, nx=29 frame produced a (13, 30) raster, and 102 of 1000
+    # widths tripped at that cell size.
+    #
+    # A FIXED epsilon on the ratio is not enough on its own: `xmin`/`xmax`
+    # come out of `slice_extent`'s own arithmetic on `frame.origin`, and
+    # the subtraction that cancels their shared magnitude loses more ulps
+    # the larger that magnitude is -- the same lesson `cell_index`'s own
+    # boundary tolerance is built around. At a UTM-scale origin (~5e5-5e6)
+    # a plain `1e-9` is itself too small (measured residual 1.86e-9 to
+    # 3.73e-9 above the true integer at cell=0.1 and cell=0.05), so the
+    # bound is scaled by the same `64 * eps * max(1, |coord|)` margin
+    # `cell_index` uses, converted from metres to cells by dividing by
+    # `cell`.
+    eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / cell
+    width = max(1, int(math.ceil((xmax - xmin) / cell - eps)))
+    height = max(1, int(math.ceil((ymax - ymin) / cell - eps)))
 
     # Cell CENTRES, so a sample lands in the middle of its output pixel
     # rather than on a boundary where round-off decides which cell it

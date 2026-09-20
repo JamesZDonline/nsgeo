@@ -153,11 +153,52 @@ def test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels():
 def test_the_shared_limit_covers_every_level_exactly_once():
     """Abutting windows, so no depth is weighted twice in the percentile.
     A step-1 implementation would weight the middle of the axis ~10x more
-    than its ends and shift the limit."""
+    than its ends and shift the limit.
+
+    The non-divisible case is the one that matters: `plan_windows` emits
+    whole windows only, so without a final partial window the tail of the
+    axis is excluded from the stretch entirely -- 20 of 181 levels on the
+    real corpus, and the brightest ones in it."""
     cube = _cube_with_varying_levels()
     windows = plan_windows(cube.z, 10, 10)
     assert sum(w.n_levels for w in windows) == cube.z.nz
     assert [w.k0 for w in windows] == [0, 10, 20, 30]
+
+    # nz=37 with thickness 10: plan_windows gives 0,10,20 and stops at 30,
+    # leaving 7 levels. shared_limit must still see all 37.
+    odd = SliceCube(
+        frame=cube.frame,
+        z=ZAxis(t0_ns=0.0, dz_ns=0.5, nz=37),
+        mean=cube.mean[:37],
+        count=cube.count,
+        provenance=cube.provenance,
+    )
+    seen: list[np.ndarray] = []
+
+    class _Recording:
+        percentile = 99.0
+
+        def limit(self, data: np.ndarray) -> float:
+            seen.append(np.asarray(data))
+            return 1.0
+
+    shared_limit(odd, 10, _Recording())
+    # `slice_levels` returns one aggregated value per CELL per window, not
+    # per level, so the total `shared_limit` hands to `clip.limit` is
+    # (n_windows * n_cells), never (nz * n_cells) -- a window of any
+    # thickness still contributes exactly `frame.n_cells` values. The
+    # windows are abutting and whole except for one thinner tail window
+    # (spec 9.4's whole-window rule applies to `plan_windows`, not to this
+    # measurement), so the expected window count is a plain ceiling
+    # division: 4 windows for nz=37, thickness=10 (0-10, 10-20, 20-30,
+    # 30-37), not 3 (without the tail fix, the last 7 levels are dropped
+    # entirely and `shared_limit` never sees them).
+    expected_n_windows = -(-odd.z.nz // 10)  # ceil(37 / 10) == 4
+    assert seen and seen[0].size == expected_n_windows * odd.frame.n_cells, (
+        f"shared_limit saw {seen[0].size} values from an implied "
+        f"{seen[0].size // odd.frame.n_cells} window(s); expected "
+        f"{expected_n_windows} windows (the tail window must not be dropped)"
+    )
 
 
 def test_limit_over_slices_ignores_nodata_and_survives_an_all_nodata_slice():
@@ -240,3 +281,24 @@ def test_north_up_carries_nodata_through_unchanged():
     out, _ = to_north_up(values, frame)
     assert np.isnan(out[1, 1])  # row 1 of 3 is its own mirror image
     assert np.isfinite(out[0]).all()
+
+
+def test_north_up_of_an_axis_aligned_frame_has_exactly_the_frames_shape():
+    """At spec 6.4's realistic 0.10 m cells the span `(xmax - xmin) / cell`
+    is an exact integer mathematically and `n + 4e-15` in floating point,
+    so a plain ceil() adds a phantom all-nodata row and column. The
+    fixture used by the other north-up tests has cell=1.0, where the
+    arithmetic is exact, and so cannot see this."""
+    for nx, ny, cell in ((29, 12, 0.1), (23, 19, 0.05), (7, 3, 0.2), (13, 11, 1.0)):
+        frame = CubeFrame(
+            origin=(500000.0, 4500000.0),
+            azimuth=0.0,
+            cell=cell,
+            nx=nx,
+            ny=ny,
+            crs="EPSG:32633",
+        )
+        values = np.arange(ny * nx, dtype=float).reshape(ny, nx)
+        out, _ = to_north_up(values, frame)
+        assert out.shape == (ny, nx), f"{nx}x{ny} at cell={cell} gained a phantom row/column"
+        np.testing.assert_allclose(out, values[::-1])

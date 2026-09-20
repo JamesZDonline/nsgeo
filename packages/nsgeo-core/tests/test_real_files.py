@@ -163,20 +163,26 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     adjacent levels in this real amp_envelope cube correlate at 0.95-0.99,
     because envelope detection is itself a smoothing operation, so a window
     mean barely differs from the levels it averages. Measured on this
-    corpus, shared_limit falls from 2.724 at thickness 1 to 2.166 at 20 and
-    1.265 at 90 -- smooth and monotonic, exactly as specified. A synthetic
-    fixture with i.i.d. levels shows a far larger reduction (~0.55) at the
-    same thickness, which is why the magnitude claim lives on that fixture
-    in test_slices_display.py and only the direction and the mechanism are
-    asserted here. Do not re-add a magnitude threshold to this test: any
-    value that passes on this corpus is a fact about this antenna and this
-    processing, not about shared_limit.
+    corpus (with the tail window included, per Ruling F), shared_limit
+    falls from 2.724 at thickness 1 to 2.171 at 20, 2.061 at 23, and 2.051
+    at 90 -- still monotonic, but far flatter past thickness 20 than
+    before that fix (which measured 1.265 at 90): thickness=90 leaves the
+    axis's last level as a tail window of its own, and that level is one
+    of the brightest in the cube, so it keeps contributing its own
+    brightness to the stretch instead of being averaged away or dropped
+    entirely at large thickness. A synthetic fixture with i.i.d. levels
+    shows a far larger reduction (~0.55) at the same thickness, which is
+    why the magnitude claim lives on that fixture in test_slices_display.py
+    and only the direction and the mechanism are asserted here. Do not
+    re-add a magnitude threshold to this test: any value that passes on
+    this corpus is a fact about this antenna and this processing, not
+    about shared_limit.
     """
     from nsgeo.processing import build_step
     from nsgeo.render import UnipolarClip, to_index8_unipolar
     from nsgeo.slices.binning import PreparedLine, build_cube, plan_line
     from nsgeo.slices.cube import Provenance
-    from nsgeo.slices.display import plan_windows, shared_limit
+    from nsgeo.slices.display import SliceWindow, plan_windows, shared_limit
     from nsgeo.slices.frame import CubeFrame, ZAxis
 
     prepared = []
@@ -226,7 +232,13 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     # over the slices actually displayed at this thickness. This is what
     # dies against the `clip.limit(cube.mean)` implementation M10 measured,
     # and against a windows-overlap mutant that weights mid-depths twice.
-    windows = plan_windows(z, thickness, thickness)
+    # `shared_limit` folds a final, thinner tail window in when thickness
+    # does not divide nz (Ruling F) -- 20 of this axis's 181 levels, here
+    # -- so this cross-check must add the same tail window or it measures
+    # a different (and, per that ruling, wrong) set of displayed slices.
+    windows = list(plan_windows(z, thickness, thickness))
+    if windows[-1].k1 < z.nz:
+        windows.append(SliceWindow(windows[-1].k1, z.nz))
     shown = np.concatenate([cube.slice_levels(w.k0, w.k1).ravel() for w in windows])
     shown = shown[np.isfinite(shown)]
     assert correct == pytest.approx(float(np.percentile(shown, clip.percentile)), rel=1e-6)

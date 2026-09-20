@@ -25,6 +25,6 @@ from nsgeo.slices.display import (  # noqa: F401
     window_label,
     window_times_ns,
 )
-from nsgeo.slices.fill import disc_kernel, fill  # noqa: F401
+from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill  # noqa: F401
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent  # noqa: F401
 from nsgeo.slices.store import CubeStoreError, load_cube, save_cube  # noqa: F401
