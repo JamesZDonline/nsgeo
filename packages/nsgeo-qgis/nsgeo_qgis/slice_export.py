@@ -79,7 +79,7 @@ reviewer of this task does:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -105,7 +105,7 @@ from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsR
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import SourceChoice
+from nsgeo_qgis.slices_plan import Resolution, SourceChoice
 
 
 @dataclass(frozen=True)
@@ -496,7 +496,11 @@ class ViewSettings:
             radius_m=float(doc["radius_m"]),
             palette=str(doc["palette"]),
             stretch=str(doc["stretch"]),
-            coverage=bool(doc["coverage"]),
+            # `.get(..., False)`, not `doc["coverage"]` (Task 7): tolerant
+            # of a `view` dict that carries the other five fields but not
+            # this one -- the same reader-tolerance this module's `Task 7`
+            # functions extend to the record as a whole.
+            coverage=bool(doc.get("coverage", False)),
         )
 
 
@@ -550,3 +554,73 @@ def cube_record(
         # --- how it was BEING READ: changes nothing in the array ---
         "view": view.to_dict(),
     }
+
+
+@dataclass(frozen=True)
+class CubeRecipe:
+    """A `Site.cubes` record, read back as the three things the dock sets.
+
+    `resolution` and `view` are optional because a record written before
+    this milestone carries neither. Absent means UNKNOWN, and the dock
+    keeps whatever it already had rather than inventing a default that
+    would look like a restored setting.
+    """
+
+    choice: SourceChoice
+    resolution: Resolution | None
+    view: ViewSettings | None
+
+
+def recipe_from_record(record: Mapping[str, Any]) -> CubeRecipe:
+    """Read a cube record back into the three values the dock sets.
+
+    Tolerant of a record written by an earlier build -- `load_site`
+    stores records opaquely, so old ones arrive here unchanged and it is
+    this function, not the schema, that has to cope. Strict about a
+    field that is PRESENT and wrong: a reversed z range restored silently
+    would produce a different cube under the same name, which is the one
+    failure a reproducibility feature must not have.
+
+    `transform`'s "none" <-> `NO_TRANSFORM` ("") mapping is the one place
+    the record's spelling and `SourceChoice`'s meet -- see `cube_record`'s
+    own docstring for why the record spells it "none" at all.
+
+    `line_keys` reads back as `()` both when `record["lines"]` is an
+    explicit empty list and when the key is absent entirely (an
+    old-format record) -- this function cannot tell those two apart from
+    the record alone, and does not try to; both mean "no line list to
+    restore".
+    """
+    try:
+        choice = SourceChoice(
+            grid_id=str(record["grid_id"]),
+            preset=str(record["preset"]),
+            transform=(
+                "" if record.get("transform", "none") == "none" else str(record["transform"])
+            ),
+            line_keys=tuple(str(k) for k in record.get("lines", ())),
+        )
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"cube record is missing {exc}") from exc
+
+    resolution = None
+    if "z" in record:
+        z_doc = record["z"]
+        try:
+            resolution = Resolution(
+                cell=float(record["cell"]),
+                dz_ns=float(z_doc["dz_ns"]),
+                t0_ns=float(z_doc["t0_ns"]),
+                t1_ns=float(z_doc["t1_ns"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"cube record has an invalid z range: {exc}") from exc
+
+    view = None
+    if record.get("view"):
+        try:
+            view = ViewSettings.from_dict(dict(record["view"]))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"cube record has invalid view settings: {exc}") from exc
+
+    return CubeRecipe(choice=choice, resolution=resolution, view=view)

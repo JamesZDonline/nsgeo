@@ -46,6 +46,7 @@ from qgis.PyQt.QtWidgets import (
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slice_export import ViewSettings, recipe_from_record
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
@@ -143,6 +144,18 @@ class SlicesDock(QgsDockWidget):
         #: (tens of them), not a per-tick cost, so `display_limit()` only
         #: pays for it again when one of those three actually changed.
         self._shared_limit_cache: tuple[tuple[Any, ...], float] | None = None
+        #: Task 7: a palette name `restore_cube` still owes `palette_combo`
+        #: once the preparation it just dispatched finishes. `_on_prepared`
+        #: always calls `_refill_palette_combo()`, which resets the combo
+        #: to a computed default regardless of what was selected before
+        #: (by design -- see that method's own docstring) -- so a palette
+        #: applied by `apply_view` before `prepare()` would otherwise be
+        #: silently overwritten the moment the async preparation completes.
+        #: Consumed and cleared by `_on_prepared` every time it runs
+        #: (restore-triggered or not), and cleared early by
+        #: `_on_source_changed`/`set_included` too, so a manual change made
+        #: while a restore is still preparing cannot inherit its palette.
+        self._pending_palette: str | None = None
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -152,9 +165,15 @@ class SlicesDock(QgsDockWidget):
         source_layout = QVBoxLayout(self.source_group)
 
         form = QFormLayout()
+        # Cube sits above Grid (Task 7): it is the control that sets all
+        # three of the others (and the inclusion set, and Resolution), so
+        # it reads first. `refresh_cube_combo()` fills it; see that
+        # method's own docstring for why it starts empty here.
+        self.cube_combo = QComboBox()
         self.grid_combo = QComboBox()
         self.preset_combo = QComboBox()
         self.transform_combo = QComboBox()
+        form.addRow("Cube", self.cube_combo)
         form.addRow("Grid", self.grid_combo)
         form.addRow("Preset", self.preset_combo)
         form.addRow("Transform", self.transform_combo)
@@ -338,6 +357,7 @@ class SlicesDock(QgsDockWidget):
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
         self.export_button.clicked.connect(lambda: self.export_requested.emit())
+        self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
         self.transform_combo.currentTextChanged.connect(self._on_source_changed)
@@ -363,6 +383,17 @@ class SlicesDock(QgsDockWidget):
             self.radius_spin,
         ):
             _spin.valueChanged.connect(lambda _value: self._debounce.start())
+
+        # Task 7: `cube_combo` falls back to "(unsaved)" the moment one of
+        # the four fields that decide what the cube IS (spec 5.4's split,
+        # `cube_record`'s own docstring) moves -- `cell`/`dz_ns`/`t0_ns`/
+        # `t1_ns`, i.e. the `Resolution` dataclass's own fields. Deliberately
+        # NOT `radius_spin`: the fill radius is a `ViewSettings` field (it
+        # changes no pixel in the array, only how it is displayed -- see
+        # `Resolution`'s own docstring), so moving it alone leaves the
+        # combo's claim about the array still true.
+        for _spin in (self.cell_spin, self.dz_spin, self.z0_spin, self.z1_spin):
+            _spin.valueChanged.connect(lambda _value: self._mark_cube_unsaved())
 
         # Display changes no value `refresh_slice()` fetches from the
         # engine, but each still changes what the map ought to show --
@@ -414,6 +445,7 @@ class SlicesDock(QgsDockWidget):
                 self._refill(self.preset_combo, preset_names)
             finally:
                 self._updating -= 1
+            self.refresh_cube_combo()
             self._sync_included()
             self._update_included_label()
             self._refresh_source_status()
@@ -435,6 +467,28 @@ class SlicesDock(QgsDockWidget):
         combo.addItems(items)
         if current in items:
             combo.setCurrentText(current)
+
+    def refresh_cube_combo(self) -> None:
+        """Refill `cube_combo` from `session.site.cubes`, `"(unsaved)"`
+        first -- called from `rebuild_source` (so a fresh `site_opened`
+        picks up whatever `cubes` the reopened survey carries, alongside
+        every other session signal `rebuild_source` already answers) and
+        directly by `plugin.py`'s save handler, the moment a new record
+        exists.
+
+        Guarded by `_updating`, the same reason `rebuild_source` guards
+        `grid_combo`/`preset_combo` (see its own docstring): refilling
+        emits `currentTextChanged` even when the selection ends up
+        unchanged, and without this guard that would read as the user
+        picking a cube and fire `_on_cube_changed`/`restore_cube`.
+        """
+        try:
+            self._updating += 1
+            site = self.session.site
+            cube_ids = sorted(site.cubes) if site is not None else []
+            self._refill(self.cube_combo, ["(unsaved)", *cube_ids])
+        finally:
+            self._updating -= 1
 
     def _default_included(self, grid_id: str | None) -> tuple[str, ...]:
         """Every line placed on `grid_id`, in survey order -- the default
@@ -568,6 +622,13 @@ class SlicesDock(QgsDockWidget):
         changed = keys != self._included
         self._included = keys
         self._included_is_default = False
+        # Task 7: an explicit line-chooser choice is not a restore, and
+        # must not inherit one still in flight -- see `_pending_palette`'s
+        # own docstring for why a manual change clears it here and in
+        # `_on_source_changed` rather than leaving `_on_prepared` to apply
+        # a palette this choice has nothing to do with.
+        self._pending_palette = None
+        self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
         if changed:
@@ -693,6 +754,12 @@ class SlicesDock(QgsDockWidget):
         if self._updating:
             return
         try:
+            # Task 7: a manual combo change, not a restore -- see
+            # `_pending_palette`'s own docstring for why this must not
+            # inherit a palette a still-preparing `restore_cube` owes a
+            # DIFFERENT preparation.
+            self._pending_palette = None
+            self._mark_cube_unsaved()
             self._sync_included()
             self._update_included_label()
             self.prepare()
@@ -789,6 +856,25 @@ class SlicesDock(QgsDockWidget):
             # (`engine.output_unipolar`), which can only be known once a
             # preparation has actually run.
             self._refill_palette_combo()
+            # Task 7: reapply a palette `restore_cube` owed this
+            # preparation -- `_refill_palette_combo` just reset the combo
+            # to a computed default regardless of what was there before
+            # (its own docstring explains why), which would otherwise
+            # silently discard a restored palette the instant this async
+            # preparation finished. Consumed (and cleared) every time this
+            # runs, restore-triggered or not, so a stale value from an
+            # earlier, unrelated restore can never outlive the next
+            # `_on_prepared`; a palette not currently offered (the wrong
+            # polarity, say) is simply skipped, not raised.
+            pending, self._pending_palette = self._pending_palette, None
+            if pending is not None:
+                names = [self.palette_combo.itemText(i) for i in range(self.palette_combo.count())]
+                if pending in names:
+                    self.palette_combo.blockSignals(True)
+                    try:
+                        self.palette_combo.setCurrentText(pending)
+                    finally:
+                        self.palette_combo.blockSignals(False)
             # Without this, a source that finishes preparing while the
             # Position/Resolution controls have not themselves changed
             # since (the ordinary case: their debounce already applied a
@@ -806,6 +892,176 @@ class SlicesDock(QgsDockWidget):
             self._refresh_source_status()
         except Exception:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report a slice engine error: {message}")
+
+    # ---- cube combo (Task 7: reproducing a saved cube) --------------------
+    def _mark_cube_unsaved(self) -> None:
+        """Fall back to `"(unsaved)"` the moment a widget that decides
+        what the cube IS moves away from a just-restored cube's own
+        values -- a `view` field (Display, Position, the fill radius) does
+        not change the array, so moving only those leaves the combo's
+        claim still true; the Source combos and the four `Resolution`
+        geometry spins do, and are wired to call this (see their own
+        connections and `_on_source_changed`/`set_included`).
+
+        Gated on `self._updating` for the same reason `_on_source_changed`
+        is: `restore_cube` sets these same widgets itself while restoring,
+        and without this guard restoring a cube would immediately
+        un-restore its own combo selection.
+        """
+        try:
+            if self._updating:
+                return
+            if self.cube_combo.currentText() != "(unsaved)":
+                self.cube_combo.setCurrentText("(unsaved)")
+        except Exception as exc:  # noqa: BLE001 -- reached directly from valueChanged
+            _log(f"could not update the cube combo: {exc}")
+
+    def _on_cube_changed(self, text: str) -> None:
+        """`cube_combo.currentTextChanged`: `"(unsaved)"` is a label, not
+        an action (see the class's own module docstring for the dock's
+        general "nothing runs automatically" rule -- picking a name that
+        means "nothing chosen" is not choosing something); any real cube
+        id restores it."""
+        if self._updating:
+            return
+        if not text or text == "(unsaved)":
+            return
+        try:
+            self.restore_cube(text)
+        except Exception as exc:  # noqa: BLE001 -- a slot on currentTextChanged
+            _log(f"could not restore the cube {text!r}: {exc}")
+
+    def view_settings(self) -> ViewSettings:
+        """The six values `cube_record`'s `view` half carries, read off
+        the widgets that hold them right now. `plugin.save_cube` calls
+        this so a saved record carries what was actually on screen at the
+        moment of saving, not a value re-derived some other way."""
+        return ViewSettings(
+            thickness_ns=self.thickness_spin.value(),
+            step_ns=self.step_spin.value(),
+            radius_m=self.radius_spin.value(),
+            palette=self.palette_combo.currentText(),
+            stretch=self.stretch_combo.currentText(),
+            coverage=self.coverage_check.isChecked(),
+        )
+
+    def apply_view(self, view: ViewSettings) -> None:
+        """The inverse of `view_settings()`: write `view`'s six fields
+        back onto their widgets, signals blocked throughout.
+
+        `thickness_spin`/`step_spin`/`stretch_combo`/`palette_combo`/
+        `coverage_check` are wired straight to `refresh_slice()`,
+        unconditionally -- unlike the Source combos, which check
+        `self._updating` themselves -- so setting all of them without
+        blocking would fire that many redundant redraws before
+        `restore_cube`'s own single `prepare()` produces the real
+        picture. `radius_spin` only ever restarts the Resolution
+        debounce (harmless to retrigger, and `flush_debounce()` applies
+        it deliberately, once, right after `restore_cube` finishes
+        setting every widget), but is blocked here too so this method is
+        a complete, self-contained inverse of `view_settings()` regardless
+        of what a future caller does after it.
+
+        `palette` is set only if it is currently offered -- `palette_combo`
+        still lists whatever polarity the PREVIOUS source prepared under,
+        since this runs before `restore_cube` even sets the three source
+        combos. `restore_cube` stashes it in `_pending_palette` for
+        `_on_prepared` to try again once the new source's own polarity is
+        known -- see that field's own docstring.
+        """
+        widgets = (
+            self.thickness_spin,
+            self.step_spin,
+            self.radius_spin,
+            self.palette_combo,
+            self.stretch_combo,
+            self.coverage_check,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.thickness_spin.setValue(view.thickness_ns)
+            self.step_spin.setValue(view.step_ns)
+            self.radius_spin.setValue(view.radius_m)
+            names = [self.palette_combo.itemText(i) for i in range(self.palette_combo.count())]
+            if view.palette in names:
+                self.palette_combo.setCurrentText(view.palette)
+            self.stretch_combo.setCurrentText(view.stretch)
+            self.coverage_check.setChecked(view.coverage)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+    def restore_cube(self, cube_id: str) -> None:
+        """Bring every control back to the state that produced `cube_id`'s
+        saved cube (`session.site.cubes[cube_id]`, read through
+        `recipe_from_record`), then re-prepare.
+
+        Guards its whole body -- this runs from `_on_cube_changed`, a slot
+        on `currentTextChanged`, and is itself a public entry point -- and
+        reports a refused record (`recipe_from_record`'s `ValueError` for
+        a field that is PRESENT and wrong, or simply an unknown `cube_id`)
+        through `error`/`source_status`, exactly as `prepare()` already
+        reports Ruling 2's preset-transform conflict: a caller-visible
+        refusal, not a `_log` only a developer would ever see.
+
+        `_updating` is raised around every widget this sets: the three
+        Source combos are already gated on it (`_on_source_changed`), and
+        so is `_mark_cube_unsaved` -- without this, restoring a cube would
+        immediately fall back to "(unsaved)" the moment it set the very
+        combos and Resolution spins it just restored. `apply_view` (called
+        first, per the brief's own ordering: it is what the Display/
+        Position widgets need before anything else touches them) blocks
+        signals on top of that for the widgets `_updating` alone does not
+        cover.
+
+        `_last_grid_id`/`_dz_z_seeded_for` are updated to the restored
+        grid so a later, unrelated Source change does not read this as a
+        genuine grid change and silently widen `_included` back to every
+        line on the grid, or re-seed Resolution from the grid's generic
+        defaults (`_sync_included`'s job, for a transition this is not).
+
+        `recipe.choice.line_keys` is set unconditionally, even for a
+        record with no `lines` key at all -- `recipe_from_record` cannot
+        tell "the key was missing" from "the key was an empty list" (both
+        read back as `()`), so restoring an old-format record leaves the
+        inclusion set empty rather than guessing the whole grid was meant.
+
+        `recipe.resolution`/`recipe.view` being `None` leaves the
+        corresponding widgets exactly where they were -- `CubeRecipe`'s
+        own contract for an old-format record.
+        """
+        try:
+            recipe = recipe_from_record(self.session.site.cubes[cube_id])
+            self._updating += 1
+            try:
+                if recipe.view is not None:
+                    self.apply_view(recipe.view)
+                self._pending_palette = recipe.view.palette if recipe.view is not None else None
+                self._included = recipe.choice.line_keys
+                self._included_is_default = False
+                self._last_grid_id = recipe.choice.grid_id
+                self._dz_z_seeded_for = recipe.choice.grid_id
+                self.grid_combo.setCurrentText(recipe.choice.grid_id)
+                self.preset_combo.setCurrentText(recipe.choice.preset)
+                transform_text = (
+                    "none" if recipe.choice.transform == NO_TRANSFORM else recipe.choice.transform
+                )
+                self.transform_combo.setCurrentText(transform_text)
+                if recipe.resolution is not None:
+                    self.cell_spin.setValue(recipe.resolution.cell)
+                    self.dz_spin.setValue(recipe.resolution.dz_ns)
+                    self.z0_spin.setValue(recipe.resolution.t0_ns)
+                    self.z1_spin.setValue(recipe.resolution.t1_ns)
+            finally:
+                self._updating -= 1
+            self._update_included_label()
+            self.flush_debounce()
+            self.prepare()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            message = f"could not restore cube {cube_id!r}: {exc}"
+            self.source_status.setText(message)
+            self.error.emit(message)
 
     # ---- Position/Resolution/Display -------------------------------------
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:

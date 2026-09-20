@@ -10,7 +10,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.project import ProjectError, load_site
-from nsgeo.slices import load_cube
+from nsgeo.slices import SliceWindow, load_cube
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
@@ -19,11 +19,12 @@ from nsgeo_qgis.slice_export import (
     apply_temporal_properties,
     cube_record,
     export_slices,
+    recipe_from_record,
     save_cube_npz,
     write_coverage,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import Resolution, SourceChoice
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
 from plugin_testing import synthetic_dzt
 from qgis.core import QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
@@ -395,3 +396,146 @@ def test_write_raises_when_there_are_too_many_slices(exportable, tmp_path):
     too_many = [np.zeros(shape, dtype=np.float32) for _ in range(len(plan.bands) + 1)]
     with pytest.raises(ValueError, match="more slices than the plan's"):
         GeoTiffSliceWriter().write(tmp_path / "long.tif", plan, too_many)
+
+
+def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_session):
+    """The only definition of "reproducible" worth having.
+
+    Not "the fields came back" -- a recipe that restores every field and
+    still produces a different picture has failed at the one thing it is
+    for. So: slice, save, wipe the engine, restore from the record alone,
+    slice again, and demand the same numbers.
+
+    This is also the test that catches a field quietly dropped from the
+    record, which is otherwise invisible: a missing z range just means
+    the restored cube silently uses whatever the dock happened to have.
+    """
+    engine, session = exportable_with_session
+    window = SliceWindow(6, 18)
+    before, coverage_before = engine.slice_at(window)
+
+    npz = save_cube_npz(engine, session.root / "slices" / "A__first.npz")
+    view = ViewSettings(
+        thickness_ns=5.0,
+        step_ns=2.5,
+        radius_m=0.75,
+        palette="amp_heat",
+        stretch="shared",
+        coverage=False,
+    )
+    record = cube_record(
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        view,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
+    session.site.cubes["A__first"] = record
+    session.save()
+
+    # Everything the dock held is gone; the record is all that is left.
+    engine.clear()
+    assert not engine.is_prepared
+
+    recipe = recipe_from_record(load_site(session.json_path).cubes["A__first"])
+    engine.set_source(recipe.choice)
+    assert engine.wait_for_preparation(20_000)
+    engine.set_resolution(recipe.resolution)
+    after, coverage_after = engine.slice_at(window)
+
+    np.testing.assert_array_equal(coverage_before, coverage_after)
+    np.testing.assert_array_equal(np.isfinite(before), np.isfinite(after))
+    both = np.isfinite(before)
+    np.testing.assert_allclose(before[both], after[both], rtol=1e-6, atol=1e-7)
+    assert recipe.view == view
+
+
+def test_a_recipe_restores_the_exact_line_set_not_the_whole_grid(exportable_with_session):
+    """A cube built from 22 of 26 lines is not the same cube as one built
+    from all 26, and the difference is invisible in a picture. The record
+    carries the line keys for exactly this reason."""
+    engine, session = exportable_with_session
+    subset = tuple(session.keys())[:2]
+    engine.set_source(SourceChoice("A", "p", "amp_envelope", subset))
+    assert engine.wait_for_preparation(20_000)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    npz = save_cube_npz(engine, session.root / "slices" / "A__subset.npz")
+    record = cube_record(
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
+
+    recipe = recipe_from_record(record)
+    assert recipe.choice.line_keys == subset
+    assert len(recipe.choice.line_keys) < len(session.keys())
+
+
+def test_a_record_written_by_an_older_build_still_loads(exportable_with_session):
+    """The five-key record `Site.cubes`'s docstring described before this
+    milestone must not become unreadable. `load_site` stores records
+    opaquely, so an old one arrives here intact and the reader -- not the
+    schema -- is what has to tolerate it."""
+    old = {
+        "grid_id": "A",
+        "preset": "p",
+        "transform": "amp_envelope",
+        "cell": 0.25,
+        "array": "slices/A__old.npz",
+    }
+    recipe = recipe_from_record(old)
+    assert recipe.choice.grid_id == "A"
+    assert recipe.choice.line_keys == ()  # unknown, not invented
+    assert recipe.resolution is None  # unknown: the dock keeps what it has
+    assert recipe.view is None
+
+
+def test_a_recipe_with_no_transform_restores_the_bipolar_choice(exportable_with_session):
+    """`cube_record` spells "no transform" as `"none"`; `SourceChoice`
+    spells it `NO_TRANSFORM` (`""`). This is the one place the two
+    spellings meet -- but neither round-trip test above ever restores a
+    `NO_TRANSFORM` choice (both fixtures use "amp_envelope" throughout),
+    so neither actually exercises this mapping. This one does."""
+    engine, session = exportable_with_session
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=engine.choice.line_keys
+        )
+    )
+    assert engine.wait_for_preparation(20_000)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    npz = save_cube_npz(engine, session.root / "slices" / "A__bipolar.npz")
+    record = cube_record(
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
+    assert record["transform"] == "none"
+
+    recipe = recipe_from_record(record)
+    assert recipe.choice.transform == NO_TRANSFORM
+
+
+def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session):
+    bad = {
+        "grid_id": "A",
+        "preset": "p",
+        "transform": "amp_envelope",
+        "cell": 0.25,
+        "array": "slices/x.npz",
+        "lines": [],
+        "view": {},
+        "z": {"t0_ns": 30.0, "t1_ns": 2.0, "dz_ns": 0.5},  # reversed
+    }
+    with pytest.raises(ValueError, match="z"):
+        recipe_from_record(bad)

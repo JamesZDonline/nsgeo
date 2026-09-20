@@ -67,7 +67,6 @@ from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.slice_export import (
-    ViewSettings,
     apply_temporal_properties,
     cube_record,
     export_slices,
@@ -573,26 +572,27 @@ class NsgeoPlugin:
             root = self.session.root
             line_key(Path(path), root)  # raises ProjectError early; see the docstring above
             npz_path = save_cube_npz(engine, Path(path))
-            view = ViewSettings(
-                thickness_ns=dock.thickness_spin.value(),
-                step_ns=dock.step_spin.value(),
-                radius_m=dock.radius_spin.value(),
-                palette=dock.palette_combo.currentText(),
-                stretch=dock.stretch_combo.currentText(),
-                coverage=dock.coverage_check.isChecked(),
-            )
+            # Task 7: `dock.view_settings()`, not a second, independent
+            # construction of the same six values -- the dock is the one
+            # place they are actually held, and it is also `restore_cube`'s
+            # own inverse (`apply_view`), so the two cannot drift apart.
             record = cube_record(
                 self.session,
                 engine.choice,
                 engine.frame,
                 engine.z,
-                view,
+                dock.view_settings(),
                 npz_path,
                 line_keys=engine.provenance().line_keys,
             )
             cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
             self.session.site.cubes[cube_id] = record
             self.session._set_dirty(True)
+            # Task 7: the new record is a candidate `cube_combo` selection
+            # the instant it exists, and `refresh_cube_combo` is the same
+            # guarded refill `rebuild_source` already uses for `site_opened`
+            # -- this is simply the other moment `cubes` changes.
+            dock.refresh_cube_combo()
             self.message(f"cube saved as {cube_id!r} ({record['array']!r})")
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
