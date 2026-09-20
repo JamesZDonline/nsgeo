@@ -45,7 +45,12 @@ def _smooth_size(n: int) -> int:
     361 ms to 114 ms.
 
     Must never return less than `n`: a short transform would WRAP the
-    convolution and corrupt the edges of the slice, silently.
+    convolution and corrupt the edges of the slice. Cheap cluster (M11
+    final review): "silently" was wrong -- the failure is loud, not
+    silent. A short crop makes the numerator and denominator arrays come
+    back smaller than `(ny, nx)`, and `fill`'s own `np.divide(num, den,
+    out=np.full((ny, nx), np.nan), ...)` then raises on the shape
+    mismatch rather than returning a quietly-wrong array.
     """
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")

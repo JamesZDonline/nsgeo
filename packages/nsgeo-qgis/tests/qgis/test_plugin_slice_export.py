@@ -451,6 +451,56 @@ def test_the_geotiff_carries_fill_radius_and_azimuth_metadata(exportable, tmp_pa
         ds = None
 
 
+def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_path):
+    """Cheap cluster (final review): every export test above uses this
+    file's `GRID`, at azimuth 0.0 -- the ONE azimuth at which `to_north_up`
+    drops nothing (see this module's own docstring, Ruling AE: the loss is
+    real and UNCONDITIONAL at any other azimuth, at any fill radius). So
+    the exporter's most-argued property -- what a rotated frame does to
+    the north-up resample -- was exercised nowhere. Not a numeric pin on
+    the drop rate (that belongs to `to_north_up`'s own core tests); what
+    matters here is that a rotated export still lands every band on the
+    same grid (no truncation error) and that its own bounding box genuinely
+    is not fully covered by the rotated frame's cells."""
+    from osgeo import gdal
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    rotated = Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5)
+    session.add_grid(rotated)
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", 1.0 + i * 1.0, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    engine = SliceEngine(session)
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+        assert engine.frame.azimuth == 30.0
+
+        path = tmp_path / "rotated.tif"
+        plan = export_slices(engine, path, 10, 5, None, radius_cells=0)
+        ds = gdal.Open(str(path))
+        try:
+            assert ds.RasterCount == len(plan.bands)
+            arr = ds.GetRasterBand(1).ReadAsArray()
+            # A rotated frame's own bounding box is not filled by its
+            # own cells -- some north-up pixels genuinely fall outside
+            # the surveyed (rotated) frame and must read as nodata.
+            assert np.isnan(arr).any()
+        finally:
+            ds = None
+    finally:
+        engine.dispose()
+
+
 def test_write_raises_when_there_are_too_few_slices(exportable, tmp_path):
     """Important 3 (Task 6 fix round 1): `zip(plan.bands, slices)` is no
     longer `strict=True` (that keyword needs Python 3.10+, below this

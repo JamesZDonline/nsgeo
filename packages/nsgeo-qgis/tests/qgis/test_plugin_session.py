@@ -166,6 +166,21 @@ def test_grids_and_lines_mark_dirty_and_round_trip(session, tmp_path):
     assert back.keys() == session.keys()
 
 
+def test_record_cube_writes_the_record_and_marks_dirty(session):
+    """Cheap cluster (final review): `session._set_dirty(True)` used to be
+    reached directly from `plugin.save_cube`, the only external caller of
+    that private method anywhere in the repo -- every other site mutation
+    goes through a `SiteSession` method of its own (`save_preset`'s the
+    closest parallel); this is that method for cubes."""
+    dirty = Spy(session.dirty_changed)
+    record = {"grid_id": "A", "preset": "p", "transform": "none", "cell": 0.25}
+
+    session.record_cube("A__test", record)
+
+    assert session.site.cubes["A__test"] == record
+    assert session.dirty and dirty.calls[0] == (True,)
+
+
 def test_duplicate_grid_ids_and_line_keys_are_refused(session, tmp_path):
     session.add_grid(GRID)
     with pytest.raises(ValueError, match="A"):

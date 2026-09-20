@@ -46,7 +46,6 @@ from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.session import SiteSession
 
 _CREATION_OPTIONS = ["INTERLEAVE=BAND", "TILED=NO", "BIGTIFF=IF_SAFER"]
 LAYER_NAME = "Slice (live preview)"
@@ -89,11 +88,8 @@ class SliceLayer(QObject):
     aborts the CI container (see `plugin.py`'s module docstring).
     """
 
-    def __init__(
-        self, session: SiteSession, layers: SiteLayers, parent: QObject | None = None
-    ) -> None:
+    def __init__(self, layers: SiteLayers, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.session = session
         self.layers = layers
         self._dir = Path(tempfile.mkdtemp(prefix="nsgeo-slice-"))
         self.path = self._dir / "slice.tif"
@@ -229,11 +225,19 @@ class SliceLayer(QObject):
                     band.WriteArray(array)
                     band.FlushCache()
                 finally:
-                    # Hold the dataset in a local and set it to None
-                    # explicitly: GDAL flushes to disk on destruction, and
-                    # a dataset collected mid-expression (rather than
-                    # through a bound name) is a real trap -- it bit the
-                    # spike behind this plan's own measurements.
+                    # Cheap cluster (final review): `dataset.Close()`,
+                    # then the local set to `None` -- `slice_export.py`'s
+                    # `GeoTiffSliceWriter.write` already uses `Close()` on
+                    # this same GDAL build (>= 3.7), which surfaces a
+                    # write error at close time instead of leaving it
+                    # silent until garbage collection, where a SWIG
+                    # destructor cannot raise. Holding the dataset in a
+                    # local and setting it to `None` explicitly afterwards
+                    # is still needed regardless: a dataset collected
+                    # mid-expression (rather than through a bound name) is
+                    # a real trap -- it bit the spike behind this plan's
+                    # own measurements.
+                    dataset.Close()
                     dataset = None
 
     def _create_layer(self) -> None:

@@ -623,18 +623,32 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     (`set_source`'s own `_dispatching` guard), not the event-mask half
     `test_two_different_choices_back_to_back_never_run_concurrently`
     already covers. The zero-delay timer reliably fires on the very first
-    iteration of the nested loop, long before the ~50 ms patched `load`
-    lets the cancelled task actually clear, so the reentrant call is
-    guaranteed to land INSIDE the wait, not after it -- PROVIDED
+    iteration of the nested loop, long before the patched `load` lets the
+    cancelled task actually clear, so the reentrant call is guaranteed to
+    land INSIDE the wait, not after it -- PROVIDED
     `QgsApplication.taskManager()`'s thread pool is already warm. Measured
     directly: run as the first test to ever dispatch a `QgsTask` in a
     fresh `qgis_app` process, the very first task's own thread start-up
-    latency is itself long enough to blow past the 50 ms window and this
-    test fails even against the fix (`wait_for_preparation(20_000)`
-    itself returns `False`) -- a test-isolation artefact, not evidence
-    against the fix (run straight after any other test in this file that
+    latency is itself long enough to blow past that window and this test
+    fails even against the fix (`wait_for_preparation(20_000)` itself
+    returns `False`) -- a test-isolation artefact, not evidence against
+    the fix (run straight after any other test in this file that
     dispatches one first, it passes reliably). The warm-up dispatch below
     removes that dependency on execution order.
+
+    Final review: widened, not marked. This test flaked ONCE under
+    concurrent CPU load (confirmed not a regression: 3/3 isolated, 2/2
+    clean full-suite reruns) -- timing-dependent by construction, and CI
+    runners are contended, which is the most likely source of an
+    intermittent red build on this branch. The patched `load`'s sleep
+    moved from 50 ms to 150 ms: `_CANCEL_TIMEOUT_MS` (250 ms) is the only
+    other constant this test's timing is pinned against, and 150 ms still
+    leaves it comfortable headroom (cancellation clears after roughly one
+    slow `load` plus the cheap remainder of `work()`'s loop, so still well
+    under 250 ms) while tripling the margin the zero-delay timer has to
+    land inside the wait before contention could push it past that
+    window. No assertion here was loosened -- `max_concurrent <= 1` and
+    "the latest choice wins" are exactly as strict as before.
     """
     engine, session, errors, _ = sourced
     keys = tuple(session.keys())
@@ -658,7 +672,10 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
             concurrent += 1
             max_concurrent = max(max_concurrent, concurrent)
         try:
-            time.sleep(0.05)
+            # Final review: widened from 50 ms to 150 ms -- see the
+            # docstring above for why this is still comfortably inside
+            # `_CANCEL_TIMEOUT_MS` (250 ms).
+            time.sleep(0.15)
             return real_load(self)
         finally:
             with lock:

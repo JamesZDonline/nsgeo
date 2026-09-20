@@ -1001,6 +1001,22 @@ class SliceEngine(QObject):
         clear_kernel_cache()
 
     def dispose(self) -> None:
+        # Cheap cluster (M11 final review): set, and never cleared. A
+        # queued signal delivered from INSIDE `_cancel_in_flight()`'s own
+        # nested event loop below (Ruling W's hazard -- see `set_source`'s
+        # own docstring) could otherwise reach `set_source` while
+        # `_dispatching` still reads `False` here, since this method never
+        # sets it itself: that reentrant call would then dispatch a brand
+        # new `QgsTask` rather than merely queue itself, and this teardown
+        # has no `finally` (unlike `set_source`'s own) to apply a queued
+        # choice or to wait for that new task afterwards -- a task
+        # dispatched during teardown would simply outlive it, orphaned.
+        # Setting this here instead makes any such reentrant call queue
+        # into `_queued_choice` like any other nested `set_source` call,
+        # and leaving it set afterwards means that queued choice is never
+        # applied by anything -- exactly right for an engine that is being
+        # torn down and must dispatch nothing further.
+        self._dispatching = True
         # nsgeo-qgis fix round 1 (M11, Task 3): stop any in-flight
         # preparation FIRST. Every caller of this method before Task 3's
         # SlicesDock always called wait_for_preparation() itself before

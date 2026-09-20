@@ -23,7 +23,7 @@ def mapped(qgis_app, tmp_path):
     session = SiteSession()
     session.new_site(tmp_path)
     layers = SiteLayers(session, project=project)
-    sl = SliceLayer(session, layers)
+    sl = SliceLayer(layers)
     yield sl, session, layers, project
     sl.dispose()
     layers.detach()
@@ -161,7 +161,7 @@ def test_the_layer_rejoins_a_new_group_after_a_site_switch(qgis_app, tmp_path):
     # tables/group from `site_opened`/`grids_changed`, which have already
     # fired by the time a fixture calls new_site()/add_grid() first.
     layers = SiteLayers(session, project=project)
-    sl = SliceLayer(session, layers)
+    sl = SliceLayer(layers)
     session.new_site(site1)
     session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
     try:

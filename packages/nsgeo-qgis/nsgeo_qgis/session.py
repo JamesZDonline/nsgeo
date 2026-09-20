@@ -648,6 +648,21 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.presets_changed.emit()
 
+    # ---- cubes --------------------------------------------------------------
+    def record_cube(self, cube_id: str, record: dict[str, Any]) -> None:
+        """Record a saved slice cube's recipe in `site.cubes[cube_id]`.
+
+        Cheap cluster (M11 final review): `plugin.save_cube` used to
+        write `session.site.cubes[cube_id] = record` and then call
+        `session._set_dirty(True)` directly -- the only external caller
+        of that private method anywhere in this repo. Every other site
+        mutation goes through a `SiteSession` method of its own (see
+        `save_preset` immediately above, for the closest parallel); this
+        is that method for cubes.
+        """
+        self._require_site().cubes[cube_id] = dict(record)
+        self._set_dirty(True)
+
     # ---- current line, samples, cursor ------------------------------------
     def open_line(self, key: str) -> None:
         self.line_for_key(key)

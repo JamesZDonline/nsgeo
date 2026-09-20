@@ -686,6 +686,23 @@ def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
     assert dock.display_limit() != pytest.approx(limit)
 
 
+def test_the_coverage_toggle_pins_ruling_ab_in_this_slice_mode_too(docked):
+    """Cheap cluster (final review): the test above only ever exercises
+    the DEFAULT stretch ("shared across the cube") -- `display_limit()`
+    checks `coverage_check` first, before branching on the stretch combo
+    at all, but nothing pinned that the coverage branch actually wins
+    over "this slice" too."""
+    dock, _ = docked
+    _ready(dock)
+    dock.stretch_combo.setCurrentText("this slice")
+    dock.coverage_check.setChecked(True)
+    coverage = dock.current_values()
+    assert np.nanmax(coverage) >= 1.0
+    limit = dock.display_limit()
+    assert limit == pytest.approx(float(np.nanmax(coverage)))
+    assert dock.display_unipolar() is True
+
+
 def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):
     """Spec 8: comparability by default, legibility on demand."""
     dock, _ = docked

@@ -222,7 +222,7 @@ class NsgeoPlugin:
         # the same reason `map_link` and `layers` are -- it is a map
         # concern that outlives any one dock widget and is torn down
         # outside-in in `unload()`, before `self.layers.detach()`.
-        self.slice_layer = SliceLayer(self.session, self.layers)
+        self.slice_layer = SliceLayer(self.layers)
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
@@ -586,8 +586,7 @@ class NsgeoPlugin:
                 line_keys=engine.provenance().line_keys,
             )
             cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
-            self.session.site.cubes[cube_id] = record
-            self.session._set_dirty(True)
+            self.session.record_cube(cube_id, record)
             # Task 7: the new record is a candidate `cube_combo` selection
             # the instant it exists, and `refresh_cube_combo` is the same
             # guarded refill `rebuild_source` already uses for `site_opened`

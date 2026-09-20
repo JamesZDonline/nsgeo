@@ -167,6 +167,12 @@ class ProfileView(QWidget):
         averaged, on data that was never filled.
         """
         if not all(math.isfinite(v) for v in (lo_ns, hi_ns)):
+            # Cheap cluster (M11 final review): logged, not silent -- a
+            # degenerate window (a NaN/inf `lo_ns`/`hi_ns`, e.g. from a
+            # zero-thickness or off-axis slice) is exactly the kind of
+            # input this guard's own analysis argues should leave a trace
+            # rather than just vanish.
+            _log(f"set_slice_band: non-finite window {lo_ns}..{hi_ns}; band cleared instead")
             self._slice_band = None
         else:
             self._slice_band = (min(lo_ns, hi_ns), max(lo_ns, hi_ns))
@@ -311,27 +317,12 @@ class ProfileView(QWidget):
         p.setPen(QPen(CURSOR_COLOUR, 1.5))
         p.drawLine(QPointF(x, r.top()), QPointF(x, r.bottom()))
 
-    def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
-        """Local (unoffset by `r.left()`) x-bounds of the selection band, or
-        `None` when there is no selection. `b + 1`, not `b`: the selection
-        is inclusive of trace `b`, so its right edge is the *start* of the
-        next trace -- factored out so this is a plain value comparable in a
-        test without rendering a pixel."""
-        a, b = self._selection
-        if a < 0:
-            return None
-        return t.x_of_trace(a), t.x_of_trace(b + 1)
-
-    def _paint_selection(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
-        bounds = self._selection_bounds(t)
-        if bounds is None:
-            return
-        x0, x1 = r.left() + bounds[0], r.left() + bounds[1]
-        p.fillRect(QRectF(x0, r.top(), x1 - x0, r.height()), SELECTION_COLOUR)
-        p.setPen(QPen(SELECTION_EDGE, 1, Qt.PenStyle.DashLine))
-        p.drawLine(QPointF(x0, r.top()), QPointF(x0, r.bottom()))
-        p.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
-
+    # Cheap cluster (M11 final review): `_slice_band_bounds`/`_paint_
+    # slice_band` moved ahead of `_selection_bounds`/`_paint_selection` --
+    # `paintEvent` calls them in exactly this order (slice band, then
+    # selection, then picks), and reading order matching paint order is
+    # worth keeping now that there are three layers to keep straight, not
+    # one accidental reason to prefer either ordering over the other.
     def _slice_band_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
         """Local (unoffset) y-bounds of the band, or None when there is
         none. Factored out the same way `_selection_bounds` is, and for
@@ -361,6 +352,27 @@ class ProfileView(QWidget):
         p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
         p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
         p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+
+    def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
+        """Local (unoffset by `r.left()`) x-bounds of the selection band, or
+        `None` when there is no selection. `b + 1`, not `b`: the selection
+        is inclusive of trace `b`, so its right edge is the *start* of the
+        next trace -- factored out so this is a plain value comparable in a
+        test without rendering a pixel."""
+        a, b = self._selection
+        if a < 0:
+            return None
+        return t.x_of_trace(a), t.x_of_trace(b + 1)
+
+    def _paint_selection(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        bounds = self._selection_bounds(t)
+        if bounds is None:
+            return
+        x0, x1 = r.left() + bounds[0], r.left() + bounds[1]
+        p.fillRect(QRectF(x0, r.top(), x1 - x0, r.height()), SELECTION_COLOUR)
+        p.setPen(QPen(SELECTION_EDGE, 1, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(x0, r.top()), QPointF(x0, r.bottom()))
+        p.drawLine(QPointF(x1, r.top()), QPointF(x1, r.bottom()))
 
     def _pick_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
         """Local (unoffset) (x, y) of each pick marker's centre. Factored

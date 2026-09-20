@@ -195,7 +195,12 @@ class SliceWriter(Protocol):
     implementation would have had to edit both.
     """
 
-    OPTIONS: list[str]
+    # Cheap cluster (final review): `Sequence[str]`, not `list[str]` -- a
+    # `Protocol` attribute typed as a mutable container is INVARIANT, so a
+    # writer declaring `OPTIONS` as a `tuple[str, ...]` (or any other
+    # `Sequence`) would fail a static conformance check it need not; this
+    # is read only, via `self.OPTIONS` inside `write`, never written.
+    OPTIONS: Sequence[str]
 
     def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None: ...
 

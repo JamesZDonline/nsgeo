@@ -28,8 +28,6 @@ def test_class_factory_builds_a_plugin_that_adds_and_removes_its_ui(fake_iface):
 
 
 def test_the_plugin_builds_and_disposes_its_map_link(fake_iface):
-    from nsgeo_qgis.plugin import NsgeoPlugin
-
     canvas = fake_iface.mapCanvas()
     before = len(canvas.scene().items())
 

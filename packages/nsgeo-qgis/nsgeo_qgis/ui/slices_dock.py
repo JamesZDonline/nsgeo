@@ -513,6 +513,10 @@ class SlicesDock(QgsDockWidget):
             self._sync_included()
             self._update_included_label()
             self._refresh_source_status()
+            # Cheap cluster (final review): the established pattern
+            # (`processing_dock.py`'s own `has_line` loop) -- there is
+            # nothing to choose lines FROM without a site open.
+            self.choose_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared
@@ -1323,7 +1327,7 @@ class SlicesDock(QgsDockWidget):
         self.radius_spin.setValue(1.5 * grid.default_spacing)
         self._seed_dz_z_defaults(grid_id)
 
-    def _seed_dz_z_defaults(self, grid_id: str) -> None:
+    def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
         """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
         included line's own header, at most once per grid.
 

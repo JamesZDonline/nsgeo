@@ -147,10 +147,11 @@ def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> fl
     The thickness is an argument and not a detail, because the stretch is
     a property of `(cube, thickness)` and NOT of the cube: a window mean
     has far lower variance than the levels it averages, so measuring over
-    `cube.mean` gives a limit that is systematically too high. On one
-    realistic cube `UnipolarClip().limit(cube.mean)` returned 2.59 where
-    the correct limit for the displayed 10-level slice was 0.87 -- every
-    slice then renders at about a third of its intended brightness,
+    `cube.mean` gives a limit that is systematically too high. Cheap
+    cluster (M11 final review): cited from THIS repo's own corpus, not
+    another dataset -- `UnipolarClip().limit(cube.mean)` returned 2.585
+    where the correct limit for the displayed 10-level slice was 1.274 --
+    every slice then renders at about half its intended brightness,
     identically at every depth, so it reads as dim data rather than as a
     wrong limit. M10 recorded this on `UnipolarClip` and shipped no
     helper, for want of a caller; this is the helper, and the caller is
