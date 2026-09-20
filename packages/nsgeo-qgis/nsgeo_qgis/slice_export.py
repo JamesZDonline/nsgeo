@@ -454,9 +454,27 @@ def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:
     with it, and `store._npz_path` is the one place that rule already
     lives -- see its own docstring for why `Path.with_suffix` would be
     the wrong tool here.
+
+    Final review, Important 4: a "streaming"-mode engine drops the cube
+    `cube()` just built for this write, once the write is done --
+    `engine()` caches it into `_cube`, and nothing in "streaming" mode
+    ever reads that back (`_slice`'s streaming branch calls `stream_slice`
+    directly), so it was pure dead weight: `_mode` stays "streaming"
+    (only `set_source`/`clear` ever touch it), and `format_status`
+    branches on `_mode`, not on whether a cube happens to be cached, so
+    the process silently held the whole volume on top of the prepared
+    lines while the status line went on reporting only the latter -- 111
+    MB unreported at spec 7.2's own 24-line/native-dz row, 359 MB at cell
+    0.05 m. A "resident" engine keeps its cube: it already wanted one for
+    faster redraws, and dropping it here would only force an immediate,
+    wasted rebuild on the very next slice. See `SliceEngine.drop_cube`'s
+    own docstring.
     """
     save_cube(engine.cube(), path)
-    return _npz_path(path)
+    written = _npz_path(path)
+    if engine.mode == "streaming":
+        engine.drop_cube()
+    return written
 
 
 @dataclass(frozen=True)

@@ -902,6 +902,27 @@ class SliceEngine(QObject):
             self._cube = build_cube(self._lines, plans, frame, z, self.provenance())
         return self._cube
 
+    def drop_cube(self) -> None:
+        """Release a resident cube, if one is cached, without touching
+        anything else.
+
+        Final review, Important 4: `save_cube_npz` calls `cube()` to get
+        the whole volume it wants to write, which -- in "streaming" mode --
+        caches it into `self._cube` where nothing else ever reads it back
+        (`_slice`'s streaming branch calls `stream_slice` directly) and
+        nothing but `set_source`/`clear` ever resets it again. That
+        silently and PERMANENTLY promoted a streaming engine's real memory
+        footprint by the whole cube -- 111 MB held at spec 7.2's own
+        24-line/native-dz row, 359 MB at cell 0.05 m -- while `_mode`
+        stayed "streaming" and `format_status` (which branches on `_mode`,
+        not on whether a cube happens to be cached) went on reporting only
+        the prepared lines. `save_cube_npz` calls this afterwards, only
+        when `mode == "streaming"`: a "resident" engine already wanted the
+        cube for faster redraws, and dropping it there would only force an
+        immediate, wasted rebuild on the very next slice.
+        """
+        self._cube = None
+
     def provenance(self) -> Provenance:
         """What a reader needs to trust the cube.
 

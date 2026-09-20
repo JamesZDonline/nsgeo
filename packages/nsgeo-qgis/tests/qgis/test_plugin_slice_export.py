@@ -163,6 +163,45 @@ def test_export_never_needs_a_resident_cube(exportable, tmp_path):
     assert not engine.has_cube, "export must not have built a cube behind the user's back"
 
 
+def test_save_cube_npz_does_not_permanently_promote_a_streaming_engine(exportable, tmp_path):
+    """Final review, Important 4. `engine.cube()` caches its result into
+    `_cube`, which nothing in "streaming" mode ever reads back (`_slice`'s
+    streaming branch calls `stream_slice` directly) and nothing but
+    `set_source`/`clear` ever reset again -- so a "Save cube..." click
+    used to permanently promote a streaming engine's real memory
+    footprint by the whole resident cube, while `_mode` stayed
+    "streaming" and `format_status` (branching on `_mode`, not on whether
+    a cube happens to be cached) went on reporting only the prepared
+    lines."""
+    engine = exportable
+    engine.set_always_resident(False)
+    assert engine.mode == "streaming"
+    assert not engine.has_cube
+
+    npz = save_cube_npz(engine, tmp_path / "cube.npz")
+    assert npz.exists()
+
+    assert engine.mode == "streaming", "a save alone must not change the residency mode"
+    assert not engine.has_cube, (
+        "a streaming engine must not be left holding a resident cube after a save"
+    )
+
+
+def test_save_cube_npz_leaves_a_resident_engines_cube_in_place(exportable, tmp_path):
+    """The other half of Important 4's fix: a "resident" engine already
+    wanted its cube, for faster redraws -- `save_cube_npz` must not drop
+    it and force an immediate, wasted rebuild on the very next slice."""
+    engine = exportable
+    engine.set_always_resident(True)
+    engine.slice_at(SliceWindow(4, 14))  # builds the resident cube
+    assert engine.mode == "resident"
+    assert engine.has_cube
+
+    save_cube_npz(engine, tmp_path / "cube.npz")
+
+    assert engine.has_cube, "a resident engine's own cube must survive a save"
+
+
 def test_the_temporal_mapping_is_one_nanosecond_to_one_second(exportable, tmp_path):
     """Spec 9.5's named trap. ns -> ms pairs two small units and looks
     right, and silently collapses every band at native dz into the same
