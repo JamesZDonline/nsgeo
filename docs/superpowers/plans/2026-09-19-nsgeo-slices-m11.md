@@ -643,9 +643,13 @@ Two mutants, each applied alone, re-run, then reverted:
    `test_the_label_reports_what_level_range_actually_returned_not_what_was_asked_for` to FAIL.
 2. In `plan_windows`, `range(0, z.nz - thickness_levels + 1, step_levels)` →
    `range(0, z.nz, step_levels)`. Expect
-   `test_overlapping_windows_match_the_specs_band_count_formula` and
-   `test_abutting_windows_tile_the_axis_without_gaps_or_overlap` to FAIL (the last window would
-   run past the axis).
+   `test_overlapping_windows_match_the_specs_band_count_formula` to FAIL (20 windows where 19
+   are right).
+   (Amended during execution: this plan originally also predicted
+   `test_abutting_windows_tile_the_axis_without_gaps_or_overlap` would fail here. It does not,
+   and cannot: with `thickness == step` both `range` forms floor to the same last multiple --
+   `range(0, 91, 10)` and `range(0, 100, 10)` are both `0..90` -- so that test cannot
+   discriminate this mutant. The band-count test is the one that does.)
 
 Record the observed failure counts and messages in the task report.
 
@@ -1211,10 +1215,18 @@ actually get; the point is the shape of the improvement, not the absolute number
 - [ ] **Step 29: Prove the fill tests discriminate**
 
 Mutate `_smooth_size` to `return n - 1 if n > 1 else 1` — the wrap-the-convolution defect it
-exists to prevent. Confirm `test_smooth_size_is_never_smaller_than_asked_and_is_five_smooth` FAILS
-*and* that `test_padding_to_a_smooth_size_does_not_change_the_answer` FAILS at at least one
-parametrisation (so the agreement test is genuinely load-bearing and not merely decorative).
-Revert. Record both.
+exists to prevent. Confirm `test_smooth_size_is_never_smaller_than_asked_and_is_five_smooth`
+FAILS. Revert and record.
+
+(Amended during execution: this plan originally also predicted
+`test_padding_to_a_smooth_size_does_not_change_the_answer` would fail here, calling it
+"genuinely load-bearing" against this mutant. **It does not, and the reason is worth keeping.**
+An FFT size exactly one short of the safe linear-convolution length wraps its aliasing onto
+index 0 mod M in each dimension — which sits *outside* the crop window `[r : r+ny, r : r+nx]`
+for every `r >= 1`, since the crop starts at `r`. Measured: max absolute difference 2.74e-14,
+i.e. bit-identical. A larger undersizing would be caught; this particular off-by-one is
+invisible. The wrap invariant is therefore enforced by `_smooth_size`'s own `m >= n` assertion
+and by nothing else — do not delete that test on the grounds that the agreement test covers it.)
 
 - [ ] **Step 30: Add the real-data test**
 
@@ -1226,7 +1238,24 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
 
     Real files are this project's primary validation (spec 11), and this
     is the one place the stretch a user actually sees is checked against
-    data that came off an instrument."""
+    data that came off an instrument.
+
+    The SIZE of the reduction is a property of the data, not of the code.
+    Adjacent levels in this real `amp_envelope` cube correlate at
+    0.95-0.99, because envelope detection is itself a smoothing operation,
+    so a window mean barely differs from the levels it averages. Measured
+    on this corpus, `shared_limit` falls from 2.724 at thickness 1 to
+    2.166 at 20 and 1.265 at 90 -- smooth and monotonic, exactly as
+    specified. A synthetic fixture with i.i.d. levels shows a far larger
+    reduction (~0.55) at the same thickness, which is why the magnitude
+    claim lives on that fixture in `test_slices_display.py` and only the
+    direction and the mechanism are asserted here.
+
+    **Do not re-add a magnitude threshold to this test.** Any value that
+    passes on this corpus is a fact about this antenna and this
+    processing, not about `shared_limit`. An earlier draft asserted a
+    `1.5x` bar carried over from an M10 measurement on different data; it
+    failed at 1.08x and was removed (M11 ledger, Ruling D)."""
     from nsgeo.processing import build_step
     from nsgeo.render import UnipolarClip, to_index8_unipolar
     from nsgeo.slices.binning import PreparedLine, build_cube, plan_line
@@ -1272,17 +1301,30 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     cube = build_cube(prepared, plans, frame, z, prov)
 
     clip = UnipolarClip()
-    thickness = 10
+    # 23 levels is about 5.0 ns at this dz, which satisfies spec 6.6's own
+    # rule that a thickness be at least one pulse width (~2.9 ns at 350
+    # MHz). An earlier draft of this test used 10 levels -- 2.2 ns, SHORTER
+    # than one pulse width -- and so exercised a thickness no user should
+    # choose. (Amended during execution; see the M11 ledger's Ruling D.)
+    thickness = 23
     correct = shared_limit(cube, thickness, clip)
     over_raw_levels = clip.limit(cube.mean)
     assert correct < over_raw_levels  # the direction M10 measured, on real data
 
-    # What it means on screen: at the correct limit the displayed slices
-    # span most of the 0-255 table; at the raw-level limit they do not.
+    # The exact mechanism, on real data: the shared limit IS the percentile
+    # over the slices actually displayed at this thickness. This is what
+    # dies against the `clip.limit(cube.mean)` implementation M10 measured,
+    # and against a windows-overlap mutant that weights mid-depths twice.
     windows = plan_windows(z, thickness, thickness)
     shown = np.concatenate([cube.slice_levels(w.k0, w.k1).ravel() for w in windows])
     shown = shown[np.isfinite(shown)]
-    assert np.median(to_index8_unipolar(shown, correct)) > 1.5 * np.median(
+    assert correct == pytest.approx(float(np.percentile(shown, clip.percentile)), rel=1e-6)
+
+    # And what it means on screen: at the correct limit the displayed slices
+    # sit higher in the 0-255 table than at the raw-level limit. The
+    # DIRECTION is the claim; the magnitude is a property of how much the
+    # data decorrelates with depth, not of this code -- see the docstring.
+    assert np.median(to_index8_unipolar(shown, correct)) > np.median(
         to_index8_unipolar(shown, over_raw_levels)
     )
 ```
@@ -1293,7 +1335,9 @@ Run: `./.venv/bin/python -m pytest packages/nsgeo-core/tests/test_real_files.py 
 Expected: **1 passed, 0 skipped.** A skip here means the symlinked DZT files are missing and the
 test validated nothing — stop and fix the symlink rather than proceeding.
 
-Record the two measured limits and the two median indices in the task report.
+Record the two measured limits and the two median indices in the task report, and confirm the
+amended test still kills both the `clip.limit(cube.mean)` mutant and a `plan_windows(cube.z,
+thickness_levels, 1)` mutant inside `shared_limit`.
 
 - [ ] **Step 32: Full verification and commit**
 
