@@ -150,6 +150,27 @@ _GRID_OUTLINE_OFFSET = len(GRID_COLOURS) // 2
 _PICKS_REBUILD = "picks__rebuild"
 _PICKS_BACKUP = "picks__before_rebuild"
 
+# Finding A (M8 acceptance walkthrough fix wave): the picks layer's own
+# live-edit and commit/rollback signals -- see SiteLayers._bind_picks_signals
+# for the full reasoning. Before this, `session.picks_changed` was emitted
+# from exactly one place (`SiteSession.add_pick`), so a delete, move, add or
+# rollback made through QGIS's own editing tools was invisible to the
+# profile until an unrelated `add_pick` happened to force a refresh -- the
+# defect the author hit ("if I selected a point and deleted it and hit
+# save, the pick stayed visible... until I made another pick"). The first
+# four fire from the edit buffer, live, before any commit; the last two
+# fire at the two ways an edit session ends. Deliberately NOT
+# `repaintRequested`: it fires on every canvas repaint and every style
+# change, and each one would re-read the whole picks table for nothing.
+_PICKS_EDIT_SIGNALS = (
+    "featureAdded",
+    "featuresDeleted",
+    "geometryChanged",
+    "attributeValueChanged",
+    "afterCommitChanges",
+    "afterRollBack",
+)
+
 # Sentinel returned by `_table_schema` in place of a CRS when a table by
 # that name is present in the GeoPackage but `QgsVectorLayer` could not
 # open it -- distinct from `None` (the table does not exist at all).
@@ -225,6 +246,14 @@ class SiteLayers(QObject):
         # already have picks on disk) compares against nothing and stays
         # quiet, rather than reporting every grid as newly "moved".
         self._last_grid_placements: dict[str, tuple[Any, ...]] = {}
+        # Finding A: which `picks` QgsVectorLayer object `_on_picks_edited`
+        # is currently connected to, tracked separately from
+        # `self.layers.get("picks")` -- see `_bind_picks_signals` for why
+        # (the same reason `MapLink._bound` is separate from its own
+        # registry lookup: by the time a rebind runs, the registry may
+        # already hold the NEW object, and the old one is only reachable
+        # if something kept it).
+        self._bound_picks: QgsVectorLayer | None = None
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
@@ -252,6 +281,23 @@ class SiteLayers(QObject):
             del self.layers[name]
 
     def detach(self) -> None:
+        # Finding A hazard 2: unbind BEFORE `_commit_pending_edits()` can
+        # fire a commit, not merely guard `_on_picks_edited` against one.
+        # `detach()` runs on `site_closed`, which `SiteSession.close_site`
+        # emits only after clearing `self._site` (and every other piece of
+        # site state) -- so by the time a commit here could re-entrantly
+        # emit `picks_changed`, the session already has no site and no
+        # display key, and nothing is left that should be reading `picks`
+        # at all. Unbinding first means that final commit stays silent,
+        # which is correct: it is not "the profile missed an update", it
+        # is "there is no longer a profile to update". Guarding the slot
+        # instead (checking `session.site is not None` inside
+        # `_on_picks_edited`) was considered and rejected: it would
+        # duplicate this same reasoning a second place, and still cost a
+        # pointless emit+refresh cycle during ordinary teardown for no
+        # benefit -- unbinding is both cheaper and the more direct fix for
+        # a hazard that is specifically about teardown ordering.
+        self._unbind_picks_signals()
         if self.layers:
             self._commit_pending_edits()
             ids = [lyr.id() for lyr in self.layers.values() if not sip.isdeleted(lyr)]
@@ -536,6 +582,12 @@ class SiteLayers(QObject):
         # falls back to counting directly, belt and braces.
         for layer in opened:
             layer.reload()
+        # Finding A: (re)bind regardless of whether "picks" is among
+        # `opened` this call -- an ordinary refresh with nothing to open
+        # reaches here too, and `_bind_picks_signals` is a no-op in effect
+        # when the bound object hasn't changed (unbind-then-rebind onto
+        # the same layer nets one connection, same as before).
+        self._bind_picks_signals()
 
     def _ensure_table(
         self,
@@ -965,6 +1017,110 @@ class SiteLayers(QObject):
         if layer is None or sip.isdeleted(layer):
             return None
         return layer
+
+    # ---- picks: live edit tracking (Finding A) -----------------------------
+    def _unbind_picks_signals(self) -> None:
+        """Undo `_bind_picks_signals`, defensively.
+
+        Called from `detach()` BEFORE `_commit_pending_edits()` -- see
+        that call site's own comment for why unbinding first, rather than
+        guarding `_on_picks_edited` itself, is the chosen fix for hazard 2
+        (a buffered commit made during teardown re-entrantly emitting
+        `picks_changed` for a site the session has already forgotten).
+
+        Also called from `_bind_picks_signals` itself, to release
+        whatever was bound before attaching to the (possibly different)
+        layer object now in `self.layers`. One signal at a time, each
+        guarded by its own `sip.isdeleted` check and
+        `contextlib.suppress(TypeError, RuntimeError)` -- the same shape
+        `MapLink._rebind_layer` uses to disconnect a layer that reports
+        as not-deleted while its underlying C++ object is already gone.
+        Per-signal, not one `suppress` wrapping the whole loop: a
+        `TypeError` (already disconnected) on the first signal must not
+        skip the attempt on the other five.
+        """
+        layer = self._bound_picks
+        if layer is not None and not sip.isdeleted(layer):
+            for name in _PICKS_EDIT_SIGNALS:
+                with contextlib.suppress(TypeError, RuntimeError):
+                    getattr(layer, name).disconnect(self._on_picks_edited)
+        self._bound_picks = None
+
+    def _bind_picks_signals(self) -> None:
+        """(Re)bind the CURRENT `picks` layer's own edit signals to
+        `_on_picks_edited`, so the profile tracks a delete/move/add/
+        rollback made through QGIS's ordinary editing tools live -- not
+        only when an unrelated `add_pick` happens to force a refresh
+        (Finding A, M8 acceptance walkthrough).
+
+        Tracks the bound layer in `self._bound_picks`, separately from
+        `self.layers.get("picks")` -- the same shape, for the same
+        reason, as `MapLink._rebind_layer`: `detach()` empties
+        `self.layers` and `ensure_tables()`/`_rebuild_picks` open fresh
+        layer OBJECTS (a site reopen, a CRS-driven picks rebuild, a
+        layer removed from the legend by hand and reopened), so a
+        connection made once and never renewed would point at a dead
+        wrapper and silently stop updating the profile -- no error, the
+        worst kind of stop.
+
+        Called unconditionally at the end of `ensure_tables()`, whether
+        or not the `picks` layer object actually changed this cycle:
+        unbinding an already-unbound `None` and rebinding the SAME
+        object nets exactly one connection, same as leaving it alone, so
+        there is no need to track "did it change" separately just to
+        skip a cheap no-op.
+        """
+        self._unbind_picks_signals()
+        layer = self.layers.get("picks")
+        self._bound_picks = layer
+        if layer is not None and not sip.isdeleted(layer):
+            for name in _PICKS_EDIT_SIGNALS:
+                getattr(layer, name).connect(self._on_picks_edited)
+
+    def _on_picks_edited(self, *_: Any) -> None:
+        """Any live edit-buffer change, commit or rollback on the `picks`
+        layer -- see `_PICKS_EDIT_SIGNALS`/`_bind_picks_signals` for which
+        six signals land here and why.
+
+        `write_pick` cannot double this up with `SiteSession.add_pick`'s
+        own `picks_changed` emission: it writes through
+        `layer.dataProvider().addFeatures(...)` directly (parent module
+        docstring rule 2), never through the edit buffer and never via
+        `commitChanges`/`rollBack`, so none of the six signals bound here
+        fire from an authored pick at all -- verified directly against
+        this build, not assumed.
+
+        Measured (a probe script, not assumed): committing or rolling
+        back an add/delete pair can fire more than one of the six for a
+        SINGLE user action. A plain `addFeature` then `commitChanges`
+        fires `featureAdded` live, then `featureAdded` AGAIN plus
+        `featuresDeleted` as the edit buffer swaps the buffered feature's
+        temporary negative fid for the real one the provider assigned,
+        plus `afterCommitChanges` itself -- four emissions for one save.
+        Undoing a `deleteFeature` via `rollBack()` similarly replays as a
+        `featureAdded` (the row comes back) ahead of `afterRollBack`.
+        A geometry or attribute edit's own commit is clean by contrast:
+        only `afterCommitChanges` fires in addition to the live signal.
+        This is harmless, not a bug to chase: `_refresh_picks()` reads
+        are idempotent, and this table holds a handful to the low
+        thousands of rows (see `picks_for`'s own docstring) -- a few
+        redundant, cheap reads triggered by one explicit save is a far
+        better trade than de-duplication state whose only customer would
+        ever be this one method.
+
+        A Qt slot bound straight to a `QgsVectorLayer`'s own C++ signals:
+        an escaping exception here would be swallowed (module docstring
+        rule 4) rather than reaching the CI container's
+        `qFatal()`-turned-abort, so this guards its own body and reports
+        through the module's `_log` like every other slot in this file.
+        """
+        try:
+            self.session.picks_changed.emit()
+        except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
+            _log(
+                f"could not notify the profile of a picks edit: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
 
     def _pick_point(self, pick: Pick) -> QgsPointXY | None:
         """The pick's position in the package CRS, or None when the line

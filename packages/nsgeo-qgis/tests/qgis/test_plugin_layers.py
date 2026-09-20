@@ -1213,6 +1213,217 @@ def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, mon
     assert layers.layers == {}  # still torn down; the site is closing regardless
 
 
+# --- M8 acceptance walkthrough, Finding A: the author's own words --
+# "if I selected a point and deleted it and hit save, the pick stayed
+# visible in the profile until I made another pick in the profile, at
+# which time the deleted ones would disappear." The cause: nothing
+# watched the `picks` layer's OWN editing signals, so `session.picks_
+# changed` -- emitted only from `SiteSession.add_pick` -- never fired for
+# an ordinary QGIS delete/move/add/rollback. These tests pin the
+# SiteLayers-level wiring, driven through REAL edit-buffer operations
+# (`startEditing`/`deleteFeature`/`commitChanges`), not by emitting the
+# signal by hand -- see test_plugin_profile_dock.py for the end-to-end
+# (dock + real layer) versions asserting on `dock.view._picks` itself. ---
+
+
+def test_a_buffered_delete_notifies_picks_changed_before_any_commit(populated):
+    """The responsiveness the author asked for ("could we make that link
+    more responsive somehow"): visible from the edit buffer alone, before
+    `commitChanges()` ever runs."""
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+
+    assert seen == [1]
+    picks.rollBack()
+
+
+def test_a_committed_add_through_the_edit_buffer_notifies_picks_changed(populated):
+    """Measured directly (a probe script, not assumed): committing a plain
+    `addFeature` fires THREE of our six bound signals, not one --
+    `featureAdded` and `featuresDeleted` fire again internally as QGIS's
+    edit buffer swaps the buffered feature's temporary negative fid for
+    the real one the provider assigned, in addition to
+    `afterCommitChanges` itself. `picks_changed` therefore fires four
+    times total for one add-then-save (one live, three from the commit),
+    not two -- documented here exactly, not loosened to "at least
+    twice", so a change to that internal replay is caught rather than
+    quietly tolerated. Harmless: each `_refresh_picks()` read is
+    idempotent and cheap for the handful-to-low-thousands of rows this
+    table ever holds (see `picks_for`'s own docstring) -- redundant
+    reads triggered by an explicit save are not a cost worth chasing
+    away with de-duplication state that only Finding A would ever use.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    f.setAttribute("trace", 3)
+    f.setAttribute("time_ns", 9.0)
+    assert picks.addFeature(f)
+    assert seen == [1]  # live, from featureAdded, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1, 1, 1]  # afterCommitChanges + the fid-swap replay above
+
+
+def test_a_geometry_move_through_the_edit_buffer_notifies_picks_changed(populated):
+    """A geometry-only edit doesn't change `(trace, time_ns)`, so this
+    counts emissions of `picks_changed` rather than reading rendered
+    content -- proving `geometryChanged` alone drives a notification, not
+    merely that unrelated content happens to still match. Committed
+    (not rolled back), matching the brief's own required minimum: "a
+    delete... followed by a commit... the same for an add and for a
+    geometry move". A geometry commit is clean (measured): only
+    `afterCommitChanges` fires in addition to the live `geometryChanged`,
+    unlike the add/delete cases above and below.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeGeometry(fid, QgsGeometry.fromPointXY(QgsPointXY(501.0, 707.0)))
+    assert seen == [1]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- a geometry commit is clean
+
+
+def test_an_attribute_change_through_the_edit_buffer_notifies_picks_changed(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    idx = picks.fields().indexOf("note")
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, idx, "edited by hand")
+    assert seen == [1]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- an attribute commit is clean too
+
+
+def test_a_rollback_notifies_picks_changed_too(populated):
+    """A rollback restores the on-disk view -- the profile must be told
+    that changed just as it is told about a commit. Measured: undoing a
+    `deleteFeature` replays as a `featureAdded` (the row comes back)
+    ahead of `afterRollBack` itself, so this fires twice, not once --
+    the rollback mirror image of the add-then-commit fid-swap above.
+    Harmless for the same reason: a second, idempotent read.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    assert picks.rollBack()
+
+    assert seen == [1, 1]
+
+
+def test_write_pick_does_not_double_emit_picks_changed(populated):
+    """Hazard 3 from the brief: `write_pick` goes through the data
+    provider directly, bypassing the edit buffer, and `SiteSession.
+    add_pick` already emits `picks_changed` itself once the write
+    returns -- none of the six edit-buffer/commit/rollback signals bound
+    here may ALSO fire for an authored pick."""
+    session, layers, _ = populated
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    layers.write_pick(_a_pick())
+
+    assert seen == []  # write_pick itself never emits; add_pick does that
+
+
+def test_repeated_ensure_tables_calls_do_not_accumulate_duplicate_bindings(populated):
+    """`_bind_picks_signals` runs at the end of every `ensure_tables()`
+    call, unconditionally. It must unbind before rebinding, or a picks
+    edit after several refreshes would fire `picks_changed` once per
+    accumulated (duplicate) connection instead of once."""
+    session, layers, _ = populated
+    layers.ensure_tables()
+    layers.ensure_tables()
+    layers.ensure_tables()
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    assert picks.addFeature(f)
+
+    assert seen == [1]
+
+
+def test_detach_does_not_emit_picks_changed_from_its_own_commit(populated, message_log):
+    """Hazard 2 from the brief: `_commit_pending_edits()` runs inside
+    `detach()`, which would otherwise fire `afterCommitChanges` for a
+    buffered edit while the layer is on its way out, for a site the
+    session has already forgotten. Unbinding first (see `detach()`'s own
+    comment) means that final commit stays silent -- proven here by
+    asserting the signal never fires at all, not merely that nothing
+    crashes."""
+    session, layers, _ = populated
+    _buffer_a_pick(layers)
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    layers.detach()
+
+    assert seen == []
+    assert any("picks" in m for m in message_log)  # the edit was still saved, just quietly
+
+
+def test_the_picks_binding_survives_a_site_close_and_reopen(populated, tmp_path):
+    """Hazard 1 from the brief: a site reopen replaces the `picks` layer
+    OBJECT outright (`detach()` empties the registry, `ensure_tables()`
+    opens a fresh one) -- a connection made once at construction and
+    never renewed would point at a dead wrapper after the reopen and
+    silently stop working, the exact defect `MapLink._rebind_layer`
+    exists to prevent for its own three layers."""
+    session, layers, project = populated
+    session.save()
+
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    assert picks.addFeature(f)
+
+    assert seen == [1]
+
+
 # --- controller review of I5: _adopt_legacy_package() renamed the .gpkg
 # alone. A SQLite database left by a process that did not close cleanly --
 # a QGIS crash or kill, which is not rare -- keeps a hot `-wal`/`-shm`

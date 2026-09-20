@@ -10,7 +10,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.render import PercentileClip
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import Qt
@@ -1198,3 +1198,114 @@ def test_a_failing_pick_read_is_logged_not_escaped(dock_with_picks, monkeypatch,
     session.picks_changed.emit()
 
     assert any("the picks table went away" in m for m in message_log)
+
+
+# ---- live picks editing (M8 acceptance walkthrough, Finding A) ------------
+#
+# The author's own words: "if I selected a point and deleted it and hit
+# save, the pick stayed visible in the profile until I made another pick
+# in the profile, at which time the deleted ones would disappear." The
+# cause was that nothing watched the `picks` layer's OWN editing signals --
+# `picks_changed` was emitted from exactly one place (`SiteSession.
+# add_pick`). These are the end-to-end (dock + real SiteLayers) versions:
+# real edit-buffer operations (`startEditing`/`deleteFeature`/
+# `commitChanges`), asserting on `dock.view._picks` itself, not on the
+# signal being emitted by hand.
+
+
+def test_a_buffered_delete_then_commit_refreshes_the_profile(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    assert dock.view._picks == [(5, 10.0)]
+
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+    assert dock.view._picks == []  # visible before commitChanges() -- live
+
+    assert picks.commitChanges()
+    assert dock.view._picks == []  # and it STAYS gone -- the reported defect
+
+
+def test_a_buffered_add_then_commit_refreshes_the_profile(dock_with_picks):
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 706.0)))
+    f.setAttribute("line_key", keys[0])
+    f.setAttribute("trace", 7)
+    f.setAttribute("time_ns", 22.0)
+    assert picks.addFeature(f)
+    assert dock.view._picks == [(7, 22.0)]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert dock.view._picks == [(7, 22.0)]
+
+
+def test_a_geometry_move_through_the_edit_buffer_refreshes_the_profile(dock_with_picks):
+    """A geometry-only move doesn't change what the view shows -- trace
+    and time, not position -- so this counts `picks_changed` emissions
+    instead of view content, proving the wiring actually fires for
+    `geometryChanged` and not merely that unrelated content still
+    matches."""
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeGeometry(fid, QgsGeometry.fromPointXY(QgsPointXY(501.0, 707.0)))
+
+    assert seen
+    picks.commitChanges()
+
+
+def test_a_rollback_restores_the_profile_to_what_is_on_disk(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+    assert dock.view._picks == []
+
+    assert picks.rollBack()
+
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_the_picks_binding_survives_a_site_close_and_reopen(dock_with_picks, tmp_path):
+    """A site reopen replaces the `picks` layer OBJECT outright
+    (`SiteLayers.detach()` empties its registry, `ensure_tables()` opens
+    a fresh one) -- a connection made once and never renewed would point
+    at a dead wrapper and silently stop updating the profile after this,
+    the exact defect `MapLink._rebind_layer` exists to prevent for its
+    own three layers."""
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    session.save()
+    key0 = keys[0]
+
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+    session.open_line(key0)
+
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", key0)
+    f.setAttribute("trace", 9)
+    f.setAttribute("time_ns", 15.0)
+    assert picks.addFeature(f)
+
+    assert dock.view._picks == [(9, 15.0)]
