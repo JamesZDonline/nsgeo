@@ -10,10 +10,10 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.render import colormap_names
-from nsgeo.slices import window_depths_m, window_times_ns
+from nsgeo.slices import plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
-from nsgeo_qgis.slices_plan import transform_names
+from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
@@ -266,6 +266,52 @@ def test_lines_added_after_construction_are_picked_up_as_the_default(qgis_app, t
         dock.deleteLater()
 
 
+def test_accepting_the_line_chooser_on_an_empty_grid_does_not_latch_the_seed_flag(
+    qgis_app, tmp_path
+):
+    """Final review, empty-grid latch. `set_included` used to clear
+    `_included_is_default` UNCONDITIONALLY, so accepting the line chooser
+    while the selected grid is still empty (`keys == () == self._included`
+    already, so `changed` is `False` and nothing else here would notice)
+    permanently latched it `False` -- which disables `_sync_included`'s
+    "still default" retry branch for that grid, the same branch `_seed_
+    dz_z_defaults` depends on to seed `dz`/`z0`/`z1` once a line actually
+    arrives (`plugin.py` builds this dock before any site exists, so
+    "grid added, still empty" is the ordinary flow, not an edge case).
+    With the flag latched, a line imported afterwards left `z0_spin`
+    stuck at its generic construction-time default (0.0) instead of the
+    header's own (negative) `position_ns` -- silently asking `plan_line`
+    to cover a two-way time the recording never reached, raising
+    `CoverageError` on every slice with no visible route back."""
+    session = SiteSession()
+    dock = SlicesDock(session)
+    try:
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        assert dock.included_keys() == ()
+
+        # The line chooser accepted on the still-empty grid: a no-op in
+        # every OTHER respect (`keys == self._included == ()`), which is
+        # exactly why the unconditional clear went unnoticed.
+        dock.set_included(())
+
+        path = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+        line = Line.open(path, GridPlacement("A", "y", 1.0, 0.0, 1, "L0"))
+        session.add_lines([line])
+
+        assert dock.included_keys() == tuple(session.keys()), (
+            "a line imported after an empty-grid Choose... must still become the default"
+        )
+        header = session.line_for_key(session.keys()[0]).header
+        assert dock.z0_spin.value() == pytest.approx(header.position_ns), (
+            "_seed_dz_z_defaults must still run for this grid, not stay stuck at its "
+            "construction-time default of 0.0"
+        )
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
 def test_accepting_the_line_chooser_reprepares_and_shows_stale_meanwhile(docked):
     """Fix round 1, Important 2's second half: accepting the line chooser
     is a choice made in this dock, the same as a combo change, so it must
@@ -512,6 +558,52 @@ def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
     assert f"{lo:.1f}-{hi:.1f} ns" in dock.readout.text()
 
 
+def test_the_readout_slice_count_agrees_with_the_export_band_count(docked):
+    """Final review, Minor 5. `_update_readout` used to pass `window.
+    n_levels` into `plan_windows` -- and `window` comes from `current_
+    window()`, whose `n_levels` `ZAxis.level_range` CLAMPS at either end
+    of the axis (trap 3, the same one the test just above pins for the
+    time range itself). `export_geotiff` plans its bands from the
+    UNCLAMPED `thickness_step_levels()[0]` instead, so near the deep end
+    the readout's own "N / TOTAL" recomputed a smaller, WRONG total on
+    every tick -- three different totals across three adjacent slider
+    positions, for a source `plan_windows`'s own docstring says has one
+    band count by construction."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    header = session.line_for_key(session.keys()[0]).header
+    dock.dz_spin.setValue(header.dt_ns)
+    dock.z0_spin.setValue(header.position_ns)
+    dock.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
+    dock.flush_debounce()
+    z = dock.engine.z
+
+    thickness_levels, step_levels = 23, 11
+    dock.thickness_spin.setValue(thickness_levels * z.dz_ns)
+    dock.step_spin.setValue(step_levels * z.dz_ns)
+    assert dock.thickness_step_levels() == (thickness_levels, step_levels), (
+        "fixture must round-trip to the intended level counts, or this test cannot "
+        "discriminate the fix from the bug"
+    )
+
+    true_bands = len(plan_windows(z, thickness_levels, step_levels))
+
+    totals = set()
+    # The last 25 slider positions are where `level_range` clamps
+    # `window.n_levels` below `thickness_levels` -- exactly where the bug
+    # lived.
+    for slider in range(max(0, z.nz - 25), z.nz):
+        dock.slice_slider.setValue(slider)
+        text = dock.readout.text()
+        total = int(text.split("/")[1].split("·")[0].strip())
+        totals.add(total)
+    assert totals == {true_bands}, (
+        f"the readout's own band totals {sorted(totals)} must all equal the export's "
+        f"true band count {true_bands} (`plan_windows(z, {thickness_levels}, {step_levels})`)"
+    )
+
+
 def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
     dock, _ = docked
     _ready(dock)
@@ -712,6 +804,7 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
     dock.slice_slider.setValue(5)
     assert dock.current_values() is not None
     old_readout = dock.readout.text()
+    assert dock.legend_label.text() != ""
     errors: list[str] = []
     changed: list[int] = []
     dock.error.connect(errors.append)
@@ -721,7 +814,37 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
     assert errors, "an out-of-range z1 must be reported"
     assert dock.current_values() is None
     assert dock.readout.text() != old_readout
+    # Cheap cluster (final review): `legend_label` too -- it used to keep
+    # the previous tick's number standing beside "error: ...".
+    assert dock.legend_label.text() == ""
     assert changed, "the map must be told to clear, not left showing the stale slice"
+
+
+def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
+    """Final review, Minor 6. `engine.provenance()` resolves velocity
+    against the FIRST prepared line's key and raises `KeyError` once that
+    line has been removed from the session -- a contributing line can be
+    deleted while a source stays prepared, and the cube's own arrays are
+    still entirely correct. `_resolved_velocity`'s catch used to guard
+    only `RuntimeError`, so the `KeyError` escaped through `_update_
+    readout` into `refresh_slice`'s broad `except`, which reported
+    `error: '<key>'` and cleared the map for a still-good slice."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    removed_key = dock.engine.provenance().line_keys[0]
+
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    session.remove_line(removed_key)  # emits lines_changed; does not itself refresh the slice
+
+    dock.slice_slider.setValue(6)  # the next refresh_slice() is where the KeyError used to surface
+
+    assert dock.current_values() is not None, "a still-valid slice must not be blanked"
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert not any(removed_key in e for e in errors), errors
+    assert dock.velocity_label.text() == "", "the velocity provenance has nothing left to name"
 
 
 def test_moving_the_slider_announces_the_window_it_averaged(docked):

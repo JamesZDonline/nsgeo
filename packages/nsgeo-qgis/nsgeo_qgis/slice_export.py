@@ -428,12 +428,32 @@ def write_coverage(
     display decision the way smearing an amplitude is, so there is no
     fill radius to record here. `writer` mirrors `export_slices`'s own
     substitution seam (Ruling AG).
+
+    Final review, Minor 7: `engine._slice(window)`, not `engine.slice_at
+    (window)` -- `slice_at` is the TIMED entry point, and `_REDRAW_SMOOTHING
+    = 0.7` means one full-axis pass through it (this call spans the whole
+    z axis, not one displayed window) then inflates the status line's
+    reported redraw time for many subsequent ticks. `_slice` is the
+    untimed entry point that exists for exactly this -- see its own
+    docstring ("used where a redraw timing would be a lie").
+
+    Final review, Minor 8: the written array is `NaN`, not `0`, wherever
+    `coverage` is zero -- the same "count == 0 -> NaN" the dock's own
+    coverage VIEW already applies (`refresh_slice`). Spec 3's "a zero
+    that means no data reading as no reflection" applies to this file
+    just as much as to the screen: an uncovered in-frame cell written as
+    a literal `0.0` sits against this band's own `NaN` nodata tag, so a
+    reader has no way to tell "surveyed, zero count" (impossible -- count
+    is never negative, and 0 always means uncovered) from "surveyed,
+    zero amplitude" without already knowing this is a coverage band.
     """
     frame, z = engine.frame, engine.z
     if frame is None or z is None:
         raise RuntimeError("no slice geometry: choose a source and a resolution first")
     window = SliceWindow(0, z.nz)
-    _, coverage = engine.slice_at(window)
+    _, coverage = engine._slice(window)  # the untimed entry point; see the docstring above
+    shown = coverage.astype(np.float32)
+    shown[coverage == 0] = np.nan
     plan = ExportPlan(
         frame=frame,
         z=z,
@@ -443,7 +463,7 @@ def write_coverage(
         radius_cells=None,
     )
     writer = writer if writer is not None else GeoTiffSliceWriter()
-    writer.write(path, plan, [coverage])
+    writer.write(path, plan, [shown])
 
 
 def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:
@@ -558,8 +578,24 @@ def cube_record(
     reads this field to know which lines to re-bin; a requested-but-never-
     prepared line in it would fail that restore for a reason this record
     was supposed to rule out.
+
+    Final review, Minor 10: `t1_ns` is `z.t_end_ns` for every `nz > 1`
+    (unchanged -- Task 7's Ruling AJ carefully tuned `z1_spin`'s decimals
+    around exactly this value, and that precision story is untouched
+    here), but `z.t_end_ns = t0_ns + (nz - 1) * dz_ns` EQUALS `t0_ns`
+    itself when `nz == 1` (reachable: any `0 < z1_requested - z0 < dz_ns`
+    bins to a single level). `Resolution.__post_init__` requires `t1_ns`
+    strictly greater than `t0_ns` -- so a record written for a genuine
+    one-level cube had `t0_ns == t1_ns`, and `restore_cube` refused a
+    record this same function had just written. `t0_ns + dz_ns * 0.5`
+    sits strictly inside `(t0_ns, t0_ns + dz_ns)`, which is exactly the
+    condition `ZAxis.from_range` needs to reconstruct `nz == 1` again --
+    the exact VALUE within that interval does not matter (any span in
+    `(0, 1)` levels does), so this is not sensitive to `z1_spin`'s decimal
+    precision the way the `nz > 1` case is.
     """
     root = Path(session.json_path).parent.resolve()
+    t1_ns = z.t_end_ns if z.nz > 1 else z.t0_ns + z.dz_ns * 0.5
     return {
         # --- what the cube IS: change any of these and the array changes ---
         "grid_id": choice.grid_id,
@@ -567,7 +603,7 @@ def cube_record(
         "transform": choice.transform or "none",
         "cell": float(frame.cell),
         "lines": list(line_keys),
-        "z": {"t0_ns": z.t0_ns, "t1_ns": z.t_end_ns, "dz_ns": z.dz_ns},
+        "z": {"t0_ns": z.t0_ns, "t1_ns": t1_ns, "dz_ns": z.dz_ns},
         "array": line_key(npz_path, root),
         # --- how it was BEING READ: changes nothing in the array ---
         "view": view.to_dict(),

@@ -732,11 +732,27 @@ class SlicesDock(QgsDockWidget):
         inclusion set. The equality check is the same no-op guard
         `ProcessingDock._on_form_committed` uses: clicking OK without
         actually changing anything must not spend another ~0.9 s.
+
+        Cheap cluster (final review): `_included_is_default` is cleared
+        only for a NON-EMPTY `keys` -- clearing it unconditionally meant
+        accepting the line chooser on a grid that is still EMPTY (`keys ==
+        ()`, `self._included` already `()` too, so `changed` is `False`
+        and nothing else here would otherwise notice) permanently latched
+        it `False`, disabling `_sync_included`'s "still default" retry
+        branch for this grid forever. `_seed_dz_z_defaults` depends on
+        that retry to seed `dz`/`z0`/`z1` once lines actually arrive
+        (`plugin.py` builds this dock before any site exists, so "grid
+        added, then empty" is the ordinary flow, not an edge case) -- with
+        the flag latched, lines imported afterwards left `z0 = 0.0`
+        standing on a SIR-4000 file with a negative `position_ns`, giving
+        `CoverageError` on every slice with no visible route back to a
+        working default.
         """
         keys = tuple(keys)
         changed = keys != self._included
         self._included = keys
-        self._included_is_default = False
+        if keys:
+            self._included_is_default = False
         # Task 7: an explicit line-chooser choice is not a restore, and
         # must not inherit one still in flight -- see `_pending_palette`'s
         # own docstring for why a manual change clears it here and in
@@ -762,13 +778,21 @@ class SlicesDock(QgsDockWidget):
         never drift apart on what "nothing has changed" means."""
         try:
             prepared_steps = list(self.engine.provenance().steps)
-        except RuntimeError:
-            # provenance() raises when no source is chosen. Both callers
-            # already know `engine.choice` is not None before reaching
-            # here, so this is unreachable today -- guarded anyway, since
-            # this method's whole job is being the one place this
-            # question is answered, not assuming its callers can never
-            # change.
+        except (RuntimeError, KeyError):
+            # RuntimeError: provenance() raises when no source is chosen.
+            # Both callers already know `engine.choice` is not None before
+            # reaching here, so this is unreachable today -- guarded
+            # anyway, since this method's whole job is being the one place
+            # this question is answered, not assuming its callers can
+            # never change.
+            #
+            # KeyError (final review, Minor 6): provenance() also raises
+            # this once the FIRST prepared line has been removed from the
+            # session -- see `_resolved_velocity`'s own docstring, which
+            # widens the identical catch for the identical reason. A
+            # "does not match" answer here is conservative and safe either
+            # way: both callers already treat a mismatch as "stale, not
+            # unprepared".
             return False
         return self._live_preset_steps(preset_name) == prepared_steps
 
@@ -1503,9 +1527,15 @@ class SlicesDock(QgsDockWidget):
             # radargram that may not even cover it any more -- so it is
             # cleared here for the same reason `_values`/`_window` are,
             # not left to the brief's one call site alone.
+            #
+            # Cheap cluster (final review): `legend_label` too -- without
+            # this it kept showing the PREVIOUS tick's number beside
+            # "error: ...", the exact same stale-state failure `_values`/
+            # `_window`/`readout` are already reset here to avoid.
             self._values = None
             self._window = None
             self.readout.setText(f"error: {exc}")
+            self.legend_label.setText("")
             self.slice_changed.emit()
             self.window_cleared.emit()
             self.error.emit(str(exc))
@@ -1525,11 +1555,24 @@ class SlicesDock(QgsDockWidget):
         readout stated ns only. `_resolved_velocity()` is the one place
         that resolves it, shared with `velocity_label` so the two always
         describe the same line's velocity.
+
+        Final review, Minor 5: `plan_windows` is called with `thickness_
+        step_levels()[0]` (the SAME unclamped thickness `export_geotiff`
+        plans its bands from), never `window.n_levels` -- `window` comes
+        from `current_window()`, and `ZAxis.level_range` CLAMPS its
+        returned `n_levels` to a genuinely thinner value at either end of
+        the axis (trap 3). Passing that clamped count into `plan_windows`
+        here recomputed a DIFFERENT (smaller) band total than the export
+        actually writes, so at nz=181/thickness=23/step=11 the readout
+        read "slice 15 / 15", "16 / 16", "17 / 17" at sliders 158/170/180
+        while the export wrote 15 bands throughout -- three disagreeing
+        totals for a source `plan_windows`'s own docstring says has one,
+        by construction.
         """
         z = self.engine.z
         assert z is not None  # refresh_slice() already checked current_window()
-        step_levels = self._step_levels(z)
-        windows = plan_windows(z, window.n_levels, step_levels)
+        thickness_levels, step_levels = self.thickness_step_levels()
+        windows = plan_windows(z, thickness_levels, step_levels)
         # `windows` tiles from level 0 in steps of `step_levels`; a window
         # this thin only at an axis end (trap 3) need not be a member of
         # that tiling at all, so this is arithmetic, not a search -- and
@@ -1546,10 +1589,23 @@ class SlicesDock(QgsDockWidget):
         """The line key and the velocity resolved against it, shared by
         the readout (spec 9.2's ns-and-m format) and `velocity_label`
         (spec 9.2's "provenance, not state") so the two never describe
-        two different lines. `None, None` before anything is prepared."""
+        two different lines. `None, None` before anything is prepared.
+
+        Final review, Minor 6: also `None, None` when `engine.provenance()`
+        raises `KeyError`, not just `RuntimeError` -- `provenance()`
+        resolves velocity against the FIRST prepared line's key, and that
+        raises `KeyError` once that line has been removed from the session
+        (a contributing line can be deleted while a source stays prepared;
+        the cube's own arrays are still entirely correct). Before this,
+        deleting any such line blanked an otherwise still-valid slice --
+        `refresh_slice()`'s broad `except` caught the `KeyError` escaping
+        from here, reported `error: '<key>'`, and cleared the map -- for a
+        reason that has nothing to do with whether the slice itself is
+        still good.
+        """
         try:
             keys = self.engine.provenance().line_keys
-        except RuntimeError:
+        except (RuntimeError, KeyError):
             return None, None
         if not keys:
             return None, None

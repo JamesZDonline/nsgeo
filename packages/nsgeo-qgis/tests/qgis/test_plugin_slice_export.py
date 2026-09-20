@@ -10,7 +10,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.project import ProjectError, load_site
-from nsgeo.slices import SliceWindow, load_cube
+from nsgeo.slices import SliceWindow, ZAxis, load_cube
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
@@ -340,6 +340,54 @@ def test_coverage_exports_as_a_companion_single_band_raster(exportable, tmp_path
         ds = None
 
 
+def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(exportable, tmp_path):
+    """Final review, Minor 8. The dock's own coverage VIEW maps `count ==
+    0 -> NaN` (transparent, `refresh_slice`'s coverage branch); this
+    companion raster used to write the raw integer counts instead, so an
+    uncovered in-frame cell landed as a literal `0.0` sitting against the
+    band's own NaN nodata tag. Spec 3's "a zero that means no data reading
+    as no reflection" applies to the file as much as to the screen: at
+    this fixture's 0.25 m cells and four 1 m-apart parallel lines, most of
+    the frame is genuinely uncovered, so this is not an edge case."""
+    from osgeo import gdal
+
+    engine = exportable
+    path = tmp_path / "coverage.tif"
+    write_coverage(engine, path)
+    ds = gdal.Open(str(path))
+    try:
+        band = ds.GetRasterBand(1)
+        assert np.isnan(band.GetNoDataValue())
+        arr = band.ReadAsArray()
+        assert np.isnan(arr).any(), (
+            "fixture must have uncovered in-frame cells, or this test cannot discriminate"
+        )
+        assert not (arr == 0.0).any(), "an uncovered cell must be NaN, never a literal zero"
+    finally:
+        ds = None
+
+
+def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_path):
+    """Final review, Minor 7. `write_coverage` used to call `engine.
+    slice_at(...)` -- the TIMED entry point -- over the FULL z axis, which
+    is far more levels than any single displayed window and therefore not
+    a redraw at all. `_REDRAW_SMOOTHING = 0.7` means that one measurement
+    then dominates the status line's reported redraw time for many
+    subsequent ticks. `_slice` (untimed) is what `shared_limit`'s own
+    multi-window pass already uses for the identical reason."""
+    engine = exportable
+    # A real redraw first, so `_redraw_ms` holds a small, known value.
+    engine.slice_at(SliceWindow(6, 18))
+    before = engine._redraw_ms
+    assert before is not None
+
+    write_coverage(engine, tmp_path / "coverage.tif")
+
+    assert engine._redraw_ms == before, (
+        "write_coverage's full-axis pass must not be recorded as a redraw"
+    )
+
+
 class _RecordingWriter:
     """A stub `SliceWriter` (Ruling AG, Task 6 fix round 1): records every
     call instead of touching GDAL, so a test can observe the streaming
@@ -563,6 +611,40 @@ def test_a_recipe_with_no_transform_restores_the_bipolar_choice(exportable_with_
 
     recipe = recipe_from_record(record)
     assert recipe.choice.transform == NO_TRANSFORM
+
+
+def test_a_one_level_cube_round_trips_through_a_saved_record(exportable_with_session):
+    """Final review, Minor 10. `cube_record` used to write `t1_ns =
+    z.t_end_ns` unconditionally, and `z.t_end_ns = t0_ns + (nz - 1) *
+    dz_ns` EQUALS `t0_ns` itself when `nz == 1` -- reachable whenever the
+    requested span is positive but smaller than one level.
+    `Resolution.__post_init__` requires `t1_ns` strictly greater than
+    `t0_ns`, so `restore_cube` refused a record this same function had
+    just written, for a perfectly legitimate one-level cube."""
+    engine, session = exportable_with_session
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=2.3))
+    assert engine.z.nz == 1, "fixture must actually reach the nz == 1 edge case"
+
+    npz = save_cube_npz(engine, session.root / "slices" / "A__one_level.npz")
+    record = cube_record(
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
+    assert record["z"]["t1_ns"] > record["z"]["t0_ns"], (
+        "a record naming its own axis must round-trip through Resolution's own validation"
+    )
+
+    recipe = recipe_from_record(record)  # must not raise
+    assert recipe.resolution is not None
+    restored_z = ZAxis.from_range(
+        recipe.resolution.t0_ns, recipe.resolution.t1_ns, recipe.resolution.dz_ns
+    )
+    assert restored_z.nz == 1
 
 
 def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session):
