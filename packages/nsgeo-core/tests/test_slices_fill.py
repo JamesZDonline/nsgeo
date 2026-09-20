@@ -140,3 +140,88 @@ def test_fill_rejects_a_negative_radius():
 def test_fill_rejects_mismatched_shapes():
     with pytest.raises(ValueError, match="same shape"):
         fill(np.zeros((3, 3)), np.ones((4, 4)), radius_cells=1)
+
+
+def test_smooth_size_is_never_smaller_than_asked_and_is_five_smooth():
+    from nsgeo.slices.fill import _smooth_size
+
+    for n in range(1, 400):
+        m = _smooth_size(n)
+        assert m >= n, f"_smooth_size({n}) = {m} would WRAP the convolution"
+        rest = m
+        for p in (2, 3, 5):
+            while rest % p == 0:
+                rest //= p
+        assert rest == 1, f"_smooth_size({n}) = {m} is not 5-smooth"
+    assert _smooth_size(1041) == 1080
+
+
+def _unpadded_fill(values, counts, radius_cells, min_count=0.5):
+    """M10's exact formula, at the exact minimum FFT size. The reference
+    the padded implementation must agree with -- written out here rather
+    than imported, so a change to the shipped one cannot quietly change
+    the thing it is checked against."""
+    import numpy as np
+    from nsgeo.slices.fill import disc_kernel
+
+    values = np.asarray(values, dtype=float)
+    counts = np.asarray(counts, dtype=float)
+    r = int(radius_cells)
+    ny, nx = values.shape
+    kernel = disc_kernel(r)
+    finite = np.isfinite(values)
+    numerator = np.where(finite, values, 0.0) * counts
+    denominator = np.where(finite, counts, 0.0)
+    shape = (ny + 2 * r, nx + 2 * r)
+    spectrum = np.fft.rfft2(kernel, s=shape)
+    num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)[
+        r : r + ny, r : r + nx
+    ]
+    den = np.fft.irfft2(np.fft.rfft2(denominator, s=shape) * spectrum, s=shape)[
+        r : r + ny, r : r + nx
+    ]
+    return np.divide(num, den, out=np.full((ny, nx), np.nan), where=den >= min_count).astype(
+        np.float32
+    )
+
+
+@pytest.mark.parametrize(("ny", "nx", "radius"), [(37, 41, 3), (100, 100, 8), (213, 209, 10)])
+def test_padding_to_a_smooth_size_does_not_change_the_answer(ny, nx, radius):
+    """Zero-padding a linear convolution further can only add zeros past
+    the end; the crop window is unmoved. If this ever fails, the crop
+    offset is wrong, not the padding."""
+    rng = np.random.default_rng(7)
+    counts = (rng.random((ny, nx)) < 0.2).astype(float)
+    values = np.where(counts > 0, rng.random((ny, nx)) * 10.0, np.nan)
+    got = fill(values, counts, radius)
+    want = _unpadded_fill(values, counts, radius)
+    np.testing.assert_array_equal(np.isfinite(got), np.isfinite(want))  # identical nodata mask
+    both = np.isfinite(got)
+    np.testing.assert_allclose(got[both], want[both], rtol=1e-5, atol=1e-6)
+
+
+def test_the_kernel_spectrum_cache_returns_the_same_answer_on_a_second_call():
+    """A cached array handed out by reference would be corrupted by any
+    caller that wrote into it. Nothing in `fill` does -- it only
+    multiplies -- and this pins that: two identical fills either side of a
+    different one must agree exactly."""
+    rng = np.random.default_rng(11)
+    counts = (rng.random((60, 60)) < 0.3).astype(float)
+    values = np.where(counts > 0, rng.random((60, 60)), np.nan)
+    first = fill(values, counts, 5)
+    fill(values, counts, 7)  # a different radius, same shape family
+    second = fill(values, counts, 5)
+    np.testing.assert_array_equal(np.isfinite(first), np.isfinite(second))
+    np.testing.assert_array_equal(first[np.isfinite(first)], second[np.isfinite(second)])
+
+
+def test_clearing_the_kernel_cache_does_not_change_results():
+    from nsgeo.slices.fill import clear_kernel_cache
+
+    rng = np.random.default_rng(13)
+    counts = (rng.random((50, 50)) < 0.3).astype(float)
+    values = np.where(counts > 0, rng.random((50, 50)), np.nan)
+    warm = fill(values, counts, 4)
+    clear_kernel_cache()
+    cold = fill(values, counts, 4)
+    np.testing.assert_array_equal(warm[np.isfinite(warm)], cold[np.isfinite(cold)])
