@@ -885,6 +885,16 @@ class NsgeoPlugin:
         mid-teardown -- see `open_grid_dialog`'s `clear_if_current` for the
         same reasoning) and the `show()`/`raise_()`/`activateWindow()` set
         both other dialogs here use on every path, not just some of them.
+
+        `finished` re-checks the dock's CURRENT grid against `grid_id`
+        (fix round 3, Ruling Z): the dialog is modeless and binds
+        `grid_id` once, at open time, but nothing stops the user from
+        changing the Source group's own grid combo while it sits open.
+        Without this check, accepting after such a change commits the
+        OLD grid's keys against the NEW grid's frame -- bringing back
+        both `6 of 3 included` and the silent trace drop Ruling U's own
+        scoping exists to remove, just reached one step later than a
+        cross-grid pick in the dialog itself would have.
         """
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
@@ -906,7 +916,14 @@ class NsgeoPlugin:
             def finished(result: int) -> None:
                 try:
                     if result == QDialog.DialogCode.Accepted and self.slices_dock is not None:
-                        self.slices_dock.set_included(dialog.included_keys())
+                        if self.slices_dock.grid_combo.currentText() != grid_id:
+                            self.message(
+                                "the grid changed while choosing lines; "
+                                "the line choice was not applied",
+                                Qgis.MessageLevel.Warning,
+                            )
+                        else:
+                            self.slices_dock.set_included(dialog.included_keys())
                 except Exception as exc:  # noqa: BLE001 -- a slot on finished
                     self.message(
                         f"could not apply the line choice: {exc}", Qgis.MessageLevel.Warning

@@ -285,3 +285,96 @@ def test_editing_the_selected_preset_in_place_shows_stale_without_reprocessing(d
     assert dock.engine.is_prepared
     assert dock.engine.line_count == 3
     assert list(dock.engine.provenance().steps) == before  # no re-prepare happened
+
+
+def test_calling_prepare_again_after_an_in_place_edit_clears_the_staleness(docked):
+    """Fix round 3, Ruling X. `prepare()`'s no-op guard used to compare
+    only grid/preset-name/transform/line_keys, never the steps
+    themselves -- so after an in-place edit to the selected preset, the
+    documented retry path (calling `prepare()` again) silently did
+    nothing, and with one grid and one preset the source was PERMANENTLY
+    stale: the only recovery left was toggling the transform away and
+    back, paying for two preparations and showing the wrong transform in
+    between. The guard must still skip a GENUINELY unchanged choice
+    (`test_refilling_the_combos_does_not_re_prepare` pins that half)."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    new_steps = [{"step": "background_mean", "params": {}, "enabled": True}]
+    session.site.presets["p"] = list(new_steps)
+    session.presets_changed.emit()
+    assert dock.source_status.text().startswith("stale")
+
+    dock.prepare()  # the documented retry path -- must NOT be a no-op here
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    assert list(dock.engine.provenance().steps) == new_steps
+    assert "prepared" in dock.source_status.text().lower()
+
+
+def test_the_stale_wording_names_the_grid_when_only_the_grid_diverges(docked):
+    """Fix round 3, Ruling Y's fourth finding: every non-`line_keys`
+    divergence used to print 'the preset changed', even when the grid was
+    what actually diverged. The combo is changed with signals blocked,
+    bypassing the normal `_on_source_changed` -> `prepare()` path (which
+    would immediately re-prepare against grid B and stop being stale) --
+    isolating the wording `_refresh_source_status` itself picks for a
+    grid-only divergence."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    dock.grid_combo.blockSignals(True)
+    dock.grid_combo.addItem("B")
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.blockSignals(False)
+
+    dock._refresh_source_status()
+    assert dock.source_status.text().startswith("stale")
+    assert "grid" in dock.source_status.text()
+
+
+def test_the_stale_wording_names_the_transform_when_only_the_transform_diverges(docked):
+    """Fix round 3, Ruling Y's fourth finding, the transform half."""
+    dock, _ = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    dock.transform_combo.blockSignals(True)
+    dock.transform_combo.setCurrentText("amp_abs")
+    dock.transform_combo.blockSignals(False)
+
+    dock._refresh_source_status()
+    assert dock.source_status.text().startswith("stale")
+    assert "transform" in dock.source_status.text()
+
+
+def test_a_failed_schedule_does_not_claim_lines_prepared(docked, monkeypatch):
+    """Fix round 3, Ruling Y's fifth finding: `_on_engine_error` stopped
+    writing into `source_status` directly in fix round 1 (routed through
+    `_refresh_source_status` instead), so after a failed `addTask` the
+    recomputed line read `prepared · 0 lines` -- a claim that something
+    succeeded when scheduling itself failed outright."""
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+
+    class _FakeManager:
+        def addTask(self, task: object) -> int:
+            return 0
+
+    class _FakeApp:
+        @staticmethod
+        def taskManager() -> _FakeManager:
+            return _FakeManager()
+
+    import nsgeo_qgis.slices_engine as engine_module
+
+    monkeypatch.setattr(engine_module, "QgsApplication", _FakeApp)
+    dock.transform_combo.setCurrentText("amp_abs")  # a genuine change -- prepare() must run
+
+    assert not dock.engine.is_prepared
+    assert dock.source_status.text() == "not prepared · every line failed"

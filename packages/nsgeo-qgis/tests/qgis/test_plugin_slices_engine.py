@@ -17,6 +17,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtCore import QTimer
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [
@@ -492,5 +493,89 @@ def test_two_different_choices_back_to_back_never_run_concurrently(sourced, monk
     # regression that silently kept choice_a's result would still be caught.
     assert engine.choice == choice_b
     assert engine.output_unipolar is True
+    assert engine.line_count == len(keys)
+    assert errors == [], errors
+
+
+def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
+    sourced, monkeypatch
+):
+    """Fix round 3, Ruling W. `_cancel_in_flight`'s own confirm step spins
+    a nested `QEventLoop`, which can deliver a SECOND, different
+    `set_source` call from INSIDE the first call's own frame -- a person
+    changing a combo again while the previous change is still being
+    cancelled. Measured before this guard existed: the reentrant call
+    dispatched its own task, then the OUTER call resumed and dispatched a
+    second one on top -- two real tasks at once again, with the OLDER
+    (outer) choice winning because it bumps `_generation` last.
+
+    `QTimer.singleShot(0, ...)` is scheduled just BEFORE the discriminating
+    `set_source` call specifically because a timer is a POSTED event, not
+    user input -- `_cancel_in_flight`'s `ExcludeUserInputEvents` mask does
+    not by itself stop it, so this exercises the OTHER half of the fix
+    (`set_source`'s own `_dispatching` guard), not the event-mask half
+    `test_two_different_choices_back_to_back_never_run_concurrently`
+    already covers. The zero-delay timer reliably fires on the very first
+    iteration of the nested loop, long before the ~50 ms patched `load`
+    lets the cancelled task actually clear, so the reentrant call is
+    guaranteed to land INSIDE the wait, not after it -- PROVIDED
+    `QgsApplication.taskManager()`'s thread pool is already warm. Measured
+    directly: run as the first test to ever dispatch a `QgsTask` in a
+    fresh `qgis_app` process, the very first task's own thread start-up
+    latency is itself long enough to blow past the 50 ms window and this
+    test fails even against the fix (`wait_for_preparation(20_000)`
+    itself returns `False`) -- a test-isolation artefact, not evidence
+    against the fix (run straight after any other test in this file that
+    dispatches one first, it passes reliably). The warm-up dispatch below
+    removes that dependency on execution order.
+    """
+    engine, session, errors, _ = sourced
+    keys = tuple(session.keys())
+    # Warm-up: get `QgsApplication.taskManager()` past whatever it costs
+    # to start its very first worker thread, using the REAL (fast) load --
+    # before `Line.load` is patched to sleep below. Without this, running
+    # this test first/alone in a fresh process is flaky for a reason
+    # unrelated to the fix (see the docstring above).
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys))
+    assert engine.wait_for_preparation(20_000), "warm-up preparation did not finish"
+    errors.clear()
+
+    concurrent = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+    real_load = Line.load
+
+    def slow_load(self: Line) -> list:
+        nonlocal concurrent, max_concurrent
+        with lock:
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+        try:
+            time.sleep(0.05)
+            return real_load(self)
+        finally:
+            with lock:
+                concurrent -= 1
+
+    monkeypatch.setattr(Line, "load", slow_load)
+
+    choice_a = SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys)
+    choice_b = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+    choice_c = SourceChoice(grid_id="A", preset="p", transform="amp_abs", line_keys=keys)
+
+    engine.set_source(choice_a)
+    QTimer.singleShot(0, lambda: engine.set_source(choice_c))
+    engine.set_source(choice_b)  # cancels choice_a; the timer fires during THIS wait
+    assert engine.wait_for_preparation(20_000)
+
+    assert max_concurrent <= 1, (
+        f"two tasks executed work() concurrently (max_concurrent={max_concurrent}); "
+        "a choice delivered from inside the cancel wait must be queued, not dispatched "
+        "from the reentrant call"
+    )
+    # The LATEST choice must win -- measured before this guard existed, the
+    # OLDER (outer, choice_b) one did, because the outer frame bumps
+    # `_generation` last regardless of dispatch order.
+    assert engine.choice == choice_c
     assert engine.line_count == len(keys)
     assert errors == [], errors

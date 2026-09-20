@@ -72,11 +72,12 @@ class SlicesDock(QgsDockWidget):
         # outer call is still on the stack would otherwise have its
         # `finally` clear the guard early, for the inner call's own frame.
         self._updating = 0
-        #: The included subset, in survey order. Not necessarily a subset
-        #: of the selected grid's own lines -- `LineChoiceDialog` offers
-        #: every line in the site, because two named grids can still share
-        #: one world footprint. `_default_included` only SEEDS this set
-        #: when the grid changes; it never constrains it afterwards.
+        #: The included subset, in survey order. Always a subset of the
+        #: selected grid's own lines (fix round 3, Ruling Y corrects what
+        #: this used to say): `_default_included` seeds it from the grid,
+        #: and `LineChoiceDialog` (Ruling U, fix round 1) now lists only
+        #: that same grid's lines, so nothing can widen this to a line
+        #: from elsewhere.
         self._included: tuple[str, ...] = ()
         #: The grid id `_included` was last reset for. `None` both before
         #: any grid has been looked at and whenever no grid is selected,
@@ -270,10 +271,11 @@ class SlicesDock(QgsDockWidget):
         """Spec 9.1: report the resulting memory before committing to the
         ~0.9 s of preparing it.
 
-        `total` is the selected grid's own line count -- what the
-        fraction is measured against -- but the estimate itself sums
-        over `self._included` exactly as chosen, since a line from
-        another grid the user deliberately added still costs memory.
+        `total` is the selected grid's own line count, and `included` is
+        always a subset of it (fix round 3, Ruling Y corrects what this
+        used to say: `LineChoiceDialog` now lists only the selected
+        grid's own lines -- Ruling U, fix round 1 -- so there is no longer
+        a way to include a line from elsewhere).
 
         The sample count is read from each line's header, before
         `time_zero` crops rows -- see `slices_plan.estimate_memory` and
@@ -340,6 +342,29 @@ class SlicesDock(QgsDockWidget):
         if changed:
             self.prepare()
 
+    def _live_preset_steps(self, preset_name: str) -> list[dict]:
+        return list(self.session.site.presets.get(preset_name, [])) if self.session.is_open else []
+
+    def _prepared_steps_match(self, preset_name: str) -> bool:
+        """Whether `preset_name`'s steps, as they stand RIGHT NOW, are the
+        same recipe `engine.provenance()` says was actually captured at
+        dispatch time (Ruling K) -- `False` after an in-place edit to the
+        selected preset, even though the three combos and the inclusion
+        set show no change at all. Shared by `prepare()`'s no-op guard
+        (Ruling X) and `_refresh_source_status()` (Ruling R), so the two
+        never drift apart on what "nothing has changed" means."""
+        try:
+            prepared_steps = list(self.engine.provenance().steps)
+        except RuntimeError:
+            # provenance() raises when no source is chosen. Both callers
+            # already know `engine.choice` is not None before reaching
+            # here, so this is unreachable today -- guarded anyway, since
+            # this method's whole job is being the one place this
+            # question is answered, not assuming its callers can never
+            # change.
+            return False
+        return self._live_preset_steps(preset_name) == prepared_steps
+
     def prepare(self) -> None:
         """Build a `SourceChoice` from the three combos and the inclusion
         set, and hand it to the engine.
@@ -357,23 +382,35 @@ class SlicesDock(QgsDockWidget):
         become visible.
 
         A no-op when the computed choice already equals `engine.choice`
-        (fix round 1 follow-up, discovered while verifying Important 2):
-        `rebuild_source`'s first-computation trigger already dispatches a
-        real `QgsTask` for a freshly-available source before any caller
-        gets a chance to call `prepare()` itself, and `SliceEngine`
-        discards a SUPERSEDED task's stale result by generation but never
-        actually cancels or waits for it -- so calling `set_source` again
-        for the SAME choice while that first task is still running starts
-        a SECOND real background task reading the SAME lines at the SAME
-        time. Measured directly: this segfaults (two worker threads inside
-        `dewow.apply`/`dzt.read_header` at once), not merely wastes another
-        ~0.9 s. There is nothing to redo when nothing has actually
-        changed, so this is the same shape of no-op guard `set_included`
-        and `ProcessingDock._on_form_committed` already use, not a new
-        idea -- it happens to also be load-bearing for safety here.
+        AND the selected preset's live steps still match what was
+        actually captured at dispatch time (`_prepared_steps_match`).
+
+        This is now an EFFICIENCY guard, not a safety one (fix round 3,
+        Ruling X corrects what this docstring used to claim):
+        `SliceEngine.set_source` itself cancels and confirms any
+        in-flight preparation before dispatching a new one (Ruling V,
+        then Ruling W for the reentrant case `set_source`'s own guard
+        closes), so calling it again for an identical choice would only
+        repeat ~0.9 s of identical work, not risk the concurrency this
+        guard was once the only thing preventing.
+
+        Comparing the steps, not just the combos, is what makes the
+        no-op guard correct rather than merely convenient: an in-place
+        edit to the SELECTED preset changes nothing the three combos or
+        the inclusion set can see. Before this comparison existed, the
+        documented retry path -- calling `prepare()` again -- silently
+        did nothing after such an edit, and with one grid and one preset
+        there was no OTHER combo left to toggle: the source stayed
+        "stale" permanently, with the only escape being to toggle the
+        transform away and back, paying for two preparations and showing
+        the wrong transform in between.
         """
         choice = self.source_choice()
-        if choice is not None and choice == self.engine.choice:
+        if (
+            choice is not None
+            and choice == self.engine.choice
+            and self._prepared_steps_match(choice.preset)
+        ):
             return
         try:
             self.engine.set_source(choice)
@@ -415,18 +452,33 @@ class SlicesDock(QgsDockWidget):
 
         "Stale" covers more than the in-place-preset-edit question this
         dock's design already settled (no auto re-prepare there -- see
-        `prepare`'s and `_on_source_changed`'s docstrings): it is also
-        what accepting the line chooser leaves behind until a re-prepare
-        finishes (`source_choice()` now differs from `engine.choice` in
-        `line_keys`), and what a DELETED selected preset leaves behind --
-        `_refill` cannot restore a name that no longer exists, so the
-        combo silently jumps to a fallback while `_updating` suppresses
-        `_on_source_changed`, and without this check the status line would
-        keep naming a preset the engine never actually prepared.
+        `prepare`'s docstring): it is also what accepting the line chooser
+        leaves behind until a re-prepare finishes (`source_choice()` now
+        differs from `engine.choice` in `line_keys`), and what a DELETED
+        selected preset leaves behind -- `_refill` cannot restore a name
+        that no longer exists, so the combo silently jumps to a fallback
+        while `_updating` suppresses `_on_source_changed`, and without
+        this check the status line would keep naming a preset the engine
+        never actually prepared. Names what diverged specifically -- the
+        grid, the preset (by name or by an in-place edit to its steps),
+        the transform, or the lines -- rather than blaming "the preset"
+        for all four (fix round 3, Ruling Y: the review found every
+        non-`line_keys` mismatch printing the same preset-flavoured
+        wording, which a grid or transform change had no business doing).
 
         Left untouched while a task is running: `_on_progress` already
         owns the status line for that duration, and `engine.line_count`
         would otherwise report last time's count under this time's claim.
+
+        The "otherwise" branch is not simply `prepared · N lines` (fix
+        round 3, Ruling Y): after `_on_engine_error` -- a failed `addTask`,
+        say -- `engine.choice` still names the attempted choice and every
+        structural check above still passes, so without this the
+        recomputed line read `prepared · 0 lines`, a claim that something
+        succeeded when scheduling itself failed. A genuinely EMPTY
+        selection (`choice.line_keys == ()`) is excluded from that check
+        on purpose: `0 of 0` legitimately prepares, and is not the failure
+        this guards against.
         """
         if self.engine.is_running:
             return
@@ -435,32 +487,23 @@ class SlicesDock(QgsDockWidget):
             self.source_status.setText("not prepared")
             return
         current = self.source_choice()
-        same_selection = (
-            current is not None
-            and current.grid_id == choice.grid_id
-            and current.preset == choice.preset
-            and current.transform == choice.transform
-        )
-        if not same_selection:
+        if current is None or current.grid_id != choice.grid_id:
+            self.source_status.setText("stale · the grid changed since this was prepared")
+            return
+        if current.preset != choice.preset:
             self.source_status.setText("stale · the preset changed since this was prepared")
+            return
+        if current.transform != choice.transform:
+            self.source_status.setText("stale · the transform changed since this was prepared")
             return
         if current.line_keys != choice.line_keys:
             self.source_status.setText("stale · the lines changed since this was prepared")
             return
-        live_steps = (
-            list(self.session.site.presets.get(choice.preset, [])) if self.session.is_open else []
-        )
-        try:
-            prepared_steps = list(self.engine.provenance().steps)
-        except RuntimeError:
-            # Guarded per fix round 1's review: provenance() raises when no
-            # source is chosen. Unreachable given the `choice is None`
-            # check above, but this method's whole job is to be the one
-            # place this state is judged, so it must not assume its own
-            # ordering can never change under a later edit.
-            prepared_steps = []
-        if live_steps != prepared_steps:
+        if not self._prepared_steps_match(choice.preset):
             self.source_status.setText("stale · the preset changed since this was prepared")
+            return
+        if not self.engine.is_prepared and choice.line_keys:
+            self.source_status.setText("not prepared · every line failed")
             return
         self.source_status.setText(f"prepared · {self.engine.line_count} lines")
 

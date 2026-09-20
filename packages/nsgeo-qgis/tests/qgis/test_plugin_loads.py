@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import nsgeo_qgis
 from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
 from nsgeo_qgis.plugin import NsgeoPlugin
+from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 
@@ -84,3 +87,47 @@ def test_unloading_closes_an_open_line_chooser(fake_iface, qgis_app, tmp_path, a
     finally:
         if plugin.session is not None:
             plugin.unload()
+
+
+def test_accepting_the_line_chooser_after_the_grid_changed_is_discarded(
+    fake_iface, qgis_app, tmp_path, answer_modal
+):
+    """Fix round 3, Ruling Z: `LineChoiceDialog` is modeless and binds
+    `grid_id` once, at open time. Nothing stops the user from changing
+    the Source group's own grid combo while it sits open -- accepting
+    afterwards must not commit the OLD grid's keys against the NEW
+    grid's frame, which is exactly the `6 of 3 included` and silent
+    trace drop Ruling U's own scoping exists to remove, just reached one
+    step later than a cross-grid pick inside the dialog itself would
+    have."""
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        plugin.session.new_site(tmp_path)
+        plugin.session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+        plugin.session.add_grid(Grid("B", (100.0, 100.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+        line = Line.open(
+            synthetic_dzt(tmp_path / "raw", "FILE__0001.DZT", n_traces=60),
+            GridPlacement("A", "y", 1.0, 0.0, 1, "LA"),
+        )
+        plugin.session.add_lines([line])
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+
+        plugin.open_line_choice_dialog()  # opened while the dock's grid combo shows "A"
+        dialog = plugin._line_choice_dialog
+        assert dialog is not None
+        assert dialog.table.rowCount() == 1  # grid A's one line
+
+        plugin.slices_dock.grid_combo.setCurrentText("B")  # changed while the dialog is open
+        after_switch = plugin.slices_dock.included_keys()
+
+        dialog.select_all()  # the (stale, grid-A) result the dialog would otherwise commit
+        dialog.accept()
+
+        assert plugin.slices_dock.included_keys() == after_switch, (
+            "the OLD grid's line choice must not be committed after the grid changed"
+        )
+        item = fake_iface.messageBar().currentItem()
+        assert item is not None and "grid changed" in item.text()
+    finally:
+        plugin.unload()

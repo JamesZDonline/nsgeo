@@ -86,6 +86,21 @@ them live here:
   processing) that any previous task has actually stopped before either
   proceeds. See `_cancel_in_flight`'s own docstring for why it must run
   before `_generation` is bumped, not after.
+* **The confirm wait above is itself a nested event loop, and reopens the
+  same hazard if not guarded (Ruling W, fix round 3).** `wait_for_
+  preparation`'s `QEventLoop.exec()` can deliver a SECOND `set_source`
+  call -- a person changing a combo again while the first change is still
+  being cancelled -- from inside the first call's own frame. Measured
+  directly: the reentrant call dispatches its own task, then the outer
+  call resumes and dispatches a second one on top, restoring the very
+  segfault the confirm wait exists to prevent, with the OLDER choice
+  winning instead of the newer one. Closed with both halves together,
+  neither sufficient alone: `set_source`'s own `_dispatching` guard queues
+  (never refuses) a reentrant call so the latest choice still wins, and
+  `_cancel_in_flight`'s wait passes `ExcludeUserInputEvents` so a mouse
+  wheel or held key over a combo cannot trigger the reentrancy in the
+  first place (a `QTimer` or a queued signal still can, which is why the
+  guard is still needed even with the narrower event mask).
 """
 
 from __future__ import annotations
@@ -146,6 +161,12 @@ _REDRAW_SMOOTHING = 0.7
 #: that it can never be mistaken for the UI hanging.
 _CANCEL_TIMEOUT_MS = 250
 
+#: Ruling W (fix round 3): the sentinel meaning "no choice is queued",
+#: distinct from `None` -- `set_source(None)` is itself a legitimate call
+#: (clearing the source), so `None` cannot double as "nothing queued" the
+#: way it usually would.
+_NOT_QUEUED = object()
+
 
 class SliceEngine(QObject):
     """Everything between a chosen source and a slice. Owns no widgets."""
@@ -201,6 +222,27 @@ class SliceEngine(QObject):
         #: "genuinely failed" apart, so a person rapidly changing combos
         #: never sees a spurious "Task canceled" warning.
         self._deliberately_cancelled: set[QgsTask] = set()
+        #: Ruling W (fix round 3): guards `set_source` against itself.
+        #: `_cancel_in_flight`'s confirm step spins a nested `QEventLoop`,
+        #: which -- `ExcludeUserInputEvents` alone does not stop a
+        #: `QTimer` or a queued signal -- can still deliver a SECOND,
+        #: different `set_source` call from inside the first one's own
+        #: call frame. Left unguarded, the reentrant call finishes first
+        #: (bumping `_generation` and dispatching its own task), and then
+        #: the OUTER call resumes, bumps `_generation` PAST it, and
+        #: dispatches a second real task on top -- restoring the exact
+        #: two-tasks-at-once segfault Ruling V exists to remove, with the
+        #: OLDER (outer, chronologically-first) choice winning instead of
+        #: the newer one. See `set_source`'s own guard for the rest.
+        self._dispatching = False
+        #: The choice a reentrant `set_source` call recorded while
+        #: `_dispatching` was `True`, or `_NOT_QUEUED`. Applied by the
+        #: outer call's own `finally`, once it is safe to dispatch again --
+        #: "the latest choice wins" is the property a person clicking
+        #: through the Source combos actually expects, and queuing (rather
+        #: than refusing) is what keeps that true even when a change
+        #: arrives while another is still being cancelled.
+        self._queued_choice: Any = _NOT_QUEUED
         session.site_closed.connect(self.clear)
         session.grids_changed.connect(self._on_grids_changed)
 
@@ -327,12 +369,21 @@ class SliceEngine(QObject):
         task this engine did not ask to stop) -- `finished()` checks that
         set to tell "expected, we did this" apart from "genuinely failed"
         before deciding whether to report anything through `on_error`.
+
+        Waits with `ExcludeUserInputEvents` (Ruling W, fix round 3): half
+        of closing the reentrancy hole this confirm step itself opened --
+        see `set_source`'s own `_dispatching` guard for the other half,
+        and `wait_for_preparation`'s docstring for why excluding user
+        input alone is not enough (a `QTimer` or a queued signal still
+        gets through, which the guard is what actually stops).
         """
         for task in list(self._pending):
             self._deliberately_cancelled.add(task)
             with contextlib.suppress(RuntimeError):  # the C++ side is already gone
                 task.cancel()
-        if self._running and not self.wait_for_preparation(_CANCEL_TIMEOUT_MS):
+        if self._running and not self.wait_for_preparation(
+            _CANCEL_TIMEOUT_MS, QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        ):
             self._report(
                 "a previous slice-source preparation did not stop in time; "
                 "proceeding with the new choice anyway"
@@ -344,69 +395,108 @@ class SliceEngine(QObject):
         Raises ValueError, synchronously and before any work starts, if
         the preset carries an amplitude transform (plan Ruling 2) -- the
         caller is a dialog, and a refusal it can show is worth more than
-        an error that arrives a second later through a callback.
+        an error that arrives a second later through a callback. Never
+        raises for a QUEUED, reentrant call (see the guard below) -- there
+        is no caller left on the stack to hand a raised exception to by
+        the time this method dispatches a queued choice on its own behalf.
 
         Cancels and waits out any preparation already in flight first
         (`_cancel_in_flight`, Ruling V) -- see its own docstring for why
         that must happen before, not after, `_generation` is bumped.
+
+        Guarded against itself (Ruling W, fix round 3): `_cancel_in_
+        flight`'s confirm step spins a nested event loop, which can
+        deliver a SECOND `set_source` call (a person changing a combo
+        again while the first change is still being cancelled) from
+        INSIDE this very call's own frame. Measured directly before this
+        guard existed: the reentrant call would dispatch its own task
+        while this outer call was still cancelling the one before it, and
+        then this outer call would resume and dispatch a second task on
+        top -- two real tasks running at once again, with the OLDER
+        (outer) choice ending up as `self._choice` because this frame
+        bumps `_generation` last. A reentrant call is recorded in
+        `_queued_choice` and returns immediately instead of dispatching;
+        the OUTER call's own `finally` applies it once dispatching here is
+        safe again, so the LATEST choice still wins -- just not from
+        inside the nested loop that caused the problem.
         """
-        self._cancel_in_flight()
-        self._generation += 1
-        self._lines = []
-        self._steps = ()
-        self._plans = None
-        self._cube = None
-        self._grid_fp = None
-        self._redraw_ms = None
-        self._choice = choice
-        if choice is None or not self.session.is_open:
-            self._rebuild_geometry()
+        if self._dispatching:
+            self._queued_choice = choice
             return
+        self._dispatching = True
+        try:
+            self._cancel_in_flight()
+            self._generation += 1
+            self._lines = []
+            self._steps = ()
+            self._plans = None
+            self._cube = None
+            self._grid_fp = None
+            self._redraw_ms = None
+            self._choice = choice
+            if choice is None or not self.session.is_open:
+                self._rebuild_geometry()
+                return
 
-        site = self.session.site
-        steps = list(site.presets.get(choice.preset, []))
-        conflict = preset_transform_conflict(steps)
-        if conflict is not None:
-            self._choice = None
-            raise ValueError(
-                f"the preset {choice.preset!r} already contains the amplitude transform "
-                f"{conflict!r}. A cube's transform is chosen here and applied last, so "
-                f"remove {conflict!r} from the preset or choose it in Transform, not both"
-            )
-        # Captured now, not re-read from `site.presets` in `provenance()`:
-        # `save_preset` overwrites a name in place and `delete_preset`
-        # removes it outright, both ordinary actions while a source stays
-        # prepared, and a live read would then describe steps the cube
-        # was never actually built from (Ruling K) -- the same reasoning
-        # `provenance()` already applies to `line_keys`, one field over.
-        self._steps = tuple(dict(s) for s in steps)
+            site = self.session.site
+            steps = list(site.presets.get(choice.preset, []))
+            conflict = preset_transform_conflict(steps)
+            if conflict is not None:
+                self._choice = None
+                raise ValueError(
+                    f"the preset {choice.preset!r} already contains the amplitude transform "
+                    f"{conflict!r}. A cube's transform is chosen here and applied last, so "
+                    f"remove {conflict!r} from the preset or choose it in Transform, not both"
+                )
+            # Captured now, not re-read from `site.presets` in `provenance()`:
+            # `save_preset` overwrites a name in place and `delete_preset`
+            # removes it outright, both ordinary actions while a source stays
+            # prepared, and a live read would then describe steps the cube
+            # was never actually built from (Ruling K) -- the same reasoning
+            # `provenance()` already applies to `line_keys`, one field over.
+            self._steps = tuple(dict(s) for s in steps)
 
-        jobs: list[tuple[str, Any, np.ndarray]] = []
-        frames = site.frames
-        # Captured HERE, beside the `trace_coords` call below that actually
-        # depends on it -- NOT in `_rebuild_geometry` (Ruling P). Task 3
-        # calls `set_source` and `set_resolution` as two separate steps, so
-        # a resolution -- and therefore a `_rebuild_geometry` call -- may
-        # not exist yet when a grid changes. Keying the fingerprint to
-        # `_rebuild_geometry` left exactly that window with `_grid_fp`
-        # still None, so `_on_grids_changed` skipped silently and a later
-        # `_rebuild_geometry` built a frame from the NEW grid while these
-        # lines' `coords` stayed computed from the OLD one -- measured as a
-        # uniform 4-cell shift (1 m / 0.25 m cell) with no exception and no
-        # change in total coverage.
-        grid = frames.get(choice.grid_id)
-        self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
-        for key in choice.line_keys:
-            try:
-                line = self.session.line_for_key(key)
-                jobs.append((key, line, line.trace_coords(frames)))
-            except Exception as exc:  # noqa: BLE001 -- a missing grid or a stale key
-                self._report(f"{key}: {exc}")
-        if not jobs:
-            self._rebuild_geometry()
-            self._finish_preparation()
-            return
-        self._start_task(jobs, steps, choice.transform, self._generation)
+            jobs: list[tuple[str, Any, np.ndarray]] = []
+            frames = site.frames
+            # Captured HERE, beside the `trace_coords` call below that actually
+            # depends on it -- NOT in `_rebuild_geometry` (Ruling P). Task 3
+            # calls `set_source` and `set_resolution` as two separate steps, so
+            # a resolution -- and therefore a `_rebuild_geometry` call -- may
+            # not exist yet when a grid changes. Keying the fingerprint to
+            # `_rebuild_geometry` left exactly that window with `_grid_fp`
+            # still None, so `_on_grids_changed` skipped silently and a later
+            # `_rebuild_geometry` built a frame from the NEW grid while these
+            # lines' `coords` stayed computed from the OLD one -- measured as a
+            # uniform 4-cell shift (1 m / 0.25 m cell) with no exception and no
+            # change in total coverage.
+            grid = frames.get(choice.grid_id)
+            self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
+            for key in choice.line_keys:
+                try:
+                    line = self.session.line_for_key(key)
+                    jobs.append((key, line, line.trace_coords(frames)))
+                except Exception as exc:  # noqa: BLE001 -- a missing grid or a stale key
+                    self._report(f"{key}: {exc}")
+            if not jobs:
+                self._rebuild_geometry()
+                self._finish_preparation()
+                return
+            self._start_task(jobs, steps, choice.transform, self._generation)
+        finally:
+            self._dispatching = False
+            queued, self._queued_choice = self._queued_choice, _NOT_QUEUED
+            if queued is not _NOT_QUEUED:
+                # Applies through a normal (now non-reentrant, since
+                # `_dispatching` was just cleared above) call to this same
+                # method, rather than a second copy of the body above.
+                # There is no caller left to hand a refusal to from here,
+                # so a `ValueError` for the queued choice is reported
+                # through `on_error` instead -- the same channel every
+                # other failure reached from a callback already uses.
+                try:
+                    self.set_source(queued)
+                except ValueError as exc:
+                    self._report(str(exc))
 
     def _build_stack(self, steps: Sequence[dict[str, Any]], transform: str) -> StepStack:
         """The preset, then the transform. Order is the whole point.
@@ -856,7 +946,11 @@ class SliceEngine(QObject):
         self.on_error = None
         self.on_progress = None
 
-    def wait_for_preparation(self, timeout_ms: int = 20_000) -> bool:
+    def wait_for_preparation(
+        self,
+        timeout_ms: int = 20_000,
+        flags: QEventLoop.ProcessEventsFlag = QEventLoop.ProcessEventsFlag.AllEvents,
+    ) -> bool:
         """Spin the event loop until preparation finishes.
 
         For tests, directly -- and, with a short timeout,
@@ -865,6 +959,17 @@ class SliceEngine(QObject):
         blocking for at most one line's processing (or, uncancelled, one
         full preparation) is a small, bounded cost, and safer than
         proceeding while a task is still writing into this engine.
+
+        `flags` narrows what this nested loop processes while waiting.
+        `_cancel_in_flight` (Ruling W, fix round 3) passes
+        `ExcludeUserInputEvents`: a task's own `finished` still arrives
+        (it is a posted event, not user input), so the confirm keeps
+        working, but a mouse wheel or a held arrow key over a `QComboBox`
+        -- which emits `currentTextChanged` every 10-20 ms, well inside
+        this wait's own ~250 ms window -- can no longer re-enter
+        `set_source` from inside this very call. Left at the default
+        here for tests, which often DRIVE this wait by changing a combo
+        or emitting a signal themselves and need that processed.
 
         Returns whether it actually finished while this waited, not merely
         whether nothing is running afterwards -- a bare timeout would
@@ -896,6 +1001,6 @@ class SliceEngine(QObject):
 
         self.on_prepared = done
         timer.start(timeout_ms)
-        loop.exec()
+        loop.exec(flags)
         self.on_prepared = previous
         return finished and not self._running
