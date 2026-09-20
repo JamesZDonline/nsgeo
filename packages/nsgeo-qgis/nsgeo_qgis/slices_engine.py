@@ -123,18 +123,17 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
+    fill,
     limit_over_slices,
     plan_line,
     plan_windows,
     stream_slice,
 )
-from nsgeo.slices import shared_limit as cube_shared_limit
 from nsgeo.slices.fill import clear_kernel_cache
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.slices_plan import (
-    DEFAULT_BUDGET_BYTES,
     NO_TRANSFORM,
     MemoryEstimate,
     Resolution,
@@ -812,7 +811,7 @@ class SliceEngine(QObject):
         else:
             self._redraw_ms = _REDRAW_SMOOTHING * self._redraw_ms + (1.0 - _REDRAW_SMOOTHING) * ms
 
-    def shared_limit(self, thickness_levels: int, clip: Any) -> float:
+    def shared_limit(self, thickness_levels: int, clip: Any, radius_cells: int) -> float:
         """One display limit for the whole source, at this thickness.
 
         Spec 8's shared stretch. Measured over slices at the thickness
@@ -820,23 +819,53 @@ class SliceEngine(QObject):
         `nsgeo.slices.display.shared_limit` for the measurement that makes
         the difference a bug rather than a nuance.
 
-        The streaming branch mirrors that function's own tail-window
-        handling by hand rather than calling it: `nsgeo.slices.display
-        .shared_limit` takes a `SliceCube` and reads `cube.slice_levels`,
-        which this mode deliberately holds none of. Windows abut
-        (`step == thickness`) and a thinner FINAL window is appended
-        whenever `thickness_levels` does not evenly divide `z.nz`, exactly
-        as the cube version does -- omitting it would silently measure the
+        Final review, Important 1: measured over `fill(...)`ed slices, not
+        raw (unfilled) ones -- `radius_cells` is now a required argument,
+        not an afterthought. `refresh_slice()` always displays `fill(values,
+        coverage, radius_cells())`; this method used to measure the shared
+        limit over `self._slice(w)[0]` (the UNFILLED array, coverage-zero
+        cells still `NaN`) while `display_limit()`'s "this slice" branch
+        measured the FILLED one -- two branches of the same stretch
+        measuring two different quantities, and the shared (default)
+        branch measuring something never actually drawn. Measured directly
+        on this repo's own four real DZT files at the dock's own seeded
+        defaults (thickness 23 levels, radius 0.75 m, cell 0.25 m -> 3
+        cells; see `test_shared_limit_measures_the_filled_array_actually_
+        displayed`): the unfilled measurement came out 1.10x too high with
+        `amp_envelope` (2.114 vs. the correct 1.926) and 1.69x too high
+        with no transform (0.364 vs. 0.215) -- the out-of-the-box
+        configuration, since `transform_combo` auto-selects "none" -- so
+        every slice rendered noticeably dimmer than intended, identically
+        at every depth: exactly the "reads as dim data rather than a wrong
+        limit" failure `render.UnipolarClip`'s and `display.shared_limit`'s
+        own docstrings exist to prevent, one layer further out. Both
+        numbers are a property of this corpus and this processing, not a
+        guarantee about any other one -- do not turn them into a
+        threshold.
+
+        Builds its own window list and fills each one directly, in BOTH
+        modes, rather than delegating the resident branch to
+        `nsgeo.slices.display.shared_limit`: that function reads
+        `cube.slice_levels` straight, with no fill step of its own, so
+        using it here would leave the resident branch with the same bug
+        this fix removes from the streaming one. Windows abut (`step ==
+        thickness`) and a thinner FINAL window is appended whenever
+        `thickness_levels` does not evenly divide `z.nz`, exactly as the
+        core `shared_limit` does -- omitting it would silently measure the
         resident and streaming stretch over two different sets of levels,
         which is the mismatch a mode switch must never produce.
         """
         _, z = self._require_geometry()
-        if self._mode == "resident":
-            return cube_shared_limit(self.cube(), thickness_levels, clip)
         windows = list(plan_windows(z, thickness_levels, thickness_levels))
         if windows[-1].k1 < z.nz:
             windows.append(SliceWindow(windows[-1].k1, z.nz))
-        return limit_over_slices((self._slice(w)[0] for w in windows), clip)
+        if self._mode == "resident":
+            cube = self.cube()
+            coverage = cube.coverage()
+            slices = (fill(cube.slice_levels(w.k0, w.k1), coverage, radius_cells) for w in windows)
+        else:
+            slices = (fill(*self._slice(w), radius_cells) for w in windows)
+        return limit_over_slices(slices, clip)
 
     def cube(self) -> SliceCube:
         """The resident cube, built on first use and cached.

@@ -10,13 +10,13 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.render import UnipolarClip
-from nsgeo.slices import CoverageError, SliceWindow
+from nsgeo.render import PercentileClip, UnipolarClip
+from nsgeo.slices import CoverageError, SliceWindow, fill, limit_over_slices, plan_windows
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
-from plugin_testing import synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QTimer
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -170,11 +170,95 @@ def test_the_shared_limit_agrees_between_the_two_modes(sourced):
     _prepare(engine, session)
     clip = UnipolarClip()
     engine.set_always_resident(False)
-    streamed = engine.shared_limit(10, clip)
+    streamed = engine.shared_limit(10, clip, 2)
     engine.set_always_resident(True)
-    resident = engine.shared_limit(10, clip)
+    resident = engine.shared_limit(10, clip, 2)
     assert streamed == pytest.approx(resident, rel=1e-4)
     assert streamed > 0.0
+
+
+@needs_real_data
+def test_shared_limit_measures_the_filled_array_actually_displayed(qgis_app, tmp_path):
+    """Final review, Important 1. `shared_limit` used to measure the shared
+    stretch over the UNFILLED slice (`self._slice(w)[0]`), while what
+    `refresh_slice()` actually displays is `fill(values, coverage,
+    radius_cells())` -- so the default (shared) stretch measured something
+    never drawn. Reproduced at the dock's own seeded defaults on this
+    repo's real DZT files: thickness 23 levels (thickness_spin's default
+    5.0 ns at this dz), radius 0.75 m / cell 0.25 m -> 3 cells (1.5x
+    `default_spacing` / half of it -- the dock's own seed formulas).
+
+    `reported` (what the engine now returns) must equal `correct` (the
+    same shared-stretch measurement, computed independently here by
+    filling every window and calling `limit_over_slices` directly) --
+    and `unfilled` (the OLD measurement, over the raw arrays) must differ
+    from it meaningfully, or this test could not tell the fix from the
+    bug it replaces."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    lines = [
+        Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+        for i in range(4)
+    ]
+    session.add_lines(lines)
+    # No `time_zero`: it crops rows off the front of the radargram, which
+    # would shrink the line's own t0_ns below the header's raw
+    # `position_ns` this test seeds `z0` from directly (the dock's own
+    # `_seed_dz_z_defaults` formula) -- `dewow`/`background_mean`/
+    # `gain_agc` all leave the sample axis untouched, so `header.position_
+    # ns`/`n_samples` stay the exact bounds the prepared line covers.
+    session.site.presets["p"] = [
+        {"step": "dewow", "params": {}, "enabled": True},
+        {"step": "background_mean", "params": {}, "enabled": True},
+        {"step": "gain_agc", "params": {}, "enabled": True},
+    ]
+    engine = SliceEngine(session)
+    header = lines[0].header
+    resolution = Resolution(
+        cell=0.25,
+        dz_ns=header.dt_ns,
+        t0_ns=header.position_ns,
+        t1_ns=header.position_ns + (header.n_samples - 1) * header.dt_ns,
+    )
+    thickness_levels = max(1, round(5.0 / header.dt_ns))
+    radius_cells = round(0.75 / 0.25)
+    assert thickness_levels == 23  # the dock's own seeded thickness, at this dz
+    assert radius_cells == 3
+    try:
+        for transform, clip_cls in (
+            ("amp_envelope", UnipolarClip),
+            (NO_TRANSFORM, PercentileClip),  # transform_combo's out-of-the-box default
+        ):
+            engine.set_source(
+                SourceChoice(
+                    grid_id="A", preset="p", transform=transform, line_keys=tuple(session.keys())
+                )
+            )
+            assert engine.wait_for_preparation(20_000)
+            engine.set_resolution(resolution)
+            clip = clip_cls()
+            reported = engine.shared_limit(thickness_levels, clip, radius_cells)
+
+            z = engine.z
+            windows = list(plan_windows(z, thickness_levels, thickness_levels))
+            if windows[-1].k1 < z.nz:
+                windows.append(SliceWindow(windows[-1].k1, z.nz))
+            correct = limit_over_slices(
+                (fill(*engine._slice(w), radius_cells) for w in windows), clip
+            )
+            unfilled = limit_over_slices((engine._slice(w)[0] for w in windows), clip)
+
+            assert reported == pytest.approx(correct, rel=1e-9), (
+                f"{transform!r}: engine reported {reported}, the filled measurement is {correct}"
+            )
+            assert unfilled / correct > 1.05, (
+                f"{transform!r}: unfilled {unfilled} vs filled {correct} did not differ enough "
+                "to discriminate the fix from the bug it replaces"
+            )
+    finally:
+        engine.dispose()
 
 
 def test_provenance_names_the_lines_that_were_actually_prepared(sourced):

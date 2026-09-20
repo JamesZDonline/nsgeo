@@ -25,7 +25,15 @@ from typing import Any
 
 import numpy as np
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
-from nsgeo.slices import CubeFrame, SliceWindow, fill, plan_windows, window_label, window_times_ns
+from nsgeo.slices import (
+    CubeFrame,
+    SliceWindow,
+    fill,
+    limit_over_slices,
+    plan_windows,
+    window_label,
+    window_times_ns,
+)
 from nsgeo.velocity import VelocityModel
 from qgis.gui import QgsDockWidget
 from qgis.PyQt import sip
@@ -138,11 +146,17 @@ class SlicesDock(QgsDockWidget):
         self._values: np.ndarray | None = None
         self._window: SliceWindow | None = None
         #: `(key, limit)` from the last `shared_limit()` call, where `key`
-        #: is `(n_levels, engine.choice, engine.mode)` -- everything
-        #: `nsgeo.slices.shared_limit` (via the engine) actually measures
-        #: over. Recomputing it is a pass over every window in the cube
-        #: (tens of them), not a per-tick cost, so `display_limit()` only
-        #: pays for it again when one of those three actually changed.
+        #: is `(n_levels, engine.choice, engine.mode, radius_cells)` --
+        #: everything `engine.shared_limit` actually measures over (fix
+        #: round: `radius_cells` joined the other three once `shared_limit`
+        #: started filling each window before measuring it -- see its own
+        #: docstring). Recomputing it is a pass over every window in the
+        #: cube (tens of them), not a per-tick cost, so `display_limit()`
+        #: only pays for it again when one of those four actually changed
+        #: -- and `_on_prepared` also clears it unconditionally on every
+        #: successful preparation, because `_on_grids_changed` can
+        #: re-prepare against the SAME `SourceChoice` (a grid move), which
+        #: changes what was measured without moving any of these four.
         self._shared_limit_cache: tuple[tuple[Any, ...], float] | None = None
         #: Task 7: a palette name `restore_cube` still owes `palette_combo`
         #: once the preparation it just dispatched finishes. `_on_prepared`
@@ -895,6 +909,16 @@ class SlicesDock(QgsDockWidget):
 
     def _on_prepared(self) -> None:
         try:
+            # Final review, Important 1 (part 3): the cache's key
+            # (`n_levels`, `engine.choice`, `engine.mode`, `radius_cells`)
+            # cannot always tell a re-preparation happened -- `_on_grids_
+            # changed` re-prepares with the SAME `SourceChoice` object
+            # after a grid move, so none of those four values need to
+            # change even though the prepared lines' own coordinates just
+            # did. Every successful preparation lands here, so clearing
+            # unconditionally here is what actually keeps the cache from
+            # outliving the data it was measured over.
+            self._shared_limit_cache = None
             self._update_included_label()
             self._refresh_source_status()
             # Spec 8's rule enforced here, not just described: the combo
@@ -1500,8 +1524,9 @@ class SlicesDock(QgsDockWidget):
         The shared branch is cached (`_shared_limit_cache`) because it is
         a pass over every window in the cube, not a per-tick cost, and is
         only recomputed when the key it is measured over -- `(n_levels,
-        engine.choice, engine.mode)` -- actually changed; see that field's
-        own docstring for why those three and nothing else.
+        engine.choice, engine.mode, radius_cells)` -- actually changed;
+        see that field's own docstring for why those four and nothing
+        else.
 
         Fix round 1, Important 2 (Ruling AB): the coverage view measures
         its OWN limit -- the greatest trace count actually on screen,
@@ -1513,6 +1538,19 @@ class SlicesDock(QgsDockWidget):
         (the "shared" branch) returned ~7.0e4 on the synthetic fixture,
         so every count mapped to the shader's bottom stop and the whole
         coverage view rendered as one flat colour.
+
+        Final review, Important 1 + Minor 9: BOTH remaining branches now
+        measure exactly what `refresh_slice()` displays (`fill(values,
+        coverage, radius_cells())`), never the raw unfilled array --
+        `engine.shared_limit` takes `radius_cells()` and fills every
+        window itself (see its own docstring for the measured before/after
+        numbers, on this repo's four real DZT files); "this slice" is
+        routed through `limit_over_slices` instead of calling
+        `clip.limit(self._values)` raw, because the clips stride-subsample
+        BEFORE filtering non-finite values and `limit_over_slices` is the
+        function that exists specifically to filter first (see its own
+        docstring) -- the two branches now differ only in WHICH slices
+        they measure, never in HOW.
         """
         if self.coverage_check.isChecked():
             if self._values is None:
@@ -1523,13 +1561,14 @@ class SlicesDock(QgsDockWidget):
         if self.stretch_combo.currentText() == "this slice":
             if self._values is None:
                 return 1.0
-            return clip.limit(self._values)
+            return limit_over_slices((self._values,), clip)
         window = self._window
         if window is None:
             return 1.0
-        key = (window.n_levels, self.engine.choice, self.engine.mode)
+        radius_cells = self.radius_cells()
+        key = (window.n_levels, self.engine.choice, self.engine.mode, radius_cells)
         if self._shared_limit_cache is None or self._shared_limit_cache[0] != key:
-            value = self.engine.shared_limit(window.n_levels, clip)
+            value = self.engine.shared_limit(window.n_levels, clip, radius_cells)
             self._shared_limit_cache = (key, value)
         return self._shared_limit_cache[1]
 
