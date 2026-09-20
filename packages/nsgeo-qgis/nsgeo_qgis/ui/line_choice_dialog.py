@@ -7,6 +7,15 @@ draft put all four behind one `Edit...` button, and review rejected it
 because a control named for the act of editing rather than for what it
 edits leaves the user to guess its scope.
 
+Scoped to one grid (fix round 1, Ruling U): spec 9.1 says "every line in
+the grid", not the site. Two named grids can share a world footprint, so
+listing every line in the whole site let a line placed on grid B be ticked
+into a cube binned on grid A's frame -- its traces would then fall outside
+that frame and be silently dropped (`nsgeo.slices.binning.cell_index`
+raises no error for a point outside the grid; it is simply not counted).
+Scoping the dialog itself removes the possibility rather than merely
+reporting a `6 of 3 included` count that could never happen if it did.
+
 Modeless, like every dialog in this plugin: `show()` plus `finished`,
 never `exec()`. See `plugin.py`'s module docstring for why.
 """
@@ -29,6 +38,8 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.log import log as _log
+
 HEADERS = ("", "Line", "Traces", "Length (m)", "Own stack")
 
 
@@ -36,13 +47,20 @@ class LineChoiceDialog(QDialog):
     INCLUDE_COLUMN = 0
     STACK_COLUMN = 4
 
-    def __init__(self, session: Any, included: tuple[str, ...], parent: QWidget | None = None):
+    def __init__(
+        self,
+        session: Any,
+        grid_id: str,
+        included: tuple[str, ...],
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Lines in this cube")
         self.setModal(False)
         self.session = session
-        self._keys: list[str] = list(session.keys()) if session.is_open else []
-        self._included: set[str] = {k for k in included if k in set(self._keys)}
+        self.grid_id = grid_id
+        self._keys: list[str] = []
+        self._included: set[str] = set(included)
 
         layout = QVBoxLayout(self)
         note = QLabel(
@@ -96,15 +114,51 @@ class LineChoiceDialog(QDialog):
         self._refresh()
 
     def select_all(self) -> None:
-        self._included = set(self._keys)
-        self._refresh()
+        # A slot on QPushButton.clicked (via the lambda below): an
+        # exception here is swallowed by PyQt locally and turns into
+        # qFatal() in the CI container -- the same hazard `_on_item_changed`
+        # already guards against, which is what made this an oversight
+        # rather than a policy (fix round 1, Important 3). `_refresh` itself
+        # re-reads `_keys` from the session now, so a line removed
+        # elsewhere or the site closing no longer raises out of here --
+        # this guard is defence in depth for anything else that could.
+        try:
+            self._included = set(self._live_keys())
+            self._refresh()
+        except Exception as exc:  # noqa: BLE001 -- see above
+            _log(f"could not select every line: {exc}")
 
     def select_none(self) -> None:
-        self._included = set()
-        self._refresh()
+        try:
+            self._included = set()
+            self._refresh()
+        except Exception as exc:  # noqa: BLE001 -- see select_all
+            _log(f"could not clear the line selection: {exc}")
 
     # ---- table ------------------------------------------------------------
+    def _live_keys(self) -> list[str]:
+        """Every line currently placed on `self.grid_id`, in survey order,
+        read fresh from the session -- never the snapshot taken at
+        construction (fix round 1, Important 3 / Ruling U)."""
+        if not self.session.is_open:
+            return []
+        return [
+            key
+            for key in self.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+            if getattr(self.session.line_for_key(key).placement, "grid_id", None) == self.grid_id
+        ]
+
     def _refresh(self) -> None:
+        """Re-read `_keys` from the session (fix round 1, Important 3) --
+        never trust the snapshot taken at construction. This dialog is
+        modeless and watches no session signal, so a line can be removed,
+        or the site closed outright, while it sits open; without this, the
+        table (and `select_all`/`select_none`, which iterate `_keys`) went
+        on describing lines that no longer exist, raising `KeyError` or
+        `ProjectError` out of a slot instead of just showing an empty
+        table."""
+        self._keys = self._live_keys()
+        self._included &= set(self._keys)
         self.table.blockSignals(True)
         try:
             self.table.setRowCount(len(self._keys))
@@ -141,6 +195,4 @@ class LineChoiceDialog(QDialog):
                 return
             self.set_included(str(key), item.checkState() == Qt.CheckState.Checked)
         except Exception:  # noqa: BLE001 -- see above
-            from nsgeo_qgis.log import log
-
-            log("could not update the line selection")
+            _log("could not update the line selection")

@@ -705,6 +705,26 @@ class SliceEngine(QObject):
         clear_kernel_cache()
 
     def dispose(self) -> None:
+        # nsgeo-qgis fix round 1 (M11, Task 3): wait out any in-flight
+        # preparation FIRST. Every caller of this method before Task 3's
+        # SlicesDock always called wait_for_preparation() itself before
+        # ever disposing, so a task genuinely still running at dispose()
+        # time was never actually exercised -- until SlicesDock.
+        # rebuild_source() started dispatching one automatically the
+        # moment a grid, preset and lines already exist, from ANY
+        # plugin's initGui(), including test fixtures that have nothing
+        # to do with slices and never call wait_for_preparation()
+        # themselves (test_plugin_difference_presets.py's `plugin`
+        # fixture, say, which saves a preset mid-test and unloads without
+        # knowing a SlicesDock is listening at all). Left running past
+        # dispose(), that task keeps executing against callbacks this
+        # method is about to null out, and can still be mid-flight when a
+        # LATER, unrelated test's own real QgsTask starts -- measured
+        # directly as a segfault (two worker threads inside dewow's
+        # `running_mean` at once, from two different tests' orphaned
+        # tasks, not from anything in the same test). Bounded by whatever
+        # `_running` actually reflects; a no-op when nothing is running.
+        self.wait_for_preparation()
         # Same two exceptions map_link.py's own disconnects suppress, and
         # for the same reason: a RuntimeError from a wrapper that reports
         # as not-deleted but whose underlying C++ object is gone regardless
@@ -719,7 +739,12 @@ class SliceEngine(QObject):
         self.on_progress = None
 
     def wait_for_preparation(self, timeout_ms: int = 20_000) -> bool:
-        """Spin the event loop until preparation finishes. For tests.
+        """Spin the event loop until preparation finishes.
+
+        Mainly for tests, and now also `dispose()` (fix round 1): a real
+        caller (the plugin unloading) blocking for at most one
+        preparation's worth of time is a small, bounded cost, and safer
+        than tearing down while a task is still writing into this engine.
 
         Returns whether it actually finished while this waited, not merely
         whether nothing is running afterwards -- a bare timeout would

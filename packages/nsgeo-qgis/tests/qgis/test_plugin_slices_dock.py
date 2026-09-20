@@ -32,6 +32,21 @@ def docked(qgis_app, tmp_path):
     session.presets_changed.emit()
     dock = SlicesDock(session)
     yield dock, session
+    # Fix round 1: Important 2's first-computation trigger means
+    # construction ALREADY dispatched a real QgsTask here, and most tests
+    # above never call wait_for_preparation() themselves. dispose() only
+    # disconnects signals and drops this engine's own references -- it
+    # does not cancel or wait for a task already handed to
+    # QgsApplication.taskManager(), which is a session-scoped singleton
+    # shared by every test in this file. Left unawaited, that orphaned
+    # task keeps running in a real background thread for as long as it
+    # takes, and a later test's OWN construction can dispatch a SECOND one
+    # before the first finishes -- measured directly as a segfault (two
+    # worker threads inside dewow's `running_mean` at once), not merely a
+    # slow teardown. Waiting here, before dispose(), is what keeps every
+    # test's background work finished before the next test's fixture ever
+    # starts building a new one.
+    dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
 
@@ -62,9 +77,17 @@ def test_the_included_summary_reads_as_a_fraction_of_the_grid(docked):
 def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     """Spec 9.1: before committing the ~0.9 s the dock reports what the
     resulting memory will be, because it is decided by the line count and
-    the chosen resolution -- and spec 7.4 warns rather than hard-caps."""
-    dock, _ = docked
+    the chosen resolution -- and spec 7.4 warns rather than hard-caps.
+
+    Fix round 1, M6: `"MB" in text` alone could never fail --
+    `format_bytes` floors at 1 MB, so it reads "1 MB" whether 0 or 3 lines
+    are actually included, which is exactly the state Important 1's bug
+    produces. Asserting the fraction against the session's own line count
+    (not the dock's) makes this test fail under that bug instead of
+    passing beside it."""
+    dock, session = docked
     text = dock.included_label.text()
+    assert text.startswith(f"{len(session.keys())} of {len(session.keys())} included")
     assert "MB" in text or "GB" in text
 
 
@@ -136,3 +159,129 @@ def test_closing_the_site_empties_the_dock(docked):
     session.close_site()
     assert dock.grid_combo.count() == 0
     assert not dock.engine.is_prepared
+
+
+def test_a_single_grid_single_preset_source_prepares_without_being_asked(docked):
+    """Fix round 1, Important 2. With one grid, one preset and transform
+    'none' -- exactly this fixture's shape -- no combo can ever change
+    again after construction, so `_on_source_changed` (the only other
+    caller of `prepare()`) can never fire either. Without a first-
+    computation trigger in `rebuild_source` itself, nothing here could
+    ever reach 'prepared', which is the brief's own done-criterion for
+    this dock. `dock.prepare()` is deliberately never called in this
+    test -- calling it would defeat the point."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+
+
+def test_construction_reports_not_prepared_before_the_first_task_finishes(docked):
+    """Ruling R's first state. The first-computation trigger (Important 2)
+    starts a QgsTask synchronously inside `rebuild_source`, but the task
+    itself only finishes once the event loop is spun -- which nothing has
+    done yet at this point -- so the status line must still say the
+    honest thing about what is (not yet) prepared."""
+    dock, _ = docked
+    assert dock.source_status.text() == "not prepared"
+    assert dock.engine.wait_for_preparation(20_000)  # let the fixture's own task finish cleanly
+
+
+def test_lines_added_after_construction_are_picked_up_as_the_default(qgis_app, tmp_path):
+    """Fix round 1, Important 1 / Ruling S. The real plugin order builds
+    this dock at `initGui`, before any site exists: `grids_changed` fires
+    while the grid is still empty (seeding the default to `()`), and a
+    LATER `lines_changed`, with the same grid still selected, must still
+    pick up the lines that arrive after that seed -- not leave it stuck
+    at the count that existed the moment the grid first appeared. The
+    `docked` fixture above builds the whole site before the dock, which
+    never exercises this path at all."""
+    session = SiteSession()
+    dock = SlicesDock(session)
+    try:
+        assert dock.grid_combo.count() == 0  # no site yet
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        assert dock.included_label.text().startswith("0 of 0 included")
+        lines = [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+        session.add_lines(lines)
+        assert dock.included_label.text().startswith("3 of 3 included")
+        assert len(dock.included_keys()) == 3
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_accepting_the_line_chooser_reprepares_and_shows_stale_meanwhile(docked):
+    """Fix round 1, Important 2's second half: accepting the line chooser
+    is a choice made in this dock, the same as a combo change, so it must
+    re-prepare on its own. Ruling R: between that choice and the retry
+    finishing, `source_status` must say 'stale', not keep claiming the OLD
+    count is still current."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    keys = tuple(session.keys())[:2]
+    dock.set_included(keys)  # no explicit prepare() call
+    assert dock.source_status.text().startswith("stale")
+    assert "lines" in dock.source_status.text()
+
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 2
+    assert "prepared" in dock.source_status.text().lower()
+
+
+def test_deleting_the_selected_preset_shows_stale_not_a_wrong_name(docked):
+    """Ruling R's spec gap, as widened by the review: `_refill` cannot
+    restore a preset name that no longer exists, so the combo silently
+    jumps to a fallback while `_updating` suppresses `_on_source_changed`.
+    Without this check the dock would keep naming a preset the engine
+    never actually prepared -- deleting the SELECTED preset must not
+    quietly leave 'prepared · 3 lines' standing beside a combo that now
+    reads something else entirely."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    del session.site.presets["p"]
+    session.site.presets["only"] = list(PRESET)
+    session.presets_changed.emit()
+
+    assert dock.preset_combo.currentText() == "only"
+    assert dock.source_status.text().startswith("stale")
+    assert "preset" in dock.source_status.text()
+    # Point 5's decision stands even here: no auto re-prepare from a
+    # combo change forced by a refill, only from one the user drove.
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+
+
+def test_editing_the_selected_preset_in_place_shows_stale_without_reprocessing(docked):
+    """Point 5's decision, now with a visible consequence: editing the
+    CONTENTS of the currently-selected preset (same name) does not
+    re-prepare on its own -- Ruling K already freezes what a prepared
+    source was actually built from, on purpose -- but the status line
+    must stop claiming the screen matches a choice it no longer does."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+    before = list(dock.engine.provenance().steps)
+
+    session.site.presets["p"] = [{"step": "background_mean", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+    assert dock.source_status.text().startswith("stale")
+    assert "preset" in dock.source_status.text()
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+    assert list(dock.engine.provenance().steps) == before  # no re-prepare happened

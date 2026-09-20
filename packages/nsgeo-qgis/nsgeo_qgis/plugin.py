@@ -877,18 +877,31 @@ class NsgeoPlugin:
         dialog on top of the first; the result is committed on `finished`
         rather than after a blocking call, and the dock is re-read then
         rather than captured now, because the site can change while this
-        is open.
+        is open. Follows `open_import_dialog` exactly -- fix round 1, M4:
+        an earlier version of this method omitted `destroyed.connect(...)`
+        (a dialog destroyed some other way then leaves
+        `self._line_choice_dialog` pointing at a dead wrapper, wedging the
+        re-open branch below and making `unload()`'s own `reject()` raise
+        mid-teardown -- see `open_grid_dialog`'s `clear_if_current` for the
+        same reasoning) and the `show()`/`raise_()`/`activateWindow()` set
+        both other dialogs here use on every path, not just some of them.
         """
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
                 return
+            grid_id = self.slices_dock.grid_combo.currentText()
+            if not grid_id:
+                self.message("Choose a grid before choosing lines.", Qgis.MessageLevel.Warning)
+                return
             if self._line_choice_dialog is not None:
+                self._line_choice_dialog.show()
                 self._line_choice_dialog.raise_()
                 self._line_choice_dialog.activateWindow()
                 return
             dock = self.slices_dock
-            dialog = LineChoiceDialog(self.session, dock.included_keys(), self.iface.mainWindow())
-            self._line_choice_dialog = dialog
+            dialog = LineChoiceDialog(
+                self.session, grid_id, dock.included_keys(), self.iface.mainWindow()
+            )
 
             def finished(result: int) -> None:
                 try:
@@ -899,10 +912,22 @@ class NsgeoPlugin:
                         f"could not apply the line choice: {exc}", Qgis.MessageLevel.Warning
                     )
                 finally:
-                    self._line_choice_dialog = None
                     dialog.deleteLater()
+                    self._line_choice_dialog = None
+
+            def clear_if_current() -> None:
+                # Same reasoning as open_grid_dialog()/open_import_dialog()'s
+                # own clear_if_current: only compare identity, never touch
+                # `dialog` (already gone by the time destroyed() fires), and
+                # only clear the tracker if it still points at THIS dialog.
+                if self._line_choice_dialog is dialog:
+                    self._line_choice_dialog = None
 
             dialog.finished.connect(finished)
+            dialog.destroyed.connect(clear_if_current)
+            self._line_choice_dialog = dialog
             dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not open the line chooser: {exc}", Qgis.MessageLevel.Critical)
