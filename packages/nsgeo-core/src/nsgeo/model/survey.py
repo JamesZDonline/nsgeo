@@ -112,13 +112,22 @@ class Site:
     #: Cube recipes, keyed by cube id, each pointing at a `.npz` beside the
     #: survey file. Plain dicts for the same reason `presets` are: the JSON
     #: is the definition, and the array it names is derived and rebuildable.
-    #: Each record's keys: `grid_id` (the Grid the cube's frame was built
-    #: over), `preset` (the name of the preset applied before binning),
-    #: `transform` (the amplitude transform, e.g. "amp_envelope"), `cell`
-    #: (the frame's cell size in metres), and `array` (the path to the
-    #: `.npz`, relative to the survey file). This shape exists today only
-    #: as a literal inside test_project.py; it is recorded here so it has
-    #: one normative source.
+    #: Each record's keys, split into two halves:
+    #:
+    #: * What the cube IS -- change any of these and the array changes:
+    #:   `grid_id` (the Grid the cube's frame was built over), `preset`
+    #:   (the name of the preset applied before binning), `transform` (the
+    #:   amplitude transform, e.g. "amp_envelope", or "none"), `cell` (the
+    #:   frame's cell size in metres), `lines` (the line keys actually
+    #:   binned, in survey order), `z` (`{"t0_ns", "t1_ns", "dz_ns"}`, the
+    #:   axis the cube was built over), and `array` (the path to the
+    #:   `.npz`, relative to the survey file).
+    #: * How it was BEING READ -- changes no pixel in the cube: `view`, the
+    #:   `ViewSettings` (`nsgeo_qgis.slice_export`) the reader had on
+    #:   screen when the cube was saved: thickness, step, fill radius,
+    #:   palette, stretch, and whether coverage was showing.
+    #:
+    #: `nsgeo_qgis.slice_export.cube_record` is this shape's one writer.
     #:
     #: Unlike every line path elsewhere in a Site, `save_site` does not
     #: route a record's `array` through `project.line_key` -- it writes
@@ -126,9 +135,9 @@ class Site:
     #: relative and inside the project tree (and rejects an absolute path
     #: unless the caller opts in); bypassing it means an absolute `array`
     #: path would round-trip silently and make the survey file
-    #: non-portable. No M10 code writes a `cubes` record, so this has no
-    #: caller yet to catch it: routing `array` through `line_key` is M11's
-    #: job, to be done when it writes the first real record.
+    #: non-portable. `cube_record` routes `array` through `line_key`
+    #: itself, on the way in, so every record this Site ever holds is
+    #: already portable by the time `save_site` sees it.
     cubes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property

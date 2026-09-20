@@ -55,7 +55,7 @@ import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
@@ -66,6 +66,13 @@ from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.slice_export import (
+    ViewSettings,
+    apply_temporal_properties,
+    cube_record,
+    export_slices,
+    save_cube_npz,
+)
 from nsgeo_qgis.slice_layer import SliceLayer
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
@@ -200,6 +207,8 @@ class NsgeoPlugin:
         self.slices_dock = SlicesDock(self.session, main)
         self.slices_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
         self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
+        self.slices_dock.save_cube_requested.connect(self.save_cube)
+        self.slices_dock.export_requested.connect(self.export_geotiff)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
         # Spec 9.2: tabified with Processing rather than a fourth dock
         # competing for screen space. Processing stays the raised tab --
@@ -506,6 +515,108 @@ class NsgeoPlugin:
             )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+
+    # ---- Task 6: what leaves the plugin -----------------------------------
+    def save_cube(self) -> None:
+        """`SlicesDock.save_cube_requested`: write the resident cube to
+        `.npz` and record its recipe in `site.cubes`.
+
+        `QFileDialog.getSaveFileName` defaults into `session.root /
+        "slices"`, the same directory a plain "cube.npz" would land in --
+        `save_cube_npz`/`save_cube` (M10) create it on demand, so this
+        need not exist yet. The cube id is `<grid_id>__<name>`, `name`
+        being the stem of whatever the user typed -- `A__cube.npz` saved
+        for grid `A` records as `A__cube`.
+
+        A `QAction`-style guarded slot (see the module docstring): every
+        failure -- a save outside the project tree, a full disk, a
+        cube with no resident geometry -- is reported through
+        `message()` rather than left to escape into stderr.
+        """
+        assert self.session is not None
+        try:
+            if not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            engine = dock.engine
+            if not engine.is_prepared or engine.choice is None:
+                self.message(
+                    "prepare a slice source before saving a cube.", Qgis.MessageLevel.Warning
+                )
+                return
+            default_path = self.session.root / "slices" / "cube.npz"
+            path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(), "Save cube", str(default_path), "nsgeo cube (*.npz)"
+            )
+            if not path:
+                return
+            npz_path = save_cube_npz(engine, Path(path))
+            view = ViewSettings(
+                thickness_ns=dock.thickness_spin.value(),
+                step_ns=dock.step_spin.value(),
+                radius_m=dock.radius_spin.value(),
+                palette=dock.palette_combo.currentText(),
+                stretch=dock.stretch_combo.currentText(),
+                coverage=dock.coverage_check.isChecked(),
+            )
+            record = cube_record(
+                self.session, engine.choice, engine.frame, engine.z, view, npz_path
+            )
+            cube_id = f"{engine.choice.grid_id}__{Path(path).stem}"
+            self.session.site.cubes[cube_id] = record
+            self.session._set_dirty(True)
+            self.message(f"cube saved as {record['array']!r}")
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
+
+    def export_geotiff(self) -> None:
+        """`SlicesDock.export_requested`: write the multi-band GeoTIFF and
+        add it to the map.
+
+        `thickness_step_levels()` converts the dock's own ns spin boxes
+        into levels with the same rounding rule its live navigation
+        already uses, and `_resolved_velocity()` is the same velocity the
+        readout labels its window with -- both reused rather than
+        re-derived, so the exported bands' descriptions cannot disagree
+        with what the dock was showing when Export was clicked.
+        """
+        assert self.session is not None
+        try:
+            if not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            engine = dock.engine
+            if not engine.is_prepared:
+                self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
+                return
+            default_path = self.session.root / "slices" / "cube.tif"
+            path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(),
+                "Export GeoTIFF",
+                str(default_path),
+                "GeoTIFF (*.tif *.tiff)",
+            )
+            if not path:
+                return
+            thickness_levels, step_levels = dock.thickness_step_levels()
+            _key, velocity = dock._resolved_velocity()
+            plan = export_slices(
+                engine, Path(path), thickness_levels, step_levels, velocity, dock.radius_cells()
+            )
+            layer = QgsRasterLayer(path, Path(path).stem, "gdal")
+            if not layer.isValid():
+                self.message(
+                    f"the exported GeoTIFF at {path} could not be reopened as a layer",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            apply_temporal_properties(layer, plan)
+            self.layers.project.addMapLayer(layer, False)
+            if self.layers.group is not None:
+                self.layers.group.addLayer(layer)
+            self.message(f"exported {len(plan.bands)} bands to {path}")
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

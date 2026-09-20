@@ -71,6 +71,11 @@ class SlicesDock(QgsDockWidget):
     slice_changed = pyqtSignal()
     window_changed = pyqtSignal(float, float)  # (lo_ns, hi_ns) of the averaged window
     window_cleared = pyqtSignal()
+    #: Requests for `plugin.py`'s two file dialogs (Task 6, spec 9.6). This
+    #: dock owns no dialogs of its own -- the same split `choose_lines_
+    #: requested` already uses for `LineChoiceDialog`.
+    save_cube_requested = pyqtSignal()
+    export_requested = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -289,6 +294,20 @@ class SlicesDock(QgsDockWidget):
         self.status_label.setWordWrap(True)
         outer.addWidget(self.status_label)
 
+        # Spec 9.2: the status line sits ABOVE the export buttons, so a
+        # person reading "stale · the grid changed" sees why before
+        # reaching for either button below it. Both start disabled --
+        # `_refresh_source_status` is the one place that state is kept
+        # current, alongside everything else that line already reports.
+        button_row = QHBoxLayout()
+        self.save_button = QPushButton("Save cube…")
+        self.export_button = QPushButton("Export GeoTIFF…")
+        self.save_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        button_row.addWidget(self.save_button)
+        button_row.addWidget(self.export_button)
+        outer.addLayout(button_row)
+
         outer.addStretch(1)
         self.setWidget(body)
 
@@ -317,6 +336,8 @@ class SlicesDock(QgsDockWidget):
         # lambda drops it, the same reason `processing_dock.py`'s
         # `apply_button` uses one.
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
+        self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
+        self.export_button.clicked.connect(lambda: self.export_requested.emit())
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
         self.transform_combo.currentTextChanged.connect(self._on_source_changed)
@@ -690,6 +711,15 @@ class SlicesDock(QgsDockWidget):
         on purpose: `0 of 0` legitimately prepares, and is not the failure
         this guards against.
         """
+        # Task 6: mirrors `engine.is_prepared` on every call here,
+        # regardless of the early `is_running` return just below -- a
+        # preparation in flight must disable both buttons just as
+        # cleanly as no source chosen at all does, and this is the one
+        # place spec 9.2's "the status could have just changed" already
+        # gets recomputed everywhere it matters (rebuild_source,
+        # set_included, and both engine callbacks).
+        self.save_button.setEnabled(self.engine.is_prepared)
+        self.export_button.setEnabled(self.engine.is_prepared)
         if self.engine.is_running:
             return
         choice = self.engine.choice
@@ -857,6 +887,19 @@ class SlicesDock(QgsDockWidget):
         step spin box smaller than `dz_ns` still advances by something
         rather than stalling `step_slice`/the readout's index forever."""
         return max(1, int(round(self.step_spin.value() / z.dz_ns)))
+
+    def thickness_step_levels(self) -> tuple[int, int]:
+        """`(thickness_levels, step_levels)`, in levels of the current z
+        axis -- the same rounding rule `current_window()` and
+        `_step_levels()` already apply, exposed here so Task 6's export
+        (`plugin.py`) derives them once, the same way, rather than
+        re-deriving the formula and risking a mismatch between what the
+        dock is currently showing and what a GeoTIFF actually gets."""
+        z = self.engine.z
+        if z is None:
+            raise RuntimeError("no slice geometry: choose a source and a resolution first")
+        thickness_levels = max(1, int(round(self.thickness_spin.value() / z.dz_ns)))
+        return thickness_levels, self._step_levels(z)
 
     def step_slice(self, delta: int) -> None:
         """Move the slider by `delta` STEPS, not levels -- the unit a

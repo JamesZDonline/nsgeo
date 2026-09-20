@@ -96,6 +96,14 @@ def _no_unhandled_modals(monkeypatch):
     (QDialog.exec, QMenu.exec) below, which override this guard for
     exactly the call they are told to expect.
 
+    `QFileDialog.getSaveFileName` joined the forbidden list below in
+    Task 6 (M11), which is the first caller of it anywhere in this
+    codebase (`plugin.py`'s "Save cube..." and "Export GeoTIFF..."
+    handlers) -- closing the same gap for it, alongside the three
+    `getOpen*`/`getExistingDirectory` calls already here, before some
+    later test that never meant to trigger a real modal could hang the
+    whole suite on it instead of failing fast.
+
     QMenu.exec() is listed separately from QDialog.exec() because it is a
     separate function: verified against this Qt build, `'exec' in
     QMenu.__dict__` is True, so QMenu defines its own and patching
@@ -145,6 +153,7 @@ def _no_unhandled_modals(monkeypatch):
         (QFileDialog, "getOpenFileName"),
         (QFileDialog, "getOpenFileNames"),
         (QFileDialog, "getExistingDirectory"),
+        (QFileDialog, "getSaveFileName"),
         (QDialog, "exec"),
         (QDialog, "exec_"),
         (QMenu, "exec"),
