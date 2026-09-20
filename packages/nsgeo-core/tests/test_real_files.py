@@ -144,3 +144,69 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     np.testing.assert_allclose(
         reloaded.slice_levels(10, 28)[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
     )
+
+
+def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
+    """The M10 measurement, against real GSSI data rather than a fixture.
+
+    Real files are this project's primary validation (spec 11), and this
+    is the one place the stretch a user actually sees is checked against
+    data that came off an instrument."""
+    from nsgeo.processing import build_step
+    from nsgeo.render import UnipolarClip, to_index8_unipolar
+    from nsgeo.slices.binning import PreparedLine, build_cube, plan_line
+    from nsgeo.slices.cube import Provenance
+    from nsgeo.slices.display import plan_windows, shared_limit
+    from nsgeo.slices.frame import CubeFrame, ZAxis
+
+    prepared = []
+    for i, path in enumerate(FILES[:4]):
+        header = read_header(path)
+        rg = Radargram(
+            data=np.asarray(read_samples(path, header)[0], dtype=float),
+            dt_ns=header.dt_ns,
+            t0_ns=header.position_ns,
+        )
+        for name in ("time_zero", "dewow", "background_mean", "gain_agc", "amp_envelope"):
+            rg = build_step(name).apply(rg)
+        n_traces = rg.data.shape[1]
+        coords = np.column_stack(
+            [np.linspace(0.0, 19.99, n_traces), np.full(n_traces, 0.25 + i * 0.5)]
+        )
+        prepared.append(
+            PreparedLine(
+                key=path.name,
+                data=rg.data.astype(np.float32),
+                dt_ns=rg.dt_ns,
+                t0_ns=rg.t0_ns,
+                coords=coords,
+            )
+        )
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=0.0, cell=0.2, nx=100, ny=12, crs="EPSG:32633")
+    z = ZAxis.from_range(1.0, 40.0, 0.2165)
+    plans = [plan_line(p, frame, z) for p in prepared]
+    prov = Provenance(
+        line_keys=tuple(p.key for p in prepared),
+        preset_name="test",
+        steps=(),
+        transform="amp_envelope",
+        velocity=None,
+        built_utc="2026-09-19T00:00:00Z",
+        core_version="0.1.0.dev0",
+    )
+    cube = build_cube(prepared, plans, frame, z, prov)
+
+    clip = UnipolarClip()
+    thickness = 10
+    correct = shared_limit(cube, thickness, clip)
+    over_raw_levels = clip.limit(cube.mean)
+    assert correct < over_raw_levels  # the direction M10 measured, on real data
+
+    # What it means on screen: at the correct limit the displayed slices
+    # span most of the 0-255 table; at the raw-level limit they do not.
+    windows = plan_windows(z, thickness, thickness)
+    shown = np.concatenate([cube.slice_levels(w.k0, w.k1).ravel() for w in windows])
+    shown = shown[np.isfinite(shown)]
+    assert np.median(to_index8_unipolar(shown, correct)) > 1.5 * np.median(
+        to_index8_unipolar(shown, over_raw_levels)
+    )
