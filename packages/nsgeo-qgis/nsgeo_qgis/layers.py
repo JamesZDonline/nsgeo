@@ -47,6 +47,7 @@ from qgis.core import (
     QgsProject,
     QgsProviderRegistry,
     QgsRendererCategory,
+    QgsSingleSymbolRenderer,
     QgsSymbol,
     QgsVectorFileWriter,
     QgsVectorLayer,
@@ -57,6 +58,7 @@ from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.session import Pick, SiteSession
+from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
 _KIND = {
     "str": QMetaType.Type.QString,
@@ -645,6 +647,15 @@ class SiteLayers(QObject):
             return
         self._drop_loaded_layer(name)
         self._create_table(path, name, wkb, spec, crs)
+        if name == "picks":
+            # Finding B: reached only when `existing_crs` was `None`
+            # above -- i.e. `picks` never existed in this package at
+            # all. A table WITH rows already in it goes through
+            # `_rebuild_picks` instead (the branch just above), which
+            # styles its own way once the migration is safely complete
+            # -- see that method's own comment for why a migrated
+            # package is styled too rather than left as-is.
+            self._style_new_picks_table(path)
 
     def _recover_picks_backup(self, path: str) -> bool:
         """True if a leftover `_PICKS_BACKUP` was renamed back into
@@ -827,6 +838,22 @@ class SiteLayers(QObject):
             conn.renameVectorTable("", _PICKS_BACKUP, "picks")
             raise
         conn.dropVectorTable("", _PICKS_BACKUP)
+        # Finding B: style a migrated package too, not just a brand new
+        # one. Nothing before this fix ever called
+        # `saveStyleToDatabase` for `picks`, so a pre-M8 (or otherwise
+        # schema-stale) package has no durable style to preserve --
+        # every open until now showed QGIS's own fresh-random default
+        # regardless of what came before. This runs once, exactly when
+        # the schema actually changes, so leaving a migrated table
+        # unstyled would mean the exact packages that most need this
+        # fix (the ones old enough to still need a migration) never get
+        # it. Styled by its FINAL name, "picks", after the rename
+        # above -- not by opening `_PICKS_REBUILD` before the rename --
+        # because a saved style is keyed by table name in the
+        # GeoPackage's own `layer_styles` catalogue, and a plain SQL
+        # table rename is not something to assume also rewrites that
+        # reference.
+        self._style_new_picks_table(path)
 
     def _require_transform(
         self, source: QgsCoordinateReferenceSystem, target: QgsCoordinateReferenceSystem
@@ -1121,6 +1148,77 @@ class SiteLayers(QObject):
                 f"could not notify the profile of a picks edit: {exc}",
                 Qgis.MessageLevel.Critical,
             )
+
+    # ---- picks: styling (Finding B) ----------------------------------------
+    def _style_new_picks_table(self, path: str) -> None:
+        """Style a `picks` table that was JUST created or JUST migrated --
+        see `_style_picks` for the style itself and why it has to be
+        saved into the GeoPackage rather than merely set on an in-memory
+        layer object, and see this method's two call sites (`_ensure_table`
+        for a brand new table, `_rebuild_picks` for a migrated one) for
+        why both cases reach here but an ordinary reopen of an
+        already-current table never does.
+
+        Opened here only long enough to set and save the style, then
+        closed (`del`) before `ensure_tables()`'s own loop opens the real
+        `QgsVectorLayer` that goes into `self.layers` -- not a second
+        handle on a package QGIS already has open (parent module
+        docstring rule 2): nothing has `picks` open at either call site,
+        by construction (a fresh table has never been opened yet; a
+        migrated one has its old handle dropped via `_drop_loaded_layer`
+        earlier in `_rebuild_picks`, before the rename dance even
+        starts).
+        """
+        layer = QgsVectorLayer(f"{path}|layername=picks", "picks", "ogr")
+        if not layer.isValid():
+            raise RuntimeError(
+                f"could not open the picks table in {path} to style it after creating it"
+            )
+        self._style_picks(layer)
+        del layer  # close the handle; ensure_tables() opens the real one next
+
+    @staticmethod
+    def _style_picks(layer: QgsVectorLayer) -> None:
+        """Finding B (M8 acceptance walkthrough, reviewer's argument the
+        author accepted): a filled circle in `PICK_COLOUR` -- the same
+        colour the profile itself draws a pick in
+        (`nsgeo_qgis.ui.profile_view.PICK_COLOUR`) -- with a white stroke
+        so it reads over dark imagery, sized to be findable rather than a
+        design exercise. QGIS's own default for a newly added layer is a
+        single symbol in a RANDOM colour, which on a busy basemap can be
+        a near-invisible dot: the difference between a pick *rendering*
+        and rendering *findably*.
+
+        Saved into the GeoPackage's own style storage
+        (`saveStyleToDatabase(..., useAsDefault=True, ...)`), not merely
+        `setRenderer()` on this one Python object: a plain `setRenderer()`
+        only affects the `QgsVectorLayer` held for the life of THIS
+        `SiteLayers`/session, so the very next time the package is opened
+        (a new plugin session, a colleague's QGIS) it would fall back to
+        a fresh, differently-random default the moment this object is
+        released. Verified directly against this build: a brand new
+        `QgsVectorLayer` opened against a table with a `useAsDefault`
+        style saved this way picks it up on construction alone, with no
+        code on this end to reload it.
+
+        Called ONLY from the two paths that just created or just migrated
+        the table (see `_style_new_picks_table`'s callers) -- never from
+        a refill, unlike `_style_lines`/`_style_grids`. Those two
+        reapply on every refill because the derived tables are fully
+        regenerated every time; `picks` is user-editable, so doing the
+        same here would silently discard the user's own symbology --
+        saved into the GeoPackage the same way this method saves its own
+        -- every single time they opened the site.
+        """
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+        symbol.setColor(PICK_COLOUR)
+        marker = symbol.symbolLayer(0)
+        marker.setStrokeColor(QColor(255, 255, 255))
+        marker.setStrokeWidth(0.4)
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        err = layer.saveStyleToDatabase("default", "nsgeo picks", True, "")
+        if err:
+            raise RuntimeError(f"could not save the picks layer's style: {err}")
 
     def _pick_point(self, pick: Pick) -> QgsPointXY | None:
         """The pick's position in the package CRS, or None when the line

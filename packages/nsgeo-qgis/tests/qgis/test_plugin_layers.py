@@ -13,6 +13,7 @@ from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
+from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
     NULL,
@@ -27,11 +28,14 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
+    QgsSingleSymbolRenderer,
+    QgsSymbol,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QMetaType, Qt
+from qgis.PyQt.QtGui import QColor
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -166,6 +170,142 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
     for grid_id, symbol in by_grid.items():
         assert symbol.symbolLayer(0).strokeColor().name() != lines_colours[grid_id]
+
+
+# --- M8 acceptance walkthrough, Finding B: style `picks` ONCE, at table
+# creation, never on refresh. Unlike `grids`/`lines` above (fully
+# regenerated every refill, so restyling every time costs nothing), `picks`
+# is user-editable -- reapplying a style on every refresh would silently
+# discard the user's own symbology every time they opened the site. The
+# reviewer's argument the author accepted: QGIS's own default random
+# symbol "on a busy basemap can be a near-invisible dot in an arbitrary
+# colour -- the difference between renders and renders findably." ---
+
+
+def test_a_freshly_created_picks_table_is_styled_with_the_pick_colour(populated):
+    """Asserts on the renderer QGIS actually installed, the same
+    discipline `test_grids_layer_renders_as_dashed_outline_with_no_fill`
+    above uses -- deleting `_style_picks` leaves the default single
+    symbol (a random colour) and fails the `isinstance`/colour checks
+    below."""
+    session, layers, _ = populated
+    renderer = layers.layers["picks"].renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    symbol = renderer.symbol()
+    assert symbol.color().name() == PICK_COLOUR.name()
+    marker = symbol.symbolLayer(0)
+    assert marker.strokeColor().name() == "#ffffff"
+
+
+def test_the_style_is_saved_to_the_geopackage_not_just_the_in_memory_layer(populated):
+    """The whole point of Finding B is durability beyond this one
+    in-memory `QgsVectorLayer` -- a plain `setRenderer()` alone would not
+    survive a new plugin session. A brand new `QgsVectorLayer` opened
+    directly against the package, bypassing `layers` entirely, must come
+    up styled on its own via the GeoPackage's own saved style."""
+    session, layers, _ = populated
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.isValid()
+    renderer = fresh.renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    assert renderer.symbol().color().name() == PICK_COLOUR.name()
+
+
+def test_ensure_tables_called_again_does_not_restyle_an_up_to_date_table(populated):
+    """`_ensure_table`'s up-to-date short-circuit must be what protects a
+    user's own restyle, not luck: calling `ensure_tables()` again with
+    nothing else changed must not touch a renderer set since the table
+    was created."""
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+    custom.setColor(QColor("#00ff00"))
+    picks.setRenderer(QgsSingleSymbolRenderer(custom))
+
+    layers.ensure_tables()
+
+    assert layers.layers["picks"].renderer().symbol().color().name() == "#00ff00"
+
+
+def test_reopening_the_package_does_not_reapply_style_over_a_user_change(populated, tmp_path):
+    """A second site open must not stomp a style the user saved
+    themselves through QGIS's own "Save as Default" -- `_style_picks`
+    only ever runs from the create/migrate paths inside `_ensure_table`,
+    never from an ordinary open of an already-current table."""
+    session, layers, project = populated
+    picks = layers.layers["picks"]
+    custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+    custom.setColor(QColor("#00ff00"))
+    picks.setRenderer(QgsSingleSymbolRenderer(custom))
+    err = picks.saveStyleToDatabase("default", "the user's own style", True, "")
+    assert not err
+
+    session.save()
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+
+    reopened = layers.layers["picks"].renderer()
+    assert reopened.symbol().color().name() == "#00ff00"
+
+
+def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
+    """`_rebuild_picks` also creates a table (`_PICKS_REBUILD`) and
+    renames it into place. A migrated (pre-M8-schema) package has no
+    DURABLE style to preserve -- nothing before this fix ever called
+    `saveStyleToDatabase` for `picks`, so every open until now showed
+    QGIS's own fresh-random default regardless of what came before.
+    Styled the same as a brand new table, rather than left permanently
+    unstyled: this migration runs once, exactly when the schema changes,
+    so a package old enough to still need it is exactly the package that
+    most needs this fix.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    renderer = layers2.layers["picks"].renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    assert renderer.symbol().color().name() == PICK_COLOUR.name()
+    layers2.detach()
 
 
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's
