@@ -646,3 +646,85 @@ Net movement across the milestone: QGIS 469 → 520 passed, 0 skipped throughout
 4. Ruling 5's pick-layer styling question. The final reviewer independently recommended the same
    middle option offered to the author ("style once at table creation"), arguing QGIS's random
    per-layer default is the difference between "renders" and "renders findably".
+
+## Post-walkthrough wave (the author's hands-on pass: 18 steps, 13 pass, 0 FAIL)
+Three corrections from the walkthrough (commits 143686c, cedc03e, 770cabf), an opus review, a
+five-item tidy (d020ddc), and one controller fix (bd1302c).
+
+Ruling 21 (walkthrough finding A — a real defect the author found that no test or review did):
+**the profile showed picks that no longer exist.** `picks_changed` was emitted from exactly one
+place, `add_pick`, so every edit made through QGIS's own tools — delete, move, add, attribute
+change — was invisible to the profile until an unrelated pick forced a refresh. I reproduced it
+by probe before touching anything: a delete fires `featuresDeleted` in the buffer and
+`afterCommitChanges` on save, and nothing in the plugin listened to either. `SiteLayers` now
+binds six of the layer's edit signals and emits `picks_changed`; `ProfileDock` needed no change,
+and because `picks_for` reads through `getFeatures()` (the buffered view during an edit session)
+the profile tracks the edit live rather than only on save — which is the responsiveness the
+author asked for. Rebinding follows `MapLink._rebind_layer`'s shape, since the picks layer object
+is replaced by TWO paths, not one.
+Cost if wrong: the fix is additive; the failure mode of getting it wrong is the status quo ante.
+
+Ruling 22 (teardown ordering, and a justification that was false on two of three callers):
+the implementer chose to unbind before `_commit_pending_edits()` rather than guard the slot, and
+justified it by `close_site()` clearing session state first. The reviewer checked all three
+callers of `detach()`: that holds for `site_closed`, but `_on_site_opened` runs with the session
+holding the NEW site, and `plugin.unload()` calls `detach()` directly with the session still
+holding the OLD one and the docks `deleteLater()`'d but not destroyed — the most dangerous moment
+in the file. **The decision is right; the reason was not.** The reason that holds everywhere:
+`detach()` IS the teardown of the layer set, so no profile should be reading those layers
+whatever the session holds. Comment rewritten to name all three callers. Verified by probe that
+the buffered edit still commits on every path — only the notification is suppressed.
+Cost if wrong: none; the code was already correct and only the record changed.
+
+Ruling 23 (controller fix, bd1302c — MY constraint caused this): **the styling work landed 200
+DeprecationWarnings across the QGIS tier against a baseline of zero.** I had told the implementer
+not to switch to `saveStyleToDatabaseV2`, assuming the warning was minor; 200 of them in a suite
+that treats warnings as findings is not minor, and I caught it only by noticing the tier summary
+had grown a warning count it never had. But switching outright is also wrong: V2 is documented
+`versionadded:: 4.0` while `metadata.txt` declares `qgisMinimumVersion=3.40`, so an unconditional
+call would raise AttributeError on every supported build below this one and leave the table
+unstyled. Ruled: feature-detect. Correct on every supported version, silent on modern ones,
+nothing to revisit when the minimum moves. The fallback cannot run on this build, so it got its
+own test that hides V2 and ASSERTS the DeprecationWarning — the warning is the direct evidence
+the fallback branch ran, which is stronger than filtering it. Mutation-proved.
+Cost if wrong: a branch that only executes on QGIS 3.40-3.43, covered by one test.
+Process note on myself: I mutated an UNCOMMITTED file and restored with `git checkout`, which
+silently discarded the real edit. Caught it because the warning's line number pointed at a branch
+that should not have been executing. Restore from a copy, not from the index, when the file has
+uncommitted work in it.
+
+Review of the walkthrough wave (opus) — VERDICT: **ready to merge.** 0 Critical, 1 Important
+(non-blocking), 6 Minor. The reviewer drove the untested warning mechanism itself, probed
+`renameVectorTable`'s effect on `layer_styles`, checked all three `detach()` callers, and
+enumerated both layer-replacement paths — finding that the CRS-driven rebuild path had no test
+(added in d020ddc, mutation-proved two ways) and that a rebuild discards a user's own saved
+style (filed, not fixed — see below).
+Out-of-scope check clean: nothing from #35 or #36 crept in.
+
+Filed rather than fixed, deliberately:
+  #35 picks do not follow a grid that moves — the author's words: "This needs a fix next
+      milestone. The picks are meaningless if they are disconnected from their line."
+  #36 no way to edit or delete a pick from the profile — reported as a usability gap within
+      minutes of first real use, which is the strongest signal in the whole walkthrough.
+  #37 a rebuild discards a user's own saved symbology, and leaks a `layer_styles` row. Fixing it
+      means a read-then-write inside the migration path for a cosmetic property; wrong risk
+      during a fix wave, fine as its own change.
+
+Walkthrough answers that settled open questions:
+  Q1 pick layer symbol → **style once at table creation** (the reviewer's and my revised
+     recommendation, against my original default). Implemented in cedc03e.
+  Q2 refusal message repetition → moot. The author found step 7 unreachable: moving the pointer
+     off the canvas clears the preview (M7's Leave filter), so a preview cannot be shift-clicked
+     at all. The guard stays as defence in depth; its message is not reachable by mouse.
+  Q3 note on a new pick → unchanged, empty.
+  Q4 negative depth_m → **record it honestly.** The author: "if you have time_zero set, you
+     actually won't be able to pick above it because it isn't visible in the profile... its
+     honest. The gpr processor will know." Closes the final reviewer's blocking concern.
+  Step 15 (pre-M8 migration) n/a — the author had no picks before this branch, so their exposure
+     was nil. The code path is still exercised by tests on real authored rows.
+
+## Controller final verification at bd1302c (both tiers run in full)
+pure **367 passed / 2 skipped** (both pre-existing: test_schema.py:51) ·
+QGIS **545 passed / 0 skipped / 0 warnings** · ruff check + format clean (95 files) ·
+mypy clean (24 source files) · no `-p no:xonsh` in any committed config.
+Net across the milestone: QGIS 469 → 545.
