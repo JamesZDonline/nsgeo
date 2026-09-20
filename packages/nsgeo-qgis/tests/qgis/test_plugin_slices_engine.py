@@ -9,6 +9,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.render import UnipolarClip
 from nsgeo.slices import CoverageError, SliceWindow
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
@@ -164,6 +165,53 @@ def test_provenance_names_the_lines_that_were_actually_prepared(sourced):
     assert prov.built_utc.endswith("Z")
 
 
+def test_provenance_excludes_a_line_that_failed_to_prepare(sourced, tmp_path):
+    """Mutation check (Step 11.3): a fifth line added to the source that
+    cannot be prepared must not appear in `provenance().line_keys`, even
+    though it was named in the SourceChoice passed to set_source. This is
+    the case that discriminates `self._choice.line_keys` (the mutant) from
+    `tuple(line.key for line in self._lines)` (the real code): the request
+    and the result differ only when a line fails, so a broken fifth line
+    is required to see it at all."""
+    engine, session, _, _ = sourced
+    p = synthetic_dzt(tmp_path / "raw", "FILE__005.DZT", n_traces=60)
+    broken = Line.open(p, GridPlacement("A", "y", 5.0, 0.0, 1, p.stem))
+    session.add_lines([broken])
+    broken_key = session.line_key(broken)
+    p.unlink()  # header already read; load() will now fail on the worker
+
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    assert engine.wait_for_preparation(20_000)
+    assert engine.line_count == 4, "the broken line must not have been prepared"
+
+    prov = engine.provenance()
+    assert broken_key not in prov.line_keys
+    assert len(prov.line_keys) == 4
+
+
+def test_provenance_records_the_steps_that_were_applied_not_the_preset_as_it_stands_now(sourced):
+    """`save_preset` overwrites a name in place and `delete_preset`
+    removes it, both while a source stays prepared. The steps that were
+    applied are a fact about the preparation, exactly as the line keys
+    are -- and provenance is what a reader trusts the cube by."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    applied = engine.provenance().steps
+    assert len(applied) == len(PRESET)
+
+    session.site.presets["p"] = [{"step": "gain_agc", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    assert engine.provenance().steps == applied, "provenance followed a preset edit"
+
+    del session.site.presets["p"]
+    session.presets_changed.emit()
+    assert engine.provenance().steps == applied, "provenance lost its steps when the preset went"
+
+
 def test_a_z_range_the_lines_do_not_cover_is_reported_with_the_line_named(sourced):
     engine, session, _, _ = sourced
     _prepare(engine, session)
@@ -203,3 +251,110 @@ def test_a_line_that_cannot_be_prepared_is_reported_by_name(sourced, tmp_path):
     )
     assert engine.wait_for_preparation(20_000)
     assert any(key in msg for _, msg in errors), f"no error named {key}: {errors}"
+
+
+def test_moving_the_grid_re_prepares_rather_than_slicing_at_the_old_registration(sourced):
+    """`replace_grid` changes both the frame AND the coordinates every
+    prepared line was binned from, and M10's stale-plan guard is
+    structurally blind to it: `plan.frame` and the frame passed in are the
+    same stale object. Measured before this fix: the grid moved 100 m
+    east and `engine.frame` stayed at the OLD registration with no error
+    of any kind -- the engine had not reacted to the change at all.
+
+    The re-prepared slice's VALUES are not asserted against the old ones:
+    `GridPlacement` positions a line relative to its grid (`trace_coords`
+    round-trips world coordinates through the same grid's own origin and
+    azimuth that `CubeFrame.for_grid` shares), so a rigid move of the
+    grid is self-consistently invariant in the cube's own cell content --
+    only the frame's registration (and, downstream, the map layer) moves.
+    What must be observed instead is that a re-preparation actually ran.
+    """
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    engine.slice_at(SliceWindow(4, 14))  # so a redraw timing exists before the move too
+    count = len(prepared)
+    assert engine.frame.origin == (500.0, 700.0)
+
+    session.replace_grid(Grid("A", (600.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1, "the grid move did not trigger a re-preparation"
+    assert engine.frame.origin == (600.0, 700.0), "the engine kept the old registration"
+    assert engine.is_prepared
+    engine.slice_at(SliceWindow(4, 14))  # must not raise against the new geometry
+    assert errors == []
+
+
+def test_a_velocity_only_grid_edit_does_not_re_prepare(sourced):
+    """Velocity relabels depths without rebinning, so paying 0.9 s for it
+    would be waste. The fingerprint excludes it deliberately."""
+    engine, session, _, prepared = sourced
+    _prepare(engine, session)
+    count = len(prepared)
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count, "a velocity change re-prepared"
+
+
+def test_removing_the_chosen_grid_is_reported_rather_than_left_stale(sourced):
+    """`remove_grid` refuses to remove a grid that still has lines
+    (`ValueError`, `session.py`'s own guard) -- it does NOT remove them
+    for you. So the reachable way a chosen grid disappears out from under
+    a prepared source is: the lines are removed or reassigned first, THEN
+    the now-empty grid is removed. This test drives it that way."""
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    for key in list(session.keys()):
+        session.remove_line(key)
+    session.remove_grid("A")
+    assert not engine.is_prepared
+    assert any("A" in msg for _, msg in errors), errors
+
+
+def test_an_exception_while_finishing_preparation_still_wakes_wait_for_preparation(sourced):
+    """Every terminal path in `finished` must call `_finish_preparation`,
+    or `wait_for_preparation` blocks for the whole timeout on a bug in
+    the success path (here, a broken `_rebuild_geometry`) instead of
+    waking promptly -- the same lesson `loader.py`'s own addTask-failure
+    branch already draws for its own terminal path."""
+    engine, session, errors, _ = sourced
+
+    def _broken() -> None:
+        raise RuntimeError("boom")
+
+    engine._rebuild_geometry = _broken
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    assert engine.wait_for_preparation(5_000), "a worker-side exception left preparation hanging"
+    assert any("boom" in msg for _, msg in errors), errors
+
+
+def test_a_task_that_cannot_be_scheduled_still_notifies(sourced, monkeypatch):
+    """The addTask()-returned-0 branch is the same must-still-notify
+    contract as the other terminal paths in `finished` -- loader.py's own
+    version of this branch re-emits `loading_changed(key, False)` for
+    exactly this reason."""
+    engine, session, errors, prepared = sourced
+
+    class _FakeManager:
+        def addTask(self, task: object) -> int:
+            return 0
+
+    class _FakeApp:
+        @staticmethod
+        def taskManager() -> _FakeManager:
+            return _FakeManager()
+
+    import nsgeo_qgis.slices_engine as engine_module
+
+    monkeypatch.setattr(engine_module, "QgsApplication", _FakeApp)
+
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    assert prepared == [1], "the addTask-failure branch must still notify on_prepared"
+    assert any("schedule" in msg for _, msg in errors), errors
