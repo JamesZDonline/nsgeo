@@ -26,14 +26,23 @@ them live here:
   it must still notify.
 * `QgsTaskWrapper.finished()` swallows any exception an `on_finished`
   callback raises, with no traceback anywhere -- worse than the ordinary
-  slot hazard, which at least reaches stderr. `finished()` guards its own
-  body with `except`, not merely `finally`. Independently of that: EVERY
-  terminal path -- success, a whole-task exception, an exception raised
-  while finishing -- must call `_finish_preparation()`, in a `finally`,
-  because `wait_for_preparation` (and any future caller) waits on that
-  callback and must see a request it is actually watching end, not hang
-  for the whole timeout. `loader.py`'s own `addTask()`-failure branch
-  draws the identical lesson by re-emitting `loading_changed`.
+  slot hazard, which at least reaches stderr (verified directly in its
+  installed source: the exception is stored on an attribute and never
+  logged or re-raised). `finished()` guards its own body with `except`,
+  and EVERY terminal path -- success, a whole-task exception, an
+  exception raised while finishing -- calls `_finish_preparation()` from
+  a `finally`, because `wait_for_preparation` (and any future caller)
+  waits on that callback and must see a request it is actually watching
+  end, not hang for the whole timeout (`loader.py`'s own `addTask()`
+  -failure branch draws the identical lesson by re-emitting
+  `loading_changed`). Because a `finally` runs OUTSIDE `finished`'s own
+  `except`, `_finish_preparation` and `_report` must guard THEMSELVES
+  too -- the dock's `on_prepared` (Task 3) rebuilds widgets and really
+  can raise, and neither a raising `on_prepared` nor a raising `on_error`
+  may reach `QgsTaskWrapper`'s silent swallow. An earlier version of this
+  module put the `_finish_preparation()` call inside the `try`, which
+  reopened exactly this hole; a caller-supplied callback raising past a
+  `finally` is no safer than one raising past `finished()` itself.
 * The site can be closed, or a different site opened, while a preparation
   is in flight. `_generation` and the captured site identity together
   decide whether a result may be kept: keys are relative paths, so the
@@ -53,8 +62,19 @@ them live here:
   engine holds become the SAME (now stale) object once the grid moves, so
   `!=` never fires. `_on_grids_changed` therefore re-prepares the whole
   source, not merely the geometry, whenever the CHOSEN grid's binning
-  fields change; a velocity-only edit is deliberately excluded (see
-  `_grid_fingerprint`), since that relabels depths without rebinning.
+  fields change. The fingerprint (`_grid_fingerprint`) is captured in
+  `set_source`, beside the `trace_coords` call it protects -- NOT in
+  `_rebuild_geometry`, which may not have run yet: Task 3 sets a source
+  and a resolution as two separate calls, and keying the fingerprint to
+  the second one left a window where a grid move between them went
+  undetected, measured as a silent, uniform 4-cell shift (1 m at a
+  0.25 m cell) with no exception and no change in total coverage. A
+  velocity-only edit is deliberately excluded from the fingerprint,
+  since that relabels depths without rebinning -- but it still drops any
+  resident `_cube` (never the lines or the plans), because `cube()`
+  freezes a `Provenance` snapshot at build time and `provenance()` reads
+  velocity live; without this, an export's recorded velocity would depend
+  on whether a cube happened to be resident.
 """
 
 from __future__ import annotations
@@ -133,9 +153,11 @@ class SliceEngine(QObject):
         self._plans: list[LinePlan] | None = None
         self._frame: CubeFrame | None = None
         self._z: ZAxis | None = None
-        #: The chosen grid's binning fields as of the last successful
-        #: `_rebuild_geometry`. Compared against on `grids_changed` (see
-        #: `_on_grids_changed` and `_grid_fingerprint`, Ruling M).
+        #: The chosen grid's binning fields as of the last `set_source`
+        #: (Ruling P) -- NOT `_rebuild_geometry`, which may not have run
+        #: yet (a resolution may not exist). Compared against on
+        #: `grids_changed` (see `_on_grids_changed`/`_grid_fingerprint`,
+        #: Ruling M).
         self._grid_fp: tuple[Any, ...] | None = None
         self._cube: SliceCube | None = None
         self._mode = "streaming"
@@ -241,6 +263,7 @@ class SliceEngine(QObject):
         self._steps = ()
         self._plans = None
         self._cube = None
+        self._grid_fp = None
         self._redraw_ms = None
         self._choice = choice
         if choice is None or not self.session.is_open:
@@ -267,6 +290,19 @@ class SliceEngine(QObject):
 
         jobs: list[tuple[str, Any, np.ndarray]] = []
         frames = site.frames
+        # Captured HERE, beside the `trace_coords` call below that actually
+        # depends on it -- NOT in `_rebuild_geometry` (Ruling P). Task 3
+        # calls `set_source` and `set_resolution` as two separate steps, so
+        # a resolution -- and therefore a `_rebuild_geometry` call -- may
+        # not exist yet when a grid changes. Keying the fingerprint to
+        # `_rebuild_geometry` left exactly that window with `_grid_fp`
+        # still None, so `_on_grids_changed` skipped silently and a later
+        # `_rebuild_geometry` built a frame from the NEW grid while these
+        # lines' `coords` stayed computed from the OLD one -- measured as a
+        # uniform 4-cell shift (1 m / 0.25 m cell) with no exception and no
+        # change in total coverage.
+        grid = frames.get(choice.grid_id)
+        self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
         for key in choice.line_keys:
             try:
                 line = self.session.line_for_key(key)
@@ -401,12 +437,37 @@ class SliceEngine(QObject):
             self._report(f"could not report progress: {exc}")
 
     def _finish_preparation(self) -> None:
+        """Announce the terminal edge, and never let the callback escape.
+
+        Called from `finished`'s own `finally` so that EVERY terminal path
+        notifies (a caller watching for completion must not hang), which
+        means it runs OUTSIDE `finished`'s own `except`. So the guard
+        belongs here: `QgsTaskWrapper.finished` swallows anything raised
+        out of an `on_finished` callback with no log and no traceback
+        anywhere -- verified directly in its installed source -- and the
+        dock's `on_prepared` (Task 3) rebuilds widgets, so it is a handler
+        that really can raise.
+        """
         if self.on_prepared is None:
             return
-        self.on_prepared()
+        try:
+            self.on_prepared()
+        except Exception as exc:  # noqa: BLE001 -- see above
+            self._report(f"could not finish preparing the slice source: {exc}")
 
     def _report(self, message: str) -> None:
-        if self.on_error is not None:
+        """Report through `on_error`, and never let IT escape either.
+
+        Called from `finished`'s `except` and from `_finish_preparation`'s
+        own except above, both of which must not let a SECOND exception
+        (a raising `on_error`) replace or compound the first -- there is
+        no further channel to report a reporting failure to, so this is
+        the one place in this module that swallows silently rather than
+        reporting a step further.
+        """
+        if self.on_error is None:
+            return
+        with contextlib.suppress(Exception):
             self.on_error(message)
 
     # ---- geometry ---------------------------------------------------------
@@ -417,12 +478,17 @@ class SliceEngine(QObject):
 
     def _rebuild_geometry(self) -> None:
         # Unconditional, and wholesale. There is no such thing as keeping
-        # a plan across a geometry change.
+        # a plan across a geometry change. `_grid_fp` is deliberately left
+        # alone here: it is keyed to `set_source` (Ruling P), not to this
+        # method, because this method may not have run at all yet (no
+        # resolution chosen) when a grid change needs to be detected, and
+        # because `set_resolution` also calls this method and must not
+        # blank a fingerprint that still correctly describes the grid the
+        # CURRENT lines were prepared against.
         self._plans = None
         self._cube = None
         self._frame = None
         self._z = None
-        self._grid_fp = None
         self._redraw_ms = None
         if self._choice is None or self._resolution is None or not self.session.is_open:
             self._choose_mode()
@@ -431,7 +497,6 @@ class SliceEngine(QObject):
         res = self._resolution
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
-        self._grid_fp = self._grid_fingerprint(grid)
         self._choose_mode()
 
     @staticmethod
@@ -448,7 +513,8 @@ class SliceEngine(QObject):
         return (grid.origin, grid.azimuth, grid.size_x, grid.size_y, grid.crs)
 
     def _on_grids_changed(self) -> None:
-        """React to `replace_grid`/`remove_grid` (Ruling M).
+        """React to `replace_grid`/`remove_grid` (Ruling M), and to a
+        velocity-only edit that leaves binning untouched (Ruling Q).
 
         A slot on a `pyqtSignal`: every branch below reports through
         `on_error`/`_finish_preparation` rather than raising past this
@@ -462,6 +528,18 @@ class SliceEngine(QObject):
         fires. A full re-preparation, not merely a geometry rebuild, is
         the only way to pick up coordinates that were computed from the
         OLD grid.
+
+        When the fingerprint has NOT changed, `replace_grid` may still
+        have run -- `set_grid_velocity` goes through it too, and
+        `grids_changed` carries no information about which grid or which
+        field changed. `provenance()` reads `resolved_velocity` LIVE, but
+        `cube()` freezes a `Provenance` snapshot into the `SliceCube` the
+        moment it is built; a resident cube built before a velocity edit
+        would otherwise export the STALE velocity forever, while a
+        streaming source (no cube held) always reads the fresh one. Only
+        `self._cube` is dropped -- the prepared lines and the plans do not
+        depend on velocity at all, so dropping them would pay 0.9 s for
+        nothing.
         """
         if self._choice is None:
             return
@@ -472,11 +550,15 @@ class SliceEngine(QObject):
             self.clear()
             self._report(f"grid {grid_id!r} no longer exists; the slice source was cleared")
             return
-        if self._grid_fp is not None and self._grid_fingerprint(grid) != self._grid_fp:
+        if self._grid_fp is None:
+            return
+        if self._grid_fingerprint(grid) != self._grid_fp:
             try:
                 self.set_source(self._choice)
             except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
                 self._report(f"could not re-prepare after the grid changed: {exc}")
+            return
+        self._cube = None
 
     def _require_geometry(self) -> tuple[CubeFrame, ZAxis]:
         if self._frame is None or self._z is None:
@@ -655,9 +737,17 @@ class SliceEngine(QObject):
         def done() -> None:
             nonlocal finished
             finished = True
-            if previous is not None:
-                previous()
-            loop.quit()
+            # `_finish_preparation` already guards its call to THIS
+            # function against a raising callback (Ruling O), which means
+            # a raising `previous()` cannot escape `done()` either way --
+            # but without this `finally`, it would skip `loop.quit()` and
+            # leave this helper waiting out the full `timeout_ms` instead
+            # of waking as soon as preparation actually finished.
+            try:
+                if previous is not None:
+                    previous()
+            finally:
+                loop.quit()
 
         self.on_prepared = done
         timer.start(timeout_ms)

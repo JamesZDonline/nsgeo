@@ -358,3 +358,75 @@ def test_a_task_that_cannot_be_scheduled_still_notifies(sourced, monkeypatch):
     )
     assert prepared == [1], "the addTask-failure branch must still notify on_prepared"
     assert any("schedule" in msg for _, msg in errors), errors
+
+
+def test_a_grid_move_before_any_resolution_still_re_prepares(sourced):
+    """The ordering Task 3 actually uses: prepare, then set a resolution.
+    With the fingerprint keyed to `_rebuild_geometry` it was None until a
+    resolution existed, so a grid edit in that window left the frame built
+    from the NEW grid against coords from the OLD one -- silent mis-binning
+    at small offsets, since a stale-but-in-bounds cell id never raises."""
+    engine, session, errors, prepared = sourced
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    assert engine.wait_for_preparation(20_000)
+    count = len(prepared)
+    assert engine.frame is None  # no resolution yet
+
+    session.replace_grid(Grid("A", (501.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1, "a grid move before any resolution did not re-prepare"
+
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    assert (coverage > 0).any(), "coords and frame disagree after the move"
+    assert errors == []
+
+
+def test_a_velocity_edit_drops_a_resident_cube_rather_than_serving_stale_provenance(sourced):
+    """`provenance()` reads `resolved_velocity` LIVE, but `cube()` freezes
+    a `Provenance` snapshot into the `SliceCube` the moment it is built --
+    so a resident cube built before a velocity edit would export the
+    STALE velocity forever if nothing dropped it (Ruling Q). Only the
+    cube is dropped: the prepared lines and the plans do not depend on
+    velocity at all, so dropping them would pay 0.9 s for nothing."""
+    engine, session, _, prepared = sourced
+    _prepare(engine, session)
+    engine.set_always_resident(True)
+    engine.slice_at(SliceWindow(4, 14))  # builds the resident cube
+    assert engine.has_cube
+    line_count = engine.line_count
+    count = len(prepared)
+
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count, "a velocity edit re-prepared the lines"
+    assert engine.line_count == line_count
+    assert not engine.has_cube, "a velocity edit left a stale cube in place"
+
+
+def test_a_raising_on_prepared_still_reports_and_does_not_hang(sourced):
+    """`_finish_preparation` runs from `finished`'s own `finally`, OUTSIDE
+    its `except` -- so a raising `on_prepared` (Task 3's dock rebuilds
+    widgets there) must guard itself, or `QgsTaskWrapper.finished`
+    (verified directly in its installed source) swallows it with no log
+    and no traceback at all. The qgis-tier conftest's
+    `_no_swallowed_slot_exceptions` fixture is the belt to this test's
+    braces: it would fail this test outright if anything escaped."""
+    engine, session, errors, _ = sourced
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    engine.on_prepared = _raise
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    assert engine.wait_for_preparation(5_000), "a raising on_prepared left preparation hanging"
+    assert engine.is_prepared
+    assert any("boom" in msg for _, msg in errors), errors
