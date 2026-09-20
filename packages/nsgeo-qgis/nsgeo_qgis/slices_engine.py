@@ -931,7 +931,30 @@ class SliceEngine(QObject):
 
     # ---- lifecycle --------------------------------------------------------
     def clear(self) -> None:
-        """Drop the source and everything derived from it."""
+        """Drop the source and everything derived from it.
+
+        Final review, Important 2: `_cancel_in_flight()` runs FIRST, before
+        `_generation` is bumped -- the same order `set_source` and
+        `dispose()` already use, and for the identical reason (see
+        `_cancel_in_flight`'s own docstring). Before this fix, `clear()`
+        forced `_running` to `False` directly without cancelling
+        `_pending`, and `_cancel_in_flight`'s own confirm-and-wait is
+        gated on `if self._running` -- so the very next call into it saw
+        `_running` already `False` and skipped the wait entirely, even
+        though a task genuinely dispatched before `clear()` was still
+        executing on a worker thread. `site_closed -> clear()` immediately
+        followed by `site_opened -> ... -> set_source()` -- the ordinary
+        "File > Open site..." sequence -- is precisely how that happens: a
+        one-grid site's own construction auto-dispatches a ~0.9 s
+        preparation, the user opens a different site mid-preparation, and
+        the newly-dispatched task then ran concurrently with the one
+        `clear()` never actually stopped -- two preparations on two worker
+        threads, the condition this module's own docstring records as
+        having "segfaulted this plugin reproducibly". Reachable the same
+        way through `_on_grids_changed`'s removed-grid branch, which also
+        calls `clear()`.
+        """
+        self._cancel_in_flight()
         self._generation += 1
         self._choice = None
         self._resolution = None

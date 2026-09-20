@@ -686,3 +686,61 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     assert engine.choice == choice_c
     assert engine.line_count == len(keys)
     assert errors == [], errors
+
+
+def test_clear_during_a_live_preparation_cancels_and_waits_before_anything_else_runs(
+    sourced, monkeypatch
+):
+    """Final review, Important 2. `clear()` used to set `_running = False`
+    directly without ever cancelling `_pending`, and `_cancel_in_flight`'s
+    own confirm-and-wait is gated on `if self._running` -- so the very
+    NEXT call into it (the ordinary `site_closed -> clear()` then
+    `site_opened -> ... -> set_source()` sequence, i.e. "File > Open
+    site...") saw `_running` already `False` and skipped the wait
+    entirely, even though a task genuinely dispatched before `clear()`
+    was still executing on a worker thread. Reproduced directly: `clear()`
+    while a real task is executing, immediately followed by a new
+    `set_source()` -- the same `max_concurrent` discriminator
+    `test_two_different_choices_back_to_back_never_run_concurrently` uses
+    for the sibling hazard."""
+    engine, session, errors, _ = sourced
+    concurrent = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+    real_load = Line.load
+
+    def slow_load(self: Line) -> list:
+        nonlocal concurrent, max_concurrent
+        with lock:
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+        try:
+            time.sleep(0.05)
+            return real_load(self)
+        finally:
+            with lock:
+                concurrent -= 1
+
+    monkeypatch.setattr(Line, "load", slow_load)
+
+    keys = tuple(session.keys())
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys))
+    assert engine.is_running, "the fixture's own preparation must still be in flight"
+
+    engine.clear()  # the site-closed path -- must not leave the task running unwaited
+    assert engine._pending == set(), (
+        "clear() must cancel and CONFIRM (wait for) any live preparation, not merely forget it"
+    )
+
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+    )
+    assert engine.wait_for_preparation(20_000)
+
+    assert max_concurrent <= 1, (
+        f"two tasks executed work() concurrently (max_concurrent={max_concurrent}); "
+        "clear() must cancel and wait out any live preparation before returning"
+    )
+    assert engine.output_unipolar is True  # the new (amp_envelope) choice landed
+    assert engine.line_count == len(keys)
+    assert errors == [], errors
