@@ -12,6 +12,7 @@ from nsgeo.model.survey import Line
 from nsgeo.render import colormap_names
 from nsgeo.slices import window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_plan import transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import synthetic_dzt
@@ -778,3 +779,203 @@ def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(
         assert dock.slice_slider.value() == moved_to
     finally:
         filt.dispose()
+
+
+# ---- Task 7 fix round 1: restore_cube, driven through the real widgets ----
+
+
+def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
+    """Build a record from the dock's own, already-prepared engine and
+    drop it straight into `session.site.cubes`, then refresh the combo --
+    no `.npz` needs to exist on disk for `restore_cube` to read the
+    record back, since `recipe_from_record` never touches `array`."""
+    record = cube_record(
+        session,
+        dock.engine.choice,
+        dock.engine.frame,
+        dock.engine.z,
+        view,
+        session.root / "slices" / f"{cube_id}.npz",
+        line_keys=dock.engine.provenance().line_keys,
+    )
+    session.site.cubes[cube_id] = record
+    dock.refresh_cube_combo()
+    return record
+
+
+def test_restore_cube_brings_every_control_back_ruling_al(docked):
+    """Ruling AL: the layer neither `recipe_from_record`'s own tests nor
+    the identical-slice test can see -- the widgets themselves.
+
+    Also the regression test for Ruling AJ: `dz=0.2165, z0=2.0, z1
+    (requested)=30.0` puts `z.t_end_ns` (`t0 + (nz-1)*dz`, what the
+    record's `t1_ns` actually is) at 29.9285 -- a genuine 4th decimal
+    digit that `z1_spin.setDecimals(3)` used to floor to 29.928 the
+    moment `restore_cube` called `setValue` on it, silently narrowing the
+    slider range and losing the deepest slice on the majority of
+    plausible GSSI headers (measured at 43 of 90 swept combinations)."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.25)
+    dock.dz_spin.setValue(0.2165)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    full = dock.included_keys()
+    view = ViewSettings(
+        thickness_ns=4.0,
+        step_ns=2.0,
+        radius_m=0.5,
+        palette=dock.palette_combo.currentText(),
+        stretch="this slice",
+        coverage=True,
+    )
+    record = _save_cube(dock, session, "A__test", view)
+    assert record["z"]["t1_ns"] == pytest.approx(29.9285)
+    assert round(record["z"]["t1_ns"], 3) != record["z"]["t1_ns"], (
+        "fixture must exercise a genuine 4th decimal digit, or this test cannot "
+        "distinguish the fix from the bug"
+    )
+
+    # Perturb every restorable control so the restore is not a no-op:
+    # a second preset, a narrower inclusion set, different Resolution/view
+    # values.
+    session.site.presets["q"] = list(PRESET)
+    session.presets_changed.emit()
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.set_included(full[:1])
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.5)
+    dock.z1_spin.setValue(10.0)
+    dock.flush_debounce()
+    dock.apply_view(
+        ViewSettings(
+            thickness_ns=1.0,
+            step_ns=1.0,
+            radius_m=0.0,
+            palette=dock.palette_combo.currentText(),
+            stretch="shared across the cube",
+            coverage=False,
+        )
+    )
+    assert dock.cube_combo.currentText() == "(unsaved)", "perturbing must drop the claim"
+
+    dock.restore_cube("A__test")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.transform_combo.currentText() == "none"
+    assert dock.included_keys() == full
+    assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
+    assert dock.z0_spin.value() == record["z"]["t0_ns"]
+    assert dock.cell_spin.value() == record["cell"]
+    assert dock.view_settings() == view
+
+
+def test_restore_cube_refuses_a_missing_grid(docked):
+    """Ruling AK: `grid_combo` is non-editable, so `setCurrentText` on a
+    grid id no longer offered is a silent Qt no-op -- refused loudly
+    instead, and the previous (unrelated) selection must survive intact."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["grid_id"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.grid_combo.currentText()
+    # Driven through the combo itself, not a direct `restore_cube` call --
+    # `_on_cube_changed` sets `cube_combo` to "A__gone" (synchronously
+    # firing `restore_cube`) before this call even returns, so the
+    # "(unsaved)" assertion below is testing the except handler's own
+    # reset, not merely a value the combo already happened to hold.
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("grid" in m and "does-not-exist" in m for m in seen), seen
+    assert "grid" in dock.source_status.text() and "does-not-exist" in dock.source_status.text()
+    assert dock.grid_combo.currentText() == before, "a refusal must not partially restore"
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restore_cube_refuses_a_missing_preset(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["preset"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.preset_combo.currentText()
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("preset" in m and "does-not-exist" in m for m in seen), seen
+    assert dock.preset_combo.currentText() == before
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restore_cube_refuses_a_missing_transform(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["transform"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.transform_combo.currentText()
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("transform" in m and "does-not-exist" in m for m in seen), seen
+    assert dock.transform_combo.currentText() == before
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restoring_the_same_cube_after_a_no_op_prepare_does_not_leave_a_stale_palette(docked):
+    """Minor (fix round 1): `prepare()`'s own no-op guard skips dispatch
+    -- and therefore skips `_on_prepared` -- when the restored choice
+    already equals `engine.choice` and the preset's steps still match, a
+    state `restore_cube` itself can produce (restore, touch only
+    something Resolution-shaped, reselect the SAME cube). Without
+    clearing `_pending_palette` right there, it would sit stashed until
+    some LATER, unrelated preparation applied it."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(
+        dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+
+    dock.restore_cube("A__test")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock._pending_palette is None  # consumed by the real _on_prepared
+
+    # Reselecting the identical cube: `prepare()` is a no-op (same choice,
+    # same steps), so no task is ever dispatched and `_on_prepared` never
+    # runs -- the stash must be cleared here instead.
+    dock.restore_cube("A__test")
+    assert not dock.engine.is_running
+    assert dock._pending_palette is None

@@ -155,6 +155,17 @@ class SlicesDock(QgsDockWidget):
         #: (restore-triggered or not), and cleared early by
         #: `_on_source_changed`/`set_included` too, so a manual change made
         #: while a restore is still preparing cannot inherit its palette.
+        #: Fix round 1, Minor: ALSO cleared right after `restore_cube`'s
+        #: own `prepare()` call when that call turns out to have been a
+        #: no-op (`self.engine.is_running` still `False` afterwards) --
+        #: `prepare()`'s own guard skips dispatching, and therefore skips
+        #: `_on_prepared`, whenever the computed choice already equals
+        #: `engine.choice` and the preset's steps still match (reachable
+        #: by restoring a cube, changing only e.g. the cell size, then
+        #: reselecting the SAME cube). Without this, a value stashed here
+        #: would sit unconsumed until some LATER, unrelated preparation's
+        #: `_on_prepared` fires and applies a palette that restore no
+        #: longer has anything to do with.
         self._pending_palette: str | None = None
 
         body = QWidget(self)
@@ -266,7 +277,27 @@ class SlicesDock(QgsDockWidget):
 
         self.z1_spin = QDoubleSpinBox()
         self.z1_spin.setRange(-1_000.0, 100_000.0)
-        self.z1_spin.setDecimals(3)
+        # Fix round 1, Ruling AJ: 4, not 3, and deliberately NOT matching
+        # `z0_spin`'s 3. A record's `t1_ns` is `z.t_end_ns = t0_ns + (nz -
+        # 1) * dz_ns` (Task 6, so the record round-trips `nz` exactly
+        # rather than the requested-but-possibly-fractional `t1_ns`) --
+        # with `z0_ns` at 3 dp and `dz_ns` at 4 dp, that sum is a genuine
+        # 4-dp quantity about half the time over plausible GSSI headers
+        # (43 of 90 swept combinations). `setValue()` rounds to a spin
+        # box's own `decimals()` (verified directly: `QDoubleSpinBox`
+        # does not merely format the display), so at 3 dp `restore_cube`
+        # was silently flooring `t1_ns` below its own level boundary,
+        # which `ZAxis.from_range` then floors a whole level off -- a
+        # shorter slider range and a missing deepest slice, with nothing
+        # raised. `z0_spin` stays at 3: it is where the 3-dp precision in
+        # `z.t0_ns` originates (every `t0_ns` this dock ever produces
+        # passed through THIS spin box's own `setValue()` first, whether
+        # seeded from a header or typed by hand), so restoring a record's
+        # `t0_ns` into it is always lossless -- there is no fourth decimal
+        # for it to lose. `z1_spin` has no such origin story: its value is
+        # DERIVED (`t_end_ns`), not sourced from this widget, so it needs
+        # the extra digit the arithmetic can actually produce.
+        self.z1_spin.setDecimals(4)
         self.z1_spin.setSuffix(" ns")
         self.z1_spin.setValue(100.0)
         resolution_form.addRow("z1", self.z1_spin)
@@ -468,7 +499,7 @@ class SlicesDock(QgsDockWidget):
         if current in items:
             combo.setCurrentText(current)
 
-    def refresh_cube_combo(self) -> None:
+    def refresh_cube_combo(self, *, select: str | None = None) -> None:
         """Refill `cube_combo` from `session.site.cubes`, `"(unsaved)"`
         first -- called from `rebuild_source` (so a fresh `site_opened`
         picks up whatever `cubes` the reopened survey carries, alongside
@@ -481,12 +512,27 @@ class SlicesDock(QgsDockWidget):
         emits `currentTextChanged` even when the selection ends up
         unchanged, and without this guard that would read as the user
         picking a cube and fire `_on_cube_changed`/`restore_cube`.
+
+        `select`, when given and present among the refreshed items, is
+        set as the current text -- still inside this same `_updating`
+        guard. Fix round 1, Minor: `plugin.save_cube` passes the id it
+        just wrote, so `cube_combo` names the record that now exactly
+        matches what is on screen, rather than sitting on "(unsaved)"
+        despite nothing having changed since the save. Set this way
+        rather than by a plain `self.cube_combo.setCurrentText(cube_id)`
+        afterwards, which -- outside the guard -- would read as the user
+        picking that very cube and dispatch a whole redundant
+        `restore_cube` (and its ~0.9 s re-preparation) of the state that
+        is already on screen.
         """
         try:
             self._updating += 1
             site = self.session.site
             cube_ids = sorted(site.cubes) if site is not None else []
-            self._refill(self.cube_combo, ["(unsaved)", *cube_ids])
+            items = ["(unsaved)", *cube_ids]
+            self._refill(self.cube_combo, items)
+            if select is not None and select in items:
+                self.cube_combo.setCurrentText(select)
         finally:
             self._updating -= 1
 
@@ -962,12 +1008,22 @@ class SlicesDock(QgsDockWidget):
         a complete, self-contained inverse of `view_settings()` regardless
         of what a future caller does after it.
 
-        `palette` is set only if it is currently offered -- `palette_combo`
-        still lists whatever polarity the PREVIOUS source prepared under,
-        since this runs before `restore_cube` even sets the three source
-        combos. `restore_cube` stashes it in `_pending_palette` for
-        `_on_prepared` to try again once the new source's own polarity is
-        known -- see that field's own docstring.
+        `palette` and `stretch` are each set only if currently offered --
+        both are non-editable combos, and Qt's `setCurrentText` on one is
+        a silent no-op for a value not among its items (fix round 1,
+        Minor: the same failure class Ruling AK's `restore_cube` check
+        refuses loudly for the three Source combos; `stretch_combo`'s own
+        two items are fixed today, so this is a defensive match for that
+        method's own membership check rather than a reachable bug yet).
+        `palette_combo` specifically still lists whatever polarity the
+        PREVIOUS source prepared under, since this runs before
+        `restore_cube` even sets the three source combos -- `restore_cube`
+        stashes the palette in `_pending_palette` for `_on_prepared` to
+        try again once the new source's own polarity is known (see that
+        field's own docstring); neither combo's mismatch raises here,
+        since `view` is display-only and a display field silently keeping
+        its prior value is not the "different picture under this cube's
+        name" failure Ruling AK's Source-combo check exists to prevent.
         """
         widgets = (
             self.thickness_spin,
@@ -983,10 +1039,16 @@ class SlicesDock(QgsDockWidget):
             self.thickness_spin.setValue(view.thickness_ns)
             self.step_spin.setValue(view.step_ns)
             self.radius_spin.setValue(view.radius_m)
-            names = [self.palette_combo.itemText(i) for i in range(self.palette_combo.count())]
-            if view.palette in names:
+            palette_names = [
+                self.palette_combo.itemText(i) for i in range(self.palette_combo.count())
+            ]
+            if view.palette in palette_names:
                 self.palette_combo.setCurrentText(view.palette)
-            self.stretch_combo.setCurrentText(view.stretch)
+            stretch_names = [
+                self.stretch_combo.itemText(i) for i in range(self.stretch_combo.count())
+            ]
+            if view.stretch in stretch_names:
+                self.stretch_combo.setCurrentText(view.stretch)
             self.coverage_check.setChecked(view.coverage)
         finally:
             for widget in widgets:
@@ -1000,10 +1062,29 @@ class SlicesDock(QgsDockWidget):
         Guards its whole body -- this runs from `_on_cube_changed`, a slot
         on `currentTextChanged`, and is itself a public entry point -- and
         reports a refused record (`recipe_from_record`'s `ValueError` for
-        a field that is PRESENT and wrong, or simply an unknown `cube_id`)
-        through `error`/`source_status`, exactly as `prepare()` already
-        reports Ruling 2's preset-transform conflict: a caller-visible
-        refusal, not a `_log` only a developer would ever see.
+        a field that is PRESENT and wrong, an unknown `cube_id`, or a
+        grid/preset/transform this site no longer has -- see the next
+        paragraph) through `error`/`source_status`, exactly as `prepare()`
+        already reports Ruling 2's preset-transform conflict: a
+        caller-visible refusal, not a `_log` only a developer would ever
+        see. Fix round 1, Minor: the refusal also resets `cube_combo`
+        itself to "(unsaved)" -- `currentTextChanged` does not re-fire for
+        the same text, so without this a user could not even retry a
+        refused selection without picking something else first.
+
+        Fix round 1, Ruling AK: `grid_combo`/`preset_combo`/
+        `transform_combo` are all non-editable, and Qt's `setCurrentText`
+        on a non-editable combo silently does nothing when the text is
+        not among its items -- a preset renamed or a grid removed since
+        this cube was saved would otherwise leave the PREVIOUS selection
+        in place, `prepare()` would go on to succeed against it, and both
+        the status line and `cube_combo` would keep naming this cube over
+        a different picture. Checked with `findText` for all three,
+        together, BEFORE any widget is touched, so a refusal names every
+        missing field at once and leaves the dock entirely as it was
+        (partial restore is not an acceptable middle ground here: a user
+        can act on "preset 'x' no longer exists", not on a picture that
+        is quietly wrong).
 
         `_updating` is raised around every widget this sets: the three
         Source combos are already gated on it (`_on_source_changed`), and
@@ -1033,6 +1114,39 @@ class SlicesDock(QgsDockWidget):
         """
         try:
             recipe = recipe_from_record(self.session.site.cubes[cube_id])
+            transform_text = (
+                "none" if recipe.choice.transform == NO_TRANSFORM else recipe.choice.transform
+            )
+            # Fix round 1, Ruling AK: checked -- and refused BEFORE any
+            # widget is touched -- rather than handed straight to
+            # `setCurrentText`. All three combos are non-editable, and Qt
+            # makes `setCurrentText` on a non-editable combo a silent
+            # no-op when the text is not among its items: a preset
+            # renamed or a grid removed since the cube was saved would
+            # otherwise leave the PREVIOUS selection in place, `prepare()`
+            # would go on to succeed against it, and the status line and
+            # `cube_combo` would both go on claiming this cube's name over
+            # a different picture. Missing lines are already named
+            # individually by `set_source` through `_report`; a missing
+            # grid/preset/transform deserves the same treatment, not a
+            # silent substitution -- `recipe_from_record`'s own docstring
+            # names exactly this as the one failure a reproducibility
+            # feature must not have. Checked here, together, so a refusal
+            # names every field that is missing, not just the first.
+            missing = [
+                f"{label} {text!r}"
+                for label, combo, text in (
+                    ("grid", self.grid_combo, recipe.choice.grid_id),
+                    ("preset", self.preset_combo, recipe.choice.preset),
+                    ("transform", self.transform_combo, transform_text),
+                )
+                if combo.findText(text) < 0
+            ]
+            if missing:
+                raise ValueError(
+                    f"cube {cube_id!r} refers to {', '.join(missing)}, "
+                    "no longer present in this site"
+                )
             self._updating += 1
             try:
                 if recipe.view is not None:
@@ -1044,9 +1158,6 @@ class SlicesDock(QgsDockWidget):
                 self._dz_z_seeded_for = recipe.choice.grid_id
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)
                 self.preset_combo.setCurrentText(recipe.choice.preset)
-                transform_text = (
-                    "none" if recipe.choice.transform == NO_TRANSFORM else recipe.choice.transform
-                )
                 self.transform_combo.setCurrentText(transform_text)
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
@@ -1058,10 +1169,34 @@ class SlicesDock(QgsDockWidget):
             self._update_included_label()
             self.flush_debounce()
             self.prepare()
+            # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
+            # when the computed choice already equals `engine.choice` and
+            # the preset's live steps still match -- reachable by
+            # restoring a cube, changing only e.g. the cell size, then
+            # reselecting the SAME cube from the combo. Without this, a
+            # `_pending_palette` stashed just above would sit unconsumed
+            # until some LATER, unrelated preparation's `_on_prepared`
+            # fires and applies a palette that restore no longer has
+            # anything to do with -- exactly the staleness this field's
+            # own docstring otherwise claims cannot happen.
+            if not self.engine.is_running:
+                self._pending_palette = None
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)
             self.error.emit(message)
+            # Fix round 1, Minor: a refused restore must not leave
+            # `cube_combo` naming a cube the dock did not actually
+            # restore -- `currentTextChanged` does not re-fire for the
+            # same text, so without this the user could not even retry
+            # the same (still-broken) selection without picking something
+            # else first. `_updating` because this IS a widget set that
+            # must not itself read as a fresh choice.
+            self._updating += 1
+            try:
+                self.cube_combo.setCurrentText("(unsaved)")
+            finally:
+                self._updating -= 1
 
     # ---- Position/Resolution/Display -------------------------------------
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:

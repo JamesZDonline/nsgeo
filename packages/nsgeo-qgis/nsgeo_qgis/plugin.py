@@ -592,7 +592,10 @@ class NsgeoPlugin:
             # the instant it exists, and `refresh_cube_combo` is the same
             # guarded refill `rebuild_source` already uses for `site_opened`
             # -- this is simply the other moment `cubes` changes.
-            dock.refresh_cube_combo()
+            # Fix round 1, Minor: `select=cube_id` so the combo names the
+            # record that now exactly matches what is on screen, rather
+            # than sitting on "(unsaved)" immediately after a save.
+            dock.refresh_cube_combo(select=cube_id)
             self.message(f"cube saved as {cube_id!r} ({record['array']!r})")
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
