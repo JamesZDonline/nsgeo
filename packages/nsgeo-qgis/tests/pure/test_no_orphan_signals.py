@@ -70,7 +70,10 @@ SHADOWED = {
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is
     # built by both ProcessingDock and AddStepDialog; neither connects it.
-    "error": {"declared": 2, "connects": 1},
+    # Task 3 (M11) adds a third: SlicesDock.error, connected in plugin.py
+    # the same way ProfileDock's is -- declared rises to 3, connects to 2,
+    # and ParamForm.error stays the one genuine orphan of the three.
+    "error": {"declared": 3, "connects": 2},
 }
 
 

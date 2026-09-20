@@ -68,8 +68,10 @@ from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock
+from nsgeo_qgis.ui.slices_dock import SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
@@ -123,6 +125,7 @@ class NsgeoPlugin:
         self.survey_dock: SurveyDock | None = None
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
+        self.slices_dock: SlicesDock | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -130,6 +133,7 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
+        self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
         # actually displays -- the same shape ProcessingDock keeps
         # `_shown`/`_shown_step` in for the parameter form. `_gain_owner`
@@ -190,6 +194,18 @@ class NsgeoPlugin:
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.processing_dock)
         self.docks.append(self.processing_dock)
 
+        self.slices_dock = SlicesDock(self.session, main)
+        self.slices_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
+        # Spec 9.2: tabified with Processing rather than a fourth dock
+        # competing for screen space. Processing stays the raised tab --
+        # this milestone adds a capability, it does not take the screen
+        # away from the one people already use.
+        main.tabifyDockWidget(self.processing_dock, self.slices_dock)
+        self.processing_dock.raise_()
+        self.docks.append(self.slices_dock)
+
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
         self.profile_dock.difference_cleared.connect(
@@ -236,6 +252,12 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # Same reasoning again: LineChoiceDialog is modeless too, so it
+        # can still be open here, and reject() (not close()) is what runs
+        # its finished-signal cleanup instead of leaving it dangling with
+        # a reference to a session this method is about to tear down.
+        if self._line_choice_dialog is not None:
+            self._line_choice_dialog.reject()
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -252,6 +274,19 @@ class NsgeoPlugin:
                 "could not save changes before unloading; unsaved changes will be lost",
                 Qgis.MessageLevel.Critical,
             )
+        if self.slices_dock is not None:
+            # SliceEngine(session, ...) is built with no `parent=`, and it
+            # closes over this dock's own bound methods as callbacks
+            # (`on_prepared`/`on_error`/`on_progress`), which makes
+            # `dock -> engine -> bound method -> dock` a reference cycle.
+            # Plain refcounting cannot collect that promptly, so its
+            # `session.site_closed`/`grids_changed` connections would
+            # otherwise survive this method and could still fire -- against
+            # a dock that is about to be deleteLater()'d -- for as long as
+            # the cyclic collector happens not to have run. dispose()
+            # disconnects them (and frees the kernel cache) deterministically,
+            # before the session it is connected to is torn down below.
+            self.slices_dock.engine.dispose()
         for dock in self.docks:
             self.iface.removeDockWidget(dock)
             dock.deleteLater()
@@ -259,6 +294,7 @@ class NsgeoPlugin:
         self.survey_dock = None
         self.profile_dock = None
         self.processing_dock = None
+        self.slices_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
@@ -833,3 +869,40 @@ class NsgeoPlugin:
 
     def open_velocity_dialog(self, key: str) -> None:
         self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+
+    def open_line_choice_dialog(self) -> None:
+        """Spec 9.1's one dialog. Modeless, like every dialog here.
+
+        A single tracking slot, so a second `Choose...` does not stack a
+        dialog on top of the first; the result is committed on `finished`
+        rather than after a blocking call, and the dock is re-read then
+        rather than captured now, because the site can change while this
+        is open.
+        """
+        try:
+            if self.session is None or not self.session.is_open or self.slices_dock is None:
+                return
+            if self._line_choice_dialog is not None:
+                self._line_choice_dialog.raise_()
+                self._line_choice_dialog.activateWindow()
+                return
+            dock = self.slices_dock
+            dialog = LineChoiceDialog(self.session, dock.included_keys(), self.iface.mainWindow())
+            self._line_choice_dialog = dialog
+
+            def finished(result: int) -> None:
+                try:
+                    if result == QDialog.DialogCode.Accepted and self.slices_dock is not None:
+                        self.slices_dock.set_included(dialog.included_keys())
+                except Exception as exc:  # noqa: BLE001 -- a slot on finished
+                    self.message(
+                        f"could not apply the line choice: {exc}", Qgis.MessageLevel.Warning
+                    )
+                finally:
+                    self._line_choice_dialog = None
+                    dialog.deleteLater()
+
+            dialog.finished.connect(finished)
+            dialog.show()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open the line chooser: {exc}", Qgis.MessageLevel.Critical)
