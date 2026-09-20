@@ -808,14 +808,21 @@ FAILS. Then mutate `plan_windows(cube.z, thickness_levels, thickness_levels)` to
 `test_the_shared_limit_covers_every_level_exactly_once` FAILS. Revert both; record the measured
 ratio `over_slices / over_levels` in the task report.
 
-(Amended during execution: this plan originally also predicted
-`test_the_shared_limit_covers_every_level_exactly_once` would fail against the second mutant. It
-cannot — that test never calls `shared_limit`; it calls `plan_windows(cube.z, 10, 10)` directly
-with literal arguments, so a mutation inside `shared_limit`'s own body is invisible to it. The
-mutant *is* caught, by the percentile cross-check inside
-`test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels`: the step-1 windows
-over-weight the axis's middle and shift the measured percentile away from the abutting-window
-value the test independently recomputes.)
+(Amended during execution, then amended again: this plan's prediction that
+`test_the_shared_limit_covers_every_level_exactly_once` would fail against the second mutant did
+not hold *as the test stood at this step* — at that point the test called `plan_windows(cube.z,
+10, 10)` directly with literal arguments and never called `shared_limit` at all, so a mutation
+inside `shared_limit`'s own body was invisible to it. The mutant was instead caught, at that
+point, by the percentile cross-check inside
+`test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels`.
+
+That changed later in the same milestone: the task review's Important 2 (Ruling F, the tail-window
+fix) added a `shared_limit(odd, 10, _Recording())` call directly to
+`test_the_shared_limit_covers_every_level_exactly_once`, to pin the tail-window behaviour. With
+that call in place, the original prediction is correct after all — the step-1 mutant now fails
+this test outright, measured at 11200 values seen (28 implied windows) against 1600 expected (4
+windows). Both states are worth keeping on the record: the test as originally written could not
+see this mutant, and a later, unrelated fix gave it the ability to.)
 
 - [ ] **Step 18: Commit**
 

@@ -156,18 +156,30 @@ def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> fl
     helper, for want of a caller; this is the helper, and the caller is
     the Slices dock.
 
-    Windows abut (`step == thickness`), so every level contributes exactly
-    once and no depth is weighted more heavily than another -- including
-    the tail: `plan_windows` emits whole windows only, because its output
-    is also the GeoTIFF's bands and bands of unequal thickness are not
-    comparable (spec 9.4). A stretch is a measurement rather than an
-    export, so the tail gets a final, thinner window instead of being
-    dropped: at nz=181 and thickness=23 that is 20 levels -- and on a
-    real cube those were the BRIGHTEST levels in it, so excluding them
-    would leave a deep reflector clipped against a stretch it never
-    contributed to. A thin end window is also exactly what the viewer
-    produces there: `ZAxis.level_range` returns a genuinely thinner
+    Windows abut (`step == thickness`), so no level is omitted and none is
+    counted twice -- including the tail: `plan_windows` emits whole windows
+    only, because its output is also the GeoTIFF's bands and bands of
+    unequal thickness are not comparable (spec 9.4). A stretch is a
+    measurement rather than an export, so the tail gets a final, thinner
+    window instead of being dropped: at nz=181 and thickness=23 that is 20
+    levels -- and on a real cube those were the BRIGHTEST levels in it, so
+    excluding them would leave a deep reflector clipped against a stretch
+    it never contributed to. A thin end window is also exactly what the
+    viewer produces there: `ZAxis.level_range` returns a genuinely thinner
     window at either end of the axis.
+
+    The tail window is NOT weighted per level, and that is worth stating
+    plainly because it is easy to assume otherwise: every window
+    contributes `frame.n_cells` values to the percentile whatever its
+    thickness, so a one-level tail's levels carry `thickness` times the
+    per-level weight of the rest. The consequence is that this function is
+    not monotone in `thickness_levels` -- measured on a 181-level cube,
+    2.1455 at thickness 180 against 0.9972 at 181, where 181 needs no tail
+    at all. Across the thicknesses a viewer actually uses (roughly 14-30
+    levels, 3-6.5 ns at native dz) the effect is under 1%, and it errs
+    toward a HIGHER limit, which clips less rather than more. Equalising it
+    would mean weighting each window by its level count, which is a real
+    option if a caller ever needs monotonicity; nothing needs it today.
     """
     windows = list(plan_windows(cube.z, thickness_levels, thickness_levels))
     if windows[-1].k1 < cube.z.nz:

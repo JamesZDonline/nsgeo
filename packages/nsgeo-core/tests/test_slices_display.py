@@ -182,23 +182,20 @@ def test_the_shared_limit_covers_every_level_exactly_once():
             seen.append(np.asarray(data))
             return 1.0
 
-    shared_limit(odd, 10, _Recording())
     # `slice_levels` returns one aggregated value per CELL per window, not
-    # per level, so the total `shared_limit` hands to `clip.limit` is
-    # (n_windows * n_cells), never (nz * n_cells) -- a window of any
-    # thickness still contributes exactly `frame.n_cells` values. The
-    # windows are abutting and whole except for one thinner tail window
-    # (spec 9.4's whole-window rule applies to `plan_windows`, not to this
-    # measurement), so the expected window count is a plain ceiling
-    # division: 4 windows for nz=37, thickness=10 (0-10, 10-20, 20-30,
-    # 30-37), not 3 (without the tail fix, the last 7 levels are dropped
-    # entirely and `shared_limit` never sees them).
-    expected_n_windows = -(-odd.z.nz // 10)  # ceil(37 / 10) == 4
-    assert seen and seen[0].size == expected_n_windows * odd.frame.n_cells, (
-        f"shared_limit saw {seen[0].size} values from an implied "
-        f"{seen[0].size // odd.frame.n_cells} window(s); expected "
-        f"{expected_n_windows} windows (the tail window must not be dropped)"
+    # per level, so a count check alone (n_windows * n_cells) cannot tell a
+    # correctly-placed tail from any other 4-window set -- it pins count,
+    # not placement. Compare against a locally built expectation instead:
+    # the exact four windows this axis must be cut into, abutting and whole
+    # except for one thinner tail (0-10, 10-20, 20-30, 30-37 for nz=37,
+    # thickness=10; without the tail fix the last 7 levels are dropped and
+    # `shared_limit` never sees them at all).
+    expected = np.concatenate(
+        [odd.slice_levels(k0, k1).ravel() for k0, k1 in ((0, 10), (10, 20), (20, 30), (30, 37))]
     )
+    shared_limit(odd, 10, _Recording())
+    assert seen, "shared_limit never called the normaliser"
+    np.testing.assert_allclose(np.sort(seen[0]), np.sort(expected[np.isfinite(expected)]))
 
 
 def test_limit_over_slices_ignores_nodata_and_survives_an_all_nodata_slice():

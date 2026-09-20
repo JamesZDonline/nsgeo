@@ -236,6 +236,17 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     # does not divide nz (Ruling F) -- 20 of this axis's 181 levels, here
     # -- so this cross-check must add the same tail window or it measures
     # a different (and, per that ruling, wrong) set of displayed slices.
+    #
+    # What this DOES pin: it kills the `clip.limit(cube.mean)` mutant and a
+    # step-overlap mutant inside `shared_limit`, because both change the
+    # percentile's VALUE. What it does NOT pin: tail window PLACEMENT --
+    # this reconstructs the same "append a window from the last whole
+    # window's end to nz" rule `shared_limit` uses, rather than deriving it
+    # independently, so a wrong-but-overlapping tail is invisible here: an
+    # overlapping `(158, 181)` tail (vs. the correct `(161, 181)`) measured
+    # 2.060750 on both sides, to 6 decimal places, on this corpus. Tail
+    # placement is pinned instead by the synthetic, exact-identity test in
+    # `test_slices_display.py`.
     windows = list(plan_windows(z, thickness, thickness))
     if windows[-1].k1 < z.nz:
         windows.append(SliceWindow(windows[-1].k1, z.nz))
