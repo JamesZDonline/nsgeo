@@ -592,10 +592,21 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not render the difference view: {exc}", Qgis.MessageLevel.Critical)
 
     def set_slice_band(self, lo_ns: float, hi_ns: float) -> None:
-        self.view.set_slice_band(lo_ns, hi_ns)
+        # Connected directly to `SlicesDock.window_changed` in `plugin.py`,
+        # same as every other cross-dock slot in this file (see the module
+        # docstring, and `set_difference_index` just above) -- an
+        # exception here never reaches `emit()`, it is swallowed locally
+        # and reaches `qFatal()` in the CI container.
+        try:
+            self.view.set_slice_band(lo_ns, hi_ns)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
 
     def clear_slice_band(self) -> None:
-        self.view.clear_slice_band()
+        try:
+            self.view.clear_slice_band()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
 
     def current_radargram(self) -> Radargram | None:
         if self._key is None:

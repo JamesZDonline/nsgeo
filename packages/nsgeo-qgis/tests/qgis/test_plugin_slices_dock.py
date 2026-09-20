@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
@@ -11,8 +13,9 @@ from nsgeo.render import colormap_names
 from nsgeo.slices import window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import transform_names
-from nsgeo_qgis.ui.slices_dock import SlicesDock
+from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtCore import QEvent, Qt
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -705,3 +708,73 @@ def test_step_slice_moves_by_the_step_not_by_one_level(docked):
     moved = dock.slice_slider.value() - start
     assert moved == round(2.5 / dock.engine.z.dz_ns)
     assert moved > 1
+
+
+class _WheelStub:
+    """The minimal `QWheelEvent`-shaped surface `eventFilter` reads.
+
+    Not a real `QWheelEvent`: its constructor signature differs between
+    Qt 5 and Qt 6 (the same reason `depth_scroll_delta` itself is a plain
+    function tested without one), but `eventFilter`'s own body only ever
+    calls `.type()`, `.modifiers()` and `.angleDelta().y()` on the event
+    it is handed -- so a stub exposing exactly those three is a Qt-version-
+    independent way to exercise the filter directly, the same way
+    `depth_scroll_delta`'s own pure test needs no event at all.
+    """
+
+    def __init__(self, angle_delta_y: int, shift: bool) -> None:
+        self._angle_delta_y = angle_delta_y
+        self._shift = shift
+
+    def type(self) -> QEvent.Type:
+        return QEvent.Type.Wheel
+
+    def modifiers(self) -> Qt.KeyboardModifier:
+        return Qt.KeyboardModifier.ShiftModifier if self._shift else Qt.KeyboardModifier.NoModifier
+
+    def angleDelta(self) -> Any:
+        class _Delta:
+            def __init__(self, y: int) -> None:
+                self._y = y
+
+            def y(self) -> int:
+                return self._y
+
+        return _Delta(self._angle_delta_y)
+
+
+class _NonWheelStub:
+    def type(self) -> QEvent.Type:
+        return QEvent.Type.MouseMove
+
+
+def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(fake_iface, docked):
+    """Minor 3 (Task 5 review): `depth_scroll_delta` was pinned as a pure
+    function, but nothing pinned `CanvasDepthScroll.eventFilter` itself --
+    the thing that actually decides whether an event is consumed. A
+    mutant that returns `True` before the `delta == 0` check would take
+    the map's zoom away entirely (every wheel event on the canvas
+    swallowed, shift or not) and would survive the whole suite without
+    this test: `depth_scroll_delta`'s own test never touches the filter,
+    and nothing else calls `eventFilter` at all.
+    """
+    dock, _ = docked
+    _ready(dock)
+    filt = CanvasDepthScroll(fake_iface.mapCanvas(), dock)
+    try:
+        start = dock.slice_slider.value()
+
+        consumed = filt.eventFilter(None, _WheelStub(-120, shift=True))
+        assert consumed is True
+        assert dock.slice_slider.value() > start, "shift+wheel must actually step the slice"
+
+        moved_to = dock.slice_slider.value()
+        consumed = filt.eventFilter(None, _WheelStub(-120, shift=False))
+        assert consumed is False, "plain scroll must stay the map's own zoom, not be consumed"
+        assert dock.slice_slider.value() == moved_to, "plain scroll must not move the slice"
+
+        consumed = filt.eventFilter(None, _NonWheelStub())
+        assert consumed is False
+        assert dock.slice_slider.value() == moved_to
+    finally:
+        filt.dispose()
