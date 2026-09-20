@@ -62,7 +62,9 @@ refined by a migration velocity scan.
    sibling registered steps whenever wanted, per the `background_mean` /
    `_sliding` / `_svd` precedent — distinct algorithms get distinct step names, and a
    `choice` param is only for variants inside one algorithm.
-4. **Sequence: its own plan, after M11.**
+4. **Sequence: its own plan.** Originally placed after M11; the velocity milestone was then
+   placed after M12, so migration follows it as **Plan 5, M14**. See
+   `docs/superpowers/specs/2026-09-20-nsgeo-velocity-fit-design.md`.
 5. **Velocity reaches the step as acquisition context on `Radargram`**, not as a step
    parameter — so one preset applied across a grid migrates each line at its own
    velocity, which is what per-line overrides exist for.
@@ -106,8 +108,8 @@ working untouched; there are no non-test `Radargram(...)` construction sites.
 collection case `GridPlacement` already refuses), and `velocity` from
 `VelocityModel.from_dielectric(header.epsr)`, the third tier of `resolve_velocity`.
 
-The single production caller is `session.py:572`, and `self.velocity_for_line(line)`
-already exists at `session.py:537`. One line carries the full line→grid→header
+The single production caller is `session.py:572`, and `self.resolved_velocity(key)`
+already exists at `session.py:535`. One line carries the full line→grid→header
 precedence into the step.
 
 `processing` importing `velocity` adds no cycle: `velocity.py` is a numpy-only leaf
