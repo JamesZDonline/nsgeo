@@ -844,8 +844,22 @@ class SliceEngine(QObject):
         A latency optimisation, never a capability (spec 7.4) -- every
         caller here works without one. The exporter and the `.npz` writer
         use it because they want the whole volume anyway.
+
+        Raises the same `RuntimeError` `_slice` already raises for zero
+        lines (M11 Task 6 fix round 1, Important 2). Without this guard,
+        `save_cube_npz`'s direct `engine.cube()` call -- unlike `slice_at`,
+        which reaches `_slice`'s own check first in every mode but this
+        one -- built and returned a full-size, all-NaN `SliceCube` with no
+        exception at all: `set_source` clears `_lines` synchronously while
+        a re-preparation is still in flight, but leaves `_frame`/`_z`
+        alone, so `_require_geometry()` keeps succeeding. A click on "Save
+        cube..." during that ~0.9 s window wrote a real `.npz`, recorded
+        it in `site.cubes`, and reported success -- a survey file gaining
+        a record for a cube with no data in it.
         """
         if self._cube is None:
+            if not self._lines:
+                raise RuntimeError("no lines are prepared")
             frame, z = self._require_geometry()
             plans = self._ensure_plans()
             self._cube = build_cube(self._lines, plans, frame, z, self.provenance())

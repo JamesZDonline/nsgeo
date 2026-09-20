@@ -34,23 +34,35 @@ Two decisions this task owns, recorded here rather than only in the task
 report because a future reader of this file needs them as much as a
 reviewer of this task does:
 
-* **North-up pitch is the frame's own cell size, not a finer one.**
+* **North-up pitch is the frame's own cell size, not a finer one (Ruling
+  AE, Task 6 fix round 1, corrects this bullet's own first draft).**
   `to_north_up` (Task 1) drops 15-18% of frame cells at rotated azimuths
-  under nearest-neighbour resampling, which is a real, measured gap. This
-  writer does not compensate for it with a finer output pitch, for three
-  reasons together: (1) the export path is always slice -> fill ->
-  to_north_up, and `fill` has already spread any isolated cell across its
-  radius before this module ever sees it, so the gap bites hardest
-  exactly where a user asked for it least filled (`radius_cells=0`) --
-  which is a debugging view of raw coverage, not the archival deliverable
-  spec 9.4 targets; (2) a finer pitch multiplies the pixel count (4x at
-  half-cell), which multiplies the per-band write cost this module's own
-  `INTERLEAVE=BAND` choice exists to keep small; (3) implementing it
-  correctly needs `to_north_up`'s own resample loop, and that function is
-  already the single source both `SliceLayer` and this module read --
-  duplicating its arithmetic here to parameterise the pitch would let the
-  two drift, which is exactly the failure `window_label` being shared
-  between the dock and this module already avoids for the text labels.
+  under nearest-neighbour resampling, which is a real, measured gap, and
+  the loss is UNCONDITIONAL: `fill` never puts a dropped cell into the
+  output at all, at any radius -- it only makes that cell's value
+  recoverable from a surviving neighbour before this module ever sees the
+  array. Radius only changes how much the loss matters, never whether it
+  happens, and radius 0 (spec 6.4's own honest unfilled truth,
+  `radius_spin`'s construction default, and a value `export_geotiff`
+  passes straight through with no refusal) is not a debugging-only case
+  this module gets to assume away. This writer does not compensate with a
+  finer output pitch anyway, for reasons that hold regardless: (1) a
+  finer pitch is a MITIGATION, not a fix -- nearest-neighbour at half
+  pitch still drops cells, it only lowers the probability that a given
+  cell is sampled by no output pixel at all; the actual fix is forward
+  scatter-mapping inside `to_north_up` itself, which is Task 1 work, not
+  this module's; (2) it multiplies the pixel count (4x at half-cell),
+  which multiplies the per-band write cost `INTERLEAVE=BAND` exists to
+  keep small, for a partial mitigation of a problem it does not solve --
+  the wrong trade twice over; (3) implementing even that partial
+  mitigation needs `to_north_up`'s own resample loop, and that function
+  is already the single source both `SliceLayer` and this module read --
+  duplicating its arithmetic here would let the two drift, which is
+  exactly the failure `window_label` being shared between the dock and
+  this module already avoids for the text labels. What this module does
+  instead: say so, on both the file (`NSGEO_FILL_RADIUS_CELLS`/
+  `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata, `GeoTiffSliceWriter.write`)
+  and the message bar (`plugin.export_geotiff`, at radius 0).
 * **The per-band `cell_index` solve is not hoisted out of the export
   loop.** Task 1's review measured ~1.4 s of repeated solving across 39
   bands of a 400x300x400 cube, because `to_north_up`'s resample grid does
@@ -67,10 +79,10 @@ reviewer of this task does:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from nsgeo.project import line_key
@@ -118,6 +130,15 @@ class ExportPlan:
     recipe, carried through for a future writer (the netCDF one the
     module docstring names) that would want to record it in the file
     itself, the way `save_cube_npz` already does for the `.npz`.
+
+    `radius_cells` is `None` for a plan that carries no fill radius at
+    all (`write_coverage`'s companion raster is never filled -- coverage
+    counts are exact, and smearing a count is not a display decision the
+    way smearing an amplitude is). `GeoTiffSliceWriter.write` records it,
+    and the frame's azimuth, as dataset-level metadata -- see Ruling AE
+    (Task 6 fix round 1) for why: the export is a lossy resample at any
+    fill radius, radius 0 included, and a reader five years from now with
+    only the `.tif` in hand needs a way to see that from the file itself.
     """
 
     frame: CubeFrame
@@ -125,6 +146,7 @@ class ExportPlan:
     crs: str
     bands: tuple[SliceBand, ...]
     provenance: Provenance
+    radius_cells: int | None = None
 
 
 def plan_export(
@@ -132,19 +154,50 @@ def plan_export(
     thickness_levels: int,
     step_levels: int,
     velocity: VelocityModel | None,
+    radius_cells: int | None = None,
 ) -> ExportPlan:
     """The band list a GeoTIFF export would write, without writing anything.
 
     `plan_windows` is spec 9.4's band-count formula by construction (see
     its own docstring), so `len(plan.bands)` and the dock's slice count
     are never two agreeing implementations, only one.
+
+    `radius_cells` is carried through onto the plan only -- it changes no
+    band here, only what `GeoTiffSliceWriter.write` later records as
+    metadata. Optional and keyword-compatible with every existing caller
+    (`export_slices` is the only one that has a real value to pass).
     """
     frame, z = engine.frame, engine.z
     if frame is None or z is None:
         raise RuntimeError("no slice geometry: choose a source and a resolution first")
     windows = plan_windows(z, thickness_levels, step_levels)
     bands = tuple(SliceBand(window=w, description=window_label(z, w, velocity)) for w in windows)
-    return ExportPlan(frame=frame, z=z, crs=frame.crs, bands=bands, provenance=engine.provenance())
+    return ExportPlan(
+        frame=frame,
+        z=z,
+        crs=frame.crs,
+        bands=bands,
+        provenance=engine.provenance(),
+        radius_cells=radius_cells,
+    )
+
+
+class SliceWriter(Protocol):
+    """What `export_slices`/`write_coverage` need from a writer (spec 9.6).
+
+    A structural interface, not a base class: `GeoTiffSliceWriter` below
+    satisfies it with no inheritance, and a future netCDF writer (the
+    module docstring's own example of why this exists at all) would too.
+    Declaring the seam here -- rather than only in prose -- is what makes
+    substituting one an addition instead of a refactor to two call sites
+    (Ruling AG, Task 6 fix round 1): before this, `export_slices` and
+    `write_coverage` each named `GeoTiffSliceWriter` directly, so a second
+    implementation would have had to edit both.
+    """
+
+    OPTIONS: list[str]
+
+    def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None: ...
 
 
 class GeoTiffSliceWriter:
@@ -154,7 +207,7 @@ class GeoTiffSliceWriter:
     `slice_layer.py`'s (plan Ruling 3): that file is an uncompressed
     scratch preview rewritten every tick; this one is the durable
     artefact a reader keeps, so it pays compression's write cost once for
-    a much smaller file forever after.
+    a much smaller file forever after. Satisfies `SliceWriter` structurally.
     """
 
     OPTIONS = [
@@ -178,6 +231,22 @@ class GeoTiffSliceWriter:
         rotated frame's bounding box can differ, in principle, from one
         slice to the next only if the frame itself changed mid-export,
         which would itself be a bug worth surfacing loudly).
+
+        `zip(plan.bands, slices)` is deliberately NOT `strict=True` (Task
+        6 fix round 1, Important 3): `strict=` needs Python 3.10+, and
+        this package's floor is `>=3.9` -- a QGIS 3.40 build running
+        Python 3.9 would raise `TypeError: zip() takes no keyword
+        arguments` the first time this ran, and nothing in either venv or
+        in CI would have caught it (both venvs here are 3.12; the 3.9 CI
+        job never imports this module). The `written != len(plan.bands)`
+        check below keeps the same guarantee `strict=True` bought, in
+        plain Python.
+
+        `plan.radius_cells`/`plan.frame.azimuth` are written as dataset
+        metadata once the dataset exists (Ruling AE, same fix round): the
+        export is a lossy resample at ANY fill radius including 0 (see
+        `ExportPlan`'s own docstring), and a reader with only the `.tif`
+        needs a way to see that without this module's source in hand.
         """
         if not plan.bands:
             raise ValueError("an export plan needs at least one band")
@@ -194,9 +263,8 @@ class GeoTiffSliceWriter:
                 dataset = None
                 try:
                     shape: tuple[int, int] | None = None
-                    for index, (band_plan, values) in enumerate(
-                        zip(plan.bands, slices, strict=True)
-                    ):
+                    written = 0
+                    for index, (band_plan, values) in enumerate(zip(plan.bands, slices)):
                         array, geotransform = to_north_up(values, plan.frame)
                         if dataset is None:
                             height, width = array.shape
@@ -211,6 +279,13 @@ class GeoTiffSliceWriter:
                             )
                             dataset.SetGeoTransform(geotransform)
                             dataset.SetProjection(QgsCoordinateReferenceSystem(plan.crs).toWkt())
+                            if plan.radius_cells is not None:
+                                dataset.SetMetadataItem(
+                                    "NSGEO_FILL_RADIUS_CELLS", str(plan.radius_cells)
+                                )
+                            dataset.SetMetadataItem(
+                                "NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)
+                            )
                         elif array.shape != shape:
                             raise ValueError(
                                 f"band {index + 1} resampled to {array.shape}, but the first "
@@ -221,8 +296,16 @@ class GeoTiffSliceWriter:
                         band.SetNoDataValue(float("nan"))
                         band.SetDescription(band_plan.description)
                         band.WriteArray(array)
-                    if dataset is None:
-                        raise ValueError("no slices were written")
+                        written += 1
+                    if written != len(plan.bands):
+                        # Covers an empty `slices` too: `plan.bands` is
+                        # non-empty (checked above), so `written == 0`
+                        # trips this before `dataset` (never created)
+                        # could be tested separately.
+                        raise ValueError(
+                            f"expected {len(plan.bands)} slices (one per planned band), got "
+                            f"{written}"
+                        )
                 finally:
                     # Hold the dataset in a local and set it to None
                     # explicitly (see slice_layer.py's own `_write` for the
@@ -245,6 +328,8 @@ def export_slices(
     step_levels: int,
     velocity: VelocityModel | None,
     radius_cells: int,
+    *,
+    writer: SliceWriter | None = None,
 ) -> ExportPlan:
     """Plan, then write, one band at a time -- never a resident cube.
 
@@ -253,15 +338,24 @@ def export_slices(
     whatever mode the engine is already in, and hands it straight to the
     writer. A caller with `engine.mode == "streaming"` never sees this
     function build a cube behind their back.
+
+    `writer` defaults to a fresh `GeoTiffSliceWriter()` -- NOT a mutable
+    default argument (Ruling AG, Task 6 fix round 1): a `None` sentinel
+    with the real default constructed inside the body, so every call gets
+    its own writer instance rather than one shared (and, worse, capable
+    of accumulating state) across every call this process ever makes. A
+    test substitutes a stub here to observe the streaming property
+    without touching GDAL at all.
     """
-    plan = plan_export(engine, thickness_levels, step_levels, velocity)
+    plan = plan_export(engine, thickness_levels, step_levels, velocity, radius_cells=radius_cells)
+    writer = writer if writer is not None else GeoTiffSliceWriter()
 
     def _filled_slices() -> Iterable[np.ndarray]:
         for band in plan.bands:
             values, coverage = engine.slice_at(band.window)
             yield fill(values, coverage, radius_cells)
 
-    GeoTiffSliceWriter().write(path, plan, _filled_slices())
+    writer.write(path, plan, _filled_slices())
     return plan
 
 
@@ -299,13 +393,21 @@ def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
     props.setIsActive(True)
 
 
-def write_coverage(engine: SliceEngine, path: str | Path) -> None:
+def write_coverage(
+    engine: SliceEngine, path: str | Path, *, writer: SliceWriter | None = None
+) -> None:
     """A single-band, north-up raster of traces-per-cell over the full axis.
 
     `SliceCube.coverage()`'s own invariant (a cell is covered at every
     level or none) makes any window's coverage the whole cube's coverage,
     so the full axis is used here only to have a window to ask for -- not
     because coverage varies with depth.
+
+    `radius_cells=None` on the plan: a coverage raster is never filled
+    (see `ExportPlan`'s own docstring) -- smearing a count is not a
+    display decision the way smearing an amplitude is, so there is no
+    fill radius to record here. `writer` mirrors `export_slices`'s own
+    substitution seam (Ruling AG).
     """
     frame, z = engine.frame, engine.z
     if frame is None or z is None:
@@ -318,8 +420,10 @@ def write_coverage(engine: SliceEngine, path: str | Path) -> None:
         crs=frame.crs,
         bands=(SliceBand(window=window, description="coverage: traces per cell"),),
         provenance=engine.provenance(),
+        radius_cells=None,
     )
-    GeoTiffSliceWriter().write(path, plan, [coverage])
+    writer = writer if writer is not None else GeoTiffSliceWriter()
+    writer.write(path, plan, [coverage])
 
 
 def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:
@@ -383,6 +487,8 @@ def cube_record(
     z: ZAxis,
     view: ViewSettings,
     npz_path: Path,
+    *,
+    line_keys: Sequence[str],
 ) -> dict[str, Any]:
     """One `Site.cubes` record: the whole recipe, with its path made portable.
 
@@ -397,6 +503,19 @@ def cube_record(
     the behaviour worth having: a survey file pointing at somebody's
     scratch directory opens nowhere else, and it would round-trip through
     save and load without complaint.
+
+    `line_keys` is a required, explicit keyword -- deliberately NOT
+    `choice.line_keys` (Ruling AF, Task 6 fix round 1). `choice` is what
+    was ASKED for; `engine.provenance().line_keys` is what the cube was
+    ACTUALLY built from, and the two disagree exactly when a line fails
+    during preparation (already surfaced separately through `on_error` at
+    that moment). `Site.cubes`'s own docstring calls `lines` "the line
+    keys actually binned" -- a caller MUST pass
+    `engine.provenance().line_keys` here, not `choice.line_keys`, or the
+    record lies about what the array contains. Task 7's restore path
+    reads this field to know which lines to re-bin; a requested-but-never-
+    prepared line in it would fail that restore for a reason this record
+    was supposed to rule out.
     """
     root = Path(session.json_path).parent.resolve()
     return {
@@ -405,7 +524,7 @@ def cube_record(
         "preset": choice.preset,
         "transform": choice.transform or "none",
         "cell": float(frame.cell),
-        "lines": list(choice.line_keys),
+        "lines": list(line_keys),
         "z": {"t0_ns": z.t0_ns, "t1_ns": z.t_end_ns, "dz_ns": z.dz_ns},
         "array": line_key(npz_path, root),
         # --- how it was BEING READ: changes nothing in the array ---

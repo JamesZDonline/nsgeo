@@ -53,7 +53,7 @@ from typing import Any
 
 import nsgeo
 from nsgeo.processing import build_step
-from nsgeo.project import ProjectError
+from nsgeo.project import ProjectError, line_key
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer
 from qgis.PyQt import sip
@@ -72,6 +72,7 @@ from nsgeo_qgis.slice_export import (
     cube_record,
     export_slices,
     save_cube_npz,
+    write_coverage,
 )
 from nsgeo_qgis.slice_layer import SliceLayer
 from nsgeo_qgis.ui.grid_dialog import GridDialog
@@ -524,9 +525,28 @@ class NsgeoPlugin:
         `QFileDialog.getSaveFileName` defaults into `session.root /
         "slices"`, the same directory a plain "cube.npz" would land in --
         `save_cube_npz`/`save_cube` (M10) create it on demand, so this
-        need not exist yet. The cube id is `<grid_id>__<name>`, `name`
-        being the stem of whatever the user typed -- `A__cube.npz` saved
-        for grid `A` records as `A__cube`.
+        need not exist yet.
+
+        Validated with `line_key` BEFORE anything is written (Task 6 fix
+        round 1, "also fold in"): the earlier version called
+        `save_cube_npz` first and let `cube_record`'s own `line_key` call
+        raise second, which meant an out-of-tree destination built the
+        whole cube and compressed it to disk before refusing -- real
+        work for a save that was always going to be rejected. `root` and
+        the raised `ProjectError` are identical either way; only the
+        order changed.
+
+        The cube id is `<grid_id>__<name>`, `name` being the stem of the
+        file numpy ACTUALLY wrote (Important 1, same fix round) --
+        `Path(npz_path).stem`, not `Path(path).stem`. `store._npz_path`'s
+        own docstring names exactly this hazard: a user-typed name with a
+        dot that is not an extension (a version tag, e.g. "cube.v1")
+        keeps that dot in the file numpy writes ("cube.v1.npz") but the
+        RAW dialog string's stem does not agree with it in general --
+        and, worse, two such saves ("cube.v1", "cube.v2") used to collide
+        on the SAME id ("A__cube"), so the second save silently replaced
+        the first record while leaving both `.npz` files on disk, one of
+        them now orphaned with no recipe pointing at it.
 
         A `QAction`-style guarded slot (see the module docstring): every
         failure -- a save outside the project tree, a full disk, a
@@ -550,6 +570,8 @@ class NsgeoPlugin:
             )
             if not path:
                 return
+            root = self.session.root
+            line_key(Path(path), root)  # raises ProjectError early; see the docstring above
             npz_path = save_cube_npz(engine, Path(path))
             view = ViewSettings(
                 thickness_ns=dock.thickness_spin.value(),
@@ -560,12 +582,18 @@ class NsgeoPlugin:
                 coverage=dock.coverage_check.isChecked(),
             )
             record = cube_record(
-                self.session, engine.choice, engine.frame, engine.z, view, npz_path
+                self.session,
+                engine.choice,
+                engine.frame,
+                engine.z,
+                view,
+                npz_path,
+                line_keys=engine.provenance().line_keys,
             )
-            cube_id = f"{engine.choice.grid_id}__{Path(path).stem}"
+            cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
             self.session.site.cubes[cube_id] = record
             self.session._set_dirty(True)
-            self.message(f"cube saved as {record['array']!r}")
+            self.message(f"cube saved as {cube_id!r} ({record['array']!r})")
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
 
@@ -579,6 +607,24 @@ class NsgeoPlugin:
         readout labels its window with -- both reused rather than
         re-derived, so the exported bands' descriptions cannot disagree
         with what the dock was showing when Export was clicked.
+
+        Two additions from Task 6 fix round 1:
+
+        * Ruling AE: the export is a lossy resample at ANY fill radius,
+          radius 0 included -- `fill` only makes a dropped cell
+          recoverable from a surviving neighbour, it never puts the cell
+          itself back, so the loss is unconditional and radius only
+          changes how much it matters. At `radius_cells() == 0` (spec
+          6.4's honest unfilled truth, and `radius_spin`'s own
+          construction default) the success message is pushed at
+          `Warning` rather than `Info`, naming the consequence -- the
+          file itself also carries this, via `NSGEO_FILL_RADIUS_CELLS`/
+          `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata (see `slice_export
+          .GeoTiffSliceWriter.write`).
+        * Ruling AH: spec 9.4 says coverage exports as a companion
+          single-band raster "when asked" -- wired here to the control
+          that already asks for exactly that, the dock's own coverage
+          toggle, rather than adding a second button nobody requested.
         """
         assert self.session is not None
         try:
@@ -600,8 +646,9 @@ class NsgeoPlugin:
                 return
             thickness_levels, step_levels = dock.thickness_step_levels()
             _key, velocity = dock._resolved_velocity()
+            radius_cells = dock.radius_cells()
             plan = export_slices(
-                engine, Path(path), thickness_levels, step_levels, velocity, dock.radius_cells()
+                engine, Path(path), thickness_levels, step_levels, velocity, radius_cells
             )
             layer = QgsRasterLayer(path, Path(path).stem, "gdal")
             if not layer.isValid():
@@ -614,7 +661,26 @@ class NsgeoPlugin:
             self.layers.project.addMapLayer(layer, False)
             if self.layers.group is not None:
                 self.layers.group.addLayer(layer)
-            self.message(f"exported {len(plan.bands)} bands to {path}")
+
+            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            if dock.coverage_check.isChecked():
+                coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
+                write_coverage(engine, coverage_path)
+                coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
+                if coverage_layer.isValid():
+                    self.layers.project.addMapLayer(coverage_layer, False)
+                    if self.layers.group is not None:
+                        self.layers.group.addLayer(coverage_layer)
+                parts.append(f"coverage to {coverage_path}")
+            message = ", ".join(parts)
+            if radius_cells == 0:
+                self.message(
+                    f"{message} -- fill radius 0: cells a rotated frame's north-up resample "
+                    f"drops are not in this file at all, only recoverable at a larger radius",
+                    Qgis.MessageLevel.Warning,
+                )
+            else:
+                self.message(message)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 

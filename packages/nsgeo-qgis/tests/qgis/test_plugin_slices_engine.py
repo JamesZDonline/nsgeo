@@ -142,6 +142,29 @@ def test_streaming_and_a_resident_cube_give_the_same_slice(sourced):
     np.testing.assert_array_equal(np.isfinite(streamed), np.isfinite(resident))
 
 
+def test_cube_refuses_when_no_lines_are_prepared(sourced):
+    """Important 2 (Task 6 fix round 1): `cube()` used to have no
+    zero-line guard, unlike `_slice`'s streaming path, which already
+    checked `self._lines` before ever reaching `cube()`. `save_cube_npz`'s
+    direct `engine.cube()` call bypassed that check entirely -- reachable
+    for real during the window `set_source` clears `_lines` synchronously
+    while a re-preparation is still in flight (`_frame`/`_z` are left
+    alone), and it built a full-size, all-NaN `SliceCube` with no
+    exception at all. Reproduced here without needing to hit that race:
+    an EMPTY line selection (`line_keys=()`) reaches the identical state
+    -- geometry present, no lines -- synchronously and legitimately
+    (`SlicesDock`'s own "0 of 0" status text already treats it as
+    ordinary, not a failure)."""
+    engine, session, _, _ = sourced
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=()))
+    assert engine.wait_for_preparation(20_000)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    assert engine.frame is not None and engine.z is not None
+    assert not engine.is_prepared
+    with pytest.raises(RuntimeError, match="no lines are prepared"):
+        engine.cube()
+
+
 def test_the_shared_limit_agrees_between_the_two_modes(sourced):
     engine, session, _, _ = sourced
     _prepare(engine, session)

@@ -14,6 +14,7 @@ from nsgeo.slices import load_cube
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
+    GeoTiffSliceWriter,
     ViewSettings,
     apply_temporal_properties,
     cube_record,
@@ -194,11 +195,56 @@ def test_the_survey_record_keeps_the_cube_path_relative(exportable_with_session,
     the one that has to do it."""
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
-    record = cube_record(engine.session, engine.choice, engine.frame, engine.z, _VIEW, npz)
+    record = cube_record(
+        engine.session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
     assert record["array"] == "slices/A__default.npz"
     assert not Path(record["array"]).is_absolute()
     assert set(record) == {"grid_id", "preset", "transform", "cell", "array", "lines", "z", "view"}
     assert record["z"] == {"t0_ns": 2.0, "t1_ns": 30.0, "dz_ns": 0.5}
+    assert record["lines"] == list(engine.provenance().line_keys)
+
+
+def test_the_record_lines_are_what_was_actually_binned_not_what_was_asked_for(
+    exportable_with_session,
+):
+    """Ruling AF (Task 6 fix round 1). `choice.line_keys` is the REQUEST;
+    `engine.provenance().line_keys` is what the cube was actually built
+    from. They differ the moment one requested key fails to prepare --
+    here, a key naming no line at all -- and `cube_record`'s `lines`
+    must be the latter: Task 7's restore path reads it to know which
+    lines to re-bin, and a requested-but-never-prepared key in it would
+    try to re-bin a line the cube never held."""
+    engine, session = exportable_with_session
+    requested = (*engine.choice.line_keys, "raw/does-not-exist.DZT")
+    bad_choice = SourceChoice(
+        grid_id=engine.choice.grid_id,
+        preset=engine.choice.preset,
+        transform=engine.choice.transform,
+        line_keys=requested,
+    )
+    engine.set_source(bad_choice)
+    assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    assert engine.choice.line_keys == requested  # the request, unpruned
+    assert "raw/does-not-exist.DZT" not in engine.provenance().line_keys  # what actually bound
+
+    npz = save_cube_npz(engine, session.root / "slices" / "A__partial.npz")
+    record = cube_record(
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+    )
+    assert "raw/does-not-exist.DZT" not in record["lines"]
     assert record["lines"] == list(engine.provenance().line_keys)
 
 
@@ -210,14 +256,28 @@ def test_a_cube_written_outside_the_project_tree_is_refused(exportable_with_sess
     outside.parent.mkdir(exist_ok=True)
     npz = save_cube_npz(engine, outside)
     with pytest.raises(ProjectError, match="portable"):
-        cube_record(session, engine.choice, engine.frame, engine.z, _VIEW, npz)
+        cube_record(
+            session,
+            engine.choice,
+            engine.frame,
+            engine.z,
+            _VIEW,
+            npz,
+            line_keys=engine.provenance().line_keys,
+        )
 
 
 def test_the_record_survives_a_save_and_reload_of_the_survey(exportable_with_session, tmp_path):
     engine, session = exportable_with_session
     npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
     session.site.cubes["A__default"] = cube_record(
-        session, engine.choice, engine.frame, engine.z, _VIEW, npz
+        session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
     )
     session.save()
     reloaded = load_site(session.json_path)
@@ -238,3 +298,81 @@ def test_coverage_exports_as_a_companion_single_band_raster(exportable, tmp_path
         assert np.nanmax(counts) >= 1
     finally:
         ds = None
+
+
+class _RecordingWriter:
+    """A stub `SliceWriter` (Ruling AG, Task 6 fix round 1): records every
+    call instead of touching GDAL, so a test can observe the streaming
+    property directly rather than only inferring it from `engine.has_cube`."""
+
+    OPTIONS: list[str] = []
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object, list[np.ndarray]]] = []
+
+    def write(self, path, plan, slices) -> None:  # noqa: ANN001 -- matches SliceWriter structurally
+        self.calls.append((path, plan, list(slices)))
+
+
+def test_export_slices_streams_through_a_substituted_writer(exportable, tmp_path):
+    """Spec 9.6: a writer INTERFACE, not a function that knows GDAL --
+    substituting one must be a plugged-in collaborator, not a two-call-
+    site refactor (Ruling AG). This also doubles as the cheapest possible
+    proof of the band-by-band streaming property: every array the
+    generator yields lands in `slices`, one per `plan.bands`, in the
+    same north-up-less grid-local shape `engine.slice_at` returns it in
+    (the writer, not `export_slices`, is what calls `to_north_up`)."""
+    engine = exportable
+    writer = _RecordingWriter()
+    path = tmp_path / "cube.tif"
+    plan = export_slices(engine, path, 10, 5, None, radius_cells=0, writer=writer)
+    assert len(writer.calls) == 1
+    called_path, called_plan, slices = writer.calls[0]
+    assert called_path == path
+    assert called_plan is plan
+    assert len(slices) == len(plan.bands)
+    for array in slices:
+        assert array.shape == (engine.frame.ny, engine.frame.nx)
+
+
+def test_write_coverage_also_accepts_a_substituted_writer(exportable, tmp_path):
+    engine = exportable
+    writer = _RecordingWriter()
+    write_coverage(engine, tmp_path / "coverage.tif", writer=writer)
+    assert len(writer.calls) == 1
+    _path, plan, slices = writer.calls[0]
+    assert len(slices) == 1
+    assert plan.radius_cells is None  # coverage is never filled
+
+
+def test_the_geotiff_carries_fill_radius_and_azimuth_metadata(exportable, tmp_path):
+    """Ruling AE (Task 6 fix round 1): the export is a lossy resample at
+    ANY fill radius, radius 0 included -- a reader with only the `.tif`
+    must be able to see that without this module's source in hand."""
+    from osgeo import gdal
+
+    engine = exportable
+    path = tmp_path / "cube.tif"
+    export_slices(engine, path, 10, 5, None, radius_cells=3)
+    ds = gdal.Open(str(path))
+    try:
+        tags = ds.GetMetadata()
+        assert tags["NSGEO_FILL_RADIUS_CELLS"] == "3"
+        assert tags["NSGEO_FRAME_AZIMUTH_DEG"] == str(engine.frame.azimuth)
+    finally:
+        ds = None
+
+
+def test_write_raises_when_the_slice_count_disagrees_with_the_plan(exportable, tmp_path):
+    """Important 3 (Task 6 fix round 1): `zip(plan.bands, slices)` is no
+    longer `strict=True` (that keyword needs Python 3.10+, below this
+    package's `>=3.9` floor), so this explicit count check is what still
+    catches a caller handing over the wrong number of slices -- the same
+    guarantee `strict=True` used to provide."""
+    from nsgeo_qgis.slice_export import plan_export
+
+    engine = exportable
+    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    too_few = [np.zeros((engine.frame.ny, engine.frame.nx), dtype=np.float32)]
+    with pytest.raises(ValueError, match="expected .* slices"):
+        GeoTiffSliceWriter().write(tmp_path / "short.tif", plan, too_few)

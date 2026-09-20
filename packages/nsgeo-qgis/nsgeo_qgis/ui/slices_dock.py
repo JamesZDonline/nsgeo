@@ -635,6 +635,23 @@ class SlicesDock(QgsDockWidget):
         "stale" permanently, with the only escape being to toggle the
         transform away and back, paying for two preparations and showing
         the wrong transform in between.
+
+        Task 6 fix round 1, Important 2: refreshes `save_button`/
+        `export_button` (and the status line/text) immediately after a
+        successful dispatch, not just in `_on_prepared`/`_on_engine_error`
+        once the ~0.9 s task finishes. `set_source` clears `engine._lines`
+        SYNCHRONOUSLY before returning here, so `engine.is_prepared` is
+        already `False` the moment this call returns -- without this,
+        both buttons stayed visibly enabled for the whole re-preparation
+        window, and a click on either during it reached the engine with a
+        stale response (see `SliceEngine.cube()`'s own new guard, this
+        same fix round, for what "Save cube..." did there before that
+        guard existed). Deliberately not in a blanket `finally`: the
+        `except` branch below already writes a specific, readable refusal
+        (e.g. Ruling 2's preset-transform-conflict message) straight into
+        `source_status`, and recomputing it there would immediately
+        overwrite that message with the generic "not prepared" this
+        method would otherwise compute.
         """
         choice = self.source_choice()
         if (
@@ -645,9 +662,18 @@ class SlicesDock(QgsDockWidget):
             return
         try:
             self.engine.set_source(choice)
+            self._refresh_source_status()
         except Exception as exc:  # noqa: BLE001 -- see the docstring above
             message = str(exc)
             self.source_status.setText(message)
+            # Buttons only, not the full `_refresh_source_status()` call
+            # above -- see the docstring: that would overwrite `message`
+            # (a specific refusal) with a generic "not prepared". `_lines`
+            # is already cleared by `set_source` even on this path (it
+            # runs before the conflict check that raises), so this is
+            # never stale.
+            self.save_button.setEnabled(self.engine.is_prepared)
+            self.export_button.setEnabled(self.engine.is_prepared)
             self.error.emit(message)
 
     def _on_source_changed(self, _text: str = "") -> None:
