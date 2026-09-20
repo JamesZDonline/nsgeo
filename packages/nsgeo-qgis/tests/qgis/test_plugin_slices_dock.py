@@ -98,6 +98,47 @@ def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     assert "MB" in text or "GB" in text
 
 
+def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
+    """Final review, Important 3 / Ruling AN. `SliceEngine.set_always_
+    resident` existed with no caller anywhere but tests -- the override
+    spec 9.2 itself describes had no control anywhere in the dock. Placed
+    in the Display group (this plugin has no settings infrastructure to
+    put it in), carrying spec 9.2's own wording and the actual cost the
+    toggle buys (`engine.estimate.cube_bytes`, not the total -- the
+    prepared lines are already held in memory in EITHER mode)."""
+    dock, _ = docked
+    _ready(dock)
+    assert dock.engine.mode == "streaming"
+    assert not dock.resident_check.isChecked()
+    assert "faster dragging" in dock.resident_check.text()
+    assert "MB" in dock.resident_check.text() or "GB" in dock.resident_check.text()
+
+    dock.resident_check.setChecked(True)
+    assert dock.engine.mode == "resident"
+    dock.resident_check.setChecked(False)
+    assert dock.engine.mode == "streaming"
+
+
+def test_the_included_label_warns_over_the_default_budget(docked, monkeypatch):
+    """Final review, Important 3 / Ruling AN. Spec 9.1/7.4's "warns and
+    requires confirmation above the budget rather than hard-caps" was
+    entirely unimplemented before this -- the label reported "about N MB"
+    and never compared it to anything. Warns, never blocks: spec 7.4 is
+    explicit that an over-budget cube degrades to streaming rather than
+    failing, so nothing about what actually happens changes here -- only
+    what the label says about it."""
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    dock, _ = docked
+    monkeypatch.setattr(dock_module, "DEFAULT_BUDGET_BYTES", 1)
+    dock._update_included_label()
+    assert "over the default budget" in dock.included_label.text()
+
+    monkeypatch.setattr(dock_module, "DEFAULT_BUDGET_BYTES", DEFAULT_BUDGET_BYTES)
+    dock._update_included_label()
+    assert "over the default budget" not in dock.included_label.text()
+
+
 def test_choosing_a_preset_that_carries_a_transform_is_refused_visibly(docked):
     """Ruling 2, surfaced. The engine raises; the dock must turn that into
     something the user can read and act on, not let it escape a slot."""

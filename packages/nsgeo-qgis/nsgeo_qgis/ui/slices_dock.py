@@ -57,6 +57,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, recipe_from_record
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
+    DEFAULT_BUDGET_BYTES,
     NO_TRANSFORM,
     Resolution,
     SourceChoice,
@@ -349,6 +350,18 @@ class SlicesDock(QgsDockWidget):
         self.coverage_check = QCheckBox("Show coverage")
         display_form.addRow(self.coverage_check)
 
+        # Ruling AN (M11 final review): the settings override spec 9.2
+        # itself describes ("keep the whole volume in memory for faster
+        # dragging") lives here, in the Display group, rather than in
+        # settings -- this plugin has none, and building one was ruled
+        # beyond this milestone's scope. Wired to `SliceEngine.
+        # set_always_resident`, which existed but had no caller anywhere
+        # but tests. `_update_resident_check_label` fills in the real
+        # text (spec 9.2's own wording, with the cost it names) once an
+        # engine estimate exists; the placeholder here is never shown.
+        self.resident_check = QCheckBox("Keep the whole volume in memory for faster dragging")
+        display_form.addRow(self.resident_check)
+
         self.legend_label = QLabel("")
         display_form.addRow("Legend", self.legend_label)
 
@@ -379,6 +392,7 @@ class SlicesDock(QgsDockWidget):
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
         # refills it with the real answer once a source actually exists.
         self._refill_palette_combo()
+        self._update_resident_check_label()
 
         # Filled once, and BEFORE the connects just below: `transform_names()`
         # is the registry, not the site, and does not change while this dock
@@ -448,6 +462,11 @@ class SlicesDock(QgsDockWidget):
         self.stretch_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
         self.palette_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
         self.coverage_check.toggled.connect(lambda _checked: self.refresh_slice())
+        # Not wired straight to refresh_slice(): the residency override
+        # changes no pixel (spec 11's own property -- streaming and
+        # resident agree exactly), only how fast the NEXT slice redraws,
+        # so `_on_resident_toggled` reaches the engine directly.
+        self.resident_check.toggled.connect(self._on_resident_toggled)
 
         self.rebuild_source()
 
@@ -626,6 +645,15 @@ class SlicesDock(QgsDockWidget):
         `time_zero` crops rows -- see `slices_plan.estimate_memory` and
         this dock's own module docstring for why that is "about", not
         exact, and why that is the honest choice.
+
+        Ruling AN (M11 final review): also where the over-budget WARNING
+        spec 9.1/7.4 asks for lives -- "warns and requires confirmation
+        above the budget rather than hard-caps" was entirely unimplemented
+        before this; this label reported "about N MB" and never compared
+        it to anything. Warns, never blocks: spec 7.4 is explicit that an
+        over-budget cube degrades to streaming rather than failing, so the
+        estimate going over the budget changes nothing about what happens
+        next -- only what the label says about it.
         """
         grid_id = self.grid_combo.currentText() or None
         total = len(self._default_included(grid_id))
@@ -640,9 +668,36 @@ class SlicesDock(QgsDockWidget):
         n_cells = frame.n_cells if frame is not None else 0
         nz = z.nz if z is not None else 0
         estimate = estimate_memory(samples, n_cells, nz)
-        self.included_label.setText(
-            f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
+        text = f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
+        if estimate.total_bytes > DEFAULT_BUDGET_BYTES:
+            text += " -- over the default budget; slices will stream rather than hold it all"
+        self.included_label.setText(text)
+        self._update_resident_check_label()
+
+    def _update_resident_check_label(self) -> None:
+        """Spec 9.2's own wording for the residency override, with the
+        cost it names filled in: `engine.estimate.cube_bytes` is what
+        turning it on actually adds -- the prepared lines are already held
+        in memory in EITHER mode, so the whole-volume checkbox's own cost
+        is the cube alone, not the total. Called from `_update_included_
+        label` (every place that estimate could have changed) and from
+        `_apply_resolution` (a resolution change moves `frame`/`z`, and so
+        `engine.estimate`, without necessarily touching `_included`)."""
+        mb = format_bytes(self.engine.estimate.cube_bytes)
+        self.resident_check.setText(
+            f"Keep the whole volume in memory for faster dragging (uses {mb})"
         )
+
+    def _on_resident_toggled(self, checked: bool) -> None:
+        try:
+            self.engine.set_always_resident(checked)
+            # Spec 11: streaming and resident agree on every pixel, so
+            # nothing on screen needs to change -- only the status line's
+            # own "held in memory"/"redraws in" figures, which only
+            # `refresh_slice()` recomputes.
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- a slot on QCheckBox.toggled
+            _log(f"could not toggle whole-volume residency: {exc}")
 
     def source_choice(self) -> SourceChoice | None:
         """What the three combos and the inclusion set currently say,
@@ -1377,11 +1432,15 @@ class SlicesDock(QgsDockWidget):
                 self.error.emit(str(exc))
                 return
             self.engine.set_resolution(resolution)
-            # Keyed on `(n_levels, choice, mode)` -- see the field's own
-            # docstring -- and a geometry change can only have moved
-            # `n_levels` (the axis it is measured against changed), so
-            # there is no cheaper way to know the old cache is still good.
+            # Keyed on `(n_levels, choice, mode, radius_cells)` -- see the
+            # field's own docstring -- and a geometry change can only have
+            # moved `n_levels` (the axis it is measured against changed),
+            # so there is no cheaper way to know the old cache is still
+            # good.
             self._shared_limit_cache = None
+            # `engine.estimate.cube_bytes` depends on `frame`/`z`, both of
+            # which `set_resolution` may just have moved.
+            self._update_resident_check_label()
             new_z = self.engine.z
             nz = new_z.nz if new_z is not None else 1
             # Fix round 1, M3: blocked. `setRange` and `setValue` can each

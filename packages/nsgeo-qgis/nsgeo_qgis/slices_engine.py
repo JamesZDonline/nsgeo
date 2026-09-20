@@ -204,7 +204,6 @@ class SliceEngine(QObject):
         self._cube: SliceCube | None = None
         self._mode = "streaming"
         self._always_resident = False
-        self._budget_bytes = DEFAULT_BUDGET_BYTES
         self._redraw_ms: float | None = None
         self._generation = 0
         self._running = False
@@ -308,17 +307,26 @@ class SliceEngine(QObject):
 
     def set_always_resident(self, flag: bool) -> None:
         """The settings override of spec 9.2, worded there for what it
-        buys: *keep the whole volume in memory for faster dragging*."""
+        buys: *keep the whole volume in memory for faster dragging*.
+
+        Ruling AN (M11 final review): wired to a checkbox in the dock's
+        Display group rather than to settings -- this plugin has no
+        settings infrastructure, and building one was ruled beyond this
+        milestone's scope.
+        """
         self._always_resident = bool(flag)
         self._choose_mode()
 
-    def set_budget_bytes(self, budget: int) -> None:
-        self._budget_bytes = int(budget)
-        self._choose_mode()
-
     def _choose_mode(self) -> None:
+        # Ruling AN (M11 final review): `set_budget_bytes` -- a second
+        # override, for the BUDGET rather than the always-resident flag --
+        # is deleted. It had zero callers anywhere, production or test: the
+        # budget is a constant (spec 9.1/7.4 never asks for it to be
+        # configurable), and an orphaned setter is worse than no setter at
+        # all. `choose_residency`'s own `budget_bytes` default is this same
+        # constant, so leaving it out here is not a behaviour change.
         self._mode = choose_residency(
-            self.estimate, len(self._lines), self._budget_bytes, self._always_resident
+            self.estimate, len(self._lines), always_resident=self._always_resident
         )
 
     # ---- source -----------------------------------------------------------
