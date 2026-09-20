@@ -75,6 +75,17 @@ them live here:
   freezes a `Provenance` snapshot at build time and `provenance()` reads
   velocity live; without this, an export's recorded velocity would depend
   on whether a cube happened to be resident.
+* **Two real preparations must never run at once.** `_generation` decides
+  whose RESULT is kept, never whether a superseded task is still actually
+  executing -- and two of them reading the same lines on two worker
+  threads segfaulted this plugin reproducibly, both for the identical
+  choice re-requested faster than it could finish (Task 3, fix round 1)
+  and for two genuinely different choices a click apart (fix round 2,
+  Ruling V). `set_source` and `dispose()` both call `_cancel_in_flight()`
+  first, which cancels and CONFIRMS (waits, bounded by roughly one line's
+  processing) that any previous task has actually stopped before either
+  proceeds. See `_cancel_in_flight`'s own docstring for why it must run
+  before `_generation` is bumped, not after.
 """
 
 from __future__ import annotations
@@ -124,6 +135,17 @@ from nsgeo_qgis.slices_plan import (
 #: is unreadable; this smooths it without hiding a real change.
 _REDRAW_SMOOTHING = 0.7
 
+#: Ruling V (M11, Task 3 fix round 2): how long `_cancel_in_flight` waits
+#: for a cancelled preparation to actually clear before giving up and
+#: proceeding anyway. `work()` checks `isCanceled()` once per line, so a
+#: cancelled task stops within one line's processing -- measured at
+#: roughly 13 ms to load plus 26 ms for an envelope, ~40 ms total. This is
+#: several times that, generous for a slower disk or a larger file, while
+#: staying two orders of magnitude below a full ~0.9 s preparation -- long
+#: enough to almost never fire the "proceed anyway" branch, short enough
+#: that it can never be mistaken for the UI hanging.
+_CANCEL_TIMEOUT_MS = 250
+
 
 class SliceEngine(QObject):
     """Everything between a chosen source and a slice. Owns no widgets."""
@@ -170,6 +192,15 @@ class SliceEngine(QObject):
         # own, so a task with no Python reference is collected silently
         # and its on_finished never runs.
         self._pending: set[QgsTask] = set()
+        #: Tasks `_cancel_in_flight()` itself asked to stop (fix round 2,
+        #: Ruling V). `QgsTaskWrapper.finished()` (verified directly in its
+        #: installed source) synthesises `Exception("Task canceled")` for
+        #: ANY cancelled task, indistinguishable by message alone from one
+        #: this engine did not ask to cancel -- membership here is what
+        #: lets `finished()` tell "expected, we did this on purpose" from
+        #: "genuinely failed" apart, so a person rapidly changing combos
+        #: never sees a spurious "Task canceled" warning.
+        self._deliberately_cancelled: set[QgsTask] = set()
         session.site_closed.connect(self.clear)
         session.grids_changed.connect(self._on_grids_changed)
 
@@ -250,6 +281,63 @@ class SliceEngine(QObject):
         )
 
     # ---- source -----------------------------------------------------------
+    def _cancel_in_flight(self) -> None:
+        """Stop any preparation already running, and wait for it to clear.
+
+        Ruling V (fix round 2): `_generation` discards a superseded
+        task's RESULT, which is not the same thing as stopping the task
+        itself -- two real preparations reading the same lines on two
+        worker threads segfaulted this plugin reproducibly (Task 3, fix
+        round 1), and that fix only closed the identical-choice case
+        (`SlicesDock.prepare`'s own no-op guard). Two GENUINELY DIFFERENT
+        choices dispatched within about a second of each other -- a
+        person clicking through the Source combos, not just a test
+        fixture -- still overlapped. `loader.py` avoids the analogous
+        hazard by refusing to double-dispatch a key at all
+        (`if key in self._tasks`); the equivalent here, since a superseded
+        choice must still be replaced rather than merely refused, is to
+        cancel the old one and confirm it actually stopped before
+        starting the new one.
+
+        Called BEFORE `_generation` is bumped, deliberately: the
+        cancelled task's own `finished()` callback is what actually
+        clears `self._running` and wakes `wait_for_preparation` below (via
+        `_finish_preparation`) -- and `finished()` only takes that path
+        when its captured generation still matches `self._generation`.
+        Bumping first would make every one of THIS task's own terminal
+        paths look stale to itself, so `wait_for_preparation` would never
+        see the `on_prepared` it is waiting on and would sit out the full
+        timeout even though the task genuinely, promptly stopped.
+
+        Bounded, not open-ended: `work()` checks `isCanceled()` once per
+        line, so this waits about one line's processing
+        (`_CANCEL_TIMEOUT_MS`), not the ~0.9 s a full preparation takes.
+        If it still has not cleared by then, this reports through
+        `on_error` and returns anyway rather than refusing the caller's
+        new choice -- a `set_source` that sometimes silently declines to
+        take effect is a worse failure mode than a rare residual overlap
+        this method already spends its whole budget trying to prevent;
+        `set_source` proceeding is what actually keeps "the latest choice
+        always wins" true even in that unlikely case.
+
+        Records each cancelled task in `_deliberately_cancelled` before
+        calling `cancel()` (verified directly against `QgsTaskWrapper`'s
+        installed source: it synthesises `Exception("Task canceled")` for
+        ANY cancelled task, indistinguishable by message alone from a
+        task this engine did not ask to stop) -- `finished()` checks that
+        set to tell "expected, we did this" apart from "genuinely failed"
+        before deciding whether to report anything through `on_error`.
+        """
+        for task in list(self._pending):
+            self._deliberately_cancelled.add(task)
+            with contextlib.suppress(RuntimeError):  # the C++ side is already gone
+                task.cancel()
+        if self._running and not self.wait_for_preparation(_CANCEL_TIMEOUT_MS):
+            self._report(
+                "a previous slice-source preparation did not stop in time; "
+                "proceeding with the new choice anyway"
+            )
+
     def set_source(self, choice: SourceChoice | None) -> None:
         """Choose what goes into the cube and start preparing it.
 
@@ -257,7 +345,12 @@ class SliceEngine(QObject):
         the preset carries an amplitude transform (plan Ruling 2) -- the
         caller is a dialog, and a refusal it can show is worth more than
         an error that arrives a second later through a callback.
+
+        Cancels and waits out any preparation already in flight first
+        (`_cancel_in_flight`, Ruling V) -- see its own docstring for why
+        that must happen before, not after, `_generation` is bumped.
         """
+        self._cancel_in_flight()
         self._generation += 1
         self._lines = []
         self._steps = ()
@@ -377,6 +470,13 @@ class SliceEngine(QObject):
 
         def finished(exception: BaseException | None, result: Any = None) -> None:
             self._pending.discard(task)
+            # Fix round 2, Ruling V: recorded (and cleared) here, before
+            # any staleness check, because `_cancel_in_flight()` cancels
+            # this very task BEFORE `_generation` is bumped past it -- see
+            # that method's own docstring for why -- so this callback
+            # still sees a MATCHING generation and does not return early.
+            was_cancelled_here = task in self._deliberately_cancelled
+            self._deliberately_cancelled.discard(task)
             # Whether THIS callback owns the notification duty. It does
             # not for the two staleness checks just below -- a newer
             # request, or a different site, already owns it -- but every
@@ -400,7 +500,18 @@ class SliceEngine(QObject):
                 for message in failures:
                     self._report(message)
                 if exception is not None:
-                    self._report(str(exception))
+                    # `QgsTaskWrapper.finished()` (verified directly in its
+                    # installed source) synthesises `Exception("Task
+                    # canceled")` for ANY cancelled task, indistinguishable
+                    # by message alone from one this engine did not ask to
+                    # stop. Stay silent for exactly the ones `_cancel_in_
+                    # flight()` cancelled on purpose -- a person rapidly
+                    # changing the Source combos must not see a spurious
+                    # "Task canceled" warning for doing exactly what those
+                    # combos already invite; a genuine failure (a bad file,
+                    # a worker-side bug) still gets reported either way.
+                    if not (was_cancelled_here and str(exception) == "Task canceled"):
+                        self._report(str(exception))
                     return
                 self._lines = list(result or [])
                 self._rebuild_geometry()
@@ -705,7 +816,7 @@ class SliceEngine(QObject):
         clear_kernel_cache()
 
     def dispose(self) -> None:
-        # nsgeo-qgis fix round 1 (M11, Task 3): wait out any in-flight
+        # nsgeo-qgis fix round 1 (M11, Task 3): stop any in-flight
         # preparation FIRST. Every caller of this method before Task 3's
         # SlicesDock always called wait_for_preparation() itself before
         # ever disposing, so a task genuinely still running at dispose()
@@ -722,9 +833,16 @@ class SliceEngine(QObject):
         # LATER, unrelated test's own real QgsTask starts -- measured
         # directly as a segfault (two worker threads inside dewow's
         # `running_mean` at once, from two different tests' orphaned
-        # tasks, not from anything in the same test). Bounded by whatever
-        # `_running` actually reflects; a no-op when nothing is running.
-        self.wait_for_preparation()
+        # tasks, not from anything in the same test).
+        #
+        # Fix round 2 (Ruling V): routed through `_cancel_in_flight()`
+        # rather than a bare `wait_for_preparation()` -- a teardown has no
+        # reason to sit out however much of a full ~0.9 s preparation is
+        # left when it is about to discard the result anyway; cancelling
+        # first bounds this to one line's processing
+        # (`_CANCEL_TIMEOUT_MS`), the same reasoning `set_source` now
+        # uses for the same problem.
+        self._cancel_in_flight()
         # Same two exceptions map_link.py's own disconnects suppress, and
         # for the same reason: a RuntimeError from a wrapper that reports
         # as not-deleted but whose underlying C++ object is gone regardless
@@ -741,10 +859,12 @@ class SliceEngine(QObject):
     def wait_for_preparation(self, timeout_ms: int = 20_000) -> bool:
         """Spin the event loop until preparation finishes.
 
-        Mainly for tests, and now also `dispose()` (fix round 1): a real
-        caller (the plugin unloading) blocking for at most one
-        preparation's worth of time is a small, bounded cost, and safer
-        than tearing down while a task is still writing into this engine.
+        For tests, directly -- and, with a short timeout,
+        `_cancel_in_flight()` (fix rounds 1-2), which every real
+        `set_source` and `dispose()` call routes through: a real caller
+        blocking for at most one line's processing (or, uncancelled, one
+        full preparation) is a small, bounded cost, and safer than
+        proceeding while a task is still writing into this engine.
 
         Returns whether it actually finished while this waited, not merely
         whether nothing is running afterwards -- a bare timeout would

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
@@ -430,3 +433,64 @@ def test_a_raising_on_prepared_still_reports_and_does_not_hang(sourced):
     assert engine.wait_for_preparation(5_000), "a raising on_prepared left preparation hanging"
     assert engine.is_prepared
     assert any("boom" in msg for _, msg in errors), errors
+
+
+def test_two_different_choices_back_to_back_never_run_concurrently(sourced, monkeypatch):
+    """Fix round 2, Ruling V. `_generation` was already known to discard a
+    SUPERSEDED task's result; what it does not do is stop the superseded
+    task from still executing. Two GENUINELY DIFFERENT `set_source` calls
+    with no intervening wait -- a person clicking through the Source
+    combos, not only a test fixture -- used to dispatch two real
+    `QgsTask`s that read the same lines at the same time, which segfaulted
+    this plugin reproducibly (Task 3, fix round 1 closed only the
+    identical-choice case).
+
+    `Line.load` is patched to sleep, widening the window a real disk read
+    only holds open for a few milliseconds into one long enough that a
+    counter under a lock catches genuine thread overlap deterministically
+    -- stronger evidence than timing, and than hoping for a repeat
+    segfault. Confirmed this test actually discriminates: reverted
+    `_cancel_in_flight()` to a no-op (commenting out its body) and re-ran
+    just this test -- it failed with `max_concurrent == 2`, both threads
+    inside the patched `load` at once, exactly the shape the fix removes.
+    """
+    engine, session, errors, _ = sourced
+    concurrent = 0
+    max_concurrent = 0
+    lock = threading.Lock()
+    real_load = Line.load
+
+    def slow_load(self: Line) -> list:
+        nonlocal concurrent, max_concurrent
+        with lock:
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+        try:
+            time.sleep(0.05)
+            return real_load(self)
+        finally:
+            with lock:
+                concurrent -= 1
+
+    monkeypatch.setattr(Line, "load", slow_load)
+
+    keys = tuple(session.keys())
+    choice_a = SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys)
+    choice_b = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+
+    engine.set_source(choice_a)
+    engine.set_source(choice_b)  # no intervening wait -- the discriminating call
+    assert engine.wait_for_preparation(20_000)
+
+    assert max_concurrent <= 1, (
+        f"two tasks executed work() concurrently (max_concurrent={max_concurrent}); "
+        "_cancel_in_flight() must confirm the first task actually stopped before "
+        "the second one starts"
+    )
+    # The later choice is the one that lands -- checked structurally
+    # (output_unipolar reads the CHOSEN transform, not a stored flag) so a
+    # regression that silently kept choice_a's result would still be caught.
+    assert engine.choice == choice_b
+    assert engine.output_unipolar is True
+    assert engine.line_count == len(keys)
+    assert errors == [], errors
