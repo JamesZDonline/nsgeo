@@ -363,12 +363,12 @@ def test_the_geotiff_carries_fill_radius_and_azimuth_metadata(exportable, tmp_pa
         ds = None
 
 
-def test_write_raises_when_the_slice_count_disagrees_with_the_plan(exportable, tmp_path):
+def test_write_raises_when_there_are_too_few_slices(exportable, tmp_path):
     """Important 3 (Task 6 fix round 1): `zip(plan.bands, slices)` is no
     longer `strict=True` (that keyword needs Python 3.10+, below this
     package's `>=3.9` floor), so this explicit count check is what still
-    catches a caller handing over the wrong number of slices -- the same
-    guarantee `strict=True` used to provide."""
+    catches a caller handing over too few slices -- the same guarantee
+    `strict=True` used to provide in this direction."""
     from nsgeo_qgis.slice_export import plan_export
 
     engine = exportable
@@ -376,3 +376,22 @@ def test_write_raises_when_the_slice_count_disagrees_with_the_plan(exportable, t
     too_few = [np.zeros((engine.frame.ny, engine.frame.nx), dtype=np.float32)]
     with pytest.raises(ValueError, match="expected .* slices"):
         GeoTiffSliceWriter().write(tmp_path / "short.tif", plan, too_few)
+
+
+def test_write_raises_when_there_are_too_many_slices(exportable, tmp_path):
+    """Task 6 fix round 2, Minor 1: `written != len(plan.bands)` alone
+    can only ever detect too FEW slices -- `zip` stops consuming at the
+    shorter iterable, so `written` never exceeds `len(plan.bands)` and a
+    `slices` iterable with a surplus had that surplus silently dropped,
+    with no exception. `strict=True` used to catch this direction too
+    (`ValueError: zip() argument 2 is longer than argument 1`); the
+    explicit `next(iterator, None)` probe after the loop is what restores
+    it without `strict=`."""
+    from nsgeo_qgis.slice_export import plan_export
+
+    engine = exportable
+    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    shape = (engine.frame.ny, engine.frame.nx)
+    too_many = [np.zeros(shape, dtype=np.float32) for _ in range(len(plan.bands) + 1)]
+    with pytest.raises(ValueError, match="more slices than the plan's"):
+        GeoTiffSliceWriter().write(tmp_path / "long.tif", plan, too_many)

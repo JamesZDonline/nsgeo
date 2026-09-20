@@ -239,8 +239,19 @@ class GeoTiffSliceWriter:
         arguments` the first time this ran, and nothing in either venv or
         in CI would have caught it (both venvs here are 3.12; the 3.9 CI
         job never imports this module). The `written != len(plan.bands)`
-        check below keeps the same guarantee `strict=True` bought, in
-        plain Python.
+        check plus the explicit `next(iterator, None)` probe after the
+        loop together keep the same guarantee `strict=True` bought, in
+        plain Python -- BOTH directions of it (Task 6 fix round 2,
+        Minor 1): `zip` stops at the shorter iterable, so `written` alone
+        can only ever detect too FEW slices (it never exceeds
+        `len(plan.bands)`); a `slices` iterable with a surplus past
+        `plan.bands` would otherwise have that surplus silently dropped,
+        the exact case `strict=True` used to raise
+        `ValueError: zip() argument 2 is longer than argument 1` for. The
+        probe is what makes an iterator (not a list) the right type for
+        this parameter: consuming one further item from `slices` after
+        the loop is answering "is there more?", which a plain `len()`
+        check could not do without the caller pre-materialising it.
 
         `plan.radius_cells`/`plan.frame.azimuth` are written as dataset
         metadata once the dataset exists (Ruling AE, same fix round): the
@@ -264,7 +275,8 @@ class GeoTiffSliceWriter:
                 try:
                     shape: tuple[int, int] | None = None
                     written = 0
-                    for index, (band_plan, values) in enumerate(zip(plan.bands, slices)):
+                    iterator = iter(slices)
+                    for index, (band_plan, values) in enumerate(zip(plan.bands, iterator)):
                         array, geotransform = to_north_up(values, plan.frame)
                         if dataset is None:
                             height, width = array.shape
@@ -306,6 +318,14 @@ class GeoTiffSliceWriter:
                             f"expected {len(plan.bands)} slices (one per planned band), got "
                             f"{written}"
                         )
+                    if next(iterator, None) is not None:
+                        # The other direction `strict=True` used to catch:
+                        # `zip` above stopped consuming `iterator` the
+                        # moment `plan.bands` was exhausted, so a surplus
+                        # item is still sitting unread here -- `written`
+                        # alone cannot see it, since it can never exceed
+                        # `len(plan.bands)`.
+                        raise ValueError(f"more slices than the plan's {len(plan.bands)} bands")
                 finally:
                     # Hold the dataset in a local and set it to None
                     # explicitly (see slice_layer.py's own `_write` for the

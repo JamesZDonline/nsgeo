@@ -225,3 +225,46 @@ def test_export_geotiff_also_writes_coverage_when_checked(plugin, tmp_path, answ
     )
     assert layer is not None and layer.isValid()
     assert plugin.layers.group.findLayer(layer.id()) is not None
+
+
+def test_a_failed_coverage_companion_does_not_report_the_main_export_as_failed(
+    plugin, tmp_path, answer_modal, message_log, monkeypatch
+):
+    """Task 6 fix round 2, Minor 2. By the time the coverage companion is
+    written, the main GeoTIFF already exists, has its temporal properties
+    applied, and is already in `layers.group` -- a failure writing the
+    companion (a full disk, a locked file) must not read as the main
+    export having failed. Cheaply provoked with a monkeypatch (a real
+    full-disk/locked-file condition is not practical to set up in a unit
+    test) rather than left unverified."""
+    import nsgeo_qgis.plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plugin_module, "write_coverage", _boom)
+
+    target = tmp_path / "slices" / "cube.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+
+    # The main export must stand: file on disk, valid layer, in the group.
+    assert target.exists()
+    layer = next(
+        (v for v in plugin.layers.project.mapLayers().values() if v.source() == str(target)),
+        None,
+    )
+    assert layer is not None and layer.isValid()
+    assert plugin.layers.group.findLayer(layer.id()) is not None
+    # No companion file, and no companion layer.
+    assert not (tmp_path / "slices" / "cube_coverage.tif").exists()
+
+    assert not any("could not export the GeoTIFF" in m for m in message_log)
+    assert any("coverage companion" in m for m in message_log)
+    assert any("disk full" in m for m in message_log)

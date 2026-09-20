@@ -625,6 +625,13 @@ class NsgeoPlugin:
           single-band raster "when asked" -- wired here to the control
           that already asks for exactly that, the dock's own coverage
           toggle, rather than adding a second button nobody requested.
+          Its write sits in its OWN `try/except` (Task 6 fix round 2,
+          Minor 2): by the time it runs, the main GeoTIFF has already
+          been written and added to the map, so a failure writing the
+          companion is reported at `Warning`, naming the companion file,
+          rather than reaching the outer handler's Critical "could not
+          export the GeoTIFF" -- which would misreport a fully successful
+          main export as a failure.
         """
         assert self.session is not None
         try:
@@ -665,13 +672,27 @@ class NsgeoPlugin:
             parts = [f"exported {len(plan.bands)} bands to {path}"]
             if dock.coverage_check.isChecked():
                 coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
-                write_coverage(engine, coverage_path)
-                coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
-                if coverage_layer.isValid():
+                try:
+                    write_coverage(engine, coverage_path)
+                    coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
+                    if not coverage_layer.isValid():
+                        raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
                     self.layers.project.addMapLayer(coverage_layer, False)
                     if self.layers.group is not None:
                         self.layers.group.addLayer(coverage_layer)
-                parts.append(f"coverage to {coverage_path}")
+                    parts.append(f"coverage to {coverage_path}")
+                except Exception as exc:  # noqa: BLE001 -- Task 6 fix round 2, Minor 2: the
+                    # main GeoTIFF above has already been written, its temporal properties
+                    # applied, and its layer added to `layers.group` -- a companion failure
+                    # here (a full disk, a locked file) must be reported on its own terms, at
+                    # Warning, naming the companion specifically, rather than reaching the
+                    # outer handler's Critical "could not export the GeoTIFF", which would
+                    # read as the main export having failed when it plainly did not.
+                    self.message(
+                        f"the GeoTIFF exported, but the coverage companion at {coverage_path} "
+                        f"could not be written: {exc}",
+                        Qgis.MessageLevel.Warning,
+                    )
             message = ", ".join(parts)
             if radius_cells == 0:
                 self.message(
