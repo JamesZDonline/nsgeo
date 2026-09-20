@@ -308,6 +308,70 @@ def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
     layers2.detach()
 
 
+# --- M8 acceptance walkthrough, Finding C: the moved-grid warning reached
+# only `QgsMessageLog` -- the Log Messages Panel, closed by default -- so
+# the author went looking for it and could not find it ("Where does this
+# warning exist?"). `on_warning`, following `LineLoader.on_error`'s own
+# precedent, is how `SiteLayers` reaches the plugin's message bar instead.
+# The log entry stays; this is IN ADDITION to it, never instead. ---
+
+_MOVED_GRID = Grid("A", (501.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+
+
+def test_on_warning_receives_the_moved_grid_warning(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    seen: list[str] = []
+    layers.on_warning = seen.append
+
+    session.replace_grid(_MOVED_GRID)
+
+    # `replace_grid` drives TWO refreshes (`grids_changed` then
+    # `lines_changed`) -- exactly one warning, not two, because the
+    # first refresh already updates `_last_grid_placements` to match the
+    # new placement before the second one runs (see
+    # `_warn_if_a_placed_grid_moved`'s own docstring).
+    assert len(seen) == 1
+    assert "A" in seen[0]
+    assert "changed position" in seen[0]
+
+
+def test_on_warning_is_not_called_when_no_grid_actually_moved(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    seen: list[str] = []
+    layers.on_warning = seen.append
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert seen == []
+
+
+def test_on_warning_defaults_to_none_and_behaves_exactly_as_before(populated, message_log):
+    session, layers, _ = populated
+    assert layers.on_warning is None
+    layers.write_pick(_a_pick())
+
+    session.replace_grid(_MOVED_GRID)  # must not raise with no callback attached
+
+    assert any("changed position" in m for m in message_log)
+
+
+def test_a_raising_on_warning_does_not_escape_or_break_the_refresh(populated, message_log):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+
+    def boom(msg: str) -> None:
+        raise RuntimeError("the message bar is unavailable")
+
+    layers.on_warning = boom
+
+    session.replace_grid(_MOVED_GRID)  # must not raise, must not abort the refresh
+
+    assert layers.feature_count("lines") == 3  # the rest of refresh() still ran
+    assert any("on_warning callback raised" in m for m in message_log)
+
+
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's
 # own CRS can be edited later (replace_grid, which Task 9's dock exposes).
 # Every already-created table was written in the old CRS and must be

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -234,11 +235,25 @@ def _as_opt_str(value: Any) -> str | None:
 
 class SiteLayers(QObject):
     def __init__(
-        self, session: SiteSession, project: QgsProject | None = None, parent: QObject | None = None
+        self,
+        session: SiteSession,
+        project: QgsProject | None = None,
+        on_warning: Callable[[str], None] | None = None,
+        parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.project = project or QgsProject.instance()
+        # Finding C (M8 walkthrough): "Where does this warning exist?" --
+        # nowhere the author could see, before this. `_warn_if_a_placed_grid_moved`
+        # only ever reached `QgsMessageLog` (the Log Messages Panel, closed
+        # by default). `SiteLayers` has no access to the message bar
+        # itself, so -- following `LineLoader`'s `on_error` precedent
+        # exactly (see loader.py and plugin.py's `initGui`) -- this is an
+        # optional callback the plugin wires to `self.message(...,
+        # Qgis.MessageLevel.Warning)`. Default None so every existing
+        # caller (tests included) behaves exactly as before.
+        self.on_warning = on_warning
         self.layers: dict[str, QgsVectorLayer] = {}
         self.group: Any = None
         # Final review, Important 2: each placed grid's own origin/
@@ -510,6 +525,19 @@ class SiteLayers(QObject):
         stays quiet by the same comparison: nothing "moved" relative to
         nothing, even though that site's `picks` table may already hold
         rows from before this session opened it.
+
+        Finding C (M8 walkthrough): the author asked "Where does this
+        warning exist?" -- the honest answer used to be "the Log Messages
+        Panel, which is closed by default", i.e. nowhere they would ever
+        see it. `_log` stays (it is the durable record: a QGIS session's
+        message bar auto-dismisses, the log does not), but now also
+        reaches `self.on_warning`, if the plugin gave one -- see
+        `SiteLayers.__init__` and `LineLoader.on_error`, whose precedent
+        this follows exactly. Guarded locally rather than trusting only
+        `refresh()`'s own containment around this whole method: this is
+        the one place in this class that calls out into plugin code from
+        inside a method reached by a Qt slot, and that call must not be
+        allowed to escape regardless of what any caller happens to do.
         """
         moved = sorted(
             grid_id
@@ -522,13 +550,18 @@ class SiteLayers(QObject):
         layer = self.layers.get("picks")
         if layer is None or sip.isdeleted(layer) or self.feature_count("picks") == 0:
             return
-        _log(
+        message = (
             f"grid(s) {', '.join(moved)} changed position, orientation or size; "
             "picks already recorded against lines on them keep the map position "
             "they were authored at and will no longer sit on their line -- picks "
-            "are not re-placed automatically (see the Picking section of the README)",
-            Qgis.MessageLevel.Warning,
+            "are not re-placed automatically (see the Picking section of the README)"
         )
+        _log(message, Qgis.MessageLevel.Warning)
+        if self.on_warning is not None:
+            try:
+                self.on_warning(message)
+            except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
+                _log(f"the on_warning callback raised: {exc}", Qgis.MessageLevel.Critical)
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
