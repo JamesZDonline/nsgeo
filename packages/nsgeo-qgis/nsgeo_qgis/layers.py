@@ -1304,19 +1304,34 @@ class SiteLayers(QObject):
         marker.setStrokeColor(QColor(255, 255, 255))
         marker.setStrokeWidth(0.4)
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-        # `saveStyleToDatabase`, not the newer `saveStyleToDatabaseV2`. An
-        # earlier note here justified that by V2 not being available on
-        # the target QGIS -- checked directly against this build
-        # (3.44.7-Solothurn): `saveStyleToDatabaseV2` DOES exist. That was
-        # never the real reason to keep the deprecated call; the actual
-        # reason is simply that it works and the target here is QGIS 3.44
-        # LTR, so switching is a separate decision for whenever the
-        # plugin's minimum QGIS version moves, not part of this fix. It
-        # does emit a `DeprecationWarning` into test output (here and in
-        # the test that simulates a user's own saved style) -- expected
-        # and harmless, named here so it reads as known rather than a
-        # mystery to chase.
-        err = layer.saveStyleToDatabase("default", "nsgeo picks", True, "")
+        # Which save call, and why it is chosen at runtime rather than
+        # hardcoded. Two earlier versions of this comment each reached a
+        # true conclusion by a wrong route: first that
+        # `saveStyleToDatabaseV2` is unavailable (it exists on this
+        # 3.44.7 build), then that keeping the deprecated call is fine
+        # "because the target is 3.44 LTR". The real constraint is
+        # `metadata.txt`'s `qgisMinimumVersion=3.40`: V2 is documented
+        # `versionadded:: 4.0`, so on the 3.40-3.43 builds this plugin
+        # declares support for, calling it unconditionally would raise
+        # AttributeError and leave the table unstyled -- while on this
+        # build and later the deprecated call warns on every site
+        # creation (measured: 200 DeprecationWarnings across the QGIS
+        # tier against a baseline of zero, which is not the pristine
+        # output this suite otherwise holds to).
+        #
+        # Feature-detecting satisfies both: no warning where V2 exists,
+        # no AttributeError where it does not, and nothing to revisit
+        # when the minimum version moves. The return shapes differ --
+        # V2 gives (SaveStyleResults, msgError), the original gives
+        # msgError alone -- so only the message is compared, which is
+        # what both use to signal failure. The fallback branch has its
+        # own test (`test_the_style_still_saves_on_a_qgis_without_
+        # saveStyleToDatabaseV2`), since it cannot otherwise run here.
+        save_v2 = getattr(layer, "saveStyleToDatabaseV2", None)
+        if save_v2 is not None:
+            _, err = save_v2("default", "nsgeo picks", True, "")
+        else:  # QGIS < 4.0 without the V2 backport; see qgisMinimumVersion
+            err = layer.saveStyleToDatabase("default", "nsgeo picks", True, "")
         if err:
             raise RuntimeError(f"could not save the picks layer's style: {err}")
 

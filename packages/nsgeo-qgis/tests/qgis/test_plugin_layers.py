@@ -211,6 +211,56 @@ def test_the_style_is_saved_to_the_geopackage_not_just_the_in_memory_layer(popul
     assert renderer.symbol().color().name() == PICK_COLOUR.name()
 
 
+def test_the_style_still_saves_on_a_qgis_without_saveStyleToDatabaseV2(
+    qgis_app, tmp_path, monkeypatch
+):
+    """`_style_picks` chooses its save call at runtime because neither
+    one works everywhere this plugin claims to run: `saveStyleToDatabaseV2`
+    is `versionadded:: 4.0`, while `metadata.txt` declares
+    `qgisMinimumVersion=3.40`. V2 exists on this build, so every other
+    test in this file exercises only that branch -- the deprecated
+    fallback, which is the branch that actually protects the declared
+    minimum version, would never run at all.
+
+    Patched to `None` rather than deleted, deliberately. `del
+    QgsVectorLayer.saveStyleToDatabaseV2` appears to succeed on a
+    sip-wrapped class and then does nothing -- verified directly: the
+    built-in is still reachable through `getattr` afterwards, and
+    `monkeypatch.undo()` fails trying to restore what it believes it
+    removed. `None` reproduces exactly what the production code
+    observes on a 3.40-3.43 build, because it reads the attribute as
+    `getattr(layer, "saveStyleToDatabaseV2", None)` and branches on
+    `is not None` -- an absent attribute and a `None` one are the same
+    value at that call site.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    monkeypatch.setattr(QgsVectorLayer, "saveStyleToDatabaseV2", None)
+    assert getattr(QgsVectorLayer, "saveStyleToDatabaseV2", None) is None  # the premise
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    # `pytest.warns` rather than a filter: the DeprecationWarning is the
+    # direct evidence that the FALLBACK branch ran, not the V2 one, so
+    # asserting it is strictly stronger than silencing it -- and it keeps
+    # the one warning this suite legitimately produces from reading as
+    # stray noise. (`add_grid` reaches `_style_picks` synchronously via
+    # `grids_changed` -> `refresh`, so the warning surfaces here.)
+    with pytest.warns(DeprecationWarning, match="saveStyleToDatabase"):
+        session.add_grid(GRID)
+    monkeypatch.undo()
+
+    # Styled through the fallback, and durably: a fresh layer opened
+    # straight off the package comes up with the pick colour, which only
+    # a style actually written into `layer_styles` can produce.
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.isValid()
+    assert fresh.renderer().symbol().color().name() == PICK_COLOUR.name()
+    layers.detach()
+    project.clear()
+
+
 def test_ensure_tables_called_again_does_not_restyle_an_up_to_date_table(populated):
     """`_ensure_table`'s up-to-date short-circuit must be what protects a
     user's own restyle, not luck: calling `ensure_tables()` again with
@@ -237,7 +287,16 @@ def test_reopening_the_package_does_not_reapply_style_over_a_user_change(populat
     custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
     custom.setColor(QColor("#00ff00"))
     picks.setRenderer(QgsSingleSymbolRenderer(custom))
-    err = picks.saveStyleToDatabase("default", "the user's own style", True, "")
+    # Feature-detected the same way `_style_picks` does, and for the same
+    # reason: V2 is `versionadded:: 4.0` while metadata.txt declares
+    # qgisMinimumVersion=3.40, so neither call alone works everywhere this
+    # plugin claims to run. Here it also keeps the suite's output pristine
+    # -- the deprecated call warns once per invocation.
+    save_v2 = getattr(picks, "saveStyleToDatabaseV2", None)
+    if save_v2 is not None:
+        _, err = save_v2("default", "the user's own style", True, "")
+    else:
+        err = picks.saveStyleToDatabase("default", "the user's own style", True, "")
     assert not err
 
     session.save()
