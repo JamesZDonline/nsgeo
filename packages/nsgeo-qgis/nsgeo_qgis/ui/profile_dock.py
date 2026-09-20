@@ -153,7 +153,12 @@ class ProfileDock(QgsDockWidget):
         bar.addWidget(self.percentile_slider)
         bar.addWidget(self.percentile_label)
         self.colormap_combo = QComboBox()
-        self.colormap_combo.addItems(colormap_names())
+        # Radargram amplitude is bipolar; the unipolar tables (M10, for
+        # horizontal slices) don't belong here -- amp_heat on bipolar data
+        # is a configuration error, and amp_black_high/amp_white_high are
+        # pixel-identical to grey_black_high/grey_white_high already in
+        # this list.
+        self.colormap_combo.addItems(colormap_names(unipolar=False))
         self.colormap_combo.setCurrentText(DEFAULT_COLORMAP)
         bar.addWidget(self.colormap_combo)
         # Finding 7 (M7 walkthrough re-review, third round): the preview

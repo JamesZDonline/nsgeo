@@ -8,7 +8,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
-from nsgeo.render import PercentileClip
+from nsgeo.render import PercentileClip, colormap_names
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
@@ -102,6 +102,21 @@ def test_display_gain_rerenders_without_touching_the_stack(opened):
     dock.colormap_combo.setCurrentText("seismic")
     assert dock.image.colormap_name == "seismic"
     assert len(session.stack_for(key)) == 0
+
+
+def test_colormap_combo_offers_only_bipolar_tables(bare):
+    """M10 gave `colormap_names()` a `unipolar` filter for slice display.
+    A radargram is bipolar, so this combo must ask for the bipolar tables
+    only -- calling it with no argument would silently add amp_heat (a
+    configuration error on bipolar data, per render.py's own
+    UNIPOLAR_COLORMAPS docstring) plus amp_black_high/amp_white_high,
+    which are pixel-identical to grey_black_high/grey_white_high already
+    in the list.
+    """
+    _, dock, _ = bare
+    items = [dock.colormap_combo.itemText(i) for i in range(dock.colormap_combo.count())]
+    assert items == colormap_names(unipolar=False)
+    assert "amp_heat" not in items
 
 
 def test_percentile_slider_direction_is_gain_intuitive(opened):

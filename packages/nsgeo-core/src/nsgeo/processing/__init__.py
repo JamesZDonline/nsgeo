@@ -7,6 +7,7 @@ Importing this package registers every built-in step, so `build_step` and
 from __future__ import annotations
 
 from nsgeo.processing import (  # noqa: F401
+    amplitude,
     background,
     bandpass,
     dewow,
@@ -22,6 +23,7 @@ from nsgeo.processing.base import (  # noqa: F401
     build_step,
     default_params,
     get_step,
+    is_unipolar,
     nyquist_mhz,
     register,
     required_params,
