@@ -21,15 +21,23 @@ slot below guards its own body and reports through `error` or
 
 from __future__ import annotations
 
+from typing import Any
+
+import numpy as np
+from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
+from nsgeo.slices import CubeFrame, SliceWindow, fill, plan_windows, window_label
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSlider,
     QVBoxLayout,
     QWidget,
 )
@@ -39,11 +47,13 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
+    Resolution,
     SourceChoice,
     estimate_memory,
     format_bytes,
     transform_names,
 )
+from nsgeo_qgis.ui.profile_dock import velocity_source
 
 
 class SlicesDock(QgsDockWidget):
@@ -52,6 +62,10 @@ class SlicesDock(QgsDockWidget):
     #: same split `SurveyDock`/`ProfileDock` already use for grid/import.
     choose_lines_requested = pyqtSignal()
     error = pyqtSignal(str)
+    #: Emitted at the end of `refresh_slice()`, whenever `current_values()`
+    #: /`current_frame()`/`display_limit()` are worth reading again --
+    #: `plugin.py` connects this to redraw `SliceLayer` (Task 4).
+    slice_changed = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -100,6 +114,20 @@ class SlicesDock(QgsDockWidget):
         #: makes an explicit choice (`set_included`), and set again only by
         #: an actual grid change.
         self._included_is_default = True
+        #: The current slice's own values (post coverage/fill) and the
+        #: `SliceWindow` they came from, as `refresh_slice()` last left
+        #: them -- `None` before anything has been prepared. `display_limit()`
+        #: reads both: the array for "this slice"'s own clip, `_window
+        #: .n_levels` as half the shared-limit cache's key.
+        self._values: np.ndarray | None = None
+        self._window: SliceWindow | None = None
+        #: `(key, limit)` from the last `shared_limit()` call, where `key`
+        #: is `(n_levels, engine.choice, engine.mode)` -- everything
+        #: `nsgeo.slices.shared_limit` (via the engine) actually measures
+        #: over. Recomputing it is a pass over every window in the cube
+        #: (tens of them), not a per-tick cost, so `display_limit()` only
+        #: pays for it again when one of those three actually changed.
+        self._shared_limit_cache: tuple[tuple[Any, ...], float] | None = None
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -129,10 +157,135 @@ class SlicesDock(QgsDockWidget):
         source_layout.addWidget(self.source_status)
 
         outer.addWidget(self.source_group)
-        # Task 4 appends Position/Resolution/Display group boxes here,
-        # above this stretch, with no restructuring of what is above.
+
+        # ---- Position: the slider IS the top of the window (spec 9.2) --
+        # there is no separate "Top" field. The readout sits directly
+        # beneath it with nothing between them, because the control that
+        # moves the window and the statement of where it now is are read
+        # together on every tick; `velocity_label` is one line further
+        # down, in a smaller and dimmer face, because a velocity is
+        # provenance about the source, not state this control changes.
+        self.position_group = QGroupBox("Position")
+        position_layout = QVBoxLayout(self.position_group)
+
+        self.slice_slider = QSlider(Qt.Orientation.Horizontal)
+        self.slice_slider.setRange(0, 0)
+        position_layout.addWidget(self.slice_slider)
+
+        self.readout = QLabel("not prepared")
+        position_layout.addWidget(self.readout)
+
+        self.velocity_label = QLabel("")
+        velocity_font = self.velocity_label.font()
+        velocity_font.setPointSizeF(max(1.0, velocity_font.pointSizeF() * 0.85))
+        self.velocity_label.setFont(velocity_font)
+        self.velocity_label.setStyleSheet("color: palette(mid);")
+        position_layout.addWidget(self.velocity_label)
+
+        thickness_form = QFormLayout()
+        self.thickness_spin = QDoubleSpinBox()
+        self.thickness_spin.setRange(0.01, 100_000.0)
+        self.thickness_spin.setDecimals(2)
+        self.thickness_spin.setSuffix(" ns")
+        self.thickness_spin.setValue(5.0)
+        self.step_spin = QDoubleSpinBox()
+        self.step_spin.setRange(0.01, 100_000.0)
+        self.step_spin.setDecimals(2)
+        self.step_spin.setSuffix(" ns")
+        # Spec 6.6's 50% overlap default: a reflector sitting on a window
+        # boundary is halved in both neighbours rather than lost from one
+        # of them, which a step equal to the thickness (no overlap) would
+        # do at every boundary in the stack.
+        self.step_spin.setValue(self.thickness_spin.value() / 2.0)
+        thickness_form.addRow("Thickness", self.thickness_spin)
+        thickness_form.addRow("Step", self.step_spin)
+        position_layout.addLayout(thickness_form)
+
+        outer.addWidget(self.position_group)
+
+        # ---- Resolution: the binning geometry, debounced (44 ms a
+        # rebuild, spec 7.2 and trap 4) so a slider dragged through five
+        # cell sizes in a second rebuilds once, not five times.
+        self.resolution_group = QGroupBox("Resolution")
+        resolution_form = QFormLayout(self.resolution_group)
+
+        self.cell_spin = QDoubleSpinBox()
+        self.cell_spin.setRange(0.01, 5.0)
+        self.cell_spin.setDecimals(3)
+        self.cell_spin.setSuffix(" m")
+        self.cell_spin.setValue(0.5)
+        resolution_form.addRow("Cell size", self.cell_spin)
+
+        self.dz_spin = QDoubleSpinBox()
+        self.dz_spin.setRange(0.001, 100.0)
+        self.dz_spin.setDecimals(4)
+        self.dz_spin.setSuffix(" ns")
+        self.dz_spin.setValue(1.0)
+        resolution_form.addRow("dz", self.dz_spin)
+
+        self.z0_spin = QDoubleSpinBox()
+        self.z0_spin.setRange(-1_000.0, 100_000.0)
+        self.z0_spin.setDecimals(3)
+        self.z0_spin.setSuffix(" ns")
+        self.z0_spin.setValue(0.0)
+        resolution_form.addRow("z0", self.z0_spin)
+
+        self.z1_spin = QDoubleSpinBox()
+        self.z1_spin.setRange(-1_000.0, 100_000.0)
+        self.z1_spin.setDecimals(3)
+        self.z1_spin.setSuffix(" ns")
+        self.z1_spin.setValue(100.0)
+        resolution_form.addRow("z1", self.z1_spin)
+
+        self.radius_spin = QDoubleSpinBox()
+        self.radius_spin.setRange(0.0, 50.0)
+        self.radius_spin.setDecimals(3)
+        self.radius_spin.setSuffix(" m")
+        self.radius_spin.setValue(0.0)
+        resolution_form.addRow("Fill radius", self.radius_spin)
+
+        outer.addWidget(self.resolution_group)
+
+        # One debounce for all five Resolution widgets: `flush_debounce()`
+        # stops the timer and applies immediately, for tests and for
+        # anything that needs the current geometry right away.
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(120)
+        self._debounce.timeout.connect(self._apply_resolution)
+
+        # ---- Display: how the slice is coloured and stretched, never
+        # what it contains -- spec 8's comparability-by-default,
+        # legibility-on-demand split.
+        self.display_group = QGroupBox("Display")
+        display_form = QFormLayout(self.display_group)
+
+        self.stretch_combo = QComboBox()
+        self.stretch_combo.addItems(["shared across the cube", "this slice"])
+        display_form.addRow("Stretch", self.stretch_combo)
+
+        self.palette_combo = QComboBox()
+        display_form.addRow("Palette", self.palette_combo)
+
+        self.coverage_check = QCheckBox("Show coverage")
+        display_form.addRow(self.coverage_check)
+
+        self.legend_label = QLabel("")
+        display_form.addRow("Legend", self.legend_label)
+
+        outer.addWidget(self.display_group)
+
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        outer.addWidget(self.status_label)
+
         outer.addStretch(1)
         self.setWidget(body)
+
+        # A palette is always offered, even before any source is chosen
+        # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
+        # refills it with the real answer once a source actually exists.
+        self._refill_palette_combo()
 
         # Filled once, and BEFORE the connects just below: `transform_names()`
         # is the registry, not the site, and does not change while this dock
@@ -162,6 +315,32 @@ class SlicesDock(QgsDockWidget):
         session.grids_changed.connect(self.rebuild_source)
         session.lines_changed.connect(self.rebuild_source)
         session.presets_changed.connect(self.rebuild_source)
+
+        # Position is cheap (0.6-4 ms, the module docstring's own figure):
+        # every tick redraws directly, with no debounce.
+        self.slice_slider.valueChanged.connect(lambda _value: self.refresh_slice())
+        self.thickness_spin.valueChanged.connect(lambda _value: self.refresh_slice())
+        self.step_spin.valueChanged.connect(lambda _value: self.refresh_slice())
+
+        # Resolution is not: every one of these five widgets only starts
+        # the shared debounce (see its own construction above for why).
+        for _spin in (
+            self.cell_spin,
+            self.dz_spin,
+            self.z0_spin,
+            self.z1_spin,
+            self.radius_spin,
+        ):
+            _spin.valueChanged.connect(lambda _value: self._debounce.start())
+
+        # Display changes no value `refresh_slice()` fetches from the
+        # engine, but each still changes what the map ought to show --
+        # a new palette, a different stretch, coverage instead of
+        # amplitude -- so each still funnels through the one path that
+        # recomputes `_values` and re-emits `slice_changed`.
+        self.stretch_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
+        self.palette_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
+        self.coverage_check.toggled.connect(lambda _checked: self.refresh_slice())
 
         self.rebuild_source()
 
@@ -254,12 +433,22 @@ class SlicesDock(QgsDockWidget):
         (`grids_changed` then `lines_changed`) before the user ever
         touches a combo, and the seed from the FIRST of those must not
         outlive the other two.
+
+        An actual grid change is also the one moment `_seed_resolution_
+        defaults` re-seeds the Resolution group: `cell_spin`/`radius_spin`
+        from `grid_id`'s own `default_spacing` (spec 4, spec 6.4) and
+        `dz_spin`/`z0_spin`/`z1_spin` from the new default's first
+        included line, if it has one yet. Tied to this branch and not to
+        every call here, for the same reason `_included_is_default`
+        exists at all: reseeding on every `presets_changed` would silently
+        overwrite a cell size the user picked for THIS grid.
         """
         grid_id = self.grid_combo.currentText() or None
         if grid_id != self._last_grid_id:
             self._last_grid_id = grid_id
             self._included = self._default_included(grid_id)
             self._included_is_default = True
+            self._seed_resolution_defaults(grid_id)
             return
         if self._included_is_default:
             self._included = self._default_included(grid_id)
@@ -518,6 +707,19 @@ class SlicesDock(QgsDockWidget):
         try:
             self._update_included_label()
             self._refresh_source_status()
+            # Spec 8's rule enforced here, not just described: the combo
+            # only ever lists tables that suit the source's OWN polarity
+            # (`engine.output_unipolar`), which can only be known once a
+            # preparation has actually run.
+            self._refill_palette_combo()
+            # Without this, a source that finishes preparing while the
+            # Position/Resolution controls have not themselves changed
+            # since (the ordinary case: their debounce already applied a
+            # seeded default while the ~0.9 s preparation was still
+            # in flight) would leave the map and `current_values()`
+            # exactly as `refresh_slice()`'s own early return last left
+            # them -- `None` -- until the user happens to touch a control.
+            self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report that the slice source is prepared: {exc}")
 
@@ -527,3 +729,221 @@ class SlicesDock(QgsDockWidget):
             self._refresh_source_status()
         except Exception:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report a slice engine error: {message}")
+
+    # ---- Position/Resolution/Display -------------------------------------
+    def _seed_resolution_defaults(self, grid_id: str | None) -> None:
+        """Re-seed the Resolution group's defaults from the grid that was
+        just selected -- called only from `_sync_included`'s grid-changed
+        branch, so an unrelated session signal never overwrites a value
+        the user picked for the grid that is still selected.
+
+        `cell_spin`/`radius_spin` need only the grid itself (spec 4's "no
+        smaller than the trace spacing, no larger than half the line
+        spacing", and spec 6.4's 1.5x-spacing fill radius). `dz_spin`/
+        `z0_spin`/`z1_spin` need a line too -- there is no such thing as a
+        grid's own native sample interval -- so they are left at whatever
+        they already were when the grid has none yet (`lines_changed`
+        later does not re-trigger this; see the module docstring's own
+        `_included_is_default` reasoning for why re-seeding on every
+        session signal would be wrong, not merely unnecessary).
+
+        `z0_spin` is seeded from `header.position_ns`, NOT 0: a DZT's
+        recorded window need not start at time zero at all (`velocity.py`'s
+        own docstring gives a real SIR-4000 example starting at -11.09 ns),
+        and `Radargram.from_profile` sets exactly `t0_ns=header.position_ns`
+        (`processing/base.py`). Seeding 0.0 here -- caught only by actually
+        running `refresh_slice()` against a real synthetic fixture, not by
+        inspection -- silently asked for levels before the line's own
+        recording starts, which `plan_line` refuses with `CoverageError`
+        the moment anything tries to slice it.
+        """
+        if grid_id is None or not self.session.is_open:
+            return
+        try:
+            grid = self.session.grid(grid_id)
+        except KeyError:
+            return
+        self.cell_spin.setValue(min(0.5, grid.default_spacing / 2.0))
+        self.radius_spin.setValue(1.5 * grid.default_spacing)
+        included = self._default_included(grid_id)
+        if not included:
+            return
+        header = self.session.line_for_key(included[0]).header
+        self.dz_spin.setValue(header.dt_ns)
+        self.z0_spin.setValue(header.position_ns)
+        self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
+
+    def _refill_palette_combo(self) -> None:
+        """Spec 8's rule made concrete: only tables that suit the
+        source's actual polarity are ever offered, defaulting to the one
+        named for that polarity rather than preserving whatever the combo
+        happened to show for a differently-polarised source before."""
+        unipolar = self.engine.output_unipolar
+        names = colormap_names(unipolar=unipolar)
+        default = "amp_black_high" if unipolar else DEFAULT_COLORMAP
+        self.palette_combo.clear()
+        self.palette_combo.addItems(names)
+        if default in names:
+            self.palette_combo.setCurrentText(default)
+
+    def current_window(self) -> SliceWindow | None:
+        z = self.engine.z
+        if z is None:
+            return None
+        top_ns = z.t0_ns + self.slice_slider.value() * z.dz_ns
+        k0, k1 = z.level_range(top_ns, max(z.dz_ns, self.thickness_spin.value()))
+        return SliceWindow(k0, k1)
+
+    def current_frame(self) -> CubeFrame | None:
+        return self.engine.frame
+
+    def current_values(self) -> np.ndarray | None:
+        return self._values
+
+    def radius_cells(self) -> int:
+        return max(0, int(round(self.radius_spin.value() / self.cell_spin.value())))
+
+    def _step_levels(self, z: Any) -> int:
+        """`step_spin`'s nanoseconds, in levels of `z` -- at least 1, so a
+        step spin box smaller than `dz_ns` still advances by something
+        rather than stalling `step_slice`/the readout's index forever."""
+        return max(1, int(round(self.step_spin.value() / z.dz_ns)))
+
+    def step_slice(self, delta: int) -> None:
+        """Move the slider by `delta` STEPS, not levels -- the unit a
+        person navigating overlapping slices actually thinks in."""
+        z = self.engine.z
+        step_levels = self._step_levels(z) if z is not None else 1
+        target = self.slice_slider.value() + delta * step_levels
+        target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), target))
+        self.slice_slider.setValue(target)
+
+    def flush_debounce(self) -> None:
+        """Apply a pending Resolution change immediately. Used by tests,
+        and by anything else that needs the current geometry right now
+        rather than up to 120 ms from now."""
+        self._debounce.stop()
+        self._apply_resolution()
+
+    def _apply_resolution(self) -> None:
+        try:
+            previous_time: float | None = None
+            old_z = self.engine.z
+            if old_z is not None:
+                previous_time = old_z.t0_ns + self.slice_slider.value() * old_z.dz_ns
+            try:
+                resolution = Resolution(
+                    cell=self.cell_spin.value(),
+                    dz_ns=self.dz_spin.value(),
+                    t0_ns=self.z0_spin.value(),
+                    t1_ns=self.z1_spin.value(),
+                )
+            except ValueError as exc:
+                # __post_init__'s own validation (e.g. z1 <= z0) -- a
+                # refusal the user can read, not a crash from a QTimer slot.
+                self.error.emit(str(exc))
+                return
+            self.engine.set_resolution(resolution)
+            # Keyed on `(n_levels, choice, mode)` -- see the field's own
+            # docstring -- and a geometry change can only have moved
+            # `n_levels` (the axis it is measured against changed), so
+            # there is no cheaper way to know the old cache is still good.
+            self._shared_limit_cache = None
+            new_z = self.engine.z
+            nz = new_z.nz if new_z is not None else 1
+            self.slice_slider.setRange(0, max(0, nz - 1))
+            if new_z is not None and previous_time is not None:
+                nearest = int(round((previous_time - new_z.t0_ns) / new_z.dz_ns))
+                self.slice_slider.setValue(max(0, min(new_z.nz - 1, nearest)))
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            self.error.emit(str(exc))
+
+    def refresh_slice(self) -> None:
+        try:
+            window = self.current_window()
+            if window is None or not self.engine.is_prepared:
+                self._values = None
+                return
+            values, coverage = self.engine.slice_at(window)
+            if self.coverage_check.isChecked():
+                shown = coverage.astype(float)
+                shown[coverage == 0] = np.nan
+            else:
+                shown = fill(values, coverage, self.radius_cells())
+            self._values = shown
+            self._window = window
+            self._update_readout(window)
+            self.status_label.setText(self.engine.status_text())
+            self.slice_changed.emit()
+        except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
+            # escape passes locally and aborts the CI container.
+            self.error.emit(str(exc))
+
+    def _update_readout(self, window: SliceWindow) -> None:
+        """Spec 6.6: derived from `(k0, k1)` -- what `ZAxis.level_range`
+        actually returned -- and NEVER rebuilt from `self.slice_slider
+        .value()`/`self.thickness_spin.value()`, which can disagree with
+        it at either end of the axis (trap 3). `velocity_label` and
+        `legend_label` are refreshed alongside it, on the same tick, for
+        the same "read together" reason spec 9.2 puts them in one group.
+        """
+        z = self.engine.z
+        assert z is not None  # refresh_slice() already checked current_window()
+        step_levels = self._step_levels(z)
+        windows = plan_windows(z, window.n_levels, step_levels)
+        # `windows` tiles from level 0 in steps of `step_levels`; a window
+        # this thin only at an axis end (trap 3) need not be a member of
+        # that tiling at all, so this is arithmetic, not a search -- and
+        # it degrades gracefully to "the last slice" there rather than
+        # raising.
+        index = min(len(windows) - 1, window.k0 // step_levels)
+        label = window_label(z, window)
+        self.readout.setText(f"slice {index + 1} / {len(windows)} · {label}")
+        self._update_velocity_label()
+        self._update_legend_label()
+
+    def _update_velocity_label(self) -> None:
+        try:
+            keys = self.engine.provenance().line_keys
+        except RuntimeError:
+            self.velocity_label.setText("")
+            return
+        if not keys:
+            self.velocity_label.setText("")
+            return
+        key = keys[0]
+        model = self.session.resolved_velocity(key)
+        source = velocity_source(self.session, key)
+        self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({source})")
+
+    def _update_legend_label(self) -> None:
+        limit = self.display_limit()
+        base = f"0 – {limit:.3g}" if self.engine.output_unipolar else f"−{limit:.3g} – {limit:.3g}"
+        transform_label = self.transform_combo.currentText() or "none"
+        self.legend_label.setText(f"{base} ({transform_label})")
+
+    def display_limit(self) -> float:
+        """Spec 8: one limit for the whole cube by default, so depths stay
+        comparable; a limit measured on just this slice, on demand, for
+        legibility when a deep, dim window would otherwise wash out.
+
+        The shared branch is cached (`_shared_limit_cache`) because it is
+        a pass over every window in the cube, not a per-tick cost, and is
+        only recomputed when the key it is measured over -- `(n_levels,
+        engine.choice, engine.mode)` -- actually changed; see that field's
+        own docstring for why those three and nothing else.
+        """
+        clip: Any = UnipolarClip() if self.engine.output_unipolar else PercentileClip()
+        if self.stretch_combo.currentText() == "this slice":
+            if self._values is None:
+                return 1.0
+            return clip.limit(self._values)
+        window = self._window
+        if window is None:
+            return 1.0
+        key = (window.n_levels, self.engine.choice, self.engine.mode)
+        if self._shared_limit_cache is None or self._shared_limit_cache[0] != key:
+            value = self.engine.shared_limit(window.n_levels, clip)
+            self._shared_limit_cache = (key, value)
+        return self._shared_limit_cache[1]

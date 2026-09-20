@@ -1,11 +1,14 @@
-"""The Slices dock's Source group."""
+"""The Slices dock's Source group, and its Position/Resolution/Display groups."""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.render import colormap_names
+from nsgeo.slices import window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import transform_names
 from nsgeo_qgis.ui.slices_dock import SlicesDock
@@ -378,3 +381,188 @@ def test_a_failed_schedule_does_not_claim_lines_prepared(docked, monkeypatch):
 
     assert not dock.engine.is_prepared
     assert dock.source_status.text() == "not prepared · every line failed"
+
+
+def _ready(dock):
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.dz_spin.setValue(0.5)
+    dock.cell_spin.setValue(0.25)
+    dock.flush_debounce()  # applies the pending Resolution change immediately
+
+
+def test_the_readout_states_the_window_that_was_actually_averaged(docked):
+    """Spec 9.2: the control that moves the window and the statement of
+    where the window now is are one unit, read together on every tick.
+    Spec 6.6: always the full range, never the centre -- with overlapping
+    slices, the extent of what is averaged is the thing a reader would
+    otherwise mistake for vertical resolution."""
+    dock, _ = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    text = dock.readout.text()
+    window = dock.current_window()
+    assert window is not None
+    lo, hi = window_times_ns(dock.engine.z, window)
+    assert f"{lo:.1f}" in text and f"{hi:.1f}" in text
+    assert "ns" in text
+    assert "/" in text and "slice" in text  # "slice 14 / 40"
+
+
+def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
+    """Trap 3. At either end `ZAxis.level_range` returns a genuinely
+    thinner window than asked for, and spec 6.6 requires the readout to
+    show what was actually averaged. A readout rebuilt from the slider
+    position plus the thickness spin box claims a window the axis
+    refused."""
+    dock, _ = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(8.0)
+    dock.slice_slider.setValue(dock.slice_slider.maximum())
+    window = dock.current_window()
+    lo, hi = window_times_ns(dock.engine.z, window)
+    assert hi <= dock.engine.z.t_end_ns + 1e-9
+    assert hi - lo < 8.0  # thinner than requested, and the readout says so
+    assert f"{hi:.1f}" in dock.readout.text()
+
+
+def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
+    dock, _ = docked
+    _ready(dock)
+    seen: list[int] = []
+    dock.slice_changed.connect(lambda: seen.append(1))
+    dock.slice_slider.setValue(4)
+    first = dock.current_values().copy()
+    dock.slice_slider.setValue(30)
+    second = dock.current_values()
+    assert len(seen) >= 2
+    both = np.isfinite(first) & np.isfinite(second)
+    assert both.any()
+    assert not np.allclose(first[both], second[both]), "a different depth must look different"
+
+
+def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
+    """Spec 6.4's default is 1.5 x the line spacing -- a distance. The
+    spin box is therefore in metres and the cell conversion happens
+    underneath, so halving the cell size does not silently halve the
+    smoothing.
+
+    Strengthened from the brief's own draft: with this fixture's
+    `GRID.default_spacing` of 0.5, the default radius is 0.75 m -- under
+    1 cell wide before ANY conversion -- so `int(self.radius_spin.value())`
+    (metres misread as an already-integer cell count, the exact mutant
+    Step 10 names) truncates to 0 both before and after the cell change,
+    and `before * 2 == 0` too, so the relative-doubling check alone passes
+    even against that mutant (verified: all 37 tests in this file and
+    `test_plugin_slice_layer.py` still passed with that mutant applied).
+    The added absolute check pins the one number the mutant cannot also
+    get right by accident."""
+    dock, session = docked
+    _ready(dock)
+    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    before = dock.radius_cells()
+    assert before == round(1.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
+    dock.cell_spin.setValue(0.125)
+    dock.flush_debounce()
+    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
+    """Spec 6.4: at realistic spacing about 80% of cells are empty, so the
+    fill is most of the picture rather than a nicety."""
+    dock, _ = docked
+    _ready(dock)
+    dock.radius_spin.setValue(0.0)
+    dock.flush_debounce()
+    unfilled = np.isfinite(dock.current_values()).sum()
+    dock.radius_spin.setValue(1.0)
+    dock.flush_debounce()
+    filled = np.isfinite(dock.current_values()).sum()
+    assert filled > unfilled
+
+
+def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
+    """Spec 3: a zero that means 'no data' reading as 'no reflection' is
+    the defect a count array exists to fix, and the coverage view is where
+    a user sees it."""
+    dock, _ = docked
+    _ready(dock)
+    dock.coverage_check.setChecked(True)
+    coverage = dock.current_values()
+    assert np.nanmax(coverage) >= 1.0
+    assert np.allclose(coverage[np.isfinite(coverage)] % 1.0, 0.0), "counts are whole traces"
+    dock.coverage_check.setChecked(False)
+    assert not np.allclose(np.nan_to_num(dock.current_values()), np.nan_to_num(coverage))
+
+
+def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):
+    """Spec 8: comparability by default, legibility on demand."""
+    dock, _ = docked
+    _ready(dock)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(4)
+    shallow = dock.display_limit()
+    dock.slice_slider.setValue(40)
+    deep = dock.display_limit()
+    assert shallow == pytest.approx(deep)
+
+    dock.stretch_combo.setCurrentText("this slice")
+    dock.slice_slider.setValue(4)
+    shallow_own = dock.display_limit()
+    dock.slice_slider.setValue(40)
+    deep_own = dock.display_limit()
+    assert shallow_own != pytest.approx(deep_own)
+
+
+def test_the_palette_offers_unipolar_tables_for_a_transformed_source(docked):
+    """Spec 8's rule: a bipolar table on unipolar data is a configuration
+    error, not a style choice. The combo is where that rule is enforced.
+
+    Fixed from the brief's own draft: `docked`'s preset ("p", a plain
+    `dewow`) carries no transform, and `transform_combo` starts on its
+    first item, "none" -- so without explicitly choosing a transform here,
+    `engine.output_unipolar` is already False right after `_ready()`, and
+    the very first assertion below (expecting the UNIPOLAR list) fails
+    against correct code. The name says "for a transformed source"; the
+    fixture needs to actually be one before that assertion runs."""
+    dock, _ = docked
+    _ready(dock)
+    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert set(offered) == set(colormap_names(unipolar=True))
+    assert "seismic" not in offered
+
+    dock.transform_combo.setCurrentText("none")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert set(offered) == set(colormap_names(unipolar=False))
+    assert "amp_heat" not in offered
+
+
+def test_the_status_line_reports_what_is_held_and_how_fast(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.slice_slider.setValue(8)
+    text = dock.status_label.text()
+    assert "lines held in memory" in text
+    assert "slices redraw in" in text
+
+
+def test_a_resolution_change_is_debounced_into_one_rebuild(docked):
+    """Spec 7.2 and trap 4: a rebuild is 44 ms and even the improved fill
+    is 32 ms at 600x600, so a slider emitting per-step would queue work
+    faster than it can finish."""
+    dock, _ = docked
+    _ready(dock)
+    rebuilds: list[int] = []
+    dock.slice_changed.connect(lambda: rebuilds.append(1))
+    for value in (0.2, 0.3, 0.4, 0.5):
+        dock.cell_spin.setValue(value)
+    assert rebuilds == [], "nothing should have rebuilt while the value was still moving"
+    dock.flush_debounce()
+    assert len(rebuilds) == 1

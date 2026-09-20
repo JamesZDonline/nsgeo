@@ -66,6 +66,7 @@ from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.slice_layer import SliceLayer
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
@@ -126,6 +127,7 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        self.slice_layer: SliceLayer | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -205,6 +207,13 @@ class NsgeoPlugin:
         main.tabifyDockWidget(self.processing_dock, self.slices_dock)
         self.processing_dock.raise_()
         self.docks.append(self.slices_dock)
+
+        # The active slice on the map: owned here (not by the dock) for
+        # the same reason `map_link` and `layers` are -- it is a map
+        # concern that outlives any one dock widget and is torn down
+        # outside-in in `unload()`, before `self.layers.detach()`.
+        self.slice_layer = SliceLayer(self.session, self.layers)
+        self.slices_dock.slice_changed.connect(self._on_slice_changed)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
@@ -319,6 +328,13 @@ class NsgeoPlugin:
             # is still connected to.
             self.map_link.dispose()
             self.map_link = None
+        if self.slice_layer is not None:
+            # Same ordering as map_link just above: outside-in, before
+            # layers.detach() removes the group this layer would otherwise
+            # try to rejoin, and before the scratch GeoTIFF it writes to
+            # is orphaned by this plugin unloading around it.
+            self.slice_layer.dispose()
+            self.slice_layer = None
         if self.layers is not None:
             self.layers.detach()
             self.layers = None
@@ -463,6 +479,26 @@ class NsgeoPlugin:
         # is still in progress.
         self._gain_step = new
         self.session.replace_step(key, row, new)
+
+    def _on_slice_changed(self) -> None:
+        try:
+            dock, layer = self.slices_dock, self.slice_layer
+            if dock is None or layer is None:
+                return
+            values, frame = dock.current_values(), dock.current_frame()
+            if values is None or frame is None:
+                layer.clear()
+                return
+            layer.update(
+                values,
+                frame,
+                limit=dock.display_limit(),
+                colormap_name=dock.palette_combo.currentText(),
+                unipolar=dock.engine.output_unipolar,
+                subtitle=dock.readout.text(),
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too
