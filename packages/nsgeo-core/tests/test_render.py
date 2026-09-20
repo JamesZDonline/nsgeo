@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from nsgeo import render
 from nsgeo.io.dzt import read_samples
 from nsgeo.render import (
     DEFAULT_COLORMAP,
@@ -222,3 +223,121 @@ def test_real_file_renders_with_both_extremes_present():
     assert idx.min() == 0 and idx.max() == 255
     rgb = to_rgb8(data, PercentileClip().limit(data), colormap(DEFAULT_COLORMAP))
     assert rgb.shape == data.shape + (3,)
+
+
+def test_unipolar_index_puts_zero_at_the_bottom_not_the_middle():
+    """The whole point: a bipolar table would floor an |A| slice at grey."""
+    out = render.to_index8_unipolar(np.array([[0.0, 0.5, 1.0]]), limit=1.0)
+    assert list(out[0]) == [0, 128, 255]
+
+
+def test_unipolar_index_clips_above_the_limit():
+    out = render.to_index8_unipolar(np.array([[2.0, -1.0]]), limit=1.0)
+    assert list(out[0]) == [255, 0]
+
+
+def test_unipolar_clip_uses_the_percentile_of_the_values_themselves():
+    """Not of their magnitudes: the data is already non-negative, so a
+    percentile over |x| would be the same number computed twice."""
+    data = np.concatenate([np.zeros(99), [100.0]])[None, :]
+    assert render.UnipolarClip(percentile=100.0).limit(data) == pytest.approx(100.0)
+    assert render.UnipolarClip(percentile=90.0).limit(data) == 1.0  # median is 0 -> fallback
+
+
+def test_unipolar_clip_ignores_nan_nodata():
+    data = np.array([[1.0, np.nan, 3.0]])
+    assert render.UnipolarClip(percentile=100.0).limit(data) == pytest.approx(3.0)
+
+
+def test_unipolar_clip_falls_back_when_everything_is_nodata():
+    assert render.UnipolarClip().limit(np.full((4, 4), np.nan)) == 1.0
+
+
+def test_unipolar_clip_validates_its_arguments():
+    """Mirrors test_percentile_clip_validates_its_arguments: UnipolarClip
+    passed all four of its other tests with __post_init__ deleted, so
+    validation itself was untested."""
+    with pytest.raises(ValueError):
+        render.UnipolarClip(percentile=0.0)
+    with pytest.raises(ValueError):
+        render.UnipolarClip(max_samples=0)
+
+
+def test_unipolar_clip_subsamples_large_arrays_deterministically():
+    """Mirrors test_percentile_clip_subsamples_large_arrays_deterministically:
+    the max_samples stride branch runs on every real slice (a resident
+    cube's mean is exactly this shape) but was never exercised by a test."""
+    rng = np.random.default_rng(1)
+    data = rng.random(size=(512, 3000))  # non-negative, unlike PercentileClip's normal draw
+    clip = render.UnipolarClip(percentile=99.0, max_samples=10_000)
+    lim = clip.limit(data)
+    step = int(np.ceil(data.size / 10_000))
+    expected = float(np.percentile(data.ravel()[::step], 99.0))
+    assert lim == expected
+    full = float(np.percentile(data, 99.0))
+    assert abs(lim - full) / full < 0.05
+
+
+def test_rgba_makes_nodata_transparent_and_data_opaque():
+    """A slice cell with no traces under it must not paint as a value."""
+    data = np.array([[0.0, np.nan]])
+    lut = render.colormap("amp_black_high")
+    out = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=True)
+    assert out.shape == (1, 2, 4)
+    assert out[0, 0, 3] == 255
+    assert out[0, 1, 3] == 0
+
+
+def test_rgba_bipolar_path_matches_the_existing_rgb_mapping():
+    data = np.array([[-1.0, 0.0, 1.0]])
+    lut = render.colormap("seismic")
+    rgba = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=False)
+    rgb = render.to_rgb8(data, limit=1.0, lut=lut)
+    np.testing.assert_array_equal(rgba[..., :3], rgb)
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_rgba_bipolar_path_is_opaque_even_where_the_input_is_nan():
+    """A radargram has no nodata: `to_index8` maps NaN to the neutral
+    middle of the table so an AGC divide-by-zero artifact never reads as a
+    reflector, and making that pixel transparent would punch a see-through
+    stripe through the radargram instead -- worse than the neutral grey it
+    paints today. Alpha must stay opaque there, and the RGB must still
+    match `to_rgb8`."""
+    data = np.array([[-1.0, np.nan, 1.0]])
+    lut = render.colormap("seismic")
+    rgba = render.to_rgba8(data, limit=1.0, lut=lut, unipolar=False)
+    rgb = render.to_rgb8(data, limit=1.0, lut=lut)
+    np.testing.assert_array_equal(rgba[..., :3], rgb)
+    assert (rgba[..., 3] == 255).all()
+
+
+def test_unipolar_colormaps_are_listed_separately():
+    assert set(render.colormap_names(unipolar=True)) == set(render.UNIPOLAR_COLORMAPS)
+    assert "seismic" not in render.colormap_names(unipolar=True)
+    assert "amp_heat" not in render.colormap_names(unipolar=False)
+    assert set(render.colormap_names()) >= set(render.UNIPOLAR_COLORMAPS)
+
+
+def test_amp_black_high_runs_white_to_black():
+    lut = render.colormap("amp_black_high")
+    assert tuple(lut[0]) == (255, 255, 255)
+    assert tuple(lut[255]) == (0, 0, 0)
+
+
+def test_amp_heat_runs_black_through_red_and_orange_to_white():
+    """Endpoints alone do not pin this table: at t=0 every channel formula
+    clips to 0 and at t=1 every channel formula clips to 1, regardless of
+    which channel each formula was assigned to -- a version with its
+    channels permuted (blue -> cyan -> white instead of black -> red ->
+    orange -> white) would still land on black at index 0 and white at
+    index 255. The midpoint is what tells them apart: on the real table
+    it is a saturated orange-red (red already maxed, blue still zero),
+    which a blue-first permutation would report as the mirror image."""
+    lut = render.colormap("amp_heat")
+    assert tuple(lut[0]) == (0, 0, 0)
+    assert tuple(lut[255]) == (255, 255, 255)
+    r, g, b = (int(v) for v in lut[128])
+    assert r == 255
+    assert b == 0
+    assert 100 <= g <= 160

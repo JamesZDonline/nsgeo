@@ -203,7 +203,10 @@ its serialised steps, the transform, the velocity model, the build time, and the
 ### 5.4 On disk
 
 The core writes `slices/<grid_id>__<name>.npz` holding `mean`, `count`, and a JSON metadata
-blob. The survey JSON gains a `cubes` list recording the recipe and pointing at the file.
+blob. The survey JSON gains a `cubes` object, keyed by cube id, recording the recipe and
+pointing at the file. (Amended during execution: specified here as a list; the implementation
+uses a dict keyed by id instead, which is better -- it matches `presets`, and it makes lookup
+by id direct rather than a linear scan. The spec is corrected to match what shipped.)
 
 Derived, like the GeoPackage: the JSON is the truth, the `.npz` is regenerable, and a missing
 one is an offer to rebuild rather than an error. `.npz` rather than GeoTIFF because the core has
@@ -669,8 +672,14 @@ Unchanged in structure from Plan 2 and Plan 3, which is deliberate:
   fixtures only as far as they mirror them.
 - **Properties, not just examples**, for the binner: total count equals the number of contributing
   traces; a cube binned at cell `c` and then coarsened by `f` equals one binned at `c × f`;
-  streaming a window equals the corresponding slice of a resident cube, exactly; an empty cell is
-  NaN and never 0.
+  streaming a window equals the corresponding slice of a resident cube; an empty cell is
+  NaN and never 0. (Amended during execution: "equals" here is mathematical equality, not bit
+  equality, and the property test correctly checks it with `rtol=1e-5` rather than exact
+  equality -- `build_cube` divides per level then averages levels, while `stream_slice` sums
+  levels then divides once, and the two orders of operation are float-unequal even though they
+  compute the same real number. This was originally specified as exact; it is not achievable by
+  this pair of algorithms and was never achieved. A future maintainer should not "fix" that
+  tolerance to be tighter or exact -- it is doing its job.)
 - **The envelope is pinned against its own definition**, not against a padded approximation, so
   the rejected optimisation cannot reappear silently.
 - **A smoke benchmark** asserting the tier boundaries hold in the right order of magnitude —

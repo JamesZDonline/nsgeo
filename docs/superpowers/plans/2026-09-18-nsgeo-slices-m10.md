@@ -24,7 +24,7 @@ Every task's requirements implicitly include all of these.
   - `python -m pytest packages/nsgeo-core/tests -v`
   - `ruff check . && ruff format --check .`
   - `mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent packages/nsgeo-core/src`
-- **Commit messages** end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`.
+- **Commit messages** end with the trailer `Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>`. (amended during execution: this fixed string was superseded -- implementers use whatever attribution their own harness instructs at commit time, not this literal trailer.)
 - **Measured facts** this plan relies on, from the real files: 512 samples, 110.86 ns range, `dt = 0.2165 ns`, `t0 = -11.086 ns`, ε_r 14; after the four-step preset `time_zero → dewow → background_mean → gain_agc` the array is 463 × 608, and **463 is prime**.
 
 ## File Structure
@@ -265,7 +265,7 @@ class CubeFrame:
     straight across.
     """
 
-    origin: Tuple[float, float]
+    origin: tuple[float, float]  # amended during execution (ruff UP)
     azimuth: float
     cell: float
     nx: int
@@ -282,7 +282,7 @@ class CubeFrame:
     def n_cells(self) -> int:
         return self.nx * self.ny
 
-    def axes(self) -> Tuple[np.ndarray, np.ndarray]:
+    def axes(self) -> tuple[np.ndarray, np.ndarray]:  # amended during execution (ruff UP)
         """Unit vectors of frame-local +X and +Y in world coordinates."""
         a = math.radians(self.azimuth)
         y_hat = np.array([math.sin(a), math.cos(a)])
@@ -412,7 +412,7 @@ class ZAxis:
             raise ValueError(f"t1_ns must exceed t0_ns, got {t0_ns} .. {t1_ns}")
         return cls(t0_ns=t0_ns, dz_ns=dz_ns, nz=int(math.floor((t1_ns - t0_ns) / dz_ns)) + 1)
 
-    def level_range(self, top_ns: float, thickness_ns: float) -> Tuple[int, int]:
+    def level_range(self, top_ns: float, thickness_ns: float) -> tuple[int, int]:  # amended during execution (ruff UP)
         """Half-open [k0, k1) for a window, clamped to the axis.
 
         Never returns an empty range: a window entirely off the end still
@@ -456,6 +456,8 @@ The z axis is two-way time, with depth derived through VelocityModel.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -664,11 +666,11 @@ class _NoParams:
         pass
 
     @property
-    def params(self) -> Dict[str, Any]:
+    def params(self) -> dict[str, Any]:  # amended during execution (ruff UP)
         return {}
 
     @classmethod
-    def schema(cls) -> Tuple[ParamSpec, ...]:
+    def schema(cls) -> tuple[ParamSpec, ...]:  # amended during execution (ruff UP)
         return ()
 
 
@@ -798,6 +800,8 @@ surfaced as StepStack.output_unipolar for front ends choosing a palette.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
+
 ---
 
 ### Task 3: Unipolar rendering
@@ -814,6 +818,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   - `UnipolarClip(percentile: float = 99.0, max_samples: int = 200_000)` with `.limit(data) -> float`
   - `to_index8_unipolar(data: np.ndarray, limit: float) -> np.ndarray`
   - `to_rgba8(data, limit, lut, *, unipolar: bool) -> np.ndarray` — `(H, W, 4)` uint8, alpha 0 where the input is not finite
+    (amended during execution: only for `unipolar=True`. The bipolar path, `unipolar=False`, is fully opaque regardless of `data` — a radargram has no nodata, and `to_index8` deliberately maps a NaN sample to the neutral middle of the table rather than a transparent hole, so making that pixel see-through would be worse, not better.)
   - `UNIPOLAR_COLORMAPS: frozenset[str]`, and `colormap_names(unipolar: bool | None = None)`
   - New tables `"amp_black_high"`, `"amp_white_high"`, `"amp_heat"`
 
@@ -875,11 +880,10 @@ def test_unipolar_colormaps_are_listed_separately():
     assert set(render.colormap_names()) >= set(render.UNIPOLAR_COLORMAPS)
 
 
-def test_every_colormap_is_a_valid_table():
-    for name in render.colormap_names():
-        lut = render.colormap(name)
-        assert lut.shape == (256, 3)
-        assert lut.dtype == np.uint8
+# (amended during execution: `test_every_colormap_is_a_valid_table` was dropped
+# before landing -- it is a duplicate of the pre-existing
+# `test_every_colormap_is_a_256_by_3_uint8_table`, which already asserts the
+# same (256, 3) uint8 shape for every name in `colormap_names()`.)
 
 
 def test_amp_black_high_runs_white_to_black():
@@ -1035,6 +1039,8 @@ rather than a reserved index.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
+
 ---
 
 ### Task 4: `SliceCube` and the binner
@@ -1053,7 +1059,7 @@ The resident build: prepared lines in, a z-major cube of means plus a per-cell c
   - `Provenance(line_keys, preset_name, steps, transform, velocity, built_utc, core_version)`, frozen, with `.to_dict()` / `.from_dict()`
   - `SliceCube(frame, z, mean, count, provenance)`, frozen, with `.slice_levels(k0, k1) -> np.ndarray` (shape `(ny, nx)`) and `.coverage() -> np.ndarray` (shape `(ny, nx)`, int32)
   - `PreparedLine(key: str, data: np.ndarray, dt_ns: float, t0_ns: float, coords: np.ndarray)`
-  - `LinePlan(z_index, z_weight, order, starts, cells, counts)`
+  - `LinePlan(z_index, z_weight, order, starts, cells, counts)` (amended during execution: also carries `frame: CubeFrame` and `z: ZAxis` so that `build_cube` and `stream_slice` can reject a plan built against a different frame or axis)
   - `CoverageError(Exception)`
   - `plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan`
   - `build_cube(lines, plans, frame, z, provenance) -> SliceCube`
@@ -1235,15 +1241,15 @@ class Provenance:
     and may be read by a front end that never loaded the site.
     """
 
-    line_keys: Tuple[str, ...]
+    line_keys: tuple[str, ...]  # amended during execution (ruff UP)
     preset_name: str
-    steps: Tuple[Dict[str, Any], ...]
+    steps: tuple[dict[str, Any], ...]  # amended during execution (ruff UP)
     transform: str
-    velocity: Optional[Dict[str, Any]]
+    velocity: dict[str, Any] | None  # amended during execution (ruff UP)
     built_utc: str
     core_version: str
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # amended during execution (ruff UP)
         return {
             "line_keys": list(self.line_keys),
             "preset_name": self.preset_name,
@@ -1255,7 +1261,7 @@ class Provenance:
         }
 
     @classmethod
-    def from_dict(cls, doc: Dict[str, Any]) -> Provenance:
+    def from_dict(cls, doc: dict[str, Any]) -> Provenance:  # amended during execution (ruff UP)
         return cls(
             line_keys=tuple(doc["line_keys"]),
             preset_name=doc["preset_name"],
@@ -1381,6 +1387,9 @@ class LinePlan:
     starts: np.ndarray
     cells: np.ndarray
     counts: np.ndarray
+    # amended during execution: adds frame and z fields below, as implemented:
+    frame: CubeFrame
+    z: ZAxis
 
 
 def plan_line(line: PreparedLine, frame: CubeFrame, z: ZAxis) -> LinePlan:
@@ -1433,16 +1442,20 @@ def resample_window(line: PreparedLine, plan: LinePlan, k0: int, k1: int) -> np.
     return (lower * (1.0 - weight) + upper * weight).astype(np.float32, copy=False)
 
 
+# (amended during execution: `accumulate` no longer takes `k0`/`k1`. It takes
+# the level count from `total.shape[0]` instead: `build_cube` is its only
+# caller and always covers the full axis, and a partial window here would
+# silently double-count `count` if ever called more than once per line.
+# `resample_window` still takes an explicit window, for the caller --
+# `stream_slice` -- that legitimately wants one.)
 def accumulate(
     total: np.ndarray,
     count: np.ndarray,
     line: PreparedLine,
     plan: LinePlan,
-    k0: int,
-    k1: int,
 ) -> None:
-    """Add one line's contribution, in place."""
-    block = resample_window(line, plan, k0, k1)
+    """Add one line's contribution over the whole axis, in place."""
+    block = resample_window(line, plan, 0, total.shape[0])
     total[:, plan.cells] += np.add.reduceat(block, plan.starts, axis=1)
     count[plan.cells] += plan.counts
 
@@ -1460,17 +1473,16 @@ def build_cube(
     total = np.zeros((z.nz, frame.n_cells), dtype=np.float32)
     count = np.zeros(frame.n_cells, dtype=np.int32)
     for line, plan in zip(lines, plans):
-        accumulate(total, count, line, plan, 0, z.nz)
+        accumulate(total, count, line, plan)  # amended during execution: no k0/k1
     mean = np.divide(
         total, count, out=np.full_like(total, np.nan), where=count > 0
     )
     return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
 
 
-def slice_extent(frame: CubeFrame) -> Tuple[float, float, float, float]:
-    """(min_x, min_y, max_x, max_y) of the frame in its own local metres."""
-    return (0.0, 0.0, frame.nx * frame.cell, frame.ny * frame.cell)
 ```
+
+(amended during execution: `slice_extent` was dropped rather than shipped. M10 wrote no caller for it -- a helper with no caller in this milestone is exactly what this plan's own review flagged elsewhere as a mistake to avoid repeating -- and M11's north-up GeoTIFF export is its actual caller. It should return in M11 written together with that caller and a real test, not ahead of either.)
 
 - [ ] **Step 5: Export from the package**
 
@@ -1514,6 +1526,8 @@ count as data and read as a dead zone.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -1702,7 +1716,7 @@ def stream_slice(
     z: ZAxis,
     k0: int,
     k1: int,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:  # amended during execution (ruff UP)
     """One slice, binned straight from the lines, holding no cube.
 
     This is the default residency. It is the same algorithm as `build_cube`
@@ -1713,6 +1727,9 @@ def stream_slice(
     Returns (values, coverage), both shaped (ny, nx); values is NaN where
     coverage is zero.
     """
+    # amended during execution: call `_check_plans_current(lines, plans, frame, z)`
+    # after the len check and before array work to reject plans built against a
+    # different frame or z axis, as `build_cube` does
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
     if not 0 <= k0 < k1 <= z.nz:
@@ -1802,12 +1819,19 @@ def fill(
     r = int(radius_cells)
     ny, nx = values.shape
     kernel = disc_kernel(r)
-    numerator = np.where(np.isfinite(values), values, 0.0) * counts
+    finite = np.isfinite(values)
+    numerator = np.where(finite, values, 0.0) * counts
+    # amended during execution: denominator must convolve the SAME masked counts
+    # the numerator uses, not raw `counts`. A NaN value with non-zero count would
+    # otherwise contribute 0 to the numerator but full weight to the denominator,
+    # returning 1.2 instead of the correct 6.0 on a 3x3 with NaN at count 4
+    # and 6.0 at count 1.
+    counts_for_denominator = np.where(finite, counts, 0.0)
 
     shape = (ny + 2 * r, nx + 2 * r)
     spectrum = np.fft.rfft2(kernel, s=shape)
     num = np.fft.irfft2(np.fft.rfft2(numerator, s=shape) * spectrum, s=shape)
-    den = np.fft.irfft2(np.fft.rfft2(counts, s=shape) * spectrum, s=shape)
+    den = np.fft.irfft2(np.fft.rfft2(counts_for_denominator, s=shape) * spectrum, s=shape)
     num = num[r : r + ny, r : r + nx]
     den = den[r : r + ny, r : r + nx]
 
@@ -1858,6 +1882,8 @@ NaN rather than being invented.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
+
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
 
 ---
 
@@ -2024,7 +2050,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any
 
 import numpy as np
 
@@ -2038,7 +2064,7 @@ class CubeStoreError(Exception):
     """Raised when a cube file is missing, unreadable, or not a cube."""
 
 
-def _meta(cube: SliceCube) -> Dict[str, Any]:
+def _meta(cube: SliceCube) -> dict[str, Any]:  # amended during execution (ruff UP)
     return {
         "store_version": STORE_VERSION,
         "frame": {
@@ -2054,7 +2080,7 @@ def _meta(cube: SliceCube) -> Dict[str, Any]:
     }
 
 
-def save_cube(cube: SliceCube, path: Union[str, Path]) -> None:
+def save_cube(cube: SliceCube, path: str | Path) -> None:  # amended during execution (ruff UP)
     """Write `cube` to `path`, creating parent directories as needed."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2066,7 +2092,7 @@ def save_cube(cube: SliceCube, path: Union[str, Path]) -> None:
     )
 
 
-def load_cube(path: Union[str, Path]) -> SliceCube:
+def load_cube(path: str | Path) -> SliceCube:  # amended during execution (ruff UP)
     """Read a cube written by `save_cube`."""
     path = Path(path)
     if not path.exists():
@@ -2095,7 +2121,7 @@ def load_cube(path: Union[str, Path]) -> SliceCube:
             cell=float(frame_doc["cell"]),
             nx=int(frame_doc["nx"]),
             ny=int(frame_doc["ny"]),
-            crs=frame_doc["crs"],
+            crs=frame_doc["crs"],  # amended during execution: implemented with validation that crs is a string, rejecting None with CubeStoreError to prevent silent failure in GeoTIFF export
         ),
         z=ZAxis(
             t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])
@@ -2232,6 +2258,8 @@ bin, slice, stream, save and reload.
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+(amended during execution: this fixed trailer string was superseded -- implementers use their own harness's attribution instead.)
+
 ---
 
 ## What M10 deliberately does not do
@@ -2242,10 +2270,11 @@ Named here so a reviewer does not flag them as gaps:
 - **No GeoTIFF, no GDAL, no temporal encoding.** M11.
 - **No directional de-striping** (spec §6.5) and **no site mosaic** (§10). M12.
 - **No on-disk residency tier.** Spec §7.4 flags it as unmeasured; the spike runs before anything commits to memory-mapping, and nothing in this plan depends on it.
+- **No `coarsen`.** (amended during execution: this was missing from the plan entirely -- the spec names `coarsen` in three places, including its required-property list, and this plan mentioned it zero times, neither implementing it nor acknowledging the gap. M10 ships `build_cube`, `stream_slice` and `fill` at the cube's native cell size only; block-averaging a resident cube down to a coarser grid for a zoomed-out view is deferred to M11, alongside the on-disk residency tier it would most naturally pair with.)
 
 ## Plan Self-Review
 
-**Spec coverage.** §5.1 `CubeFrame` → Task 1. §5.2 `ZAxis` → Task 1. §5.3 `SliceCube`, z-major layout, per-cell count and the rejection rule → Tasks 4. §5.4 `.npz` and the JSON `cubes` list → Task 6. §6.2 transforms and the no-padding rule → Task 2. §6.3 binning and the precomputed plans → Task 4. §6.4 the fill → Task 5. §6.6 `slice_levels` and `level_range` → Tasks 1 and 4. §7.4 streaming → Task 5. §8 unipolar rendering → Task 3. §6.5, §9, §10 are M11/M12 and are listed above as out of scope for this plan.
+**Spec coverage.** §5.1 `CubeFrame` → Task 1. §5.2 `ZAxis` → Task 1. §5.3 `SliceCube`, z-major layout, per-cell count and the rejection rule → Tasks 4. §5.4 `.npz` and the `cubes` dict → Task 6. §6.2 transforms and the no-padding rule → Task 2. §6.3 binning and the precomputed plans → Task 4. §6.4 the fill → Task 5. §6.6 `slice_levels` and `level_range` → Tasks 1 and 4. §7.4 streaming → Task 5. §8 unipolar rendering → Task 3. §6.5, §9, §10 are M11/M12 and are listed above as out of scope for this plan.
 
 **Type consistency, checked across tasks.** `CubeFrame.cell_index` returns flat `iy * nx + ix` in Task 1 and is consumed with that meaning by `plan_line` in Task 4 and `SliceCube.coverage`'s reshape in Task 4. `ZAxis.level_range` returns the half-open pair that `slice_levels` and `stream_slice` both validate as `0 <= k0 < k1 <= nz`. `PreparedLine.data` is float32 in Tasks 4–6. `Provenance.to_dict` / `from_dict` in Task 4 are what `store.py` calls in Task 6. `is_unipolar` is defined in Task 2 and consumed by `StepStack.output_unipolar` in the same task; `to_rgba8(..., unipolar=...)` in Task 3 takes the bool that property produces.
 
