@@ -1628,6 +1628,46 @@ def test_the_picks_binding_survives_a_site_close_and_reopen(populated, tmp_path)
     assert seen == [1]
 
 
+def test_the_picks_binding_survives_a_mid_session_crs_driven_rebuild(populated):
+    """The picks layer OBJECT is replaced by two paths, not one. The test
+    above covers the first (a site close and reopen). This covers the
+    second: a mid-session `replace_grid` whose CRS change drives
+    `_ensure_table` into `_rebuild_picks`, which calls
+    `_drop_loaded_layer("picks")` and leaves the reopen loop at the end
+    of `ensure_tables()` to open a fresh object -- the exact path
+    `MapLink` had to learn about the hard way (`_rebind_layer`), and it
+    deserves its own test rather than a probe.
+
+    Asserts the object really was replaced and that `_bound_picks`
+    tracks the new one -- but the part that actually matters is the
+    genuine edit session at the end: a connection re-made only on the
+    OLD object would leave `_bound_picks is layers.layers["picks"]` true
+    (pure bookkeeping) while a real `startEditing`/`deleteFeature`/
+    `commitChanges` on the layer QGIS now holds reaches nothing.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    original_picks = layers.layers["picks"]
+    assert layers.feature_count("picks") == 1
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    rebuilt_picks = layers.layers["picks"]
+    assert rebuilt_picks is not original_picks
+    assert layers.feature_count("picks") == 1
+    assert layers._bound_picks is rebuilt_picks
+
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    fid = next(rebuilt_picks.getFeatures()).id()
+    assert rebuilt_picks.startEditing()
+    assert rebuilt_picks.deleteFeature(fid)
+    assert seen == [1]  # live, before any commit -- same as the buffered-delete test above
+
+    assert rebuilt_picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- a delete's own commit is clean
+
+
 # --- controller review of I5: _adopt_legacy_package() renamed the .gpkg
 # alone. A SQLite database left by a process that did not close cleanly --
 # a QGIS crash or kill, which is not rare -- keeps a hot `-wal`/`-shm`

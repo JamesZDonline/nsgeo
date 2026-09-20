@@ -300,21 +300,54 @@ class SiteLayers(QObject):
     def detach(self) -> None:
         # Finding A hazard 2: unbind BEFORE `_commit_pending_edits()` can
         # fire a commit, not merely guard `_on_picks_edited` against one.
-        # `detach()` runs on `site_closed`, which `SiteSession.close_site`
-        # emits only after clearing `self._site` (and every other piece of
-        # site state) -- so by the time a commit here could re-entrantly
-        # emit `picks_changed`, the session already has no site and no
-        # display key, and nothing is left that should be reading `picks`
-        # at all. Unbinding first means that final commit stays silent,
-        # which is correct: it is not "the profile missed an update", it
-        # is "there is no longer a profile to update". Guarding the slot
-        # instead (checking `session.site is not None` inside
-        # `_on_picks_edited`) was considered and rejected: it would
-        # duplicate this same reasoning a second place, and still cost a
-        # pointless emit+refresh cycle during ordinary teardown for no
-        # benefit -- unbinding is both cheaper and the more direct fix for
-        # a hazard that is specifically about teardown ordering.
-        self._unbind_picks_signals()
+        #
+        # An earlier version of this comment justified that by what
+        # `SiteSession.close_site` happens to do before emitting
+        # `site_closed` (clear session state first). Checked against all
+        # three callers of `detach()`, that justification is false on two
+        # of them:
+        #   - `close_site()` -> `site_closed`: session state IS already
+        #     cleared here, as that reasoning assumed.
+        #   - `_on_site_opened` (bound to `site_opened`): `detach()` runs
+        #     with the session already holding the NEW site, not none.
+        #   - `plugin.unload()`: calls `layers.detach()` directly.
+        #     `close_site()` is never called, so the session still holds
+        #     the OLD site -- and the docks have been `deleteLater()`'d
+        #     but not yet destroyed. This is the most dangerous of the
+        #     three moments in this file, and the old reasoning had
+        #     nothing to say about it.
+        #
+        # The reason that actually holds in all three: `detach()` IS the
+        # teardown of this layer set itself, so there is never a profile
+        # that should still be reading these layers -- regardless of
+        # what the session holds at the time. Unbinding first is safe
+        # because of what `detach()` *is*, not because of what
+        # `close_site()` happens to do first.
+        #
+        # Verified by probe: the buffered edit is still committed to the
+        # GeoPackage on every path (`_commit_pending_edits()` still runs
+        # right below) -- only the notification is suppressed, and on
+        # every one of the three paths above the profile is being
+        # cleared, destroyed, or rebuilt for a different site anyway.
+        # Nothing is hidden.
+        #
+        # Guarding the slot instead (checking `session.site is not None`
+        # inside `_on_picks_edited`) was considered and rejected: it
+        # would duplicate this same reasoning a second place, and still
+        # cost a pointless emit+refresh cycle during ordinary teardown for
+        # no benefit -- unbinding is both cheaper and the more direct fix
+        # for a hazard that is specifically about teardown ordering.
+        with contextlib.suppress(Exception):
+            # In production this cannot raise (`_bound_picks` is only
+            # ever `None` or a real `QgsVectorLayer`, and the two
+            # realistic exceptions inside `_unbind_picks_signals` are
+            # already suppressed there) -- but losing buffered picks (see
+            # `_commit_pending_edits`'s own docstring: "twenty depth
+            # picks over an hour, silently gone") is worse than leaking a
+            # signal connection during teardown, so nothing this call
+            # could possibly raise may be allowed to skip the commit
+            # right after it.
+            self._unbind_picks_signals()
         if self.layers:
             self._commit_pending_edits()
             ids = [lyr.id() for lyr in self.layers.values() if not sip.isdeleted(lyr)]
@@ -872,20 +905,42 @@ class SiteLayers(QObject):
             raise
         conn.dropVectorTable("", _PICKS_BACKUP)
         # Finding B: style a migrated package too, not just a brand new
-        # one. Nothing before this fix ever called
-        # `saveStyleToDatabase` for `picks`, so a pre-M8 (or otherwise
-        # schema-stale) package has no durable style to preserve --
-        # every open until now showed QGIS's own fresh-random default
-        # regardless of what came before. This runs once, exactly when
-        # the schema actually changes, so leaving a migrated table
-        # unstyled would mean the exact packages that most need this
-        # fix (the ones old enough to still need a migration) never get
-        # it. Styled by its FINAL name, "picks", after the rename
-        # above -- not by opening `_PICKS_REBUILD` before the rename --
-        # because a saved style is keyed by table name in the
-        # GeoPackage's own `layer_styles` catalogue, and a plain SQL
-        # table rename is not something to assume also rewrites that
-        # reference.
+        # one -- this runs once, exactly when the schema or CRS actually
+        # changes, so skipping it here would mean the packages most in
+        # need of a style (the ones stale enough to still need a
+        # migration) never get one.
+        #
+        # The ordering below (style AFTER both renames) is REQUIRED, not
+        # merely defensible, and an earlier version of this comment had
+        # the reason backwards. It hedged that "a plain SQL table rename
+        # is not something to assume also rewrites [the layer_styles]
+        # reference" -- verified directly against this build (QGIS
+        # 3.44.7): `renameVectorTable` DOES rewrite
+        # `layer_styles.f_table_name`. That is exactly why this must run
+        # after both renames above, not before: renaming the OLD "picks"
+        # out to `_PICKS_BACKUP` carries ITS style reference out to the
+        # backup name along with it, so whatever ends up named "picks"
+        # next arrives with no style entry of its own -- restyling it,
+        # by that final name, after the swap is the only ordering that
+        # produces a styled table (this method also just hardcodes that
+        # name, so calling it any earlier would not even find the right
+        # table).
+        #
+        # The claim this comment used to make -- "a pre-M8 package has
+        # no durable style to preserve" -- is true only for a pre-M8
+        # package. It is false for any package created or migrated AFTER
+        # this fix landed: `_rebuild_picks` also runs on a CRS change
+        # (`replace_grid`, exposed by the survey dock) on a package of
+        # ANY schema vintage, including one that already carries a style
+        # from an earlier run of this same method -- possibly the
+        # user's own. Because of the rewrite-on-rename behaviour just
+        # described, that style is not carried into the new "picks"
+        # either -- it is left on the backup table, which is dropped a
+        # few lines above. Unconditionally restyling here therefore DOES
+        # discard a real, possibly user-saved style on a rebuild. Not
+        # fixed here -- filed as a known issue, since fixing it means
+        # reading a style off the backup before dropping it, inside the
+        # migration path, for a cosmetic property.
         self._style_new_picks_table(path)
 
     def _require_transform(
@@ -1249,6 +1304,18 @@ class SiteLayers(QObject):
         marker.setStrokeColor(QColor(255, 255, 255))
         marker.setStrokeWidth(0.4)
         layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        # `saveStyleToDatabase`, not the newer `saveStyleToDatabaseV2`. An
+        # earlier note here justified that by V2 not being available on
+        # the target QGIS -- checked directly against this build
+        # (3.44.7-Solothurn): `saveStyleToDatabaseV2` DOES exist. That was
+        # never the real reason to keep the deprecated call; the actual
+        # reason is simply that it works and the target here is QGIS 3.44
+        # LTR, so switching is a separate decision for whenever the
+        # plugin's minimum QGIS version moves, not part of this fix. It
+        # does emit a `DeprecationWarning` into test output (here and in
+        # the test that simulates a user's own saved style) -- expected
+        # and harmless, named here so it reads as known rather than a
+        # mystery to chase.
         err = layer.saveStyleToDatabase("default", "nsgeo picks", True, "")
         if err:
             raise RuntimeError(f"could not save the picks layer's style: {err}")
