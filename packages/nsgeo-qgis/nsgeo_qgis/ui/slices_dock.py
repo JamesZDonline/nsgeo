@@ -26,6 +26,7 @@ from typing import Any
 import numpy as np
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import CubeFrame, SliceWindow, fill, plan_windows, window_label
+from nsgeo.velocity import VelocityModel
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -99,6 +100,11 @@ class SlicesDock(QgsDockWidget):
         #: first `rebuild_source()` call in `__init__` reads as a "grid
         #: changed" transition exactly when a grid is actually available.
         self._last_grid_id: str | None = None
+        #: The grid id `dz_spin`/`z0_spin`/`z1_spin` were last successfully
+        #: seeded FROM A REAL LINE for -- `None` reset on every genuine
+        #: grid change; see `_seed_dz_z_defaults` for why a grid change
+        #: alone is not enough to know these three are done being seeded.
+        self._dz_z_seeded_for: str | None = None
         #: Whether `_included` is still the SEEDED default for
         #: `_last_grid_id`, as opposed to a subset the user chose through
         #: `LineChoiceDialog` (fix round 1, Important 1 / Ruling S).
@@ -435,23 +441,34 @@ class SlicesDock(QgsDockWidget):
         outlive the other two.
 
         An actual grid change is also the one moment `_seed_resolution_
-        defaults` re-seeds the Resolution group: `cell_spin`/`radius_spin`
-        from `grid_id`'s own `default_spacing` (spec 4, spec 6.4) and
-        `dz_spin`/`z0_spin`/`z1_spin` from the new default's first
-        included line, if it has one yet. Tied to this branch and not to
-        every call here, for the same reason `_included_is_default`
+        defaults` re-seeds `cell_spin`/`radius_spin` from `grid_id`'s own
+        `default_spacing` (spec 4, spec 6.4) -- tied to this branch and
+        not to every call here, for the same reason `_included_is_default`
         exists at all: reseeding on every `presets_changed` would silently
         overwrite a cell size the user picked for THIS grid.
+
+        `dz_spin`/`z0_spin`/`z1_spin` are different: they need a LINE, not
+        just a grid, and `plugin.py` builds this dock before any site
+        exists -- new site, then add a grid, then import lines under it is
+        the ordinary flow, not an edge case, and it fires `grids_changed`
+        (this method's grid-changed branch) before any `lines_changed`
+        that could seed them. `_seed_dz_z_defaults` is therefore also
+        retried from the "still default" branch below, exactly where
+        `_included` itself is already retried for the same reason -- once
+        successfully seeded for a grid it does not re-run for that grid
+        again, so a value the user later chooses is never clobbered.
         """
         grid_id = self.grid_combo.currentText() or None
         if grid_id != self._last_grid_id:
             self._last_grid_id = grid_id
             self._included = self._default_included(grid_id)
             self._included_is_default = True
+            self._dz_z_seeded_for = None
             self._seed_resolution_defaults(grid_id)
             return
         if self._included_is_default:
             self._included = self._default_included(grid_id)
+            self._seed_dz_z_defaults(grid_id)
             return
         valid = set(self.session.keys()) if self.session.is_open else set()
         self._included = tuple(k for k in self._included if k in valid)
@@ -732,30 +749,15 @@ class SlicesDock(QgsDockWidget):
 
     # ---- Position/Resolution/Display -------------------------------------
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:
-        """Re-seed the Resolution group's defaults from the grid that was
-        just selected -- called only from `_sync_included`'s grid-changed
+        """Re-seed `cell_spin`/`radius_spin` from the grid that was just
+        selected -- called only from `_sync_included`'s grid-changed
         branch, so an unrelated session signal never overwrites a value
-        the user picked for the grid that is still selected.
-
-        `cell_spin`/`radius_spin` need only the grid itself (spec 4's "no
+        the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and spec 6.4's 1.5x-spacing fill radius). `dz_spin`/
-        `z0_spin`/`z1_spin` need a line too -- there is no such thing as a
-        grid's own native sample interval -- so they are left at whatever
-        they already were when the grid has none yet (`lines_changed`
-        later does not re-trigger this; see the module docstring's own
-        `_included_is_default` reasoning for why re-seeding on every
-        session signal would be wrong, not merely unnecessary).
-
-        `z0_spin` is seeded from `header.position_ns`, NOT 0: a DZT's
-        recorded window need not start at time zero at all (`velocity.py`'s
-        own docstring gives a real SIR-4000 example starting at -11.09 ns),
-        and `Radargram.from_profile` sets exactly `t0_ns=header.position_ns`
-        (`processing/base.py`). Seeding 0.0 here -- caught only by actually
-        running `refresh_slice()` against a real synthetic fixture, not by
-        inspection -- silently asked for levels before the line's own
-        recording starts, which `plan_line` refuses with `CoverageError`
-        the moment anything tries to slice it.
+        spacing", and spec 6.4's 1.5x-spacing fill radius -- both need
+        only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
+        separately, by `_seed_dz_z_defaults`: see its own docstring for
+        why a grid change is not the only moment that needs to try them.
         """
         if grid_id is None or not self.session.is_open:
             return
@@ -765,6 +767,34 @@ class SlicesDock(QgsDockWidget):
             return
         self.cell_spin.setValue(min(0.5, grid.default_spacing / 2.0))
         self.radius_spin.setValue(1.5 * grid.default_spacing)
+        self._seed_dz_z_defaults(grid_id)
+
+    def _seed_dz_z_defaults(self, grid_id: str) -> None:
+        """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
+        included line's own header, at most once per grid.
+
+        These three need a LINE, not just a grid -- there is no such
+        thing as a grid's own native sample interval -- and `plugin.py`
+        builds this dock before any site exists: new site, then add a
+        grid, then import lines under it is the ORDINARY flow, not an
+        edge case, and it fires `grids_changed` (which is when
+        `_seed_resolution_defaults` runs) before any line exists to read.
+        Seeding these only from the grid-changed branch left them stuck
+        at their generic fallback construction-time values
+        (`dz=1.0, z0=0.0, z1=100.0`) forever in that flow -- which not
+        only states the wrong numbers, it silently asks for two-way times
+        `plan_line` cannot cover: `z0=0.0` on a line whose own recording
+        starts at a negative `position_ns` (as real SIR-4000 files do)
+        raises `CoverageError` the moment anything tries to slice it.
+        `_sync_included` therefore also retries this from its "still
+        default" branch. `_dz_z_seeded_for` is what keeps a retry from
+        re-running once it has genuinely succeeded for this grid: without
+        it, every `rebuild_source()` (an unrelated `presets_changed`,
+        say) would re-seed over a value the user has since changed by
+        hand.
+        """
+        if self._dz_z_seeded_for == grid_id:
+            return
         included = self._default_included(grid_id)
         if not included:
             return
@@ -772,19 +802,34 @@ class SlicesDock(QgsDockWidget):
         self.dz_spin.setValue(header.dt_ns)
         self.z0_spin.setValue(header.position_ns)
         self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
+        self._dz_z_seeded_for = grid_id
 
     def _refill_palette_combo(self) -> None:
         """Spec 8's rule made concrete: only tables that suit the
         source's actual polarity are ever offered, defaulting to the one
         named for that polarity rather than preserving whatever the combo
-        happened to show for a differently-polarised source before."""
+        happened to show for a differently-polarised source before.
+
+        Fix round 1, M2: signals blocked around the refill. Unblocked,
+        `currentTextChanged` -- wired to `refresh_slice()` -- fires once
+        going from empty to whatever Qt auto-selects as the first item
+        (itself, on the very first call, an "unknown colormap ''" error
+        logged from `refresh_slice()`'s own broad guard) and again if
+        `setCurrentText(default)` picks something else, each a spurious
+        full rebuild on top of the one `_on_prepared()` already calls
+        explicitly right after this returns.
+        """
         unipolar = self.engine.output_unipolar
         names = colormap_names(unipolar=unipolar)
         default = "amp_black_high" if unipolar else DEFAULT_COLORMAP
-        self.palette_combo.clear()
-        self.palette_combo.addItems(names)
-        if default in names:
-            self.palette_combo.setCurrentText(default)
+        self.palette_combo.blockSignals(True)
+        try:
+            self.palette_combo.clear()
+            self.palette_combo.addItems(names)
+            if default in names:
+                self.palette_combo.setCurrentText(default)
+        finally:
+            self.palette_combo.blockSignals(False)
 
     def current_window(self) -> SliceWindow | None:
         z = self.engine.z
@@ -851,10 +896,20 @@ class SlicesDock(QgsDockWidget):
             self._shared_limit_cache = None
             new_z = self.engine.z
             nz = new_z.nz if new_z is not None else 1
-            self.slice_slider.setRange(0, max(0, nz - 1))
-            if new_z is not None and previous_time is not None:
-                nearest = int(round((previous_time - new_z.t0_ns) / new_z.dz_ns))
-                self.slice_slider.setValue(max(0, min(new_z.nz - 1, nearest)))
+            # Fix round 1, M3: blocked. `setRange` and `setValue` can each
+            # emit `valueChanged` -- wired to `refresh_slice()` -- on top
+            # of the explicit call below; a `dz`/`z0`/`z1` change (unlike
+            # a cell-only change) generally moves the slider's own clamped
+            # value, so this was invisible to a debounce test that only
+            # ever varies `cell_spin`.
+            self.slice_slider.blockSignals(True)
+            try:
+                self.slice_slider.setRange(0, max(0, nz - 1))
+                if new_z is not None and previous_time is not None:
+                    nearest = int(round((previous_time - new_z.t0_ns) / new_z.dz_ns))
+                    self.slice_slider.setValue(max(0, min(new_z.nz - 1, nearest)))
+            finally:
+                self.slice_slider.blockSignals(False)
             self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
             self.error.emit(str(exc))
@@ -864,6 +919,14 @@ class SlicesDock(QgsDockWidget):
             window = self.current_window()
             if window is None or not self.engine.is_prepared:
                 self._values = None
+                # Fix round 1, Important 4: emitted here too. `set_source`
+                # empties the engine's lines SYNCHRONOUSLY, before any
+                # re-preparation even starts, so this is the only path
+                # that can tell `plugin._on_slice_changed` to `clear()`
+                # the map for a source that just stopped being prepared --
+                # without it the map kept showing the PREVIOUS source's
+                # slice, indefinitely if the new one never prepares.
+                self.slice_changed.emit()
                 return
             values, coverage = self.engine.slice_at(window)
             if self.coverage_check.isChecked():
@@ -878,6 +941,16 @@ class SlicesDock(QgsDockWidget):
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
+            # Fix round 1, M4: state reset here too, not just reported --
+            # otherwise `current_values()`/`current_window()`/the readout
+            # keep describing the tick before this one (e.g. an out-of-
+            # range `z1` that a prepared line no longer covers), and a
+            # message bar warning appears beside a map and readout that
+            # both still claim the OLD window is what is on screen.
+            self._values = None
+            self._window = None
+            self.readout.setText(f"error: {exc}")
+            self.slice_changed.emit()
             self.error.emit(str(exc))
 
     def _update_readout(self, window: SliceWindow) -> None:
@@ -887,6 +960,14 @@ class SlicesDock(QgsDockWidget):
         it at either end of the axis (trap 3). `velocity_label` and
         `legend_label` are refreshed alongside it, on the same tick, for
         the same "read together" reason spec 9.2 puts them in one group.
+
+        Fix round 1, Important 1: spec 9.2 fixes the readout's text as
+        BOTH units (`slice 14 / 40 · 12.0-16.0 ns · 0.60-0.80 m`), and
+        `window_label` already does that when given a velocity -- the
+        two-argument call here had simply never passed one, so the
+        readout stated ns only. `_resolved_velocity()` is the one place
+        that resolves it, shared with `velocity_label` so the two always
+        describe the same line's velocity.
         """
         z = self.engine.z
         assert z is not None  # refresh_slice() already checked current_window()
@@ -898,27 +979,41 @@ class SlicesDock(QgsDockWidget):
         # it degrades gracefully to "the last slice" there rather than
         # raising.
         index = min(len(windows) - 1, window.k0 // step_levels)
-        label = window_label(z, window)
+        key, velocity = self._resolved_velocity()
+        label = window_label(z, window, velocity)  # falls back to ns-only when velocity is None
         self.readout.setText(f"slice {index + 1} / {len(windows)} · {label}")
-        self._update_velocity_label()
+        self._update_velocity_label(key, velocity)
         self._update_legend_label()
 
-    def _update_velocity_label(self) -> None:
+    def _resolved_velocity(self) -> tuple[str | None, VelocityModel | None]:
+        """The line key and the velocity resolved against it, shared by
+        the readout (spec 9.2's ns-and-m format) and `velocity_label`
+        (spec 9.2's "provenance, not state") so the two never describe
+        two different lines. `None, None` before anything is prepared."""
         try:
             keys = self.engine.provenance().line_keys
         except RuntimeError:
-            self.velocity_label.setText("")
-            return
+            return None, None
         if not keys:
+            return None, None
+        key = keys[0]
+        return key, self.session.resolved_velocity(key)
+
+    def _update_velocity_label(self, key: str | None, velocity: VelocityModel | None) -> None:
+        if key is None or velocity is None:
             self.velocity_label.setText("")
             return
-        key = keys[0]
-        model = self.session.resolved_velocity(key)
         source = velocity_source(self.session, key)
-        self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({source})")
+        self.velocity_label.setText(f"v = {velocity.surface_velocity:.3f} m/ns ({source})")
 
     def _update_legend_label(self) -> None:
         limit = self.display_limit()
+        if self.coverage_check.isChecked():
+            # Ruling AB: a count map's legend states a count scale, not
+            # an amplitude range with a transform name that does not
+            # apply to it.
+            self.legend_label.setText(f"0 – {limit:.3g} traces")
+            return
         base = f"0 – {limit:.3g}" if self.engine.output_unipolar else f"−{limit:.3g} – {limit:.3g}"
         transform_label = self.transform_combo.currentText() or "none"
         self.legend_label.setText(f"{base} ({transform_label})")
@@ -933,7 +1028,23 @@ class SlicesDock(QgsDockWidget):
         only recomputed when the key it is measured over -- `(n_levels,
         engine.choice, engine.mode)` -- actually changed; see that field's
         own docstring for why those three and nothing else.
+
+        Fix round 1, Important 2 (Ruling AB): the coverage view measures
+        its OWN limit -- the greatest trace count actually on screen,
+        floored at 1 -- regardless of the stretch combo. The shared
+        stretch exists so DEPTHS stay amplitude-comparable (spec 8); that
+        is not a property trace counts have at all, and `_values` here
+        holds counts (1..a few), not amplitudes, whenever coverage is
+        checked. Measured before this fix: `engine.shared_limit(...)`
+        (the "shared" branch) returned ~7.0e4 on the synthetic fixture,
+        so every count mapped to the shader's bottom stop and the whole
+        coverage view rendered as one flat colour.
         """
+        if self.coverage_check.isChecked():
+            if self._values is None:
+                return 1.0
+            finite = self._values[np.isfinite(self._values)]
+            return max(1.0, float(np.nanmax(finite))) if finite.size else 1.0
         clip: Any = UnipolarClip() if self.engine.output_unipolar else PercentileClip()
         if self.stretch_combo.currentText() == "this slice":
             if self._values is None:
@@ -947,3 +1058,17 @@ class SlicesDock(QgsDockWidget):
             value = self.engine.shared_limit(window.n_levels, clip)
             self._shared_limit_cache = (key, value)
         return self._shared_limit_cache[1]
+
+    def display_unipolar(self) -> bool:
+        """Whether `current_values()` has no negative side, for the LUT
+        `plugin.py` builds the map layer's shader with. Always `True` for
+        the coverage view -- a trace count is never negative regardless
+        of `engine.output_unipolar`, which describes the SOURCE, not what
+        `refresh_slice()` currently has `_values` holding -- so a bipolar
+        source's coverage view is not drawn on a bipolar ramp with half
+        the table addressing counts that cannot occur (Ruling AB, the same
+        reasoning `display_limit()`'s own coverage branch applies to the
+        number rather than the colour)."""
+        if self.coverage_check.isChecked():
+            return True
+        return self.engine.output_unipolar

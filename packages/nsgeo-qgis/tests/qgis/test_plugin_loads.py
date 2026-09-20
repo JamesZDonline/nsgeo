@@ -131,3 +131,52 @@ def test_accepting_the_line_chooser_after_the_grid_changed_is_discarded(
         assert item is not None and "grid changed" in item.text()
     finally:
         plugin.unload()
+
+
+def test_a_source_change_clears_the_stale_slice_from_the_map(
+    fake_iface, qgis_app, tmp_path, answer_modal
+):
+    """Fix round 1, Important 4. `set_source` empties the engine's lines
+    SYNCHRONOUSLY (before any re-preparation even starts), but nothing
+    called `refresh_slice()` again until the NEXT successful preparation
+    -- `refresh_slice()`'s own early return (not prepared) set `_values =
+    None` without emitting `slice_changed`, the only signal
+    `plugin._on_slice_changed` uses to `clear()` the map layer. From the
+    moment a combo changed, the map kept showing the PREVIOUS source's
+    slice -- indefinitely if the new source never prepares, as here: grid
+    B has no lines, so `_lines` stays empty even once "preparation"
+    (trivially) finishes."""
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        plugin.session.new_site(tmp_path)
+        plugin.session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+        lines = [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+        plugin.session.add_lines(lines)
+        plugin.session.site.presets["p"] = [{"step": "dewow", "params": {}, "enabled": True}]
+        plugin.session.presets_changed.emit()
+
+        dock = plugin.slices_dock
+        assert dock is not None
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()  # apply the seeded default resolution and render once
+        assert plugin.slice_layer is not None
+        assert plugin.slice_layer.layer is not None, "the map must show something before the switch"
+
+        plugin.session.add_grid(Grid("B", (100.0, 100.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+        dock.grid_combo.setCurrentText("B")  # grid B has no lines: "prepares" synchronously, empty
+        assert not dock.engine.is_prepared
+
+        assert plugin.slice_layer.layer is None, (
+            "the stale slice from grid A must not still be on the map for a source with no lines"
+        )
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    finally:
+        plugin.unload()

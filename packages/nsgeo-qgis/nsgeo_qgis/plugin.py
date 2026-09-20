@@ -494,7 +494,7 @@ class NsgeoPlugin:
                 frame,
                 limit=dock.display_limit(),
                 colormap_name=dock.palette_combo.currentText(),
-                unipolar=dock.engine.output_unipolar,
+                unipolar=dock.display_unipolar(),
                 subtitle=dock.readout.text(),
             )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring

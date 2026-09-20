@@ -8,7 +8,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.render import colormap_names
-from nsgeo.slices import window_times_ns
+from nsgeo.slices import window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_plan import transform_names
 from nsgeo_qgis.ui.slices_dock import SlicesDock
@@ -393,13 +393,38 @@ def _ready(dock):
     dock.flush_debounce()  # applies the pending Resolution change immediately
 
 
+def test_the_seeded_default_resolution_actually_slices(docked):
+    """Fix round 1, Important 6. Every other navigation test in this file
+    runs through `_ready()`, which overwrites `z0_spin`/`z1_spin` with
+    values that happen to sit inside the fixture's real recording
+    window -- so nothing exercised `_seed_resolution_defaults`'s OWN
+    z0/z1 formula. That is precisely how a `z0 = 0.0` seed (assuming a
+    DZT's recorded window starts at time zero) reached Step 10 alive: it
+    made every default-resolution `refresh_slice()` raise `CoverageError`
+    silently (caught by `refresh_slice()`'s own guard), which looked like
+    a suspiciously fast, do-nothing timing loop rather than a visible
+    failure, and was only actually caught by timing it."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()  # apply the SEEDED default resolution, no overrides
+    header = session.line_for_key(session.keys()[0]).header
+    assert dock.z0_spin.value() == pytest.approx(header.position_ns)
+    assert dock.current_values() is not None
+
+
 def test_the_readout_states_the_window_that_was_actually_averaged(docked):
     """Spec 9.2: the control that moves the window and the statement of
     where the window now is are one unit, read together on every tick.
     Spec 6.6: always the full range, never the centre -- with overlapping
     slices, the extent of what is averaged is the thing a reader would
-    otherwise mistake for vertical resolution."""
-    dock, _ = docked
+    otherwise mistake for vertical resolution.
+
+    Fix round 1, Important 1: spec 9.2 fixes the text as BOTH units
+    (`slice 14 / 40 · 12.0-16.0 ns · 0.60-0.80 m`) -- the brief's own
+    draft only ever checked the ns half, which is why the readout could
+    silently drop the m half entirely."""
+    dock, session = docked
     _ready(dock)
     dock.thickness_spin.setValue(4.0)
     dock.slice_slider.setValue(10)
@@ -410,6 +435,10 @@ def test_the_readout_states_the_window_that_was_actually_averaged(docked):
     assert f"{lo:.1f}" in text and f"{hi:.1f}" in text
     assert "ns" in text
     assert "/" in text and "slice" in text  # "slice 14 / 40"
+    velocity = session.resolved_velocity(session.keys()[0])
+    lo_m, hi_m = window_depths_m(dock.engine.z, window, velocity)
+    assert f"{lo_m:.2f}" in text and f"{hi_m:.2f}" in text
+    assert "m" in text
 
 
 def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
@@ -417,7 +446,15 @@ def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
     thinner window than asked for, and spec 6.6 requires the readout to
     show what was actually averaged. A readout rebuilt from the slider
     position plus the thickness spin box claims a window the axis
-    refused."""
+    refused.
+
+    Fix round 1, M1: asserting only `f"{hi:.1f}" in text` cannot
+    discriminate a readout rebuilt from the raw request here, because at
+    this clamped last window `lo == hi`, which coincides with the
+    mutant's own top-of-window value at the same slider position. The
+    added, parallel assertion pins the whole "lo-hi ns" substring, the
+    same shape the fill-radius test already pins as an absolute value
+    rather than only a relative one."""
     dock, _ = docked
     _ready(dock)
     dock.thickness_spin.setValue(8.0)
@@ -427,6 +464,7 @@ def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
     assert hi <= dock.engine.z.t_end_ns + 1e-9
     assert hi - lo < 8.0  # thinner than requested, and the readout says so
     assert f"{hi:.1f}" in dock.readout.text()
+    assert f"{lo:.1f}-{hi:.1f} ns" in dock.readout.text()
 
 
 def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
@@ -488,15 +526,27 @@ def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
 def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
     """Spec 3: a zero that means 'no data' reading as 'no reflection' is
     the defect a count array exists to fix, and the coverage view is where
-    a user sees it."""
+    a user sees it.
+
+    Fix round 1, Important 2 (Ruling AB): checking only `current_values()`
+    is exactly why nothing caught `display_limit()` ignoring the coverage
+    view and returning the SHARED (amplitude) limit instead -- ~7.0e4 on
+    this fixture, which maps every trace count to the shader's bottom
+    stop and renders the whole view as one flat colour. The added
+    assertions pin the limit itself, not just the array it is measured
+    over."""
     dock, _ = docked
     _ready(dock)
     dock.coverage_check.setChecked(True)
     coverage = dock.current_values()
     assert np.nanmax(coverage) >= 1.0
     assert np.allclose(coverage[np.isfinite(coverage)] % 1.0, 0.0), "counts are whole traces"
+    limit = dock.display_limit()
+    assert limit == pytest.approx(float(np.nanmax(coverage)))
+    assert dock.display_unipolar() is True, "a trace count is never negative"
     dock.coverage_check.setChecked(False)
     assert not np.allclose(np.nan_to_num(dock.current_values()), np.nan_to_num(coverage))
+    assert dock.display_limit() != pytest.approx(limit)
 
 
 def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):
@@ -566,3 +616,64 @@ def test_a_resolution_change_is_debounced_into_one_rebuild(docked):
     assert rebuilds == [], "nothing should have rebuilt while the value was still moving"
     dock.flush_debounce()
     assert len(rebuilds) == 1
+
+
+def test_a_preparation_triggers_exactly_one_rebuild_not_several(docked):
+    """Fix round 1, M2: `_refill_palette_combo` used to `clear()` and
+    `addItems()` a combo wired to `refresh_slice()` via
+    `currentTextChanged`, producing up to two spurious rebuilds on top of
+    the one `_on_prepared()` itself asks for -- and a logged "unknown
+    colormap ''" error from the first, empty-string transition."""
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    seen: list[int] = []
+    errors: list[str] = []
+    dock.slice_changed.connect(lambda: seen.append(1))
+    dock.error.connect(errors.append)
+    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert len(seen) == 1, "one preparation must mean exactly one rebuild, not several"
+    assert not any("colormap" in e for e in errors), errors
+
+
+def test_a_resolution_change_touching_dz_is_still_one_rebuild(docked):
+    """Fix round 1, M3: `_apply_resolution` called `setRange()` then
+    `setValue()` on the slider, each of which can emit `valueChanged` --
+    wired to `refresh_slice()` -- before calling `refresh_slice()` itself.
+    Invisible to `test_a_resolution_change_is_debounced_into_one_rebuild`
+    because a CELL-only change leaves the slider's own clamped value
+    untouched; a `dz`/`z0`/`z1` change generally does not."""
+    dock, _ = docked
+    _ready(dock)
+    rebuilds: list[int] = []
+    dock.slice_changed.connect(lambda: rebuilds.append(1))
+    dock.dz_spin.setValue(1.0)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(50.0)
+    dock.flush_debounce()
+    assert len(rebuilds) == 1
+
+
+def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
+    """Fix round 1, M4: `refresh_slice`'s exception path used to leave
+    `_values`, `_window` and the readout describing the previous, good
+    tick -- an out-of-range `z1` (past what a prepared line actually
+    covers) raised `CoverageError` from inside `engine.slice_at()`, and
+    the message bar's warning appeared beside a map and readout that both
+    still claimed the OLD window was on screen."""
+    dock, _ = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    old_readout = dock.readout.text()
+    errors: list[str] = []
+    changed: list[int] = []
+    dock.error.connect(errors.append)
+    dock.slice_changed.connect(lambda: changed.append(1))
+    dock.z1_spin.setValue(200.0)  # past the line's own recorded window
+    dock.flush_debounce()
+    assert errors, "an out-of-range z1 must be reported"
+    assert dock.current_values() is None
+    assert dock.readout.text() != old_readout
+    assert changed, "the map must be told to clear, not left showing the stale slice"
