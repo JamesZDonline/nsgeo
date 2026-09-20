@@ -151,7 +151,27 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
 
     Real files are this project's primary validation (spec 11), and this
     is the one place the stretch a user actually sees is checked against
-    data that came off an instrument."""
+    data that came off an instrument.
+
+    thickness=23 (~5.0 ns at this dz), not 10 (~2.2 ns): spec 6.6 and
+    Conyers both require a slice thickness of at least one pulse width, so
+    that variation in the transmitted pulse does not bias the average --
+    this antenna's pulse width is ~2.9 ns at 350 MHz, so a 2.2 ns window is
+    not a thickness a user should ever choose.
+
+    The SIZE of the reduction is a property of the data, not of the code:
+    adjacent levels in this real amp_envelope cube correlate at 0.95-0.99,
+    because envelope detection is itself a smoothing operation, so a window
+    mean barely differs from the levels it averages. Measured on this
+    corpus, shared_limit falls from 2.724 at thickness 1 to 2.166 at 20 and
+    1.265 at 90 -- smooth and monotonic, exactly as specified. A synthetic
+    fixture with i.i.d. levels shows a far larger reduction (~0.55) at the
+    same thickness, which is why the magnitude claim lives on that fixture
+    in test_slices_display.py and only the direction and the mechanism are
+    asserted here. Do not re-add a magnitude threshold to this test: any
+    value that passes on this corpus is a fact about this antenna and this
+    processing, not about shared_limit.
+    """
     from nsgeo.processing import build_step
     from nsgeo.render import UnipolarClip, to_index8_unipolar
     from nsgeo.slices.binning import PreparedLine, build_cube, plan_line
@@ -197,16 +217,24 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     cube = build_cube(prepared, plans, frame, z, prov)
 
     clip = UnipolarClip()
-    thickness = 10
+    thickness = 23  # ~5.0 ns at this dz -- at least one pulse width, spec 6.6
     correct = shared_limit(cube, thickness, clip)
     over_raw_levels = clip.limit(cube.mean)
     assert correct < over_raw_levels  # the direction M10 measured, on real data
 
-    # What it means on screen: at the correct limit the displayed slices
-    # span most of the 0-255 table; at the raw-level limit they do not.
+    # The exact mechanism, on real data: the shared limit IS the percentile
+    # over the slices actually displayed at this thickness. This is what
+    # dies against the `clip.limit(cube.mean)` implementation M10 measured,
+    # and against a windows-overlap mutant that weights mid-depths twice.
     windows = plan_windows(z, thickness, thickness)
     shown = np.concatenate([cube.slice_levels(w.k0, w.k1).ravel() for w in windows])
     shown = shown[np.isfinite(shown)]
-    assert np.median(to_index8_unipolar(shown, correct)) > 1.5 * np.median(
+    assert correct == pytest.approx(float(np.percentile(shown, clip.percentile)), rel=1e-6)
+
+    # And what it means on screen: at the correct limit the displayed slices
+    # sit higher in the 0-255 table than at the raw-level limit. The
+    # DIRECTION is the claim; the magnitude is a property of how much the
+    # data decorrelates with depth, not of this code (see the docstring).
+    assert np.median(to_index8_unipolar(shown, correct)) > np.median(
         to_index8_unipolar(shown, over_raw_levels)
     )
