@@ -40,6 +40,11 @@ from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
 
 MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, 8, 28
+# Vertical extent of the axis caption band ("ns" / "m") at the top of a
+# vertical margin -- the same rect `_paint_axes` passes to `drawText` for
+# the caption. A tick label whose band reaches in is colliding with it;
+# see `_label_in_caption_band` (issue #7).
+CAPTION_BAND = MARGIN_TOP + 10
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
 CURSOR_COLOUR = QColor(255, 159, 26)
@@ -326,27 +331,30 @@ class ProfileView(QWidget):
         for tick, y in self._time_ticks(t):
             yy = r.top() + y
             p.drawLine(QPointF(r.left() - 4, yy), QPointF(r.left(), yy))
-            p.drawText(
-                QRectF(0, yy - 8, r.left() - 6, 16),
-                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                tick,
-            )
-        p.drawText(
-            QRectF(0, 0, r.left() - 6, MARGIN_TOP + 10), int(Qt.AlignmentFlag.AlignRight), "ns"
-        )
+            if not self._label_in_caption_band(y):
+                # The mark always paints (it never reaches the caption
+                # band); only a label whose band does is skipped -- issue
+                # #7's "0" over "ns" under an active `time_zero` step.
+                p.drawText(
+                    QRectF(0, yy - 8, r.left() - 6, 16),
+                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                    tick,
+                )
+        p.drawText(QRectF(0, 0, r.left() - 6, CAPTION_BAND), int(Qt.AlignmentFlag.AlignRight), "ns")
         # right: depth
         p.drawLine(r.topRight(), r.bottomRight())
         if self._velocity is not None:
             for label, y in self._depth_ticks(t):
                 yy = r.top() + y
                 p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                p.drawText(
-                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    label,
-                )
+                if not self._label_in_caption_band(y):
+                    p.drawText(
+                        QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
+                        int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                        label,
+                    )
             p.drawText(
-                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, MARGIN_TOP + 10),
+                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_BAND),
                 int(Qt.AlignmentFlag.AlignLeft),
                 "m",
             )
@@ -374,6 +382,28 @@ class ProfileView(QWidget):
         return [
             (f"{tick:g}", t.y_of_time(float(tick))) for tick in nice_ticks(t.time_lo, t.time_hi)
         ]
+
+    def _label_in_caption_band(self, y_local: float) -> bool:
+        """Whether a tick label at local `y_local` would be painted on top
+        of the axis caption band ("ns" / "m") at the top of the margin.
+        `_paint_axes` skips the label when this is true, but never the
+        tick mark.
+
+        A label is the 16-px rect `QRectF(..., yy - 8, ..., 16)` centred
+        on the tick at `yy = r.top() + y_local`, so it occupies the
+        absolute band [y_local + MARGIN_TOP - 8, y_local + MARGIN_TOP + 8];
+        the caption band is [0, CAPTION_BAND]. Ticks never sit above the
+        window (a label's band bottom is therefore always positive), so
+        the overlap reduces to the band's top edge crossing the caption's
+        bottom. Issue #7 is this method returning true for the "0" tick:
+        under an active `time_zero` step the window starts at 0, so the
+        tick is at local y = 0 -- or at any small positive y whenever the
+        line's zero offset is small enough, the collision the M6
+        checkpoint reported.
+        Deliberate about the `CAPTION_BAND` boundary rather than the
+        caption's glyph extent: deterministic across fonts and DPI.
+        """
+        return y_local + MARGIN_TOP - 8 < CAPTION_BAND
 
     def _distance_unit_label(self) -> str:
         return "m" if self._distance is not None else "trace"
