@@ -13,6 +13,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.render.qimage import RadargramImage, rgb_to_qimage
 from nsgeo_qgis.ui.profile_view import (
     BACKGROUND,
+    CAPTION_ROW,
     CURSOR_COLOUR,
     MARGIN_LEFT,
     MARGIN_TOP,
@@ -288,7 +289,9 @@ def test_vertical_scaling_reconciles_an_image_shorter_than_n_samples(make_view):
 @pytest.fixture
 def view(make_view):
     v = make_view()
-    v.resize(800, 300)
+    # An 800x300 widget under the original 8-px top margin: a 696x264 image
+    # rect, which the hard-coded tick and zoom numbers below are derived from.
+    v.resize(800, 264 + MARGIN_TOP + 28)
     v.show()
     rg = _rg()
     v.set_axes(
@@ -566,10 +569,10 @@ def test_wheel_event_zooms_about_the_cursor(view):
     """
     v, rg = view
     r = v.image_rect()
-    assert (r.left(), r.top()) == (56, 8)  # the numbers below assume this fixture's exact geometry
+    assert (r.left(), r.top()) == (56, 22)  # the numbers below assume this fixture's exact geometry
     ev = QWheelEvent(
-        QPointF(404, 140),
-        QPointF(404, 140),
+        QPointF(404, 154),
+        QPointF(404, 154),
         QPoint(0, 0),
         QPoint(0, 120),  # one standard wheel notch
         Qt.MouseButton.NoButton,
@@ -580,7 +583,7 @@ def test_wheel_event_zooms_about_the_cursor(view):
     QApplication.sendEvent(v, ev)
     t = v.transform
     # steps = 120/120.0 = 1.0; factor = 1.25**1.0 = 1.25; anchor (348, 132)
-    # local, i.e. widget point (404, 140) with this fixture's margins.
+    # local, i.e. widget point (404, 154) with this fixture's margins.
     assert (t.trace_lo, t.trace_hi) == (pytest.approx(20.0), pytest.approx(180.0))
     assert (t.time_lo, t.time_hi) == (pytest.approx(2.4), pytest.approx(53.6))
 
@@ -1143,44 +1146,34 @@ def test_time_ticks_are_actually_rendered_in_the_left_margin(view):
     assert QColor(shot.pixel(r.left() - 2, between_ticks_y)).red() > 200
 
 
-def test_topmost_tick_labels_skip_the_axis_caption_band(view):
-    """Issue #7: a tick label whose band reaches into the caption band at the
-    top of a vertical margin is painted on top of the "ns"/"m" caption.
-    The reported collision is the "0" under an active `time_zero` step
-    (the axis starts at exactly 0, the tick sits at local y = 0, and its
-    16-px label band [0, 16] covers the caption band [0, MARGIN_TOP + 10])
-    -- but the collision is not unique to that case: the fixture itself
-    (t0_ns = -4.0) already places its "0" tick at y = 16.5, still inside
-    the band, and so would any line whose zero offset is small enough.
+def _has_ink(shot, x0, x1, y0, y1):
+    return any(QColor(shot.pixel(x, y)).red() < 150 for x in range(x0, x1) for y in range(y0, y1))
 
-    `_paint_axes` must therefore skip the *label* while a tick's local y
-    is still within the caption band (the tick mark keeps painting: it
-    never reaches the caption), and must not skip the first tick below
-    the band -- the fixture's "20" at y = 99.0 -- pinning the skip's
-    lower bound to the band itself rather than half the axis.
-    """
+
+def test_caption_row_sits_above_the_topmost_tick_label():
+    """Issue #7: the "ns"/"m" captions have their own row, and a tick label
+    (a 16-px rect centred on its tick) at the very top of the axis starts
+    below it -- so no top tick, not even `time_zero`'s "0", collides."""
+    assert CAPTION_ROW <= MARGIN_TOP - 8
+
+
+@pytest.mark.parametrize("t0_ns", [0.0, -4.0])
+def test_top_zero_label_is_painted_below_the_caption(view, t0_ns):
+    """Issue #7's two cases: `t0_ns = 0.0` (an active `time_zero` step; the
+    "0" tick sits at the very top of the axis, where it used to print over
+    "ns") and the fixture's -4.0 ("0" a little lower). Both the caption and
+    the "0" label must paint, the label in its own 16-px band and the tick
+    mark beside it -- hiding the label is not a fix for the collision."""
     v, rg = view
-    _, y0 = v._time_ticks(v.transform)[0]  # "0", inside the band (fixture: y = 16.5)
-    assert v._label_in_caption_band(y0)
-    _, y20 = v._time_ticks(v.transform)[1]  # "20", far below the band (fixture: y = 99.0)
-    assert not v._label_in_caption_band(y20)
-
-
-def test_top_tick_keeps_its_mark_when_its_label_is_skipped(view):
-    """Consumption check for the issue #7 skip: with `t0_ns = 0.0` (the
-    `time_zero` case) the "0" tick sits at the very top of the axis. Its
-    *label* must go -- it would sit on the caption -- but its *mark*,
-    r.left()-4 to r.left() at y = r.top(), must not: a `continue` placed
-    before the `drawLine`, or an over-broad skip, would drop it with the
-    label, and the value test above (which does not paint at all) plus
-    the band test (which asserts the decision, not the draw) would not
-    catch that.
-    """
-    v, rg = view
-    v.set_axes(rg.n_traces, rg.n_samples, 0.0, rg.dt_ns)  # the time_zero case: axis starts at 0
+    v.set_axes(rg.n_traces, rg.n_samples, t0_ns, rg.dt_ns)
     shot = v.grab_image()
     r = v.image_rect()
-    assert QColor(shot.pixel(r.left() - 2, r.top())).red() < 150  # the mark: axis colour
+    label, y = v._time_ticks(v.transform)[0]
+    assert label == "0"
+    yy = int(round(r.top() + y))
+    assert _has_ink(shot, 0, r.left() - 6, 0, CAPTION_ROW)  # "ns"
+    assert _has_ink(shot, 0, r.left() - 6, max(CAPTION_ROW, yy - 8), yy + 8)  # "0"
+    assert _has_ink(shot, r.left() - 3, r.left() - 1, yy - 1, yy + 2)  # the mark
 
 
 def test_distance_ticks_are_actually_rendered_at_the_bottom(view):
