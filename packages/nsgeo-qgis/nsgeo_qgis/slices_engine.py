@@ -939,12 +939,27 @@ class SliceEngine(QObject):
         prepared, and a live read would then describe steps the cube was
         never actually built from -- the same defect this docstring
         already rejects for `line_keys`, one field over.
+
+        A line can be removed from the survey while a source stays
+        prepared, and `resolved_velocity` raises KeyError for a key that
+        is gone. The cube's own arrays are still correct, so losing the
+        depth LABEL is the only honest consequence -- blanking the map
+        and breaking "Save cube..." and "Export GeoTIFF" is not. Falling
+        through to the next prepared line is faithful rather than
+        arbitrary: `resolve_velocity` goes line override -> grid velocity
+        -> header dielectric, and a cube is built from one grid (spec 3),
+        so another line of the same grid almost always carries the same
+        model.
         """
         if self._choice is None:
             raise RuntimeError("no source is chosen")
         velocity = None
-        if self._lines:
-            velocity = self.session.resolved_velocity(self._lines[0].key).to_dict()
+        for line in self._lines:
+            try:
+                velocity = self.session.resolved_velocity(line.key).to_dict()
+                break
+            except (KeyError, RuntimeError):
+                continue
         return Provenance(
             line_keys=tuple(line.key for line in self._lines),
             preset_name=self._choice.preset,

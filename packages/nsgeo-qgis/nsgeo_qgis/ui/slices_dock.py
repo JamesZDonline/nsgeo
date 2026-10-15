@@ -1614,7 +1614,10 @@ class SlicesDock(QgsDockWidget):
         if not keys:
             return None, None
         key = keys[0]
-        return key, self.session.resolved_velocity(key)
+        try:
+            return key, self.session.resolved_velocity(key)
+        except (KeyError, RuntimeError):
+            return None, None
 
     def _update_velocity_label(self, key: str | None, velocity: VelocityModel | None) -> None:
         if key is None or velocity is None:

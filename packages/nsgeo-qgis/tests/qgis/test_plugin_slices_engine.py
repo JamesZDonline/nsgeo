@@ -761,3 +761,38 @@ def test_clear_during_a_live_preparation_cancels_and_waits_before_anything_else_
     assert engine.output_unipolar is True  # the new (amp_envelope) choice landed
     assert engine.line_count == len(keys)
     assert errors == [], errors
+
+
+def test_provenance_survives_a_contributing_line_being_removed(sourced):
+    """A line can be deleted from the survey while a source stays
+    prepared. The cube's arrays are still correct, so provenance must
+    keep working -- `cube()`, "Save cube..." and "Export GeoTIFF" all
+    route through it, and a raw KeyError there blanks the map and breaks
+    both exports for an ordinary survey edit."""
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+
+    first = session.keys()[0]
+    session.remove_line(first)
+
+    prov = engine.provenance()  # must not raise
+    assert prov.velocity is not None  # a surviving line supplied it
+    assert engine.cube() is not None  # the path that actually broke
+
+
+def test_provenance_velocity_is_none_when_all_prepared_lines_removed(sourced):
+    """When all prepared lines are removed from the survey, provenance
+    still works but velocity is None, which `window_label` omits from the
+    depth LABEL -- the only honest consequence of losing all velocity
+    sources."""
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+
+    for key in list(session.keys()):
+        session.remove_line(key)
+
+    prov = engine.provenance()  # must not raise
+    assert prov.velocity is None  # no lines left to supply it
+    assert engine.cube() is not None  # arrays are still there
