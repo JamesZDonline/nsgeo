@@ -26,12 +26,12 @@ DZT and DZX readers.
 | `DztError` | Raised when a DZT file is malformed or unsupported. |
 | `DztHeader` | The parsed DZT header. |
 | `DzxError` | Raised when a DZX sidecar exists but cannot be parsed. |
-| `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system. |
+| `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
 | `read_header` | Read only the header, cheaply. |
 | `read_samples` | Read all samples as (channels, samples, traces). |
-| `sidecar_for` | The DZX beside a DZT. |
+| `sidecar_for` | The DZX beside a DZT, or the path itself if it is one; None when there is none. |
 | `trace_count` | Number of traces, from the file size. |
 
 ### `nsgeo.model`
@@ -42,7 +42,7 @@ The survey data model.
 |---|---|
 | `Line` | One collected survey line; headers are eager, samples are lazy. |
 | `Profile` | One channel of one radargram; its data is raw and never mutated. |
-| `Site` | The grids, lines and step stacks of a survey. |
+| `Site` | The grids, lines, step stacks, presets and saved cubes of a survey. |
 | `clear_profile_cache` | Drop the cached profiles. |
 
 ### `nsgeo.geometry`
@@ -51,7 +51,7 @@ Coordinate frames and trace placement.
 
 | Name | Purpose |
 |---|---|
-| `Grid` | A survey grid: origin, azimuth, size and CRS. |
+| `Grid` | A survey grid: origin, azimuth, size, CRS, default line spacing and an optional velocity model. |
 | `GridFit` | The result of fitting a grid to corner points. |
 | `GridPlacement` | A line positioned parametrically within a grid frame. |
 | `Placement` | How traces are positioned; the protocol placements satisfy. |
@@ -85,7 +85,7 @@ Time and depth slices: binning lines into a cube and cutting it.
 | `CoverageError` | A line cannot contribute to the requested cube. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
-| `LinePlan` | What is known about one line before the window moves. |
+| `LinePlan` | Everything about one line that does not change when the window moves. |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SliceCube` | Binned amplitude over a frame and a z axis. |
@@ -137,8 +137,8 @@ Amplitude to pixels, with no Qt.
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
 | `to_index8_unipolar` | Map 0..limit to 0..255. |
-| `to_rgb8` | Index and lookup table to an RGB uint8 array. |
-| `to_rgba8` | Index and lookup table to an RGBA uint8 array. |
+| `to_rgb8` | Amplitudes, a limit and a (256, 3) lookup table to an (H, W, 3) uint8 RGB array, mapped as `to_index8` does. |
+| `to_rgba8` | Amplitudes, a limit and a lookup table to an (H, W, 4) uint8 RGBA array. Keyword-only `unipolar`: when true, maps as `to_index8_unipolar` does and alpha is 0 wherever the data is not finite; when false, maps as `to_rgb8` does, fully opaque. |
 
 ### `nsgeo.velocity`
 
