@@ -70,13 +70,28 @@ def transform_value(text: str) -> str:
     return NO_TRANSFORM if text in ("", "none") else text
 
 
-def grid_keys(session: Any, grid_id: str) -> tuple[str, ...]:
-    """Every line placed on `grid_id`, in survey order."""
-    return tuple(
-        key
-        for key in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
-        if getattr(session.line_for_key(key).placement, "grid_id", None) == grid_id
-    )
+def keys_by_grid(session: Any) -> dict[str | None, tuple[str, ...]]:
+    """Every line's key under the grid it is placed on, in survey order.
+
+    One pass over the survey (final review M3). The grid list is refreshed
+    on every progress step, so a caller that needs several grids' lines
+    builds this once and passes it on, rather than walking every line per
+    grid. Unplaced lines are under None.
+    """
+    out: dict[str | None, list[str]] = {}
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        grid_id = getattr(session.line_for_key(key).placement, "grid_id", None)
+        out.setdefault(grid_id, []).append(key)
+    return {grid_id: tuple(keys) for grid_id, keys in out.items()}
+
+
+def grid_keys(
+    session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
+) -> tuple[str, ...]:
+    """Every line placed on `grid_id`, in survey order (from `by_grid` when given)."""
+    if by_grid is None:
+        by_grid = keys_by_grid(session)
+    return tuple(by_grid.get(grid_id, ()))
 
 
 def default_preset(session: Any, grid_id: str) -> str | None:
@@ -88,9 +103,11 @@ def default_preset(session: Any, grid_id: str) -> str | None:
     return presets[0] if presets else None
 
 
-def source_keys(session: Any, grid_id: str) -> tuple[str, ...]:
+def source_keys(
+    session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
+) -> tuple[str, ...]:
     """The grid's remembered lines, still on it and in survey order; every line if none."""
-    every = grid_keys(session, grid_id)
+    every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:
         return every
@@ -98,15 +115,14 @@ def source_keys(session: Any, grid_id: str) -> tuple[str, ...]:
     return tuple(k for k in every if k in wanted)
 
 
-def included_grids(session: Any) -> tuple[str, ...]:
+def included_grids(
+    session: Any, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
+) -> tuple[str, ...]:
     """The remembered included grids, in site order; every grid with lines if none."""
     ids = [grid.id for grid in session.site.grids]
     stored = session.site_view().get("grids")
     if stored is None:
-        wanted = {
-            getattr(session.line_for_key(key).placement, "grid_id", None)
-            for key in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
-        }
+        wanted = set(by_grid if by_grid is not None else keys_by_grid(session))
     else:
         wanted = set(stored)
     return tuple(g for g in ids if g in wanted)
@@ -127,6 +143,7 @@ def stored_method(session: Any) -> str:
 def site_source(session: Any, included: Iterable[str], transform_text: str) -> SiteSource:
     """Each included grid's own preset and lines, under the site's one transform."""
     transform = transform_value(transform_text)
+    by_grid = keys_by_grid(session)
     grids = []
     for grid_id in included:
         preset = default_preset(session, grid_id)
@@ -137,7 +154,7 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
                 grid_id=grid_id,
                 preset=preset,
                 transform=transform,
-                line_keys=source_keys(session, grid_id),
+                line_keys=source_keys(session, grid_id, by_grid),
             )
         )
     return SiteSource(transform=transform, grids=tuple(grids))
@@ -156,13 +173,20 @@ def state_text(site_engine: Any, grid_id: str) -> str:
     return str(state)
 
 
-def site_rows(session: Any, site_engine: Any, included: Iterable[str]) -> list[SiteRow]:
-    """One row per grid in the site, in site order."""
+def site_rows(
+    session: Any,
+    site_engine: Any,
+    included: Iterable[str],
+    by_grid: Mapping[str | None, tuple[str, ...]] | None = None,
+) -> list[SiteRow]:
+    """One row per grid in the site, in site order; one pass over the lines (M3)."""
+    if by_grid is None:
+        by_grid = keys_by_grid(session)
     chosen = set(included)
     rows = []
     for grid in session.site.grids:
-        every = grid_keys(session, grid.id)
-        keys = source_keys(session, grid.id)
+        every = grid_keys(session, grid.id, by_grid)
+        keys = source_keys(session, grid.id, by_grid)
         if not every:
             state = "no lines"
         elif grid.id not in chosen:
@@ -223,8 +247,9 @@ def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float, 
     header-seeded range once its lines are prepared.
     """
     headers = []
+    by_grid = keys_by_grid(session)
     for grid_id in included:
-        keys = source_keys(session, grid_id)
+        keys = source_keys(session, grid_id, by_grid)
         if keys:
             headers.append(session.line_for_key(keys[0]).header)
     if not headers:
@@ -583,13 +608,16 @@ class SiteScope:
 
     # ---- the grid list and normalisation ----------------------------------------
     def refresh_rows(self) -> None:
+        """The grid list and the radius tooltip, from one pass over the lines (M3)."""
         dock = self.dock
         if not self.session.is_open:
             dock.site_panel.set_rows([])
             return
-        dock.site_panel.set_rows(site_rows(self.session, self.engine, self.included()))
+        by_grid = keys_by_grid(self.session)
+        included = included_grids(self.session, by_grid)
+        dock.site_panel.set_rows(site_rows(self.session, self.engine, included, by_grid))
         dock.radius_spacing_spin.setToolTip(
-            radius_tooltip(self.session, self.included(), dock.radius_spacing_spin.value())
+            radius_tooltip(self.session, included, dock.radius_spacing_spin.value())
         )
 
     def update_export_button(self) -> None:

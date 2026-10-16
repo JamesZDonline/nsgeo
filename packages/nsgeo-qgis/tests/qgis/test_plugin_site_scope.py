@@ -17,6 +17,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
+from nsgeo_qgis.slices_plan import format_bytes
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -189,6 +190,25 @@ def test_one_slider_moves_every_grid(plugin):
         ), grid_id
 
 
+def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
+    """Final review M2: leaving Whole site keeps every prepared site grid
+    held (Ruling 1), so This grid's status line says how much, by the
+    site's own accounting -- here every engine streams, so its lines."""
+    dock = plugin.slices_dock
+    dock.slice_slider.setValue(5)
+    _events()
+    assert "held by the site view" not in dock.status_label.text()
+    whole_site(plugin)
+    site = dock.site_engine
+    assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
+    held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
+    assert site.held_bytes == held
+    dock.grid_scope_button.click()
+    _events()
+    text = dock.status_label.text()
+    assert text == f"{dock.engine.status_text()} · +{format_bytes(held)} held by the site view"
+
+
 def test_switching_scope_keeps_the_window_time(plugin):
     dock = plugin.slices_dock
     # A coarser This-grid dz, so the same slider index is a different time
@@ -234,6 +254,28 @@ def test_unticking_a_grid_removes_it_from_the_map(plugin):
     assert dock.site_panel.table.item(1, 4).text() == "not included"
 
 
+def test_refreshing_the_grid_list_reads_each_line_once(plugin, monkeypatch):
+    """Final review M3: the list is refreshed on every progress step, and
+    it walked every line twice per grid (and twice more for the included
+    set) each time. One pass over the survey now builds grid -> lines."""
+    dock = whole_site(plugin)
+    session = plugin.session
+    real = session.line_for_key
+    calls: list[str] = []
+
+    def counted(key):
+        calls.append(key)
+        return real(key)
+
+    monkeypatch.setattr(session, "line_for_key", counted)
+    dock._site.refresh_rows()
+    assert sorted(calls) == sorted(session.keys())  # noqa: SIM118 -- SiteSession.keys()
+    table = dock.site_panel.table
+    assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
+    assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
+    assert "A 2.25 m" in dock.radius_spacing_spin.toolTip()
+
+
 def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
     """Ruling T3-d: spec 4.2's "preparing n of m" in the State column."""
     LoadCounter(monkeypatch, delay=0.05)
@@ -276,20 +318,26 @@ def test_choose_lines_acts_on_the_selected_grid_only(plugin, monkeypatch):
     assert dock.site_engine.engine_for("B").line_count == 3
 
 
-def test_a_line_choice_is_dropped_when_the_selection_moved_meanwhile(plugin, fake_iface):
-    """M11's Ruling Z, for the site: the grid at `finished` must be the one
-    the chooser was opened for."""
+def test_a_line_choice_goes_to_its_grid_when_the_selection_moved_meanwhile(plugin, fake_iface):
+    """Final review M1, flipping M11's Ruling Z for the site only. The
+    chooser names its grid and `set_included_for` addresses that grid by
+    id, so a row selected meanwhile does not throw the choice away: it is
+    applied to the grid the chooser was opened for. This grid scope still
+    drops it (`test_plugin_loads`)."""
     dock = whole_site(plugin)
     dock.site_panel.select_grid("B")
     plugin.open_line_choice_dialog()
     dialog = plugin._line_choice_dialog
+    b_keys = dock.line_choice_keys("B")
     dock.site_panel.select_grid("C")
-    dialog.select_none()
+    dialog.set_included(b_keys[0], False)
     dialog.accept()
-    assert plugin.session.slice_source("B") is None
+    settle(dock)
+    assert plugin.session.slice_source("B")["lines"] == list(b_keys[1:])
     assert plugin.session.slice_source("C") is None
+    assert dock.site_engine.engine_for("B").line_count == 3
     item = fake_iface.messageBar().currentItem()
-    assert item is not None and "grid changed" in item.text()
+    assert item is None or "grid changed" not in item.text()
 
 
 def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):

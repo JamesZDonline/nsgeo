@@ -941,20 +941,32 @@ class SiteEngine(QObject):
             return float(clip.limit(np.array([], dtype=float)))
         return limit_over_slices(slices, clip)
 
-    def status_text(self) -> str:
-        """`3 grids · 62 lines held in memory, 74 MB · slices redraw in 11 ms`.
+    @property
+    def held_bytes(self) -> int:
+        """What the site holds in memory, as M11's `format_status` counts it.
 
-        What is HELD, as M11's `format_status` counts it: the prepared
-        lines, plus a cube only where an engine keeps one resident.
+        The prepared lines, plus a cube only where an engine keeps one
+        resident. Still held after leaving site scope (Ruling 1), so This
+        grid's status line names it too (final review M2).
         """
-        held_by = [e for e in self._engines.values() if e.is_prepared]
-        n_lines = sum(e.line_count for e in held_by)
         held = 0
-        for engine in held_by:
+        for engine in self._engines.values():
+            if not engine.is_prepared:
+                continue
             estimate = engine.estimate
             held += estimate.lines_bytes
             if engine.mode == "resident":
                 held += estimate.cube_bytes
+        return held
+
+    def status_text(self) -> str:
+        """`3 grids · 62 lines held in memory, 74 MB · slices redraw in 11 ms`.
+
+        What is HELD: `held_bytes`.
+        """
+        held_by = [e for e in self._engines.values() if e.is_prepared]
+        n_lines = sum(e.line_count for e in held_by)
+        held = self.held_bytes
         grids = "grid" if len(held_by) == 1 else "grids"
         lines = "line" if n_lines == 1 else "lines"
         speed = "—" if self._redraw_ms is None else f"{max(1, round(self._redraw_ms))} ms"

@@ -1898,7 +1898,7 @@ class SlicesDock(QgsDockWidget):
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
-            self.status_label.setText(self.engine.status_text())
+            self.status_label.setText(self._grid_status_text())
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
@@ -2236,6 +2236,19 @@ class SlicesDock(QgsDockWidget):
             self._included_is_default = True
         self._update_included_label()
         self._grid_prepare_pending = True
+
+    def _grid_status_text(self) -> str:
+        """This grid's status line, and what the site view still holds.
+
+        Final review M2: leaving Whole site keeps every prepared site grid
+        (Ruling 1), memory This grid's own line would otherwise hide. The
+        figure is `SiteEngine.held_bytes`, the site's own accounting.
+        """
+        text = self.engine.status_text()
+        held = self.site_engine.held_bytes
+        if held > 0:
+            text += f" · +{format_bytes(held)} held by the site view"
+        return text
 
     # ---- R-P5: This grid never prepares while the site shows ---------------
     def _mark_grid_stale(self) -> None:

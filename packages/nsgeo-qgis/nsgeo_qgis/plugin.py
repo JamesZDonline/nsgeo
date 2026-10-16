@@ -1431,6 +1431,12 @@ class NsgeoPlugin:
         both `6 of 3 included` and the silent trace drop Ruling U's own
         scoping exists to remove, just reached one step later than a
         cross-grid pick in the dialog itself would have.
+
+        In This grid scope only (M12 final review M1). In site scope the
+        choice is the grid's own remembered source, which
+        `set_included_for` addresses by id, and the dialog names the grid
+        it is for: a row selected meanwhile is no reason to throw the
+        choice away, so it is applied to the grid it was opened for.
         """
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
@@ -1453,7 +1459,10 @@ class NsgeoPlugin:
             def finished(result: int) -> None:
                 try:
                     if result == QDialog.DialogCode.Accepted and self.slices_dock is not None:
-                        if self.slices_dock.line_choice_grid() != grid_id:
+                        if (
+                            self.slices_dock.scope() == "grid"
+                            and self.slices_dock.line_choice_grid() != grid_id
+                        ):
                             self.message(
                                 "the grid changed while choosing lines; "
                                 "the line choice was not applied",
