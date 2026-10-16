@@ -1743,3 +1743,34 @@ def test_picking_a_saved_cube_remembers_its_preset_and_lines_for_that_grid(docke
     assert dock.preset_combo.currentText() == "q"
     assert dock.included_keys() == a_keys[:2]
     assert dock.engine.wait_for_preparation(20_000)
+
+
+@pytest.mark.parametrize("remembered", [(), ("raw/elsewhere/FILE__900.DZT",)])
+def test_an_empty_remembered_line_set_is_the_default(docked_two_grids, tmp_path, remembered):
+    """Final review D4: a remembered `lines` that leaves no line on the grid --
+    an empty choice, or lines that have all left it -- is the default, every
+    line, and stays the default: a line imported later is picked up."""
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=remembered)
+    dock.grid_combo.setCurrentText("A")
+    assert dock.included_keys() == a_keys
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    assert len(dock.included_keys()) == 4
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_grids):
+    """Final review D4: an old-format cube record names no line list, so
+    picking it remembers `lines=None` ("every line"), not an empty choice.
+    The dock itself still restores its empty inclusion set (M11)."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__old", view)
+    del record["lines"]  # written before cube records carried their lines
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.included_keys() == ()
+    assert session.slice_source("A")["lines"] is None

@@ -843,7 +843,10 @@ class SlicesDock(QgsDockWidget):
         remembered preset that no longer exists is skipped; remembered line
         keys are filtered to the ones still on the grid, in survey order. A
         remembered `lines` of None means "every line", so it stays a
-        default and a line imported later is still picked up."""
+        default and a line imported later is still picked up. So does one
+        that filters to nothing -- an empty choice, or lines that have all
+        left the grid (final review D4): an empty inclusion set would leave
+        This grid with nothing to prepare and no way back to the default."""
         entry = self.session.slice_source(grid_id) if grid_id and self.session.is_open else None
         if entry is None:
             return
@@ -861,19 +864,22 @@ class SlicesDock(QgsDockWidget):
         lines = entry.get("lines")
         if lines is not None:
             wanted = set(lines)
-            self._included = tuple(k for k in self._default_included(grid_id) if k in wanted)
-            self._included_is_default = False
+            every = self._default_included(grid_id)
+            kept = tuple(k for k in every if k in wanted)
+            self._included = kept if kept else every
+            self._included_is_default = not kept
 
-    def _remember_source(self) -> None:
+    def _remember_source(self, *, every_line: bool = False) -> None:
         """Record the user's own choice for the selected grid. Called only
         from a real user change (`_on_source_changed`, `set_included`),
         never from `rebuild_source`'s first computation: opening a site
-        must not mark it dirty."""
+        must not mark it dirty. `every_line` remembers `lines=None` whatever
+        the inclusion set is: a cube record that names no line list (D4)."""
         grid_id = self.grid_combo.currentText()
         preset = self.preset_combo.currentText()
         if not grid_id or not preset or not self.session.is_open:
             return
-        lines = None if self._included_is_default else self._included
+        lines = None if every_line or self._included_is_default else self._included
         self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
 
     def _update_included_label(self) -> None:
@@ -1550,7 +1556,8 @@ class SlicesDock(QgsDockWidget):
         own contract for an old-format record.
         """
         try:
-            recipe = recipe_from_record(self.session.site.cubes[cube_id])
+            record = self.session.site.cubes[cube_id]
+            recipe = recipe_from_record(record)
             transform_text = (
                 "none" if recipe.choice.transform == NO_TRANSFORM else recipe.choice.transform
             )
@@ -1607,8 +1614,10 @@ class SlicesDock(QgsDockWidget):
             # a user choice, so its preset and lines become this grid's
             # remembered source. `restore_cube` is reached only from
             # `_on_cube_changed`, which returns early under `_updating`, so
-            # no automatic path (opening a site) remembers through here.
-            self._remember_source()
+            # no automatic path (opening a site) remembers through here. A
+            # record with no `lines` key names no line list: it is remembered
+            # as every line, not as an empty choice (final review D4).
+            self._remember_source(every_line="lines" not in record)
             self._update_included_label()
             self.flush_debounce()
             self.prepare()
