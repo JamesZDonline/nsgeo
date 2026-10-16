@@ -1,4 +1,4 @@
-# nsgeo site view and de-striping (Plan 4, M12 and M12b) — design
+# nsgeo site view (Plan 4, M12) — design, with de-striping designed for later
 
 M10 gave the core a slice cube and M11 put one grid's slices on the map. This phase is the last
 row of the slices spec's milestone table — *"a site reads as one interpretation"* — and it
@@ -6,15 +6,17 @@ replaces that spec's §6.5 (directional de-striping) and §10 (site level) with 
 brainstorming on 2026-10-15/16. Where this document and the slices spec disagree, this one wins
 and the difference is stated.
 
-It is **two plans**, built in this order:
-
-| | Plan | Ends with |
+| | Scope | Ends with |
 |---|---|---|
 | **M12** | The site view: a *Whole site* scope in the Slices dock, grid-to-grid normalisation, one site GeoTIFF that records what was done | Every grid's slice moves under one slider, on one scale, and exports as one file |
-| **M12b** | De-striping: stagger correction (grid-wide, then line by line) and direction balancing | Zigzag stagger is gone from map, profile and slices alike |
+| *Later, unscheduled* | De-striping (§6): stagger correction and direction balancing | Zigzag stagger is gone from map, profile and slices alike |
 
-The order is the user's: the site view is the problem they opened with, and stagger is easier to
-judge once the whole site is visible.
+**De-striping is not part of M12.** It was brainstormed alongside the site view and briefly
+planned as a second plan, M12b; the user then moved it out entirely — it does not need the site
+view, and the site view does not need it. Stagger reaches beyond slices into the map, the
+profile, picks and line editing (issue #29), so it belongs with that work. §6 keeps what was
+decided so it is not re-brainstormed from nothing; it is a design, not a commitment, and is
+re-checked against the code when it is scheduled.
 
 ---
 
@@ -77,7 +79,7 @@ objected to — it is open to correction.
 | Stagger scope | Applies **everywhere a trace is positioned** — map, profile, slices, picks | Design call | It corrects *where* traces are; views that disagreed would be worse than none |
 | Stagger storage | **Separate from the line's recorded start position** | Design call | The survey file keeps the field measurement and the correction apart |
 | Direction balancing | **In**, for **any number of directions** | User | "I didn't mean to restrict it to two directions" |
-| Per-line brightness matching | **Out of M12/M12b** | Design call from the user's "brightness stripes are actually less of a common concern" | It also erases real features parallel to the lines (§5) |
+| Per-line brightness matching | **Out, including from the later de-striping work** | Design call from the user's "brightness stripes are actually less of a common concern" | It also erases real features parallel to the lines (§5) |
 | Real-data validation | Automated tests use the ten local lines, **split and perturbed** (§9); the acceptance walkthrough uses the **user's own multi-grid data, privately** | User | They have suitable data but cannot expose it to the repo |
 
 ---
@@ -357,7 +359,6 @@ plugin:
 
 - dataset level: the transform; the normalisation method; each included grid's id, preset name,
   velocity and manual multiplier; the site cell size and fill radius; the z unit of the bands;
-  (M12b) each grid's stagger shift and whether direction balancing was on;
 - per band: the shared time window in ns, **each grid's depth range** for it (they differ when
   velocities do, §4.3), and **each grid's normalisation factor(s) for that band**.
 
@@ -415,7 +416,10 @@ measures nT about a background level, where an offset is the natural error.
 
 ---
 
-## 6. De-striping (M12b)
+## 6. De-striping (designed, not scheduled)
+
+Not built in M12 (see the top of this document). When it is scheduled, its export metadata joins
+§4.7's list (each grid's stagger shift, whether direction balancing was on).
 
 Three different problems were separated in brainstorming; two are in.
 
@@ -448,7 +452,7 @@ along their length.
   search range. Offered as a suggestion; the user accepts it or adjusts by eye.
 - **Selecting and adjusting a single line** needs UI nsgeo does not have (issue #29: lines cannot
   be edited after import). Its layout is to be mocked up (lavish) and agreed with the user when
-  M12b's plan is written; this document does not fix it.
+  de-striping's plan is written; this document does not fix it.
 
 ### 6.2 Direction balancing
 
@@ -477,7 +481,7 @@ its near neighbours rather than the whole grid, so broad trends survive.
 
 ## 7. Non-goals and anti-goals
 
-**Not doing:** lining grids up by depth (after M13, §4.3); overlap-strip fitting; seam
+**Not doing:** de-striping (later, §6); lining grids up by depth (after M13, §4.3); overlap-strip fitting; seam
 feathering or blending; per-line brightness matching; the Temporal Controller (W10); netCDF;
 topographic correction; editing presets from the site list (unless the builder finds it free).
 
@@ -487,7 +491,7 @@ topographic correction; editing presets from the site list (unless the builder f
 - Two controls that can disagree about what depth is on the map.
 - A site view that still makes the user repeat an action per grid to look at another depth.
 - A site GeoTIFF that cannot say, by itself, what was done to its values.
-- A stagger correction that only one view knows about.
+- (De-striping, later) A stagger correction that only one view knows about.
 
 ---
 
@@ -528,15 +532,15 @@ be committed or read by the test suite**. The user has such data and will use it
   the export arithmetic.
 - **Export round trip.** Read the site GeoTIFF back: lattice, band count, nodata, and the
   recorded method and per-band factors.
-- **(M12b) Stagger.** First establish whether the local lines were walked zigzag (the user
+- **(De-striping, later) Stagger.** First establish whether the local lines were walked zigzag (the user
   believes so but is not sure): a feature crossing the lines aligns across adjacent lines only
   under the right direction assumption. If they were, they may carry real stagger, and the
   suggestion is tested on unaltered data; in any case, shift alternate lines by a known distance
   and the suggestion must recover it.
-- **(M12b) Direction balancing** needs x and y lines over the same cells, which the local data
+- **(De-striping, later) Direction balancing** needs x and y lines over the same cells, which the local data
   cannot supply — the one part tested on synthetic data only, and the brief must say so.
 
 **Manual, the acceptance gate:** a walkthrough on the user's own multi-grid data, run by the user,
-before each plan's merge decision. Nothing from that data is committed. This is the check that
+before M12's merge decision. Nothing from that data is committed. This is the check that
 the tests cannot make — whether a real multi-day site looks right — and every M11 walkthrough
 round found defects a green suite missed.
