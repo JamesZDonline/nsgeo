@@ -1,14 +1,20 @@
-"""The active slice on the map: a float raster, restyled and reloaded in place.
+"""The active slice on the map: a float raster, restyled and repointed in place.
 
 A real float32 raster with NaN nodata, not a picture. A reader can then
 query an amplitude, and the same values go out to the GeoTIFF unchanged --
 spec 9.4's reason for exporting float rather than bytes applies just as
 well to what is on screen.
 
-Rewritten in place on every tick rather than rebuilt: verified against
-this GDAL and QGIS, `reloadData()` refreshes the pixel values, and the
-layer's `width()`/`height()` follow even when the cell slider changes the
-shape, so a drag never churns the layer tree.
+The layer object is kept across ticks rather than rebuilt, so a drag
+never churns the layer tree: each tick points the same `QgsRasterLayer`
+at a new file with `setDataSource()`, and `width()`/`height()` follow
+even when the cell slider changes the shape. Every tick writes a NEW file
+rather than rewriting one in place, because Windows cannot delete or
+replace a file QGIS holds open, and GDAL's `Create()` deletes first -- an
+in-place rewrite failed there with "Permission denied" on the second
+tick (found in the 0.1.0 walkthrough; Linux allows it, so CI never saw
+it). QGIS's render threads can keep the old file open briefly after the
+switch too, so superseded files are deleted best-effort, on later ticks.
 
 Uncompressed, unlike the export (plan Ruling 3). Measured here at GDAL
 3.8.4: `COMPRESS=DEFLATE, PREDICTOR=3` costs 8.8 ms for a 300x300 float
@@ -24,6 +30,7 @@ project would find it gone. `slice_export.py` writes the durable one.
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import warnings
@@ -36,6 +43,7 @@ from osgeo import gdal
 from qgis.core import (
     QgsColorRampShader,
     QgsCoordinateReferenceSystem,
+    QgsDataProvider,
     QgsRasterLayer,
     QgsRasterShader,
     QgsSingleBandPseudoColorRenderer,
@@ -81,8 +89,8 @@ def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShad
 class SliceLayer(QObject):
     """The one live raster layer showing the dock's current slice.
 
-    Owns a scratch GeoTIFF and, once created, one `QgsRasterLayer` that is
-    rewritten and reloaded rather than replaced -- see the module
+    Owns scratch GeoTIFFs and, once created, one `QgsRasterLayer` that is
+    repointed at the newest one rather than replaced -- see the module
     docstring for why. Every public method guards its own body: `update`
     is reached from a slider slot, and an exception escaping a slot
     aborts the CI container (see `plugin.py`'s module docstring).
@@ -92,7 +100,12 @@ class SliceLayer(QObject):
         super().__init__(parent)
         self.layers = layers
         self._dir = Path(tempfile.mkdtemp(prefix="nsgeo-slice-"))
-        self.path = self._dir / "slice.tif"
+        #: The CURRENT file: the one the layer reads. Replaced, never
+        #: rewritten, on every update.
+        self.path = self._dir / "slice-000000.tif"
+        self._serial = 0
+        #: Superseded files not yet deleted; see `_sweep`.
+        self._stale: list[Path] = []
         self.layer: QgsRasterLayer | None = None
         #: `(colormap_name, limit, unipolar)` the current renderer was
         #: built for, or `None` before the first one. Rebuilding a 256-stop
@@ -113,13 +126,18 @@ class SliceLayer(QObject):
     ) -> None:
         try:
             array, geotransform = to_north_up(values, frame)
-            self._write(array, geotransform, frame.crs)
+            self._serial += 1
+            new_path = self._dir / f"slice-{self._serial:06d}.tif"
+            self._write(new_path, array, geotransform, frame.crs)
+            previous, self.path = self.path, new_path
+            self._stale.append(previous)
             if self._layer_gone():
                 self.layer = None
                 self._create_layer()
             else:
-                self.layer.dataProvider().reloadData()
+                self._repoint()
                 self._ensure_group_membership()
+            self._sweep()
             if self.layer is None:
                 return
             key = (colormap_name, float(limit), bool(unipolar))
@@ -172,8 +190,51 @@ class SliceLayer(QObject):
         if group.findLayer(self.layer.id()) is None:
             group.addLayer(self.layer)
 
+    def _sweep(self) -> None:
+        """Delete superseded files, best effort, and never raise.
+
+        A stale file may still be open -- QGIS's render threads can hold a
+        clone of the old provider for a moment -- and Windows refuses to
+        delete it then. Keep it listed and try again on the next update. On
+        Linux the list is empty again by the next call; on Windows it stays
+        short, since each file is released soon after the switch.
+        """
+        kept = []
+        for path in self._stale:
+            # GDAL drops a `<file>.aux.xml` sidecar (band statistics) beside
+            # a file QGIS has rendered, so it goes with the file.
+            for doomed in (path, path.with_name(path.name + ".aux.xml")):
+                try:
+                    os.remove(doomed)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    kept.append(path)
+                    break
+        self._stale = kept
+
+    def _repoint(self) -> None:
+        """Point the existing layer at `self.path`, keeping its identity.
+
+        Verified on QGIS 3.40, 3.44 and 4.2: `setDataSource` keeps the
+        renderer (and its classification range), so `_renderer_key` stays
+        valid. `loadDefaultStyle` is off by `ReadFlags()` for the same
+        reason: a default style would replace that renderer.
+        """
+        assert self.layer is not None
+        self.layer.setDataSource(
+            str(self.path),
+            LAYER_NAME,
+            "gdal",
+            QgsDataProvider.ProviderOptions(),
+            QgsDataProvider.ReadFlags(),
+        )
+        if not self.layer.isValid():
+            raise RuntimeError(f"could not open {self.path}: {self.layer.error().summary()}")
+
     def _write(
         self,
+        path: Path,
         array: np.ndarray,
         geotransform: tuple[float, float, float, float, float, float],
         crs: str,
@@ -215,7 +276,7 @@ class SliceLayer(QObject):
                 driver = gdal.GetDriverByName("GTiff")
                 height, width = array.shape
                 dataset = driver.Create(
-                    str(self.path), width, height, 1, gdal.GDT_Float32, options=_CREATION_OPTIONS
+                    str(path), width, height, 1, gdal.GDT_Float32, options=_CREATION_OPTIONS
                 )
                 try:
                     dataset.SetGeoTransform(geotransform)
