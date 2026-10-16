@@ -12,8 +12,8 @@ from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import session as session_module
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.core import Qgis, QgsApplication
+from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
+from qgis.core import Qgis
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -645,16 +645,11 @@ def _capture_log(fn):
     unrecoverable ones use.
     """
     seen: list[tuple[str, int]] = []
-    log = QgsApplication.messageLog()
-
-    def _on_message(msg, tag, level):
-        seen.append((msg, int(level)))
-
-    log.messageReceived.connect(_on_message)
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
     try:
         fn()
     finally:
-        log.messageReceived.disconnect(_on_message)
+        disconnect()
     return seen
 
 

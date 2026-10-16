@@ -55,6 +55,12 @@ everything else in the package.
 python packages/nsgeo-qgis/scripts/dev_link.py      # symlink into the QGIS profile
 ```
 
+For QGIS 4, whose profiles live under `QGIS4/`, add `--qgis-major 4`:
+
+```bash
+python packages/nsgeo-qgis/scripts/dev_link.py --qgis-major 4
+```
+
 Then enable **nsgeo** in QGIS's plugin manager. The plugin finds the core source
 through the symlink's real path; no `pip install` into QGIS's Python is needed.
 Use the Plugin Reloader plugin after edits.
@@ -71,3 +77,16 @@ QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/te
 ```
 
 The `qgis/` directory skips itself when `qgis` is not importable.
+
+To test against either QGIS major without installing it, run the suite in the
+official image with `scripts/in_qgis_docker.sh`. It copies the worktree to a
+throwaway `/work`, installs pytest, and makes the real-data symlinks resolve:
+
+```bash
+packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:4.2 \
+    python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
+packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:3.44 \
+    python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
+```
+
+CI runs the same two images. On Qt 6, the dock-width test is an expected failure.

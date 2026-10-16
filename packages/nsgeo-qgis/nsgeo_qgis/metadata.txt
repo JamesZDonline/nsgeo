@@ -1,6 +1,7 @@
 [general]
 name=nsgeo
 qgisMinimumVersion=3.40
+qgisMaximumVersion=4.99
 supportsQt6=True
 description=Near-surface geophysics: GPR profiles in map context
 about=Load GSSI DZT files, organise them into georeferenced grids, view and process radargrams, and navigate them from the QGIS map. Core library is numpy-only and vendored into this plugin.

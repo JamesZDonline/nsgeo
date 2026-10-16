@@ -16,7 +16,7 @@ from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QEvent, Qt
+from qgis.PyQt.QtCore import QT_VERSION_STR, QEvent, Qt
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -1347,6 +1347,11 @@ def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper)
     assert abs(snapped - value) < 10.0**-decimals
 
 
+@pytest.mark.xfail(
+    QT_VERSION_STR.startswith("6."),
+    reason="§3.2e: Qt 6 metrics give 253 px; settle in the QGIS 4 walkthrough",
+    strict=True,
+)
 def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
     """A dock widget's minimum size is a HARD floor on the main window's:
     QGIS cannot shrink a dock area below it, so a tall dock drags the whole

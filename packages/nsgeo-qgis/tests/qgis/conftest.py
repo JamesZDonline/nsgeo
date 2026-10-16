@@ -172,6 +172,9 @@ def _no_unhandled_modals(monkeypatch):
     from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QInputDialog, QMenu, QMessageBox
 
     def _forbid(cls: type, name: str, reason: str = "unexpected modal") -> None:
+        if not hasattr(cls, name):
+            return  # PyQt6 has no `exec_`
+
         def _raise(*args: object, **kwargs: object) -> None:
             raise AssertionError(f"{reason}: {cls.__name__}.{name}{args!r}")
 
@@ -271,17 +274,12 @@ def message_log(qgis_app):
     consolidated here so every test in this tier gets it for free, with
     no import needed, the same way `fake_iface`/`answer_modal` already are.
     """
-    from qgis.core import QgsApplication
+    from plugin_testing import connect_message_log
 
-    log = QgsApplication.messageLog()
     messages: list[str] = []
-
-    def _on_message(msg: str, tag: str, level: int) -> None:
-        messages.append(msg)
-
-    log.messageReceived.connect(_on_message)
+    disconnect = connect_message_log(lambda msg, tag, level: messages.append(msg))
     yield messages
-    log.messageReceived.disconnect(_on_message)
+    disconnect()
 
 
 @pytest.fixture

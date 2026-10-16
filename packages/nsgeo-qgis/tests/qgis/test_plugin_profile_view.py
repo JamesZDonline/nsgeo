@@ -21,7 +21,7 @@ from nsgeo_qgis.ui.profile_view import (
     ProfileView,
 )
 from nsgeo_qgis.ui.view_transform import ViewTransform
-from plugin_testing import REAL_DZT, needs_real_data
+from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
@@ -509,7 +509,9 @@ def test_mouse_move_emits_the_trace_under_the_cursor(view):
     # fixture's specific 800px width for no reason connected to what the
     # test names. `r.width() // 3` = 232 is `1/3` of 696 exactly but lands
     # on 66.666..., nowhere near an integer boundary.
-    QTest.mouseMove(v, QPoint(r.left() + r.width() // 3, r.top() + 20))
+    # send_hover, not QTest.mouseMove: Qt 6's QTest mouse state leaks across
+    # files and can swallow the move (M9 spec 3.2c).
+    send_hover(v, QPoint(r.left() + r.width() // 3, r.top() + 20))
     assert got and got[-1] == v.transform.trace_index_at(r.width() // 3) == 66
 
 

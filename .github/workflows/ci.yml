@@ -8,7 +8,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.9", "3.12"]
+        python: ["3.9", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,7 +20,11 @@ jobs:
 
   plugin-qgis:
     runs-on: ubuntu-latest
-    container: qgis/qgis:ltr
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["qgis/qgis:3.44", "qgis/qgis:4.2"]
+    container: ${{ matrix.image }}
     env:
       QT_QPA_PLATFORM: offscreen
       QGIS_PREFIX_PATH: /usr
