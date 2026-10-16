@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import re
-import threading
 import time
 
 import numpy as np
 import pytest
-from nsgeo.model.survey import Line
 from nsgeo.render import UnipolarClip
 from nsgeo.slices import (
     NORMALISATION_METHODS,
@@ -36,62 +34,17 @@ from nsgeo_qgis.slices_plan import (
     limit_windows,
     radius_cells_for,
 )
+from plugin_testing import LoadCounter, spin_until
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsPointXY,
     QgsProject,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QEventLoop
 
 #: M11's test resolution, with the z range widened to hold the whole site.
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
 TICK = {"radius_spacings": 1.5, "method": "none", "manual": {}}
-
-
-class LoadCounter:
-    """`Line.load`, counted -- and optionally slowed -- under a lock.
-
-    M11's `test_two_different_choices_back_to_back_never_run_concurrently`
-    pattern: the sleep widens the few milliseconds a real read holds a
-    worker thread into a window long enough that a counter under a lock
-    catches two preparations overlapping deterministically, which is
-    stronger evidence than timing and safer than waiting for a segfault.
-    """
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, delay: float = 0.0) -> None:
-        self.delay = delay
-        self.calls = 0
-        self.concurrent = 0
-        self.max_concurrent = 0
-        lock = threading.Lock()
-        real_load = Line.load
-
-        def load(line: Line) -> list:
-            with lock:
-                self.calls += 1
-                self.concurrent += 1
-                self.max_concurrent = max(self.max_concurrent, self.concurrent)
-            try:
-                if self.delay:
-                    time.sleep(self.delay)
-                return real_load(line)
-            finally:
-                with lock:
-                    self.concurrent -= 1
-
-        monkeypatch.setattr(Line, "load", load)
-
-
-def spin_until(predicate, timeout_ms: int = 20_000) -> bool:
-    """Run the event loop until `predicate()` holds, or time out."""
-    deadline = time.monotonic() + timeout_ms / 1000.0
-    while not predicate():
-        if time.monotonic() > deadline:
-            return False
-        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
-        time.sleep(0.002)
-    return True
 
 
 @pytest.fixture
