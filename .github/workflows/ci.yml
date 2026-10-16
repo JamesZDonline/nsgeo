@@ -44,6 +44,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: docker://rhysd/actionlint:latest
+        with:
+          args: -color
       - run: python -m pip install ruff mypy numpy
       - run: ruff check .
       - run: ruff format --check .
@@ -52,3 +55,66 @@ jobs:
             packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py \
             packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py \
             packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py
+
+  build-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build the plugin zip
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python packages/nsgeo-qgis/scripts/build_zip.py --out dist --tag "$GITHUB_REF_NAME"
+          else
+            python packages/nsgeo-qgis/scripts/build_zip.py --out dist
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsgeo_qgis-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
+  smoke:
+    needs: build-zip
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["qgis/qgis:3.44", "qgis/qgis:4.2"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: nsgeo_qgis-zip
+          path: dist
+      - name: install the zip into QGIS and probe it
+        run: |
+          zips=(dist/*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "expected exactly one zip in dist/, found ${#zips[@]}" >&2
+            exit 1
+          fi
+          bash packages/nsgeo-qgis/scripts/smoke_install.sh "${zips[0]}"
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, plugin-qgis, lint, build-zip, smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: nsgeo_qgis-zip
+          path: dist
+      - name: publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --title "nsgeo ${GITHUB_REF_NAME#v}" \
+            --notes-file "docs/releases/${GITHUB_REF_NAME#v}.md"
