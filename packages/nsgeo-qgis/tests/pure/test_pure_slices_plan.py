@@ -215,3 +215,92 @@ def test_smallest_safe_cell_never_goes_below_the_spin_floor_on_a_small_grid():
     from nsgeo_qgis.slices_plan import smallest_safe_cell
 
     assert smallest_safe_cell(6.0, 12.0) <= 0.01
+
+
+# ---- the site view (M12) --------------------------------------------------
+
+
+def test_a_site_source_shares_one_transform_and_names_each_grid_once():
+    """Spec 4.2: one transform combo for the site. A site slice is one
+    layer with one renderer, so every grid must agree on polarity; and a
+    grid listed twice would be prepared twice and drawn on top of itself."""
+    from nsgeo_qgis.slices_plan import SiteSource
+
+    a = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=("a1",))
+    b = SourceChoice(grid_id="B", preset="q", transform="amp_envelope", line_keys=("b1",))
+    source = SiteSource(transform="amp_envelope", grids=(a, b))
+    assert source.grids == (a, b)
+    assert SiteSource(transform="", grids=()).grids == ()  # an empty site is a site
+
+    signed_b = SourceChoice(grid_id="B", preset="q", transform="", line_keys=("b1",))
+    with pytest.raises(ValueError, match="'B'"):
+        SiteSource(transform="amp_envelope", grids=(a, signed_b))
+    again_a = SourceChoice(grid_id="A", preset="q", transform="amp_envelope", line_keys=("a2",))
+    with pytest.raises(ValueError, match="'A'"):
+        SiteSource(transform="amp_envelope", grids=(a, b, again_a))
+
+
+def test_the_fill_radius_follows_each_grids_own_line_spacing():
+    """Spec 4.4: in site scope the radius is a multiple of each grid's own
+    spacing, so a 0.5 m grid and a 1.0 m grid in one site each get
+    M11's 1.5x. Rounded like the dock's `radius_cells` (round, not floor:
+    3.6 cells is 4, which a floor would make 3), and never negative."""
+    from nsgeo_qgis.slices_plan import radius_cells_for
+
+    assert radius_cells_for(0.5, 1.5, 0.25) == 3
+    assert radius_cells_for(1.0, 1.5, 0.25) == 6
+    assert radius_cells_for(0.6, 1.5, 0.25) == 4  # 3.6 cells
+    assert radius_cells_for(0.5, 0.0, 0.25) == 0
+    assert radius_cells_for(0.5, -2.0, 0.25) == 0
+    with pytest.raises(ValueError):
+        radius_cells_for(0.5, 1.5, 0.0)
+
+
+def test_limit_windows_are_the_abutting_windows_and_the_thinner_tail():
+    """Below the cap, `limit_windows` is exactly what
+    `SliceEngine.shared_limit` measures over: `plan_windows(z, t, t)` plus
+    a thinner final window when the thickness does not divide the axis --
+    the levels a viewer reaches at the end of the slider (trap 4)."""
+    from nsgeo.slices import SliceWindow, ZAxis
+    from nsgeo_qgis.slices_plan import limit_windows
+
+    z = ZAxis(t0_ns=0.0, dz_ns=0.5, nz=23)
+    assert limit_windows(z, 5) == (
+        SliceWindow(0, 5),
+        SliceWindow(5, 10),
+        SliceWindow(10, 15),
+        SliceWindow(15, 20),
+        SliceWindow(20, 23),
+    )
+    whole = ZAxis(t0_ns=0.0, dz_ns=0.5, nz=20)
+    assert limit_windows(whole, 5)[-1] == SliceWindow(15, 20)  # no tail to add
+    assert len(limit_windows(whole, 5)) == 4
+    assert limit_windows(whole, 40) == (SliceWindow(0, 20),)  # thicker than the axis
+
+
+def test_limit_windows_keep_at_most_twelve_evenly_spread_with_both_ends():
+    """Ruling 4: a ten-grid site cannot afford a full stretch pass over
+    every window on every change, and a display percentile does not need
+    one. The subset is evenly spread and always holds the first window
+    and the last -- the last being the thinner tail, whose levels on a
+    real cube were the brightest (display.shared_limit's docstring)."""
+    from nsgeo.slices import SliceWindow, ZAxis, plan_windows
+    from nsgeo_qgis.slices_plan import SITE_LIMIT_WINDOWS, limit_windows
+
+    assert SITE_LIMIT_WINDOWS == 12
+    z = ZAxis(t0_ns=0.0, dz_ns=0.25, nz=181)
+    every = list(plan_windows(z, 5, 5)) + [SliceWindow(180, 181)]
+    assert len(every) == 37
+    chosen = limit_windows(z, 5)
+    assert len(chosen) == 12
+    assert chosen[0] == every[0]
+    assert chosen[-1] == SliceWindow(180, 181)
+    index = [every.index(w) for w in chosen]
+    assert index == sorted(set(index)), "repeated or out of order"
+    gaps = {b - a for a, b in zip(index, index[1:])}
+    assert gaps <= {3, 4}, f"not evenly spread: gaps {sorted(gaps)}"
+
+    assert len(limit_windows(z, 5, max_windows=5)) == 5
+    assert len(limit_windows(z, 60)) == 4  # three whole windows and the tail: under the cap
+    with pytest.raises(ValueError):
+        limit_windows(z, 5, max_windows=1)

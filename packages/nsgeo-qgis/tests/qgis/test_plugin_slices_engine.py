@@ -796,3 +796,88 @@ def test_provenance_velocity_is_none_when_all_prepared_lines_removed(sourced):
     prov = engine.provenance()  # must not raise
     assert prov.velocity is None  # no lines left to supply it
     assert engine.cube() is not None  # arrays are still there
+
+
+# ---- M12: the hooks the site engine composes this engine through ----------
+
+
+def test_with_a_grid_moved_hook_a_move_clears_and_hands_over_instead_of_re_preparing(sourced):
+    """R-P2 (M12). M11's self-dispatch on a grid move is a preparation
+    started outside whatever serialises this engine against others (trap
+    1). With `on_grid_moved` set, a move drops the stale lines -- which
+    were binned at the old registration -- and hands the re-preparation to
+    the owner, who queues it; this engine starts nothing itself."""
+    engine, session, errors, prepared = sourced
+    moved: list[int] = []
+    engine.on_grid_moved = lambda: moved.append(1)
+    _prepare(engine, session)
+    count = len(prepared)
+
+    session.replace_grid(Grid("A", (600.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    assert moved == [1]
+    assert not engine.is_running, "the engine dispatched the re-preparation itself"
+    assert not engine.is_prepared, "lines binned at the old registration were kept"
+    assert engine.choice is None
+    assert engine.frame is None
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+    # A velocity-only edit is still not a move.
+    _prepare(engine, session)
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert moved == [1]
+    assert engine.is_prepared
+
+
+def test_a_raising_grid_moved_hook_is_reported_not_propagated(sourced):
+    """The hook runs inside a slot on `grids_changed`; an exception there
+    would escape into Qt (the CI container aborts on it). It is reported
+    through `on_error` instead, and the engine is still cleared."""
+    engine, session, errors, _ = sourced
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    engine.on_grid_moved = _raise
+    _prepare(engine, session)
+    session.replace_grid(Grid("A", (600.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    assert not engine.is_prepared
+    assert any("boom" in msg for _, msg in errors), errors
+
+
+def test_the_hook_can_be_given_to_the_constructor(qgis_app):
+    """Task 5 sets it on the dock's engine as an attribute; the site
+    engine passes it when it builds its own."""
+    session = SiteSession()
+
+    def hook() -> None:
+        return None
+
+    engine = SliceEngine(session, on_grid_moved=hook)
+    try:
+        assert engine.on_grid_moved is hook
+        assert SliceEngine(session).on_grid_moved is None
+    finally:
+        engine.dispose()
+
+
+def test_cancel_preparation_stops_the_task_and_keeps_nothing_else_running(sourced, monkeypatch):
+    """Ruling 1 (M12): the site engine leaves site scope with `cancel()`,
+    which must stop the one preparation in flight -- and confirm it
+    stopped -- without the engine starting anything else."""
+    engine, session, errors, _ = sourced
+    real_load = Line.load
+
+    def slow_load(self: Line) -> list:
+        time.sleep(0.05)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", slow_load)
+    keys = tuple(session.keys())
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys))
+    assert engine.is_running
+    engine.cancel_preparation()
+    assert not engine.is_running
+    assert engine._pending == set()
+    assert errors == [], errors

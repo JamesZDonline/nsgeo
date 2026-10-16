@@ -177,12 +177,22 @@ class SliceEngine(QObject):
         on_error: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         parent: QObject | None = None,
+        *,
+        on_grid_moved: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.on_prepared = on_prepared
         self.on_error = on_error
         self.on_progress = on_progress
+        #: R-P2 (M12): who re-prepares when the chosen grid moves. None (the
+        #: default) keeps M11's behaviour: this engine re-prepares itself.
+        #: Set, a move clears this engine and calls the hook instead, so
+        #: an owner that serialises preparations across several engines
+        #: (`SiteEngine`, trap 1) queues the re-preparation rather than
+        #: having it start beside another engine's. See
+        #: `_hand_over_the_move`.
+        self.on_grid_moved = on_grid_moved
         self._choice: SourceChoice | None = None
         self._resolution: Resolution | None = None
         self._lines: list[PreparedLine] = []
@@ -426,6 +436,31 @@ class SliceEngine(QObject):
                 "a previous slice-source preparation did not stop in time; "
                 "proceeding with the new choice anyway"
             )
+
+    def cancel_preparation(self) -> None:
+        """Stop the preparation in flight, confirm it stopped, and start nothing.
+
+        Ruling 1 (M12): `SiteEngine` owns one engine per grid and lets
+        them prepare strictly one at a time, because two preparations at
+        once segfault (trap 1). Leaving site scope must stop the grid
+        being prepared without touching the grids already prepared, and
+        none of the existing entry points does only that: `set_source`
+        dispatches a new task, and `clear()` also drops the choice and the
+        resolution. This is `_cancel_in_flight` made public -- cancel, and
+        wait (bounded by `_CANCEL_TIMEOUT_MS`, about one line's processing)
+        until the task has really ended.
+
+        Afterwards `is_running` is False, unless that bounded wait ran out
+        (reported through `on_error`). Then it stays True until the task
+        actually finishes, which is exactly what a caller checking
+        `is_running` before its next dispatch needs to see.
+
+        The engine's lines are not to be trusted afterwards: the
+        cancelled `set_source` had already dropped the previous ones, and
+        the cancelled task's result may or may not have landed. The
+        caller re-dispatches with `set_source` when it wants the grid.
+        """
+        self._cancel_in_flight()
 
     def set_source(self, choice: SourceChoice | None) -> None:
         """Choose what goes into the cube and start preparing it.
@@ -766,7 +801,9 @@ class SliceEngine(QObject):
         engine holds become the SAME (now stale) object, so `!=` never
         fires. A full re-preparation, not merely a geometry rebuild, is
         the only way to pick up coordinates that were computed from the
-        OLD grid.
+        OLD grid. With `on_grid_moved` set (R-P2, M12) that
+        re-preparation is handed to the owner instead of started here --
+        see `_hand_over_the_move`.
 
         When the fingerprint has NOT changed, `replace_grid` may still
         have run -- `set_grid_velocity` goes through it too, and
@@ -792,12 +829,42 @@ class SliceEngine(QObject):
         if self._grid_fp is None:
             return
         if self._grid_fingerprint(grid) != self._grid_fp:
+            if self.on_grid_moved is not None:
+                self._hand_over_the_move(grid_id)
+                return
             try:
                 self.set_source(self._choice)
             except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
                 self._report(f"could not re-prepare after the grid changed: {exc}")
             return
         self._cube = None
+
+    def _hand_over_the_move(self, grid_id: str) -> None:
+        """R-P2 (M12): the chosen grid moved and an owner re-prepares.
+
+        The `set_source(self._choice)` above starts a task from inside
+        this slot, outside any queue an owner keeps across engines. Moving
+        one grid while another grid prepares -- or moving a grid that two
+        engines hold -- would then run two preparations at once, which
+        segfaulted M11 (trap 1). So: `clear()`, which cancels and waits
+        out any task in flight and drops the lines binned at the old
+        registration, then tell the owner, who queues the grid. Nothing is
+        dispatched here.
+
+        Still a slot: neither half may raise past it, so both report
+        through `on_error`.
+        """
+        try:
+            self.clear()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not drop the slice source after grid {grid_id!r} moved: {exc}")
+        hook = self.on_grid_moved
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not re-prepare after grid {grid_id!r} moved: {exc}")
 
     def _require_geometry(self) -> tuple[CubeFrame, ZAxis]:
         if self._frame is None or self._z is None:
@@ -1102,6 +1169,7 @@ class SliceEngine(QObject):
         self.on_prepared = None
         self.on_error = None
         self.on_progress = None
+        self.on_grid_moved = None
 
     def wait_for_preparation(
         self,
