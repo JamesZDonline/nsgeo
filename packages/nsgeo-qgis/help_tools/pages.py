@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -54,6 +54,12 @@ class Link:
     section: str
 
 
+@dataclass(frozen=True)
+class Ref:
+    sources: tuple[str, ...]
+    text: str
+
+
 @dataclass
 class PageInfo:
     name: str
@@ -66,6 +72,7 @@ class PageInfo:
     stylesheets: list[str]
     scripts: int
     plain_text: str
+    refs: list[Ref] = field(default_factory=list)
 
 
 def _collapse(parts: list[str]) -> str:
@@ -94,6 +101,7 @@ class _PageParser(HTMLParser):
         self.claims: list[Claim] = []
         self.links: list[Link] = []
         self.ref_sources: list[str] = []
+        self.refs: list[Ref] = []
         self.images: list[str] = []
         self.stylesheets: list[str] = []
         self.scripts = 0
@@ -121,6 +129,8 @@ class _PageParser(HTMLParser):
         if "link" in e.kinds:
             k = e.attrs["link"]
             self.links.append(Link(k["href"], k["source"], text, k["section"]))
+        if "ref" in e.kinds:
+            self.refs.append(Ref(tuple(e.attrs["ref"]["source"].split()), text))
         if "plain" in e.kinds:
             self.plain_text = text
 
@@ -165,6 +175,9 @@ class _PageParser(HTMLParser):
         is_ref_item = tag != "a" and "claim" not in entry.kinds and "refs" in self._open_sections()
         if is_ref_item and "data-source" in a:
             self.ref_sources.extend(a["data-source"].split())
+            entry.kinds.add("ref")
+            entry.attrs["ref"] = {"source": a["data-source"]}
+            entry.buf = []
         if tag == "img" and "src" in a:
             self.images.append(a["src"])
         elif tag == "link" and "stylesheet" in a.get("rel", "").lower().split():
@@ -207,6 +220,7 @@ def parse_page(path: Path) -> PageInfo:
         stylesheets=parser.stylesheets,
         scripts=parser.scripts,
         plain_text=parser.plain_text,
+        refs=parser.refs,
     )
 
 

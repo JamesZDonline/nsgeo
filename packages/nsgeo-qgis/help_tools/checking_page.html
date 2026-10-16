@@ -112,12 +112,22 @@ label.notel { font-size: 0.8rem; font-weight: 500; display: grid; gap: 0.25rem; 
 <script>
 const LEDGER = /*__LEDGER__*/null;
 const STATES = ["unchecked", "ok", "wrong"];
+const FIELDS = ["exists", "says"];
 const LABELS = { unchecked: "Not yet", ok: "Yes", wrong: "No" };
 const CLASSES = { unchecked: "u", ok: "k", wrong: "w" };
-const rows = new Map();   // item id -> {el, radios, note, item}
-const marks = new Map();  // item id -> {exists, says, note}
+const NOTE_DELAY = 800;
+const rows = new Map();     // item id -> {el, exists, says, note, item}
+const marks = new Map();    // item id -> {exists, says, note}
+const known = new Set();    // ids whose document exists in the store
+const dirty = new Map();    // item id -> Set of fields changed since the last write began
+const chains = new Map();   // item id -> promise of that document's last queued write
+const pending = new Set();  // ids with a write queued or running
+const timers = new Map();   // item id -> note debounce timer
 let db = null;
+let writable = false;       // set after the first non-cached snapshot, cleared on a fatal write error
+let fatal = false;          // an invalid_argument rejection: read-only for the rest of the visit
 
+function norm(v) { return STATES.includes(v) ? v : "unchecked"; }
 function el(tag, props, ...kids) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
@@ -131,12 +141,60 @@ function link(href, text) {
 }
 function mark(id) { return marks.get(id) || { exists: "unchecked", says: "unchecked", note: "" }; }
 
+const notices = { load: "", error: "", ro: "" };
+function setNotice(kind, text) {
+  notices[kind] = text;
+  const n = document.getElementById("notice");
+  const shown = notices.error || notices.ro || notices.load;
+  n.textContent = shown; n.hidden = !shown; n.className = "notice" + (notices.error ? " err" : "");
+}
+
+// Writes to one document run one at a time; each step sends the latest values of the fields
+// that changed, so a burst of ticks becomes one write.
 function save(id, patch) {
-  if (!db) return;
-  const next = Object.assign({}, mark(id), patch);
-  marks.set(id, next);
-  paint(id);
-  db.doc("checks/" + id).set(next).catch(() => notice("Could not save that mark. Check your connection and try again.", true));
+  if (!db || !writable) return;
+  const cur = mark(id);
+  const changed = Object.keys(patch).filter(k => cur[k] !== patch[k]);
+  if (!changed.length) return;
+  marks.set(id, Object.assign({}, cur, patch));
+  const d = dirty.get(id) || new Set();
+  changed.forEach(k => d.add(k));
+  dirty.set(id, d);
+  pending.add(id);
+  paint(id); progress();
+  const prev = chains.get(id) || Promise.resolve();
+  const step = prev.then(() => flush(id));
+  chains.set(id, step);
+  step.then(() => { if (chains.get(id) === step) { chains.delete(id); pending.delete(id); } });
+}
+
+async function flush(id) {
+  const d = dirty.get(id);
+  if (!d || !d.size || fatal) return;
+  dirty.delete(id);
+  const latest = mark(id);
+  const fields = Object.fromEntries([...d].map(k => [k, latest[k]]));
+  try {
+    const ref = db.doc("checks/" + id);
+    const create = () => ref.set({ exists: latest.exists, says: latest.says, note: latest.note });
+    const send = () => (known.has(id) ? ref.update(fields) : create());
+    try {
+      await send();
+    } catch (e) {
+      if (e && e.code === "unavailable") await send();     // one retry for a transient failure
+      else if (e && e.code === "invalid_argument" && known.has(id)) await create();
+      else throw e;
+    }
+    known.add(id);
+  } catch (e) {
+    d.forEach(k => { const s = dirty.get(id) || new Set(); s.add(k); dirty.set(id, s); });
+    if (e && e.code === "invalid_argument") {
+      fatal = true; writable = false; enable(false);
+      setNotice("error", "Saving was refused, so the page is read-only for the rest of this visit. Reload to try again.");
+    } else {
+      setNotice("error", "Could not save the last mark. Check your connection and tick it again.");
+    }
+  }
 }
 
 function tri(id, field, title, hint) {
@@ -157,23 +215,27 @@ function tri(id, field, title, hint) {
 function buildItem(item) {
   const id = item.id;
   const ex = tri(id, "exists", "Exists as cited", "Claude pre-checked this against the catalogue link above.");
-  const sy = tri(id, "says", item.kind === "link" ? "Goes where the page says" : "Says this", "Read the source at the place given.");
+  const says = { claim: "Says this", link: "Goes where the page says", ref: "Reference is right" }[item.kind];
+  const sy = tri(id, "says", says, "Read the source at the place given.");
   const note = el("textarea", { id: id + "-note", rows: "2" });
   note.disabled = true;
-  note.addEventListener("change", () => save(id, { note: note.value }));
+  const commit = () => { clearTimeout(timers.get(id)); timers.delete(id); save(id, { note: note.value }); };
+  note.addEventListener("input", () => { clearTimeout(timers.get(id)); timers.set(id, setTimeout(commit, NOTE_DELAY)); });
+  note.addEventListener("change", commit);
 
-  const where = el("div", { class: "where" },
-    el("span", { class: "kind", text: item.kind }),
+  const where = el("div", { class: "kind-row where" },
+    el("span", { class: "kind", text: item.kind === "ref" ? "reference" : item.kind }),
     el("span", { text: item.page + " / " + item.section }),
     el("span", { text: id }));
   const body = [where, el("p", { class: "text", text: item.text })];
   if (item.kind === "claim") {
     const ev = el("div", { class: "ev" });
-    ev.append(el("div", {}, "Claude's basis: ", el("span", { class: "tag " + item.evidence, text: item.evidence === "read" ? "read" : "from memory" })));
+    const basis = item.evidence === "read" ? ["read", "read"] : item.evidence === "memory" ? ["memory", "from memory"] : ["", "(no record)"];
+    ev.append(el("div", {}, "Claude's basis: ", el("span", { class: "tag " + basis[0], text: basis[1] })));
     if (item.quote) ev.append(el("blockquote", { class: "quote", text: item.quote }));
-    ev.append(el("div", {}, el("b", { text: "Where to look: " }), item.look));
+    if (item.look) ev.append(el("div", {}, el("b", { text: "Where to look: " }), item.look));
     body.push(ev);
-  } else {
+  } else if (item.kind === "link") {
     const ul = el("ul", { class: "hrefs" });
     for (const h of item.hrefs || []) ul.append(el("li", {}, link(h)));
     body.push(ul);
@@ -192,13 +254,10 @@ function buildItem(item) {
 
 function paint(id) {
   const r = rows.get(id), m = mark(id);
-  for (const f of ["exists", "says"]) {
-    const v = STATES.includes(m[f]) ? m[f] : "unchecked";
-    for (const s of STATES) r[f][s].checked = s === v;
-  }
+  for (const f of FIELDS) for (const s of STATES) r[f][s].checked = s === norm(m[f]);
   if (document.activeElement !== r.note && r.note.value !== (m.note || "")) r.note.value = m.note || "";
-  const both = m.exists !== "unchecked" && m.says !== "unchecked";
-  const flagged = m.exists === "wrong" || m.says === "wrong";
+  const both = norm(m.exists) !== "unchecked" && norm(m.says) !== "unchecked";
+  const flagged = norm(m.exists) === "wrong" || norm(m.says) === "wrong";
   r.el.classList.toggle("done", both && !flagged);
   r.el.classList.toggle("flag", flagged);
 }
@@ -207,19 +266,14 @@ function progress() {
   let done = 0, flagged = 0;
   for (const [id] of rows) {
     const m = mark(id);
-    if (m.exists !== "unchecked" && m.says !== "unchecked") done++;
-    if (m.exists === "wrong" || m.says === "wrong") flagged++;
+    if (norm(m.exists) !== "unchecked" && norm(m.says) !== "unchecked") done++;
+    if (norm(m.exists) === "wrong" || norm(m.says) === "wrong") flagged++;
   }
   const n = rows.size;
   document.getElementById("count").textContent = done + " of " + n + " checked" + (flagged ? " · " + flagged + " flagged" : "");
   const pct = n ? 100 / n : 0;
   document.getElementById("m-ok").style.width = Math.max(0, done - flagged) * pct + "%";
   document.getElementById("m-bad").style.width = flagged * pct + "%";
-}
-
-function notice(text, isErr) {
-  const n = document.getElementById("notice");
-  n.textContent = text; n.hidden = !text; n.className = "notice" + (isErr ? " err" : "");
 }
 
 function render() {
@@ -248,27 +302,35 @@ function render() {
 
 function enable(on) {
   for (const r of rows.values()) {
-    for (const f of ["exists", "says"]) for (const s of STATES) r[f][s].disabled = !on;
+    for (const f of FIELDS) for (const s of STATES) r[f][s].disabled = !on;
     r.note.disabled = !on;
   }
 }
 
 render();
-notice("Loading your saved marks…");
+setNotice("load", "Loading your saved marks…");
 (async () => {
   try { db = await window.claude.use("db"); } catch (e) { db = null; }
   if (!db) {
-    notice("Read-only. Sign in to Claude to save your marks. The ledger below still shows every item and source.");
+    setNotice("load", "");
+    setNotice("ro", "Read-only. Saving isn't available in this view. The ledger below still shows every item and source.");
     return;
   }
   db.collection("checks").onSnapshot(snap => {
-    marks.clear();
+    known.clear();
     for (const d of snap.docs) {
+      known.add(d.id);
+      if (pending.has(d.id) || !rows.has(d.id)) continue;   // keep what the viewer just ticked
       const v = d.data() || {};
-      marks.set(d.id, { exists: v.exists || "unchecked", says: v.says || "unchecked", note: v.note || "" });
+      marks.set(d.id, { exists: norm(v.exists), says: norm(v.says), note: typeof v.note === "string" ? v.note : "" });
     }
+    for (const id of [...marks.keys()]) if (!known.has(id) && !pending.has(id)) marks.delete(id);
     for (const [id] of rows) paint(id);
-    progress(); enable(true); notice("");
-  }, () => { enable(false); notice("Could not load your saved marks, so the page is read-only. Reload to try again.", true); });
+    progress();
+    // A cached first snapshot may be partial. Writing then could replace marks not loaded yet.
+    if (snap.metadata && snap.metadata.fromCache) return;
+    if (!fatal) { writable = true; enable(true); }
+    setNotice("load", "");
+  }, () => { writable = false; enable(false); setNotice("load", ""); setNotice("error", "Could not load your saved marks, so the page is read-only. Reload to try again."); });
 })();
 </script>

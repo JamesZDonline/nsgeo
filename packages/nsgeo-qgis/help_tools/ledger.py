@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from nsgeo_qgis.help_pages import HELP_DIR
@@ -17,6 +18,8 @@ from help_tools.sources import SOURCES_DIR, Sources, load_sources
 
 TEMPLATE = Path(__file__).resolve().parent / "checking_page.html"
 TOKEN = "/*__LEDGER__*/null"
+# The db's document-id grammar (db.d.ts PATH GRAMMAR), because an item id is a document id.
+_ID = re.compile(r"^[A-Za-z0-9_\-.~:@+]{1,200}$")
 
 
 def build_ledger(help_dir: Path, sources: Sources) -> dict:
@@ -60,6 +63,23 @@ def build_ledger(help_dir: Path, sources: Sources) -> dict:
                     item["text"] += f" | {link.text}"
                 if link.href not in item["hrefs"]:
                     item["hrefs"].append(link.href)
+        cited = {s for c in page.claims for s in c.sources} | set(by_source)
+        for ref in page.refs:
+            for sid in ref.sources:
+                if sid in cited:
+                    continue
+                cited.add(sid)
+                items.append(
+                    {
+                        "id": f"ref-{page.name}-{sid}",
+                        "kind": "ref",
+                        "page": page.name,
+                        "section": "refs",
+                        "text": ref.text,
+                        "sources": [sid],
+                    }
+                )
+    _check_ids(items)
     return {
         "items": items,
         "sources": {
@@ -75,12 +95,26 @@ def build_ledger(help_dir: Path, sources: Sources) -> dict:
     }
 
 
+def _check_ids(items: list[dict]) -> None:
+    seen: set[str] = set()
+    problems = []
+    for item in items:
+        iid = item["id"]
+        if not _ID.match(iid) or iid in (".", ".."):
+            problems.append(f"item id {iid!r} is not a valid document id")
+        elif iid in seen:
+            problems.append(f"item id {iid!r} appears more than once")
+        seen.add(iid)
+    if problems:
+        raise ValueError("\n".join(problems))
+
+
 def render_checking_page(ledger: dict, template: Path) -> str:
-    """Put the ledger JSON where the template's single token is; `</` becomes `<\\/`."""
+    """Put the ledger JSON where the template's single token is; every `<` becomes `\\u003c`."""
     text = Path(template).read_text(encoding="utf-8")
     if text.count(TOKEN) != 1:
         raise ValueError(f"{template} must hold exactly one {TOKEN} token")
-    data = json.dumps(ledger, ensure_ascii=False, indent=1).replace("</", "<\\/")
+    data = json.dumps(ledger, ensure_ascii=False, indent=1).replace("<", "\\u003c")
     return text.replace(TOKEN, data)
 
 

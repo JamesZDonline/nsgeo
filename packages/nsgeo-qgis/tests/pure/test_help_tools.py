@@ -425,10 +425,19 @@ def test_a_repeated_href_is_listed_once(tmp_path):
     assert link["hrefs"] == ["https://example.org/a"]
 
 
+def two_pages(tmp_path, first="dewow", second="agc"):
+    """Two valid pages citing t-src, the second with its own claim id `x-claim`."""
+    write_valid_help(tmp_path, name=first)
+    write_valid_help(
+        tmp_path, name=second, edits=(('data-claim="t-claim"', 'data-claim="x-claim"'),)
+    )
+    base = valid_sources()
+    claims = {**base.claims, "x-claim": replace(base.claims["t-claim"], id="x-claim")}
+    return Sources(base.sources, claims)
+
+
 def test_the_same_source_on_two_pages_gives_two_link_items(tmp_path):
-    write_valid_help(tmp_path, name="dewow")
-    write_valid_help(tmp_path, name="agc")
-    items = build_ledger(tmp_path, valid_sources())["items"]
+    items = build_ledger(tmp_path, two_pages(tmp_path))["items"]
     assert [i["id"] for i in items if i["kind"] == "link"] == [
         "link-agc-t-src",
         "link-dewow-t-src",
@@ -436,11 +445,10 @@ def test_the_same_source_on_two_pages_gives_two_link_items(tmp_path):
 
 
 def test_items_run_page_name_then_document_order(tmp_path):
-    for name in ("zeta", "alpha"):
-        write_valid_help(tmp_path, name=name)
-    ids = [(i["page"], i["id"]) for i in build_ledger(tmp_path, valid_sources())["items"]]
+    sources = two_pages(tmp_path, first="zeta", second="alpha")
+    ids = [(i["page"], i["id"]) for i in build_ledger(tmp_path, sources)["items"]]
     assert ids == [
-        ("alpha", "t-claim"),
+        ("alpha", "x-claim"),
         ("alpha", "link-alpha-t-src"),
         ("zeta", "t-claim"),
         ("zeta", "link-zeta-t-src"),
@@ -502,9 +510,70 @@ def test_render_replaces_the_token_and_escapes_script_ends(tmp_path):
     html = render_checking_page(ledger, template)
     assert "/*__LEDGER__*/" not in html
     assert html.count("</script>") == 1
-    assert "<\\/script>" in html
+    assert "<\\/script>" not in html and "\\u003c/script>" in html
     inner = html[len("<script>const L = ") : -len(";</script>")]
     assert json.loads(inner) == ledger
+
+
+def test_render_leaves_no_script_or_comment_opener_in_the_json(tmp_path):
+    ledger = {"items": [{"text": "a <!--<script> b <!-- c"}], "sources": {}}
+    template = tmp_path / "t.html"
+    template.write_text("<script>const L = /*__LEDGER__*/null;</script>", encoding="utf-8")
+    html = render_checking_page(ledger, template)
+    body = html[len("<script>") : -len("</script>")]
+    assert "<" not in body
+    assert json.loads(body[len("const L = ") : -1]) == ledger
+
+
+@pytest.mark.parametrize("bad", ["has space", "a/b", "..", ".", "x" * 201, "é-claim", ""])
+def test_a_bad_item_id_is_refused(tmp_path, bad):
+    write_valid_help(tmp_path, edits=(('data-claim="t-claim"', f'data-claim="{bad}"'),))
+    base = valid_sources()
+    sources = Sources(base.sources, {bad: replace(base.claims["t-claim"], id=bad)})
+    with pytest.raises(ValueError, match="not a valid document id"):
+        build_ledger(tmp_path, sources)
+
+
+def test_a_repeated_item_id_is_refused(tmp_path):
+    write_valid_help(tmp_path, name="dewow")
+    write_valid_help(tmp_path, name="agc")  # both pages declare claim t-claim
+    with pytest.raises(ValueError, match="more than once"):
+        build_ledger(tmp_path, valid_sources())
+
+
+def test_a_claim_with_two_sources_keeps_their_order(tmp_path):
+    write_valid_help(
+        tmp_path, edits=(('data-source="t-src">Wow', 'data-source="t-src u-src">Wow'),)
+    )
+    base = valid_sources()
+    src2 = replace(base.sources["t-src"], id="u-src", citation="Other")
+    sources = Sources({**base.sources, "u-src": src2}, base.claims)
+    items = build_ledger(tmp_path, sources)["items"]
+    assert items[0]["sources"] == ["t-src", "u-src"]
+    assert list(build_ledger(tmp_path, sources)["sources"]) == ["t-src", "u-src"]
+
+
+def test_a_source_cited_only_in_refs_gets_a_ref_item(tmp_path):
+    ref = '<li data-source="t-src">A reference.</li>'
+    both = ref + '<li data-source="r-src">Only here. <i>Title</i>.</li>'
+    write_valid_help(tmp_path, edits=((ref, both),))
+    base = valid_sources()
+    sources = Sources(
+        {**base.sources, "r-src": replace(base.sources["t-src"], id="r-src")}, base.claims
+    )
+    items = build_ledger(tmp_path, sources)["items"]
+    refs = [i for i in items if i["kind"] == "ref"]
+    assert refs == [
+        {
+            "id": "ref-dewow-r-src",
+            "kind": "ref",
+            "page": "dewow",
+            "section": "refs",
+            "text": "Only here. Title.",
+            "sources": ["r-src"],
+        }
+    ]
+    assert "r-src" in build_ledger(tmp_path, sources)["sources"]
 
 
 def test_render_requires_exactly_one_token(tmp_path):
