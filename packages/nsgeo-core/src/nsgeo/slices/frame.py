@@ -267,3 +267,28 @@ class ZAxis:
         k0 = max(0, min(k0, self.nz - 1))
         k1 = max(k0 + 1, min(k1, self.nz))
         return k0, k1
+
+
+def slice_extent(frame: CubeFrame) -> tuple[float, float, float, float]:
+    """The axis-aligned world bounding box of `frame`, as (xmin, ymin, xmax, ymax).
+
+    All four corners, never two. A rotated rectangle's bounding box is set
+    by the corners the origin-to-far-corner diagonal does not touch, so the
+    cheap two-corner form is right only at azimuth 0 -- and silently wrong,
+    by up to the frame's own width, at every other angle.
+
+    This is what a north-up export resamples into: the box is in world
+    units and is generally larger than `nx * cell` by `ny * cell`, because
+    a rotated frame does not fill its own bounding box.
+    """
+    x_hat, y_hat = frame.axes()
+    origin = np.asarray(frame.origin, dtype=float)
+    span_x = frame.nx * frame.cell * x_hat
+    span_y = frame.ny * frame.cell * y_hat
+    corners = np.array([origin, origin + span_x, origin + span_y, origin + span_x + span_y])
+    return (
+        float(corners[:, 0].min()),
+        float(corners[:, 1].min()),
+        float(corners[:, 0].max()),
+        float(corners[:, 1].max()),
+    )

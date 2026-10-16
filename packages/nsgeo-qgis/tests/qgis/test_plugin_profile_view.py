@@ -1325,6 +1325,99 @@ def test_real_file_renders_at_full_resolution(make_view):
     v.grab_image()
 
 
+def test_the_slice_band_spans_the_windows_time_range(make_view):
+    view = make_view()
+    view.resize(400, 300)
+    view.set_axes(n_traces=100, n_samples=200, t0_ns=0.0, dt_ns=0.5)
+    view.set_slice_band(20.0, 30.0)
+    bounds = view._slice_band_bounds(view.transform)
+    assert bounds is not None
+    y0, y1 = bounds
+    assert y0 == pytest.approx(view.transform.y_of_time(20.0))
+    assert y1 == pytest.approx(view.transform.y_of_time(30.0))
+    assert y1 > y0
+
+
+def test_a_single_level_window_still_draws_a_visible_band(make_view):
+    """A one-level window averages a single sample and so has zero time
+    extent -- which is the truth, and a zero-height rectangle no user can
+    see. The data stays honest; the PAINTER enforces a floor."""
+    view = make_view()
+    view.resize(400, 300)
+    view.set_axes(n_traces=100, n_samples=200, t0_ns=0.0, dt_ns=0.5)
+    view.set_slice_band(20.0, 20.0)
+    y0, y1 = view._slice_band_bounds(view.transform)
+    assert y1 - y0 >= 2.0
+
+
+def test_clearing_the_band_removes_it(make_view):
+    view = make_view()
+    view.resize(400, 300)
+    view.set_axes(n_traces=100, n_samples=200, t0_ns=0.0, dt_ns=0.5)
+    view.set_slice_band(20.0, 30.0)
+    view.clear_slice_band()
+    assert view._slice_band_bounds(view.transform) is None
+
+
+def test_painting_with_a_band_raises_nothing(make_view):
+    """paintEvent is a Qt-invoked virtual: an escaping exception leaves
+    the QPainter bound to the widget and the NEXT repaint segfaults the
+    process -- measured, not theorised (see the module docstring's C1)."""
+    view = make_view()
+    view.resize(400, 300)
+    view.set_axes(n_traces=100, n_samples=200, t0_ns=0.0, dt_ns=0.5)
+    view.set_slice_band(-50.0, 500.0)  # a window entirely outside the view
+    view.grab_image()
+    view.set_slice_band(20.0, 30.0)
+    view.grab_image()
+
+
+def test_the_band_is_actually_painted_under_the_picks(view):
+    """Minor 2 (Task 5 review): the three tests above pin
+    `_slice_band_bounds`'s arithmetic, but nothing proved
+    `_paint_slice_band` draws a single pixel, and no test caught the band
+    painting order swapped to sit OVER the picks instead of under them --
+    confirmed directly: `_paint_slice_band` reduced to `return` on its
+    first line, and the order swapped to after `_paint_picks`, each
+    passed every one of the file's 566 pre-existing tests.
+
+    Two assertions do both jobs in one render. The pick marker at (100,
+    10.0) is drawn as an OPAQUE filled polygon (`_paint_picks`), so its
+    interior colour is exactly `PICK_COLOUR` when nothing is drawn over
+    it afterwards, and something visibly different (`SLICE_BAND_COLOUR`
+    alpha-blended on top) when the band is painted after it instead of
+    before. Measured directly with the mutation applied: the pick
+    interior at `(pick_x, pick_y - 5)` reads `(224, 66, 27)` in the
+    shipped order and `(197, 92, 70)` with the order swapped -- close
+    enough to still look "pick-ish" to a loose colour-range check (which
+    is exactly why the existing pick test does not catch this), but not
+    equal, so an exact-colour comparison does.
+    """
+    v, rg = view
+    v.set_picks([(100, 10.0)])
+    r = v.image_rect()
+    pick_x = int(round(r.left() + v.transform.x_of_trace(100.5)))
+    pick_y = int(round(r.top() + v.transform.y_of_time(10.0))) - 5  # inside the marker's solid fill
+
+    before = v.grab_image()
+    pick_before = QColor(before.pixel(pick_x, pick_y))
+
+    v.set_slice_band(8.0, 12.0)  # spans the pick's own two-way time
+    after = v.grab_image()
+    pick_after = QColor(after.pixel(pick_x, pick_y))
+
+    # A point away from the pick, still inside the band's y-range: proves
+    # the band actually changes pixels rather than painting nothing.
+    band_probe_x = r.left() + 5
+    band_probe_y = int(round(r.top() + v.transform.y_of_time(9.0)))
+    assert QColor(before.pixel(band_probe_x, band_probe_y)) != QColor(
+        after.pixel(band_probe_x, band_probe_y)
+    ), "the band must actually change pixels, not paint nothing"
+    # The pick, inside that same y-range, must read exactly the same --
+    # proves the band sits UNDER it, not over it.
+    assert pick_after == pick_before, PICK_COLOUR.name()
+
+
 # ---- picking: only inside the radargram (M8) -------------------------------
 
 

@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
-from nsgeo.slices.frame import CubeFrame, ZAxis
+from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.velocity import VelocityModel
 
 
@@ -211,6 +211,43 @@ def test_level_range_is_a_genuine_intersection_not_a_clamped_copy():
 def test_z_axis_rejects_a_non_positive_dz():
     with pytest.raises(ValueError, match="dz_ns must be positive"):
         ZAxis(t0_ns=0.0, dz_ns=0.0, nz=5)
+
+
+def test_slice_extent_of_an_axis_aligned_frame_is_its_own_box():
+    frame = CubeFrame(origin=(100.0, 200.0), azimuth=0.0, cell=0.5, nx=40, ny=20, crs="EPSG:32633")
+    assert slice_extent(frame) == pytest.approx((100.0, 200.0, 120.0, 210.0))
+
+
+def test_slice_extent_covers_all_four_corners_of_a_rotated_frame():
+    """The mutant this exists to catch takes only the origin and the far
+    corner, which is correct at azimuth 0 and wrong at every other angle:
+    a rotated rectangle's bounding box is decided by the two corners the
+    diagonal misses."""
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=30.0, cell=1.0, nx=10, ny=4, crs="EPSG:32633")
+    xmin, ymin, xmax, ymax = slice_extent(frame)
+    x_hat, y_hat = frame.axes()
+    corners = np.array(
+        [
+            [0.0, 0.0],
+            10.0 * x_hat,
+            4.0 * y_hat,
+            10.0 * x_hat + 4.0 * y_hat,
+        ]
+    )
+    assert xmin == pytest.approx(corners[:, 0].min())
+    assert ymin == pytest.approx(corners[:, 1].min())
+    assert xmax == pytest.approx(corners[:, 0].max())
+    assert ymax == pytest.approx(corners[:, 1].max())
+    # The two-corner mutant would miss by this much, so the test is not vacuous.
+    two_corner_ymin = min(0.0, float((10.0 * x_hat + 4.0 * y_hat)[1]))
+    assert abs(two_corner_ymin - ymin) > 1.0
+
+
+def test_slice_extent_is_wider_than_the_frame_when_rotated():
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=45.0, cell=1.0, nx=10, ny=10, crs="EPSG:32633")
+    xmin, ymin, xmax, ymax = slice_extent(frame)
+    assert xmax - xmin == pytest.approx(math.hypot(10.0, 10.0), rel=1e-9)
+    assert ymax - ymin == pytest.approx(math.hypot(10.0, 10.0), rel=1e-9)
 
 
 def test_azimuth_convention_matches_grid():

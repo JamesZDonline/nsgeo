@@ -1,0 +1,1591 @@
+"""The Slices dock's Source group, and its Position/Resolution/Display groups."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pytest
+from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
+from nsgeo.render import colormap_names
+from nsgeo.slices import plan_windows, window_depths_m, window_times_ns
+from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slice_export import ViewSettings, cube_record
+from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
+from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from qgis.PyQt.QtCore import QEvent, Qt
+
+GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
+PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
+
+
+@pytest.fixture
+def docked(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    lines = [
+        Line.open(
+            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+            GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+        )
+        for i in range(3)
+    ]
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    yield dock, session
+    # Fix round 1: Important 2's first-computation trigger means
+    # construction ALREADY dispatched a real QgsTask here, and most tests
+    # above never call wait_for_preparation() themselves. dispose() only
+    # disconnects signals and drops this engine's own references -- it
+    # does not cancel or wait for a task already handed to
+    # QgsApplication.taskManager(), which is a session-scoped singleton
+    # shared by every test in this file. Left unawaited, that orphaned
+    # task keeps running in a real background thread for as long as it
+    # takes, and a later test's OWN construction can dispatch a SECOND one
+    # before the first finishes -- measured directly as a segfault (two
+    # worker threads inside dewow's `running_mean` at once), not merely a
+    # slow teardown. Waiting here, before dispose(), is what keeps every
+    # test's background work finished before the next test's fixture ever
+    # starts building a new one.
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_the_source_combos_are_filled_from_the_site_not_from_literals(docked):
+    dock, session = docked
+    assert [dock.grid_combo.itemText(i) for i in range(dock.grid_combo.count())] == ["A"]
+    assert "p" in [dock.preset_combo.itemText(i) for i in range(dock.preset_combo.count())]
+    offered = [dock.transform_combo.itemText(i) for i in range(dock.transform_combo.count())]
+    assert offered[0] == "none"  # spec 6.2 and GPRSLICE's xfrm_method=NONE
+    assert offered[1:] == transform_names()
+
+
+def test_adding_a_preset_updates_the_combo_without_a_reopen(docked):
+    dock, session = docked
+    session.site.presets["second"] = list(PRESET)
+    session.presets_changed.emit()
+    assert "second" in [dock.preset_combo.itemText(i) for i in range(dock.preset_combo.count())]
+
+
+def test_the_included_summary_reads_as_a_fraction_of_the_grid(docked):
+    dock, session = docked
+    assert dock.included_label.text().startswith("3 of 3 included")
+    dock.set_included(tuple(session.keys())[:2])
+    assert dock.included_label.text().startswith("2 of 3 included")
+
+
+def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
+    """Spec 9.1: before committing the ~0.9 s the dock reports what the
+    resulting memory will be, because it is decided by the line count and
+    the chosen resolution -- and spec 7.4 warns rather than hard-caps.
+
+    Fix round 1, M6: `"MB" in text` alone could never fail --
+    `format_bytes` floors at 1 MB, so it reads "1 MB" whether 0 or 3 lines
+    are actually included, which is exactly the state Important 1's bug
+    produces. Asserting the fraction against the session's own line count
+    (not the dock's) makes this test fail under that bug instead of
+    passing beside it."""
+    dock, session = docked
+    text = dock.included_label.text()
+    assert text.startswith(f"{len(session.keys())} of {len(session.keys())} included")
+    assert "MB" in text or "GB" in text
+
+
+def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
+    """Final review, Important 3 / Ruling AN. `SliceEngine.set_always_
+    resident` existed with no caller anywhere but tests -- the override
+    spec 9.2 itself describes had no control anywhere in the dock. Placed
+    in the Display group (this plugin has no settings infrastructure to
+    put it in), carrying spec 9.2's own wording and the actual cost the
+    toggle buys (`engine.estimate.cube_bytes`, not the total -- the
+    prepared lines are already held in memory in EITHER mode)."""
+    dock, _ = docked
+    _ready(dock)
+    assert dock.engine.mode == "streaming"
+    assert not dock.resident_check.isChecked()
+    # Spec 9.2's wording lives on the control, but split: the short form
+    # on the face and the full sentence in the tooltip. A QCheckBox cannot
+    # elide or wrap, so its text IS its minimum width -- the full wording
+    # measured a 555 px floor, which a dock passes straight on to the main
+    # window (see `test_the_dock_minimum_does_not_force_the_main_window_
+    # to_grow`). The cost stays on the face, where spec 9.2 wants it.
+    assert "faster dragging" in dock.resident_check.toolTip()
+    assert "memory" in dock.resident_check.text()
+    assert "MB" in dock.resident_check.text() or "GB" in dock.resident_check.text()
+    assert dock.resident_check.minimumSizeHint().width() <= 360
+
+    dock.resident_check.setChecked(True)
+    assert dock.engine.mode == "resident"
+    dock.resident_check.setChecked(False)
+    assert dock.engine.mode == "streaming"
+
+
+def test_the_included_label_warns_over_the_default_budget(docked, monkeypatch):
+    """Final review, Important 3 / Ruling AN. Spec 9.1/7.4's "warns and
+    requires confirmation above the budget rather than hard-caps" was
+    entirely unimplemented before this -- the label reported "about N MB"
+    and never compared it to anything. Warns, never blocks: spec 7.4 is
+    explicit that an over-budget cube degrades to streaming rather than
+    failing, so nothing about what actually happens changes here -- only
+    what the label says about it."""
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    dock, _ = docked
+    monkeypatch.setattr(dock_module, "DEFAULT_BUDGET_BYTES", 1)
+    dock._update_included_label()
+    assert "over the default budget" in dock.included_label.text()
+
+    monkeypatch.setattr(dock_module, "DEFAULT_BUDGET_BYTES", DEFAULT_BUDGET_BYTES)
+    dock._update_included_label()
+    assert "over the default budget" not in dock.included_label.text()
+
+
+def test_choosing_a_preset_that_carries_a_transform_is_refused_visibly(docked):
+    """Ruling 2, surfaced. The engine raises; the dock must turn that into
+    something the user can read and act on, not let it escape a slot."""
+    dock, session = docked
+    session.site.presets["bad"] = [{"step": "amp_abs", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    dock.preset_combo.setCurrentText("bad")  # re-preparing is what refuses it
+    assert any("amp_abs" in msg for msg in seen), seen
+    assert "amp_abs" in dock.source_status.text()
+    assert not dock.engine.is_prepared
+
+
+def test_refilling_the_combos_does_not_re_prepare(docked):
+    """Refilling a QComboBox emits currentTextChanged. Without the
+    _updating guard the dock re-prepares on construction and on every
+    grids_changed / lines_changed / presets_changed — ~0.9 s of work per
+    unrelated session signal, which IS the "nothing runs automatically"
+    the design forbids."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    prepared: list[int] = []
+    dock.engine.on_prepared = lambda: prepared.append(1)
+    session.site.presets["another"] = list(PRESET)
+    session.presets_changed.emit()
+    session.lines_changed.emit()
+    assert dock.engine.wait_for_preparation(2_000)
+    assert prepared == [], "refilling the combos must not have re-prepared"
+
+
+def test_preparing_reports_progress_and_then_reports_prepared(docked):
+    dock, session = docked
+    dock.prepare()  # the dock prepares on construction too; this is the retry path
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+    assert "prepared" in dock.source_status.text().lower()
+
+
+def test_changing_the_source_re_prepares_it_rather_than_waiting_to_be_asked(docked):
+    """Spec 9.1, explicitly: changing the grid, preset or transform
+    re-runs the preparation as a QgsTask. That is not a violation of
+    "nothing runs automatically" -- the user chose a preset, and
+    preparation is the execution of that choice, not an inference about
+    it. A prepared source left standing after one of its three inputs
+    changed would tell the user the screen matches a choice it does not."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    dock.grid_combo.setCurrentText("B")  # no explicit prepare() call
+    assert dock.engine.wait_for_preparation(20_000)
+    # Grid B holds no lines, so the re-preparation really ran and really
+    # used the new grid rather than leaving the old result in place.
+    assert dock.engine.line_count == 0
+
+
+def test_closing_the_site_empties_the_dock(docked):
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    session.close_site()
+    assert dock.grid_combo.count() == 0
+    assert not dock.engine.is_prepared
+
+
+def test_a_single_grid_single_preset_source_prepares_without_being_asked(docked):
+    """Fix round 1, Important 2. With one grid, one preset and transform
+    'none' -- exactly this fixture's shape -- no combo can ever change
+    again after construction, so `_on_source_changed` (the only other
+    caller of `prepare()`) can never fire either. Without a first-
+    computation trigger in `rebuild_source` itself, nothing here could
+    ever reach 'prepared', which is the brief's own done-criterion for
+    this dock. `dock.prepare()` is deliberately never called in this
+    test -- calling it would defeat the point."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+
+
+def test_construction_reports_not_prepared_before_the_first_task_finishes(docked):
+    """Ruling R's first state. The first-computation trigger (Important 2)
+    starts a QgsTask synchronously inside `rebuild_source`, but the task
+    itself only finishes once the event loop is spun -- which nothing has
+    done yet at this point -- so the status line must still say the
+    honest thing about what is (not yet) prepared."""
+    dock, _ = docked
+    assert dock.source_status.text() == "not prepared"
+    assert dock.engine.wait_for_preparation(20_000)  # let the fixture's own task finish cleanly
+
+
+def test_lines_added_after_construction_are_picked_up_as_the_default(qgis_app, tmp_path):
+    """Fix round 1, Important 1 / Ruling S. The real plugin order builds
+    this dock at `initGui`, before any site exists: `grids_changed` fires
+    while the grid is still empty (seeding the default to `()`), and a
+    LATER `lines_changed`, with the same grid still selected, must still
+    pick up the lines that arrive after that seed -- not leave it stuck
+    at the count that existed the moment the grid first appeared. The
+    `docked` fixture above builds the whole site before the dock, which
+    never exercises this path at all."""
+    session = SiteSession()
+    dock = SlicesDock(session)
+    try:
+        assert dock.grid_combo.count() == 0  # no site yet
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        assert dock.included_label.text().startswith("0 of 0 included")
+        lines = [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+        session.add_lines(lines)
+        assert dock.included_label.text().startswith("3 of 3 included")
+        assert len(dock.included_keys()) == 3
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_accepting_the_line_chooser_on_an_empty_grid_does_not_latch_the_seed_flag(
+    qgis_app, tmp_path
+):
+    """Final review, empty-grid latch. `set_included` used to clear
+    `_included_is_default` UNCONDITIONALLY, so accepting the line chooser
+    while the selected grid is still empty (`keys == () == self._included`
+    already, so `changed` is `False` and nothing else here would notice)
+    permanently latched it `False` -- which disables `_sync_included`'s
+    "still default" retry branch for that grid, the same branch `_seed_
+    dz_z_defaults` depends on to seed `dz`/`z0`/`z1` once a line actually
+    arrives (`plugin.py` builds this dock before any site exists, so
+    "grid added, still empty" is the ordinary flow, not an edge case).
+    With the flag latched, a line imported afterwards left `z0_spin`
+    stuck at its generic construction-time default (0.0) instead of the
+    header's own (negative) `position_ns` -- silently asking `plan_line`
+    to cover a two-way time the recording never reached, raising
+    `CoverageError` on every slice with no visible route back."""
+    session = SiteSession()
+    dock = SlicesDock(session)
+    try:
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        assert dock.included_keys() == ()
+
+        # The line chooser accepted on the still-empty grid: a no-op in
+        # every OTHER respect (`keys == self._included == ()`), which is
+        # exactly why the unconditional clear went unnoticed.
+        dock.set_included(())
+
+        path = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+        line = Line.open(path, GridPlacement("A", "y", 1.0, 0.0, 1, "L0"))
+        session.add_lines([line])
+
+        assert dock.included_keys() == tuple(session.keys()), (
+            "a line imported after an empty-grid Choose... must still become the default"
+        )
+        header = session.line_for_key(session.keys()[0]).header
+        assert dock.z0_spin.value() == pytest.approx(header.position_ns), (
+            "_seed_dz_z_defaults must still run for this grid, not stay stuck at its "
+            "construction-time default of 0.0"
+        )
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_accepting_the_line_chooser_reprepares_and_shows_stale_meanwhile(docked):
+    """Fix round 1, Important 2's second half: accepting the line chooser
+    is a choice made in this dock, the same as a combo change, so it must
+    re-prepare on its own. Ruling R: between that choice and the retry
+    finishing, `source_status` must say 'stale', not keep claiming the OLD
+    count is still current."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    keys = tuple(session.keys())[:2]
+    dock.set_included(keys)  # no explicit prepare() call
+    assert dock.source_status.text().startswith("stale")
+    assert "lines" in dock.source_status.text()
+
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 2
+    assert "prepared" in dock.source_status.text().lower()
+
+
+def test_deleting_the_selected_preset_shows_stale_not_a_wrong_name(docked):
+    """Ruling R's spec gap, as widened by the review: `_refill` cannot
+    restore a preset name that no longer exists, so the combo silently
+    jumps to a fallback while `_updating` suppresses `_on_source_changed`.
+    Without this check the dock would keep naming a preset the engine
+    never actually prepared -- deleting the SELECTED preset must not
+    quietly leave 'prepared · 3 lines' standing beside a combo that now
+    reads something else entirely."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    del session.site.presets["p"]
+    session.site.presets["only"] = list(PRESET)
+    session.presets_changed.emit()
+
+    assert dock.preset_combo.currentText() == "only"
+    assert dock.source_status.text().startswith("stale")
+    assert "preset" in dock.source_status.text()
+    # Point 5's decision stands even here: no auto re-prepare from a
+    # combo change forced by a refill, only from one the user drove.
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+
+
+def test_editing_the_selected_preset_in_place_shows_stale_without_reprocessing(docked):
+    """Point 5's decision, now with a visible consequence: editing the
+    CONTENTS of the currently-selected preset (same name) does not
+    re-prepare on its own -- Ruling K already freezes what a prepared
+    source was actually built from, on purpose -- but the status line
+    must stop claiming the screen matches a choice it no longer does."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+    before = list(dock.engine.provenance().steps)
+
+    session.site.presets["p"] = [{"step": "background_mean", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+    assert dock.source_status.text().startswith("stale")
+    assert "preset" in dock.source_status.text()
+    assert dock.engine.is_prepared
+    assert dock.engine.line_count == 3
+    assert list(dock.engine.provenance().steps) == before  # no re-prepare happened
+
+
+def test_calling_prepare_again_after_an_in_place_edit_clears_the_staleness(docked):
+    """Fix round 3, Ruling X. `prepare()`'s no-op guard used to compare
+    only grid/preset-name/transform/line_keys, never the steps
+    themselves -- so after an in-place edit to the selected preset, the
+    documented retry path (calling `prepare()` again) silently did
+    nothing, and with one grid and one preset the source was PERMANENTLY
+    stale: the only recovery left was toggling the transform away and
+    back, paying for two preparations and showing the wrong transform in
+    between. The guard must still skip a GENUINELY unchanged choice
+    (`test_refilling_the_combos_does_not_re_prepare` pins that half)."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 3
+
+    new_steps = [{"step": "background_mean", "params": {}, "enabled": True}]
+    session.site.presets["p"] = list(new_steps)
+    session.presets_changed.emit()
+    assert dock.source_status.text().startswith("stale")
+
+    dock.prepare()  # the documented retry path -- must NOT be a no-op here
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    assert list(dock.engine.provenance().steps) == new_steps
+    assert "prepared" in dock.source_status.text().lower()
+
+
+def test_the_stale_wording_names_the_grid_when_only_the_grid_diverges(docked):
+    """Fix round 3, Ruling Y's fourth finding: every non-`line_keys`
+    divergence used to print 'the preset changed', even when the grid was
+    what actually diverged. The combo is changed with signals blocked,
+    bypassing the normal `_on_source_changed` -> `prepare()` path (which
+    would immediately re-prepare against grid B and stop being stale) --
+    isolating the wording `_refresh_source_status` itself picks for a
+    grid-only divergence."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    dock.grid_combo.blockSignals(True)
+    dock.grid_combo.addItem("B")
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.blockSignals(False)
+
+    dock._refresh_source_status()
+    assert dock.source_status.text().startswith("stale")
+    assert "grid" in dock.source_status.text()
+
+
+def test_the_stale_wording_names_the_transform_when_only_the_transform_diverges(docked):
+    """Fix round 3, Ruling Y's fourth finding, the transform half."""
+    dock, _ = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    dock.transform_combo.blockSignals(True)
+    dock.transform_combo.setCurrentText("amp_abs")
+    dock.transform_combo.blockSignals(False)
+
+    dock._refresh_source_status()
+    assert dock.source_status.text().startswith("stale")
+    assert "transform" in dock.source_status.text()
+
+
+def test_a_failed_schedule_does_not_claim_lines_prepared(docked, monkeypatch):
+    """Fix round 3, Ruling Y's fifth finding: `_on_engine_error` stopped
+    writing into `source_status` directly in fix round 1 (routed through
+    `_refresh_source_status` instead), so after a failed `addTask` the
+    recomputed line read `prepared · 0 lines` -- a claim that something
+    succeeded when scheduling itself failed outright."""
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+
+    class _FakeManager:
+        def addTask(self, task: object) -> int:
+            return 0
+
+    class _FakeApp:
+        @staticmethod
+        def taskManager() -> _FakeManager:
+            return _FakeManager()
+
+    import nsgeo_qgis.slices_engine as engine_module
+
+    monkeypatch.setattr(engine_module, "QgsApplication", _FakeApp)
+    dock.transform_combo.setCurrentText("amp_abs")  # a genuine change -- prepare() must run
+
+    assert not dock.engine.is_prepared
+    assert dock.source_status.text() == "not prepared · every line failed"
+
+
+def _ready(dock):
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.dz_spin.setValue(0.5)
+    dock.cell_spin.setValue(0.25)
+    dock.flush_debounce()  # applies the pending Resolution change immediately
+
+
+def test_the_seeded_default_resolution_actually_slices(docked):
+    """Fix round 1, Important 6. Every other navigation test in this file
+    runs through `_ready()`, which overwrites `z0_spin`/`z1_spin` with
+    values that happen to sit inside the fixture's real recording
+    window -- so nothing exercised `_seed_resolution_defaults`'s OWN
+    z0/z1 formula. That is precisely how a `z0 = 0.0` seed (assuming a
+    DZT's recorded window starts at time zero) reached Step 10 alive: it
+    made every default-resolution `refresh_slice()` raise `CoverageError`
+    silently (caught by `refresh_slice()`'s own guard), which looked like
+    a suspiciously fast, do-nothing timing loop rather than a visible
+    failure, and was only actually caught by timing it."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()  # apply the SEEDED default resolution, no overrides
+    header = session.line_for_key(session.keys()[0]).header
+    assert dock.z0_spin.value() == pytest.approx(header.position_ns)
+    assert dock.current_values() is not None
+
+
+def test_the_readout_states_the_window_that_was_actually_averaged(docked):
+    """Spec 9.2: the control that moves the window and the statement of
+    where the window now is are one unit, read together on every tick.
+    Spec 6.6: always the full range, never the centre -- with overlapping
+    slices, the extent of what is averaged is the thing a reader would
+    otherwise mistake for vertical resolution.
+
+    Fix round 1, Important 1: spec 9.2 fixes the text as BOTH units
+    (`slice 14 / 40 · 12.0-16.0 ns · 0.60-0.80 m`) -- the brief's own
+    draft only ever checked the ns half, which is why the readout could
+    silently drop the m half entirely."""
+    dock, session = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    text = dock.readout.text()
+    window = dock.current_window()
+    assert window is not None
+    lo, hi = window_times_ns(dock.engine.z, window)
+    assert f"{lo:.1f}" in text and f"{hi:.1f}" in text
+    assert "ns" in text
+    assert "/" in text and "slice" in text  # "slice 14 / 40"
+    velocity = session.resolved_velocity(session.keys()[0])
+    lo_m, hi_m = window_depths_m(dock.engine.z, window, velocity)
+    assert f"{lo_m:.2f}" in text and f"{hi_m:.2f}" in text
+    assert "m" in text
+
+
+def test_the_readout_shrinks_with_the_window_at_the_end_of_the_axis(docked):
+    """Trap 3. At either end `ZAxis.level_range` returns a genuinely
+    thinner window than asked for, and spec 6.6 requires the readout to
+    show what was actually averaged. A readout rebuilt from the slider
+    position plus the thickness spin box claims a window the axis
+    refused.
+
+    Fix round 1, M1: asserting only `f"{hi:.1f}" in text` cannot
+    discriminate a readout rebuilt from the raw request here, because at
+    this clamped last window `lo == hi`, which coincides with the
+    mutant's own top-of-window value at the same slider position. The
+    added, parallel assertion pins the whole "lo-hi ns" substring, the
+    same shape the fill-radius test already pins as an absolute value
+    rather than only a relative one."""
+    dock, _ = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(8.0)
+    dock.slice_slider.setValue(dock.slice_slider.maximum())
+    window = dock.current_window()
+    lo, hi = window_times_ns(dock.engine.z, window)
+    assert hi <= dock.engine.z.t_end_ns + 1e-9
+    assert hi - lo < 8.0  # thinner than requested, and the readout says so
+    assert f"{hi:.1f}" in dock.readout.text()
+    assert f"{lo:.1f}-{hi:.1f} ns" in dock.readout.text()
+
+
+def test_the_readout_slice_count_agrees_with_the_export_band_count(docked):
+    """Final review, Minor 5. `_update_readout` used to pass `window.
+    n_levels` into `plan_windows` -- and `window` comes from `current_
+    window()`, whose `n_levels` `ZAxis.level_range` CLAMPS at either end
+    of the axis (trap 3, the same one the test just above pins for the
+    time range itself). `export_geotiff` plans its bands from the
+    UNCLAMPED `thickness_step_levels()[0]` instead, so near the deep end
+    the readout's own "N / TOTAL" recomputed a smaller, WRONG total on
+    every tick -- three different totals across three adjacent slider
+    positions, for a source `plan_windows`'s own docstring says has one
+    band count by construction."""
+    dock, session = docked
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    header = session.line_for_key(session.keys()[0]).header
+    dock.dz_spin.setValue(header.dt_ns)
+    dock.z0_spin.setValue(header.position_ns)
+    dock.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
+    dock.flush_debounce()
+    z = dock.engine.z
+
+    thickness_levels, step_levels = 23, 11
+    dock.thickness_spin.setValue(thickness_levels * z.dz_ns)
+    dock.step_spin.setValue(step_levels * z.dz_ns)
+    assert dock.thickness_step_levels() == (thickness_levels, step_levels), (
+        "fixture must round-trip to the intended level counts, or this test cannot "
+        "discriminate the fix from the bug"
+    )
+
+    true_bands = len(plan_windows(z, thickness_levels, step_levels))
+
+    totals = set()
+    # The last 25 slider positions are where `level_range` clamps
+    # `window.n_levels` below `thickness_levels` -- exactly where the bug
+    # lived.
+    for slider in range(max(0, z.nz - 25), z.nz):
+        dock.slice_slider.setValue(slider)
+        text = dock.readout.text()
+        total = int(text.split("/")[1].split("·")[0].strip())
+        totals.add(total)
+    assert totals == {true_bands}, (
+        f"the readout's own band totals {sorted(totals)} must all equal the export's "
+        f"true band count {true_bands} (`plan_windows(z, {thickness_levels}, {step_levels})`)"
+    )
+
+
+def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
+    dock, _ = docked
+    _ready(dock)
+    seen: list[int] = []
+    dock.slice_changed.connect(lambda: seen.append(1))
+    dock.slice_slider.setValue(4)
+    first = dock.current_values().copy()
+    dock.slice_slider.setValue(30)
+    second = dock.current_values()
+    assert len(seen) >= 2
+    both = np.isfinite(first) & np.isfinite(second)
+    assert both.any()
+    assert not np.allclose(first[both], second[both]), "a different depth must look different"
+
+
+def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
+    """Spec 6.4's default is 1.5 x the line spacing -- a distance. The
+    spin box is therefore in metres and the cell conversion happens
+    underneath, so halving the cell size does not silently halve the
+    smoothing.
+
+    Strengthened from the brief's own draft: with this fixture's
+    `GRID.default_spacing` of 0.5, the default radius is 0.75 m -- under
+    1 cell wide before ANY conversion -- so `int(self.radius_spin.value())`
+    (metres misread as an already-integer cell count, the exact mutant
+    Step 10 names) truncates to 0 both before and after the cell change,
+    and `before * 2 == 0` too, so the relative-doubling check alone passes
+    even against that mutant (verified: all 37 tests in this file and
+    `test_plugin_slice_layer.py` still passed with that mutant applied).
+    The added absolute check pins the one number the mutant cannot also
+    get right by accident."""
+    dock, session = docked
+    _ready(dock)
+    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    before = dock.radius_cells()
+    assert before == round(1.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
+    dock.cell_spin.setValue(0.125)
+    dock.flush_debounce()
+    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
+    """Spec 6.4: at realistic spacing about 80% of cells are empty, so the
+    fill is most of the picture rather than a nicety."""
+    dock, _ = docked
+    _ready(dock)
+    dock.radius_spin.setValue(0.0)
+    dock.flush_debounce()
+    unfilled = np.isfinite(dock.current_values()).sum()
+    dock.radius_spin.setValue(1.0)
+    dock.flush_debounce()
+    filled = np.isfinite(dock.current_values()).sum()
+    assert filled > unfilled
+
+
+def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
+    """Spec 3: a zero that means 'no data' reading as 'no reflection' is
+    the defect a count array exists to fix, and the coverage view is where
+    a user sees it.
+
+    Fix round 1, Important 2 (Ruling AB): checking only `current_values()`
+    is exactly why nothing caught `display_limit()` ignoring the coverage
+    view and returning the SHARED (amplitude) limit instead -- ~7.0e4 on
+    this fixture, which maps every trace count to the shader's bottom
+    stop and renders the whole view as one flat colour. The added
+    assertions pin the limit itself, not just the array it is measured
+    over."""
+    dock, _ = docked
+    _ready(dock)
+    dock.coverage_check.setChecked(True)
+    coverage = dock.current_values()
+    assert np.nanmax(coverage) >= 1.0
+    assert np.allclose(coverage[np.isfinite(coverage)] % 1.0, 0.0), "counts are whole traces"
+    limit = dock.display_limit()
+    assert limit == pytest.approx(float(np.nanmax(coverage)))
+    assert dock.display_unipolar() is True, "a trace count is never negative"
+    dock.coverage_check.setChecked(False)
+    assert not np.allclose(np.nan_to_num(dock.current_values()), np.nan_to_num(coverage))
+    assert dock.display_limit() != pytest.approx(limit)
+
+
+def test_the_coverage_toggle_pins_ruling_ab_in_this_slice_mode_too(docked):
+    """Cheap cluster (final review): the test above only ever exercises
+    the DEFAULT stretch ("shared across the cube") -- `display_limit()`
+    checks `coverage_check` first, before branching on the stretch combo
+    at all, but nothing pinned that the coverage branch actually wins
+    over "this slice" too."""
+    dock, _ = docked
+    _ready(dock)
+    dock.stretch_combo.setCurrentText("this slice")
+    dock.coverage_check.setChecked(True)
+    coverage = dock.current_values()
+    assert np.nanmax(coverage) >= 1.0
+    limit = dock.display_limit()
+    assert limit == pytest.approx(float(np.nanmax(coverage)))
+    assert dock.display_unipolar() is True
+
+
+def test_a_shared_stretch_holds_one_limit_across_depth_and_per_slice_does_not(docked):
+    """Spec 8: comparability by default, legibility on demand."""
+    dock, _ = docked
+    _ready(dock)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(4)
+    shallow = dock.display_limit()
+    dock.slice_slider.setValue(40)
+    deep = dock.display_limit()
+    assert shallow == pytest.approx(deep)
+
+    dock.stretch_combo.setCurrentText("this slice")
+    dock.slice_slider.setValue(4)
+    shallow_own = dock.display_limit()
+    dock.slice_slider.setValue(40)
+    deep_own = dock.display_limit()
+    assert shallow_own != pytest.approx(deep_own)
+
+
+def test_the_palette_offers_unipolar_tables_for_a_transformed_source(docked):
+    """Spec 8's rule: a bipolar table on unipolar data is a configuration
+    error, not a style choice. The combo is where that rule is enforced.
+
+    Fixed from the brief's own draft: `docked`'s preset ("p", a plain
+    `dewow`) carries no transform, and `transform_combo` starts on its
+    first item, "none" -- so without explicitly choosing a transform here,
+    `engine.output_unipolar` is already False right after `_ready()`, and
+    the very first assertion below (expecting the UNIPOLAR list) fails
+    against correct code. The name says "for a transformed source"; the
+    fixture needs to actually be one before that assertion runs."""
+    dock, _ = docked
+    _ready(dock)
+    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert set(offered) == set(colormap_names(unipolar=True))
+    assert "seismic" not in offered
+
+    dock.transform_combo.setCurrentText("none")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    assert set(offered) == set(colormap_names(unipolar=False))
+    assert "amp_heat" not in offered
+
+
+def test_the_status_line_reports_what_is_held_and_how_fast(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.slice_slider.setValue(8)
+    text = dock.status_label.text()
+    assert "lines held in memory" in text
+    assert "slices redraw in" in text
+
+
+def test_a_resolution_change_is_debounced_into_one_rebuild(docked):
+    """Spec 7.2 and trap 4: a rebuild is 44 ms and even the improved fill
+    is 32 ms at 600x600, so a slider emitting per-step would queue work
+    faster than it can finish."""
+    dock, _ = docked
+    _ready(dock)
+    rebuilds: list[int] = []
+    dock.slice_changed.connect(lambda: rebuilds.append(1))
+    for value in (0.2, 0.3, 0.4, 0.5):
+        dock.cell_spin.setValue(value)
+    assert rebuilds == [], "nothing should have rebuilt while the value was still moving"
+    dock.flush_debounce()
+    assert len(rebuilds) == 1
+
+
+def test_a_preparation_triggers_exactly_one_rebuild_not_several(docked):
+    """Fix round 1, M2: `_refill_palette_combo` used to `clear()` and
+    `addItems()` a combo wired to `refresh_slice()` via
+    `currentTextChanged`, producing up to two spurious rebuilds on top of
+    the one `_on_prepared()` itself asks for -- and a logged "unknown
+    colormap ''" error from the first, empty-string transition."""
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    seen: list[int] = []
+    errors: list[str] = []
+    dock.slice_changed.connect(lambda: seen.append(1))
+    dock.error.connect(errors.append)
+    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert len(seen) == 1, "one preparation must mean exactly one rebuild, not several"
+    assert not any("colormap" in e for e in errors), errors
+
+
+def test_a_resolution_change_touching_dz_is_still_one_rebuild(docked):
+    """Fix round 1, M3: `_apply_resolution` called `setRange()` then
+    `setValue()` on the slider, each of which can emit `valueChanged` --
+    wired to `refresh_slice()` -- before calling `refresh_slice()` itself.
+    Invisible to `test_a_resolution_change_is_debounced_into_one_rebuild`
+    because a CELL-only change leaves the slider's own clamped value
+    untouched; a `dz`/`z0`/`z1` change generally does not."""
+    dock, _ = docked
+    _ready(dock)
+    rebuilds: list[int] = []
+    dock.slice_changed.connect(lambda: rebuilds.append(1))
+    dock.dz_spin.setValue(1.0)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(50.0)
+    dock.flush_debounce()
+    assert len(rebuilds) == 1
+
+
+def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
+    """Fix round 1, M4: `refresh_slice`'s exception path used to leave
+    `_values`, `_window` and the readout describing the previous, good
+    tick -- an out-of-range `z1` (past what a prepared line actually
+    covers) raised `CoverageError` from inside `engine.slice_at()`, and
+    the message bar's warning appeared beside a map and readout that both
+    still claimed the OLD window was on screen."""
+    dock, _ = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    old_readout = dock.readout.text()
+    assert dock.legend_label.text() != ""
+    errors: list[str] = []
+    changed: list[int] = []
+    dock.error.connect(errors.append)
+    dock.slice_changed.connect(lambda: changed.append(1))
+    dock.z1_spin.setValue(200.0)  # past the line's own recorded window
+    dock.flush_debounce()
+    assert errors, "an out-of-range z1 must be reported"
+    assert dock.current_values() is None
+    assert dock.readout.text() != old_readout
+    # Cheap cluster (final review): `legend_label` too -- it used to keep
+    # the previous tick's number standing beside "error: ...".
+    assert dock.legend_label.text() == ""
+    assert changed, "the map must be told to clear, not left showing the stale slice"
+
+
+def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
+    """Final review, Minor 6. `engine.provenance()` resolves velocity
+    against the FIRST prepared line's key and raises `KeyError` once that
+    line has been removed from the session -- a contributing line can be
+    deleted while a source stays prepared, and the cube's own arrays are
+    still entirely correct. `_resolved_velocity`'s catch used to guard
+    only `RuntimeError`, so the `KeyError` escaped through `_update_
+    readout` into `refresh_slice`'s broad `except`, which reported
+    `error: '<key>'` and cleared the map for a still-good slice."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    removed_key = dock.engine.provenance().line_keys[0]
+
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    session.remove_line(removed_key)  # emits lines_changed; does not itself refresh the slice
+
+    dock.slice_slider.setValue(6)  # the next refresh_slice() is where the KeyError used to surface
+
+    assert dock.current_values() is not None, "a still-valid slice must not be blanked"
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert not any(removed_key in e for e in errors), errors
+    assert dock.velocity_label.text() == "", "the velocity provenance has nothing left to name"
+
+
+def test_moving_the_slider_announces_the_window_it_averaged(docked):
+    dock, _ = docked
+    _ready(dock)
+    seen: list[tuple[float, float]] = []
+    dock.window_changed.connect(lambda lo, hi: seen.append((lo, hi)))
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(12)
+    assert seen
+    lo, hi = seen[-1]
+    window = dock.current_window()
+    assert (lo, hi) == pytest.approx(window_times_ns(dock.engine.z, window))
+
+
+def test_step_slice_moves_by_the_step_not_by_one_level(docked):
+    """Spec 6.6: thickness and step answer different questions. Stepping
+    by one level would make shift+scroll take dozens of turns to cross a
+    slice at native dz."""
+    dock, _ = docked
+    _ready(dock)
+    dock.thickness_spin.setValue(5.0)
+    dock.step_spin.setValue(2.5)
+    start = dock.slice_slider.value()
+    dock.step_slice(1)
+    moved = dock.slice_slider.value() - start
+    assert moved == round(2.5 / dock.engine.z.dz_ns)
+    assert moved > 1
+
+
+class _WheelStub:
+    """The minimal `QWheelEvent`-shaped surface `eventFilter` reads.
+
+    Not a real `QWheelEvent`: its constructor signature differs between
+    Qt 5 and Qt 6 (the same reason `depth_scroll_delta` itself is a plain
+    function tested without one), but `eventFilter`'s own body only ever
+    calls `.type()`, `.modifiers()` and `.angleDelta().y()` on the event
+    it is handed -- so a stub exposing exactly those three is a Qt-version-
+    independent way to exercise the filter directly, the same way
+    `depth_scroll_delta`'s own pure test needs no event at all.
+    """
+
+    def __init__(self, angle_delta_y: int, shift: bool) -> None:
+        self._angle_delta_y = angle_delta_y
+        self._shift = shift
+
+    def type(self) -> QEvent.Type:
+        return QEvent.Type.Wheel
+
+    def modifiers(self) -> Qt.KeyboardModifier:
+        return Qt.KeyboardModifier.ShiftModifier if self._shift else Qt.KeyboardModifier.NoModifier
+
+    def angleDelta(self) -> Any:
+        class _Delta:
+            def __init__(self, y: int) -> None:
+                self._y = y
+
+            def y(self) -> int:
+                return self._y
+
+        return _Delta(self._angle_delta_y)
+
+
+class _NonWheelStub:
+    def type(self) -> QEvent.Type:
+        return QEvent.Type.MouseMove
+
+
+def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(fake_iface, docked):
+    """Minor 3 (Task 5 review): `depth_scroll_delta` was pinned as a pure
+    function, but nothing pinned `CanvasDepthScroll.eventFilter` itself --
+    the thing that actually decides whether an event is consumed. A
+    mutant that returns `True` before the `delta == 0` check would take
+    the map's zoom away entirely (every wheel event on the canvas
+    swallowed, shift or not) and would survive the whole suite without
+    this test: `depth_scroll_delta`'s own test never touches the filter,
+    and nothing else calls `eventFilter` at all.
+    """
+    dock, _ = docked
+    _ready(dock)
+    filt = CanvasDepthScroll(fake_iface.mapCanvas(), dock)
+    try:
+        start = dock.slice_slider.value()
+
+        consumed = filt.eventFilter(None, _WheelStub(-120, shift=True))
+        assert consumed is True
+        assert dock.slice_slider.value() > start, "shift+wheel must actually step the slice"
+
+        moved_to = dock.slice_slider.value()
+        consumed = filt.eventFilter(None, _WheelStub(-120, shift=False))
+        assert consumed is False, "plain scroll must stay the map's own zoom, not be consumed"
+        assert dock.slice_slider.value() == moved_to, "plain scroll must not move the slice"
+
+        consumed = filt.eventFilter(None, _NonWheelStub())
+        assert consumed is False
+        assert dock.slice_slider.value() == moved_to
+    finally:
+        filt.dispose()
+
+
+# ---- Task 7 fix round 1: restore_cube, driven through the real widgets ----
+
+
+def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
+    """Build a record from the dock's own, already-prepared engine and
+    drop it straight into `session.site.cubes`, then refresh the combo --
+    no `.npz` needs to exist on disk for `restore_cube` to read the
+    record back, since `recipe_from_record` never touches `array`."""
+    record = cube_record(
+        session,
+        dock.engine.choice,
+        dock.engine.frame,
+        dock.engine.z,
+        view,
+        session.root / "slices" / f"{cube_id}.npz",
+        line_keys=dock.engine.provenance().line_keys,
+    )
+    session.site.cubes[cube_id] = record
+    dock.refresh_cube_combo()
+    return record
+
+
+def test_restore_cube_brings_every_control_back_ruling_al(docked):
+    """Ruling AL: the layer neither `recipe_from_record`'s own tests nor
+    the identical-slice test can see -- the widgets themselves.
+
+    Also the regression test for Ruling AJ: `dz=0.2165, z0=2.0, z1
+    (requested)=30.0` puts `z.t_end_ns` (`t0 + (nz-1)*dz`, what the
+    record's `t1_ns` actually is) at 29.9285 -- a genuine 4th decimal
+    digit that `z1_spin.setDecimals(3)` used to floor to 29.928 the
+    moment `restore_cube` called `setValue` on it, silently narrowing the
+    slider range and losing the deepest slice on the majority of
+    plausible GSSI headers (measured at 43 of 90 swept combinations)."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.25)
+    dock.dz_spin.setValue(0.2165)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    full = dock.included_keys()
+    view = ViewSettings(
+        thickness_ns=4.0,
+        step_ns=2.0,
+        radius_m=0.5,
+        palette=dock.palette_combo.currentText(),
+        stretch="this slice",
+        coverage=True,
+    )
+    record = _save_cube(dock, session, "A__test", view)
+    assert record["z"]["t1_ns"] == pytest.approx(29.9285)
+    assert round(record["z"]["t1_ns"], 3) != record["z"]["t1_ns"], (
+        "fixture must exercise a genuine 4th decimal digit, or this test cannot "
+        "distinguish the fix from the bug"
+    )
+
+    # Perturb every restorable control so the restore is not a no-op:
+    # a second preset, a narrower inclusion set, different Resolution/view
+    # values.
+    session.site.presets["q"] = list(PRESET)
+    session.presets_changed.emit()
+    dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.set_included(full[:1])
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.5)
+    dock.z1_spin.setValue(10.0)
+    dock.flush_debounce()
+    dock.apply_view(
+        ViewSettings(
+            thickness_ns=1.0,
+            step_ns=1.0,
+            radius_m=0.0,
+            palette=dock.palette_combo.currentText(),
+            stretch="shared across the cube",
+            coverage=False,
+        )
+    )
+    assert dock.cube_combo.currentText() == "(unsaved)", "perturbing must drop the claim"
+
+    dock.restore_cube("A__test")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.transform_combo.currentText() == "none"
+    assert dock.included_keys() == full
+    assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
+    assert dock.z0_spin.value() == record["z"]["t0_ns"]
+    assert dock.cell_spin.value() == record["cell"]
+    assert dock.view_settings() == view
+
+
+def test_restore_cube_refuses_a_missing_grid(docked):
+    """Ruling AK: `grid_combo` is non-editable, so `setCurrentText` on a
+    grid id no longer offered is a silent Qt no-op -- refused loudly
+    instead, and the previous (unrelated) selection must survive intact."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["grid_id"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.grid_combo.currentText()
+    # Driven through the combo itself, not a direct `restore_cube` call --
+    # `_on_cube_changed` sets `cube_combo` to "A__gone" (synchronously
+    # firing `restore_cube`) before this call even returns, so the
+    # "(unsaved)" assertion below is testing the except handler's own
+    # reset, not merely a value the combo already happened to hold.
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("grid" in m and "does-not-exist" in m for m in seen), seen
+    assert "grid" in dock.source_status.text() and "does-not-exist" in dock.source_status.text()
+    assert dock.grid_combo.currentText() == before, "a refusal must not partially restore"
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restore_cube_refuses_a_missing_preset(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["preset"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.preset_combo.currentText()
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("preset" in m and "does-not-exist" in m for m in seen), seen
+    assert dock.preset_combo.currentText() == before
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restore_cube_refuses_a_missing_transform(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    record = _save_cube(
+        dock,
+        session,
+        "A__gone",
+        ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False),
+    )
+    record["transform"] = "does-not-exist"
+
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    before = dock.transform_combo.currentText()
+    dock.cube_combo.setCurrentText("A__gone")
+
+    assert any("transform" in m and "does-not-exist" in m for m in seen), seen
+    assert dock.transform_combo.currentText() == before
+    assert dock.cube_combo.currentText() == "(unsaved)"
+
+
+def test_restoring_the_same_cube_after_a_no_op_prepare_does_not_leave_a_stale_palette(docked):
+    """Minor (fix round 1): `prepare()`'s own no-op guard skips dispatch
+    -- and therefore skips `_on_prepared` -- when the restored choice
+    already equals `engine.choice` and the preset's steps still match, a
+    state `restore_cube` itself can produce (restore, touch only
+    something Resolution-shaped, reselect the SAME cube). Without
+    clearing `_pending_palette` right there, it would sit stashed until
+    some LATER, unrelated preparation applied it."""
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(
+        dock, session, "A__test", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+
+    dock.restore_cube("A__test")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock._pending_palette is None  # consumed by the real _on_prepared
+
+    # Reselecting the identical cube: `prepare()` is a no-op (same choice,
+    # same steps), so no task is ever dispatched and `_on_prepared` never
+    # runs -- the stash must be cleared here instead.
+    dock.restore_cube("A__test")
+    assert not dock.engine.is_running
+    assert dock._pending_palette is None
+
+
+@needs_real_data
+def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_app, tmp_path):
+    """Regression, M11 walkthrough: a preset that crops rows off the FRONT
+    of the radargram leaves every prepared line starting LATER than its own
+    header says, and the dock seeded `z0`/`z1` from that raw header.
+
+    On this repo's own real files `time_zero` drops 49 of 512 rows, so a
+    prepared line spans -0.476..99.561 ns while the seeded cube asked for
+    -11.086..99.546 -- and the first slice raised, verbatim:
+
+        line 'FILE__001.DZT' spans -0.476..99.561 ns, which does not cover
+        the cube's -11.086..99.546 ns; shrink the z range or exclude the line
+
+    `time_zero` first is the ordinary preset an operator builds, not an
+    edge case. The pre-existing real-data engine test dodged precisely this
+    hazard -- "No `time_zero`: it crops rows off the front of the
+    radargram, which would shrink the line's own t0_ns below the header's
+    raw `position_ns` this test seeds `z0` from directly" -- which is why a
+    green suite shipped a default that cannot slice.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    lines = [
+        Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+        for i in range(4)
+    ]
+    session.add_lines(lines)
+    session.site.presets["p"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+
+        header = lines[0].header
+        prepared = dock.engine.prepared_z_bounds()
+        assert prepared is not None
+        # The hazard is real on this data, and this test would notice if it
+        # stopped being real: the crop must actually move the start.
+        assert prepared[0] > header.position_ns + 1.0, (prepared, header.position_ns)
+
+        # The fix: the seeded range lies inside what every prepared line
+        # covers, so `plan_line` can bin it.
+        assert dock.z0_spin.value() >= prepared[0]
+        assert dock.z1_spin.value() <= prepared[1]
+
+        # ... and the slice that used to raise now actually renders.
+        assert dock.current_values() is not None
+        assert not [m for m in errors if "does not cover" in m], errors
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path):
+    """Three lines whose time-zero lands on a different sample each -- the
+    ordinary consequence of antenna coupling changing across a survey, and
+    what `time_zero(mode="first_break")` is for.
+
+    This repo's ten real DZT files are byte-identical in the sample axis
+    (all -11.086..99.561 ns, 512 samples, and all cropped to exactly 463 by
+    `first_break`), so on real data the union and the intersection of their
+    coverage are the SAME two numbers and no real-data test can tell a
+    correct `prepared_z_bounds` from one that takes `min`/`max` the wrong
+    way round. Hence synthetic lines built to disagree.
+
+    Pinned behaviourally rather than by recomputing the same `min`/`max`
+    the method itself uses: the bounds must be plannable for EVERY line,
+    and tight -- one `dz` wider at either end must break at least one line.
+    """
+    from nsgeo.slices import CoverageError, ZAxis, plan_line
+    from tests.synthetic import write_dzt
+
+    raw = tmp_path / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(7)
+    # The flat band drives `first_break`; putting it at a different row in
+    # each line makes each crop a different number of samples, so the three
+    # prepared lines genuinely start at three different two-way times.
+    for i, (band, range_ns) in enumerate(((40, 110.864), (70, 104.0), (100, 98.0))):
+        data = (rng.normal(size=(512, 40)) * 1e6).astype(np.int32)
+        data[band : band + 4, :] = 5_000_000
+        write_dzt(raw / f"FILE__00{i + 1}.DZT", data, range_ns=range_ns)
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_lines(
+        [
+            Line.open(
+                raw / f"FILE__00{i + 1}.DZT",
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+    )
+    session.site.presets["p"] = [{"step": "time_zero", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        prepared = list(dock.engine.prepared_lines())
+        starts = {round(line.t0_ns, 6) for line in prepared}
+        ends = {round(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns, 6) for line in prepared}
+        # Without this the test could pass on lines that happen to agree,
+        # which is exactly how the real files hid the bug.
+        assert len(starts) == 3, starts
+        assert len(ends) == 3, ends
+
+        bounds = dock.engine.prepared_z_bounds()
+        assert bounds is not None
+        low, high = bounds
+        dz = max(line.dt_ns for line in prepared)
+
+        # Plannable for every line: a union would hand back a range that
+        # the latest-starting (or earliest-ending) line cannot cover.
+        axis = ZAxis.from_range(low, high, dz)
+        for line in prepared:
+            plan_line(line, dock.engine.frame, axis)
+
+        # ... and tight at both ends, so a needlessly timid range fails too.
+        for wider in (
+            ZAxis.from_range(low - 2 * dz, high, dz),
+            ZAxis.from_range(low, high + 2 * dz, dz),
+        ):
+            with pytest.raises(CoverageError):
+                for line in prepared:
+                    plan_line(line, dock.engine.frame, wider)
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals", "upper"),
+    [
+        (-0.47636787593364716, 3, False),  # the real files' own prepared t0
+        (99.56100623309612, 4, True),  # ... and their prepared end
+        (-0.4766, 3, False),  # rounds the WRONG way without the correction
+        (12.34565, 4, True),
+        (-11.0864, 3, False),
+        (0.001, 3, False),  # exact at the precision: must not drift a step
+        (0.001, 3, True),
+        (-2.5, 1, True),
+        (-2.5, 1, False),
+    ],
+)
+def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper):
+    """`_snap_inside` exists because `QDoubleSpinBox.setValue` rounds to the
+    box's own precision, and a bound rounded the wrong way is a bound
+    escaped -- re-raising the very `CoverageError` the clamp is there to
+    prevent, now only for certain headers and only in the fourth decimal
+    place. Pins both halves: the result is ON the spin's grid, and on the
+    legal side of `value`.
+    """
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    snapped = _snap_inside(value, decimals, upper=upper)
+    assert snapped == round(snapped, decimals)  # lands on the spin's grid
+    if upper:
+        assert snapped <= value, (snapped, value)
+    else:
+        assert snapped >= value, (snapped, value)
+    # Tight: never gives away more than one step of the spin's precision.
+    assert abs(snapped - value) < 10.0**-decimals
+
+
+def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
+    """A dock widget's minimum size is a HARD floor on the main window's:
+    QGIS cannot shrink a dock area below it, so a tall dock drags the whole
+    application window taller. Reported from the M11 walkthrough as "it
+    messes up the width/height of the window", and measured in a real QGIS
+    on this profile: this dock's minimum was 556 x 1013, against 449 x 239
+    for Processing and 101 x 132 for Survey. 1013 px of hard floor does not
+    fit a 1080p screen once QGIS's own chrome is accounted for.
+
+    Four group boxes stacked cannot be made short, so the fix is that they
+    no longer have to be: the dock scrolls. Pinned on both halves -- a
+    small floor AND content that stays its natural size inside the scroll
+    area rather than being crushed into it.
+    """
+    from qgis.PyQt.QtWidgets import QScrollArea
+
+    dock = SlicesDock(SiteSession())
+    try:
+        minimum = dock.minimumSizeHint()
+        assert minimum.height() <= 400, minimum.height()
+        assert minimum.width() <= 360, minimum.width()
+
+        scroll = dock.findChild(QScrollArea)
+        assert scroll is not None
+        assert scroll.widgetResizable()
+        # The content keeps its own full height inside the scroll area --
+        # a "fix" that merely let the groups be squashed would lose rows.
+        assert scroll.widget().minimumSizeHint().height() >= 600
+
+        # ... and the dock still OPENS at a usable width, so this is not
+        # the degenerate fix of making everything collapsible to nothing.
+        assert dock.sizeHint().width() >= 280
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis_app, tmp_path):
+    """Walkthrough round 2, W7: "These also tick by 1 unit at a time, which
+    is too much. It also leads to cell size going to .001 which then
+    crashes qgis because it is too fine a grid."
+
+    `cell_spin` spans 0.01-5.0 m and kept Qt's default `singleStep` of
+    1.0, so ONE press of the down-arrow from the seeded 0.5 m clamped
+    straight to the 0.01 m minimum -- and cell count goes as 1/cell**2.
+    On the 300 m grid below that is 30000 x 30000: a frame no amount of
+    streaming makes drawable, since the per-slice array alone is the
+    problem.
+
+    The claim pinned here is the one that matters to a user holding down
+    an arrow key: NO number of clicks reaches a geometry that cannot be
+    drawn. That is stronger than checking a step size, and it is what
+    actually failed.
+    """
+    from nsgeo_qgis.slices_plan import MAX_FRAME_CELLS, frame_cells
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(big)
+    lines = [
+        Line.open(
+            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+            GridPlacement("Big", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+        )
+        for i in range(2)
+    ]
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(20_000)
+        seeded = dock.cell_spin.value()
+        assert frame_cells(big.size_x, big.size_y, seeded) <= MAX_FRAME_CELLS
+
+        # Hold the down-arrow. Far more presses than the range can absorb.
+        for _ in range(500):
+            dock.cell_spin.stepBy(-1)
+            assert frame_cells(big.size_x, big.size_y, dock.cell_spin.value()) <= (
+                MAX_FRAME_CELLS
+            ), f"cell {dock.cell_spin.value()} on a 300 m grid cannot be drawn"
+
+        # ... and one click is a usable increment, not a leap to the end
+        # of the range. The old behaviour went 0.5 -> minimum in one.
+        dock.cell_spin.setValue(seeded)
+        dock.cell_spin.stepBy(-1)
+        assert dock.cell_spin.value() < seeded
+        assert seeded - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
+    """Walkthrough round 2, W5/W7: "the up/down amount skips by 1 m at a
+    time, which is too big an increment."
+
+    Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
+    or the decimals, so every one of these shipped with an arrow click
+    that moved a 0.75 m radius to 1.75 m and a 0.2165 ns dz to 1.2165.
+    `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
+    per click is the only increment that means anything on a time axis.
+    """
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    header = dock.session.line_for_key(dock.session.keys()[0]).header
+
+    assert dock.radius_spin.singleStep() <= 0.1
+    assert dock.cell_spin.singleStep() <= 0.1
+    assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
+    assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
+    assert dock.z1_spin.singleStep() == pytest.approx(header.dt_ns)
+    # Position is in ns over a ~110 ns window: 1 ns is a fifth of the
+    # default thickness, which is a leap, not a nudge.
+    assert dock.thickness_spin.singleStep() <= 0.5
+    assert dock.step_spin.singleStep() <= 0.5
+
+
+def test_the_resolution_controls_say_what_they_do(docked):
+    """Walkthrough round 2, W5/W7: "Fill radius is also not a super
+    intuitive label, what does it do?" and "Not sure what dz does?"
+
+    Neither is a naming failure that renaming fixes -- both are terms of
+    art with no shorter correct name -- so each carries the sentence that
+    makes it actionable, on the control itself.
+    """
+    dock, _ = docked
+    for spin, must_say in (
+        (dock.radius_spin, "no line"),
+        (dock.dz_spin, "sample"),
+        (dock.cell_spin, "spacing"),
+        (dock.coverage_check, "traces"),
+    ):
+        tip = spin.toolTip()
+        assert tip, f"{spin.objectName() or spin} has no tooltip"
+        assert must_say in tip.lower(), tip
+
+
+def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app, tmp_path):
+    """`cell_spin`'s floor stops the arrows reaching an undrawable frame,
+    but a `Resolution` can arrive from a saved cube record too
+    (`restore_cube`), written against a different grid and never passed
+    through this spin box at all. That path gets a readable refusal
+    naming a cell size that would work, and the engine's geometry is left
+    exactly as it was.
+
+    Refused and not warned-and-allowed on purpose: spec 7.4's "warn
+    rather than hard-cap" is about memory BUDGETS, where the fallback is
+    to degrade to streaming. There is no degraded mode here -- the
+    per-slice array is itself what cannot be allocated.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(big)
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60),
+                GridPlacement("Big", "y", 1.0, 0.0, 1, "L0"),
+            )
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        before = dock.engine.frame
+        assert before is not None
+
+        # Exactly what a restored record does: a value the spin's own
+        # floor would never have allowed.
+        dock.cell_spin.setMinimum(0.001)
+        dock.cell_spin.setValue(0.001)
+        dock.flush_debounce()
+
+        assert errors, "an undrawable geometry must say so"
+        assert "too many to draw" in errors[-1], errors
+        assert "0.15" in errors[-1], f"the refusal must name a cell that works: {errors[-1]}"
+        assert dock.engine.frame is before, (
+            "the engine must still hold the geometry it had, not a frame it cannot draw"
+        )
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_coverage_legend_says_what_a_blank_cell_means(docked):
+    """Walkthrough round 2, W6: "Don't know what this is doing. It does
+    look gappy, not sure what legend you're talking about."
+
+    The gappiness is correct -- coverage is deliberately NOT filled, so
+    that the binned truth stays visible underneath the cosmetic step
+    (spec 6.4) -- but the legend read `0 - 15 traces`, and zero is the one
+    value the view never draws: a cell no line crossed is left blank, not
+    coloured at the bottom of the ramp. So the legend named a scale that
+    did not match the picture, on the one view whose entire job is to be
+    read literally.
+    """
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+
+    dock.coverage_check.setChecked(True)
+    legend = dock.legend_label.text()
+    assert "traces" in legend, legend
+    assert "blank" in legend.lower(), f"the legend must explain the gaps: {legend}"
+    assert not legend.startswith("0 "), f"zero is never drawn in this view: {legend}"
+
+    # And back: an amplitude legend still names its transform, and makes
+    # no claim about blank cells, which the fill has covered over.
+    dock.coverage_check.setChecked(False)
+    amplitude = dock.legend_label.text()
+    assert "traces" not in amplitude, amplitude
+    assert "blank" not in amplitude.lower(), amplitude
+
+
+def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
+    """A `QLabel`'s minimum width is its text width unless it wraps, and a
+    dock's minimum width is a hard floor on the QGIS main window's -- the
+    same mechanism that made this dock force a 556 px window in round 1.
+    The coverage legend is the longest string this dock ever shows.
+    """
+    dock = SlicesDock(SiteSession())
+    try:
+        assert dock.legend_label.wordWrap()
+        dock.legend_label.setText("1 – 15 traces per cell · blank = no line crossed")
+        assert dock.legend_label.minimumSizeHint().width() <= 200
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()

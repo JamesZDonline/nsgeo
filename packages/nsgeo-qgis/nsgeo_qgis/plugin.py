@@ -48,16 +48,17 @@ lean on exec() to make them unreachable.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
 import nsgeo
 from nsgeo.processing import build_step
-from nsgeo.project import ProjectError
+from nsgeo.project import ProjectError, line_key
 from nsgeo.velocity import VelocityModel
-from qgis.core import Qgis, QgsMessageLog
+from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer, QgsSettings
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
 from nsgeo_qgis import plugin_version
@@ -66,13 +67,27 @@ from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.slice_export import (
+    apply_temporal_properties,
+    cube_record,
+    export_slices,
+    save_cube_npz,
+    write_coverage,
+)
+from nsgeo_qgis.slice_layer import SliceLayer
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
+from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock
+from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
+
+#: Where the one-shot "Slices has been tabbed onto Processing once" flag
+#: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
+_TABIFIED_KEY = "nsgeo/slicesDockTabified"
 
 
 def _finish_with_digitise_tool(tool: DigitiseGridTool) -> None:
@@ -123,6 +138,12 @@ class NsgeoPlugin:
         self.survey_dock: SurveyDock | None = None
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
+        self.slices_dock: SlicesDock | None = None
+        #: Whether this session should still tab Slices onto Processing.
+        #: Read from settings in `initGui`; see `_tabify_slices_dock`.
+        self._want_tabify = False
+        self.slice_layer: SliceLayer | None = None
+        self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
         self.act_save: QAction | None = None
@@ -131,6 +152,7 @@ class NsgeoPlugin:
         self.act_pick: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
+        self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
         # actually displays -- the same shape ProcessingDock keeps
         # `_shown`/`_shown_step` in for the parameter form. `_gain_owner`
@@ -209,6 +231,66 @@ class NsgeoPlugin:
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.processing_dock)
         self.docks.append(self.processing_dock)
 
+        self.slices_dock = SlicesDock(self.session, main)
+        self.slices_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
+        self.slices_dock.save_cube_requested.connect(self.save_cube)
+        self.slices_dock.export_requested.connect(self.export_geotiff)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
+        # Spec 9.2: tabified with Processing rather than a fourth dock
+        # competing for screen space. Processing stays the raised tab --
+        # this milestone adds a capability, it does not take the screen
+        # away from the one people already use.
+        #
+        # Deferred to the event loop, and NOT done synchronously here:
+        # QGIS restores its saved window layout AFTER loading plugins, so
+        # a `tabifyDockWidget` called from `initGui()` is silently undone
+        # before the user ever sees the window. Measured in a real QGIS
+        # 3.44 on this repo's own profile: `tabifiedDockWidgets()` came
+        # back empty for both docks at startup (the two panels stacked in
+        # one column, as reported from the M11 walkthrough), while the
+        # identical call made later, from a timer, tabbed them correctly.
+        # Nothing shorter than "after the constructor returns" is
+        # sufficient, and a zero-millisecond timer is exactly that.
+        #
+        # Once only, keyed in the profile's own settings: after the first
+        # time, QGIS's restored layout IS the user's answer, and a plugin
+        # that re-tabs on every start would overrule anyone who had
+        # deliberately dragged the two apart.
+        # Decided ONCE, here, and remembered for both attempts below: if
+        # the settings flag were re-read inside the slot, the first
+        # attempt would set it and the second would then decline to undo
+        # QGIS's overwrite.
+        self._want_tabify = not QgsSettings().value(_TABIFIED_KEY, False, type=bool)
+        if self._want_tabify:
+            # `initializationCompleted` is QGIS's own "startup is over"
+            # signal, and restoring the saved window layout is part of
+            # that startup -- measured in a real QGIS 3.44 on this repo's
+            # profile: our tab was in place at 1.4 s, QGIS's restore wiped
+            # it at 2.67 s (the main window resized in the same tick), and
+            # `initializationCompleted` fired at 2.95 s. Hence the signal
+            # and not a delay: any fixed timeout would be a guess at a
+            # number that varies with the machine and the profile.
+            self.iface.initializationCompleted.connect(self._tabify_slices_dock)
+            # ... and the timer as well, for the OTHER way this plugin
+            # gets loaded: enabled by hand from the Plugin Manager, with
+            # QGIS long since initialised, `initializationCompleted` has
+            # already fired and will never fire again. Nothing overwrites
+            # the layout in that case, so this attempt is the one that
+            # sticks.
+            QTimer.singleShot(0, self._tabify_slices_dock)
+        self.docks.append(self.slices_dock)
+
+        # The active slice on the map: owned here (not by the dock) for
+        # the same reason `map_link` and `layers` are -- it is a map
+        # concern that outlives any one dock widget and is torn down
+        # outside-in in `unload()`, before `self.layers.detach()`.
+        self.slice_layer = SliceLayer(self.layers)
+        self.slices_dock.slice_changed.connect(self._on_slice_changed)
+        self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
+        self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
+        self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
+
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
         self.profile_dock.difference_cleared.connect(
@@ -223,6 +305,16 @@ class NsgeoPlugin:
         # gives it one. Re-running _sync_gain_strip here on the same
         # signal ProfileDock re-renders from closes that gap.
         self.session.line_loaded.connect(self._resync_gain_strip)
+        # Walkthrough round 2, W8: the same shape of gap as the gain strip
+        # just above, for the profile band. The band is a property of the
+        # SLICE, not of the line, but it lives in `ProfileView` state that
+        # `clear()` resets on `line_opened("")` -- and `window_changed`
+        # only fires when the window CHANGES, which it has not. Connected
+        # AFTER `ProfileDock`'s own `line_opened` slot (that dock is built
+        # earlier in this method, and Qt runs direct connections in
+        # connection order), so this re-announces onto a view that has
+        # already finished opening rather than one about to be cleared.
+        self.session.line_opened.connect(self._resync_slice_band)
 
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
@@ -232,7 +324,40 @@ class NsgeoPlugin:
         # changes -- line_opened carries "" when there is none.
         self.session.line_opened.connect(self._update_enabled)
 
+    def _tabify_slices_dock(self) -> None:
+        """Tab Slices onto Processing, once, after QGIS has restored its
+        own layout.
+
+        Called twice by design (see `initGui`) and idempotent, so the
+        second call is free when the first already stuck. A slot on both
+        a Qt signal and a `QTimer`: it must report rather than raise, and
+        it may fire after `unload()` has already run.
+        """
+        try:
+            dock = self.slices_dock
+            processing = self.processing_dock
+            if dock is None or processing is None:
+                return
+            if sip.isdeleted(dock) or sip.isdeleted(processing):
+                return
+            if not self._want_tabify:
+                return
+            main = self.iface.mainWindow()
+            if dock not in main.tabifiedDockWidgets(processing):
+                main.tabifyDockWidget(processing, dock)
+            processing.raise_()
+            QgsSettings().setValue(_TABIFIED_KEY, True)
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            self.message(f"could not tab the Slices panel: {exc}", Qgis.MessageLevel.Warning)
+
     def unload(self) -> None:
+        # Connected in initGui() and owned by `iface`, which outlives this
+        # plugin: left connected, a later startup signal would reach a
+        # method on a torn-down plugin. Suppressed because the connection
+        # is conditional (see `_want_tabify`) and Qt raises on
+        # disconnecting what was never connected.
+        with contextlib.suppress(Exception):
+            self.iface.initializationCompleted.disconnect(self._tabify_slices_dock)
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
@@ -259,6 +384,12 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # Same reasoning again: LineChoiceDialog is modeless too, so it
+        # can still be open here, and reject() (not close()) is what runs
+        # its finished-signal cleanup instead of leaving it dangling with
+        # a reference to a session this method is about to tear down.
+        if self._line_choice_dialog is not None:
+            self._line_choice_dialog.reject()
         # QGIS cannot be told "no" here -- the plugin is unloading
         # regardless of what save_with_prompt() returns -- so there is no
         # Cancel option: offering one would be a button that cannot do
@@ -275,6 +406,22 @@ class NsgeoPlugin:
                 "could not save changes before unloading; unsaved changes will be lost",
                 Qgis.MessageLevel.Critical,
             )
+        if self.slices_dock is not None:
+            # SliceEngine(session, ...) is built with no `parent=`, and it
+            # closes over this dock's own bound methods as callbacks
+            # (`on_prepared`/`on_error`/`on_progress`), which makes
+            # `dock -> engine -> bound method -> dock` a reference cycle.
+            # Plain refcounting cannot collect that promptly, so its
+            # `session.site_closed`/`grids_changed` connections would
+            # otherwise survive this method and could still fire -- against
+            # a dock that is about to be deleteLater()'d -- for as long as
+            # the cyclic collector happens not to have run. dispose()
+            # disconnects them (and frees the kernel cache) deterministically,
+            # before the session it is connected to is torn down below.
+            self.slices_dock.engine.dispose()
+        if self.depth_scroll is not None:
+            self.depth_scroll.dispose()
+            self.depth_scroll = None
         for dock in self.docks:
             self.iface.removeDockWidget(dock)
             dock.deleteLater()
@@ -282,6 +429,7 @@ class NsgeoPlugin:
         self.survey_dock = None
         self.profile_dock = None
         self.processing_dock = None
+        self.slices_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
@@ -307,6 +455,13 @@ class NsgeoPlugin:
             # is still connected to.
             self.map_link.dispose()
             self.map_link = None
+        if self.slice_layer is not None:
+            # Same ordering as map_link just above: outside-in, before
+            # layers.detach() removes the group this layer would otherwise
+            # try to rejoin, and before the scratch GeoTIFF it writes to
+            # is orphaned by this plugin unloading around it.
+            self.slice_layer.dispose()
+            self.slice_layer = None
         if self.layers is not None:
             self.layers.detach()
             self.layers = None
@@ -411,6 +566,19 @@ class NsgeoPlugin:
             return
         self._sync_gain_strip(self.processing_dock.current_row())
 
+    def _resync_slice_band(self, key: str) -> None:
+        """Re-announce the slice window onto a freshly opened line.
+        See the connection in `initGui` for why. A slot on a
+        `pyqtSignal`: it reports rather than raises."""
+        if not key or self.slices_dock is None:
+            # `line_opened("")` IS the clear -- re-announcing onto a view
+            # with no line would draw a band across an empty panel.
+            return
+        try:
+            self.slices_dock.reannounce_window()
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not redraw the slice band: {exc}", Qgis.MessageLevel.Warning)
+
     def _on_gain_points(self, points: list) -> None:
         if self.session is None or self.processing_dock is None:
             return
@@ -462,6 +630,217 @@ class NsgeoPlugin:
         # is still in progress.
         self._gain_step = new
         self.session.replace_step(key, row, new)
+
+    def _on_slice_changed(self) -> None:
+        try:
+            dock, layer = self.slices_dock, self.slice_layer
+            if dock is None or layer is None:
+                return
+            values, frame = dock.current_values(), dock.current_frame()
+            if values is None or frame is None:
+                layer.clear()
+                return
+            layer.update(
+                values,
+                frame,
+                limit=dock.display_limit(),
+                colormap_name=dock.palette_combo.currentText(),
+                unipolar=dock.display_unipolar(),
+                subtitle=dock.readout.text(),
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+
+    # ---- Task 6: what leaves the plugin -----------------------------------
+    def save_cube(self) -> None:
+        """`SlicesDock.save_cube_requested`: write the resident cube to
+        `.npz` and record its recipe in `site.cubes`.
+
+        `QFileDialog.getSaveFileName` defaults into `session.root /
+        "slices"`, the same directory a plain "cube.npz" would land in --
+        `save_cube_npz`/`save_cube` (M10) create it on demand, so this
+        need not exist yet.
+
+        Validated with `line_key` BEFORE anything is written (Task 6 fix
+        round 1, "also fold in"): the earlier version called
+        `save_cube_npz` first and let `cube_record`'s own `line_key` call
+        raise second, which meant an out-of-tree destination built the
+        whole cube and compressed it to disk before refusing -- real
+        work for a save that was always going to be rejected. `root` and
+        the raised `ProjectError` are identical either way; only the
+        order changed.
+
+        The cube id is `<grid_id>__<name>`, `name` being the stem of the
+        file numpy ACTUALLY wrote (Important 1, same fix round) --
+        `Path(npz_path).stem`, not `Path(path).stem`. `store._npz_path`'s
+        own docstring names exactly this hazard: a user-typed name with a
+        dot that is not an extension (a version tag, e.g. "cube.v1")
+        keeps that dot in the file numpy writes ("cube.v1.npz") but the
+        RAW dialog string's stem does not agree with it in general --
+        and, worse, two such saves ("cube.v1", "cube.v2") used to collide
+        on the SAME id ("A__cube"), so the second save silently replaced
+        the first record while leaving both `.npz` files on disk, one of
+        them now orphaned with no recipe pointing at it.
+
+        A `QAction`-style guarded slot (see the module docstring): every
+        failure -- a save outside the project tree, a full disk, a
+        cube with no resident geometry -- is reported through
+        `message()` rather than left to escape into stderr.
+        """
+        assert self.session is not None
+        try:
+            if not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            engine = dock.engine
+            if not engine.is_prepared or engine.choice is None:
+                self.message(
+                    "prepare a slice source before saving a cube.", Qgis.MessageLevel.Warning
+                )
+                return
+            default_path = self.session.root / "slices" / "cube.npz"
+            path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(), "Save cube", str(default_path), "nsgeo cube (*.npz)"
+            )
+            if not path:
+                return
+            root = self.session.root
+            line_key(Path(path), root)  # raises ProjectError early; see the docstring above
+            npz_path = save_cube_npz(engine, Path(path))
+            # Task 7: `dock.view_settings()`, not a second, independent
+            # construction of the same six values -- the dock is the one
+            # place they are actually held, and it is also `restore_cube`'s
+            # own inverse (`apply_view`), so the two cannot drift apart.
+            record = cube_record(
+                self.session,
+                engine.choice,
+                engine.frame,
+                engine.z,
+                dock.view_settings(),
+                npz_path,
+                line_keys=engine.provenance().line_keys,
+            )
+            cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
+            self.session.record_cube(cube_id, record)
+            # Task 7: the new record is a candidate `cube_combo` selection
+            # the instant it exists, and `refresh_cube_combo` is the same
+            # guarded refill `rebuild_source` already uses for `site_opened`
+            # -- this is simply the other moment `cubes` changes.
+            # Fix round 1, Minor: `select=cube_id` so the combo names the
+            # record that now exactly matches what is on screen, rather
+            # than sitting on "(unsaved)" immediately after a save.
+            dock.refresh_cube_combo(select=cube_id)
+            self.message(f"cube saved as {cube_id!r} ({record['array']!r})")
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
+
+    def export_geotiff(self) -> None:
+        """`SlicesDock.export_requested`: write the multi-band GeoTIFF and
+        add it to the map.
+
+        `thickness_step_levels()` converts the dock's own ns spin boxes
+        into levels with the same rounding rule its live navigation
+        already uses, and `_resolved_velocity()` is the same velocity the
+        readout labels its window with -- both reused rather than
+        re-derived, so the exported bands' descriptions cannot disagree
+        with what the dock was showing when Export was clicked.
+
+        Two additions from Task 6 fix round 1:
+
+        * Ruling AE: the export is a lossy resample at ANY fill radius,
+          radius 0 included -- `fill` only makes a dropped cell
+          recoverable from a surviving neighbour, it never puts the cell
+          itself back, so the loss is unconditional and radius only
+          changes how much it matters. At `radius_cells() == 0` (spec
+          6.4's honest unfilled truth, and `radius_spin`'s own
+          construction default) the success message is pushed at
+          `Warning` rather than `Info`, naming the consequence -- the
+          file itself also carries this, via `NSGEO_FILL_RADIUS_CELLS`/
+          `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata (see `slice_export
+          .GeoTiffSliceWriter.write`).
+        * Ruling AH: spec 9.4 says coverage exports as a companion
+          single-band raster "when asked" -- wired here to the control
+          that already asks for exactly that, the dock's own coverage
+          toggle, rather than adding a second button nobody requested.
+          Its write sits in its OWN `try/except` (Task 6 fix round 2,
+          Minor 2): by the time it runs, the main GeoTIFF has already
+          been written and added to the map, so a failure writing the
+          companion is reported at `Warning`, naming the companion file,
+          rather than reaching the outer handler's Critical "could not
+          export the GeoTIFF" -- which would misreport a fully successful
+          main export as a failure.
+        """
+        assert self.session is not None
+        try:
+            if not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            engine = dock.engine
+            if not engine.is_prepared:
+                self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
+                return
+            default_path = self.session.root / "slices" / "cube.tif"
+            path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(),
+                "Export GeoTIFF",
+                str(default_path),
+                "GeoTIFF (*.tif *.tiff)",
+            )
+            if not path:
+                return
+            thickness_levels, step_levels = dock.thickness_step_levels()
+            _key, velocity = dock._resolved_velocity()
+            radius_cells = dock.radius_cells()
+            plan = export_slices(
+                engine, Path(path), thickness_levels, step_levels, velocity, radius_cells
+            )
+            layer = QgsRasterLayer(path, Path(path).stem, "gdal")
+            if not layer.isValid():
+                self.message(
+                    f"the exported GeoTIFF at {path} could not be reopened as a layer",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            apply_temporal_properties(layer, plan)
+            self.layers.project.addMapLayer(layer, False)
+            if self.layers.group is not None:
+                self.layers.group.addLayer(layer)
+
+            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            if dock.coverage_check.isChecked():
+                coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
+                try:
+                    write_coverage(engine, coverage_path)
+                    coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
+                    if not coverage_layer.isValid():
+                        raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
+                    self.layers.project.addMapLayer(coverage_layer, False)
+                    if self.layers.group is not None:
+                        self.layers.group.addLayer(coverage_layer)
+                    parts.append(f"coverage to {coverage_path}")
+                except Exception as exc:  # noqa: BLE001 -- Task 6 fix round 2, Minor 2: the
+                    # main GeoTIFF above has already been written, its temporal properties
+                    # applied, and its layer added to `layers.group` -- a companion failure
+                    # here (a full disk, a locked file) must be reported on its own terms, at
+                    # Warning, naming the companion specifically, rather than reaching the
+                    # outer handler's Critical "could not export the GeoTIFF", which would
+                    # read as the main export having failed when it plainly did not.
+                    self.message(
+                        f"the GeoTIFF exported, but the coverage companion at {coverage_path} "
+                        f"could not be written: {exc}",
+                        Qgis.MessageLevel.Warning,
+                    )
+            message = ", ".join(parts)
+            if radius_cells == 0:
+                self.message(
+                    f"{message} -- fill radius 0: cells a rotated frame's north-up resample "
+                    f"drops are not in this file at all, only recoverable at a larger radius",
+                    Qgis.MessageLevel.Warning,
+                )
+            else:
+                self.message(message)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 
     def _toggle_pick_mode(self, checked: bool) -> None:
         """The Pick toolbar toggle. Drives the dock, never the view
@@ -897,3 +1276,82 @@ class NsgeoPlugin:
 
     def open_velocity_dialog(self, key: str) -> None:
         self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+
+    def open_line_choice_dialog(self) -> None:
+        """Spec 9.1's one dialog. Modeless, like every dialog here.
+
+        A single tracking slot, so a second `Choose...` does not stack a
+        dialog on top of the first; the result is committed on `finished`
+        rather than after a blocking call, and the dock is re-read then
+        rather than captured now, because the site can change while this
+        is open. Follows `open_import_dialog` exactly -- fix round 1, M4:
+        an earlier version of this method omitted `destroyed.connect(...)`
+        (a dialog destroyed some other way then leaves
+        `self._line_choice_dialog` pointing at a dead wrapper, wedging the
+        re-open branch below and making `unload()`'s own `reject()` raise
+        mid-teardown -- see `open_grid_dialog`'s `clear_if_current` for the
+        same reasoning) and the `show()`/`raise_()`/`activateWindow()` set
+        both other dialogs here use on every path, not just some of them.
+
+        `finished` re-checks the dock's CURRENT grid against `grid_id`
+        (fix round 3, Ruling Z): the dialog is modeless and binds
+        `grid_id` once, at open time, but nothing stops the user from
+        changing the Source group's own grid combo while it sits open.
+        Without this check, accepting after such a change commits the
+        OLD grid's keys against the NEW grid's frame -- bringing back
+        both `6 of 3 included` and the silent trace drop Ruling U's own
+        scoping exists to remove, just reached one step later than a
+        cross-grid pick in the dialog itself would have.
+        """
+        try:
+            if self.session is None or not self.session.is_open or self.slices_dock is None:
+                return
+            grid_id = self.slices_dock.grid_combo.currentText()
+            if not grid_id:
+                self.message("Choose a grid before choosing lines.", Qgis.MessageLevel.Warning)
+                return
+            if self._line_choice_dialog is not None:
+                self._line_choice_dialog.show()
+                self._line_choice_dialog.raise_()
+                self._line_choice_dialog.activateWindow()
+                return
+            dock = self.slices_dock
+            dialog = LineChoiceDialog(
+                self.session, grid_id, dock.included_keys(), self.iface.mainWindow()
+            )
+
+            def finished(result: int) -> None:
+                try:
+                    if result == QDialog.DialogCode.Accepted and self.slices_dock is not None:
+                        if self.slices_dock.grid_combo.currentText() != grid_id:
+                            self.message(
+                                "the grid changed while choosing lines; "
+                                "the line choice was not applied",
+                                Qgis.MessageLevel.Warning,
+                            )
+                        else:
+                            self.slices_dock.set_included(dialog.included_keys())
+                except Exception as exc:  # noqa: BLE001 -- a slot on finished
+                    self.message(
+                        f"could not apply the line choice: {exc}", Qgis.MessageLevel.Warning
+                    )
+                finally:
+                    dialog.deleteLater()
+                    self._line_choice_dialog = None
+
+            def clear_if_current() -> None:
+                # Same reasoning as open_grid_dialog()/open_import_dialog()'s
+                # own clear_if_current: only compare identity, never touch
+                # `dialog` (already gone by the time destroyed() fires), and
+                # only clear the tracker if it still points at THIS dialog.
+                if self._line_choice_dialog is dialog:
+                    self._line_choice_dialog = None
+
+            dialog.finished.connect(finished)
+            dialog.destroyed.connect(clear_if_current)
+            self._line_choice_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open the line chooser: {exc}", Qgis.MessageLevel.Critical)

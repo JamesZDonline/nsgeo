@@ -343,3 +343,64 @@ def test_cubes_must_be_an_object_keyed_by_id(tmp_path, bad_cubes):
     path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": [], "cubes": bad_cubes}))
     with pytest.raises(ProjectError, match="'cubes' must be an object"):
         load_site(path)
+
+
+def test_a_full_cubes_record_round_trips_unchanged_even_with_an_absolute_array(tmp_path):
+    """Two things at once, because they are the same guarantee seen from
+    both sides.
+
+    First: a record carrying every key `nsgeo_qgis.slice_export.
+    cube_record` writes -- not just the five `test_cubes_round_trip_
+    through_the_survey_json` above already covers, but also `lines`, `z`
+    and `view` -- round-trips through `save_site`/`load_site` with no key
+    dropped, renamed or coerced.
+
+    Second, and the reason M11's `cube_record` has to do the sanitising
+    itself: `save_site` does not route a record's `array` through
+    `project.line_key` the way it does every line path elsewhere in a
+    Site. An absolute `array` therefore round-trips VERBATIM, with no
+    error and no rewrite -- proving `save_site` is not the safety net, so
+    whatever calls it (`cube_record`) has to be.
+    """
+    site = Site()
+    site.cubes = {
+        "grid-a-standard": {
+            "grid_id": "A",
+            "preset": "slice-standard",
+            "transform": "amp_envelope",
+            "cell": 0.1,
+            "lines": ["data/L0.DZT", "data/L1.DZT"],
+            "z": {"t0_ns": 2.0, "t1_ns": 30.0, "dz_ns": 0.5},
+            "array": "slices/grid-a-standard.npz",
+            "view": {
+                "thickness_ns": 5.0,
+                "step_ns": 2.5,
+                "radius_m": 0.75,
+                "palette": "amp_heat",
+                "stretch": "shared across the cube",
+                "coverage": False,
+            },
+        },
+        "out-of-tree": {
+            "grid_id": "A",
+            "preset": "slice-standard",
+            "transform": "none",
+            "cell": 0.1,
+            "lines": [],
+            "z": {"t0_ns": 0.0, "t1_ns": 10.0, "dz_ns": 1.0},
+            "array": "/home/someone/scratch/cube.npz",
+            "view": {
+                "thickness_ns": 1.0,
+                "step_ns": 1.0,
+                "radius_m": 0.0,
+                "palette": "seismic",
+                "stretch": "this slice",
+                "coverage": True,
+            },
+        },
+    }
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    reloaded = load_site(path).cubes
+    assert reloaded == site.cubes
+    assert reloaded["out-of-tree"]["array"] == "/home/someone/scratch/cube.npz"
