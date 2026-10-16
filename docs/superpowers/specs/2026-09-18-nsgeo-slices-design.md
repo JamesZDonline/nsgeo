@@ -298,6 +298,9 @@ shows.
 
 ### 6.5 Directional de-striping
 
+> **Superseded** by `2026-10-16-nsgeo-site-view-design.md` (M12 and M12b), which replaces this
+> section with what was decided in M12's brainstorming.
+
 The model has always put `axis` on the placement rather than the grid, so one grid can hold
 lines running both ways. Generalised here to **per-trace heading**, computed from consecutive
 trace coordinates and binned into heading classes (default two, mod 180°). Each class bins into
@@ -649,6 +652,9 @@ writer later is then a new implementation rather than a refactor.
 ---
 
 ## 10. Site level: many grids, one interpretation
+
+> **Superseded** by `2026-10-16-nsgeo-site-view-design.md` (M12 and M12b), which replaces this
+> section with what was decided in M12's brainstorming.
 
 Per-grid cubes are the unit of computation; they are not the unit of interpretation. An anomaly
 crossing a grid boundary becomes two rasters, and with independent stretches it shows a visible
