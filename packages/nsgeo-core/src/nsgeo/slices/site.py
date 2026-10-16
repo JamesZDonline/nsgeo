@@ -199,9 +199,13 @@ def window_on(z: ZAxis, top_ns: float, thickness_ns: float) -> SliceWindow | Non
     return SliceWindow(max(0, k0), min(k1, z.nz))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Seam:
-    """Two grids' facing strips. `a < b`; masks are `(ny, nx)` in their own frame."""
+    """Two grids' facing strips. `a < b`; masks are `(ny, nx)` in their own frame.
+
+    `eq=False`: the generated `__eq__`/`__hash__` over ndarray fields raise, so a
+    Seam compares and hashes by identity instead.
+    """
 
     a: str
     b: str

@@ -499,6 +499,25 @@ def _split_slices(k, gain):
     return {"A": (va, ca), "B": (vb * gain, cb)}, seams
 
 
+def _strip_ratio(slices, seam):
+    """S_ab / S_ba for a seam, measured in the test from its masks."""
+
+    # Written out here, not via background_level, so a bug there cannot cancel out.
+    def level(grid, mask):
+        values, coverage = slices[grid]
+        mag = np.sort(np.abs(values[mask & (coverage > 0)]))
+        return float(mag[: math.ceil(0.75 * mag.size - 1e-9)].mean())
+
+    return level(seam.a, seam.mask_a) / level(seam.b, seam.mask_b)
+
+
+def test_a_seam_compares_and_hashes_without_raising():
+    m = np.zeros((2, 2), dtype=bool)
+    s1, s2 = Seam("A", "B", m, m), Seam("A", "B", m.copy(), m.copy())
+    assert s1 == s1 and (s1 == s2) is False  # identity, not array equality
+    assert len({s1, s2}) == 2
+
+
 @needs_real_files
 @pytest.mark.parametrize("method", ["background", "edge"])
 def test_real_split_background_and_edge_recover_a_depth_dependent_gain_exactly(method):
@@ -513,6 +532,12 @@ def test_real_split_background_and_edge_recover_a_depth_dependent_gain_exactly(m
         r0 = n0["B"][0] / n0["A"][0]
         r1 = n1["B"][0] / n1["A"][0]
         assert r1 == pytest.approx(r0 / g_k, rel=1e-5)
+        if method == "edge":
+            # Edge match reads the seam strips only: the ratio is the strips' ratio, and
+            # differs from the whole-grid (background) ratio on real halves.
+            assert r0 == pytest.approx(_strip_ratio(plain, seams[0]), rel=1e-5)
+            bg = normalise("background", plain)
+            assert r0 != pytest.approx(bg["B"][0] / bg["A"][0], rel=1e-4)
         ratios.append(r0)
     assert len({round(r, 6) for r in ratios}) > 1  # the halves genuinely differ with depth
 
@@ -567,3 +592,40 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam():
         covered |= (ids >= 0) & np.isfinite(v.ravel()[np.clip(ids, 0, None)])
     out = compose(lat, layers)
     np.testing.assert_array_equal(np.isfinite(out).ravel(), covered)
+
+
+def _chain_slices(k, g_b, g_c):
+    """Three real grids in a row: A lines 0-2, B lines 3-5, C lines 6-9, natural world y."""
+    crs = "EPSG:32633"
+    frames = {
+        "A": CubeFrame((0.0, 0.0), 0.0, CELL, 100, 8, crs),
+        "B": CubeFrame((0.0, 1.6), 0.0, CELL, 100, 7, crs),
+        "C": CubeFrame((0.0, 3.0), 0.0, CELL, 100, 11, crs),
+    }
+    members = {"A": range(0, 3), "B": range(3, 6), "C": range(6, 10)}
+    gain = {"A": 1.0, "B": g_b, "C": g_c}
+    k0, k1 = _WINDOWS[k]
+    slices, covs = {}, {}
+    for g, frame in frames.items():
+        v, c = _binned(_lines(members[g], lambda local: local), frame, k0, k1)
+        slices[g], covs[g] = (v * gain[g], c), c
+    seams = find_seams(frames, covs, dict.fromkeys(frames, SPACING))
+    return slices, seams
+
+
+@needs_real_files
+def test_real_chain_edge_match_recovers_gains_and_equals_the_pairwise_solve():
+    for k in range(5):
+        g_b, g_c = 0.5 * math.exp(-k / 4.0), 1.6 * math.exp(-k / 3.0)
+        plain, seams = _chain_slices(k, 1.0, 1.0)
+        perturbed, seams_p = _chain_slices(k, g_b, g_c)
+        for ss in (seams, seams_p):
+            assert [(s.a, s.b) for s in ss] == [("A", "B"), ("B", "C")]  # no A-C
+        n0 = {g: a for g, (a, _) in normalise("edge", plain, seams).items()}
+        n1 = {g: a for g, (a, _) in normalise("edge", perturbed, seams_p).items()}
+        # (a) both gains recovered
+        assert n1["B"] / n1["A"] == pytest.approx(n0["B"] / n0["A"] / g_b, rel=1e-5)
+        assert n1["C"] / n1["A"] == pytest.approx(n0["C"] / n0["A"] / g_c, rel=1e-5)
+        # (b) global == pairwise: one equation per seam, strips measured in the test
+        assert n1["B"] / n1["A"] == pytest.approx(_strip_ratio(perturbed, seams_p[0]), rel=1e-5)
+        assert n1["C"] / n1["B"] == pytest.approx(_strip_ratio(perturbed, seams_p[1]), rel=1e-5)
