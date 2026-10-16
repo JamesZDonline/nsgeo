@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dewow help draft</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #5e5c57; --rule: #dedbd3;
+    --accent: #1f4e79; --warn-bg: #fff6e0; --warn-rule: #e3c26b;
+    --review-bg: #eef3f8; --review-rule: #9db6cf; --card: #ffffff; --code: #f1efe9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1c1e; --fg: #e9e7e2; --muted: #a7a49c; --rule: #3a3b3e;
+      --accent: #8ab8e6; --warn-bg: #2f2918; --warn-rule: #8c7432;
+      --review-bg: #1f2833; --review-rule: #3f5d7c; --card: #232427; --code: #2b2c30;
+    }
+    img.fig { background: #fff; }
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 17px/1.6 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
+  .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  code { font: 0.86em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         background: var(--code); padding: 0.05em 0.3em; border-radius: 3px; }
+  img { max-width: 100%; height: auto; }
+  math[display="block"] { margin: 0.9em 0; font-size: 1.08em; overflow-x: auto; overflow-y: hidden; }
+
+  /* ---- review band (not part of the shipped page) ---- */
+  .review { background: var(--review-bg); border-bottom: 3px dashed var(--review-rule);
+            padding: 28px 16px 36px; font-size: 15px; line-height: 1.5; }
+  .review .inner { max-width: 1120px; margin: 0 auto; }
+  .review h1 { font-size: 22px; margin: 0 0 4px; }
+  .review h2 { font-size: 17px; margin: 28px 0 8px; }
+  .review p { margin: 6px 0; max-width: 80ch; }
+  .tag { display: inline-block; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+         border: 1px solid var(--review-rule); border-radius: 999px; padding: 1px 10px; color: var(--muted); }
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
+  .opt { background: var(--card); border: 1px solid var(--rule); border-radius: 10px; padding: 12px; display: block; cursor: pointer; }
+  .opt:has(input:checked) { outline: 3px solid var(--accent); outline-offset: -1px; }
+  .opt .head { display: flex; gap: 8px; align-items: baseline; font-weight: 600; }
+  .opt img { display: block; margin: 10px 0 8px; border: 1px solid var(--rule); border-radius: 4px; }
+  .opt .cost { font-size: 13px; color: var(--muted); }
+  .opt .rec { color: var(--accent); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  .row input[type=text] { flex: 1 1 280px; min-width: 0; padding: 7px 9px; border: 1px solid var(--rule); border-radius: 6px; background: var(--card); color: var(--fg); font: inherit; }
+  button.q { font: inherit; font-weight: 600; padding: 7px 16px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer; }
+  .calls { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-top: 8px; padding: 0; list-style: none; }
+  .calls li { background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; }
+  .calls b { display: block; }
+
+  /* ---- the help page as it would ship ---- */
+  .page { max-width: 780px; margin: 0 auto; padding: 36px 16px 80px; }
+  .page header { border-bottom: 1px solid var(--rule); padding-bottom: 14px; margin-bottom: 8px; }
+  .kicker { font-size: 13px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+  .page h1 { font-size: 40px; line-height: 1.1; margin: 6px 0 6px; }
+  .meta { font-size: 14px; color: var(--muted); }
+  nav.toc { font-size: 14px; margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  nav.toc a { text-decoration: none; }
+  .page h2 { font-size: 24px; margin: 46px 0 6px; padding-top: 6px; }
+  .page h2 .lvl { display: block; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .page h3 { font-size: 18px; margin: 26px 0 4px; }
+  .lede { font-size: 20px; line-height: 1.6; }
+  figure { margin: 22px 0; }
+  figcaption { font-size: 14px; color: var(--muted); line-height: 1.45; margin-top: 6px; }
+  .setting { border: 1px solid var(--rule); border-radius: 8px; padding: 4px 18px 10px; background: var(--card); }
+  .setting h3 { margin-top: 14px; }
+  table.t { border-collapse: collapse; font-size: 14px; margin: 10px 0; width: 100%; }
+  table.t th, table.t td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule); }
+  .note { background: var(--warn-bg); border-left: 4px solid var(--warn-rule); padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 16px 0; }
+  .deep { border-top: 2px solid var(--rule); margin-top: 52px; }
+  ol.refs { font-size: 15px; padding-left: 1.2em; }
+  ol.refs li { margin: 6px 0; }
+  footer { margin-top: 48px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule); padding-top: 12px; }
+</style>
+</head>
+<body>
+
+<!-- ======================= REVIEW BAND — not shipped ======================= -->
+<section class="review sans" data-lavish-question="help-button">
+  <div class="inner">
+    <span class="tag">Review notes, not part of the page</span>
+    <h1>Help pages: where the button goes, and one page drafted for real</h1>
+    <p>Below the dashed line is a full draft of the <b>dewow</b> page as it would ship, with figures made by running nsgeo on campus line <code>FILE__007</code> (picked at random). Annotate anything, especially the voice of the first paragraph, since that sets the tone for all twelve pages.</p>
+
+    <h2>1. Where should the Help button go?</h2>
+    <p>These are renders of the real Processing panel with a Help button added. Each one is disabled when no step is selected. The panel has a minimum width that it can't be dragged narrower than, and the top row is what sets it.</p>
+    <form id="placement" onsubmit="event.preventDefault(); const f=new FormData(this); const c=f.get('placement'); const n=(f.get('note')||'').trim(); if(!c) return; window.lavish && window.lavish.queuePrompt('Help button placement: ' + c + (n ? ' — ' + n : ''), {tag:'choice', text:'Placement: ' + c, element:this, data:{question:'help-button', answer:c, note:n}});">
+      <div class="options">
+        <label class="opt">
+          <span class="head"><input type="radio" name="placement" value="B: Help in the bottom row" checked> B · “Help” in the bottom row <span class="rec">my pick</span></span>
+          <img src="dock_bottom.png" alt="Processing panel with Help beside Presets in the bottom row">
+          <span class="cost">Minimum width stays at <b>458 px</b>. It sits with Apply to grid and Presets, below the settings for the selected step.</span>
+        </label>
+        <label class="opt">
+          <span class="head"><input type="radio" name="placement" value="A: Help in the top row"> A · “Help” in the top row</span>
+          <img src="dock_top.png" alt="Processing panel with Help after Difference in the top row">
+          <span class="cost">Minimum width goes from 458 to <b>544 px</b>. It sits right beside the list, but the panel can't be made as narrow as it can today.</span>
+        </label>
+        <label class="opt">
+          <span class="head"><input type="radio" name="placement" value="C: ? in the top row"> C · a small “?” in the top row</span>
+          <img src="dock_q.png" alt="Processing panel with a question-mark button after Difference">
+          <span class="cost">Minimum width goes from 458 to <b>488 px</b>. Compact, but it's a “?” rather than the word “Help”.</span>
+        </label>
+      </div>
+      <div class="row">
+        <input type="text" name="note" placeholder="Optional note (e.g. also put it on the right-click menu)">
+        <button class="q" type="submit">Queue this answer</button>
+      </div>
+    </form>
+    <p style="font-size:13px;color:var(--muted)">Rendered offscreen with Qt's default style. In QGIS the buttons follow your system theme, but the widths compare the same way.</p>
+
+    <h2>2. Calls I've made (annotate any you'd change)</h2>
+    <ul class="calls">
+      <li><b>Pages ship inside the plugin</b>They open from disk with no internet needed. Only the outside links need a connection.</li>
+      <li><b>Equations use MathML</b>Browsers draw it natively, so no math library has to be bundled or downloaded.</li>
+      <li><b>Every page uses the same campus line</b>That way the three gains and the three background removals can be compared on identical data. The line can be swapped later by re-running one script.</li>
+      <li><b>Figures come from a script, not by hand</b>The script runs nsgeo's real step code on the campus file. If a step's code changes, its pictures are re-made with it.</li>
+      <li><b>No step ships without a page</b>A test checks that every step in the registry has a help page, so future steps (M13's, say) can't arrive without one.</li>
+      <li><b>Section order</b>Plain words → pictures → the method → settings → things to know → how nsgeo does it → further reading.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ======================= THE HELP PAGE AS IT WOULD SHIP ======================= -->
+<main class="page">
+  <header>
+    <div class="kicker sans">nsgeo processing step</div>
+    <h1>Dewow</h1>
+    <div class="meta sans">Step name <code>dewow</code> · one setting: <b>Window</b> (ns) · works on each trace by itself</div>
+    <nav class="toc sans">
+      <a href="#plain">In plain words</a><a href="#pictures">What it does to a line</a><a href="#method">The method</a>
+      <a href="#settings">Settings</a><a href="#know">Things to know</a><a href="#nsgeo">How nsgeo does it</a><a href="#refs">Further reading</a>
+    </nav>
+  </header>
+
+  <section id="plain">
+    <h2><span class="lvl sans">In plain words</span>A slow drift, taken away</h2>
+    <p class="lede">Each time the radar sends a pulse into the ground, it records how the signal coming back changes over a tiny slice of time. Sometimes that recording also has a slow, gentle drift in it that has nothing to do with what is buried. The drift is called “wow.” It makes the whole recording rise and fall slowly, the way a boat bobs on a long, slow wave while small ripples pass across it. Dewow finds that slow drift and subtracts it, so what is left is the quicker wiggles that come from things underground. It does this by looking at a short stretch of time around each moment, working out the average there, and taking that average away.</p>
+  </section>
+
+  <section id="pictures">
+    <h2><span class="lvl sans">Pictures</span>What it does to a line</h2>
+    <figure>
+      <img class="fig" src="dewow_trace.png" alt="A single trace with its running mean drawn over it, and the trace after the mean is subtracted">
+      <figcaption>One trace from the middle of the campus line. The red curve is the running average that dewow subtracts at the default 4 ns window. This line has almost no drift to begin with, so the red curve mostly follows the slower swings of the radar pulse itself.</figcaption>
+    </figure>
+    <figure>
+      <img class="fig" src="dewow_panels.png" alt="Three radargram panels: before dewow, after dewow, and the difference">
+      <figcaption>The whole campus line, raw data, top 50 ns shown. Left: before. Middle: after dewow at the default window. Right: what was taken away, which is the same thing the panel's <b>Difference</b> button shows. Each panel is scaled on its own (99th-percentile clip), so the right panel looks stronger than it is.</figcaption>
+    </figure>
+  </section>
+
+  <section id="method">
+    <h2><span class="lvl sans">The method</span>A running mean, subtracted</h2>
+    <p>In GPR, <em>wow</em> is a low-frequency signal that decays slowly down each trace. It is usually explained as the receiver electronics being swamped by the strong early arrivals (the air and ground waves) and then slowly recovering, or as inductive coupling between the antenna and the ground. Many systems filter some of it out while recording, and how much is left over depends on the instrument and its settings.</p>
+    <p>The standard fix is to estimate the slow part of each trace with a <a href="https://en.wikipedia.org/wiki/Moving_average">moving average</a> (also called a running mean or boxcar filter) and subtract it. For a trace <i>x</i>(<i>t</i>) and a window of length <i>W</i>:</p>
+    <math display="block"><mi>y</mi><mo>(</mo><mi>t</mi><mo>)</mo><mo>=</mo><mi>x</mi><mo>(</mo><mi>t</mi><mo>)</mo><mo>−</mo><mfrac><mn>1</mn><mi>W</mi></mfrac><msubsup><mo>∫</mo><mrow><mi>t</mi><mo>−</mo><mi>W</mi><mo>/</mo><mn>2</mn></mrow><mrow><mi>t</mi><mo>+</mo><mi>W</mi><mo>/</mo><mn>2</mn></mrow></msubsup><mi>x</mi><mo>(</mo><mi>τ</mi><mo>)</mo><mspace width="0.17em"></mspace><mi>d</mi><mi>τ</mi></math>
+    <p>A running mean is a <a href="https://en.wikipedia.org/wiki/Low-pass_filter">low-pass filter</a>: it keeps slow changes and smooths away fast ones. Subtracting it from the original therefore makes a <a href="https://en.wikipedia.org/wiki/High-pass_filter">high-pass filter</a>, which takes away slow changes and keeps fast ones. In frequency terms, the fraction of each frequency <i>f</i> that survives is</p>
+    <math display="block"><mi>H</mi><mo>(</mo><mi>f</mi><mo>)</mo><mo>=</mo><mn>1</mn><mo>−</mo><mi>sinc</mi><mo>(</mo><mi>f</mi><mi>W</mi><mo>)</mo><mo>,</mo><mspace width="1em"></mspace><mi>sinc</mi><mo>(</mo><mi>u</mi><mo>)</mo><mo>=</mo><mfrac><mrow><mi>sin</mi><mo>(</mo><mi>π</mi><mi>u</mi><mo>)</mo></mrow><mrow><mi>π</mi><mi>u</mi></mrow></mfrac></math>
+    <p>where <a href="https://en.wikipedia.org/wiki/Sinc_function">sinc</a> is the frequency response of a boxcar. Other programs sometimes estimate the slow part with a running median or a smooth curve fitted to each trace instead. nsgeo uses the running mean.</p>
+    <figure>
+      <img class="fig" src="dewow_response.png" alt="Frequency response of dewow with a 4 ns window, rising from zero to about 1.2 near 366 MHz">
+      <figcaption>Measured, not drawn from the formula: nsgeo's dewow run on a single spike at this file's sample interval. Below about 190 MHz, more than half the power is removed. Around 366 MHz the curve rises above 1, meaning those frequencies come out about 21% <em>stronger</em> than they went in. See “Things to know.”</figcaption>
+    </figure>
+  </section>
+
+  <section id="settings">
+    <h2><span class="lvl sans">Settings</span>What you can change</h2>
+    <div class="setting">
+      <h3>Window <span class="sans" style="font-size:14px;color:var(--muted);font-weight:400">ns · default 4</span></h3>
+      <p>How long a stretch of time is averaged at each point. A <b>longer</b> window gives a smoother average that follows only the slowest changes, so less is removed. A <b>shorter</b> window lets the average follow quicker changes, so more is removed, including more of the radar pulse. The window has to be at least one sample long (0.217 ns on the campus line) or the step will not run.</p>
+      <table class="t sans">
+        <thead><tr><th>Window</th><th>Samples used<br>(campus line)</th><th>More than half the power<br>removed below</th><th>Strongest boost<br>(≈ +21%) near</th></tr></thead>
+        <tbody>
+          <tr><td>2 ns</td><td>9 (1.95 ns)</td><td>≈ 390 MHz</td><td>≈ 740 MHz</td></tr>
+          <tr><td>4 ns (default)</td><td>18 (3.90 ns)</td><td>≈ 190 MHz</td><td>≈ 370 MHz</td></tr>
+          <tr><td>8 ns</td><td>37 (8.01 ns)</td><td>≈ 95 MHz</td><td>≈ 180 MHz</td></tr>
+        </tbody>
+      </table>
+      <p style="font-size:15px">Both columns scale with the window: the half-power point is about 0.75 / <i>W</i> and the boost peaks near 1.43 / <i>W</i>.</p>
+    </div>
+  </section>
+
+  <section id="know">
+    <h2><span class="lvl sans">Things to know</span>Side effects</h2>
+    <ul>
+      <li><b>It can't tell wow from slow parts of real signal.</b> Anything slower than the window is treated as drift, including the low-frequency part of genuine reflections. On the campus line, most of what dewow removes is the slower part of the radar pulse (see the pictures).</li>
+      <li><b>It boosts some frequencies a little.</b> A boxcar's response has side lobes, so frequencies around 1.43 / <i>W</i> come out up to about 21–23% stronger. With the default window that peak lands near 370 MHz, close to the centre frequency of a 350 MHz antenna.</li>
+      <li><b>It works on one trace at a time.</b> It never compares neighbouring traces, so flat bands running the length of the line (antenna ringing, for example) are left alone. Removing those is what the background-removal steps do.</li>
+      <li><b>The top and bottom of each trace are treated slightly differently.</b> Near the ends there isn't a full window of samples, so the average uses fewer of them (details below).</li>
+    </ul>
+  </section>
+
+  <section id="nsgeo" class="deep">
+    <h2><span class="lvl sans">How nsgeo does it</span>The exact computation</h2>
+    <p>Each trace is a column of <i>n</i> samples <i>x</i><sub>0</sub> … <i>x</i><sub><i>n</i>−1</sub>, spaced Δ<i>t</i> apart. The data are converted to 64-bit floats first. The window in nanoseconds, <i>W</i>, becomes a whole number of samples:</p>
+    <math display="block"><mi>w</mi><mo>=</mo><mi>round</mi><mo>(</mo><mi>W</mi><mo>/</mo><mi>Δ</mi><mi>t</mi><mo>)</mo><mo>,</mo><mspace width="1.5em"></mspace><mi>h</mi><mo>=</mo><mo>⌊</mo><mi>w</mi><mo>/</mo><mn>2</mn><mo>⌋</mo></math>
+    <p>If <i>w</i> &lt; 1 the step raises an error rather than doing nothing. If <i>w</i> is longer than the trace, it is cut to <i>n</i>. For every sample <i>i</i>, the averaging window runs from <i>lo</i><sub><i>i</i></sub> up to (but not including) <i>hi</i><sub><i>i</i></sub>:</p>
+    <math display="block"><msub><mi>lo</mi><mi>i</mi></msub><mo>=</mo><mi>max</mi><mo>(</mo><mn>0</mn><mo>,</mo><mi>i</mi><mo>−</mo><mi>h</mi><mo>)</mo><mo>,</mo><mspace width="1.5em"></mspace><msub><mi>hi</mi><mi>i</mi></msub><mo>=</mo><mi>min</mi><mo>(</mo><mi>n</mi><mo>,</mo><mi>i</mi><mo>−</mo><mi>h</mi><mo>+</mo><mi>w</mi><mo>)</mo></math>
+    <math display="block"><msub><mi>m</mi><mi>i</mi></msub><mo>=</mo><mfrac><mn>1</mn><mrow><msub><mi>hi</mi><mi>i</mi></msub><mo>−</mo><msub><mi>lo</mi><mi>i</mi></msub></mrow></mfrac><munderover><mo>∑</mo><mrow><mi>k</mi><mo>=</mo><msub><mi>lo</mi><mi>i</mi></msub></mrow><mrow><msub><mi>hi</mi><mi>i</mi></msub><mo>−</mo><mn>1</mn></mrow></munderover><msub><mi>x</mi><mi>k</mi></msub><mo>,</mo><mspace width="1.5em"></mspace><msub><mi>y</mi><mi>i</mi></msub><mo>=</mo><msub><mi>x</mi><mi>i</mi></msub><mo>−</mo><msub><mi>m</mi><mi>i</mi></msub></math>
+    <h3>Choices this makes that the textbook formula doesn't</h3>
+    <ul>
+      <li><b>Rounding.</b> The window actually used is <i>w</i>·Δ<i>t</i>, not <i>W</i>. On the campus line, 4 ns becomes 18 samples, or 3.90 ns.</li>
+      <li><b>Shrinking edges.</b> The trace is not padded. Within about half a window of the top or bottom, the mean is taken over fewer samples (at <i>i</i> = 0, only the first <i>w</i> − <i>h</i>), so the edges are high-passed less strongly than the middle.</li>
+      <li><b>Even windows are off-centre by half a sample.</b> For even <i>w</i>, the window covers <i>h</i> samples before <i>i</i> and <i>h</i> − 1 after. With 18 samples that is 9 before and 8 after, which shifts the subtracted mean by half a sample (≈ 0.11 ns on the campus line). Odd windows are centred.</li>
+      <li><b>Discrete response.</b> Away from the edges, the subtracted mean is a <a href="https://en.wikipedia.org/wiki/Dirichlet_kernel">Dirichlet kernel</a>, <i>D</i><sub><i>w</i></sub>(<i>f</i>) = sin(π<i>f w</i>Δ<i>t</i>) / (<i>w</i> sin(π<i>f</i>Δ<i>t</i>)), which is the sampled cousin of the sinc above. Well below the Nyquist frequency (about 2300 MHz here) the two agree closely. The response figure above was measured, so it already includes this.</li>
+      <li><b>Speed.</b> The sums come from a <a href="https://en.wikipedia.org/wiki/Prefix_sum">cumulative sum</a>, <i>m</i><sub><i>i</i></sub> = (<i>S</i><sub><i>hi</i></sub> − <i>S</i><sub><i>lo</i></sub>) / (<i>hi</i> − <i>lo</i>), so the cost doesn't depend on the window length. The result matches a direct sum up to floating-point rounding.</li>
+    </ul>
+    <p class="sans" style="font-size:14px;color:var(--muted)">Source: <code>nsgeo/processing/dewow.py</code> and <code>running_mean</code> in <code>nsgeo/processing/_util.py</code>.</p>
+  </section>
+
+  <section id="refs">
+    <h2><span class="lvl sans">Further reading</span>Sources</h2>
+    <ol class="refs">
+      <li>Cassidy, N. J. (2009). Ground penetrating radar data processing, modelling and analysis. In H. M. Jol (Ed.), <i>Ground Penetrating Radar: Theory and Applications</i>. Elsevier. The standard processing chapter. It covers dewow alongside the other steps here.</li>
+      <li>Annan, A. P. (2009). Electromagnetic principles of ground penetrating radar. In the same volume. Where wow comes from.</li>
+      <li>Conyers, L. B. (2013). <i>Ground-Penetrating Radar for Archaeology</i> (3rd ed.). AltaMira Press.</li>
+      <li>Wikipedia: <a href="https://en.wikipedia.org/wiki/Ground-penetrating_radar">Ground-penetrating radar</a> · <a href="https://en.wikipedia.org/wiki/Moving_average">Moving average</a> · <a href="https://en.wikipedia.org/wiki/High-pass_filter">High-pass filter</a> · <a href="https://en.wikipedia.org/wiki/Sinc_function">Sinc function</a></li>
+    </ol>
+  </section>
+
+  <footer class="sans">Figures: campus training line, GSSI SIR-4000 with an HS350US antenna, made by running nsgeo's own step code on the raw file.</footer>
+</main>
+</body>
+</html>
