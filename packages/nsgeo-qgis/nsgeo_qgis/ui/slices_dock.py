@@ -1487,6 +1487,12 @@ class SlicesDock(QgsDockWidget):
                     self.z1_spin.setValue(recipe.resolution.t1_ns)
             finally:
                 self._updating -= 1
+            # M12 spec 4.2 (controller ruling T2-b): picking a saved cube is
+            # a user choice, so its preset and lines become this grid's
+            # remembered source. `restore_cube` is reached only from
+            # `_on_cube_changed`, which returns early under `_updating`, so
+            # no automatic path (opening a site) remembers through here.
+            self._remember_source()
             self._update_included_label()
             self.flush_debounce()
             self.prepare()

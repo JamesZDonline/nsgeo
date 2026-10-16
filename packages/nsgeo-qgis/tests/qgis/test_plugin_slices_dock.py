@@ -1645,6 +1645,9 @@ def test_switching_grid_away_and_back_restores_that_grids_preset_and_lines(docke
     dock.set_included(a_keys[:2])
     dock.grid_combo.setCurrentText("B")
     assert dock.included_keys() == _grid_keys(session, "B")
+    # B shows "p" so A's "q" must genuinely be restored on the way back,
+    # not merely still be showing.
+    dock.preset_combo.setCurrentText("p")
     dock.grid_combo.setCurrentText("A")
     assert dock.preset_combo.currentText() == "q"
     assert dock.included_keys() == a_keys[:2]
@@ -1680,4 +1683,63 @@ def test_a_remembered_line_that_left_the_grid_is_filtered_out(docked_two_grids):
     session.remove_line(a_keys[0])
     dock.grid_combo.setCurrentText("A")
     assert dock.included_keys() == (a_keys[1],)
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_reopening_a_survey_restores_a_remembered_source_without_dirtying_or_rewriting_it(
+    docked_two_grids,
+):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.preset_combo.setCurrentText("q")  # not the first preset
+    dock.set_included(a_keys[1:])
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    stored = session.slice_source("A")
+    assert stored == {"preset": "q", "lines": list(a_keys[1:])}
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.grid_combo.currentText() == "A"
+        assert dock2.preset_combo.currentText() == "q"
+        assert dock2.included_keys() == a_keys[1:]
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert not reopened.dirty
+        assert reopened.slice_source("A") == stored
+    finally:
+        dock2.engine.wait_for_preparation(20_000)
+        dock2.engine.dispose()
+        dock2.deleteLater()
+
+
+def test_picking_a_saved_cube_remembers_its_preset_and_lines_for_that_grid(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.preset_combo.setCurrentText("q")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(
+        thickness_ns=4.0,
+        step_ns=2.0,
+        radius_m=0.5,
+        palette=dock.palette_combo.currentText(),
+        stretch="this slice",
+        coverage=False,
+    )
+    _save_cube(dock, session, "A__c", view)
+    # Move A's remembered source elsewhere, so only the cube pick can bring q back.
+    dock.preset_combo.setCurrentText("p")
+    dock.set_included(a_keys[:1])
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("A")["preset"] == "p"
+
+    dock.cube_combo.setCurrentText("A__c")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")
+    dock.preset_combo.setCurrentText("p")
+    dock.grid_combo.setCurrentText("A")
+    assert dock.preset_combo.currentText() == "q"
+    assert dock.included_keys() == a_keys[:2]
     assert dock.engine.wait_for_preparation(20_000)
