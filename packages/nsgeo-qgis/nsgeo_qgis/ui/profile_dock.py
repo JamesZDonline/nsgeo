@@ -219,6 +219,7 @@ class ProfileDock(QgsDockWidget):
         session.line_opened.connect(self._on_line_opened)
         session.line_loaded.connect(self._on_line_loaded)
         session.stack_changed.connect(self._on_stack_changed)
+        session.picks_changed.connect(self._on_picks_changed)
         session.trace_changed.connect(self._on_trace_changed)
         session.selection_changed.connect(self._on_selection_changed)
         session.lines_changed.connect(self._refresh_velocity)
@@ -417,6 +418,7 @@ class ProfileDock(QgsDockWidget):
             )
             self.view.set_image(None)
         self._refresh_velocity()
+        self._refresh_picks()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -435,6 +437,29 @@ class ProfileDock(QgsDockWidget):
             self._render()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not re-render after a stack change: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_picks_changed(self) -> None:
+        try:
+            self._refresh_picks()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not refresh the picks on the profile: {exc}", Qgis.MessageLevel.Critical)
+
+    def _refresh_picks(self) -> None:
+        """Put the DISPLAYED line's picks on the view.
+
+        `self._key`, not `_working_key`: a preview shows the hovered
+        line's own picks, because seeing what has been interpreted on a
+        line is most of the point of glancing at it. That is not a breach
+        of spec §3.3 -- reading is not authoring, and `session.add_pick`
+        refuses a preview independently. `picks_changed` carries no key
+        (it is a "something changed" signal), so this recomputes from
+        whatever is on screen rather than filtering on one.
+        """
+        key = self._key
+        if key is None:
+            self.view.set_picks([])
+            return
+        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
@@ -567,6 +592,18 @@ class ProfileDock(QgsDockWidget):
         elif self._strip_was_visible:
             self.gain_strip.show()
         self._strip_was_visible = False
+
+    def set_pick_mode(self, flag: bool) -> None:
+        """Turn the profile's pick mode on or off.
+
+        A passthrough, deliberately: `plugin.py` owns the toolbar toggle
+        and must not reach into `self.view` past the dock that owns it.
+        `ProfileView.set_pick_mode` shipped in Plan 2 with no caller
+        anywhere -- a manual tester found it, went looking for a pick
+        mode, and concluded the build was broken rather than that the
+        feature was unbuilt (spec §1, §6). This is its first consumer.
+        """
+        self.view.set_pick_mode(bool(flag))
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
@@ -814,32 +851,45 @@ class ProfileDock(QgsDockWidget):
             # A preview never authors data (spec §3.3, §4.3). `self._key`
             # is the DISPLAYED line, so without this a shift-click on a
             # previewed radargram would emit a pick for a line the user
-            # only hovered. Nothing consumes pick_requested until M8 --
-            # this is guarded here, in the change that makes `_key` mean
-            # "displayed", rather than left for M8 to discover.
+            # only hovered.
+            #
+            # M8: this used to return silently, which was right while
+            # nothing consumed `pick_requested` -- there was no pick to
+            # miss. Now there is, and silence is indistinguishable from a
+            # pick that worked: the user shift-clicks a previewed line
+            # and nothing whatever happens, which is the same complaint
+            # issue #33 records about steps that "disappear". The guard
+            # is unchanged; it says why now. `session.add_pick` refuses
+            # the same write independently -- this is the message, not
+            # the protection.
+            self.error.emit(
+                "picks are authored on the working line; this is a preview — "
+                "select the line on the map to work on it"
+            )
             return
-        # I6: guarded like every other slot here, even though nothing
-        # connects to `pick_requested` yet. Nothing in Plan 2 does: the
-        # pick tool is M8, in Plan 3 ("Pick tool, picks layer, marks
-        # layer"), and this signal plus `ProfileView.set_pick_mode()` are
-        # the half of it that already exists. Until then a shift-click on
-        # the profile emits into nothing, and `set_pick_mode()` has no
-        # control wired to it -- picks are authored by editing the
-        # `picks` layer on the map canvas with QGIS's own tools. An
-        # earlier draft of this comment said "Task 18/19 will"; those
-        # tasks were re-scoped to the gain strip and the difference
-        # view/presets and never touched picking, and the stale note sent
-        # a reader looking for a pick mode that was never built. Verified
-        # directly: an exception raised by a *downstream* subscriber of
-        # `pick_requested` is swallowed by PyQt at the point that
-        # subscriber is invoked, and never propagates back into this
-        # `try` at all -- so this cannot catch a future picking dock's own
-        # bug. What it does guard is this method's own body, which is
-        # exactly the "every slot guards its body" rule this file's
-        # docstring states, and the one place that will matter if this
-        # method ever grows logic ahead of the `emit()` call. A pick is
-        # authored data with no other source of truth; failing loudly
-        # here is cheap insurance for what this line can control.
+        # I6: guarded like every other slot in this file, for the reason
+        # this file's own docstring states -- not because there is
+        # nothing downstream: `pick_requested` IS connected now, to
+        # `plugin.py`'s `_on_pick_requested`, which relays into
+        # `session.add_pick` and reports a failure on the message bar,
+        # and `set_pick_mode` has a real control wired to it, the Pick
+        # toolbar toggle (`plugin.py`'s `_toggle_pick_mode`). Picks are
+        # authored by clicking (Pick mode on) or Shift-clicking (off) the
+        # profile; hand-editing the `picks` layer on the map canvas with
+        # QGIS's own tools still works (the layer stays writable on
+        # purpose) but is no longer the only way in.
+        #
+        # Verified directly: an exception raised by a *downstream*
+        # subscriber of `pick_requested` is swallowed by PyQt at the
+        # point that subscriber is invoked, and never propagates back
+        # into this `try` at all -- so this cannot catch that relay's own
+        # bug, or `session.add_pick`'s. What it does guard is this
+        # method's own body, which is exactly the "every slot guards its
+        # body" rule this file's docstring states, and the one place
+        # that will matter if this method ever grows logic ahead of the
+        # `emit()` call. A pick is authored data with no other source of
+        # truth; failing loudly here is cheap insurance for what this
+        # line can control.
         if self._key is None:
             return
         try:

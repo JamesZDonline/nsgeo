@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 
 import nsgeo_qgis.layers as layers_module
@@ -11,9 +12,11 @@ from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
-from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
+from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
+from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
@@ -25,11 +28,14 @@ from qgis.core import (
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
+    QgsSingleSymbolRenderer,
+    QgsSymbol,
     QgsVectorFileWriter,
     QgsVectorLayer,
     QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QMetaType, Qt
+from qgis.PyQt.QtGui import QColor
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -164,6 +170,265 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
     for grid_id, symbol in by_grid.items():
         assert symbol.symbolLayer(0).strokeColor().name() != lines_colours[grid_id]
+
+
+# --- M8 acceptance walkthrough, Finding B: style `picks` ONCE, at table
+# creation, never on refresh. Unlike `grids`/`lines` above (fully
+# regenerated every refill, so restyling every time costs nothing), `picks`
+# is user-editable -- reapplying a style on every refresh would silently
+# discard the user's own symbology every time they opened the site. The
+# reviewer's argument the author accepted: QGIS's own default random
+# symbol "on a busy basemap can be a near-invisible dot in an arbitrary
+# colour -- the difference between renders and renders findably." ---
+
+
+def test_a_freshly_created_picks_table_is_styled_with_the_pick_colour(populated):
+    """Asserts on the renderer QGIS actually installed, the same
+    discipline `test_grids_layer_renders_as_dashed_outline_with_no_fill`
+    above uses -- deleting `_style_picks` leaves the default single
+    symbol (a random colour) and fails the `isinstance`/colour checks
+    below."""
+    session, layers, _ = populated
+    renderer = layers.layers["picks"].renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    symbol = renderer.symbol()
+    assert symbol.color().name() == PICK_COLOUR.name()
+    marker = symbol.symbolLayer(0)
+    assert marker.strokeColor().name() == "#ffffff"
+
+
+def test_the_style_is_saved_to_the_geopackage_not_just_the_in_memory_layer(populated):
+    """The whole point of Finding B is durability beyond this one
+    in-memory `QgsVectorLayer` -- a plain `setRenderer()` alone would not
+    survive a new plugin session. A brand new `QgsVectorLayer` opened
+    directly against the package, bypassing `layers` entirely, must come
+    up styled on its own via the GeoPackage's own saved style."""
+    session, layers, _ = populated
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.isValid()
+    renderer = fresh.renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    assert renderer.symbol().color().name() == PICK_COLOUR.name()
+
+
+def test_the_style_still_saves_on_a_qgis_without_saveStyleToDatabaseV2(
+    qgis_app, tmp_path, monkeypatch
+):
+    """`_style_picks` chooses its save call at runtime because neither
+    one works everywhere this plugin claims to run: `saveStyleToDatabaseV2`
+    is `versionadded:: 4.0`, while `metadata.txt` declares
+    `qgisMinimumVersion=3.40`. V2 exists on this build, so every other
+    test in this file exercises only that branch -- the deprecated
+    fallback, which is the branch that actually protects the declared
+    minimum version, would never run at all.
+
+    Patched to `None` rather than deleted, deliberately. `del
+    QgsVectorLayer.saveStyleToDatabaseV2` appears to succeed on a
+    sip-wrapped class and then does nothing -- verified directly: the
+    built-in is still reachable through `getattr` afterwards, and
+    `monkeypatch.undo()` fails trying to restore what it believes it
+    removed. `None` reproduces exactly what the production code
+    observes on a 3.40-3.43 build, because it reads the attribute as
+    `getattr(layer, "saveStyleToDatabaseV2", None)` and branches on
+    `is not None` -- an absent attribute and a `None` one are the same
+    value at that call site.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    monkeypatch.setattr(QgsVectorLayer, "saveStyleToDatabaseV2", None)
+    assert getattr(QgsVectorLayer, "saveStyleToDatabaseV2", None) is None  # the premise
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    # `pytest.warns` rather than a filter: the DeprecationWarning is the
+    # direct evidence that the FALLBACK branch ran, not the V2 one, so
+    # asserting it is strictly stronger than silencing it -- and it keeps
+    # the one warning this suite legitimately produces from reading as
+    # stray noise. (`add_grid` reaches `_style_picks` synchronously via
+    # `grids_changed` -> `refresh`, so the warning surfaces here.)
+    with pytest.warns(DeprecationWarning, match="saveStyleToDatabase"):
+        session.add_grid(GRID)
+    monkeypatch.undo()
+
+    # Styled through the fallback, and durably: a fresh layer opened
+    # straight off the package comes up with the pick colour, which only
+    # a style actually written into `layer_styles` can produce.
+    fresh = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert fresh.isValid()
+    assert fresh.renderer().symbol().color().name() == PICK_COLOUR.name()
+    layers.detach()
+    project.clear()
+
+
+def test_ensure_tables_called_again_does_not_restyle_an_up_to_date_table(populated):
+    """`_ensure_table`'s up-to-date short-circuit must be what protects a
+    user's own restyle, not luck: calling `ensure_tables()` again with
+    nothing else changed must not touch a renderer set since the table
+    was created."""
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+    custom.setColor(QColor("#00ff00"))
+    picks.setRenderer(QgsSingleSymbolRenderer(custom))
+
+    layers.ensure_tables()
+
+    assert layers.layers["picks"].renderer().symbol().color().name() == "#00ff00"
+
+
+def test_reopening_the_package_does_not_reapply_style_over_a_user_change(populated, tmp_path):
+    """A second site open must not stomp a style the user saved
+    themselves through QGIS's own "Save as Default" -- `_style_picks`
+    only ever runs from the create/migrate paths inside `_ensure_table`,
+    never from an ordinary open of an already-current table."""
+    session, layers, project = populated
+    picks = layers.layers["picks"]
+    custom = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PointGeometry)
+    custom.setColor(QColor("#00ff00"))
+    picks.setRenderer(QgsSingleSymbolRenderer(custom))
+    # Feature-detected the same way `_style_picks` does, and for the same
+    # reason: V2 is `versionadded:: 4.0` while metadata.txt declares
+    # qgisMinimumVersion=3.40, so neither call alone works everywhere this
+    # plugin claims to run. Here it also keeps the suite's output pristine
+    # -- the deprecated call warns once per invocation.
+    save_v2 = getattr(picks, "saveStyleToDatabaseV2", None)
+    if save_v2 is not None:
+        _, err = save_v2("default", "the user's own style", True, "")
+    else:
+        err = picks.saveStyleToDatabase("default", "the user's own style", True, "")
+    assert not err
+
+    session.save()
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+
+    reopened = layers.layers["picks"].renderer()
+    assert reopened.symbol().color().name() == "#00ff00"
+
+
+def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
+    """`_rebuild_picks` also creates a table (`_PICKS_REBUILD`) and
+    renames it into place. A migrated (pre-M8-schema) package has no
+    DURABLE style to preserve -- nothing before this fix ever called
+    `saveStyleToDatabase` for `picks`, so every open until now showed
+    QGIS's own fresh-random default regardless of what came before.
+    Styled the same as a brand new table, rather than left permanently
+    unstyled: this migration runs once, exactly when the schema changes,
+    so a package old enough to still need it is exactly the package that
+    most needs this fix.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    renderer = layers2.layers["picks"].renderer()
+    assert isinstance(renderer, QgsSingleSymbolRenderer)
+    assert renderer.symbol().color().name() == PICK_COLOUR.name()
+    layers2.detach()
+
+
+# --- M8 acceptance walkthrough, Finding C: the moved-grid warning reached
+# only `QgsMessageLog` -- the Log Messages Panel, closed by default -- so
+# the author went looking for it and could not find it ("Where does this
+# warning exist?"). `on_warning`, following `LineLoader.on_error`'s own
+# precedent, is how `SiteLayers` reaches the plugin's message bar instead.
+# The log entry stays; this is IN ADDITION to it, never instead. ---
+
+_MOVED_GRID = Grid("A", (501.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+
+
+def test_on_warning_receives_the_moved_grid_warning(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    seen: list[str] = []
+    layers.on_warning = seen.append
+
+    session.replace_grid(_MOVED_GRID)
+
+    # `replace_grid` drives TWO refreshes (`grids_changed` then
+    # `lines_changed`) -- exactly one warning, not two, because the
+    # first refresh already updates `_last_grid_placements` to match the
+    # new placement before the second one runs (see
+    # `_warn_if_a_placed_grid_moved`'s own docstring).
+    assert len(seen) == 1
+    assert "A" in seen[0]
+    assert "changed position" in seen[0]
+
+
+def test_on_warning_is_not_called_when_no_grid_actually_moved(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    seen: list[str] = []
+    layers.on_warning = seen.append
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert seen == []
+
+
+def test_on_warning_defaults_to_none_and_behaves_exactly_as_before(populated, message_log):
+    session, layers, _ = populated
+    assert layers.on_warning is None
+    layers.write_pick(_a_pick())
+
+    session.replace_grid(_MOVED_GRID)  # must not raise with no callback attached
+
+    assert any("changed position" in m for m in message_log)
+
+
+def test_a_raising_on_warning_does_not_escape_or_break_the_refresh(populated, message_log):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+
+    def boom(msg: str) -> None:
+        raise RuntimeError("the message bar is unavailable")
+
+    layers.on_warning = boom
+
+    session.replace_grid(_MOVED_GRID)  # must not raise, must not abort the refresh
+
+    assert layers.feature_count("lines") == 3  # the rest of refresh() still ran
+    assert any("on_warning callback raised" in m for m in message_log)
 
 
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's
@@ -595,6 +860,161 @@ def test_a_short_migration_refuses_the_swap_rather_than_losing_picks(
     # The swap never began, so there is no renamed-out original either.
     backup = QgsVectorLayer(f"{session.gpkg_path}|layername={_PICKS_BACKUP}", _PICKS_BACKUP, "ogr")
     assert not backup.isValid()
+
+
+# --- final review, Important 1: two related holes in the migration's
+# safety net, both found on the whole-branch review rather than any
+# per-task review, and both of which silently destroy every authored
+# pick while reporting a successful migration.
+#
+# (a) `_read_picks_rows` used to return `[]` when the on-disk table
+# would not open at all -- indistinguishable from "opened and genuinely
+# has zero rows". The swap's own row-count gate then compares the
+# migrated count against `len(old_rows)`, i.e. 0 == 0, passes trivially,
+# and the real (never actually read) table is renamed out and dropped
+# while an empty one takes its place.
+#
+# (b) `_table_schema` used to return the identical `(None, [])` for
+# "no table by this name exists yet" and "a table by this name exists
+# but will not open" -- so `_ensure_table` could not tell a
+# present-but-broken `picks` table apart from a brand-new site, and
+# routed it into `_create_table`'s `CreateOrOverwriteLayer`, the same
+# path a genuinely fresh package takes. ----------------------------------
+
+
+def test_picks_survive_a_failure_to_open_the_table_before_a_migration(
+    populated, monkeypatch, message_log
+):
+    """Important 1a. `_read_picks_rows` is only ever called from
+    `_rebuild_picks`, itself only reached once `_table_schema` has just
+    opened `picks` successfully in this same `_ensure_table` call -- so
+    a SECOND open of that same table failing means something changed in
+    between (a lock, a permissions change, momentary corruption), not an
+    empty table.
+
+    Simulated by making `_read_picks_rows`'s OWN construction of the
+    `picks` `QgsVectorLayer` come back invalid, identified by inspecting
+    the immediate caller's frame rather than by call order or count.
+    `_table_schema`'s own probe inside `_ensure_table` builds the
+    textually identical `QgsVectorLayer(path, "picks", "ogr")` call, so
+    the two cannot be told apart by their arguments at all -- and
+    `replace_grid` below drives TWO refreshes (`grids_changed` then
+    `lines_changed`, both connected to `SiteLayers.refresh`), so a fault
+    keyed on call order or count would have to land on a different call
+    each time and would either mis-fire or stop firing on the second
+    refresh. A fault keyed on the caller's function name fires
+    identically and persistently on every attempt regardless -- the same
+    property the two sibling tests above rely on by keying their own
+    injected faults on a stable name (`_PICKS_REBUILD`, a rename's own
+    arguments) rather than a count. Monkeypatching `QgsVectorLayer.isValid`
+    on the class instead was ruled out for the same reason those two
+    call sites cannot be told apart by arguments: it would blind
+    `_table_schema`'s probe too, and `_rebuild_picks` would never be
+    reached at all -- the very path this hole is in.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 5.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_layer_class = layers_module.QgsVectorLayer
+
+    class Unopenable:
+        def isValid(self):
+            return False
+
+        def __getattr__(self, attr):
+            raise AssertionError(f"_read_picks_rows touched {attr!r} on a layer that never opened")
+
+    def picks_wont_open_for_read_picks_rows(uri, name, provider):
+        caller = sys._getframe(1).f_code.co_name
+        if name == "picks" and provider == "ogr" and caller == "_read_picks_rows":
+            return Unopenable()
+        return real_layer_class(uri, name, provider)
+
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", picks_wont_open_for_read_picks_rows)
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    # ensure_tables() contains a per-table failure, the same as the two
+    # sibling failure-injection tests above: the RuntimeError is logged,
+    # not raised out of the signal.
+    assert any("picks" in m and "untouched" in m for m in message_log), message_log
+
+    # Nothing was ever migrated or swapped: read the ORIGINAL table back
+    # with a brand-new, unpatched QgsVectorLayer -- not through `layers`,
+    # in case a failed rebuild left its registry stale, the same reason
+    # the sibling tests above do it this way.
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"  # unchanged: never rebuilt
+    survivor = next(on_disk.getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(5.0)
+
+
+def test_an_unopenable_picks_table_is_refused_not_overwritten(populated, monkeypatch, message_log):
+    """Important 1b. Before this fix, a `picks` table that is present on
+    disk but will not open through `QgsVectorLayer` right now (a lock, a
+    permissions problem, anything short-lived) was indistinguishable
+    from a table that has never existed at all -- `_ensure_table` would
+    route it straight into `_create_table`'s `CreateOrOverwriteLayer`
+    and destroy it, the same path a genuinely new site takes.
+
+    Simulated by making EVERY construction of the `picks`
+    `QgsVectorLayer` come back invalid, unconditionally -- no call-order
+    tricks are needed here, because this test drives exactly ONE
+    `refresh()` by calling it directly rather than through a signal, so
+    there is only ever one attempt to open `picks` per table probe.
+    `_table_schema`'s presence check goes through
+    `QgsProviderRegistry`'s own connection instead of `QgsVectorLayer`
+    (see its docstring), which this test never touches, so it genuinely
+    finds the real table sitting there. No grid or schema change is
+    involved -- this is deliberately a plain `refresh()`, because the
+    defect is that `_ensure_table` could not tell "broken" from
+    "absent" even when NOTHING about the table's own required shape had
+    changed.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["time_ns"] = 6.0
+    assert picks.dataProvider().addFeatures([f])[0]
+
+    real_layer_class = layers_module.QgsVectorLayer
+
+    class Unopenable:
+        def isValid(self):
+            return False
+
+        def __getattr__(self, attr):
+            raise AssertionError(f"an unopenable picks layer should not be asked for {attr!r}")
+
+    def picks_wont_open(uri, name, provider):
+        if name == "picks" and provider == "ogr":
+            return Unopenable()
+        return real_layer_class(uri, name, provider)
+
+    monkeypatch.setattr(layers_module, "QgsVectorLayer", picks_wont_open)
+
+    layers.refresh()
+
+    assert any("picks" in m and "could not" in m for m in message_log), message_log
+
+    # The real table -- seeded row included -- was never touched: read
+    # it back with a brand-new, unpatched QgsVectorLayer, not through
+    # `layers` (whose registry may not even still hold "picks").
+    on_disk = QgsVectorLayer(f"{session.gpkg_path}|layername=picks", "picks", "ogr")
+    assert on_disk.isValid()
+    assert on_disk.crs().authid() == "EPSG:32616"
+    survivor = next(on_disk.getFeatures())
+    assert survivor["line_key"] == "raw/FILE__001.DZT"
+    assert survivor["time_ns"] == pytest.approx(6.0)
 
 
 # --- fix round 2: an untransformable CRS pair (measured with a projected
@@ -1056,6 +1476,257 @@ def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, mon
     assert layers.layers == {}  # still torn down; the site is closing regardless
 
 
+# --- M8 acceptance walkthrough, Finding A: the author's own words --
+# "if I selected a point and deleted it and hit save, the pick stayed
+# visible in the profile until I made another pick in the profile, at
+# which time the deleted ones would disappear." The cause: nothing
+# watched the `picks` layer's OWN editing signals, so `session.picks_
+# changed` -- emitted only from `SiteSession.add_pick` -- never fired for
+# an ordinary QGIS delete/move/add/rollback. These tests pin the
+# SiteLayers-level wiring, driven through REAL edit-buffer operations
+# (`startEditing`/`deleteFeature`/`commitChanges`), not by emitting the
+# signal by hand -- see test_plugin_profile_dock.py for the end-to-end
+# (dock + real layer) versions asserting on `dock.view._picks` itself. ---
+
+
+def test_a_buffered_delete_notifies_picks_changed_before_any_commit(populated):
+    """The responsiveness the author asked for ("could we make that link
+    more responsive somehow"): visible from the edit buffer alone, before
+    `commitChanges()` ever runs."""
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+
+    assert seen == [1]
+    picks.rollBack()
+
+
+def test_a_committed_add_through_the_edit_buffer_notifies_picks_changed(populated):
+    """Measured directly (a probe script, not assumed): committing a plain
+    `addFeature` fires THREE of our six bound signals, not one --
+    `featureAdded` and `featuresDeleted` fire again internally as QGIS's
+    edit buffer swaps the buffered feature's temporary negative fid for
+    the real one the provider assigned, in addition to
+    `afterCommitChanges` itself. `picks_changed` therefore fires four
+    times total for one add-then-save (one live, three from the commit),
+    not two -- documented here exactly, not loosened to "at least
+    twice", so a change to that internal replay is caught rather than
+    quietly tolerated. Harmless: each `_refresh_picks()` read is
+    idempotent and cheap for the handful-to-low-thousands of rows this
+    table ever holds (see `picks_for`'s own docstring) -- redundant
+    reads triggered by an explicit save are not a cost worth chasing
+    away with de-duplication state that only Finding A would ever use.
+    """
+    session, layers, _ = populated
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    f.setAttribute("trace", 3)
+    f.setAttribute("time_ns", 9.0)
+    assert picks.addFeature(f)
+    assert seen == [1]  # live, from featureAdded, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1, 1, 1]  # afterCommitChanges + the fid-swap replay above
+
+
+def test_a_geometry_move_through_the_edit_buffer_notifies_picks_changed(populated):
+    """A geometry-only edit doesn't change `(trace, time_ns)`, so this
+    counts emissions of `picks_changed` rather than reading rendered
+    content -- proving `geometryChanged` alone drives a notification, not
+    merely that unrelated content happens to still match. Committed
+    (not rolled back), matching the brief's own required minimum: "a
+    delete... followed by a commit... the same for an add and for a
+    geometry move". A geometry commit is clean (measured): only
+    `afterCommitChanges` fires in addition to the live `geometryChanged`,
+    unlike the add/delete cases above and below.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeGeometry(fid, QgsGeometry.fromPointXY(QgsPointXY(501.0, 707.0)))
+    assert seen == [1]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- a geometry commit is clean
+
+
+def test_an_attribute_change_through_the_edit_buffer_notifies_picks_changed(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    idx = picks.fields().indexOf("note")
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, idx, "edited by hand")
+    assert seen == [1]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- an attribute commit is clean too
+
+
+def test_a_rollback_notifies_picks_changed_too(populated):
+    """A rollback restores the on-disk view -- the profile must be told
+    that changed just as it is told about a commit. Measured: undoing a
+    `deleteFeature` replays as a `featureAdded` (the row comes back)
+    ahead of `afterRollBack` itself, so this fires twice, not once --
+    the rollback mirror image of the add-then-commit fid-swap above.
+    Harmless for the same reason: a second, idempotent read.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    assert picks.rollBack()
+
+    assert seen == [1, 1]
+
+
+def test_write_pick_does_not_double_emit_picks_changed(populated):
+    """Hazard 3 from the brief: `write_pick` goes through the data
+    provider directly, bypassing the edit buffer, and `SiteSession.
+    add_pick` already emits `picks_changed` itself once the write
+    returns -- none of the six edit-buffer/commit/rollback signals bound
+    here may ALSO fire for an authored pick."""
+    session, layers, _ = populated
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    layers.write_pick(_a_pick())
+
+    assert seen == []  # write_pick itself never emits; add_pick does that
+
+
+def test_repeated_ensure_tables_calls_do_not_accumulate_duplicate_bindings(populated):
+    """`_bind_picks_signals` runs at the end of every `ensure_tables()`
+    call, unconditionally. It must unbind before rebinding, or a picks
+    edit after several refreshes would fire `picks_changed` once per
+    accumulated (duplicate) connection instead of once."""
+    session, layers, _ = populated
+    layers.ensure_tables()
+    layers.ensure_tables()
+    layers.ensure_tables()
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    assert picks.addFeature(f)
+
+    assert seen == [1]
+
+
+def test_detach_does_not_emit_picks_changed_from_its_own_commit(populated, message_log):
+    """Hazard 2 from the brief: `_commit_pending_edits()` runs inside
+    `detach()`, which would otherwise fire `afterCommitChanges` for a
+    buffered edit while the layer is on its way out, for a site the
+    session has already forgotten. Unbinding first (see `detach()`'s own
+    comment) means that final commit stays silent -- proven here by
+    asserting the signal never fires at all, not merely that nothing
+    crashes."""
+    session, layers, _ = populated
+    _buffer_a_pick(layers)
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    layers.detach()
+
+    assert seen == []
+    assert any("picks" in m for m in message_log)  # the edit was still saved, just quietly
+
+
+def test_the_picks_binding_survives_a_site_close_and_reopen(populated, tmp_path):
+    """Hazard 1 from the brief: a site reopen replaces the `picks` layer
+    OBJECT outright (`detach()` empties the registry, `ensure_tables()`
+    opens a fresh one) -- a connection made once at construction and
+    never renewed would point at a dead wrapper after the reopen and
+    silently stop working, the exact defect `MapLink._rebind_layer`
+    exists to prevent for its own three layers."""
+    session, layers, project = populated
+    session.save()
+
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+
+    picks = layers.layers["picks"]
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", "raw/FILE__001.DZT")
+    assert picks.addFeature(f)
+
+    assert seen == [1]
+
+
+def test_the_picks_binding_survives_a_mid_session_crs_driven_rebuild(populated):
+    """The picks layer OBJECT is replaced by two paths, not one. The test
+    above covers the first (a site close and reopen). This covers the
+    second: a mid-session `replace_grid` whose CRS change drives
+    `_ensure_table` into `_rebuild_picks`, which calls
+    `_drop_loaded_layer("picks")` and leaves the reopen loop at the end
+    of `ensure_tables()` to open a fresh object -- the exact path
+    `MapLink` had to learn about the hard way (`_rebind_layer`), and it
+    deserves its own test rather than a probe.
+
+    Asserts the object really was replaced and that `_bound_picks`
+    tracks the new one -- but the part that actually matters is the
+    genuine edit session at the end: a connection re-made only on the
+    OLD object would leave `_bound_picks is layers.layers["picks"]` true
+    (pure bookkeeping) while a real `startEditing`/`deleteFeature`/
+    `commitChanges` on the layer QGIS now holds reaches nothing.
+    """
+    session, layers, _ = populated
+    layers.write_pick(_a_pick())
+    original_picks = layers.layers["picks"]
+    assert layers.feature_count("picks") == 1
+
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+
+    rebuilt_picks = layers.layers["picks"]
+    assert rebuilt_picks is not original_picks
+    assert layers.feature_count("picks") == 1
+    assert layers._bound_picks is rebuilt_picks
+
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+    fid = next(rebuilt_picks.getFeatures()).id()
+    assert rebuilt_picks.startEditing()
+    assert rebuilt_picks.deleteFeature(fid)
+    assert seen == [1]  # live, before any commit -- same as the buffered-delete test above
+
+    assert rebuilt_picks.commitChanges()
+    assert seen == [1, 1]  # afterCommitChanges only -- a delete's own commit is clean
+
+
 # --- controller review of I5: _adopt_legacy_package() renamed the .gpkg
 # alone. A SQLite database left by a process that did not close cleanly --
 # a QGIS crash or kill, which is not rare -- keeps a hot `-wal`/`-shm`
@@ -1250,3 +1921,374 @@ def test_discarding_the_site_still_saves_pick_edits_and_the_log_says_why(
 
     plugin.unload()
     project.clear()
+
+
+# ---- picks: the store (M8, spec §4.1, §4.2) --------------------------------
+
+
+def _a_pick(key="raw/FILE__001.DZT", trace=7, time_ns=12.5, **kw):
+    """A fully-populated Pick, so a test that cares about one field does
+    not have to spell out the other ten."""
+    fields = dict(
+        line_key=key,
+        trace=trace,
+        time_ns=time_ns,
+        distance_m=0.117,
+        depth_m=0.25,
+        velocity_m_ns=0.04,
+        stack_json='[{"step": "dewow", "params": {}, "enabled": true}]',
+        note="",
+        created="2026-09-19T10:00:00+00:00",
+    )
+    fields.update(kw)
+    return Pick(**fields)
+
+
+def test_the_picks_table_carries_the_two_grouping_fields(populated):
+    """Spec §4.2: `feature_id` and `seq` exist from M8 and are written
+    null, so a horizon later is an ordered run of existing picks and
+    needs no migration of an authored table."""
+    session, layers, _ = populated
+    names = [f.name() for f in layers.layers["picks"].fields() if f.name() != "fid"]
+    assert names[-2:] == ["feature_id", "seq"]
+
+
+def test_write_pick_stores_every_field_and_places_it_on_the_line(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=0))
+
+    assert layers.feature_count("picks") == 1
+    feat = next(layers.layers["picks"].getFeatures())
+    assert feat["line_key"] == "raw/FILE__001.DZT"
+    assert feat["trace"] == 0
+    assert feat["time_ns"] == pytest.approx(12.5)
+    assert feat["distance_m"] == pytest.approx(0.117)
+    assert feat["depth_m"] == pytest.approx(0.25)
+    assert feat["velocity_m_ns"] == pytest.approx(0.04)
+    assert "dewow" in feat["stack_json"]
+    assert feat["created"] == "2026-09-19T10:00:00+00:00"
+    assert feat["feature_id"] == NULL
+    assert feat["seq"] == NULL
+    # Trace 0 of the first line sits at the grid origin, in the package CRS.
+    point = feat.geometry().asPoint()
+    assert (point.x(), point.y()) == pytest.approx((500.0, 700.0), abs=1e-6)
+
+
+def test_write_pick_places_a_later_trace_further_along_the_line(populated):
+    """The geometry is the trace's own world position, not the line's
+    start: a pick's whole value on the map is where along the line it
+    is."""
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=0))
+    layers.write_pick(_a_pick(trace=59))
+
+    points = [f.geometry().asPoint() for f in layers.layers["picks"].getFeatures()]
+    a, b = sorted(points, key=lambda p: (p.x(), p.y()))
+    assert a.distance(b) == pytest.approx(59 / 60, abs=1e-6)
+
+
+def test_write_pick_refuses_rather_than_dropping_the_pick_when_the_table_is_gone(populated):
+    session, layers, _ = populated
+    layers.detach()
+    with pytest.raises(RuntimeError, match="picks"):
+        layers.write_pick(_a_pick())
+
+
+def test_a_pick_on_an_unplaceable_line_is_stored_without_geometry(populated, tmp_path, message_log):
+    """A time-triggered acquisition has no geometry (`trace_coords`
+    raises), so the pick cannot be drawn -- but time is the truth and the
+    pick is authored data with no other source. It is stored with a null
+    geometry and the log says why, rather than being refused."""
+    session, layers, _ = populated
+    p = synthetic_dzt(tmp_path / "raw", "FILE__004.DZT", n_traces=40, traces_per_metre=0.0)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 1.5, 0.0, 1, p.stem))])
+
+    layers.write_pick(_a_pick(key="raw/FILE__004.DZT", trace=3))
+
+    feat = next(layers.layers["picks"].getFeatures())
+    assert feat["line_key"] == "raw/FILE__004.DZT"
+    assert feat.geometry().isNull()
+    assert any("cannot be placed" in m for m in message_log)
+
+
+def test_picks_for_returns_only_that_lines_picks_in_trace_order(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=40, time_ns=30.0))
+    layers.write_pick(_a_pick(trace=5, time_ns=10.0))
+    layers.write_pick(_a_pick(key="raw/FILE__002.DZT", trace=9, time_ns=20.0))
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(5, 10.0), (40, 30.0)]
+    assert all(p.line_key == "raw/FILE__001.DZT" for p in got)
+    assert got[0].feature_id is None
+    assert got[0].seq is None
+    assert got[0].note == ""
+
+
+def test_picks_for_is_empty_rather_than_raising_with_no_site_open(populated):
+    session, layers, _ = populated
+    layers.detach()
+    assert layers.picks_for("raw/FILE__001.DZT") == []
+
+
+def test_picks_for_skips_a_hand_edited_row_with_no_trace_or_time(populated, message_log):
+    """The `picks` layer is deliberately editable in QGIS, so a user can
+    digitise a point into it with the ordinary tools and leave the
+    attributes blank. `float(NULL)` inside a slot would abort the CI
+    container; such a row is skipped and named instead."""
+    session, layers, _ = populated
+    layer = layers.layers["picks"]
+    f = QgsFeature(layer.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    assert layer.dataProvider().addFeatures([f])[0]
+    layers.write_pick(_a_pick(trace=2, time_ns=8.0))
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(2, 8.0)]
+    assert any("no trace or time" in m for m in message_log)
+
+
+def test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact(
+    qgis_app, tmp_path, message_log
+):
+    """The one migration in M8. `picks` is the only table that cannot be
+    regenerated, and this project has already had to repair its storage
+    twice -- so the rows, their attributes and their geometry must all
+    survive the two new columns arriving, with the new columns null.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    # Rewrite `picks` with the pre-M8 field set and put two authored rows
+    # in it, exactly as a site created before this milestone would have.
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    rows = []
+    for i, (trace, time_ns) in enumerate([(4, 11.0), (33, 26.5)]):
+        f = QgsFeature(old.fields())
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0 + i, 700.0 + i)))
+        f["line_key"] = "raw/FILE__001.DZT"
+        f["trace"] = trace
+        f["time_ns"] = time_ns
+        f["note"] = f"note {i}"
+        rows.append(f)
+    assert old.dataProvider().addFeatures(rows)[0]
+    del old
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert names == [name for name, _ in TABLES["picks"][1]]
+    assert layers2.feature_count("picks") == 2
+    got = sorted(layers2.layers["picks"].getFeatures(), key=lambda f: f["trace"])
+    assert [(f["trace"], f["time_ns"], f["note"]) for f in got] == [
+        (4, 11.0, "note 0"),
+        (33, 26.5, "note 1"),
+    ]
+    assert [f["feature_id"] for f in got] == [NULL, NULL]
+    assert [f["seq"] for f in got] == [NULL, NULL]
+    assert not got[0].geometry().isNull()
+    layers2.detach()
+
+
+def test_the_layers_register_themselves_as_the_sessions_pick_store(populated):
+    """Spec §4.1 names `session.add_pick`, but the session holds no
+    layers and the parent spec forbids a second OGR handle on a package
+    QGIS already has open -- so the write is delegated. The registration
+    must happen in the constructor, before any site_opened could fire."""
+    session, layers, _ = populated
+    assert session.pick_store is layers
+
+
+# ---- picks: fix round 1 (review findings) ----------------------------------
+
+
+def test_write_pick_reports_an_unknown_line_key_as_a_runtime_error(populated):
+    """`_pick_point` calls `session.line_for_key`, which raises
+    `KeyError` for a key that names no line. `write_pick`'s own contract
+    is `RuntimeError` on any failure to write; it must not depend on
+    `add_pick`'s WORKING-line guard (a later task) to keep that promise.
+    """
+    session, layers, _ = populated
+    with pytest.raises(RuntimeError, match="raw/FILE__999.DZT"):
+        layers.write_pick(_a_pick(key="raw/FILE__999.DZT"))
+
+
+def test_picks_for_reads_a_hand_edited_row_with_blank_optional_fields(populated):
+    """`_as_float`/`_as_str`'s NULL branches are otherwise never
+    exercised: every pick `_a_pick()` writes has every optional field
+    filled in, and the one hand-edited row the sibling test covers is
+    discarded by the trace/time gate before any converter runs. A row
+    with a trace and a time but a blank `distance_m` and `note` must
+    still come back as a `Pick`, not raise -- the trap Fact 3 in the
+    brief names: `float(NULL)` raises, and `value is not None` would not
+    have caught it."""
+    session, layers, _ = populated
+    layer = layers.layers["picks"]
+    f = QgsFeature(layer.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["trace"] = 12
+    f["time_ns"] = 15.0
+    assert layer.dataProvider().addFeatures([f])[0]
+
+    got = layers.picks_for("raw/FILE__001.DZT")
+
+    assert len(got) == 1
+    assert got[0].distance_m is None
+    assert got[0].note == ""
+
+
+def test_picks_for_survives_a_failed_rebuild_leaving_pre_m8_fields_missing(
+    qgis_app, tmp_path, monkeypatch, message_log
+):
+    """`_ensure_table` routes a schema-mismatched `picks` table through
+    `_rebuild_picks`; if that raises -- any of the five ways its own
+    docstring names it can (an invalid temp layer, a provider
+    `addFeatures` failure, the row-count gate, a bad transform, a locked
+    rename) -- `ensure_tables` catches it, Critical-logs it, and
+    *continues* (layers.py's per-table containment). The loop right
+    after opens the still-pre-M8 table straight into
+    `self.layers["picks"]`, with no `feature_id`/`seq` fields at all.
+    `picks_for` must not then raise `KeyError` reading them -- proven
+    here by making the rebuild actually fail, not merely asserted from
+    the guard's presence.
+    """
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    # Rewrite `picks` with the pre-M8 field set and one authored row,
+    # exactly as the migration test does.
+    old_spec = [
+        (name, kind) for name, kind in TABLES["picks"][1] if name not in ("feature_id", "seq")
+    ]
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    f = QgsFeature(old.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f["line_key"] = "raw/FILE__001.DZT"
+    f["trace"] = 4
+    f["time_ns"] = 11.0
+    assert old.dataProvider().addFeatures([f])[0]
+    del old
+
+    # Force the migration to fail; ensure_tables catches it, logs
+    # Critical, and moves on -- the disk table stays pre-M8.
+    monkeypatch.setattr(
+        SiteLayers,
+        "_rebuild_picks",
+        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated rebuild failure")),
+    )
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    assert any("could not prepare table 'picks'" in m for m in message_log)
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert "feature_id" not in names  # proves the rebuild really did not run
+
+    got = layers2.picks_for("raw/FILE__001.DZT")
+
+    assert [(p.trace, p.time_ns) for p in got] == [(4, 11.0)]
+    assert got[0].feature_id is None
+    assert got[0].seq is None
+    layers2.detach()
+
+
+def test_write_pick_refuses_when_the_picks_layer_predates_a_grid_crs_change(populated, monkeypatch):
+    """`_ensure_table`'s own docstring names this exact scenario: a
+    grid's CRS changing (`replace_grid`) means every table should be
+    rebuilt, but if `_rebuild_picks` fails, `ensure_tables` logs
+    Critical and moves on *without* reloading the already-open `picks`
+    layer -- so it keeps declaring its old CRS while `self.crs()` (the
+    package CRS, taken from the first grid) now returns the new one.
+    `_pick_point` computes a point in the new CRS via the same
+    `_line_points` -> `_points` path `_refill` already guards for the
+    derived tables; `picks` needs the identical guard, not a milder one,
+    because unlike them it is never regenerated on the next refresh.
+    """
+    session, layers, _ = populated
+    monkeypatch.setattr(
+        SiteLayers,
+        "_rebuild_picks",
+        lambda self, *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated rebuild failure")),
+    )
+
+    session.replace_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32615", 0.5))
+
+    assert layers.layers["picks"].crs().authid() == "EPSG:32616"
+    assert layers.crs().authid() == "EPSG:32615"
+    with pytest.raises(RuntimeError, match="picks"):
+        layers.write_pick(_a_pick())
+    assert layers.feature_count("picks") == 0  # refused, not written

@@ -10,9 +10,10 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.render import PercentileClip, colormap_names
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import synthetic_dzt
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QStyle
 
@@ -1066,3 +1067,260 @@ def test_a_preview_that_triggers_a_load_does_not_persist_an_empty_stack(opened):
 
     assert dock.image is not None  # sanity: the preview really rendered
     assert key2 not in session.site.stacks
+
+
+# ---- pick mode and pick refusal (M8, spec §4.1, §4.3) ----------------------
+
+
+def test_set_pick_mode_reaches_the_view(opened):
+    """`ProfileView.set_pick_mode` shipped in Plan 2 with no caller at
+    all -- a manual tester found it, went looking for a pick mode, and
+    concluded the build was broken rather than that the feature was
+    unbuilt (spec §1). This is its first consumer."""
+    session, dock, key, line = opened
+    dock.set_pick_mode(True)
+    assert dock.view.cursor().shape() == Qt.CursorShape.CrossCursor
+    dock.set_pick_mode(False)
+    assert dock.view.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_a_pick_while_previewing_is_refused_out_loud(previewing):
+    """M7 guarded this and returned silently, because nothing consumed
+    the signal yet. Now that a pick is real, silence is indistinguishable
+    from a pick that landed -- the user shift-clicks a previewed line and
+    nothing whatever happens. The guard stays; it just says why now.
+
+    NOTE on the brief's test: as given, this test never entered a preview
+    at all -- the `previewing` fixture only loads two lines and opens the
+    first as the WORKING line (see `test_preview_renders_the_previewed_
+    line_not_the_working_one`, which calls `session.set_preview` itself to
+    get there). Without that call, `dock._preview_key` stays `None` and
+    the emitted pick landed on the working line -- confirmed directly: run
+    as the brief wrote it, `emitted` held one tuple and the test failed on
+    `assert emitted == []`, not on the guard this test means to exercise.
+    Added the same `session.set_preview(keys[1], 5)` call the sibling test
+    uses to actually reach the previewing state before picking.
+    """
+    dock, session, keys = previewing
+    session.set_preview(keys[1], 5)
+    emitted = []
+    errors = []
+    dock.pick_requested.connect(lambda k, t, ns: emitted.append((k, t, ns)))
+    dock.error.connect(errors.append)
+
+    dock.view.pick_requested.emit(20, 15.0)
+
+    assert emitted == []
+    assert len(errors) == 1
+    assert "preview" in errors[0].lower()
+
+
+# ---- picks on the profile (M8, spec §4.3) ----------------------------------
+
+
+@pytest.fixture
+def dock_with_picks(qgis_app, tmp_path):
+    """A ProfileDock over a session that can actually store picks."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.layers import SiteLayers
+    from plugin_testing import synthetic_dzt
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    keys = session.keys()
+    dock = ProfileDock(session)
+    session.open_line(keys[0])
+    yield dock, session, layers, keys
+    dock.deleteLater()
+    layers.detach()
+    project.clear()
+
+
+def test_a_new_pick_appears_on_the_profile_without_reopening_the_line(dock_with_picks):
+    """`picks_changed` was declared in Plan 2, never emitted and never
+    connected (spec §1). This is its first consumer, and the reason it
+    exists: a pick the user just made has to show up where they made
+    it."""
+    dock, session, layers, keys = dock_with_picks
+    assert dock.view._picks == []
+
+    session.add_pick(keys[0], 12, 18.0)
+
+    assert dock.view._picks == [(12, 18.0)]
+
+
+def test_opening_a_line_shows_the_picks_already_on_it(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    session.open_line(keys[1])
+    assert dock.view._picks == []
+
+    session.open_line(keys[0])
+
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_a_preview_shows_the_previewed_lines_own_picks(dock_with_picks):
+    """Reading is not authoring. The view follows `display_key`, so a
+    preview shows the hovered line's picks -- the point of a preview is
+    to see what is on that line, interpretation included -- while
+    `add_pick` still refuses to write there."""
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    session.open_line(keys[1])
+    session.add_pick(keys[1], 44, 33.0)
+    session.open_line(keys[0])
+
+    session.set_preview(keys[1], 20)
+    assert dock.view._picks == [(44, 33.0)]
+
+    session.clear_preview()
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_closing_the_site_clears_the_picks_from_the_view(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+
+    session.close_site()
+
+    assert dock.view._picks == []
+
+
+def test_a_failing_pick_read_is_logged_not_escaped(dock_with_picks, monkeypatch, message_log):
+    """`picks_changed` is a Qt signal, so this slot's body runs under
+    C++: an exception escaping it reaches qFatal() in the LTR container.
+    The conftest's `_no_swallowed_slot_exceptions` fixture is what turns
+    a regression here into a local red test."""
+    dock, session, layers, keys = dock_with_picks
+
+    def boom(key):
+        raise RuntimeError("the picks table went away")
+
+    monkeypatch.setattr(session, "picks_for", boom)
+    session.picks_changed.emit()
+
+    assert any("the picks table went away" in m for m in message_log)
+
+
+# ---- live picks editing (M8 acceptance walkthrough, Finding A) ------------
+#
+# The author's own words: "if I selected a point and deleted it and hit
+# save, the pick stayed visible in the profile until I made another pick
+# in the profile, at which time the deleted ones would disappear." The
+# cause was that nothing watched the `picks` layer's OWN editing signals --
+# `picks_changed` was emitted from exactly one place (`SiteSession.
+# add_pick`). These are the end-to-end (dock + real SiteLayers) versions:
+# real edit-buffer operations (`startEditing`/`deleteFeature`/
+# `commitChanges`), asserting on `dock.view._picks` itself, not on the
+# signal being emitted by hand.
+
+
+def test_a_buffered_delete_then_commit_refreshes_the_profile(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    assert dock.view._picks == [(5, 10.0)]
+
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+    assert dock.view._picks == []  # visible before commitChanges() -- live
+
+    assert picks.commitChanges()
+    assert dock.view._picks == []  # and it STAYS gone -- the reported defect
+
+
+def test_a_buffered_add_then_commit_refreshes_the_profile(dock_with_picks):
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 706.0)))
+    f.setAttribute("line_key", keys[0])
+    f.setAttribute("trace", 7)
+    f.setAttribute("time_ns", 22.0)
+    assert picks.addFeature(f)
+    assert dock.view._picks == [(7, 22.0)]  # live, before any commit
+
+    assert picks.commitChanges()
+    assert dock.view._picks == [(7, 22.0)]
+
+
+def test_a_geometry_move_through_the_edit_buffer_refreshes_the_profile(dock_with_picks):
+    """A geometry-only move doesn't change what the view shows -- trace
+    and time, not position -- so this counts `picks_changed` emissions
+    instead of view content, proving the wiring actually fires for
+    `geometryChanged` and not merely that unrelated content still
+    matches."""
+    from qgis.core import QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    seen: list[int] = []
+    session.picks_changed.connect(lambda: seen.append(1))
+
+    assert picks.startEditing()
+    assert picks.changeGeometry(fid, QgsGeometry.fromPointXY(QgsPointXY(501.0, 707.0)))
+
+    assert seen
+    picks.commitChanges()
+
+
+def test_a_rollback_restores_the_profile_to_what_is_on_disk(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    session.add_pick(keys[0], 5, 10.0)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.deleteFeature(fid)
+    assert dock.view._picks == []
+
+    assert picks.rollBack()
+
+    assert dock.view._picks == [(5, 10.0)]
+
+
+def test_the_picks_binding_survives_a_site_close_and_reopen(dock_with_picks, tmp_path):
+    """A site reopen replaces the `picks` layer OBJECT outright
+    (`SiteLayers.detach()` empties its registry, `ensure_tables()` opens
+    a fresh one) -- a connection made once and never renewed would point
+    at a dead wrapper and silently stop updating the profile after this,
+    the exact defect `MapLink._rebind_layer` exists to prevent for its
+    own three layers."""
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY
+
+    dock, session, layers, keys = dock_with_picks
+    session.save()
+    key0 = keys[0]
+
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+    session.open_line(key0)
+
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0, 700.0)))
+    f.setAttribute("line_key", key0)
+    f.setAttribute("trace", 9)
+    f.setAttribute("time_ns", 15.0)
+    assert picks.addFeature(f)
+
+    assert dock.view._picks == [(9, 15.0)]

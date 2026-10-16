@@ -26,6 +26,7 @@ import contextlib
 from typing import Any
 
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCoordinateTransform,
     QgsGeometry,
@@ -122,9 +123,30 @@ class MapLink(QObject):
         session.site_closed.connect(self._on_lines_changed)
         canvas.destinationCrsChanged.connect(self._on_lines_changed)
 
-        # None means "not yet bound"; see _rebind_layer for why this is
-        # tracked separately from `_lines_layer()`'s own lookup.
-        self._lines_layer_bound: QgsVectorLayer | None = None
+        # Selecting a feature in any of these is a deliberate gesture that
+        # navigates (spec §3.4). `lines` promotes; `picks` and `marks`
+        # jump to a line AND a trace. QGIS's own Select tool, no tool
+        # slot of ours, no stolen clicks. This dict is the single place
+        # that list is written down -- a `SELECTABLE` class constant used
+        # to duplicate it, but both loops that matter (`_rebind_layer`,
+        # `dispose`) already iterated `_selection_slots` itself rather
+        # than the constant, which left `SELECTABLE` a second,
+        # unchecked copy with only the `dict.fromkeys` seed below still
+        # reading it. Final review, Minor 5: deleted, and `_bound` is now
+        # seeded from this dict directly, so the two can never drift
+        # apart again.
+        self._selection_slots = {
+            "lines": self._on_selection,
+            "picks": self._on_pick_selection,
+            "marks": self._on_mark_selection,
+        }
+        # None means "not yet bound"; tracked per layer, and separately
+        # from each `layers.layers[...]` lookup, for the reason
+        # _rebind_layer gives. One NAMED slot per layer rather than a
+        # lambda or `self.sender()`: a bound method is what
+        # `disconnect()` can reliably take back off, and dispose() has to
+        # be able to.
+        self._bound: dict[str, QgsVectorLayer | None] = dict.fromkeys(self._selection_slots)
         self._rebind_layer()
 
     # ---- cache ------------------------------------------------------------
@@ -163,11 +185,14 @@ class MapLink(QObject):
         self._geoms = geoms
         return geoms
 
-    def _lines_layer(self) -> QgsVectorLayer | None:
-        layer = self.layers.layers.get("lines")
+    def _selectable_layer(self, name: str) -> QgsVectorLayer | None:
+        layer = self.layers.layers.get(name)
         if layer is None or sip.isdeleted(layer):
             return None
         return layer
+
+    def _lines_layer(self) -> QgsVectorLayer | None:
+        return self._selectable_layer("lines")
 
     def _transform(self, layer: QgsVectorLayer) -> QgsCoordinateTransform | None:
         """`None` means "already in the canvas CRS, do not transform" --
@@ -362,7 +387,7 @@ class MapLink(QObject):
         return None if best is None else (best[1], best[2])
 
     def _rebind_layer(self) -> None:
-        """Follow the `lines` layer across rebuilds.
+        """Follow the selectable layers across rebuilds.
 
         A site reopen (`SiteLayers.detach()` clearing its registry, then
         `refresh()` rebuilding it -- the sequence `_on_site_opened` runs on
@@ -375,20 +400,37 @@ class MapLink(QObject):
         construction and never renewed would point at a dead wrapper after
         such a reopen and promotion would silently stop working -- with no
         error, which is the worst kind of stop.
+
+        M8: three layers, not one. `picks` and `marks` are rebound on the
+        same signals and released by the same `dispose()`, because a
+        reopen replaces all four layer objects together -- binding only
+        `lines` across a reopen while leaving pick and mark navigation
+        pointing at dead wrappers would fail exactly the way this method
+        exists to prevent, just less visibly.
         """
-        old = self._lines_layer_bound
-        if old is not None and not sip.isdeleted(old):
-            # Same two exceptions dispose() suppresses around this same
-            # disconnect call, and for the same reason: a RuntimeError from
-            # a wrapper that reports as not-deleted but whose underlying
-            # C++ object is gone regardless must not abort this method
-            # before the new layer is bound below.
-            with contextlib.suppress(TypeError, RuntimeError):
-                old.selectionChanged.disconnect(self._on_selection)
-        layer = self._lines_layer()
-        self._lines_layer_bound = layer
-        if layer is not None:
-            layer.selectionChanged.connect(self._on_selection)
+        # Iterates `_selection_slots` itself -- the single source of
+        # truth for which layers are selectable (see its own comment in
+        # __init__) -- rather than looking each slot up by name from some
+        # separate list: a name missing from `_selection_slots` would
+        # raise `KeyError` here, and `dispose()` runs this same shape of
+        # loop with a promise that nothing here may abort before its
+        # scene-removal loop -- a `KeyError` would be exactly that
+        # failure, just reached a different way than Item I4.
+        for name, slot in self._selection_slots.items():
+            old = self._bound.get(name)
+            if old is not None and not sip.isdeleted(old):
+                # Same two exceptions dispose() suppresses around this
+                # same disconnect call, and for the same reason: a
+                # RuntimeError from a wrapper that reports as not-deleted
+                # but whose underlying C++ object is gone regardless must
+                # not abort this method before the remaining layers are
+                # bound below.
+                with contextlib.suppress(TypeError, RuntimeError):
+                    old.selectionChanged.disconnect(slot)
+            layer = self._selectable_layer(name)
+            self._bound[name] = layer
+            if layer is not None:
+                layer.selectionChanged.connect(slot)
 
     def _on_selection(self, *_: Any) -> None:
         """A preview becomes the working line when the user selects the
@@ -416,6 +458,67 @@ class MapLink(QObject):
                 self.session.open_line(key)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_pick_selection(self, *_: Any) -> None:
+        try:
+            self._jump_to_feature("picks", "trace")
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not jump to the selected pick: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_mark_selection(self, *_: Any) -> None:
+        try:
+            self._jump_to_feature("marks", "scan")
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not jump to the selected mark: {exc}", Qgis.MessageLevel.Critical)
+
+    def _jump_to_feature(self, name: str, trace_field: str) -> None:
+        """Open the selected feature's line and put the cursor on its
+        trace (spec §3.4's closing promise, and §4.4 for marks).
+
+        `open_line` first, `set_trace` second, and not the other way
+        round: `set_trace` structurally ignores a key that is not
+        `current_key`, so a trace set before the promotion would be
+        silently dropped. That ordering is the whole reason this is one
+        method rather than two call sites.
+
+        Promotion goes through `session.open_line`, the same path the
+        survey tree and the `lines` layer already use, so no two ways of
+        opening a line can diverge.
+        """
+        layer = self._selectable_layer(name)
+        if layer is None or not self.session.is_open:
+            return
+        ids = layer.selectedFeatureIds()
+        if len(ids) != 1:
+            # A multi-selection has no single answer, and guessing one is
+            # worse than doing nothing (spec §3.4). An empty selection is
+            # the ordinary result of clicking empty map and must not
+            # close the line the user is working on.
+            return
+        feature = layer.getFeature(ids[0])
+        key = str(feature["line_key"])
+        if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+            # Reachable by design, not just corruption: `remove_line`
+            # deliberately leaves a line's picks and marks in place
+            # rather than deleting authored data along with the line
+            # that produced it, so selecting one of those orphans is an
+            # ordinary consequence of removing a line, not a bug.
+            # Returning bare here would be the same "silence is
+            # indistinguishable from success" complaint this milestone
+            # fixed for a refused pick write (`write_pick` logs when a
+            # line cannot be placed) -- a click that visibly selected a
+            # feature and then did nothing looks exactly like a working
+            # jump that happened to land nowhere.
+            _log(f"the selected {name[:-1]} names line {key!r}, which is no longer in the site")
+            return
+        self.session.open_line(key)
+        trace = feature[trace_field]
+        if trace == NULL:
+            # `picks` is editable, so a hand-digitised row can carry a
+            # line_key and nothing else. Opening its line is still the
+            # right answer; `int(NULL)` raises, and this runs in a slot.
+            return
+        self.session.set_trace(key, int(trace))
 
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
@@ -558,7 +661,7 @@ class MapLink(QObject):
         gone (a second `dispose()` call, or one made after the canvas
         itself tore its signals down) -- idempotency needs that caught,
         the same way the item removal below tolerates being called twice.
-        The `lines` layer's `selectionChanged` connection (see
+        Each selectable layer's `selectionChanged` connection (see
         `_rebind_layer`) is released the same way, so disposal stops the
         link promoting as well as drawing. The Leave-event filter
         installed on `canvas.viewport()` (see `eventFilter`) is removed
@@ -593,16 +696,23 @@ class MapLink(QObject):
                 self.canvas.xyCoordinates.disconnect(self._on_xy)
             with contextlib.suppress(TypeError, RuntimeError):
                 self.canvas.viewport().removeEventFilter(self)
-        # The lines layer is rebound across every site reopen (see
-        # _rebind_layer), so disposal has to release whichever instance is
-        # currently bound -- guarded the same way as the canvas above, and
-        # for the same reason: nothing here may abort before the
-        # scene-removal loop below.
-        layer = self._lines_layer_bound
-        self._lines_layer_bound = None
-        if layer is not None and not sip.isdeleted(layer):
-            with contextlib.suppress(TypeError, RuntimeError):
-                layer.selectionChanged.disconnect(self._on_selection)
+        # The selectable layers are rebound across every site reopen (see
+        # _rebind_layer), so disposal has to release whichever instances
+        # are currently bound -- guarded the same way as the canvas above,
+        # and for the same reason: nothing here may abort before the
+        # scene-removal loop below. Iterates `_selection_slots` itself,
+        # the single source of truth for which layers are selectable (see
+        # its own comment in __init__), rather than looking each slot up
+        # by name from some separate list -- that could raise `KeyError`
+        # for a name the two disagreed about, which would abort this
+        # method before `_marker`/`_band` come off the scene -- the Item
+        # I4 leak this method exists to prevent.
+        for name, slot in self._selection_slots.items():
+            layer = self._bound.get(name)
+            self._bound[name] = None
+            if layer is not None and not sip.isdeleted(layer):
+                with contextlib.suppress(TypeError, RuntimeError):
+                    layer.selectionChanged.disconnect(slot)
         items, self._marker, self._band = (self._marker, self._band), None, None
         for item in items:
             if item is None or sip.isdeleted(item):

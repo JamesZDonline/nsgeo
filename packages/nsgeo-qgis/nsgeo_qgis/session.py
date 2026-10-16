@@ -15,6 +15,9 @@ none of this is protected by a lock.
 from __future__ import annotations
 
 import dataclasses
+import datetime as _dt
+import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,36 @@ _GPKG_SUFFIX = ".nsgeo.gpkg"
 # movable in principle -- it is shared memory backing a live `-wal`,
 # meaningless once detached from it.
 _SQLITE_JOURNALS = ("-wal", "-shm", "-journal")
+
+
+@dataclasses.dataclass(frozen=True)
+class Pick:
+    """One authored pick: a trace and a two-way time on one line.
+
+    Time is the truth. `distance_m`, `depth_m` and `velocity_m_ns` are
+    conveniences that can be recomputed from the line's geometry and its
+    resolved velocity model, and are `None` when the line cannot supply
+    them (a time-triggered acquisition has no distance axis).
+
+    `feature_id` and `seq` are written null by M8 and exist now so that a
+    horizon later is an ordered run of existing picks sharing a
+    `feature_id`, needing no migration of an authored table (spec §4.2).
+    `picks` is the one table `survey.nsgeo.json` cannot regenerate, and
+    this project has already had to repair its storage twice; the cheap
+    time to add these columns is before there are horizons to migrate.
+    """
+
+    line_key: str
+    trace: int
+    time_ns: float
+    distance_m: float | None
+    depth_m: float | None
+    velocity_m_ns: float | None
+    stack_json: str
+    note: str
+    created: str
+    feature_id: str | None = None
+    seq: int | None = None
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -83,6 +116,10 @@ class SiteSession(QObject):
         self._selection: tuple[int, int] = (-1, -1)
         self._preview_key: str | None = None
         self._preview_trace = -1
+        # Set by SiteLayers' own constructor (see set_pick_store). None
+        # until then, which is the normal state of a session built by a
+        # test that has no layers at all.
+        self._pick_store: Any | None = None
 
     # ---- state ------------------------------------------------------------
     @property
@@ -740,6 +777,139 @@ class SiteSession(QObject):
         if self._selection != (-1, -1) and self._current_key is not None:
             self._selection = (-1, -1)
             self.selection_changed.emit(self._current_key, -1, -1)
+
+    # ---- picks (spec §4) --------------------------------------------------
+    @property
+    def pick_store(self) -> Any | None:
+        # The read half of set_pick_store. Observed by tests, no production
+        # caller: the write path reaches the store through _pick_store
+        # directly. Kept anyway -- it is the symmetric public counterpart
+        # to a public setter, and it is what lets the registration test
+        # assert without reaching into the private attribute.
+        return self._pick_store
+
+    def set_pick_store(self, store: Any) -> None:
+        """Register the object that actually writes picks.
+
+        Spec §4.1 names `session.add_pick`, and the invariant it enforces
+        (a pick targets the WORKING line) belongs here beside
+        `set_trace`'s and `set_selection`'s identical guards. The *write*
+        cannot be here: this object holds no `QgsVectorLayer`, and the
+        parent spec §4.3 rule 2 forbids opening a second OGR handle on a
+        GeoPackage QGIS already has open. `SiteLayers` holds the loaded
+        layer and registers itself from its own constructor.
+
+        This makes the reference cycle session <-> layers explicit.
+        Deliberate: neither class defines `__del__`, so Python's cycle
+        collector handles it, and `plugin.unload()` drops both together.
+        """
+        self._pick_store = store
+
+    def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
+        """Author one pick on the WORKING line.
+
+        `key` must be `current_key`. This is the same guard `set_trace`
+        and `set_selection` carry, and it exists here rather than only in
+        the dock for the reason spec §3.3 gives: `current_key` is what
+        every destructive operation resolves through, and a preview must
+        never reach one. M7's reviews found three separate attempts by a
+        preview to reach a write; the structural answer is to refuse in
+        the session, where no caller can forget.
+
+        Unlike `set_trace`, this RAISES rather than returning silently. A
+        trace that does not move is invisible and harmless; a pick that
+        does not appear is authored data lost with no message. The caller
+        is `plugin.py`'s relay, which puts the reason on the message bar.
+
+        `picks_changed` is emitted only after the store's write returns:
+        announcing a pick that is not on disk is the worst report
+        available for the one table `survey.nsgeo.json` cannot
+        regenerate.
+
+        Does NOT dirty the session. A pick goes straight into the
+        GeoPackage; `survey.nsgeo.json` is untouched, so `Save site`
+        would have nothing to write and prompting for it would be a lie.
+        """
+        if key != self._current_key:
+            raise ValueError(
+                f"a pick targets the working line ({self._current_key!r}), not {key!r}; "
+                f"select the line on the map to work on it"
+            )
+        if self._pick_store is None:
+            raise RuntimeError("no pick store is attached to this session; cannot author a pick")
+        if not math.isfinite(time_ns):
+            raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
+        line = self.line_for_key(key)
+        index = max(0, min(int(trace), line.n_traces - 1))
+        # The view emits a pick for any left click in the widget, and
+        # ViewTransform.time_of_y does not clamp -- a click in the top
+        # margin yields a time before the record starts. Clamped into the
+        # line's own recorded window, the same way the trace is.
+        #
+        # Final review, Minor 8: `t_end` here is `t0 + (n_samples - 1) *
+        # dt_ns` -- the time of the LAST sample -- while
+        # `ViewTransform.t_end` is `t0 + n_samples * dt_ns`, one whole
+        # sample interval later. That is deliberate, not a mismatch to
+        # reconcile: a pick names a sample, and `n_samples - 1` is the
+        # last one that actually exists, so this errs inward rather than
+        # clamping to a time no sample was ever recorded at. Do not
+        # "fix" the two to match.
+        t0 = float(line.header.position_ns)
+        t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
+        lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
+        time = max(lo, min(float(time_ns), hi))
+        model = self.resolved_velocity(key)
+        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
+        # call `np.asarray` on whatever they are handed, so this keeps
+        # numpy out of session.py's imports entirely for one scalar.
+        times = [time]
+        pick = Pick(
+            line_key=key,
+            trace=index,
+            time_ns=time,
+            distance_m=self._pick_distance(line, index),
+            depth_m=float(model.depth_at(times)[0]),
+            velocity_m_ns=float(model.velocity_at(times)[0]),
+            # insert=False: reading the stack to record it must not be
+            # what creates one. M7's Finding 4 is the same shape -- a
+            # hovered line persisted an empty StepStack purely because
+            # something asked for it.
+            stack_json=json.dumps(self.stack_for(key, insert=False).to_dicts()),
+            note="",
+            created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        )
+        self._pick_store.write_pick(pick)
+        self.picks_changed.emit()
+        return pick
+
+    @staticmethod
+    def _pick_distance(line: Line, index: int) -> float | None:
+        """Distance along the line at `index`, or None when the line has
+        no distance axis at all. `Line.distance_along()` raises
+        `ValueError` for a time-triggered acquisition
+        (`traces_per_metre <= 0`); `ProfileDock._safe_distance` and
+        `SiteLayers._line_points` already treat that as a property of the
+        file rather than an error. Time is the truth here, so a missing
+        distance is a null field, not a refused pick.
+        """
+        try:
+            return float(line.distance_along()[index])
+        except (ValueError, IndexError):
+            return None
+
+    def picks_for(self, key: str) -> list[Pick]:
+        """Every pick on `key`, ordered by (trace, time).
+
+        Empty rather than raising when no store is attached: this is read
+        from a render slot, and a raise there reaches `qFatal()` in the
+        CI container. Reading is not authoring, so unlike `add_pick`
+        there is no invariant to protect -- a preview may show its own
+        line's picks.
+        """
+        if self._pick_store is None:
+            return []
+        picks: list[Pick] = self._pick_store.picks_for(key)
+        return picks
 
     # ---- preview (spec §3.3) ----------------------------------------------
     def set_preview(self, key: str | None, trace: int = -1) -> None:
