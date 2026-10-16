@@ -11,7 +11,8 @@ from typing import Any
 
 from nsgeo.processing import available_steps, build_step, default_params, get_step, required_params
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -28,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis import help_pages
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
@@ -174,6 +176,10 @@ class ProcessingDock(QgsDockWidget):
         self._delete_presets_menu = QMenu("Delete", self.presets_menu)
         self.presets_button.setMenu(self.presets_menu)
         bottom.addWidget(self.presets_button)
+        self.help_button = QPushButton("Help")
+        self.help_button.setToolTip("Open a page explaining the selected step")
+        self.help_button.setEnabled(False)
+        bottom.addWidget(self.help_button)
         session.presets_changed.connect(self._rebuild_presets_menu)
         session.site_opened.connect(self._rebuild_presets_menu)
         self._rebuild_presets_menu()
@@ -194,6 +200,7 @@ class ProcessingDock(QgsDockWidget):
         # the "replace every other line" prompt entirely. The lambda
         # drops the `checked` argument so a real click always confirms.
         self.apply_button.clicked.connect(lambda: self.apply_to_grid())
+        self.help_button.clicked.connect(lambda: self.open_help())
         self.list.itemChanged.connect(self._on_item_changed)
         self.list.currentRowChanged.connect(self._on_current_row)
         self.list.model().rowsMoved.connect(self._on_rows_moved)
@@ -259,6 +266,30 @@ class ProcessingDock(QgsDockWidget):
         # two together mean "enabled iff a line is open AND a row in it
         # is selected".
         self.diff_button.setEnabled(row >= 0)
+        name = self._selected_step_name()
+        self.help_button.setEnabled(name is not None and help_pages.page_path(name) is not None)
+
+    def _selected_step_name(self) -> str | None:
+        """The name of the step at the current row, read from the session's
+        stack rather than the list item's text so it is right even mid-edit."""
+        key = self.key()
+        row = self.list.currentRow()
+        if key is None or row < 0:
+            return None
+        entries = self.session.stack_for(key).entries
+        return entries[row][0].name if row < len(entries) else None
+
+    def open_help(self) -> None:
+        name = self._selected_step_name()
+        if name is None:
+            return
+        # Re-resolved at click time: the file may have vanished since the
+        # button was enabled (a partial install, a sync tool).
+        path = help_pages.page_path(name)
+        if path is None:
+            self.status.setText(f"No help page for {name}.")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
     def _on_stack_changed(self, key: str) -> None:
         if key == self.key():

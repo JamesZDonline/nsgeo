@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps
+from nsgeo_qgis import help_pages
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui import processing_dock
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
@@ -264,3 +268,91 @@ def test_apply_button_click_confirms_before_applying(opened, answer_modal):
     other = session.keys()[1]
     assert len(session.stack_for(other)) == 0
     assert "cancelled" in dock.status.text()
+
+
+@pytest.fixture
+def help_dir(tmp_path, monkeypatch):
+    # Spaces and a non-ASCII character in the path: Review Focus 1.
+    d = tmp_path / "Plug-ins dé test" / "help"
+    d.mkdir(parents=True)
+    (d / "dewow.html").write_text("x", encoding="utf-8")
+    (d / "background_mean.html").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(help_pages, "HELP_DIR", d)
+    return d
+
+
+@pytest.fixture
+def opened_urls(monkeypatch):
+    urls = []
+    monkeypatch.setattr(
+        processing_dock.QDesktopServices, "openUrl", lambda url: urls.append(url) or True
+    )
+    return urls
+
+
+def test_help_button_sits_right_after_presets(opened):
+    _, dock, _ = opened
+    row = next(
+        dock.widget().layout().itemAt(i).layout()
+        for i in range(dock.widget().layout().count())
+        if dock.widget().layout().itemAt(i).layout() is not None
+        and dock.widget().layout().itemAt(i).layout().indexOf(dock.presets_button) >= 0
+    )
+    assert dock.help_button.text() == "Help"
+    assert row.indexOf(dock.help_button) == row.indexOf(dock.presets_button) + 1
+
+
+def test_help_disabled_with_no_line_or_no_selection(qgis_app, opened, help_dir):
+    assert not ProcessingDock(SiteSession()).help_button.isEnabled()
+    _, dock, _ = opened
+    dock.add_step("dewow")
+    dock.list.setCurrentRow(-1)
+    assert not dock.help_button.isEnabled()
+
+
+def test_help_enabled_only_for_steps_with_a_page(opened, help_dir):
+    _, dock, _ = opened
+    dock.add_step("dewow")
+    dock.add_step("gain_agc")
+    dock.list.setCurrentRow(0)
+    assert dock.help_button.isEnabled()
+    dock.list.setCurrentRow(1)
+    assert not dock.help_button.isEnabled()  # no gain_agc.html
+
+
+def test_help_click_opens_that_steps_page(opened, help_dir, opened_urls):  # Review Focus 1
+    _, dock, _ = opened
+    dock.add_step("dewow")
+    dock.list.setCurrentRow(0)
+    dock.help_button.click()
+    assert [Path(u.toLocalFile()) for u in opened_urls] == [help_dir / "dewow.html"]
+
+
+def test_help_follows_the_step_after_a_move(opened, help_dir, opened_urls):  # Review Focus 2
+    session, dock, key = opened
+    dock.add_step("dewow")
+    dock.add_step("background_mean")
+    dock.list.setCurrentRow(1)  # background_mean
+    session.move_step(key, 1, 0)  # rebuild keeps row 1, which is now dewow
+    dock.help_button.click()
+    assert [Path(u.toLocalFile()) for u in opened_urls] == [help_dir / "dewow.html"]
+
+
+def test_help_works_for_an_unchecked_step(opened, help_dir, opened_urls):  # Review Focus 3
+    session, dock, key = opened
+    dock.add_step("dewow")
+    session.set_step_enabled(key, 0, False)
+    dock.list.setCurrentRow(0)
+    assert dock.help_button.isEnabled()
+    dock.help_button.click()
+    assert len(opened_urls) == 1
+
+
+def test_help_with_the_page_gone_opens_nothing(opened, help_dir, opened_urls):  # Review Focus 4
+    _, dock, _ = opened
+    dock.add_step("dewow")
+    dock.list.setCurrentRow(0)
+    (help_dir / "dewow.html").unlink()
+    dock.help_button.click()
+    assert opened_urls == []
+    assert "dewow" in dock.status.text()
