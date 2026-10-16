@@ -9,15 +9,16 @@ with a QGIS plugin.
 > **Status: 0.1.0, the first release, experimental.** The QGIS plugin imports
 > DZT files into grids placed on the map, links the map and the profile both
 > ways, processes profiles, records picks, and builds time and depth slices. It
-> installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x. macOS is untested,
-> and the [getting-started guide](docs/guide/getting-started.md) lists the known
-> issues.
+> installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x, and each release's
+> zip is checked by installing it into QGIS 3.40, 3.44 and 4.2. macOS is
+> untested, and the [getting-started guide](docs/guide/getting-started.md) lists
+> the known issues.
 
 ## Install
 
 1. Download `nsgeo_qgis-<version>.zip` from the
-   [Releases page](https://github.com/JamesZDonline/nsgeo/releases). Do not
-   unzip it.
+   [Releases page](https://github.com/JamesZDonline/nsgeo/releases), not the
+   *Source code* downloads, which will not install. Do not unzip it.
 2. In QGIS, choose **Plugins → Manage and Install Plugins… → Install from ZIP**,
    choose the zip, and click **Install Plugin**. Click **Yes** at QGIS's security
    warning, which it shows for any plugin installed from a zip.

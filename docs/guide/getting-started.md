@@ -24,7 +24,9 @@ need to install anything else.
 
 1. Download `nsgeo_qgis-0.1.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
-   under **Assets**. Do not unzip it, because QGIS installs the zip file as it is.
+   under **Assets**. Download that file, not the *Source code* downloads listed
+   beside it, which will not install. Do not unzip it, because QGIS installs the
+   zip file as it is.
 2. In QGIS, open **Plugins → Manage and Install Plugins…** and choose **Install
    from ZIP** on the left.
 3. Click the **…** button next to **ZIP file**, choose the zip, and click
@@ -49,14 +51,17 @@ Install Plugins… → Installed** and tick **nsgeo**.
 
 ### macOS (untested)
 
-The steps are the same, from the **Plugins** menu inside QGIS. nsgeo 0.1.0 has
-not been tried on a Mac. If you try it, please report what happens, whether it
-works or not (see [Reporting a problem](#6-reporting-a-problem)).
+The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
+downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
+**Open "safe" files after downloading** in Safari's **Settings → General** before
+you download, or use another browser. nsgeo 0.1.0 has not been tried on a Mac.
+If you try it, please report what happens, whether it works or not (see
+[Reporting a problem](#6-reporting-a-problem)).
 
 ### Linux
 
 The steps are the same. Every release is checked by installing its zip into
-QGIS 3.44 and QGIS 4.2 on Linux.
+QGIS 3.40, QGIS 3.44 and QGIS 4.2 on Linux.
 
 ### Upgrading
 
@@ -202,9 +207,9 @@ Profile**.
   that trace was recorded. Drag across the profile to select a range of traces;
   the range is drawn on the map too.
 - Hover a *different* line on the map, and the profile shows a preview of it. The
-  panel title starts with **PREVIEW:**. A preview is for looking only. Processing
-  and picks stay with the line you opened. To work on the previewed line, select
-  it on the map or click it in **nsgeo Survey**.
+  panel title shows **PREVIEW:** before the line's name. A preview is for looking
+  only. Processing and picks stay with the line you opened. To work on the
+  previewed line, select it on the map or click it in **nsgeo Survey**.
 
 The map link never takes over the map. Pan, zoom, identify and select keep
 working as usual.
@@ -249,9 +254,12 @@ line, the depth and the velocity.
 - Select a pick on the map, and its line opens with the cursor on the pick's
   trace.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
-  note, move a pick or delete one. Read
+  note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
   [Known issues](#5-known-issues-in-010) before you do.
+- Do not drag a pick to a new place on the map. It keeps the trace, time and
+  distance it was made at, so the point and its record would no longer agree.
+  To move a pick, delete it and pick again on the profile.
 
 ### Step 7: Build slices
 
@@ -308,8 +316,9 @@ A few things to know:
   only on a computer where that path exists.
 - **A pick's map position is fixed when you make it.** If you later move, resize
   or rotate its grid with **Edit grid…**, the line is redrawn in its new place but
-  the pick stays where it was. nsgeo shows a warning when this happens. So finish
-  placing a grid before you start picking on its lines.
+  the pick stays where it was. nsgeo shows a warning when this happens. The
+  warning says to see "the Picking section of the README"; this paragraph is
+  what it means. So finish placing a grid before you start picking on its lines.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the
@@ -325,15 +334,17 @@ has a simple way around it.
 
 ### Unsaved edits in the picks layer can be lost (#22)
 
-[Issue #22](https://github.com/JamesZDonline/nsgeo/issues/22). Changing a grid's
-CRS can make nsgeo rebuild the **picks** layer. If you have the picks layer in
-editing mode with changes not yet saved (a note typed in its attribute table,
-say), the rebuild throws those changes away without a warning. Picks that were
-already saved are kept.
+[Issue #22](https://github.com/JamesZDonline/nsgeo/issues/22). nsgeo keeps its
+map layers in the CRS of the site's first grid. When that CRS changes, nsgeo
+rebuilds the **picks** layer. Editing, removing or adding a grid can each do
+this, including adding a grid in a new CRS after you have removed the last one.
+If you have the picks layer in editing mode with changes not yet saved (a note
+typed in its attribute table, say), the rebuild throws those changes away without
+a warning. Picks that were already saved are kept.
 
-**Workaround:** before you open **Edit grid…** or **Set velocity…** (they open
-the same window), or use **Remove grid**, check that the picks layer is not being
-edited. If **picks** shows a pencil icon in the Layers panel, select it, choose
+**Workaround:** save or discard your picks-layer edits before you use any grid
+command: **Add grid…**, **Edit grid…**, **Set velocity…** or **Remove grid**. If
+**picks** shows a pencil icon in the Layers panel, select it, choose
 **Layer → Toggle Editing**, and then **Save** (or **Discard**) when QGIS asks.
 
 ### Moving the GeoPackage on its own can lose data (#23)
@@ -396,4 +407,6 @@ its window. Your DZT files are untouched.
    plugin.
 
 GitHub issues are public. Do not attach DZT files, coordinates, or screenshots of
-the map that would show where a site is.
+the map that would show where a site is. Error text often includes the names of
+your files and folders. Before you post it, replace any name that would identify
+a site with a made-up one such as `SITE`, or email the report instead.
