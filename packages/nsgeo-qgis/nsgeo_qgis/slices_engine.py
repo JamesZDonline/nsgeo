@@ -257,6 +257,37 @@ class SliceEngine(QObject):
     def line_count(self) -> int:
         return len(self._lines)
 
+    def prepared_lines(self) -> tuple[PreparedLine, ...]:
+        """The prepared lines, read-only. A tuple, not the live list: a
+        caller inspecting coverage must not be able to reorder or drop
+        what the next `_ensure_plans()` will plan."""
+        return tuple(self._lines)
+
+    def prepared_z_bounds(self) -> tuple[float, float] | None:
+        """The two-way time range EVERY prepared line covers, or None.
+
+        The INTERSECTION, never the union: `plan_line` refuses a cube
+        whose z range runs past any one line's own recording window, so
+        the range they have in common is the only one that can be binned.
+
+        Read off the PREPARED lines -- the same `PreparedLine` objects
+        `plan_line` validates -- rather than off the raw DZT headers,
+        which is the whole point of its existing. A preset that crops the
+        sample axis (`time_zero` drops 49 of 512 rows on this repo's own
+        real files, moving the start ~10.6 ns later) leaves the header
+        describing a window the processed line no longer has. Seeding the
+        dock's z range from the header instead of from this shipped a
+        default that could not slice at all: see
+        `test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis`.
+        """
+        if not self._lines:
+            return None
+        t0 = max(line.t0_ns for line in self._lines)
+        t1 = min(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns for line in self._lines)
+        if not t1 > t0:
+            return None
+        return (t0, t1)
+
     @property
     def frame(self) -> CubeFrame | None:
         return self._frame

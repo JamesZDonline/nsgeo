@@ -28,10 +28,41 @@ def qgis_app():
     app.exitQgis()
 
 
+class _FakeSignal:
+    """Enough of a pyqtSignal for `FakeIface` to carry one.
+
+    `FakeIface` is a plain object, not a QObject, so it cannot declare a
+    real `pyqtSignal`; promoting it to QObject would change the lifetime
+    of every fixture in this suite for one signal. Connect/emit is all the
+    plugin asks of `initializationCompleted`, and `disconnect` raises on an
+    unknown slot exactly as Qt's does, because the plugin's `unload()`
+    suppresses precisely that.
+    """
+
+    def __init__(self) -> None:
+        self._slots: list = []
+
+    def connect(self, slot) -> None:
+        self._slots.append(slot)
+
+    def disconnect(self, slot=None) -> None:
+        if slot is None:
+            self._slots.clear()
+        else:
+            self._slots.remove(slot)  # raises if never connected, as Qt does
+
+    def emit(self) -> None:
+        for slot in list(self._slots):
+            slot()
+
+
 class FakeIface:
     """The parts of QgisInterface the plugin touches."""
 
     def __init__(self) -> None:
+        #: QGIS emits this when startup -- INCLUDING restoring the saved
+        #: window layout -- is over. See `_tabify_slices_dock`.
+        self.initializationCompleted = _FakeSignal()
         from qgis.gui import QgsMapCanvas, QgsMessageBar
         from qgis.PyQt.QtWidgets import QMainWindow
 

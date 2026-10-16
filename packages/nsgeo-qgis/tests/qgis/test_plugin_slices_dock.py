@@ -15,7 +15,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
-from plugin_testing import synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -110,8 +110,16 @@ def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docke
     _ready(dock)
     assert dock.engine.mode == "streaming"
     assert not dock.resident_check.isChecked()
-    assert "faster dragging" in dock.resident_check.text()
+    # Spec 9.2's wording lives on the control, but split: the short form
+    # on the face and the full sentence in the tooltip. A QCheckBox cannot
+    # elide or wrap, so its text IS its minimum width -- the full wording
+    # measured a 555 px floor, which a dock passes straight on to the main
+    # window (see `test_the_dock_minimum_does_not_force_the_main_window_
+    # to_grow`). The cost stays on the face, where spec 9.2 wants it.
+    assert "faster dragging" in dock.resident_check.toolTip()
+    assert "memory" in dock.resident_check.text()
     assert "MB" in dock.resident_check.text() or "GB" in dock.resident_check.text()
+    assert dock.resident_check.minimumSizeHint().width() <= 360
 
     dock.resident_check.setChecked(True)
     assert dock.engine.mode == "resident"
@@ -1160,3 +1168,218 @@ def test_restoring_the_same_cube_after_a_no_op_prepare_does_not_leave_a_stale_pa
     dock.restore_cube("A__test")
     assert not dock.engine.is_running
     assert dock._pending_palette is None
+
+
+@needs_real_data
+def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_app, tmp_path):
+    """Regression, M11 walkthrough: a preset that crops rows off the FRONT
+    of the radargram leaves every prepared line starting LATER than its own
+    header says, and the dock seeded `z0`/`z1` from that raw header.
+
+    On this repo's own real files `time_zero` drops 49 of 512 rows, so a
+    prepared line spans -0.476..99.561 ns while the seeded cube asked for
+    -11.086..99.546 -- and the first slice raised, verbatim:
+
+        line 'FILE__001.DZT' spans -0.476..99.561 ns, which does not cover
+        the cube's -11.086..99.546 ns; shrink the z range or exclude the line
+
+    `time_zero` first is the ordinary preset an operator builds, not an
+    edge case. The pre-existing real-data engine test dodged precisely this
+    hazard -- "No `time_zero`: it crops rows off the front of the
+    radargram, which would shrink the line's own t0_ns below the header's
+    raw `position_ns` this test seeds `z0` from directly" -- which is why a
+    green suite shipped a default that cannot slice.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    lines = [
+        Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+        for i in range(4)
+    ]
+    session.add_lines(lines)
+    session.site.presets["p"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+
+        header = lines[0].header
+        prepared = dock.engine.prepared_z_bounds()
+        assert prepared is not None
+        # The hazard is real on this data, and this test would notice if it
+        # stopped being real: the crop must actually move the start.
+        assert prepared[0] > header.position_ns + 1.0, (prepared, header.position_ns)
+
+        # The fix: the seeded range lies inside what every prepared line
+        # covers, so `plan_line` can bin it.
+        assert dock.z0_spin.value() >= prepared[0]
+        assert dock.z1_spin.value() <= prepared[1]
+
+        # ... and the slice that used to raise now actually renders.
+        assert dock.current_values() is not None
+        assert not [m for m in errors if "does not cover" in m], errors
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path):
+    """Three lines whose time-zero lands on a different sample each -- the
+    ordinary consequence of antenna coupling changing across a survey, and
+    what `time_zero(mode="first_break")` is for.
+
+    This repo's ten real DZT files are byte-identical in the sample axis
+    (all -11.086..99.561 ns, 512 samples, and all cropped to exactly 463 by
+    `first_break`), so on real data the union and the intersection of their
+    coverage are the SAME two numbers and no real-data test can tell a
+    correct `prepared_z_bounds` from one that takes `min`/`max` the wrong
+    way round. Hence synthetic lines built to disagree.
+
+    Pinned behaviourally rather than by recomputing the same `min`/`max`
+    the method itself uses: the bounds must be plannable for EVERY line,
+    and tight -- one `dz` wider at either end must break at least one line.
+    """
+    from nsgeo.slices import CoverageError, ZAxis, plan_line
+    from tests.synthetic import write_dzt
+
+    raw = tmp_path / "raw"
+    raw.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(7)
+    # The flat band drives `first_break`; putting it at a different row in
+    # each line makes each crop a different number of samples, so the three
+    # prepared lines genuinely start at three different two-way times.
+    for i, (band, range_ns) in enumerate(((40, 110.864), (70, 104.0), (100, 98.0))):
+        data = (rng.normal(size=(512, 40)) * 1e6).astype(np.int32)
+        data[band : band + 4, :] = 5_000_000
+        write_dzt(raw / f"FILE__00{i + 1}.DZT", data, range_ns=range_ns)
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_lines(
+        [
+            Line.open(
+                raw / f"FILE__00{i + 1}.DZT",
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(3)
+        ]
+    )
+    session.site.presets["p"] = [{"step": "time_zero", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        prepared = list(dock.engine.prepared_lines())
+        starts = {round(line.t0_ns, 6) for line in prepared}
+        ends = {round(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns, 6) for line in prepared}
+        # Without this the test could pass on lines that happen to agree,
+        # which is exactly how the real files hid the bug.
+        assert len(starts) == 3, starts
+        assert len(ends) == 3, ends
+
+        bounds = dock.engine.prepared_z_bounds()
+        assert bounds is not None
+        low, high = bounds
+        dz = max(line.dt_ns for line in prepared)
+
+        # Plannable for every line: a union would hand back a range that
+        # the latest-starting (or earliest-ending) line cannot cover.
+        axis = ZAxis.from_range(low, high, dz)
+        for line in prepared:
+            plan_line(line, dock.engine.frame, axis)
+
+        # ... and tight at both ends, so a needlessly timid range fails too.
+        for wider in (
+            ZAxis.from_range(low - 2 * dz, high, dz),
+            ZAxis.from_range(low, high + 2 * dz, dz),
+        ):
+            with pytest.raises(CoverageError):
+                for line in prepared:
+                    plan_line(line, dock.engine.frame, wider)
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("value", "decimals", "upper"),
+    [
+        (-0.47636787593364716, 3, False),  # the real files' own prepared t0
+        (99.56100623309612, 4, True),  # ... and their prepared end
+        (-0.4766, 3, False),  # rounds the WRONG way without the correction
+        (12.34565, 4, True),
+        (-11.0864, 3, False),
+        (0.001, 3, False),  # exact at the precision: must not drift a step
+        (0.001, 3, True),
+        (-2.5, 1, True),
+        (-2.5, 1, False),
+    ],
+)
+def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper):
+    """`_snap_inside` exists because `QDoubleSpinBox.setValue` rounds to the
+    box's own precision, and a bound rounded the wrong way is a bound
+    escaped -- re-raising the very `CoverageError` the clamp is there to
+    prevent, now only for certain headers and only in the fourth decimal
+    place. Pins both halves: the result is ON the spin's grid, and on the
+    legal side of `value`.
+    """
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    snapped = _snap_inside(value, decimals, upper=upper)
+    assert snapped == round(snapped, decimals)  # lands on the spin's grid
+    if upper:
+        assert snapped <= value, (snapped, value)
+    else:
+        assert snapped >= value, (snapped, value)
+    # Tight: never gives away more than one step of the spin's precision.
+    assert abs(snapped - value) < 10.0**-decimals
+
+
+def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
+    """A dock widget's minimum size is a HARD floor on the main window's:
+    QGIS cannot shrink a dock area below it, so a tall dock drags the whole
+    application window taller. Reported from the M11 walkthrough as "it
+    messes up the width/height of the window", and measured in a real QGIS
+    on this profile: this dock's minimum was 556 x 1013, against 449 x 239
+    for Processing and 101 x 132 for Survey. 1013 px of hard floor does not
+    fit a 1080p screen once QGIS's own chrome is accounted for.
+
+    Four group boxes stacked cannot be made short, so the fix is that they
+    no longer have to be: the dock scrolls. Pinned on both halves -- a
+    small floor AND content that stays its natural size inside the scroll
+    area rather than being crushed into it.
+    """
+    from qgis.PyQt.QtWidgets import QScrollArea
+
+    dock = SlicesDock(SiteSession())
+    try:
+        minimum = dock.minimumSizeHint()
+        assert minimum.height() <= 400, minimum.height()
+        assert minimum.width() <= 360, minimum.width()
+
+        scroll = dock.findChild(QScrollArea)
+        assert scroll is not None
+        assert scroll.widgetResizable()
+        # The content keeps its own full height inside the scroll area --
+        # a "fix" that merely let the groups be squashed would lose rows.
+        assert scroll.widget().minimumSizeHint().height() >= 600
+
+        # ... and the dock still OPENS at a usable width, so this is not
+        # the degenerate fix of making everything collapsible to nothing.
+        assert dock.sizeHint().width() >= 280
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()

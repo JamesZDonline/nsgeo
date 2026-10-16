@@ -48,6 +48,7 @@ lean on exec() to make them unreachable.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -55,9 +56,9 @@ import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.velocity import VelocityModel
-from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer
+from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer, QgsSettings
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
 from nsgeo_qgis import plugin_version
@@ -83,6 +84,10 @@ from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
 MENU = "&nsgeo"
+
+#: Where the one-shot "Slices has been tabbed onto Processing once" flag
+#: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
+_TABIFIED_KEY = "nsgeo/slicesDockTabified"
 
 
 def _finish_with_digitise_tool(tool: DigitiseGridTool) -> None:
@@ -134,6 +139,9 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        #: Whether this session should still tab Slices onto Processing.
+        #: Read from settings in `initGui`; see `_tabify_slices_dock`.
+        self._want_tabify = False
         self.slice_layer: SliceLayer | None = None
         self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
@@ -214,8 +222,44 @@ class NsgeoPlugin:
         # competing for screen space. Processing stays the raised tab --
         # this milestone adds a capability, it does not take the screen
         # away from the one people already use.
-        main.tabifyDockWidget(self.processing_dock, self.slices_dock)
-        self.processing_dock.raise_()
+        #
+        # Deferred to the event loop, and NOT done synchronously here:
+        # QGIS restores its saved window layout AFTER loading plugins, so
+        # a `tabifyDockWidget` called from `initGui()` is silently undone
+        # before the user ever sees the window. Measured in a real QGIS
+        # 3.44 on this repo's own profile: `tabifiedDockWidgets()` came
+        # back empty for both docks at startup (the two panels stacked in
+        # one column, as reported from the M11 walkthrough), while the
+        # identical call made later, from a timer, tabbed them correctly.
+        # Nothing shorter than "after the constructor returns" is
+        # sufficient, and a zero-millisecond timer is exactly that.
+        #
+        # Once only, keyed in the profile's own settings: after the first
+        # time, QGIS's restored layout IS the user's answer, and a plugin
+        # that re-tabs on every start would overrule anyone who had
+        # deliberately dragged the two apart.
+        # Decided ONCE, here, and remembered for both attempts below: if
+        # the settings flag were re-read inside the slot, the first
+        # attempt would set it and the second would then decline to undo
+        # QGIS's overwrite.
+        self._want_tabify = not QgsSettings().value(_TABIFIED_KEY, False, type=bool)
+        if self._want_tabify:
+            # `initializationCompleted` is QGIS's own "startup is over"
+            # signal, and restoring the saved window layout is part of
+            # that startup -- measured in a real QGIS 3.44 on this repo's
+            # profile: our tab was in place at 1.4 s, QGIS's restore wiped
+            # it at 2.67 s (the main window resized in the same tick), and
+            # `initializationCompleted` fired at 2.95 s. Hence the signal
+            # and not a delay: any fixed timeout would be a guess at a
+            # number that varies with the machine and the profile.
+            self.iface.initializationCompleted.connect(self._tabify_slices_dock)
+            # ... and the timer as well, for the OTHER way this plugin
+            # gets loaded: enabled by hand from the Plugin Manager, with
+            # QGIS long since initialised, `initializationCompleted` has
+            # already fired and will never fire again. Nothing overwrites
+            # the layout in that case, so this attempt is the one that
+            # sticks.
+            QTimer.singleShot(0, self._tabify_slices_dock)
         self.docks.append(self.slices_dock)
 
         # The active slice on the map: owned here (not by the dock) for
@@ -247,7 +291,40 @@ class NsgeoPlugin:
         self.session.site_opened.connect(self._update_enabled)
         self.session.site_closed.connect(self._update_enabled)
 
+    def _tabify_slices_dock(self) -> None:
+        """Tab Slices onto Processing, once, after QGIS has restored its
+        own layout.
+
+        Called twice by design (see `initGui`) and idempotent, so the
+        second call is free when the first already stuck. A slot on both
+        a Qt signal and a `QTimer`: it must report rather than raise, and
+        it may fire after `unload()` has already run.
+        """
+        try:
+            dock = self.slices_dock
+            processing = self.processing_dock
+            if dock is None or processing is None:
+                return
+            if sip.isdeleted(dock) or sip.isdeleted(processing):
+                return
+            if not self._want_tabify:
+                return
+            main = self.iface.mainWindow()
+            if dock not in main.tabifiedDockWidgets(processing):
+                main.tabifyDockWidget(processing, dock)
+            processing.raise_()
+            QgsSettings().setValue(_TABIFIED_KEY, True)
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            self.message(f"could not tab the Slices panel: {exc}", Qgis.MessageLevel.Warning)
+
     def unload(self) -> None:
+        # Connected in initGui() and owned by `iface`, which outlives this
+        # plugin: left connected, a later startup signal would reach a
+        # method on a torn-down plugin. Suppressed because the connection
+        # is conditional (see `_want_tabify`) and Qt raises on
+        # disconnecting what was never connected.
+        with contextlib.suppress(Exception):
+            self.iface.initializationCompleted.disconnect(self._tabify_slices_dock)
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still

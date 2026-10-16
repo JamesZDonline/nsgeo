@@ -4,8 +4,10 @@ import nsgeo_qgis
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo_qgis.plugin import NsgeoPlugin
+from nsgeo_qgis.plugin import _TABIFIED_KEY, NsgeoPlugin
 from plugin_testing import synthetic_dzt
+from qgis.core import QgsSettings
+from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 
@@ -42,14 +44,51 @@ def test_the_plugin_builds_and_disposes_its_map_link(fake_iface):
 
 
 def test_the_slices_dock_is_tabified_with_processing(fake_iface, qgis_app):
+    """... and survives QGIS restoring its own window layout afterwards.
+
+    M11 walkthrough: in a real QGIS 3.44 both docks came back from
+    `tabifiedDockWidgets()` empty and sat stacked in one column, although
+    `initGui()` had called `tabifyDockWidget`. Instrumented in that real
+    QGIS, on this repo's own profile, the sequence is:
+
+        1.4 s   our tab is in place
+        2.67 s  QGIS restores the saved layout -- tab gone, main window
+                resized in the same tick
+        2.95 s  `initializationCompleted`
+
+    So the restore is the thing that undoes it, and QGIS's own
+    "startup is over" signal is the first moment after it. This test
+    replays exactly that -- `restoreState` with the layout as it was
+    BEFORE the tab, which is what QGIS itself does -- so it fails against
+    any version that tabs only during `initGui()` or only from a timer.
+    """
+    QgsSettings().setValue(_TABIFIED_KEY, False)
     plugin = NsgeoPlugin(fake_iface)
     plugin.initGui()
     try:
         assert plugin.slices_dock is not None
         assert plugin.slices_dock.objectName() == "nsgeoSlicesDock"
         main = fake_iface.mainWindow()
+        # The layout QGIS has saved from a previous session: no tab.
+        before_tab = main.saveState()
+        assert plugin.slices_dock not in main.tabifiedDockWidgets(plugin.processing_dock)
+
+        # The Plugin-Manager path: nothing will overwrite the layout, so
+        # the timer's attempt is the one that sticks.
+        QCoreApplication.processEvents()
+        assert plugin.slices_dock in main.tabifiedDockWidgets(plugin.processing_dock)
+
+        # The startup path: QGIS restores its saved layout over the top.
+        assert main.restoreState(before_tab)
+        assert plugin.slices_dock not in main.tabifiedDockWidgets(plugin.processing_dock)
+
+        # ... and this is the moment the tab has to be re-applied.
+        fake_iface.initializationCompleted.emit()
         tabbed = main.tabifiedDockWidgets(plugin.processing_dock)
         assert plugin.slices_dock in tabbed
+        # Once only: the flag is now set, so a user who later drags the
+        # two apart is not overruled on their next start.
+        assert QgsSettings().value(_TABIFIED_KEY, False, type=bool)
         # fix round 1, M5: the line this replaces --
         # `assert plugin.processing_dock.visibleRegion is not None` -- named
         # the bound method itself (no `()`), which is never None and so
@@ -63,6 +102,26 @@ def test_the_slices_dock_is_tabified_with_processing(fake_iface, qgis_app):
         # rather than keep a check that could never fail.
     finally:
         plugin.unload()
+
+
+def test_a_profile_that_has_already_been_tabbed_once_is_left_alone(fake_iface, qgis_app):
+    """The flag is what keeps this from overruling the user every start.
+
+    Someone who drags Slices out of the tab group has given QGIS their
+    answer, and QGIS saves it; a plugin that re-tabs unconditionally on
+    every startup would silently overwrite that answer forever.
+    """
+    QgsSettings().setValue(_TABIFIED_KEY, True)
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        main = fake_iface.mainWindow()
+        QCoreApplication.processEvents()
+        fake_iface.initializationCompleted.emit()
+        assert plugin.slices_dock not in main.tabifiedDockWidgets(plugin.processing_dock)
+    finally:
+        plugin.unload()
+        QgsSettings().setValue(_TABIFIED_KEY, False)
 
 
 def test_unloading_closes_an_open_line_chooser(fake_iface, qgis_app, tmp_path, answer_modal):

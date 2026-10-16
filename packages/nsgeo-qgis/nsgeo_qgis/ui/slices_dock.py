@@ -43,10 +43,12 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -67,6 +69,26 @@ from nsgeo_qgis.slices_plan import (
     transform_names,
 )
 from nsgeo_qgis.ui.profile_dock import velocity_source
+
+
+def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
+    """`value` rounded to `decimals`, never ESCAPING the bound it describes.
+
+    A plain `round()` is wrong at a boundary: `QDoubleSpinBox.setValue`
+    rounds to the box's own precision, and rounding a lower bound DOWN (or
+    an upper bound UP) puts the spin a few ten-thousandths of a nanosecond
+    outside the range every prepared line actually covers -- which is
+    exactly the `CoverageError` the caller is clamping to avoid, now made
+    intermittent and dependent on the fourth decimal place of a header.
+    Rounds away from the forbidden side instead.
+    """
+    step = 10.0**-decimals
+    snapped = round(value, decimals)
+    if upper and snapped > value:
+        snapped -= step
+    elif not upper and snapped < value:
+        snapped += step
+    return round(snapped, decimals)
 
 
 class SlicesDock(QgsDockWidget):
@@ -359,7 +381,7 @@ class SlicesDock(QgsDockWidget):
         # but tests. `_update_resident_check_label` fills in the real
         # text (spec 9.2's own wording, with the cost it names) once an
         # engine estimate exists; the placeholder here is never shown.
-        self.resident_check = QCheckBox("Keep the whole volume in memory for faster dragging")
+        self.resident_check = QCheckBox("Keep the volume in memory")
         display_form.addRow(self.resident_check)
 
         self.legend_label = QLabel("")
@@ -386,7 +408,19 @@ class SlicesDock(QgsDockWidget):
         outer.addLayout(button_row)
 
         outer.addStretch(1)
-        self.setWidget(body)
+        # Inside a scroll area, not set as the dock's widget directly.
+        # Four group boxes stacked give `body` a ~1019 px MINIMUM height
+        # (measured), and a dock widget's minimum is a hard floor on the
+        # main window: QGIS could not shrink its right dock area below it,
+        # so opening this dock resized the whole QGIS window -- reported
+        # from the M11 walkthrough as "it messes up the width/height of
+        # the window". A scroll area's own minimum is small, so the dock
+        # can be any size the user wants and scrolls to the rest.
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(body)
+        self.setWidget(scroll)
 
         # A palette is always offered, even before any source is chosen
         # (bipolar, `engine.output_unipolar`'s own default) -- `_on_prepared`
@@ -688,8 +722,17 @@ class SlicesDock(QgsDockWidget):
         `_apply_resolution` (a resolution change moves `frame`/`z`, and so
         `engine.estimate`, without necessarily touching `_included`)."""
         mb = format_bytes(self.engine.estimate.cube_bytes)
-        self.resident_check.setText(
-            f"Keep the whole volume in memory for faster dragging (uses {mb})"
+        # Short on the face, the full wording in the tooltip. A QCheckBox
+        # cannot elide or wrap its own text, so its minimum width is the
+        # width of that text -- "Keep the whole volume in memory for
+        # faster dragging (uses 118 MB)" measured a 555 px floor on this
+        # dock, and a dock's minimum width is a hard floor on the main
+        # window's. The cost stays on the face because spec 9.2 asks the
+        # control to name what it costs.
+        self.resident_check.setText(f"Keep the volume in memory ({mb})")
+        self.resident_check.setToolTip(
+            f"Keep the whole volume in memory for faster dragging.\n"
+            f"Uses {mb} on top of the prepared lines, which are held either way."
         )
 
     def _on_resident_toggled(self, checked: bool) -> None:
@@ -990,8 +1033,59 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
+    def _clamp_z_to_prepared(self) -> bool:
+        """Pull `z0`/`z1` inside the range every PREPARED line covers.
+
+        Returns whether anything moved, because the caller must then push
+        the corrected geometry at the engine before asking it for a slice.
+
+        `_seed_dz_z_defaults` seeds these two from the chosen line's raw
+        DZT header, which is the best estimate available before a
+        preparation has run but is only right for a preset that leaves the
+        sample axis alone. `time_zero` -- first in the ordinary preset,
+        not an exotic one -- crops rows off the FRONT, and on this repo's
+        own real files drops 49 of 512, moving the start from -11.086 ns
+        to -0.476 while the header still says -11.086. The cube then asked
+        for 10.6 ns of two-way time that no prepared line has, and the
+        first slice raised `CoverageError` naming the line. Correcting it
+        here, against `engine.prepared_z_bounds()`, is the only point
+        where the processed extent is actually known.
+
+        Deliberately a clamp and not a re-seed: a range the user has
+        narrowed by hand is still theirs, and `CoverageError` still
+        reaches them for lines that genuinely disagree with each other
+        (spec 9.1 wants that acted on, not hidden). Only a range reaching
+        OUTSIDE what the data can supply is corrected.
+        """
+        bounds = self.engine.prepared_z_bounds()
+        if bounds is None:
+            return False
+        low, high = bounds
+        changed = False
+        self._updating += 1
+        try:
+            for spin, bound, upper in (
+                (self.z0_spin, low, False),
+                (self.z1_spin, high, True),
+            ):
+                value = spin.value()
+                if (value > bound) if upper else (value < bound):
+                    spin.blockSignals(True)
+                    try:
+                        spin.setValue(_snap_inside(bound, spin.decimals(), upper=upper))
+                    finally:
+                        spin.blockSignals(False)
+                    changed = True
+        finally:
+            self._updating -= 1
+        return changed
+
     def _on_prepared(self) -> None:
         try:
+            # Before anything asks the engine for a slice: the seeded z
+            # range was read off a raw DZT header, and a preset that crops
+            # the sample axis makes that range uncoverable. See the method.
+            clamped = self._clamp_z_to_prepared()
             # Final review, Important 1 (part 3): the cache's key
             # (`n_levels`, `engine.choice`, `engine.mode`, `radius_cells`)
             # cannot always tell a re-preparation happened -- `_on_grids_
@@ -1035,7 +1129,16 @@ class SlicesDock(QgsDockWidget):
             # in flight) would leave the map and `current_values()`
             # exactly as `refresh_slice()`'s own early return last left
             # them -- `None` -- until the user happens to touch a control.
-            self.refresh_slice()
+            #
+            # `_apply_resolution()` rather than `refresh_slice()` when the
+            # clamp moved a spin: the engine is still holding the ZAxis
+            # built from the UNcorrected range, and the spins' own
+            # debounce was blocked along with their signals, so nothing
+            # else would ever push the correction through.
+            if clamped:
+                self._apply_resolution()
+            else:
+                self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report that the slice source is prepared: {exc}")
 
