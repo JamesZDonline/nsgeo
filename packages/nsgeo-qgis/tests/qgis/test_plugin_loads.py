@@ -22,7 +22,8 @@ def test_class_factory_builds_a_plugin_that_adds_and_removes_its_ui(fake_iface):
 
     plugin.show_about()
     item = fake_iface.messageBar().currentItem()
-    assert item is not None and "core" in item.text()
+    text = item.text() if item is not None else ""
+    assert "core" in text and ("build " in text or "development checkout" in text)
 
     plugin.unload()
     assert plugin.toolbar is None

@@ -61,7 +61,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
-from nsgeo_qgis import plugin_version
+from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
@@ -885,7 +885,7 @@ class NsgeoPlugin:
             pass
 
     def show_about(self) -> None:
-        self.message(f"plugin {plugin_version()} · core {nsgeo.__version__}")
+        self.message(f"plugin {plugin_version()} · core {nsgeo.__version__} · {build_label()}")
 
     # ---- site files -------------------------------------------------------
     def new_site(self) -> None:
