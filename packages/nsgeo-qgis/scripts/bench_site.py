@@ -195,11 +195,13 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path) -> dict:
             baseline.append(ms(time.perf_counter() - t))
             binning.append(ms(binned_at - t))
 
-        modes = sorted({site.engine_for(g).mode for g in site.ready_grids})
+        modes = [site.engine_for(g).mode for g in site.ready_grids]
+        modes = sorted(f"{modes.count(m)} {m}" for m in set(modes))
         status = site.status_text()
 
-        # For comparison only: the same ticks with every grid's cube resident
-        # (`set_always_resident`, M11 Ruling AN). The first tick builds them.
+        # For comparison only: the same ticks with every grid's cube forced
+        # resident (`set_always_resident`, M11 Ruling AN). The first tick
+        # builds any cube not already held.
         for grid_id in site.ready_grids:
             site.engine_for(grid_id).set_always_resident(True)
         t = time.perf_counter()
@@ -272,7 +274,8 @@ def main() -> int:
     )
     print(
         "| site | lines | traces/line | lattice | engine mode | prepare site (s) "
-        "| first tick (ms) | slice_at median / p90 (ms) | edge median / p90 (ms) "
+        "| first tick, incl. cube builds (ms) | slice_at median / p90 (ms) "
+        "| edge median / p90 (ms) "
         "| shared_limit (ms) | one-grid baseline median / p90 (ms) |"
     )
     print("|---|---|---|---|---|---|---|---|---|---|---|")
@@ -296,7 +299,7 @@ def main() -> int:
             f"lines written in {r['written_s']:.0f} s; {r['errors']} errors"
         )
         print(
-            f"    with every cube resident ({r['resident_mb']:.0f} MB of cubes, built in "
+            f"    forced resident, for comparison ({r['resident_mb']:.0f} MB of cubes, built in "
             f"{r['resident_build_ms']:.0f} ms): slice_at median / p90 "
             f"{r['resident_median_ms']:.1f} / {r['resident_p90_ms']:.1f} ms"
         )
