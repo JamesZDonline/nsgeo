@@ -1349,7 +1349,7 @@ def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper)
 
 @pytest.mark.xfail(
     QT_VERSION_STR.startswith("6."),
-    reason="§3.2e: Qt 6 metrics give 253 px; settle in the QGIS 4 walkthrough",
+    reason="§3.2e: Qt 6 metrics give 253 px; settled by #50",
     strict=True,
 )
 def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
