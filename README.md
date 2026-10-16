@@ -6,10 +6,27 @@ A cross-platform toolstack for GPR, magnetometry, conductivity, and resistivity
 data — built as an independent core library with thin front-end layers, starting
 with a QGIS plugin.
 
-> **Status: early development.** The core library (DZT reader, survey model,
-> processing) is complete and tested. The QGIS plugin loads sites, imports
-> lines onto the map, and shows and processes profiles. Map↔profile cursor
-> sync, picking, and a release zip are next.
+> **Status: 0.1.0, the first release, experimental.** The QGIS plugin imports
+> DZT files into grids placed on the map, links the map and the profile both
+> ways, processes profiles, records picks, and builds time and depth slices. It
+> installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x. macOS is untested,
+> and the [getting-started guide](docs/guide/getting-started.md) lists the known
+> issues.
+
+## Install
+
+1. Download `nsgeo_qgis-<version>.zip` from the
+   [Releases page](https://github.com/JamesZDonline/nsgeo/releases). Do not
+   unzip it.
+2. In QGIS, choose **Plugins → Manage and Install Plugins… → Install from ZIP**,
+   choose the zip, and click **Install Plugin**. Click **Yes** at QGIS's security
+   warning, which it shows for any plugin installed from a zip.
+3. Restart QGIS.
+
+Nothing else needs installing. The
+[getting-started guide](docs/guide/getting-started.md) covers installing,
+upgrading, a first session from DZT files to slices, where your data lives, and
+the known issues.
 
 ## Why
 
@@ -52,8 +69,8 @@ apply user-controlled processing.
 - Bidirectional map ↔ profile cursor synchronisation
 - Anomaly picking from the profile into a QGIS point layer
 
-Timeslices, migration, velocity analysis, and other instruments are designed for
-but out of scope for v1.
+Migration, velocity analysis, and other instruments are designed for but out of
+scope for v1. Time and depth slices, first planned for later, shipped in 0.1.0.
 
 ## Design
 
