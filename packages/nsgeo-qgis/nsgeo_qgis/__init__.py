@@ -40,6 +40,18 @@ def plugin_version() -> str:
     return cfg["general"]["version"]
 
 
+def build_label(core_path: Path = CORE_PATH) -> str:
+    """Which build this is: the release zip's commit, or a dev checkout."""
+    version_file = core_path / "VERSION"
+    if not version_file.is_file():
+        return "development checkout"
+    for line in version_file.read_text(encoding="utf-8").splitlines():
+        key, _, value = line.partition("=")
+        if key == "commit":
+            return f"build {value[:12]}"
+    return "development checkout"
+
+
 def classFactory(iface: Any) -> Any:
     from nsgeo_qgis.plugin import NsgeoPlugin
 

@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+__all__ = [
+    "C_M_PER_NS",
+    "VelocityModel",
+    "resolve_velocity",
+]
+
 if TYPE_CHECKING:
     # Only for type checking: `from __future__ import annotations` makes every
     # annotation in this module a string, so this import runs no code and

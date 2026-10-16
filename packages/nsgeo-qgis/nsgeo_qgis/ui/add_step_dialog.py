@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.io.dzt import DztHeader
+from nsgeo.io import DztHeader
 from nsgeo.processing import Radargram, Step, nyquist_mhz
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
 

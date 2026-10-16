@@ -14,7 +14,7 @@ from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, Si
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
 from qgis.core import (
     NULL,
     Qgis,
@@ -1453,23 +1453,16 @@ def test_pick_edits_that_cannot_be_saved_are_reported_at_critical(populated, mon
     # If the commit itself fails there is nothing left to do -- the site
     # is closing either way, exactly as unload()'s own prompt has no
     # Cancel -- so the one thing that must not happen is silence.
-    from qgis.core import QgsApplication
-
     session, layers, project = populated
     _buffer_a_pick(layers)
     monkeypatch.setattr(QgsVectorLayer, "commitChanges", lambda self, *a, **kw: False)
 
     seen: list[tuple[str, int]] = []
-    log = QgsApplication.messageLog()
-
-    def _on_message(msg, tag, level):
-        seen.append((msg, int(level)))
-
-    log.messageReceived.connect(_on_message)
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
     try:
         layers.detach()
     finally:
-        log.messageReceived.disconnect(_on_message)
+        disconnect()
 
     critical = int(Qgis.MessageLevel.Critical)
     assert any("picks" in msg and "1" in msg and level == critical for msg, level in seen), seen

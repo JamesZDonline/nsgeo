@@ -1,14 +1,20 @@
-"""The active slice on the map: a float raster, restyled and reloaded in place.
+"""The active slice on the map: a float raster, restyled and repointed in place.
 
 A real float32 raster with NaN nodata, not a picture. A reader can then
 query an amplitude, and the same values go out to the GeoTIFF unchanged --
 spec 9.4's reason for exporting float rather than bytes applies just as
 well to what is on screen.
 
-Rewritten in place on every tick rather than rebuilt: verified against
-this GDAL and QGIS, `reloadData()` refreshes the pixel values, and the
-layer's `width()`/`height()` follow even when the cell slider changes the
-shape, so a drag never churns the layer tree.
+The layer object is kept across ticks rather than rebuilt, so a drag
+never churns the layer tree: each tick points the same `QgsRasterLayer`
+at a new file with `setDataSource()`, and `width()`/`height()` follow
+even when the cell slider changes the shape. Every tick writes a NEW file
+rather than rewriting one in place, because Windows cannot delete or
+replace a file QGIS holds open, and GDAL's `Create()` deletes first -- an
+in-place rewrite failed there with "Permission denied" on the second
+tick (found in the 0.1.0 walkthrough; Linux allows it, so CI never saw
+it). QGIS's render threads can keep the old file open briefly after the
+switch too, so superseded files are deleted best-effort, on later ticks.
 
 Uncompressed, unlike the export (plan Ruling 3). Measured here at GDAL
 3.8.4: `COMPRESS=DEFLATE, PREDICTOR=3` costs 8.8 ms for a 300x300 float
@@ -24,6 +30,8 @@ project would find it gone. `slice_export.py` writes the durable one.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shutil
 import tempfile
 import warnings
@@ -36,6 +44,7 @@ from osgeo import gdal
 from qgis.core import (
     QgsColorRampShader,
     QgsCoordinateReferenceSystem,
+    QgsDataProvider,
     QgsRasterLayer,
     QgsRasterShader,
     QgsSingleBandPseudoColorRenderer,
@@ -47,6 +56,9 @@ from qgis.PyQt.QtGui import QColor
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.log import log as _log
 
+#: Deletion goes through this name so a test can refuse one file without
+#: patching `os.remove` for the whole process.
+_remove = os.remove
 _CREATION_OPTIONS = ["INTERLEAVE=BAND", "TILED=NO", "BIGTIFF=IF_SAFER"]
 LAYER_NAME = "Slice (live preview)"
 
@@ -81,8 +93,8 @@ def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShad
 class SliceLayer(QObject):
     """The one live raster layer showing the dock's current slice.
 
-    Owns a scratch GeoTIFF and, once created, one `QgsRasterLayer` that is
-    rewritten and reloaded rather than replaced -- see the module
+    Owns scratch GeoTIFFs and, once created, one `QgsRasterLayer` that is
+    repointed at the newest one rather than replaced -- see the module
     docstring for why. Every public method guards its own body: `update`
     is reached from a slider slot, and an exception escaping a slot
     aborts the CI container (see `plugin.py`'s module docstring).
@@ -92,7 +104,11 @@ class SliceLayer(QObject):
         super().__init__(parent)
         self.layers = layers
         self._dir = Path(tempfile.mkdtemp(prefix="nsgeo-slice-"))
-        self.path = self._dir / "slice.tif"
+        #: The CURRENT file: the one the layer reads. Replaced, never
+        #: rewritten, on every update, and moved only once the layer
+        #: actually reads the new one.
+        self.path = self._dir / "slice-000000.tif"
+        self._serial = 0
         self.layer: QgsRasterLayer | None = None
         #: `(colormap_name, limit, unipolar)` the current renderer was
         #: built for, or `None` before the first one. Rebuilding a 256-stop
@@ -113,13 +129,21 @@ class SliceLayer(QObject):
     ) -> None:
         try:
             array, geotransform = to_north_up(values, frame)
-            self._write(array, geotransform, frame.crs)
-            if self._layer_gone():
-                self.layer = None
-                self._create_layer()
-            else:
-                self.layer.dataProvider().reloadData()
-                self._ensure_group_membership()
+            self._serial += 1
+            new_path = self._dir / f"slice-{self._serial:06d}.tif"
+            try:
+                self._write(new_path, array, geotransform, frame.crs)
+                if self._layer_gone():
+                    self.layer = None
+                    self._create_layer(new_path)
+                else:
+                    self._repoint(new_path)
+                    self._ensure_group_membership()
+            finally:
+                # Even when the write or the repoint failed: a full-size
+                # file was probably written, and a persistent failure must
+                # not grow the scratch folder by one file per tick.
+                self._sweep()
             if self.layer is None:
                 return
             key = (colormap_name, float(limit), bool(unipolar))
@@ -172,8 +196,55 @@ class SliceLayer(QObject):
         if group.findLayer(self.layer.id()) is None:
             group.addLayer(self.layer)
 
+    def _sweep(self) -> None:
+        """Delete every scratch file the layer does not read, and never raise.
+
+        A scan of the directory rather than a list of superseded files, so
+        a file whose write or repoint failed, and sidecars such as GDAL's
+        `.aux.xml` or an `.ovr`, are covered too. What the layer reads is
+        its live `source()` while it is alive -- if `setDataSource` raised
+        before taking effect, the previous file is still the one -- and
+        `self.path` otherwise. A file QGIS's render threads still hold open
+        cannot be deleted on Windows; it is simply met again by the next
+        update's scan.
+        """
+        try:
+            keep = {self.path.name}
+            if self.layer is not None and not sip.isdeleted(self.layer):
+                keep.add(Path(self.layer.source().split("|")[0]).name)
+            for entry in self._dir.iterdir():
+                if any(entry.name == k or entry.name.startswith(k + ".") for k in keep):
+                    continue
+                with contextlib.suppress(OSError):
+                    _remove(entry)
+        except Exception as exc:  # noqa: BLE001 -- housekeeping must not stop an update
+            _log(f"could not tidy the slice scratch folder: {exc}")
+
+    def _repoint(self, path: Path) -> None:
+        """Point the existing layer at `path`, keeping its identity.
+
+        Verified on QGIS 3.40, 3.44 and 4.2: `setDataSource` keeps the
+        renderer (and its classification range), so `_renderer_key` stays
+        valid. `loadDefaultStyle` is off by `ReadFlags()` for the same
+        reason: a default style would replace that renderer. The layer's
+        current name is passed back in, because the call applies it and a
+        rename by the user must survive a tick.
+        """
+        assert self.layer is not None
+        self.layer.setDataSource(
+            str(path),
+            self.layer.name(),
+            "gdal",
+            QgsDataProvider.ProviderOptions(),
+            QgsDataProvider.ReadFlags(),
+        )
+        if not self.layer.isValid():
+            raise RuntimeError(f"could not open {path}: {self.layer.error().summary()}")
+        self.path = path
+
     def _write(
         self,
+        path: Path,
         array: np.ndarray,
         geotransform: tuple[float, float, float, float, float, float],
         crs: str,
@@ -189,8 +260,7 @@ class SliceLayer(QObject):
         # -- a real failure, but the wrong exception for the wrong reason
         # -- and `band.WriteArray(array)`'s own `CPLErr` return was
         # discarded outright, so a failed write was silently ignored and
-        # the next `reloadData()` simply republished whatever was already
-        # on disk.
+        # the layer simply kept showing whatever was already on disk.
         #
         # `ExceptionMgr` alone does NOT also silence GDAL's one-time
         # "neither UseExceptions() nor DontUseExceptions() has been
@@ -215,7 +285,7 @@ class SliceLayer(QObject):
                 driver = gdal.GetDriverByName("GTiff")
                 height, width = array.shape
                 dataset = driver.Create(
-                    str(self.path), width, height, 1, gdal.GDT_Float32, options=_CREATION_OPTIONS
+                    str(path), width, height, 1, gdal.GDT_Float32, options=_CREATION_OPTIONS
                 )
                 try:
                     dataset.SetGeoTransform(geotransform)
@@ -240,13 +310,14 @@ class SliceLayer(QObject):
                     dataset.Close()
                     dataset = None
 
-    def _create_layer(self) -> None:
-        layer = QgsRasterLayer(str(self.path), LAYER_NAME, "gdal")
+    def _create_layer(self, path: Path) -> None:
+        layer = QgsRasterLayer(str(path), LAYER_NAME, "gdal")
         # addToLegend=False: this is a scratch preview, not a durable
         # artefact, and it joins the site's own group below like every
         # other layer here -- it does not sit unparented at legend root.
         self.layers.project.addMapLayer(layer, False)
         self.layer = layer
+        self.path = path
         # A fresh layer has never had a renderer built for it.
         self._renderer_key = None
         self._ensure_group_membership()

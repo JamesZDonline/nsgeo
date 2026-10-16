@@ -15,6 +15,22 @@ from typing import Protocol
 
 import numpy as np
 
+__all__ = [
+    "DEFAULT_COLORMAP",
+    "FixedRange",
+    "Normalizer",
+    "PercentileClip",
+    "UNIPOLAR_COLORMAPS",
+    "UnipolarClip",
+    "colormap",
+    "colormap_names",
+    "decimate_columns",
+    "to_index8",
+    "to_index8_unipolar",
+    "to_rgb8",
+    "to_rgba8",
+]
+
 DEFAULT_COLORMAP = "grey_black_high"
 
 
