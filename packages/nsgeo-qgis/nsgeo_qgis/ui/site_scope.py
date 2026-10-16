@@ -205,14 +205,20 @@ def site_rows(
     return rows
 
 
-def left_out(site_engine: Any, included: Iterable[str]) -> list[str]:
-    """Included grids that are in no site file: failed, or no lines (ruling T4-a)."""
-    out = []
+def left_out_states(site_engine: Any, included: Iterable[str]) -> dict[str, str]:
+    """Included grids that are in no site file, grid id to `grid_state`:
+    failed, or no lines (ruling T4-a). What the file records (Ruling F-2)."""
+    out = {}
     for grid_id in included:
         state = state_text(site_engine, grid_id)
         if state == "no lines" or state.startswith("failed"):
-            out.append(f"{grid_id} ({state})")
+            out[grid_id] = state
     return out
+
+
+def left_out(site_engine: Any, included: Iterable[str]) -> list[str]:
+    """`left_out_states` as the export message names them: `C (no lines)`."""
+    return [f"{g} ({state})" for g, state in left_out_states(site_engine, included).items()]
 
 
 def busy(site_engine: Any, included: Iterable[str]) -> bool:
@@ -584,6 +590,9 @@ class SiteScope:
 
     def left_out(self) -> list[str]:
         return left_out(self.engine, self.included())
+
+    def left_out_states(self) -> dict[str, str]:
+        return left_out_states(self.engine, self.included())
 
     def set_lines(self, grid_id: str, keys: tuple[str, ...]) -> None:
         """A line choice for one grid: its remembered source; only it re-prepares."""

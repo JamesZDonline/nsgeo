@@ -97,6 +97,18 @@ def columns(shown, grid_id):
     return slice(first, last)
 
 
+def _metadata(path) -> dict:
+    """A GeoTIFF's dataset metadata, read with the dataset closed before any
+    assert runs (final review D5): a failing assert's traceback otherwise
+    keeps the dataset alive past `exitQgis()`, and the process dies with
+    exit 139 instead of reporting the failure."""
+    ds = gdal.Open(str(path))
+    try:
+        return dict(ds.GetMetadata())
+    finally:
+        ds.Close()
+
+
 def _uniform_source(session, preset: str) -> None:
     for grid_id in "ABC":
         session.remember_slice_source(grid_id, preset=preset, lines=None)
@@ -606,7 +618,7 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
         assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1
         assert "B" in json.loads(ds.GetRasterBand(1).GetMetadataItem("NSGEO_GRID_FACTORS"))
     finally:
-        ds = None
+        ds.Close()  # final review D5: `ds = None` leaves the assert's temporaries holding it
     names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert "site" in names
     assert plugin.layers.group.findLayer(
@@ -679,6 +691,25 @@ def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path
     assert target.exists()
     text = fake_iface.messageBar().currentItem().text()
     assert "exported" in text and "C (no lines)" in text, text
+
+
+def test_the_site_file_records_an_included_grid_it_left_out(plugin, answer_modal, tmp_path):
+    """Final review M4 (Ruling F-2): the file itself names an included grid
+    it does not hold, with its state, and says nothing when none is left out."""
+    session = plugin.session
+    dock = whole_site(plugin)
+    whole = tmp_path / "whole.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(whole), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert "NSGEO_SITE_LEFT_OUT" not in _metadata(whole)
+    session.remember_slice_source("C", preset="p", lines=())
+    session.lines_changed.emit()
+    settle(dock)
+    part = tmp_path / "part.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(part), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    left = json.loads(_metadata(part)["NSGEO_SITE_LEFT_OUT"])
+    assert left == {"C": dock.site_engine.grid_state("C")} == {"C": "no lines"}
 
 
 def test_a_failed_site_export_leaves_no_file_and_adds_no_layer(

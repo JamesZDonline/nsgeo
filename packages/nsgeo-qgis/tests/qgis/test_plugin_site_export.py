@@ -52,9 +52,26 @@ def make_site():
         site.dispose()
 
 
-def open_tif(path):
-    with gdal.ExceptionMgr(useExceptions=True):
-        return gdal.Open(str(path))
+@pytest.fixture
+def open_tif():
+    """`gdal.Open`, every dataset it opened closed at teardown (final review D5).
+
+    A failing test's traceback keeps its locals, a dataset among them, alive
+    past `qgis_app`'s `exitQgis()`, and releasing a dataset after GDAL's
+    drivers are gone killed the process (exit 139) instead of reporting the
+    failure. `Close()` releases it now, whatever still refers to it.
+    """
+    opened = []
+
+    def open_(path):
+        with gdal.ExceptionMgr(useExceptions=True):
+            ds = gdal.Open(str(path))
+        opened.append(ds)
+        return ds
+
+    yield open_
+    for ds in opened:
+        ds.Close()
 
 
 def exported(make_site, site3, tmp_path, thickness=8, step=24, **overrides):
@@ -79,7 +96,7 @@ def pull(site, plan, band, **overrides):
     )
 
 
-def test_the_file_lands_on_the_site_lattice(site3, make_site, tmp_path):
+def test_the_file_lands_on_the_site_lattice(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     lat = site.lattice
@@ -89,14 +106,14 @@ def test_the_file_lands_on_the_site_lattice(site3, make_site, tmp_path):
     assert plan.lattice == lat
 
 
-def test_there_is_a_band_per_planned_window(site3, make_site, tmp_path):
+def test_there_is_a_band_per_planned_window(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     assert len(plan.bands) > 1
     assert ds.RasterCount == len(plan.bands)
 
 
-def test_each_band_is_exactly_what_slice_at_shows(site3, make_site, tmp_path):
+def test_each_band_is_exactly_what_slice_at_shows(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     for i, band in enumerate(plan.bands):
@@ -107,7 +124,7 @@ def test_each_band_is_exactly_what_slice_at_shows(site3, make_site, tmp_path):
     assert np.isfinite(got).any()
 
 
-def test_the_dataset_records_transform_method_and_every_grid(site3, make_site, tmp_path):
+def test_the_dataset_records_transform_method_and_every_grid(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     md = open_tif(path).GetMetadata()
     assert md["NSGEO_SITE_TRANSFORM"] == "amp_envelope"
@@ -128,7 +145,7 @@ def test_the_dataset_records_transform_method_and_every_grid(site3, make_site, t
     assert ", " not in md["NSGEO_SITE_GRIDS"]
 
 
-def test_each_band_records_every_grids_factors_and_depths(site3, make_site, tmp_path):
+def test_each_band_records_every_grids_factors_and_depths(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     all_factors = []
@@ -154,7 +171,7 @@ def test_each_band_records_every_grids_factors_and_depths(site3, make_site, tmp_
     assert any(f != all_factors[0] for f in all_factors[1:])
 
 
-def test_an_absent_grid_is_null_in_the_band_metadata(site3_factory, make_site, tmp_path):
+def test_an_absent_grid_is_null_in_the_band_metadata(site3_factory, make_site, tmp_path, open_tif):
     site3 = site3_factory(samples={"C": 100})
     site, plan, path = exported(make_site, site3, tmp_path, thickness=8, step=40)
     ds = open_tif(path)
@@ -168,7 +185,7 @@ def test_an_absent_grid_is_null_in_the_band_metadata(site3_factory, make_site, t
     assert json.loads(first["NSGEO_GRID_FACTORS"])["C"] is not None
 
 
-def test_band_descriptions_name_each_grids_depths(site3_factory, make_site, tmp_path):
+def test_band_descriptions_name_each_grids_depths(site3_factory, make_site, tmp_path, open_tif):
     site3 = site3_factory(samples={"C": 100})
     site, plan, path = exported(make_site, site3, tmp_path, thickness=8, step=40)
     ds = open_tif(path)
@@ -250,7 +267,7 @@ def test_export_never_builds_a_resident_cube(site3, make_site, tmp_path):
     assert all(site.engine_for(g).mode != "resident" for g in "ABC")
 
 
-def test_the_coverage_companion_is_written_beside_it(site3, make_site, tmp_path):
+def test_the_coverage_companion_is_written_beside_it(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     out = write_site_coverage(site, path, plan)
     assert out == tmp_path / "site_coverage.tif"
@@ -269,7 +286,9 @@ def test_the_coverage_companion_is_written_beside_it(site3, make_site, tmp_path)
     assert np.isnan(ds.GetRasterBand(1).GetNoDataValue())
 
 
-def test_the_coverage_companion_does_not_claim_processing_it_never_had(site3, make_site, tmp_path):
+def test_the_coverage_companion_does_not_claim_processing_it_never_had(
+    site3, make_site, tmp_path, open_tif
+):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(write_site_coverage(site, path, plan))
     md = ds.GetMetadata()
@@ -284,14 +303,16 @@ def test_the_coverage_companion_does_not_claim_processing_it_never_had(site3, ma
     assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" in main
 
 
-def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path):
+def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path, open_tif):
     site, plan, path = exported(make_site, site3, tmp_path)
     ds = open_tif(path)
     for i in range(1, ds.RasterCount + 1):
         assert np.isnan(ds.GetRasterBand(i).GetNoDataValue())
 
 
-def test_a_ready_grid_with_no_site_axis_exports_as_absent(site3_factory, make_site, tmp_path):
+def test_a_ready_grid_with_no_site_axis_exports_as_absent(
+    site3_factory, make_site, tmp_path, open_tif
+):
     """R-P3: C ends at ~16.4 ns, so at t0=16 it has no axis (frame and z are None)."""
     site3 = site3_factory(samples={"C": 128})
     site = SiteEngine(site3.session)
@@ -332,3 +353,20 @@ def test_the_writer_refuses_a_wrong_number_of_slices(site3, make_site, tmp_path)
     slices = [pull(site, plan, b) for b in plan.bands]
     with pytest.raises(ValueError, match="more slices"):
         writer.write(tmp_path / "b.tif", plan, iter([*slices, slices[0]]))
+
+
+def test_an_included_grid_left_out_is_recorded_and_absent_otherwise(
+    site3, make_site, tmp_path, open_tif
+):
+    """Final review M4 (Ruling F-2): `NSGEO_SITE_LEFT_OUT`, a compact JSON
+    object of grid id to state, present only when an included grid is left
+    out. The coverage companion leaves the same grids out, so says so too."""
+    site, _, path = exported(make_site, site3, tmp_path)
+    assert "NSGEO_SITE_LEFT_OUT" not in open_tif(path).GetMetadata()
+    left = {"D": "no lines", "E": "failed: no line could be prepared"}
+    other = tmp_path / "left_out.tif"
+    plan = export_site(site, other, 8, 24, left_out=left, **KW)
+    md = open_tif(other).GetMetadata()
+    assert md["NSGEO_SITE_LEFT_OUT"] == '{"D":"no lines","E":"failed: no line could be prepared"}'
+    companion = open_tif(write_site_coverage(site, other, plan)).GetMetadata()
+    assert json.loads(companion["NSGEO_SITE_LEFT_OUT"]) == left

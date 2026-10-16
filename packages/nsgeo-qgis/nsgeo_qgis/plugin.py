@@ -880,8 +880,9 @@ class NsgeoPlugin:
 
         Ruling T4-a: no grid is left out silently. The button is disabled
         while an included grid prepares (the dock), and the message names
-        any included grid the file does not hold. Ruling T4-b: a failed
-        export removes what it had written, and adds no layer.
+        any included grid the file does not hold, and so does the file
+        (Ruling F-2, `NSGEO_SITE_LEFT_OUT`). Ruling T4-b: a failed export
+        removes what it had written, and adds no layer.
         """
         assert self.session is not None
         try:
@@ -920,6 +921,7 @@ class NsgeoPlugin:
                     radius_spacings=dock.radius_spacing_spin.value(),
                     gains=dock.site_gains(),
                     velocities=dock.site_velocities(),
+                    left_out=dock.site_left_out_states(),
                 )
             except Exception:
                 # Ruling T4-b: a half-written file would read as valid zeros.

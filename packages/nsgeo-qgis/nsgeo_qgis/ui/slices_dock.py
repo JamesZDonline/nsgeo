@@ -2329,6 +2329,10 @@ class SlicesDock(QgsDockWidget):
         """Included grids no site file will hold: failed, or no lines (T4-a)."""
         return self._site.left_out() if self.session.is_open else []
 
+    def site_left_out_states(self) -> dict[str, str]:
+        """`site_left_out`, grid id to state, as the site file records it (F-2)."""
+        return self._site.left_out_states() if self.session.is_open else {}
+
     def line_choice_grid(self) -> str | None:
         """The grid the line chooser acts on: This grid's, or the selected row's."""
         if self._scope == "site":

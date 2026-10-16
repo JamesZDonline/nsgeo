@@ -11,7 +11,10 @@ What the file records (Ruling 6; the key names are part of the format).
 Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
 `NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_FILL_RADIUS_SPACINGS`,
 `NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
-`SiteGridRecord`s). Band level: `NSGEO_WINDOW_NS` (`lo,hi` on the site axis),
+`SiteGridRecord`s), and `NSGEO_SITE_LEFT_OUT` (Ruling F-2: a compact JSON object of
+grid id to `SiteEngine.grid_state`, such as `"no lines"` or `"failed: ..."`, for
+each included grid the file does not hold; present only when there is one). Band
+level: `NSGEO_WINDOW_NS` (`lo,hi` on the site axis),
 `NSGEO_GRID_DEPTHS_M` and `NSGEO_GRID_FACTORS` (compact JSON objects, grid id to
 `[lo, hi]` / `[a, b]`, or `null` where the grid is absent at that time).
 
@@ -27,7 +30,7 @@ from __future__ import annotations
 import json
 import warnings
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -85,6 +88,8 @@ class SiteExportPlan:
     cell_m: float
     radius_spacings: float | None
     grids: tuple[SiteGridRecord, ...]
+    #: Ruling F-2: included grids the file does not hold, grid id to state.
+    left_out: dict[str, str] = field(default_factory=dict)
 
 
 def band_window_ns(site_z: ZAxis, window: SliceWindow) -> tuple[float, float]:
@@ -114,8 +119,14 @@ def plan_site_export(
     radius_spacings: float,
     gains: Mapping[str, float],
     velocities: Mapping[str, VelocityModel | None],
+    left_out: Mapping[str, str] | None = None,
 ) -> SiteExportPlan:
-    """The bands a site export would write, without writing anything."""
+    """The bands a site export would write, without writing anything.
+
+    `left_out` maps each included grid the file will not hold to its state
+    (Ruling F-2); the caller knows what was included, the engine only what
+    it was sent.
+    """
     lattice, site_z = site_engine.lattice, site_engine.site_z
     ready = site_engine.ready_grids
     if lattice is None or site_z is None or not ready:
@@ -168,6 +179,7 @@ def plan_site_export(
         cell_m=float(cell),
         radius_spacings=float(radius_spacings),
         grids=tuple(records),
+        left_out=dict(left_out or {}),
     )
 
 
@@ -217,6 +229,9 @@ class GeoTiffSiteWriter:
                         "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
                     }.items():
                         dataset.SetMetadataItem(key, value)
+                    if plan.left_out:
+                        # Ruling F-2: absent, not `{}`, when nothing was left out.
+                        dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
                     if plan.radius_spacings is not None:
                         # Absent, not zero, on a file that was never filled (as M11's).
                         dataset.SetMetadataItem(
@@ -279,6 +294,7 @@ def export_site(
     gains: Mapping[str, float],
     velocities: Mapping[str, VelocityModel | None],
     writer: SiteWriter | None = None,
+    left_out: Mapping[str, str] | None = None,
 ) -> SiteExportPlan:
     """Plan, then write one band at a time: one `slice_at` per band, no cube held."""
     plan = plan_site_export(
@@ -290,6 +306,7 @@ def export_site(
         radius_spacings=radius_spacings,
         gains=gains,
         velocities=velocities,
+        left_out=left_out,
     )
     writer = writer if writer is not None else GeoTiffSiteWriter()
 
