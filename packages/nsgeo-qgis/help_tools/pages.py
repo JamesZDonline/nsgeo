@@ -75,14 +75,14 @@ def _collapse(parts: list[str]) -> str:
 class _Entry:
     """An open element. `buf` collects its text when something wants it."""
 
-    __slots__ = ("tag", "section", "buf", "kind", "attrs")
+    __slots__ = ("tag", "section", "buf", "kinds", "attrs")
 
-    def __init__(self, tag, section=None, buf=None, kind=None, attrs=None):
+    def __init__(self, tag, section=None):
         self.tag = tag
         self.section = section
-        self.buf = buf
-        self.kind = kind
-        self.attrs = attrs or {}
+        self.buf: list[str] | None = None
+        self.kinds: set[str] = set()  # an element can be a claim, a link and the plain lede
+        self.attrs: dict[str, dict] = {}
 
 
 class _PageParser(HTMLParser):
@@ -112,21 +112,17 @@ class _PageParser(HTMLParser):
             self._finish(self.stack.pop())
 
     def _finish(self, e: _Entry) -> None:
-        if e.kind == "claim":
-            self.claims.append(
-                Claim(
-                    e.attrs["id"],
-                    tuple(e.attrs["source"].split()),
-                    _collapse(e.buf),
-                    e.attrs["section"],
-                )
-            )
-        elif e.kind == "link":
-            self.links.append(
-                Link(e.attrs["href"], e.attrs["source"], _collapse(e.buf), e.attrs["section"])
-            )
-        elif e.kind == "plain":
-            self.plain_text = _collapse(e.buf)
+        if e.buf is None:
+            return
+        text = _collapse(e.buf)
+        if "claim" in e.kinds:
+            c = e.attrs["claim"]
+            self.claims.append(Claim(c["id"], tuple(c["source"].split()), text, c["section"]))
+        if "link" in e.kinds:
+            k = e.attrs["link"]
+            self.links.append(Link(k["href"], k["source"], text, k["section"]))
+        if "plain" in e.kinds:
+            self.plain_text = text
 
     def handle_startendtag(self, tag, attrs) -> None:
         self._start(tag, attrs, push=False)
@@ -140,7 +136,7 @@ class _PageParser(HTMLParser):
             tags = [e.tag for e in self.stack]
             if "p" in tags:
                 self._pop_to(len(tags) - 1 - tags[::-1].index("p"))
-        entry = _Entry(tag, attrs=None)
+        entry = _Entry(tag)
         if tag == "section" and a.get("id"):
             entry.section = a["id"]
             self.section_ids.append(a["id"])
@@ -148,26 +144,25 @@ class _PageParser(HTMLParser):
         if "data-param" in a and "settings" in (*self._open_sections(), entry.section):
             self.params.append(a["data-param"])
         if "data-claim" in a:
-            entry.kind = "claim"
-            entry.buf = []
-            entry.attrs = {
+            entry.kinds.add("claim")
+            entry.attrs["claim"] = {
                 "id": a["data-claim"],
                 "source": a.get("data-source", ""),
                 "section": section,
             }
-        elif tag == "a" and a.get("href", "").lower().startswith(("http://", "https://")):
-            entry.kind = "link"
-            entry.buf = []
-            entry.attrs = {
+        if tag == "a" and a.get("href", "").lower().startswith(("http://", "https://")):
+            entry.kinds.add("link")
+            entry.attrs["link"] = {
                 "href": a["href"],
                 "source": a.get("data-source") or None,
                 "section": section,
             }
-        elif tag == "p" and not self._plain_done and "plain" in self._open_sections():
+        if tag == "p" and not self._plain_done and "plain" in self._open_sections():
             self._plain_done = True
-            entry.kind = "plain"
+            entry.kinds.add("plain")
+        if entry.kinds:
             entry.buf = []
-        is_ref_item = tag != "a" and entry.kind != "claim" and "refs" in self._open_sections()
+        is_ref_item = tag != "a" and "claim" not in entry.kinds and "refs" in self._open_sections()
         if is_ref_item and "data-source" in a:
             self.ref_sources.extend(a["data-source"].split())
         if tag == "img" and "src" in a:

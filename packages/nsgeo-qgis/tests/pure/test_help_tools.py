@@ -165,7 +165,7 @@ def test_parse_page_reads_the_valid_page(tmp_path):
 def test_missing_section_is_named(tmp_path):
     cut = ('<section id="know"><h2>Know</h2><ul><li>One thing.</li></ul></section>\n', "")
     problems = problems_for(tmp_path, [cut])
-    assert any("know" in p for p in problems)
+    assert any("missing ['know']" in p for p in problems)
 
 
 def test_swapped_sections_are_reported(tmp_path):
@@ -250,7 +250,7 @@ def test_hard_plain_paragraph_reports_its_grade(tmp_path):
         "uncertainty regarding instrumentation"
     )
     problems = problems_for(tmp_path, [(PLAIN_TEXT, hard)])
-    assert any("grade" in p for p in problems)
+    assert any("grade" in p and f"{fk_grade(hard):.1f}" in p for p in problems)
 
 
 def test_missing_or_empty_plain_paragraph_is_reported(tmp_path):
@@ -344,3 +344,25 @@ def test_an_unclosed_p_ends_at_the_next_section(tmp_path):
     assert page.plain_text == PLAIN_TEXT
     assert page.section_ids == list(SECTIONS)
     assert [c.section for c in page.claims] == ["method"]
+
+
+def test_a_claim_on_the_plain_lede_is_still_the_plain_paragraph(tmp_path):
+    lede = f'<p data-claim="t-claim" data-source="t-src">{PLAIN_TEXT}</p>'
+    edits = (
+        (f"<p>{PLAIN_TEXT}</p>", lede + "<p>Second para is here.</p>"),
+        ('<p data-claim="t-claim" data-source="t-src">Wow and flutter.', "<p>Wow and flutter."),
+    )
+    page = parse_page(write_valid_help(tmp_path, edits=edits))
+    assert page.plain_text == PLAIN_TEXT
+    assert [(c.id, c.section, c.text) for c in page.claims] == [("t-claim", "plain", PLAIN_TEXT)]
+
+
+def test_an_outbound_link_carrying_a_claim_is_both(tmp_path):
+    old = '<a href="https://example.org/a" data-source="t-src">A link</a>'
+    new = '<a href="https://example.org/a" data-source="t-src" data-claim="c2">A link</a>'
+    page = parse_page(write_valid_help(tmp_path, edits=((old, new),)))
+    assert [(c.id, c.text) for c in page.claims] == [
+        ("c2", "A link"),
+        ("t-claim", "Wow and flutter. A link"),
+    ]
+    assert [(k.href, k.text) for k in page.links] == [("https://example.org/a", "A link")]
