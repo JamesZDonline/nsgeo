@@ -51,7 +51,7 @@ def _trace_figure(rg: Radargram, stack, out: Path) -> Path:
     after = stack.intermediate(0).data[:, k]
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(10.5, 3.8), sharex=True, constrained_layout=True)
     a1.plot(t, raw, color="0.55", lw=0.8, label="Recorded trace")
-    a1.plot(t, mean, color="#c0392b", lw=2.0, label="Running mean (the 'wow')")
+    a1.plot(t, mean, color="#c0392b", lw=2.0, label="Running mean")
     a1.legend(fontsize=8, loc="upper right", frameon=False)
     a1.set_title(f"One trace (trace {k}), before", fontsize=10, loc="left")
     a2.plot(t, after, color="#1f4e79", lw=0.8)
@@ -75,7 +75,9 @@ def _response_figure(dt_ns: float, header: DztHeader, out: Path) -> Path:
     mhz = antenna_mhz(header)
     if mhz is not None:
         ax.axvline(mhz, color="#c0392b", lw=1, ls=":")
-        ax.text(mhz + 8, 0.08, f"{mhz} MHz\n(antenna centre)", fontsize=7, color="#c0392b")
+        ax.text(
+            mhz + 8, 0.08, f"{mhz} MHz\n(in the antenna's\nmodel name)", fontsize=7, color="#c0392b"
+        )
     ax.set_xlabel("Frequency (MHz)", fontsize=8)
     ax.set_ylabel("Fraction of amplitude kept", fontsize=8)
     ax.set_title(
