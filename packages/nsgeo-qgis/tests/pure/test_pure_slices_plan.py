@@ -7,6 +7,7 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
     STREAM_MS_PER_LINE,
+    STREAM_MS_PER_TRACE,
     MemoryEstimate,
     Resolution,
     SourceChoice,
@@ -17,6 +18,7 @@ from nsgeo_qgis.slices_plan import (
     preset_transform_conflict,
     transform_names,
 )
+from plugin_testing import REAL_DZT, needs_real_data
 
 
 def test_transform_names_come_from_the_registry_not_a_hardcoded_list():
@@ -66,28 +68,34 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     assert est.total_bytes == est.lines_bytes + est.cube_bytes
 
 
+#: The lines spec 7.4 was measured on: the ten real files, 606-666 traces.
+REAL_TRACES_PER_LINE = 630
+
+
 def test_streaming_stays_the_default_while_nobody_could_perceive_the_difference():
     """Spec 9.2: a resident cube redraws in 0.56 ms against streaming's
     3.6 ms and nobody can perceive that. Holding the cube below the frame
     budget buys nothing and costs memory, so it is not done even when
     there is room."""
     small = MemoryEstimate(lines_bytes=28_000_000, cube_bytes=83_000_000)
-    assert choose_residency(small, n_lines=24, budget_bytes=DEFAULT_BUDGET_BYTES) == "streaming"
-    assert 24 * STREAM_MS_PER_LINE < FRAME_BUDGET_MS  # why
+    n_traces = 24 * REAL_TRACES_PER_LINE  # spec 7.4's 24 lines
+    assert choose_residency(small, n_traces, budget_bytes=DEFAULT_BUDGET_BYTES) == "streaming"
+    assert n_traces * STREAM_MS_PER_TRACE < FRAME_BUDGET_MS  # why
 
 
 def test_a_large_site_is_promoted_to_a_resident_cube_when_it_fits():
     est = MemoryEstimate(lines_bytes=140_000_000, cube_bytes=83_000_000)
-    n_lines = 200  # 200 * 0.14 ms = 28 ms per tick, past a 16 ms frame
-    assert n_lines * STREAM_MS_PER_LINE > FRAME_BUDGET_MS
-    assert choose_residency(est, n_lines, budget_bytes=DEFAULT_BUDGET_BYTES) == "resident"
+    n_traces = 200 * REAL_TRACES_PER_LINE  # 200 lines: 28 ms per tick, past a 16 ms frame
+    assert n_traces * STREAM_MS_PER_TRACE > FRAME_BUDGET_MS
+    assert choose_residency(est, n_traces, budget_bytes=DEFAULT_BUDGET_BYTES) == "resident"
 
 
 def test_a_large_site_that_does_not_fit_degrades_to_streaming_rather_than_failing():
     """Spec 7.4: an over-budget cube degrades to streaming instead of
     failing, and the source dialog warns rather than hard-caps."""
     est = MemoryEstimate(lines_bytes=140_000_000, cube_bytes=4_000_000_000)
-    assert choose_residency(est, n_lines=200, budget_bytes=DEFAULT_BUDGET_BYTES) == "streaming"
+    n_traces = 200 * REAL_TRACES_PER_LINE
+    assert choose_residency(est, n_traces, budget_bytes=DEFAULT_BUDGET_BYTES) == "streaming"
 
 
 def test_the_settings_override_wins_in_both_directions():
@@ -96,6 +104,36 @@ def test_the_settings_override_wins_in_both_directions():
     huge = MemoryEstimate(lines_bytes=1, cube_bytes=10**12)
     # The user asked for it and spec 7.4 never hard-caps; the dock warns.
     assert choose_residency(huge, 2, DEFAULT_BUDGET_BYTES, always_resident=True) == "resident"
+
+
+def test_streaming_is_costed_per_trace_so_long_lines_go_resident():
+    """Ruling T3-c (M12). Streaming bins every trace of every line in the
+    window, so its cost goes with traces, not lines: M12's site benchmark
+    streamed 100 lines of 3000 traces in about 44 ms a tick, three frames,
+    while a per-line estimate (100 x 0.14 = 14 ms) called that
+    imperceptible. The same line count at the real files' length still
+    streams, and the rule itself -- frame budget, memory budget -- is
+    M11's."""
+    fits = MemoryEstimate(lines_bytes=120_000_000, cube_bytes=15_000_000)
+    assert pytest.approx(STREAM_MS_PER_LINE / REAL_TRACES_PER_LINE) == STREAM_MS_PER_TRACE
+    assert choose_residency(fits, 100 * 3000) == "resident"
+    assert choose_residency(fits, 100 * 670) == "streaming"
+    assert choose_residency(MemoryEstimate(1, 2 * DEFAULT_BUDGET_BYTES), 100 * 3000) == "streaming"
+
+
+@needs_real_data
+def test_the_ten_real_lines_still_stream():
+    """Real data: what M11's own ten lines choose under the per-trace
+    estimate -- streaming, as before, at well under a frame."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+
+    lines = [Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem)) for p in REAL_DZT[:10]]
+    n_traces = sum(line.n_traces for line in lines)
+    assert 6000 < n_traces < 6700
+    est = estimate_memory(sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230)
+    assert choose_residency(est, n_traces) == "streaming"
+    assert n_traces * STREAM_MS_PER_TRACE < 2.0
 
 
 def test_format_bytes_reads_like_the_spec_status_line():

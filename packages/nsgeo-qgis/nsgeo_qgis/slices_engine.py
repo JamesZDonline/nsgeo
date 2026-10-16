@@ -48,7 +48,11 @@ them live here:
   decide whether a result may be kept: keys are relative paths, so the
   same string can name a line in two different sites. These two checks
   are the one place a terminal path stays silent on purpose -- a newer
-  request, or a different site, owns the notification now.
+  request, or a different site, owns the notification now. The
+  closed-site check still ends `_running` and wakes a confirm wait
+  without calling `on_prepared` (ruling T3-e, M12): it is this request's
+  own edge, and leaving the wait to time out reported a stopped task as
+  "did not stop in time".
 * **A `LinePlan` must never outlive the frame or z axis it was built
   against.** Every `Resolution` field invalidates every plan.
   `_rebuild_geometry` drops them by setting `_plans = None`, and
@@ -251,6 +255,9 @@ class SliceEngine(QObject):
         #: than refusing) is what keeps that true even when a change
         #: arrives while another is still being cancelled.
         self._queued_choice: Any = _NOT_QUEUED
+        #: Ruling T3-e (M12): ends a `wait_for_preparation` in progress
+        #: WITHOUT calling `on_prepared`. Set only while one is waiting.
+        self._wake_waiter: Callable[[], None] | None = None
         session.site_closed.connect(self.clear)
         session.grids_changed.connect(self._on_grids_changed)
 
@@ -262,6 +269,21 @@ class SliceEngine(QObject):
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def has_live_task(self) -> bool:
+        """Whether a preparation task of this engine may still be executing.
+
+        Ruling T3-b (M12). `is_running` is this engine's CURRENT request,
+        and `clear()` (so `dispose()` too) sets it False even when its
+        bounded confirm wait gave up -- the abandoned task is then still
+        reading a line on a worker thread until its next `isCanceled()`
+        check. `_pending` holds every task until its `finished` has run,
+        whatever its generation, so this is the truth a dispatcher needs
+        before it starts another preparation (trap 1). M11's dock keeps
+        reading `is_running`, whose meaning is unchanged.
+        """
+        return self._running or bool(self._pending)
 
     @property
     def line_count(self) -> int:
@@ -367,7 +389,9 @@ class SliceEngine(QObject):
         # all. `choose_residency`'s own `budget_bytes` default is this same
         # constant, so leaving it out here is not a behaviour change.
         self._mode = choose_residency(
-            self.estimate, len(self._lines), always_resident=self._always_resident
+            self.estimate,
+            sum(int(line.data.shape[1]) for line in self._lines),
+            always_resident=self._always_resident,
         )
 
     # ---- source -----------------------------------------------------------
@@ -657,7 +681,22 @@ class SliceEngine(QObject):
                 if generation != self._generation:
                     return  # a newer source was chosen; this result is stale
                 if self.session.site is not requested_against:
-                    return  # the site was closed or replaced under us
+                    # The site was closed or replaced under us. Ruling T3-e
+                    # (M12): with the generation still matching, this is
+                    # THIS request's own terminal edge -- any newer request
+                    # bumps the generation first -- so it ends `_running`
+                    # and wakes `_cancel_in_flight`'s confirm wait (which
+                    # `clear()` on `site_closed` is spinning right now).
+                    # Without that the wait sat out `_CANCEL_TIMEOUT_MS` and
+                    # reported "did not stop in time" about a task that
+                    # had stopped. It applies nothing and reports nothing,
+                    # and wakes the wait without `on_prepared`: the dock's
+                    # `_on_prepared` redraws and refills widgets, which has
+                    # no business running for a site that is gone.
+                    self._running = False
+                    if self._wake_waiter is not None:
+                        self._wake_waiter()
+                    return
                 notify = True
                 self._running = False
                 for message in failures:
@@ -1224,8 +1263,21 @@ class SliceEngine(QObject):
             finally:
                 loop.quit()
 
+        previous_wake = self._wake_waiter
+
+        def wake() -> None:
+            # Ruling T3-e: the same wake as `done`, minus `on_prepared` --
+            # for a terminal edge that applies nothing (a closed site).
+            nonlocal finished
+            finished = True
+            loop.quit()
+            if previous_wake is not None:
+                previous_wake()
+
         self.on_prepared = done
+        self._wake_waiter = wake
         timer.start(timeout_ms)
         loop.exec(flags)
         self.on_prepared = previous
+        self._wake_waiter = previous_wake
         return finished and not self._running

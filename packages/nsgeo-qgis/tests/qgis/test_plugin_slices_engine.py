@@ -13,11 +13,12 @@ from nsgeo.model.survey import Line
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import CoverageError, SliceWindow, fill, limit_over_slices, plan_windows
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis import slices_engine
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QTimer
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [
@@ -881,3 +882,75 @@ def test_cancel_preparation_stops_the_task_and_keeps_nothing_else_running(source
     assert not engine.is_running
     assert engine._pending == set()
     assert errors == [], errors
+
+
+def test_closing_the_site_mid_preparation_stops_promptly_and_silently(sourced, monkeypatch):
+    """Ruling T3-e (M12). The task's `finished` used to return silently for
+    a site that is gone, so the confirm wait in `clear()` (`site_closed`)
+    never woke: it sat out the whole `_CANCEL_TIMEOUT_MS` and then reported
+    "did not stop in time" about a task that had stopped. That edge is this
+    request's own (any newer request bumps the generation first), so it
+    must end the wait at once -- applying nothing and reporting nothing."""
+    engine, session, errors, prepared = sourced
+    real_load = Line.load
+
+    def slow_load(self: Line) -> list:
+        time.sleep(0.05)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", slow_load)
+    keys = tuple(session.keys())
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys))
+    assert engine.is_running
+    started = time.perf_counter()
+    session.close_site()
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    assert errors == [], errors
+    assert elapsed_ms < slices_engine._CANCEL_TIMEOUT_MS, f"close took {elapsed_ms:.0f} ms"
+    assert not engine.is_running and not engine.has_live_task
+    assert prepared == [], "a preparation for a closed site was reported as finished"
+
+
+def test_has_live_task_outlasts_a_clear_whose_wait_gave_up(sourced, monkeypatch):
+    """Ruling T3-b (M12). `clear()` sets `is_running` False even when its
+    bounded wait gave up and the task is still reading a line -- the
+    meaning M11's dock relies on. `has_live_task` is the truth a dispatcher
+    needs: a task may still be executing until its `finished` has run."""
+    engine, session, errors, _ = sourced
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    real_load = Line.load
+    reading = threading.Event()
+
+    def slow_load(self: Line) -> list:
+        reading.set()
+        time.sleep(0.15)
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", slow_load)
+    keys = tuple(session.keys())
+    engine.set_source(SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys))
+    assert reading.wait(5.0)
+    engine.clear()
+    assert not engine.is_running
+    assert engine.has_live_task, "the abandoned task is still reading a line"
+    deadline = time.monotonic() + 5.0
+    while engine.has_live_task and time.monotonic() < deadline:
+        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+        time.sleep(0.002)
+    assert not engine.has_live_task
+    assert any("did not stop in time" in msg for _, msg in errors), errors
+
+
+def test_residency_is_chosen_from_the_prepared_trace_count(sourced, monkeypatch):
+    """Ruling T3-c (M12): the engine costs streaming from the traces it
+    actually holds, not from its line count. With the per-trace rate
+    raised so that these four 60-trace lines (240 traces) cost more than a
+    frame, the engine goes resident; costed by four lines it would not."""
+    from nsgeo_qgis import slices_plan
+
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    assert engine.mode == "streaming"  # 240 traces: far under a frame
+    monkeypatch.setattr(slices_plan, "STREAM_MS_PER_TRACE", slices_plan.FRAME_BUDGET_MS / 200)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    assert engine.mode == "resident"

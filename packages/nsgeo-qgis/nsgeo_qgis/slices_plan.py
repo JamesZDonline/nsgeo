@@ -41,6 +41,19 @@ NO_TRANSFORM = ""
 #: Measured, spec 7.4: streaming costs ~0.14 ms per line per tick.
 STREAM_MS_PER_LINE = 0.14
 
+#: The lines that figure was measured on: spec 7 took every timing on "the
+#: ten real files cycled to the stated line count", which hold 606-666
+#: traces each, 630 on average.
+MEASURED_TRACES_PER_LINE = 630
+
+#: Streaming's cost per trace per tick (ruling T3-c, M12). Streaming
+#: resamples and bins every trace of every line in the window, so its cost
+#: goes with traces, not lines: M12's site benchmark streamed 100 lines of
+#: 3000 traces in ~44 ms a tick (0.44 ms a line), where a per-line rate
+#: called it 14 ms and imperceptible. Measured against that, this rate
+#: predicts 0.67 ms a line -- on the cautious side.
+STREAM_MS_PER_TRACE = STREAM_MS_PER_LINE / MEASURED_TRACES_PER_LINE
+
 #: One 60 Hz frame. Below this, streaming is imperceptible.
 FRAME_BUDGET_MS = 16.0
 
@@ -231,11 +244,16 @@ def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstim
 
 def choose_residency(
     estimate: MemoryEstimate,
-    n_lines: int,
+    n_traces: int,
     budget_bytes: int = DEFAULT_BUDGET_BYTES,
     always_resident: bool = False,
 ) -> str:
-    """`"resident"` or `"streaming"`, from the line count and the budget.
+    """`"resident"` or `"streaming"`, from the prepared trace count and the budget.
+
+    M11's rule, costed per trace (ruling T3-c): stream while a tick costs
+    no more than a frame, otherwise hold the cube if it fits the budget.
+    `n_traces` is the total over every prepared line -- a line count alone
+    misjudged 3000-trace lines about threefold.
 
     Three tiers are described in spec 7.4; two exist. The third -- one
     line at a time, memory-mapped off disk -- is unmeasured there, was
@@ -245,7 +263,7 @@ def choose_residency(
     """
     if always_resident:
         return "resident"
-    if n_lines * STREAM_MS_PER_LINE <= FRAME_BUDGET_MS:
+    if n_traces * STREAM_MS_PER_TRACE <= FRAME_BUDGET_MS:
         # Imperceptible. Holding a cube here would spend memory to buy
         # nothing a person can see.
         return "streaming"
