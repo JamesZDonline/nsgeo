@@ -139,6 +139,7 @@ cells (radius 10) and 327 ms at ~1020 × 1020. A site fills once per grid per ti
 
 **Residency is automatic above 114 lines** (`choose_residency`: streaming while
 `n_lines × 0.14 ms ≤ 16 ms`, else resident up to 1.5 GB). A site crosses that line quickly.
+*M12 changed this to a per-trace estimate (ruling T3-c): see `slices_plan.choose_residency`.*
 
 ---
 
