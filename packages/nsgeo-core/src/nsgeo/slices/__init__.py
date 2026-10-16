@@ -27,4 +27,22 @@ from nsgeo.slices.display import (  # noqa: F401
 )
 from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill  # noqa: F401
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent  # noqa: F401
+from nsgeo.slices.site import (  # noqa: F401
+    BACKGROUND_FRACTION,
+    MIN_SEAM_CELLS,
+    NORMALISATION_METHODS,
+    SEAM_WIDTH_SPACINGS,
+    Seam,
+    SiteLattice,
+    background_level,
+    compose,
+    edge_match_solve,
+    find_seams,
+    grid_axis,
+    lattice_pixel,
+    normalise,
+    seam_masks,
+    site_axis,
+    window_on,
+)
 from nsgeo.slices.store import CubeStoreError, load_cube, save_cube  # noqa: F401
