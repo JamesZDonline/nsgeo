@@ -104,6 +104,13 @@ contents line linking each section.
 
 ### 4.2 Voice
 
+- **Plain, but professional (user, 2026-10-16).** The bandpass draft compared the filter to a
+  stereo's tone control and called frequencies "wiggle speeds". The user said it "reads a little
+  silly, make it a bit more professional." The paragraph should read like a good field manual or
+  museum label, not a children's book:
+  - use the real term once, with a plain gloss;
+  - use at most one analogy, and only a precise one;
+  - no invented substitute words and no slang.
 - **Plain words.** Short sentences. Measure the paragraph with the Flesch–Kincaid grade formula
   (§9). The dewow draft's paragraph scored **9.7** on the crude in-repo estimator used during
   design, so it needs shortening to meet the bar too.
