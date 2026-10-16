@@ -239,7 +239,9 @@ There are three layers:
 - `packages/nsgeo-qgis/nsgeo_qgis/help/`: `<registry name>.html` for each step, `style.css`, and
   the figures in a subfolder. They live inside the plugin package so they ship with it. When M9
   builds the release zip, it must include `help/` (a note for M9, not work for this project).
-- The figure script goes in `packages/nsgeo-qgis/scripts/`, next to `dev_link.py`.
+- The figures go in a dev-only package, `packages/nsgeo-qgis/help_tools/figures/`, with one module
+  per step. This was amended by the chunk 1 plan so pages can be written in parallel; it was
+  originally a single script in `scripts/`.
 - The sources file and the code that turns pages plus sources into the checking page's data:
   placement is the builder's call, kept out of the shipped `help/` folder unless there's a reason.
 
@@ -322,15 +324,16 @@ There are twelve steps, in five groups:
 It ends with a build to the `ns_geo` profile and a walkthrough, per the standing rule: press
 Help, see the page.
 
-**Later chunks, one per group.** They follow this order (design call):
+**Then the other eleven pages, in parallel (user, 2026-10-15: "once we've got started I think we
+can massively parallelize this because each help page is independent").** This replaces the
+original family-by-family chunks.
 
-1. `time_zero` + `bandpass`;
-2. the gains;
-3. background removal;
-4. amplitude.
+- Chunk 1 lays the files out so that each page's work touches only files named for that page.
+- One writer per page works in its own worktree.
+- The controller integrates each page, then republishes the checking page.
+- One walkthrough comes at the end.
 
-Each chunk adds its pages, re-runs the figure script, and republishes the checking page. Each
-ends with a short walkthrough.
+The chunk 1 plan's closing section has the details.
 
 Writing a page means reading the step's code first (for `nsgeo`), measuring before stating any
 number, and confirming a source exists before citing it. Then the reviewer checks the `nsgeo`

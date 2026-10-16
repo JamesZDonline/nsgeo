@@ -5,8 +5,9 @@
 > checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A Help button on the Processing panel that opens a finished dewow page in the browser,
-plus the frame every later page plugs into: the page contract and its tests, the figure script,
-the sources file, and the checking page.
+plus the frame every later page plugs into: the page contract and its tests, the figure
+machinery, the sources ledger, and the checking page. The frame is laid out so the other eleven
+pages can be written **in parallel** afterwards (user: "each help page is independent").
 
 **Architecture:** There are three parts:
 
@@ -15,13 +16,14 @@ the sources file, and the checking page.
 - **A dev-only package**, `packages/nsgeo-qgis/help_tools/`, that never ships. It parses pages and
   checks them against the step registry and the sources file. It also builds the data for the
   checking page.
-- **A matplotlib script** in `scripts/` that draws each page's figures by running nsgeo's own code
-  on a real campus line.
+- **A figures subpackage**, `help_tools/figures/`, with one module per step. It draws each
+  page's figures with matplotlib by running nsgeo's own code on a real campus line. This
+  supersedes spec §7's "script in `scripts/`" (design call, made for parallel writing).
 
 The pure-test tier enforces the contract in CI. Tasks 1–5 go to subagents. Task 6 is the
 controller's, because it publishes an Artifact.
 
-**Tech Stack:** Python 3.9+, `qgis.PyQt`, stdlib `html.parser`, matplotlib (script only), numpy,
+**Tech Stack:** Python 3.9+, `qgis.PyQt`, stdlib `html.parser`, matplotlib (`help_tools/figures/` only), numpy,
 pytest. Pages are static HTML, CSS and MathML.
 
 **Spec:** `docs/superpowers/specs/2026-10-15-nsgeo-help-pages-design.md` is binding, and its
@@ -61,8 +63,16 @@ Every task's requirements implicitly include this section.
   #40). The page then describes the current behaviour and links the issue.
 - **Plugin boundary.** `tests/pure/test_plugin_boundary.py` forbids `matplotlib`, `scipy` and
   direct `PyQt5`/`PyQt6` under `nsgeo_qgis/`. `help_pages.py` imports no Qt at all.
-  `help_tools/` and `scripts/` sit outside `nsgeo_qgis/`, so the boundary test doesn't scan them.
-  `help_tools/` still imports no Qt and no matplotlib, so the pure tier can import it in CI.
+  `help_tools/` sits outside `nsgeo_qgis/`, so the boundary test doesn't scan it. Only
+  `help_tools/figures/` imports matplotlib. The rest of `help_tools/` imports neither Qt nor
+  matplotlib, so the pure tier can import it in CI.
+- **Parallel-safe layout.** Everything one page needs lives in files named for that page:
+  `help/<step>.html`, `help/img/<step>_*.png`, `help_tools/sources/<step>.json` and
+  `help_tools/figures/<step>.py`. Parallel page writers then never touch the same file. The
+  shared files are changed only by the controller, or by a task in this chunk:
+  - `help/style.css`;
+  - `help_tools/figures/common.py`;
+  - the `PENDING` set in `tests/pure/test_help_pages.py`.
 - **Pages are offline.** A page has no `<script>` and no remote stylesheet, font or image. The
   only stylesheet is `style.css`. Equations are MathML.
 - **Section contract (spec §4.1).** `<section>` ids in order:
@@ -240,8 +250,8 @@ def test_help_with_the_page_gone_opens_nothing(opened, help_dir, opened_urls):  
 - Create: `packages/nsgeo-qgis/help_tools/__init__.py` (a docstring only: dev tooling for the
   help pages, never shipped)
 - Create: `packages/nsgeo-qgis/help_tools/readability.py`, `packages/nsgeo-qgis/help_tools/sources.py`
-- Create: `packages/nsgeo-qgis/help_tools/sources.json` containing exactly
-  `{"checking_page": null, "sources": {}, "claims": {}}`
+- Create: `packages/nsgeo-qgis/help_tools/sources/.gitkeep`. Pages' source files land here
+  later, one per page.
 - Test: `packages/nsgeo-qgis/tests/pure/test_help_tools.py`
 
 `tests/conftest.py` already puts `packages/nsgeo-qgis` on `sys.path`, so `import help_tools`
@@ -252,19 +262,27 @@ works in both tiers.
   - `readability.FK_LIMIT = 9.0`
   - `readability.syllables(word: str) -> int`
   - `readability.fk_grade(text: str) -> float`
-  - `sources.SOURCES_PATH: Path` (the JSON beside the module)
-  - `sources.load_sources(path: Path = SOURCES_PATH) -> Sources`. It raises `ValueError` whose
-    message lists **every** problem, one per line.
-  - `Sources(checking_page: str | None, sources: dict[str, Source], claims: dict[str, ClaimEvidence])`
+  - `sources.SOURCES_DIR: Path` (`help_tools/sources/`)
+  - `sources.load_sources(directory: Path = SOURCES_DIR) -> Sources`. It merges every `*.json`
+    in the directory. It raises `ValueError` whose message lists **every** problem, one per line,
+    each prefixed with the file name.
+  - `Sources(sources: dict[str, Source], claims: dict[str, ClaimEvidence])`
   - `Source(id, citation, url: str | None, checked_via, checked_on, note)`
-  - `ClaimEvidence(id, evidence, look, quote)`
+  - `ClaimEvidence(id, page, evidence, look, quote)`. `page` is the stem of the file that
+    declared the claim.
   - All dataclasses are frozen.
 
-JSON shape, per spec §6:
+Merge rules:
+
+- A source id may appear in several files, because Cassidy will be cited by many pages. Every
+  copy must be identical, or the error names the id and both files.
+- A claim id may appear in only one file.
+- An empty or missing directory loads as empty `Sources`.
+
+One file per page, `sources/<step>.json`, per spec §6:
 
 ```json
-{"checking_page": null,
- "sources": {"annan2009": {"citation": "...", "url": null,
+{"sources": {"annan2009": {"citation": "...", "url": null,
                            "exists": {"checked_via": "https://...", "checked_on": "2026-10-15",
                                       "note": "page range not confirmed"}}},
  "claims":  {"dewow-wow-origin": {"evidence": "memory", "look": "Annan 2009, Ch. 1", "quote": ""}}}
@@ -287,18 +305,30 @@ def test_fk_grade_counts_sentences():
     assert fk_grade("The cat sat. The dog ran.") == pytest.approx(-2.62)
 
 def test_load_sources_reports_every_problem_at_once(tmp_path):
-    bad = {"checking_page": None,
-           "sources": {"x": {"citation": "", "url": None, "exists": {}}},
+    bad = {"sources": {"x": {"citation": "", "url": None, "exists": {}}},
            "claims": {"c1": {"evidence": "guess", "look": "", "quote": ""},
                       "c2": {"evidence": "read", "look": "p. 3", "quote": ""}}}
-    p = tmp_path / "s.json"; p.write_text(json.dumps(bad), encoding="utf-8")
+    (tmp_path / "dewow.json").write_text(json.dumps(bad), encoding="utf-8")
     with pytest.raises(ValueError) as e:
-        load_sources(p)
+        load_sources(tmp_path)
     msg = str(e.value)
     for needle in ("x: citation", "x: exists.checked_via", "c1: evidence", "c2: quote"):
         assert needle in msg
 
-def test_the_committed_sources_file_loads():
+# helpers: write(path, obj) dumps JSON; MEMORY = {"evidence": "memory", "look": "x", "quote": ""}
+def test_shared_sources_merge_and_conflicts_are_named(tmp_path):
+    ok = {"citation": "C", "url": None, "exists": {"checked_via": "u", "checked_on": "d", "note": ""}}
+    write(tmp_path / "a.json", {"sources": {"s": ok}, "claims": {"a-1": MEMORY}})
+    write(tmp_path / "b.json", {"sources": {"s": ok}, "claims": {"b-1": MEMORY}})
+    merged = load_sources(tmp_path)
+    assert set(merged.sources) == {"s"} and merged.claims["b-1"].page == "b"
+    write(tmp_path / "b.json", {"sources": {"s": {**ok, "citation": "D"}}, "claims": {"a-1": MEMORY}})
+    with pytest.raises(ValueError) as e:
+        load_sources(tmp_path)
+    assert "s" in str(e.value) and "a.json" in str(e.value) and "b.json" in str(e.value)
+    assert "a-1" in str(e.value)                       # the duplicated claim id is named too
+
+def test_the_committed_sources_load():
     assert isinstance(load_sources(), Sources)
 ```
 
@@ -328,8 +358,9 @@ def test_the_committed_sources_file_loads():
   - `le` not exempted;
   - sentences counted as 1;
   - `load_sources` raising on the first problem only;
+  - the last file winning a source conflict silently;
   - `"read"` accepted with no quote.
-- [ ] **Step 6: Commit and push.** Message: `feat(help): reading-level estimate and the sources file`.
+- [ ] **Step 6: Commit and push.** Message: `feat(help): reading-level estimate and the per-page sources ledger`.
 
 ---
 
@@ -361,7 +392,7 @@ def test_the_committed_sources_file_loads():
   - `check_page(page: PageInfo, help_dir: Path, sources: Sources) -> list[str]`
   - `check_site(pages: list[PageInfo], sources: Sources) -> list[str]`
 
-  Every problem string starts `f"{page.name}: "` (or `"sources.json: "`) and names the
+  Every problem string starts `f"{page.name}: "` (or `"sources: "`) and names the
   offending id, setting, path or href.
 
 Markup the parser reads, per spec §6.3:
@@ -383,7 +414,8 @@ Markup the parser reads, per spec §6.3:
 - an image whose `src` is remote or doesn't exist relative to `help_dir`;
 - an outbound link with no `data-source`;
 - a `data-source` (on a claim, link or ref) missing from `sources.sources`;
-- a claim id missing from `sources.claims`;
+- a claim id missing from `sources.claims`, or declared in another page's file
+  (`claims[id].page != page.name`);
 - a claim with no source;
 - `fk_grade(plain_text) > FK_LIMIT`, with the grade in the message.
 
@@ -417,6 +449,7 @@ Markup the parser reads, per spec §6.3:
   - an `<a href="https://x.org">` without `data-source` → `"https://x.org"`;
   - a `data-source="nope"` → `"nope"`;
   - a claim id absent from `sources.claims` → that id;
+  - a claim declared in `gain_agc`'s file but used on the dewow page → that id;
   - a `#plain` paragraph of polysyllabic run-on prose → `"grade"`;
   - the same page saved as `gain_agc.html` with no `related` section → `"related"`.
 
@@ -471,64 +504,75 @@ Markup the parser reads, per spec §6.3:
 
 ---
 
-### Task 4: The figure script
+### Task 4: The figures subpackage
 
 **Files:**
-- Create: `packages/nsgeo-qgis/scripts/make_help_figures.py`
-- Test: `packages/nsgeo-qgis/tests/pure/test_help_figures.py`. Put `pytest.importorskip("matplotlib")`
-  at the top, so it runs under `.venv-qgis` only. The script is not a package, so load it with
-  `importlib.util.spec_from_file_location`.
+- Create: `packages/nsgeo-qgis/help_tools/figures/__init__.py` (the driver)
+- Create: `packages/nsgeo-qgis/help_tools/figures/__main__.py`
+- Create: `packages/nsgeo-qgis/help_tools/figures/common.py` (shared drawing)
+- Create: `packages/nsgeo-qgis/help_tools/figures/dewow.py` (the first recipe)
+- Test: `packages/nsgeo-qgis/tests/pure/test_help_figures.py`, starting with
+  `pytest.importorskip("matplotlib")` so it runs under `.venv-qgis` only.
 
 Start from the throwaway scripts in the spec's attachments folder (`dewow_images.py`,
 `dewow_response.py`). Same pictures, cleaned up.
 
 **Interfaces:**
-- Produces:
+- Produces, in `help_tools/figures/__init__.py`:
   - `DEFAULT_DATA = <repo>/packages/nsgeo-core/tests/data/local/FILE__007.DZT`
   - `DEFAULT_OUT = HELP_DIR / "img"`
-  - `load_radargram(dzt: Path) -> tuple[Radargram, DztHeader]`: channel 0 of
-    `read_samples`, `dt_ns=header.dt_ns`, `t0_ns=header.position_ns`. This mirrors
-    `Radargram.from_profile`.
-  - `RECIPES: dict[str, Callable[[Radargram, DztHeader, Path], list[Path]]]`, which for now holds
-    only `"dewow"`.
+  - `recipes() -> dict[str, ModuleType]`. It finds every module in the package except `common`
+    with `pkgutil.iter_modules`, keyed by module name, which must be a registry step name. So
+    adding a page's figures means adding one file and editing nothing shared.
   - `make_figures(dzt: Path, out_dir: Path, steps: list[str] | None = None) -> list[Path]`.
-    `None` means every recipe.
-  - `measure_dewow(dt_ns: float, windows_ns: tuple[float, ...] = (2.0, 4.0, 8.0)) -> list[dict]`.
-    Each dict has the keys `window_ns`, `samples`, `used_ns`, `half_power_mhz`, `peak_gain`,
-    `peak_mhz`.
+    `None` means every recipe. An unknown step raises `KeyError` naming it.
   - `main(argv: list[str] | None = None) -> int`, taking `--data`, `--out`, `--step`
-    (repeatable) and `--report` (prints `measure_dewow(dt)` as JSON and writes nothing).
+    (repeatable) and `--report STEP`. The report prints that recipe's `measure(dt_ns)` as JSON
+    and writes nothing.
+- Produces, in `common.py`:
+  - `load_radargram(dzt: Path) -> tuple[Radargram, DztHeader]`: channel 0 of `read_samples`,
+    `dt_ns=header.dt_ns`, `t0_ns=header.position_ns`. This mirrors `Radargram.from_profile`.
+  - `stack_of(rg: Radargram, steps: list[Step]) -> StepStack`
+  - `panels(stack: StepStack, index: int, out: Path, after_title: str, removed_title: str,
+    header: DztHeader, t_max_ns: float = 50.0) -> Path`, the generic before / after / difference
+    figure.
+  - `antenna_mhz(header: DztHeader) -> int | None`
+- **The recipe contract**, in each `<step>.py`:
+  - `make(rg: Radargram, header: DztHeader, out_dir: Path) -> list[Path]` is required.
+  - `measure(dt_ns: float) -> list[dict]` is optional.
 
-  Run it as `./.venv-qgis/bin/python packages/nsgeo-qgis/scripts/make_help_figures.py`. The
-  script puts `packages/nsgeo-qgis` on `sys.path` and imports `nsgeo_qgis` first, which runs the
-  core path shim.
+  Run it as `./.venv-qgis/bin/python -m help_tools.figures` from `packages/nsgeo-qgis`.
+  `help_tools/figures/__init__.py` imports `nsgeo_qgis` first, which runs the core path shim,
+  because `.venv-qgis` has no nsgeo installed.
 
-The dewow recipe writes three PNGs at dpi 150, matching the draft's:
+`dewow.py` writes three PNGs at dpi 150, matching the draft's:
 
 - **`dewow_trace.png`** shows trace `n_traces // 2` with time on the x axis, up to 40 ns.
   - Upper panel: the recorded trace in grey, with the running mean in red.
   - Lower panel: the result.
   - The running mean is **`StepStack.difference(0)`** at that trace, so no `_util` import is
     needed.
-- **`dewow_panels.png`** has three panels: "Before", "After dewow (window 4 ns)" and "What dewow
-  removed".
-  - They come from a `StepStack` with source set and `dewow` appended: `source`,
-    `intermediate(0)` and `difference(0)`.
+- **`dewow_panels.png`** comes from `common.panels(stack_of(rg, [dewow]), 0, ...)`, with three
+  panels: "Before", "After dewow (window 4 ns)" and "What dewow removed".
+  - `panels` draws `source` (or `intermediate(index - 1)`), `intermediate(index)` and
+    `difference(index)`.
   - Each panel is scaled on its own: `PercentileClip(99).limit`, `colormap(DEFAULT_COLORMAP)`,
     `to_rgb8`.
-  - The y axis is two-way time down to 50 ns. The x axis is distance from `traces_per_metre`, or
-    trace number when that is 0.
+  - The y axis is two-way time down to `t_max_ns`. The x axis is distance from
+    `traces_per_metre`, or trace number when that is 0.
 - **`dewow_response.png`** shows `|rfft|` of the default dewow applied to a unit spike: 8192
   samples at the file's `dt_ns`, plotted up to 1000 MHz.
   - A dashed line marks 1, and a dotted line marks 1/√2.
-  - A red dotted marker sits at the antenna's nominal frequency, parsed as the first 2–4 digit
-    run in `header.antenna` ("HS350US" → 350). Leave the marker out when there is none.
+  - A red dotted marker sits at `antenna_mhz(header)`: the first 2–4 digit run in
+    `header.antenna` ("HS350US" → 350). Leave the marker out when it is `None`.
+- **`dewow.measure(dt_ns, windows_ns=(2.0, 4.0, 8.0)) -> list[dict]`** returns dicts with the keys
+  `window_ns`, `samples`, `used_ns`, `half_power_mhz`, `peak_gain` and `peak_mhz`.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_measure_dewow_matches_the_design_measurements():     # spec §8, campus Δt
-    rows = {r["window_ns"]: r for r in measure_dewow(0.21653111279010773)}
+def test_dewow_measure_matches_the_design_measurements():     # spec §8, campus Δt
+    rows = {r["window_ns"]: r for r in dewow.measure(0.21653111279010773)}
     assert rows[4.0]["samples"] == 18 and rows[4.0]["used_ns"] == pytest.approx(3.898, abs=1e-3)
     assert rows[4.0]["half_power_mhz"] == pytest.approx(193, abs=4)
     assert rows[4.0]["peak_gain"] == pytest.approx(1.214, abs=0.01)
@@ -545,20 +589,31 @@ def test_make_figures_writes_three_pngs_for_dewow(tmp_path):
 def test_unknown_step_is_refused(tmp_path):
     with pytest.raises(KeyError, match="time_zero"):
         make_figures(synthetic_dzt(tmp_path, "F.DZT"), tmp_path, ["time_zero"])
+
+def test_recipes_are_discovered_and_named_for_registered_steps():
+    found = recipes()
+    assert "dewow" in found and "common" not in found
+    assert set(found) <= set(available_steps())
+
+def test_antenna_mhz():
+    assert antenna_mhz(replace(HEADER, antenna="HS350US")) == 350
+    assert antenna_mhz(replace(HEADER, antenna="")) is None
 ```
 
 - [ ] **Step 2: Run them under `.venv-qgis` to make sure they fail.**
-- [ ] **Step 3: Implement.** Use the `Agg` backend. `measure_dewow` uses `build_step("dewow",
+- [ ] **Step 3: Implement.** Use the `Agg` backend. `dewow.measure` uses `build_step("dewow",
   window_ns=W)` on the spike. The half-power frequency is the first frequency where
   `|H| >= 1/sqrt(2)`; the peak is the maximum of `|H|`.
-- [ ] **Step 4: Run all three commands.** Then run the script for real on `FILE__007` into a
-  scratch directory (never `help/img`; Task 5 does that). Look at the three PNGs and confirm
+- [ ] **Step 4: Run all three commands.** Then run `python -m help_tools.figures --step dewow
+  --out <scratch>` for real on `FILE__007`. Use a scratch directory, never `help/img`; Task 5
+  does that. Look at the three PNGs and confirm
   they match the attachments.
 - [ ] **Step 5: Prove discrimination.** The mutants:
   - spike FFT magnitude without `abs`;
   - `round` replaced by `int`, which gives 17 samples at 4 ns;
-  - the half-power point taken as the first point with `|H| >= 0.5`.
-- [ ] **Step 6: Commit and push.** Message: `feat(help): figure script — nsgeo's own steps on the campus line`.
+  - the half-power point taken as the first point with `|H| >= 0.5`;
+  - `recipes()` including `common`.
+- [ ] **Step 6: Commit and push.** Message: `feat(help): figures — nsgeo's own steps on the campus line, one module per page`.
 
 ---
 
@@ -568,12 +623,12 @@ def test_unknown_step_is_refused(tmp_path):
 - Create: `packages/nsgeo-qgis/nsgeo_qgis/help/style.css`
 - Create: `packages/nsgeo-qgis/nsgeo_qgis/help/dewow.html`
 - Create: `packages/nsgeo-qgis/nsgeo_qgis/help/img/dewow_{trace,panels,response}.png`, generated
-  by Task 4's script
-- Modify: `packages/nsgeo-qgis/help_tools/sources.json`
+  by Task 4
+- Create: `packages/nsgeo-qgis/help_tools/sources/dewow.json`
 - Modify: `packages/nsgeo-qgis/tests/pure/test_help_pages.py`: remove `"dewow"` from `PENDING`
 
 **Interfaces:**
-- Consumes: the Task 3 contract, `make_help_figures.py --step dewow` and `--report`.
+- Consumes: the Task 3 contract, `python -m help_tools.figures --step dewow` and `--report dewow`.
 
 **The draft** is `docs/superpowers/specs/2026-10-15-nsgeo-help-pages/dewow-draft.html`. The user
 reviewed it ("honestly looks great"), so keep its look, voice, sections and depth.
@@ -601,7 +656,7 @@ The changes:
    - **Any factual statement that is neither measured, nor read from nsgeo's code, nor backed by
      a confirmed source is cut.** Example: the draft's "running median or a smooth curve"
      sentence, unless a free source for it is found and read.
-6. **The sources file.** Use these ids:
+6. **`sources/dewow.json`.** Use these ids:
    - `cassidy2009`, `annan2009`, `conyers2013`;
    - `wp-ground-penetrating-radar`, `wp-moving-average`, `wp-low-pass-filter`,
      `wp-high-pass-filter`, `wp-sinc-function`, `wp-dirichlet-kernel`, `wp-prefix-sum`;
@@ -619,7 +674,7 @@ The changes:
 - [ ] **Step 1: Remove `dewow` from `PENDING` and run the contract tests.** They are expected to
   FAIL because `dewow.html` is missing.
 - [ ] **Step 2: Generate the figures and the report.**
-- [ ] **Step 3: Write `style.css` and `dewow.html`, and fill `sources.json`** as above.
+- [ ] **Step 3: Write `style.css` and `dewow.html`, and fill `sources/dewow.json`** as above.
 - [ ] **Step 4: Run all three commands.** Every contract test passes with one real page.
 - [ ] **Step 5: Look at it.** Take a light-mode screenshot:
   `google-chrome --headless --disable-gpu --screenshot=/tmp/<scratch>/dewow.png
@@ -627,7 +682,7 @@ The changes:
   Check that the equations render as MathML (not raw tags) and that all three figures load.
   Record anything off in the report.
 - [ ] **Step 6: Prove discrimination.** Against the real page, delete `data-param`, add
-  `<script></script>`, and delete one `sources.json` entry. Each must fail
+  `<script></script>`, and delete one entry from `sources/dewow.json`. Each must fail
   `test_every_page_meets_the_contract` or `test_pages_and_sources_file_agree`. Revert all three.
 - [ ] **Step 7: Commit and push.** Message: `docs(help): the dewow page`.
 
@@ -640,7 +695,8 @@ This task needs the Artifact tool, so the controller does it.
 **Files:**
 - Create: `packages/nsgeo-qgis/help_tools/ledger.py`
 - Create: `packages/nsgeo-qgis/help_tools/checking_page.html`, the template
-- Modify: `help_tools/sources.json` (`checking_page` URL)
+- Create: `packages/nsgeo-qgis/help_tools/checking_page.url`, one line holding the published
+  URL, so later chunks republish to the same place
 - Test: `tests/pure/test_help_tools.py` (append)
 
 **Interfaces:**
@@ -679,7 +735,7 @@ This task needs the Artifact tool, so the controller does it.
 - [ ] **Step 4: Publish.** Run `python -m help_tools.ledger --html <scratch>/checking.html`, then
   publish it with `capabilities: {db: {}}`, title "Help Sources Check" and icon `checklist`.
   Check it with one `ArtifactData` `list` of `checks`. Record the URL in
-  `sources.json["checking_page"]`.
+  `help_tools/checking_page.url`.
 - [ ] **Step 5: Run all three commands. Commit and push.** Message: `feat(help): the sources ledger and its checking page`.
 
 Later chunks republish to the same URL. Ticks survive, because doc ids are claim ids.
@@ -704,3 +760,19 @@ The standing rule applies: no merge proposal until this is done.
 3. Wait for the user's results.
 4. After the merge, repoint the symlink at `.worktrees/nsgeo-main` (memory: that detached
    worktree is the deploy target for main).
+
+---
+
+## After chunk 1: the other eleven pages, in parallel
+
+The user plans to "massively parallelize" the remaining pages once this frame exists. This plan
+lays the frame out for that (see Parallel-safe layout). The next plan is written once chunk 1 is
+merged. It should:
+
+- give one writer per page, each in its own worktree, owning exactly `help/<step>.html`,
+  `help/img/<step>_*.png`, `help_tools/sources/<step>.json` and `help_tools/figures/<step>.py`;
+- give family writers (gains, background, amplitude) their siblings' code to read for the
+  `related` lines;
+- leave integration to the controller: merge each page branch, shrink `PENDING`, run the full
+  suite, republish the checking page to the URL in `help_tools/checking_page.url`, and finish
+  with one walkthrough.
