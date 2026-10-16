@@ -290,6 +290,26 @@ def opened_urls(monkeypatch):
     return urls
 
 
+@pytest.fixture
+def refused_urls(monkeypatch):
+    """openUrl returns False, as when no handler is registered for HTML."""
+    urls = []
+    monkeypatch.setattr(
+        processing_dock.QDesktopServices, "openUrl", lambda url: urls.append(url) or False
+    )
+    return urls
+
+
+def test_help_that_cannot_open_says_where_the_page_is(opened, help_dir, refused_urls):
+    _, dock, _ = opened
+    dock.add_step("dewow")
+    dock.list.setCurrentRow(0)
+    dock.help_button.click()
+    assert len(refused_urls) == 1
+    assert "Could not open the help page for dewow" in dock.status.text()
+    assert str(help_dir / "dewow.html") in dock.status.text()
+
+
 def test_help_button_sits_right_after_presets(opened):
     _, dock, _ = opened
     row = next(

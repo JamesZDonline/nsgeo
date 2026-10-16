@@ -145,6 +145,7 @@ function link(href, text) {
 function mark(id) { return marks.get(id) || { exists: "unchecked", says: "unchecked", note: "" }; }
 
 const notices = { load: "", sub: "", ro: "" };
+let subDead = false;   // the subscription gave up: offer Reconnect
 const FATAL = ["invalid_argument", "transform_error", "revoked", "not_granted", "capability_disabled", "capability_removed"];
 const CODES = ["resource_exhausted", "quota_exceeded", "unavailable"].concat(FATAL);
 function codeOf(e) { return e && CODES.includes(e.code) ? e.code : "unavailable"; }   // unknown codes act as unavailable
@@ -178,13 +179,14 @@ let lastNotice = "";
 function renderNotice() {
   const u = unsavedIds();
   let text = "", err = false, retry = false;
+  const recon = subDead && !fatal;
   if (fatal) { text = fatalText + (u.length ? " " + listText(u) : ""); err = true; }
   else if (u.length) {
     text = [listText(u), reasonsFor(u), notices.sub].filter(Boolean).join(" ");
     err = true; retry = writable;
   } else if (notices.sub) { text = notices.sub; err = true; }
   else text = notices.ro || notices.load;
-  const key = text + "|" + err + "|" + retry;
+  const key = text + "|" + err + "|" + retry + "|" + recon;
   if (key === lastNotice) return;
   lastNotice = key;
   const n = document.getElementById("notice");
@@ -192,6 +194,11 @@ function renderNotice() {
   if (retry) {
     const b = el("button", { type: "button", id: "retry-now", class: "retry", text: "Retry now" });
     b.addEventListener("click", retryAll);
+    n.append(" ", b);
+  }
+  if (recon) {
+    const b = el("button", { type: "button", id: "reconnect", class: "retry", text: "Reconnect" });
+    b.addEventListener("click", () => { subDead = false; setNotice("sub", "Reconnecting\u2026"); subscribe(0); });
     n.append(" ", b);
   }
 }
@@ -257,6 +264,7 @@ async function flush(id) {
       fatal = true; writable = false; stopTimers(); enable(false);
       fatalText = code === "invalid_argument" || code === "transform_error"
         ? "The store refused a save, so the page is read-only for the rest of this visit. Reload to try again."
+          + (unsavedIds().length ? " A reload discards the marks listed here \u2014 copy any notes you want to keep first." : "")
         : "Saving is no longer available in this view, so the page is read-only for the rest of this visit.";
       for (const [rid] of rows) paint(rid);
     } else {
@@ -399,6 +407,7 @@ function onSnap(snap) {
   progress();
   // A cached first snapshot may be partial. Writing then could replace marks not loaded yet.
   if (cache) return;
+  subDead = false;
   setNotice("sub", "");
   const was = writable;
   if (!fatal) { writable = true; enable(true); }
@@ -416,7 +425,8 @@ function subscribe(n) {
     writable = false; enable(false); setNotice("load", "");
     for (const [rid] of rows) paint(rid);
     if (FATAL.includes(codeOf(e)) || n >= SUB_RETRIES) {
-      setNotice("sub", "Could not load your saved marks, so the page is read-only. Reload to try again.");
+      subDead = true;
+      setNotice("sub", "Could not load your saved marks, so the page is read-only. Reconnect to try again.");
       return;
     }
     // A dead listener is only recovered by subscribing again, with a growing pause.

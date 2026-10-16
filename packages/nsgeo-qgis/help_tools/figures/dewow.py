@@ -30,12 +30,15 @@ def measure(dt_ns: float, windows_ns: tuple[float, ...] = (2.0, 4.0, 8.0)) -> li
         f, h = _response(dt_ns, window)
         samples = int(round(window / dt_ns))
         peak = int(np.argmax(h))
+        reached = np.nonzero(h >= 1 / np.sqrt(2))[0]
+        if not len(reached):
+            raise ValueError(f"the {window} ns window never reaches half power")
         rows.append(
             {
                 "window_ns": window,
                 "samples": samples,
                 "used_ns": samples * dt_ns,
-                "half_power_mhz": float(f[np.argmax(h >= 1 / np.sqrt(2))]),
+                "half_power_mhz": float(f[reached[0]]),
                 "peak_gain": float(h[peak]),
                 "peak_mhz": float(f[peak]),
             }

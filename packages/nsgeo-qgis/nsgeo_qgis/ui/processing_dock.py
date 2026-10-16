@@ -289,7 +289,8 @@ class ProcessingDock(QgsDockWidget):
         if path is None:
             self.status.setText(f"No help page for {name}.")
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            self.status.setText(f"Could not open the help page for {name}. It is at {path}")
 
     def _on_stack_changed(self, key: str) -> None:
         if key == self.key():

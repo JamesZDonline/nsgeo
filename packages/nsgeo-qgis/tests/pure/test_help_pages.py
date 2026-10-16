@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from help_tools.pages import check_page, check_site, parse_page
+from help_tools.pages import check_images, check_page, check_site, check_stylesheet, parse_page
 from help_tools.sources import load_sources
 from nsgeo.processing import available_steps
 from nsgeo_qgis.help_pages import HELP_DIR
@@ -40,3 +40,9 @@ def test_every_page_meets_the_contract():
 
 def test_pages_and_sources_file_agree():
     assert check_site([parse_page(f) for f in _pages()], load_sources()) == []
+
+
+def test_no_png_is_unused_and_the_stylesheet_is_offline():
+    pages = [parse_page(f) for f in _pages()]
+    assert check_images(HELP_DIR, pages) == []
+    assert check_stylesheet(HELP_DIR) == []

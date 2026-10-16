@@ -119,8 +119,10 @@ from help_fixtures import valid_sources, write_valid_help  # noqa: E402
 from help_tools.pages import (  # noqa: E402
     FAMILIES,
     SECTIONS,
+    check_images,
     check_page,
     check_site,
+    check_stylesheet,
     expected_sections,
     parse_page,
 )
@@ -206,6 +208,94 @@ def test_missing_image_is_named(tmp_path):
 def test_remote_image_is_named(tmp_path):
     problems = problems_for(tmp_path, [('src="img/t.png"', 'src="https://x.org/i.png"')])
     assert any("https://x.org/i.png" in p for p in problems)
+
+
+def test_a_refs_entry_without_data_source_is_named(tmp_path):
+    bare = "<li>A reference nobody put in the ledger.</li>"
+    problems = problems_for(tmp_path, [("</ol></section>", bare + "</ol></section>")])
+    assert [p for p in problems if "no data-source" in p] == [
+        "dewow: a #refs entry has no data-source: 'A reference nobody put in the ledger.'"
+    ]
+
+
+def test_a_style_element_is_reported(tmp_path):
+    problems = problems_for(tmp_path, [("</head>", "<style>p{}</style></head>")])
+    assert any("<style>" in p for p in problems)
+
+
+def test_a_style_attribute_with_a_url_is_reported(tmp_path):
+    problems = problems_for(tmp_path, [("<main>", '<main style="background:url(img/t.png)">')])
+    assert any("style attribute" in p for p in problems)
+
+
+def test_a_plain_style_attribute_is_allowed(tmp_path):
+    assert problems_for(tmp_path, [("<main>", '<main style="margin:0">')]) == []
+
+
+def test_a_remote_img_srcset_entry_is_named(tmp_path):
+    srcset = 'srcset="img/t.png 1x, https://x.org/big.png 2x"'
+    problems = problems_for(tmp_path, [('alt="a picture"', f'alt="a picture" {srcset}')])
+    assert any("https://x.org/big.png" in p and "srcset" in p for p in problems)
+
+
+def test_a_remote_source_srcset_is_named(tmp_path):
+    pic = '<picture><source srcset="//x.org/a.webp"><img src="img/t.png" alt="a"></picture>'
+    problems = problems_for(tmp_path, [('<img src="img/t.png" alt="a picture">', pic)])
+    assert any("//x.org/a.webp" in p for p in problems)
+
+
+def test_a_local_srcset_is_allowed(tmp_path):
+    edit = [('alt="a picture"', 'alt="a picture" srcset="img/t.png 1x, img/t.png 2x"')]
+    assert problems_for(tmp_path, edit) == []
+
+
+def test_a_remote_icon_link_is_named(tmp_path):
+    link = '<link rel="icon" href="https://x.org/i.ico">'
+    problems = problems_for(tmp_path, [("</head>", link + "</head>")])
+    assert any("https://x.org/i.ico" in p for p in problems)
+
+
+def test_a_remote_link_without_rel_is_named(tmp_path):
+    problems = problems_for(tmp_path, [("</head>", '<link href="//x.org/y"></head>')])
+    assert any("//x.org/y" in p for p in problems)
+
+
+def test_the_stylesheet_is_scanned_for_remote_urls_and_imports(tmp_path):
+    write_valid_help(tmp_path)
+    assert check_stylesheet(tmp_path) == []
+    css = '@import "https://f.org/a.css"; @import url(//f.org/b.css);\n'
+    css += "a{background:url('http://x.org/i.png')} b{background:url(img/ok.png)}"
+    (tmp_path / "style.css").write_text(css, encoding="utf-8")
+    out = check_stylesheet(tmp_path)
+    assert sorted(out) == [
+        "style.css: '//f.org/b.css' is remote",
+        "style.css: 'http://x.org/i.png' is remote",
+        "style.css: 'https://f.org/a.css' is remote",
+    ]
+
+
+def test_a_png_no_page_uses_is_reported(tmp_path):
+    page = parse_page(write_valid_help(tmp_path))
+    assert check_images(tmp_path, [page]) == []
+    (tmp_path / "img" / "stray.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert check_images(tmp_path, [page]) == ["img/stray.png is not used by any page"]
+
+
+def test_text_from_br_and_mathml_tokens_does_not_run_together(tmp_path):
+    math = "<math><mfrac><mn>1</mn><mi>W</mi></mfrac></math>"
+    edit = [("Wow and flutter.", f"Wow<br>and flutter {math}.")]
+    page = parse_page(write_valid_help(tmp_path, edits=tuple(edit)))
+    # A space before each token, none after: the full stop stays on the formula.
+    assert page.claims[0].text == "Wow and flutter 1 W. A link"
+
+
+def test_block_boundaries_separate_words(tmp_path):
+    edit = [("Wow and flutter.", "Wow<div>and</div><figcaption>flutter</figcaption>")]
+    page = parse_page(write_valid_help(tmp_path, edits=tuple(edit)))
+    assert page.claims[0].text == "Wow and flutter A link"
+    edit = [("Wow and flutter.", "Wow<div>and</div>flutter")]  # only the end tag separates
+    page = parse_page(write_valid_help(tmp_path / "e", edits=tuple(edit)))
+    assert page.claims[0].text == "Wow and flutter A link"
 
 
 def test_outbound_link_without_source_is_named(tmp_path):

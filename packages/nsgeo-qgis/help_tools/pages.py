@@ -27,6 +27,15 @@ FAMILIES: dict[str, tuple[str, ...]] = {
     "amplitude": ("amp_abs", "amp_square", "amp_envelope"),
 }
 
+# Elements whose edges separate words: text on either side must not run together.
+_SPACED = {
+    "br", "p", "li", "div", "section", "figure", "figcaption", "blockquote", "ul", "ol",
+    "h1", "h2", "h3", "h4", "h5", "h6", "table", "tr", "td", "th", "thead", "tbody",
+}  # fmt: skip
+
+# MathML tokens get a space before them only, so a full stop after a formula stays attached.
+_TOKENS = {"mi", "mn", "mo", "mtext"}
+
 _VOID = {"img", "link", "meta", "br", "hr", "input", "mspace", "area", "base", "col", "wbr"}
 
 
@@ -73,6 +82,11 @@ class PageInfo:
     scripts: int
     plain_text: str
     refs: list[Ref] = field(default_factory=list)
+    bare_refs: list[str] = field(default_factory=list)  # text of #refs <li> lacking data-source
+    styles: int = 0  # <style> elements
+    style_urls: list[str] = field(default_factory=list)  # style="" attributes containing url(
+    remote_srcsets: list[str] = field(default_factory=list)  # remote <img>/<source> srcset entries
+    remote_links: list[str] = field(default_factory=list)  # remote <link href>, other than sheets
 
 
 def _collapse(parts: list[str]) -> str:
@@ -102,6 +116,11 @@ class _PageParser(HTMLParser):
         self.links: list[Link] = []
         self.ref_sources: list[str] = []
         self.refs: list[Ref] = []
+        self.bare_refs: list[str] = []
+        self.styles = 0
+        self.style_urls: list[str] = []
+        self.remote_srcsets: list[str] = []
+        self.remote_links: list[str] = []
         self.images: list[str] = []
         self.stylesheets: list[str] = []
         self.scripts = 0
@@ -131,8 +150,15 @@ class _PageParser(HTMLParser):
             self.links.append(Link(k["href"], k["source"], text, k["section"]))
         if "ref" in e.kinds:
             self.refs.append(Ref(tuple(e.attrs["ref"]["source"].split()), text))
+        if "bareref" in e.kinds:
+            self.bare_refs.append(text)
         if "plain" in e.kinds:
             self.plain_text = text
+
+    def _space(self) -> None:
+        for e in self.stack:
+            if e.buf is not None:
+                e.buf.append(" ")
 
     def handle_startendtag(self, tag, attrs) -> None:
         self._start(tag, attrs, push=False)
@@ -142,6 +168,8 @@ class _PageParser(HTMLParser):
 
     def _start(self, tag: str, attrs, push: bool) -> None:
         a = {k: (v or "") for k, v in attrs}
+        if tag in _SPACED or tag in _TOKENS:
+            self._space()
         if tag in ("section", "p"):
             tags = [e.tag for e in self.stack]
             if "p" in tags:
@@ -178,16 +206,33 @@ class _PageParser(HTMLParser):
             entry.kinds.add("ref")
             entry.attrs["ref"] = {"source": a["data-source"]}
             entry.buf = []
+        bare = tag == "li" and "data-source" not in a and "claim" not in entry.kinds
+        if bare and "refs" in self._open_sections():
+            entry.kinds.add("bareref")
+            entry.buf = []
         if tag == "img" and "src" in a:
             self.images.append(a["src"])
         elif tag == "link" and "stylesheet" in a.get("rel", "").lower().split():
             self.stylesheets.append(a.get("href", ""))
+        elif tag == "link" and _is_remote(a.get("href", "").strip()):
+            self.remote_links.append(a["href"])
         elif tag == "script":
             self.scripts += 1
+        elif tag == "style":
+            self.styles += 1
+        if "url(" in a.get("style", "").lower():
+            self.style_urls.append(a["style"])
+        if tag in ("img", "source") and a.get("srcset"):
+            for cand in a["srcset"].split(","):
+                url = cand.strip().split(" ")[0]
+                if url and _is_remote(url):
+                    self.remote_srcsets.append(url)
         if push:
             self.stack.append(entry)
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in _SPACED:
+            self._space()
         for i in range(len(self.stack) - 1, -1, -1):
             if self.stack[i].tag == tag:
                 self._pop_to(i)
@@ -221,6 +266,11 @@ def parse_page(path: Path) -> PageInfo:
         scripts=parser.scripts,
         plain_text=parser.plain_text,
         refs=parser.refs,
+        bare_refs=parser.bare_refs,
+        styles=parser.styles,
+        style_urls=parser.style_urls,
+        remote_srcsets=parser.remote_srcsets,
+        remote_links=parser.remote_links,
     )
 
 
@@ -260,6 +310,14 @@ def check_page(page: PageInfo, help_dir: Path, sources: Sources) -> list[str]:
         bad(f"{page.scripts} <script> element(s); pages are offline")
     if page.stylesheets != ["style.css"]:
         bad(f"stylesheets are {page.stylesheets}, expected ['style.css']")
+    if page.styles:
+        bad(f"{page.styles} <style> element(s); the only stylesheet is style.css")
+    for style in page.style_urls:
+        bad(f"a style attribute loads a url: {style[:60]!r}")
+    for url in page.remote_srcsets:
+        bad(f"srcset entry '{url}' is remote")
+    for href in page.remote_links:
+        bad(f"<link href='{href}'> is remote")
     for src in page.images:
         if _is_remote(src):
             bad(f"image '{src}' is remote")
@@ -269,6 +327,9 @@ def check_page(page: PageInfo, help_dir: Path, sources: Sources) -> list[str]:
     for link in page.links:
         if link.source is None:
             bad(f"link '{link.href}' has no data-source")
+
+    for text in page.bare_refs:
+        bad(f"a #refs entry has no data-source: {text[:60]!r}")
 
     known = sources.sources
     used = [(f"claim '{c.id}'", s) for c in page.claims for s in c.sources]
@@ -315,3 +376,26 @@ def check_site(pages: list[PageInfo], sources: Sources) -> list[str]:
     for cid in sorted(set(sources.claims) - set(uses)):
         out.append(f"sources: claim '{cid}' is in the ledger but on no page")
     return out
+
+
+def check_images(help_dir: Path, pages: list[PageInfo]) -> list[str]:
+    """PNGs in `help/img/` that no page references."""
+    help_dir = Path(help_dir)
+    used = {(help_dir / src).resolve() for p in pages for src in p.images if not _is_remote(src)}
+    return [
+        f"img/{png.name} is not used by any page"
+        for png in sorted((help_dir / "img").glob("*.png"))
+        if png.resolve() not in used
+    ]
+
+
+_CSS_URL = re.compile(r"url\(\s*['\"]?([^)'\"]+)", re.I)
+_CSS_IMPORT = re.compile(r"@import\s+['\"]?([^'\";)\s]+)", re.I)
+
+
+def check_stylesheet(help_dir: Path) -> list[str]:
+    """Remote `url(...)` or `@import` in `style.css`; pages are offline."""
+    css = (Path(help_dir) / "style.css").read_text(encoding="utf-8")
+    refs = [m.group(1).strip() for m in _CSS_URL.finditer(css)]
+    refs += [m.group(1).strip() for m in _CSS_IMPORT.finditer(css)]
+    return [f"style.css: '{r}' is remote" for r in dict.fromkeys(refs) if _is_remote(r)]

@@ -30,6 +30,15 @@ def test_dewow_measure_matches_the_design_measurements():  # spec section 8, cam
     assert rows[2.0]["samples"] == 9 and rows[8.0]["samples"] == 37
 
 
+def test_dewow_measure_refuses_a_window_that_never_reaches_half_power(monkeypatch):
+    import numpy as np
+
+    freqs = np.linspace(0.0, 1000.0, 64)
+    monkeypatch.setattr(dewow_recipe, "_response", lambda dt, w: (freqs, np.full(64, 0.1)))
+    with pytest.raises(ValueError, match="4.0 ns window"):
+        dewow_recipe.measure(0.2, windows_ns=(4.0,))
+
+
 def test_make_figures_writes_three_pngs_for_dewow(tmp_path):
     dzt = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
     paths = make_figures(dzt, tmp_path / "img", ["dewow"])
