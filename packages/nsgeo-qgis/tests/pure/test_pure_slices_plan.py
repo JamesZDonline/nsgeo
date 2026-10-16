@@ -143,3 +143,75 @@ def test_shift_scroll_steps_deeper_downward_and_is_inert_without_shift():
     assert depth_scroll_delta(120, shift_held=True) == -1  # up: shallower
     assert depth_scroll_delta(-120, shift_held=False) == 0  # plain scroll is a map zoom
     assert depth_scroll_delta(0, shift_held=True) == 0  # a horizontal-only wheel
+
+
+# ---- the cell-size floor (walkthrough round 2, W7: a crash) ---------------
+
+
+def test_frame_cells_matches_cube_frame_for_grids_own_rounding():
+    """`smallest_safe_cell` is only a safe bound if `frame_cells` counts
+    what `CubeFrame.for_grid` actually builds -- which rounds UP, and
+    floors at one cell, so a grid that is not a whole number of cells is
+    covered rather than clipped. Pinned against sizes chosen to land both
+    on and off an exact multiple."""
+    from nsgeo.slices.frame import CubeFrame
+    from nsgeo_qgis.slices_plan import frame_cells
+
+    class _Grid:
+        def __init__(self, sx, sy):
+            self.origin, self.azimuth, self.crs = (0.0, 0.0), 0.0, "EPSG:32616"
+            self.size_x, self.size_y = sx, sy
+
+    for sx, sy in ((6.0, 12.0), (40.0, 40.0), (7.3, 11.9), (0.4, 0.4)):
+        for cell in (0.5, 0.25, 0.1, 0.03):
+            frame = CubeFrame.for_grid(_Grid(sx, sy), cell)
+            assert frame_cells(sx, sy, cell) == frame.nx * frame.ny, (sx, sy, cell)
+
+
+def test_smallest_safe_cell_is_the_finest_cell_that_still_fits():
+    """Walkthrough round 2, W7: "cell size going to .001 ... crashes qgis
+    because it is too fine a grid."
+
+    `cell_spin` spans 0.01-5.0 m but kept Qt's default `singleStep` of
+    1.0, so ONE press of the down-arrow from 0.5 m clamps straight to the
+    0.01 m minimum. Cell count goes as 1/cell**2: on a 40 m grid that is a
+    4000 x 4000 frame -- about a gigabyte for a single filled slice, and
+    streaming does not help, because the per-slice array alone is the
+    problem.
+
+    Both halves pinned, because a bound that is merely safe is useless:
+    the returned cell must FIT, and one spin step finer must NOT.
+    """
+    from nsgeo_qgis.slices_plan import MAX_FRAME_CELLS, frame_cells, smallest_safe_cell
+
+    # 298.6 x 297.4 and 0.5 x 72.0 are not decoration: for both, the
+    # closed-form estimate alone -- sqrt(sx * sy / max), rounded up to a
+    # millimetre -- still lands OVER the cap (4,001,980 cells and
+    # 4,008,000), because `ceil` is applied per AXIS and not to the
+    # product. They are what makes the walk-up loop load-bearing rather
+    # than decorative; without them a one-line implementation passes.
+    for sx, sy in (
+        (6.0, 12.0),
+        (40.0, 40.0),
+        (100.0, 100.0),
+        (250.0, 80.0),
+        (3.0, 3.0),
+        (298.6, 297.4),
+        (0.5, 72.0),
+    ):
+        cell = smallest_safe_cell(sx, sy)
+        assert frame_cells(sx, sy, cell) <= MAX_FRAME_CELLS, (sx, sy, cell)
+        # Tight: not a needlessly coarse bound that would take real
+        # resolution away from a small grid.
+        finer = round(cell - 0.001, 3)
+        if finer > 0:
+            assert frame_cells(sx, sy, finer) > MAX_FRAME_CELLS or cell <= 0.011, (sx, sy, cell)
+
+
+def test_smallest_safe_cell_never_goes_below_the_spin_floor_on_a_small_grid():
+    """A 6 x 12 m grid is affordable at any cell the spin can express, so
+    the bound must not invent a coarser floor than the control already
+    has -- it exists to stop a crash, not to take resolution away."""
+    from nsgeo_qgis.slices_plan import smallest_safe_cell
+
+    assert smallest_safe_cell(6.0, 12.0) <= 0.01

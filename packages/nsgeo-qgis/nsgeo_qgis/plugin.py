@@ -286,6 +286,16 @@ class NsgeoPlugin:
         # gives it one. Re-running _sync_gain_strip here on the same
         # signal ProfileDock re-renders from closes that gap.
         self.session.line_loaded.connect(self._resync_gain_strip)
+        # Walkthrough round 2, W8: the same shape of gap as the gain strip
+        # just above, for the profile band. The band is a property of the
+        # SLICE, not of the line, but it lives in `ProfileView` state that
+        # `clear()` resets on `line_opened("")` -- and `window_changed`
+        # only fires when the window CHANGES, which it has not. Connected
+        # AFTER `ProfileDock`'s own `line_opened` slot (that dock is built
+        # earlier in this method, and Qt runs direct connections in
+        # connection order), so this re-announces onto a view that has
+        # already finished opening rather than one about to be cleared.
+        self.session.line_opened.connect(self._resync_slice_band)
 
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
@@ -520,6 +530,19 @@ class NsgeoPlugin:
         if key != self.session.current_key:
             return
         self._sync_gain_strip(self.processing_dock.current_row())
+
+    def _resync_slice_band(self, key: str) -> None:
+        """Re-announce the slice window onto a freshly opened line.
+        See the connection in `initGui` for why. A slot on a
+        `pyqtSignal`: it reports rather than raises."""
+        if not key or self.slices_dock is None:
+            # `line_opened("")` IS the clear -- re-announcing onto a view
+            # with no line would draw a band across an empty panel.
+            return
+        try:
+            self.slices_dock.reannounce_window()
+        except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
+            self.message(f"could not redraw the slice band: {exc}", Qgis.MessageLevel.Warning)
 
     def _on_gain_points(self, points: list) -> None:
         if self.session is None or self.processing_dock is None:

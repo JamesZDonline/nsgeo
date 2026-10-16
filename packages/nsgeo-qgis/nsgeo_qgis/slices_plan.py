@@ -24,6 +24,7 @@ with reasons rather than layout:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -135,6 +136,57 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
         if getattr(cls, "unipolar", False):
             return name
     return None
+
+
+#: The most cells a frame may have before the Slices dock refuses the
+#: geometry. Not a memory *budget* -- spec 7.4 is explicit that those
+#: warn rather than hard-cap -- but a floor under what can be drawn at
+#: all. Cell count goes as 1/cell**2, so the arithmetic runs away fast:
+#: measured on this repo, a 40 m grid at 0.01 m is 4000 x 4000, about a
+#: gigabyte for ONE filled slice (the fill's FFT working set, ~64 B/cell,
+#: dominates the 4 B/cell array), and 100 m is 6.4 GB. Streaming is no
+#: escape: the per-slice array is the problem, not the cube. 4 million
+#: cells keeps a filled slice near a quarter of a gigabyte, which still
+#: covers a 100 m grid at 0.05 m -- far finer than any trace spacing
+#: spec 4's own "no smaller than the trace spacing" would allow.
+MAX_FRAME_CELLS = 4_000_000
+
+
+def frame_cells(size_x: float, size_y: float, cell: float) -> int:
+    """How many cells `CubeFrame.for_grid` would build for this geometry.
+
+    Mirrors that method's own rounding exactly -- ceil, with a floor of
+    one cell per axis -- because a bound computed from different
+    arithmetic than the thing it bounds is not a bound.
+    """
+    if not cell > 0.0:
+        raise ValueError(f"cell must be positive, got {cell}")
+    nx = max(1, int(math.ceil(size_x / cell)))
+    ny = max(1, int(math.ceil(size_y / cell)))
+    return nx * ny
+
+
+def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_CELLS) -> float:
+    """The finest cell size, to a millimetre, whose frame still fits.
+
+    Solved from `cells ~ size_x * size_y / cell**2` and then walked up
+    against `frame_cells` itself, because `ceil` on each axis means the
+    continuous solution can be one millimetre optimistic; the loop is
+    what makes the result true rather than approximately true.
+
+    Returns a value that may be below any control's own minimum -- a
+    small grid is affordable at any cell size, and this must not invent a
+    coarser floor than the UI already has. Callers take the max.
+    """
+    if not (size_x > 0.0 and size_y > 0.0):
+        raise ValueError(f"grid size must be positive, got {size_x} x {size_y}")
+    if max_cells < 1:
+        raise ValueError(f"max_cells must be at least 1, got {max_cells}")
+    cell = math.sqrt(size_x * size_y / max_cells)
+    cell = math.ceil(cell * 1000.0) / 1000.0
+    while cell > 0.0 and frame_cells(size_x, size_y, cell) > max_cells:
+        cell = round(cell + 0.001, 3)
+    return cell
 
 
 def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstimate:

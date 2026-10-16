@@ -251,3 +251,84 @@ def test_the_profile_band_follows_the_slice_window(fake_iface, qgis_app, tmp_pat
         assert plugin.profile_dock.view._slice_band is None
     finally:
         plugin.unload()
+
+
+def test_the_profile_band_is_drawn_on_a_line_opened_after_the_window_moved(
+    fake_iface, qgis_app, tmp_path, answer_modal
+):
+    """Walkthrough round 2, W8: "If I open the line AFTER I have moved the
+    position slider, the slice's time window isn't drawn until I move the
+    position slider again."
+
+    The band is a property of the SLICE -- one window, identical on every
+    line -- but it lives in per-line view state. `refresh_slice()` emits
+    `window_cleared` on EVERY tick that cannot produce a slice: an
+    exception, or a source that stopped being prepared. That wipes the
+    band. Nothing ever puts it back, because `window_changed` only fires
+    when the window CHANGES -- and it has not. So after any failed tick
+    (W7's cell-size errors, say) the band stays gone through every line
+    the user opens, until they happen to nudge the slider.
+
+    Opening a line is therefore the moment to re-announce, which is the
+    same gap `_resync_gain_strip` already closes for the gain strip:
+    `line_opened` is the event the other docks never re-sync from.
+
+    Note what the existing `test_the_profile_band_follows_the_slice_window`
+    does NOT do -- it emits `window_changed` directly and never opens a
+    line at all, so it passes either way.
+    """
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    try:
+        session = plugin.session
+        session.new_site(tmp_path)
+        session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+        lines = [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+            )
+            for i in range(2)
+        ]
+        session.add_lines(lines)
+        session.site.presets["p"] = [{"step": "dewow", "params": {}, "enabled": True}]
+        session.presets_changed.emit()
+        keys = session.keys()
+        # Armed before the assertions: unload() takes the save-prompt path
+        # whether or not they pass, and an unanswered modal would replace
+        # the real failure with the conftest guard's own.
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+
+        # A REAL window, not a hand-emitted signal: the dock has to be
+        # holding one for there to be anything to re-announce, which is
+        # the whole mechanism under test.
+        dock = plugin.slices_dock
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        assert dock.current_window() is not None
+
+        session.open_line(keys[0])
+        band = plugin.profile_dock.view._slice_band
+        assert band is not None
+
+        # Exactly what a failed tick does -- `refresh_slice()`'s own
+        # error and not-prepared branches both emit this.
+        dock.window_cleared.emit()
+        assert plugin.profile_dock.view._slice_band is None
+
+        session.open_line(keys[1])
+        assert plugin.profile_dock.view._slice_band == band, (
+            "a line opened after a failed tick cleared the band must show "
+            "it again -- the window never stopped being current"
+        )
+
+        # ... and the other half of the guard: `line_opened("")` IS the
+        # clear (no line open at all). Re-announcing onto that would draw
+        # a slice band across an empty panel.
+        session.line_opened.emit("")
+        assert plugin.profile_dock.view._slice_band is None, (
+            "with no line open there is nothing for a band to be drawn on"
+        )
+    finally:
+        plugin.unload()

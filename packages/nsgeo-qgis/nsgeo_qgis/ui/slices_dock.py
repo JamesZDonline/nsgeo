@@ -60,12 +60,15 @@ from nsgeo_qgis.slice_export import ViewSettings, recipe_from_record
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
+    MAX_FRAME_CELLS,
     NO_TRANSFORM,
     Resolution,
     SourceChoice,
     depth_scroll_delta,
     estimate_memory,
     format_bytes,
+    frame_cells,
+    smallest_safe_cell,
     transform_names,
 )
 from nsgeo_qgis.ui.profile_dock import velocity_source
@@ -270,6 +273,9 @@ class SlicesDock(QgsDockWidget):
         self.thickness_spin.setDecimals(2)
         self.thickness_spin.setSuffix(" ns")
         self.thickness_spin.setValue(5.0)
+        # In ns, over a ~110 ns window: Qt's 1.0 default is a fifth of
+        # the default thickness in a single click (round 2, W5/W7).
+        self.thickness_spin.setSingleStep(0.25)
         self.step_spin = QDoubleSpinBox()
         self.step_spin.setRange(0.01, 100_000.0)
         self.step_spin.setDecimals(2)
@@ -279,6 +285,7 @@ class SlicesDock(QgsDockWidget):
         # of them, which a step equal to the thickness (no overlap) would
         # do at every boundary in the stack.
         self.step_spin.setValue(self.thickness_spin.value() / 2.0)
+        self.step_spin.setSingleStep(0.25)
         thickness_form.addRow("Thickness", self.thickness_spin)
         thickness_form.addRow("Step", self.step_spin)
         position_layout.addLayout(thickness_form)
@@ -296,6 +303,20 @@ class SlicesDock(QgsDockWidget):
         self.cell_spin.setDecimals(3)
         self.cell_spin.setSuffix(" m")
         self.cell_spin.setValue(0.5)
+        # Qt defaults `singleStep` to 1.0 whatever the range or the
+        # decimals. On a control spanning 0.01-5.0 m that made ONE press
+        # of the down-arrow clamp 0.5 m straight to the 0.01 m minimum --
+        # and cell count goes as 1/cell**2, so on a 300 m grid that is a
+        # 30000 x 30000 frame and a dead QGIS (walkthrough round 2, W7).
+        # The minimum itself is raised per grid in `_seed_resolution_
+        # defaults`; this is what stops the arrows being a cliff.
+        self.cell_spin.setSingleStep(0.05)
+        self.cell_spin.setToolTip(
+            "Width of one cube cell on the ground.\n"
+            "Spec 4 (Conyers): no smaller than the trace spacing -- below that "
+            "there is no new information to resolve -- and no larger than half "
+            "the line spacing."
+        )
         resolution_form.addRow("Cell size", self.cell_spin)
 
         self.dz_spin = QDoubleSpinBox()
@@ -303,6 +324,16 @@ class SlicesDock(QgsDockWidget):
         self.dz_spin.setDecimals(4)
         self.dz_spin.setSuffix(" ns")
         self.dz_spin.setValue(1.0)
+        # Re-set from the file's own `dt_ns` in `_seed_dz_z_defaults`:
+        # one sample per click is the only increment that means anything
+        # on a time axis. 1.0 ns -- Qt's default -- was five samples at
+        # this repo's own 0.2165 ns sampling.
+        self.dz_spin.setSingleStep(0.05)
+        self.dz_spin.setToolTip(
+            "Vertical spacing of the cube's levels, in two-way time.\n"
+            "Defaults to the file's own sample interval; §7.2 measured that "
+            "decimating buys nothing, so there is rarely a reason to coarsen it."
+        )
         resolution_form.addRow("dz", self.dz_spin)
 
         self.z0_spin = QDoubleSpinBox()
@@ -310,6 +341,11 @@ class SlicesDock(QgsDockWidget):
         self.z0_spin.setDecimals(3)
         self.z0_spin.setSuffix(" ns")
         self.z0_spin.setValue(0.0)
+        self.z0_spin.setSingleStep(0.05)
+        self.z0_spin.setToolTip(
+            "Top of the cube in two-way time. Clamped to what every included "
+            "line actually covers once they are prepared."
+        )
         resolution_form.addRow("z0", self.z0_spin)
 
         self.z1_spin = QDoubleSpinBox()
@@ -337,6 +373,11 @@ class SlicesDock(QgsDockWidget):
         self.z1_spin.setDecimals(4)
         self.z1_spin.setSuffix(" ns")
         self.z1_spin.setValue(100.0)
+        self.z1_spin.setSingleStep(0.05)
+        self.z1_spin.setToolTip(
+            "Bottom of the cube in two-way time. Clamped to what every included "
+            "line actually covers once they are prepared."
+        )
         resolution_form.addRow("z1", self.z1_spin)
 
         self.radius_spin = QDoubleSpinBox()
@@ -344,6 +385,17 @@ class SlicesDock(QgsDockWidget):
         self.radius_spin.setDecimals(3)
         self.radius_spin.setSuffix(" m")
         self.radius_spin.setValue(0.0)
+        # 1.0 m -- Qt's default -- moved the seeded 0.75 m radius to 1.75
+        # in one click, past anything spec 6.4's 1.5x-line-spacing rule
+        # would ever suggest (walkthrough round 2, W5).
+        self.radius_spin.setSingleStep(0.05)
+        self.radius_spin.setToolTip(
+            "Fills cells that no line crossed from their neighbours within "
+            "this distance (spec 6.4).\n"
+            "Default is 1.5 x the line spacing. The binned truth is kept "
+            "underneath either way -- tick Show coverage to see it, and set "
+            "this to 0 to display it unfilled."
+        )
         resolution_form.addRow("Fill radius", self.radius_spin)
 
         outer.addWidget(self.resolution_group)
@@ -370,6 +422,16 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow("Palette", self.palette_combo)
 
         self.coverage_check = QCheckBox("Show coverage")
+        # Round 2, W6: "Don't know what this is doing." The view is the
+        # whole reason the cube stores a count alongside the mean (spec
+        # 6.2), and it is unreadable without being told what the numbers
+        # are.
+        self.coverage_check.setToolTip(
+            "Shows how many traces fell in each cell instead of the amplitude.\n"
+            "Cells no line crossed are left blank, so an empty bin is "
+            "distinguishable from a real zero reflection -- which is the "
+            "whole point of recording a count."
+        )
         display_form.addRow(self.coverage_check)
 
         # Ruling AN (M11 final review): the settings override spec 9.2
@@ -385,6 +447,11 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow(self.resident_check)
 
         self.legend_label = QLabel("")
+        # Wraps, because a QLabel's minimum width is its text width and a
+        # dock's minimum width is a hard floor on the QGIS main window's
+        # -- the same mechanism that made this dock force a 556 px window
+        # in round 1. The coverage legend is the longest string here.
+        self.legend_label.setWordWrap(True)
         display_form.addRow("Legend", self.legend_label)
 
         outer.addWidget(self.display_group)
@@ -1426,7 +1493,15 @@ class SlicesDock(QgsDockWidget):
             grid = self.session.grid(grid_id)
         except KeyError:
             return
-        self.cell_spin.setValue(min(0.5, grid.default_spacing / 2.0))
+        # The floor is raised BEFORE the value is set, so the seeded
+        # value is clamped into the affordable range rather than sitting
+        # below a minimum that arrives afterwards. On any ordinary grid
+        # `smallest_safe_cell` is well under the spin's own 0.01 m and
+        # this changes nothing; it only bites where the arithmetic really
+        # does run away (walkthrough round 2, W7).
+        floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
+        self.cell_spin.setMinimum(floor)
+        self.cell_spin.setValue(max(floor, min(0.5, grid.default_spacing / 2.0)))
         self.radius_spin.setValue(1.5 * grid.default_spacing)
         self._seed_dz_z_defaults(grid_id)
 
@@ -1460,6 +1535,12 @@ class SlicesDock(QgsDockWidget):
         if not included:
             return
         header = self.session.line_for_key(included[0]).header
+        # One sample per arrow click, on all three of the time spins: on
+        # a time axis nothing else is a meaningful increment, and Qt's
+        # 1.0 ns default was five samples at this repo's own sampling
+        # (walkthrough round 2, W7).
+        for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
+            _spin.setSingleStep(header.dt_ns)
         self.dz_spin.setValue(header.dt_ns)
         self.z0_spin.setValue(header.position_ns)
         self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
@@ -1546,6 +1627,7 @@ class SlicesDock(QgsDockWidget):
 
     def _apply_resolution(self) -> None:
         try:
+            choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
             if old_z is not None:
@@ -1562,6 +1644,27 @@ class SlicesDock(QgsDockWidget):
                 # refusal the user can read, not a crash from a QTimer slot.
                 self.error.emit(str(exc))
                 return
+            # Defence in depth behind `cell_spin`'s own floor: a
+            # `Resolution` can also arrive from a saved cube record
+            # (`restore_cube`), which never passed through this spin box
+            # and may have been written against a different grid.
+            # Refused rather than warned-and-allowed: spec 7.4's
+            # "warn, do not hard-cap" is about MEMORY BUDGETS, where the
+            # fallback is to degrade to streaming. There is no degraded
+            # mode for a frame this size -- the per-slice array alone is
+            # what cannot be allocated -- so the honest answer is to say
+            # so, and to say what would work.
+            grid_now = self.session.grid(choice.grid_id) if choice is not None else None
+            if grid_now is not None:
+                cells = frame_cells(grid_now.size_x, grid_now.size_y, resolution.cell)
+                if cells > MAX_FRAME_CELLS:
+                    safe = smallest_safe_cell(grid_now.size_x, grid_now.size_y)
+                    self.error.emit(
+                        f"a {resolution.cell:g} m cell over grid "
+                        f"{grid_now.id!r} is {cells:,} cells, too many to "
+                        f"draw; use {safe:g} m or coarser"
+                    )
+                    return
             self.engine.set_resolution(resolution)
             # Keyed on `(n_levels, choice, mode, radius_cells)` -- see the
             # field's own docstring -- and a geometry change can only have
@@ -1646,6 +1749,30 @@ class SlicesDock(QgsDockWidget):
             self.slice_changed.emit()
             self.window_cleared.emit()
             self.error.emit(str(exc))
+
+    def reannounce_window(self) -> None:
+        """Re-emit the CURRENT window without recomputing the slice.
+
+        For listeners whose own state was reset underneath them and who
+        have no way to ask. The profile band is the case that needs it:
+        it is a property of the slice -- one window, identical on every
+        line -- but it lives in per-line view state that
+        `ProfileView.clear()` resets, and `window_changed` only fires
+        when the window CHANGES, which it has not. Walkthrough round 2,
+        W8: once the view had been cleared, every line opened afterwards
+        showed no band until the slider was nudged.
+
+        Deliberately does NOT re-slice: nothing about the data changed,
+        and `refresh_slice()` here would spend a redraw (and, in resident
+        mode, possibly a cube build) to announce a number this dock is
+        already holding.
+        """
+        z = self.engine.z
+        if self._window is None or z is None:
+            self.window_cleared.emit()
+            return
+        lo_ns, hi_ns = window_times_ns(z, self._window)
+        self.window_changed.emit(lo_ns, hi_ns)
 
     def _update_readout(self, window: SliceWindow) -> None:
         """Spec 6.6: derived from `(k0, k1)` -- what `ZAxis.level_range`
@@ -1735,7 +1862,15 @@ class SlicesDock(QgsDockWidget):
             # Ruling AB: a count map's legend states a count scale, not
             # an amplitude range with a transform name that does not
             # apply to it.
-            self.legend_label.setText(f"0 – {limit:.3g} traces")
+            #
+            # Round 2, W6: and it starts at ONE, not zero. Zero is the one
+            # value this view never draws -- `refresh_slice` turns a
+            # coverage of 0 into NaN, so a cell no line crossed is left
+            # blank rather than coloured at the bottom of the ramp. A
+            # legend reading "0 - 15" described a scale the picture did
+            # not use, on the one view whose whole job is to be read
+            # literally. Saying what blank means is the rest of that job.
+            self.legend_label.setText(f"1 – {limit:.3g} traces per cell · blank = no line crossed")
             return
         base = f"0 – {limit:.3g}" if self.engine.output_unipolar else f"−{limit:.3g} – {limit:.3g}"
         transform_label = self.transform_combo.currentText() or "none"

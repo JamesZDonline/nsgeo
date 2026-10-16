@@ -4978,6 +4978,14 @@ merging.
 Following the M10 precedent of annotating the spec where execution diverged, rather than leaving
 it to be read as history:
 
+- **§9.3** — amend *"Everything outside Source is a **live slider**"* (and §6.4's *"the radius is
+  a slider"*). Position's depth slider is and stays a slider: its bounds are the cube's own z
+  extent, which the data defines exactly. The Resolution fields are spin boxes, by the user's
+  decision at the round-2 walkthrough gate, on the ground that a slider needs pre-determined
+  bounds and cell size, dz and the z range have none that are not data-dependent — a slider would
+  either clip a legitimate value or invent a range. What the spec was really asking for there is
+  a *useful increment*, which Qt's `singleStep` default of 1.0 had silently destroyed; see the
+  round-2 fixes. Recorded as a decision, not a divergence.
 - **§7.4** — note that the third residency tier (on-disk, memory-mapped lines) is still unbuilt
   and unmeasured, that its spike did not run in M11, and that M11 deliberately ships no control
   for it (plan Ruling 1). The table's third row stands as designed-for-not-built.

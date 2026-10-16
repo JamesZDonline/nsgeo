@@ -1383,3 +1383,209 @@ def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
+
+
+def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis_app, tmp_path):
+    """Walkthrough round 2, W7: "These also tick by 1 unit at a time, which
+    is too much. It also leads to cell size going to .001 which then
+    crashes qgis because it is too fine a grid."
+
+    `cell_spin` spans 0.01-5.0 m and kept Qt's default `singleStep` of
+    1.0, so ONE press of the down-arrow from the seeded 0.5 m clamped
+    straight to the 0.01 m minimum -- and cell count goes as 1/cell**2.
+    On the 300 m grid below that is 30000 x 30000: a frame no amount of
+    streaming makes drawable, since the per-slice array alone is the
+    problem.
+
+    The claim pinned here is the one that matters to a user holding down
+    an arrow key: NO number of clicks reaches a geometry that cannot be
+    drawn. That is stronger than checking a step size, and it is what
+    actually failed.
+    """
+    from nsgeo_qgis.slices_plan import MAX_FRAME_CELLS, frame_cells
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(big)
+    lines = [
+        Line.open(
+            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+            GridPlacement("Big", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+        )
+        for i in range(2)
+    ]
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(20_000)
+        seeded = dock.cell_spin.value()
+        assert frame_cells(big.size_x, big.size_y, seeded) <= MAX_FRAME_CELLS
+
+        # Hold the down-arrow. Far more presses than the range can absorb.
+        for _ in range(500):
+            dock.cell_spin.stepBy(-1)
+            assert frame_cells(big.size_x, big.size_y, dock.cell_spin.value()) <= (
+                MAX_FRAME_CELLS
+            ), f"cell {dock.cell_spin.value()} on a 300 m grid cannot be drawn"
+
+        # ... and one click is a usable increment, not a leap to the end
+        # of the range. The old behaviour went 0.5 -> minimum in one.
+        dock.cell_spin.setValue(seeded)
+        dock.cell_spin.stepBy(-1)
+        assert dock.cell_spin.value() < seeded
+        assert seeded - dock.cell_spin.value() <= 0.1, "one arrow click must be a nudge"
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
+    """Walkthrough round 2, W5/W7: "the up/down amount skips by 1 m at a
+    time, which is too big an increment."
+
+    Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
+    or the decimals, so every one of these shipped with an arrow click
+    that moved a 0.75 m radius to 1.75 m and a 0.2165 ns dz to 1.2165.
+    `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
+    per click is the only increment that means anything on a time axis.
+    """
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    header = dock.session.line_for_key(dock.session.keys()[0]).header
+
+    assert dock.radius_spin.singleStep() <= 0.1
+    assert dock.cell_spin.singleStep() <= 0.1
+    assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
+    assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
+    assert dock.z1_spin.singleStep() == pytest.approx(header.dt_ns)
+    # Position is in ns over a ~110 ns window: 1 ns is a fifth of the
+    # default thickness, which is a leap, not a nudge.
+    assert dock.thickness_spin.singleStep() <= 0.5
+    assert dock.step_spin.singleStep() <= 0.5
+
+
+def test_the_resolution_controls_say_what_they_do(docked):
+    """Walkthrough round 2, W5/W7: "Fill radius is also not a super
+    intuitive label, what does it do?" and "Not sure what dz does?"
+
+    Neither is a naming failure that renaming fixes -- both are terms of
+    art with no shorter correct name -- so each carries the sentence that
+    makes it actionable, on the control itself.
+    """
+    dock, _ = docked
+    for spin, must_say in (
+        (dock.radius_spin, "no line"),
+        (dock.dz_spin, "sample"),
+        (dock.cell_spin, "spacing"),
+        (dock.coverage_check, "traces"),
+    ):
+        tip = spin.toolTip()
+        assert tip, f"{spin.objectName() or spin} has no tooltip"
+        assert must_say in tip.lower(), tip
+
+
+def test_a_restored_cell_size_too_fine_to_draw_is_refused_not_attempted(qgis_app, tmp_path):
+    """`cell_spin`'s floor stops the arrows reaching an undrawable frame,
+    but a `Resolution` can arrive from a saved cube record too
+    (`restore_cube`), written against a different grid and never passed
+    through this spin box at all. That path gets a readable refusal
+    naming a cell size that would work, and the engine's geometry is left
+    exactly as it was.
+
+    Refused and not warned-and-allowed on purpose: spec 7.4's "warn
+    rather than hard-cap" is about memory BUDGETS, where the fallback is
+    to degrade to streaming. There is no degraded mode here -- the
+    per-slice array is itself what cannot be allocated.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    big = Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5)
+    session.add_grid(big)
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60),
+                GridPlacement("Big", "y", 1.0, 0.0, 1, "L0"),
+            )
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+
+    dock = SlicesDock(session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    try:
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        before = dock.engine.frame
+        assert before is not None
+
+        # Exactly what a restored record does: a value the spin's own
+        # floor would never have allowed.
+        dock.cell_spin.setMinimum(0.001)
+        dock.cell_spin.setValue(0.001)
+        dock.flush_debounce()
+
+        assert errors, "an undrawable geometry must say so"
+        assert "too many to draw" in errors[-1], errors
+        assert "0.15" in errors[-1], f"the refusal must name a cell that works: {errors[-1]}"
+        assert dock.engine.frame is before, (
+            "the engine must still hold the geometry it had, not a frame it cannot draw"
+        )
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_coverage_legend_says_what_a_blank_cell_means(docked):
+    """Walkthrough round 2, W6: "Don't know what this is doing. It does
+    look gappy, not sure what legend you're talking about."
+
+    The gappiness is correct -- coverage is deliberately NOT filled, so
+    that the binned truth stays visible underneath the cosmetic step
+    (spec 6.4) -- but the legend read `0 - 15 traces`, and zero is the one
+    value the view never draws: a cell no line crossed is left blank, not
+    coloured at the bottom of the ramp. So the legend named a scale that
+    did not match the picture, on the one view whose entire job is to be
+    read literally.
+    """
+    dock, _ = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+
+    dock.coverage_check.setChecked(True)
+    legend = dock.legend_label.text()
+    assert "traces" in legend, legend
+    assert "blank" in legend.lower(), f"the legend must explain the gaps: {legend}"
+    assert not legend.startswith("0 "), f"zero is never drawn in this view: {legend}"
+
+    # And back: an amplitude legend still names its transform, and makes
+    # no claim about blank cells, which the fill has covered over.
+    dock.coverage_check.setChecked(False)
+    amplitude = dock.legend_label.text()
+    assert "traces" not in amplitude, amplitude
+    assert "blank" not in amplitude.lower(), amplitude
+
+
+def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
+    """A `QLabel`'s minimum width is its text width unless it wraps, and a
+    dock's minimum width is a hard floor on the QGIS main window's -- the
+    same mechanism that made this dock force a 556 px window in round 1.
+    The coverage legend is the longest string this dock ever shows.
+    """
+    dock = SlicesDock(SiteSession())
+    try:
+        assert dock.legend_label.wordWrap()
+        dock.legend_label.setText("1 – 15 traces per cell · blank = no line crossed")
+        assert dock.legend_label.minimumSizeHint().width() <= 200
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
