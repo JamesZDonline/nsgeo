@@ -9,7 +9,7 @@ from nsgeo.render import colormap
 from nsgeo.slices import CubeFrame
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.slice_layer import SliceLayer, build_shader
+from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME, SliceLayer, build_shader
 from qgis.core import QgsProject
 from qgis.PyQt.QtGui import qAlpha, qRed
 
@@ -206,3 +206,68 @@ def test_the_layer_is_recreated_after_being_removed_from_the_project(mapped):
     assert project.mapLayer(sl.layer.id()) is not None
     value, ok = sl.layer.dataProvider().sample(sl.layer.extent().center(), 1)
     assert ok and value == pytest.approx(9.0)
+
+
+# ---- M12: the site lattice through the same layer ---------------------------
+
+#: A 9 x 6 north-up lattice with 0.5 m pixels, west edge 500, north edge 706.
+SITE_GT = (500.0, 0.5, 0.0, 706.0, 0.0, -0.5)
+
+
+def test_update_north_up_renames_the_layer_in_place(mapped):
+    """M12 spec 4.5: switching to the whole site renames the one preview
+    layer rather than rebuilding it, so the layer tree does not churn."""
+    sl, _, _, project = mapped
+    sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")
+    first_id = sl.layer.id()
+    assert sl.layer.name() == LAYER_NAME
+
+    site = np.full((6, 9), 4.0, dtype=np.float32)
+    sl.update_north_up(
+        site,
+        SITE_GT,
+        "EPSG:32616",
+        limit=10.0,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="site",
+        name=SITE_LAYER_NAME,
+    )
+    assert sl.layer.id() == first_id, "renamed in place, not rebuilt"
+    assert sl.layer.name() == SITE_LAYER_NAME
+    assert (sl.layer.width(), sl.layer.height()) == (9, 6)
+    assert sl.layer.extent().xMinimum() == pytest.approx(500.0)
+    assert sl.layer.extent().yMaximum() == pytest.approx(706.0)
+    value, ok = sl.layer.dataProvider().sample(sl.layer.extent().center(), 1)
+    assert ok and value == pytest.approx(4.0)
+    assert [lyr.name() for lyr in project.mapLayers().values()].count(SITE_LAYER_NAME) == 1
+
+    sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")
+    assert sl.layer.id() == first_id
+    assert sl.layer.name() == LAYER_NAME, "This grid's update restores the name"
+
+
+def test_update_north_up_follows_a_crs_change(mapped):
+    """The site and a grid in another CRS share this one layer, and the
+    layer keeps the CRS it was created with across a `reloadData()`."""
+    sl, _, _, _ = mapped
+    values = np.full((6, 9), 1.0, dtype=np.float32)
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update_north_up(values, SITE_GT, "EPSG:32616", **kwargs)
+    assert sl.layer.crs().authid() == "EPSG:32616"
+    sl.update_north_up(values, SITE_GT, "EPSG:32615", **kwargs)
+    assert sl.layer.crs().authid() == "EPSG:32615"
+
+
+def test_the_layer_extent_follows_a_lattice_that_grows(mapped):
+    """The site lattice grows as grids become ready. The layer keeps the
+    extent it was created with across a `reloadData()`, and QGIS draws a
+    raster only inside its layer's extent."""
+    sl, _, _, _ = mapped
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update_north_up(np.full((12, 12), 1.0, np.float32), SITE_GT, "EPSG:32616", **kwargs)
+    assert sl.layer.extent().xMaximum() == pytest.approx(506.0)
+    sl.update_north_up(np.full((12, 36), 2.0, np.float32), SITE_GT, "EPSG:32616", **kwargs)
+    extent = sl.layer.extent()
+    assert (extent.xMinimum(), extent.xMaximum()) == (pytest.approx(500.0), pytest.approx(518.0))
+    assert (extent.yMinimum(), extent.yMaximum()) == (pytest.approx(700.0), pytest.approx(706.0))

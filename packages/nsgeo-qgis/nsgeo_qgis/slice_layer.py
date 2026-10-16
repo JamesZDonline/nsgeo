@@ -49,6 +49,8 @@ from nsgeo_qgis.log import log as _log
 
 _CREATION_OPTIONS = ["INTERLEAVE=BAND", "TILED=NO", "BIGTIFF=IF_SAFER"]
 LAYER_NAME = "Slice (live preview)"
+#: M12 spec 4.5: the same one layer, renamed while the dock shows the whole site.
+SITE_LAYER_NAME = "Site slice (live preview)"
 
 
 def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShader:
@@ -111,17 +113,62 @@ class SliceLayer(QObject):
         unipolar: bool,
         subtitle: str,
     ) -> None:
+        """One grid's slice: resampled north-up, then drawn by `update_north_up`."""
         try:
             array, geotransform = to_north_up(values, frame)
-            self._write(array, geotransform, frame.crs)
+            self.update_north_up(
+                array,
+                geotransform,
+                frame.crs,
+                limit=limit,
+                colormap_name=colormap_name,
+                unipolar=unipolar,
+                subtitle=subtitle,
+            )
+        except Exception as exc:  # noqa: BLE001 -- reached from a slider slot
+            _log(f"could not draw the slice layer: {exc}")
+
+    def update_north_up(
+        self,
+        array: np.ndarray,
+        geotransform: tuple[float, ...],
+        crs: str,
+        *,
+        limit: float,
+        colormap_name: str,
+        unipolar: bool,
+        subtitle: str,
+        name: str = LAYER_NAME,
+    ) -> None:
+        """Draw an array that is already north-up on `geotransform` (M12: the
+        site lattice, spec 4.5). `name` renames the existing layer in place,
+        rather than rebuilding it, so switching scope never churns the
+        layer tree.
+
+        Verified against QGIS 3.44: `reloadData()` re-reads the pixels and
+        the provider's extent and CRS, but the LAYER keeps the extent and
+        CRS it was created with. A cell change over one grid never moved
+        either; the site's lattice grows as grids become ready, and a grid
+        in another CRS shares this layer, so both are handed on here.
+        """
+        try:
+            self._write(array, tuple(geotransform), crs)
             if self._layer_gone():
                 self.layer = None
-                self._create_layer()
+                self._create_layer(name)
             else:
                 self.layer.dataProvider().reloadData()
                 self._ensure_group_membership()
             if self.layer is None:
                 return
+            if self.layer.name() != name:
+                self.layer.setName(name)
+            extent = self.layer.dataProvider().extent()
+            if self.layer.extent() != extent:
+                self.layer.setExtent(extent)
+            wanted = QgsCoordinateReferenceSystem(crs)
+            if wanted.isValid() and self.layer.crs() != wanted:
+                self.layer.setCrs(wanted)
             key = (colormap_name, float(limit), bool(unipolar))
             if key != self._renderer_key:
                 self._apply_renderer(colormap_name, limit, unipolar)
@@ -175,7 +222,7 @@ class SliceLayer(QObject):
     def _write(
         self,
         array: np.ndarray,
-        geotransform: tuple[float, float, float, float, float, float],
+        geotransform: tuple[float, ...],
         crs: str,
     ) -> None:
         # Fix round 1, Important 5 / Ruling AA: scoped to this method only
@@ -240,8 +287,8 @@ class SliceLayer(QObject):
                     dataset.Close()
                     dataset = None
 
-    def _create_layer(self) -> None:
-        layer = QgsRasterLayer(str(self.path), LAYER_NAME, "gdal")
+    def _create_layer(self, name: str = LAYER_NAME) -> None:
+        layer = QgsRasterLayer(str(self.path), name, "gdal")
         # addToLegend=False: this is a scratch preview, not a durable
         # artefact, and it joins the site's own group below like every
         # other layer here -- it does not sit unparented at legend root.
