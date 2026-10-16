@@ -1,0 +1,274 @@
+<title>Help Sources Check</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;1,400&display=swap">
+<style>
+/* Layout: a sticky progress bar over source groups; each group is a citation header, then its claims and links as rows with two three-state checks. */
+:root {
+  --bg: #f6f7f5;
+  --surface: #ffffff;
+  --fg: #1d2421;
+  --muted: #5b6761;
+  --line: #d6dbd7;
+  --accent: #1f5f4a;
+  --accent-fg: #ffffff;
+  --ok: #1d7a43;
+  --ok-bg: #dcf0e3;
+  --bad: #b3321f;
+  --bad-bg: #f8dfda;
+  --note-bg: #eef1ee;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-text: "IBM Plex Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121714; --surface: #1a211d; --fg: #e4e9e5; --muted: #9aa7a0; --line: #2f3a34;
+    --accent: #6fcba8; --accent-fg: #0d1511; --ok: #6fd596; --ok-bg: #1b3a28;
+    --bad: #f0907f; --bad-bg: #44211b; --note-bg: #222b26; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121714; --surface: #1a211d; --fg: #e4e9e5; --muted: #9aa7a0; --line: #2f3a34;
+  --accent: #6fcba8; --accent-fg: #0d1511; --ok: #6fd596; --ok-bg: #1b3a28;
+  --bad: #f0907f; --bad-bg: #44211b; --note-bg: #222b26; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; }
+* { box-sizing: border-box; }
+.wrap { max-width: 56rem; margin-inline: auto; padding-inline: 16px; padding-block: 0 4rem; }
+a { color: var(--accent); overflow-wrap: anywhere; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header.bar {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+  background: var(--bg); border-bottom: 1px solid var(--line);
+  padding-block: 0.75rem; margin-bottom: 1.25rem;
+}
+header.bar h1 { font-size: 1.1rem; font-weight: 600; margin: 0; text-wrap: balance; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 1rem; }
+.count { font-family: var(--font-mono); font-size: 0.85rem; font-variant-numeric: tabular-nums; color: var(--muted); }
+.meter { height: 6px; background: var(--note-bg); border-radius: 3px; margin-top: 0.5rem; overflow: hidden; display: flex; }
+.meter i { display: block; height: 100%; }
+.meter .m-ok { background: var(--ok); }
+.meter .m-bad { background: var(--bad); }
+.notice { margin: 0.6rem 0 0; padding: 0.5rem 0.75rem; border: 1px solid var(--line); background: var(--note-bg); border-radius: 4px; font-size: 0.875rem; }
+.notice.err { border-color: var(--bad); }
+.intro { color: var(--muted); max-width: 65ch; margin: 0 0 1.5rem; }
+
+.group { margin-bottom: 2.25rem; }
+.src { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem; }
+.src h2 { font-family: var(--font-text); font-weight: 400; font-size: 1.02rem; line-height: 1.45; margin: 0 0 0.5rem; }
+.src .sid { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); letter-spacing: 0.04em; text-transform: uppercase; }
+.rec { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.2rem 0.9rem; font-size: 0.85rem; margin: 0.6rem 0 0; }
+.rec dt { color: var(--muted); }
+.rec dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.rec .mono { font-family: var(--font-mono); font-size: 0.8rem; }
+
+.items { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.75rem; }
+.item { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 0.9rem 1rem; display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
+.item.done { border-color: var(--ok); }
+.item.flag { border-color: var(--bad); }
+.where { display: flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; align-items: center; font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); letter-spacing: 0.03em; }
+.kind { text-transform: uppercase; font-weight: 500; color: var(--accent); }
+.text { font-family: var(--font-text); font-size: 1rem; margin: 0; padding-left: 0.75rem; border-left: 3px solid var(--line); max-width: 65ch; overflow-wrap: anywhere; }
+.ev { font-size: 0.85rem; display: grid; gap: 0.25rem; }
+.ev .quote { font-family: var(--font-text); font-style: italic; margin: 0; padding: 0.4rem 0.6rem; background: var(--note-bg); border-radius: 4px; overflow-wrap: anywhere; }
+.tag { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; padding: 0.05rem 0.45rem; border: 1px solid var(--line); border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; }
+.tag.read { color: var(--ok); border-color: var(--ok); }
+.tag.memory { color: var(--bad); border-color: var(--bad); }
+.hrefs { margin: 0; padding-left: 1.1rem; font-size: 0.85rem; }
+.checks { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; }
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+legend { font-size: 0.8rem; font-weight: 500; padding: 0; margin-bottom: 0.25rem; }
+legend small { font-weight: 400; color: var(--muted); }
+.tri { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.tri label { position: relative; }
+.tri input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.tri span { display: block; padding: 0.3rem 0.75rem; font-size: 0.82rem; border-right: 1px solid var(--line); background: var(--surface); color: var(--muted); }
+.tri label:last-child span { border-right: 0; }
+.tri input:checked + span.u { background: var(--note-bg); color: var(--fg); font-weight: 500; }
+.tri input:checked + span.k { background: var(--ok-bg); color: var(--ok); font-weight: 600; }
+.tri input:checked + span.w { background: var(--bad-bg); color: var(--bad); font-weight: 600; }
+.tri input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tri input:disabled { cursor: not-allowed; }
+.tri input:disabled + span { opacity: 0.55; }
+textarea { width: 100%; min-height: 2.6rem; resize: vertical; font: inherit; font-size: 0.875rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.4rem 0.55rem; }
+textarea:disabled { opacity: 0.6; }
+label.notel { font-size: 0.8rem; font-weight: 500; display: grid; gap: 0.25rem; }
+@media (prefers-reduced-motion: no-preference) { .meter i { transition: width 0.25s; } }
+</style>
+
+<div class="wrap">
+  <header class="bar">
+    <div class="top">
+      <h1>Help Sources Check</h1>
+      <span class="count" id="count" aria-live="polite"></span>
+    </div>
+    <div class="meter" aria-hidden="true"><i class="m-ok" id="m-ok"></i><i class="m-bad" id="m-bad"></i></div>
+    <p class="notice" id="notice" hidden></p>
+  </header>
+  <p class="intro">Each row is one sentence or link from an nsgeo help page. For each, open the source, then mark whether it exists as cited and whether it says what the page says. Your marks are saved as you go, so you can stop and come back.</p>
+  <main id="groups"></main>
+</div>
+
+<script>
+const LEDGER = /*__LEDGER__*/null;
+const STATES = ["unchecked", "ok", "wrong"];
+const LABELS = { unchecked: "Not yet", ok: "Yes", wrong: "No" };
+const CLASSES = { unchecked: "u", ok: "k", wrong: "w" };
+const rows = new Map();   // item id -> {el, radios, note, item}
+const marks = new Map();  // item id -> {exists, says, note}
+let db = null;
+
+function el(tag, props, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v; else n.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) n.append(kid);
+  return n;
+}
+function link(href, text) {
+  return /^https?:\/\//.test(href) ? el("a", { href, text: text || href, rel: "noopener noreferrer" }) : el("span", { class: "mono", text: href });
+}
+function mark(id) { return marks.get(id) || { exists: "unchecked", says: "unchecked", note: "" }; }
+
+function save(id, patch) {
+  if (!db) return;
+  const next = Object.assign({}, mark(id), patch);
+  marks.set(id, next);
+  paint(id);
+  db.doc("checks/" + id).set(next).catch(() => notice("Could not save that mark. Check your connection and try again.", true));
+}
+
+function tri(id, field, title, hint) {
+  const fs = el("fieldset", {}, el("legend", {}, title + " ", el("small", { text: hint })));
+  const box = el("div", { class: "tri", role: "radiogroup" });
+  const radios = {};
+  for (const s of STATES) {
+    const input = el("input", { type: "radio", name: id + "-" + field, id: id + "-" + field + "-" + s, value: s });
+    input.disabled = true;
+    input.addEventListener("change", () => { if (input.checked) save(id, { [field]: s }); });
+    radios[s] = input;
+    box.append(el("label", {}, input, el("span", { class: CLASSES[s], text: LABELS[s] })));
+  }
+  fs.append(box);
+  return { fs, radios };
+}
+
+function buildItem(item) {
+  const id = item.id;
+  const ex = tri(id, "exists", "Exists as cited", "Claude pre-checked this against the catalogue link above.");
+  const sy = tri(id, "says", item.kind === "link" ? "Goes where the page says" : "Says this", "Read the source at the place given.");
+  const note = el("textarea", { id: id + "-note", rows: "2" });
+  note.disabled = true;
+  note.addEventListener("change", () => save(id, { note: note.value }));
+
+  const where = el("div", { class: "where" },
+    el("span", { class: "kind", text: item.kind }),
+    el("span", { text: item.page + " / " + item.section }),
+    el("span", { text: id }));
+  const body = [where, el("p", { class: "text", text: item.text })];
+  if (item.kind === "claim") {
+    const ev = el("div", { class: "ev" });
+    ev.append(el("div", {}, "Claude's basis: ", el("span", { class: "tag " + item.evidence, text: item.evidence === "read" ? "read" : "from memory" })));
+    if (item.quote) ev.append(el("blockquote", { class: "quote", text: item.quote }));
+    ev.append(el("div", {}, el("b", { text: "Where to look: " }), item.look));
+    body.push(ev);
+  } else {
+    const ul = el("ul", { class: "hrefs" });
+    for (const h of item.hrefs || []) ul.append(el("li", {}, link(h)));
+    body.push(ul);
+  }
+  if (item.sources.length > 1) {
+    const also = el("div", { class: "ev" }, el("b", { text: "Also cites: " }));
+    item.sources.slice(1).forEach((s, i) => also.append((i ? "; " : ""), (LEDGER.sources[s] || {}).citation || s));
+    body.push(also);
+  }
+  body.push(el("div", { class: "checks" }, ex.fs, sy.fs),
+    el("label", { class: "notel", for: id + "-note" }, "Note", note));
+  const node = el("article", { class: "item", id: "item-" + id }, ...body);
+  rows.set(id, { el: node, exists: ex.radios, says: sy.radios, note, item });
+  return node;
+}
+
+function paint(id) {
+  const r = rows.get(id), m = mark(id);
+  for (const f of ["exists", "says"]) {
+    const v = STATES.includes(m[f]) ? m[f] : "unchecked";
+    for (const s of STATES) r[f][s].checked = s === v;
+  }
+  if (document.activeElement !== r.note && r.note.value !== (m.note || "")) r.note.value = m.note || "";
+  const both = m.exists !== "unchecked" && m.says !== "unchecked";
+  const flagged = m.exists === "wrong" || m.says === "wrong";
+  r.el.classList.toggle("done", both && !flagged);
+  r.el.classList.toggle("flag", flagged);
+}
+
+function progress() {
+  let done = 0, flagged = 0;
+  for (const [id] of rows) {
+    const m = mark(id);
+    if (m.exists !== "unchecked" && m.says !== "unchecked") done++;
+    if (m.exists === "wrong" || m.says === "wrong") flagged++;
+  }
+  const n = rows.size;
+  document.getElementById("count").textContent = done + " of " + n + " checked" + (flagged ? " · " + flagged + " flagged" : "");
+  const pct = n ? 100 / n : 0;
+  document.getElementById("m-ok").style.width = Math.max(0, done - flagged) * pct + "%";
+  document.getElementById("m-bad").style.width = flagged * pct + "%";
+}
+
+function notice(text, isErr) {
+  const n = document.getElementById("notice");
+  n.textContent = text; n.hidden = !text; n.className = "notice" + (isErr ? " err" : "");
+}
+
+function render() {
+  const groups = new Map();
+  for (const item of LEDGER.items) {
+    const sid = item.sources[0] || "(none)";
+    if (!groups.has(sid)) groups.set(sid, []);
+    groups.get(sid).push(item);
+  }
+  const root = document.getElementById("groups");
+  if (!groups.size) { root.append(el("p", { class: "intro", text: "The ledger is empty. No help page has a claim or a link yet." })); }
+  for (const [sid, items] of groups) {
+    const s = LEDGER.sources[sid] || { citation: sid, url: null, checked_via: "", checked_on: "", note: "" };
+    const rec = el("dl", { class: "rec" });
+    if (s.url) rec.append(el("dt", { text: "Catalogue link" }), el("dd", {}, link(s.url)));
+    rec.append(el("dt", { text: "Claude checked" }), el("dd", {}, s.checked_via ? link(s.checked_via) : "(no record)", s.checked_on ? " on " + s.checked_on : ""));
+    if (s.note) rec.append(el("dt", { text: "What it found" }), el("dd", { text: s.note }));
+    const head = el("div", { class: "src" }, el("div", { class: "sid", text: "Source " + sid }), el("h2", { text: s.citation }), rec);
+    const list = el("div", { class: "items" });
+    for (const it of items) list.append(buildItem(it));
+    root.append(el("section", { class: "group" }, head, list));
+  }
+  for (const [id] of rows) paint(id);
+  progress();
+}
+
+function enable(on) {
+  for (const r of rows.values()) {
+    for (const f of ["exists", "says"]) for (const s of STATES) r[f][s].disabled = !on;
+    r.note.disabled = !on;
+  }
+}
+
+render();
+notice("Loading your saved marks…");
+(async () => {
+  try { db = await window.claude.use("db"); } catch (e) { db = null; }
+  if (!db) {
+    notice("Read-only. Sign in to Claude to save your marks. The ledger below still shows every item and source.");
+    return;
+  }
+  db.collection("checks").onSnapshot(snap => {
+    marks.clear();
+    for (const d of snap.docs) {
+      const v = d.data() || {};
+      marks.set(d.id, { exists: v.exists || "unchecked", says: v.says || "unchecked", note: v.note || "" });
+    }
+    for (const [id] of rows) paint(id);
+    progress(); enable(true); notice("");
+  }, () => { enable(false); notice("Could not load your saved marks, so the page is read-only. Reload to try again.", true); });
+})();
+</script>
