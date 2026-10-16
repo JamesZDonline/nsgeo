@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+import zlib
 from typing import Any
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -340,3 +342,141 @@ def drive_dialog(monkeypatch):
         return calls
 
     return _install
+
+
+# ---- M12: a three-grid site -------------------------------------------------
+
+#: Three adjacent 6 x 6 m grids, west to east, in the site's CRS (A's, as
+#: the first grid). Lines run along y at 1.5 m spacing, starting 0.8 m in
+#: from each grid's west edge and ending 0.7 m short of its east edge, so
+#: both sides of every shared edge have a line within the seam width
+#: (`SEAM_WIDTH_SPACINGS` x 1.5 m = 2.25 m) and real seams are found.
+SITE3_CRS = "EPSG:32616"
+SITE3_SPACING = 1.5
+SITE3_ORIGINS = {"A": (500.0, 700.0), "B": (506.0, 700.0), "C": (512.0, 700.0)}
+SITE3_OFFSETS = (0.8, 2.3, 3.8, 5.3)
+SITE3_PRESETS = {
+    "p": [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+        {"step": "gain_agc", "params": {}, "enabled": True},
+    ],
+    # No gain step, so a grid recorded at a different gain still shows it.
+    "raw": [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ],
+}
+
+
+class Site3:
+    """`site3`'s session and the sources it is usually asked for."""
+
+    def __init__(self, session: Any, json_path: Any) -> None:
+        self.session = session
+        #: Saved, so a test can close the site and open it again.
+        self.json_path = json_path
+
+    def keys(self, grid_id: str) -> tuple[str, ...]:
+        return tuple(
+            self.session.line_key(line)
+            for line in self.session.site.lines
+            if line.placement.grid_id == grid_id
+        )
+
+    def choice(self, grid_id: str, preset: str = "p", transform: str = "amp_envelope") -> Any:
+        from nsgeo_qgis.slices_plan import SourceChoice
+
+        return SourceChoice(
+            grid_id=grid_id, preset=preset, transform=transform, line_keys=self.keys(grid_id)
+        )
+
+    def source(self, grids: str = "ABC", preset: str = "p", transform: str = "amp_envelope") -> Any:
+        from nsgeo_qgis.slices_plan import SiteSource
+
+        return SiteSource(
+            transform=transform, grids=tuple(self.choice(g, preset, transform) for g in grids)
+        )
+
+
+@pytest.fixture
+def site3_factory(qgis_app, tmp_path):
+    """Build `site3`, optionally varied.
+
+    `samples` gives a grid's lines fewer samples (a shorter time range at
+    the same sample interval); `scale` multiplies a grid's recorded
+    amplitudes; `crs` re-declares a grid in another CRS at the same place
+    on the ground (its origin is transformed, its azimuth kept);
+    `same_data` gives every grid's i-th line the same samples, so grids
+    differ only by what `scale` does to them.
+    """
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.session import SiteSession
+    from qgis.core import (
+        QgsCoordinateReferenceSystem,
+        QgsCoordinateTransform,
+        QgsPointXY,
+        QgsProject,
+    )
+    from tests.synthetic import write_dzt
+
+    built = 0
+
+    def build(
+        *,
+        samples: dict[str, int] | None = None,
+        scale: dict[str, float] | None = None,
+        crs: dict[str, str] | None = None,
+        same_data: bool = False,
+    ) -> Site3:
+        nonlocal built
+        built += 1
+        root = tmp_path / f"site3_{built}"
+        root.mkdir()
+        session = SiteSession()
+        session.new_site(root)
+        lines = []
+        for grid_id, origin in SITE3_ORIGINS.items():
+            grid_crs = (crs or {}).get(grid_id, SITE3_CRS)
+            if grid_crs != SITE3_CRS:
+                transform = QgsCoordinateTransform(
+                    QgsCoordinateReferenceSystem(SITE3_CRS),
+                    QgsCoordinateReferenceSystem(grid_crs),
+                    QgsProject.instance(),
+                )
+                moved = transform.transform(QgsPointXY(*origin))
+                origin = (moved.x(), moved.y())
+            session.add_grid(Grid(grid_id, origin, 0.0, 6.0, 6.0, grid_crs, SITE3_SPACING))
+            n_samples = (samples or {}).get(grid_id, 512)
+            gain = (scale or {}).get(grid_id, 1.0)
+            for i, offset in enumerate(SITE3_OFFSETS):
+                seed = f"{'A' if same_data else grid_id}{i}"
+                rng = np.random.default_rng(zlib.crc32(seed.encode()))
+                data = rng.normal(size=(n_samples, 60)) * 1e6
+                data[40:44, :] = 5e6
+                folder = root / "raw" / grid_id
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / f"FILE__00{i + 1}.DZT"
+                write_dzt(
+                    path,
+                    (data * gain).astype(np.int32),
+                    traces_per_metre=10.0,
+                    range_ns=110.864 * n_samples / 512,
+                )
+                placement = GridPlacement(grid_id, "y", offset, 0.05, 1, path.stem)
+                lines.append(Line.open(path, placement))
+        session.add_lines(lines)
+        for name, steps in SITE3_PRESETS.items():
+            session.site.presets[name] = [dict(s) for s in steps]
+        session.save()
+        return Site3(session, session.json_path)
+
+    return build
+
+
+@pytest.fixture
+def site3(site3_factory):
+    """Three adjacent 6 x 6 m synthetic grids, A, B and C, four lines each."""
+    return site3_factory()
