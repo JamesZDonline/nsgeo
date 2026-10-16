@@ -83,7 +83,7 @@ class SiteExportPlan:
     transform: str
     method: str
     cell_m: float
-    radius_spacings: float
+    radius_spacings: float | None
     grids: tuple[SiteGridRecord, ...]
 
 
@@ -124,9 +124,9 @@ def plan_site_export(
     cell = None
     for grid_id in ready:
         engine = site_engine.engine_for(grid_id)
-        frame = engine.frame
-        if cell is None:
-            cell = frame.cell
+        if cell is None and engine.frame is not None:
+            cell = engine.frame.cell
+        grid = site_engine.session.grid(grid_id)
         velocity = velocities.get(grid_id)
         records.append(
             SiteGridRecord(
@@ -134,11 +134,13 @@ def plan_site_export(
                 preset=engine.choice.preset,
                 velocity=velocity.to_dict() if velocity is not None else None,
                 gain=float(gains.get(grid_id, 1.0)),
-                line_spacing_m=float(site_engine.session.grid(grid_id).default_spacing),
-                azimuth_deg=float(frame.azimuth),
-                crs=frame.crs,
+                line_spacing_m=float(grid.default_spacing),
+                azimuth_deg=float(grid.azimuth),
+                crs=grid.crs,
             )
         )
+    if cell is None:
+        cell = lattice.pixel  # every grid lacks an axis: nothing is drawn anyway
     bands = []
     for window in plan_windows(site_z, thickness_levels, step_levels):
         top, thickness = band_window_ns(site_z, window)
@@ -146,7 +148,7 @@ def plan_site_export(
         absent: set[str] = set()
         for grid_id in ready:
             z = site_engine.engine_for(grid_id).z
-            grid_window = window_on(z, top, thickness)
+            grid_window = window_on(z, top, thickness) if z is not None else None
             velocity = velocities.get(grid_id)
             if grid_window is None:
                 depths[grid_id] = None
@@ -211,11 +213,15 @@ class GeoTiffSiteWriter:
                         "NSGEO_SITE_NORMALISATION": plan.method,
                         "NSGEO_SITE_CELL_M": str(plan.cell_m),
                         "NSGEO_SITE_PIXEL_M": str(lattice.pixel),
-                        "NSGEO_SITE_FILL_RADIUS_SPACINGS": str(plan.radius_spacings),
                         "NSGEO_SITE_Z_UNIT": "ns",
                         "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
                     }.items():
                         dataset.SetMetadataItem(key, value)
+                    if plan.radius_spacings is not None:
+                        # Absent, not zero, on a file that was never filled (as M11's).
+                        dataset.SetMetadataItem(
+                            "NSGEO_SITE_FILL_RADIUS_SPACINGS", str(plan.radius_spacings)
+                        )
                     written = 0
                     iterator = iter(slices)
                     for index, (band_plan, shown) in enumerate(zip(plan.bands, iterator)):
@@ -328,9 +334,15 @@ def write_site_coverage(site_engine: SiteEngine, path: str | Path, plan: SiteExp
         manual={},
         coverage=True,
     )
+    # The companion is raw counts: no normalisation, no fill, no manual gain. Its
+    # plan says so (method "none", no fill radius, every recorded gain 1.0) rather
+    # than repeating the values file's processing.
     coverage_plan = replace(
         plan,
         bands=(replace(first, description="coverage: traces per cell"),),
+        method="none",
+        radius_spacings=None,
+        grids=tuple(replace(g, gain=1.0) for g in plan.grids),
     )
     GeoTiffSiteWriter().write(out, coverage_plan, [shown])
     return out

@@ -12,6 +12,7 @@ from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
     apply_site_temporal_properties,
+    band_window_ns,
     export_site,
     plan_site_export,
     write_site_coverage,
@@ -258,7 +259,64 @@ def test_the_coverage_companion_is_written_beside_it(site3, make_site, tmp_path)
     assert (ds.RasterXSize, ds.RasterYSize) == (site.lattice.width, site.lattice.height)
     assert ds.GetGeoTransform() == pytest.approx(site.lattice.geotransform)
     arr = ds.GetRasterBand(1).ReadAsArray()
-    assert np.isfinite(arr).any() and (arr[np.isfinite(arr)] > 0).all()
+    top, thickness = band_window_ns(plan.site_z, plan.bands[0].window)
+    counts = site.slice_at(
+        top, thickness, radius_spacings=1.5, method="none", manual={}, coverage=True
+    ).array
+    assert np.array_equal(arr, counts, equal_nan=True)
+    finite = arr[np.isfinite(arr)]
+    assert finite.size and (finite >= 1).all() and (finite == np.round(finite)).all()
+    assert np.isnan(ds.GetRasterBand(1).GetNoDataValue())
+
+
+def test_the_coverage_companion_does_not_claim_processing_it_never_had(site3, make_site, tmp_path):
+    site, plan, path = exported(make_site, site3, tmp_path)
+    ds = open_tif(write_site_coverage(site, path, plan))
+    md = ds.GetMetadata()
+    assert md["NSGEO_SITE_NORMALISATION"] == "none"
+    assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" not in md
+    assert [g["gain"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == [1.0, 1.0, 1.0]
+    factors = json.loads(ds.GetRasterBand(1).GetMetadata()["NSGEO_GRID_FACTORS"])
+    assert all(f == [1.0, 0.0] for f in factors.values())
+    # the values file keeps what it did
+    main = open_tif(path).GetMetadata()
+    assert main["NSGEO_SITE_NORMALISATION"] == "edge"
+    assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" in main
+
+
+def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path):
+    site, plan, path = exported(make_site, site3, tmp_path)
+    ds = open_tif(path)
+    for i in range(1, ds.RasterCount + 1):
+        assert np.isnan(ds.GetRasterBand(i).GetNoDataValue())
+
+
+def test_a_ready_grid_with_no_site_axis_exports_as_absent(site3_factory, make_site, tmp_path):
+    """R-P3: C ends at ~16.4 ns, so at t0=16 it has no axis (frame and z are None)."""
+    site3 = site3_factory(samples={"C": 128})
+    site = SiteEngine(site3.session)
+    try:
+        site.set_source(site3.source())
+        assert site.wait_until_idle(60_000)
+        site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=16.0, t1_ns=60.0))
+        assert site.engine_for("C").z is None
+        path = tmp_path / "r.tif"
+        plan = export_site(site, path, 4, 8, **KW)
+        ds = open_tif(path)
+        assert ds.RasterCount == len(plan.bands) >= 2
+        for i in range(1, ds.RasterCount + 1):
+            band = ds.GetRasterBand(i)
+            md = band.GetMetadata()
+            assert json.loads(md["NSGEO_GRID_DEPTHS_M"])["C"] is None
+            assert json.loads(md["NSGEO_GRID_FACTORS"])["C"] is None
+            assert json.loads(md["NSGEO_GRID_FACTORS"])["A"] is not None
+            assert "C no data" in band.GetDescription()
+        grids = {g["grid_id"]: g for g in json.loads(ds.GetMetadata()["NSGEO_SITE_GRIDS"])}
+        assert grids["C"]["crs"] == site3.session.grid("C").crs
+        assert float(ds.GetMetadata()["NSGEO_SITE_CELL_M"]) == 0.25
+    finally:
+        site.wait_until_idle(20_000)
+        site.dispose()
 
 
 def test_the_writer_reuses_m11s_creation_options():
