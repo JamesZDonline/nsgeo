@@ -91,6 +91,7 @@ jobs:
           name: nsgeo_qgis-zip
           path: dist
       - name: install the zip into QGIS and probe it
+        shell: bash
         run: |
           zips=(dist/*.zip)
           if [ "${#zips[@]}" -ne 1 ]; then
