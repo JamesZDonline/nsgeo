@@ -9,7 +9,6 @@ from nsgeo_qgis.help_pages import HELP_DIR
 
 PENDING = {
     "time_zero",
-    "dewow",
     "bandpass",
     "gain_agc",
     "gain_parametric",

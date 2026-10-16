@@ -1,0 +1,173 @@
+{
+  "sources": {
+    "cassidy2009": {
+      "citation": "Cassidy, N. J. (2009). Ground penetrating radar data processing, modelling and analysis. In H. M. Jol (Ed.), Ground Penetrating Radar: Theory and Applications (pp. 141–176). Elsevier.",
+      "url": "https://doi.org/10.1016/B978-0-444-53348-7.00005-3",
+      "exists": {
+        "checked_via": "https://api.crossref.org/works/10.1016/B978-0-444-53348-7.00005-3",
+        "checked_on": "2026-10-16",
+        "note": "Crossref: book chapter by Nigel J. Cassidy, pp. 141–176, Elsevier, 2009, ISBN 978-0-444-53348-7. Editor Harry M. Jol per the NTK catalogue record, https://vufind.techlib.cz/Record/001809382/Details."
+      }
+    },
+    "annan2009": {
+      "citation": "Annan, A. P. (2009). Electromagnetic principles of ground penetrating radar. In H. M. Jol (Ed.), Ground Penetrating Radar: Theory and Applications (pp. 1–40). Elsevier.",
+      "url": "https://doi.org/10.1016/B978-0-444-53348-7.00001-6",
+      "exists": {
+        "checked_via": "https://api.crossref.org/works/10.1016/B978-0-444-53348-7.00001-6",
+        "checked_on": "2026-10-16",
+        "note": "Crossref: book chapter by A. P. Annan, pp. 1–40, Elsevier, 2009, ISBN 978-0-444-53348-7. Editor Harry M. Jol per the NTK catalogue record, https://vufind.techlib.cz/Record/001809382/Details."
+      }
+    },
+    "conyers2013": {
+      "citation": "Conyers, L. B. (2013). Ground-Penetrating Radar for Archaeology (3rd ed.). AltaMira Press.",
+      "url": null,
+      "exists": {
+        "checked_via": "https://api.crossref.org/works/10.5040/9798216437222",
+        "checked_on": "2026-10-16",
+        "note": "Crossref: book by Lawrence B. Conyers, AltaMira Press, 2013, edition number 3, print ISBN 978-0-7591-2349-6."
+      }
+    },
+    "rgpr-tutorial": {
+      "citation": "Huber, E. (2020). Basic GPR data processing. RGPR tutorial.",
+      "url": "https://emanuelhuber.github.io/RGPR/02_RGPR_tutorial_basic-GPR-data-processing/",
+      "exists": {
+        "checked_via": "https://emanuelhuber.github.io/RGPR/02_RGPR_tutorial_basic-GPR-data-processing/",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200 and the page was read. Date from its 'Last update: 04 Jun 2020'; author from the RGPR project's GitHub account (emanuelhuber/RGPR), which the page links."
+      }
+    },
+    "wp-ground-penetrating-radar": {
+      "citation": "Wikipedia, \"Ground-penetrating radar\".",
+      "url": "https://en.wikipedia.org/wiki/Ground-penetrating_radar",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Ground-penetrating_radar",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-moving-average": {
+      "citation": "Wikipedia, \"Moving average\".",
+      "url": "https://en.wikipedia.org/wiki/Moving_average",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Moving_average",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-low-pass-filter": {
+      "citation": "Wikipedia, \"Low-pass filter\".",
+      "url": "https://en.wikipedia.org/wiki/Low-pass_filter",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Low-pass_filter",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-high-pass-filter": {
+      "citation": "Wikipedia, \"High-pass filter\".",
+      "url": "https://en.wikipedia.org/wiki/High-pass_filter",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/High-pass_filter",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-sinc-function": {
+      "citation": "Wikipedia, \"Sinc function\".",
+      "url": "https://en.wikipedia.org/wiki/Sinc_function",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Sinc_function",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-dirichlet-kernel": {
+      "citation": "Wikipedia, \"Dirichlet kernel\".",
+      "url": "https://en.wikipedia.org/wiki/Dirichlet_kernel",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Dirichlet_kernel",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "wp-prefix-sum": {
+      "citation": "Wikipedia, \"Prefix sum\".",
+      "url": "https://en.wikipedia.org/wiki/Prefix_sum",
+      "exists": {
+        "checked_via": "https://en.wikipedia.org/wiki/Prefix_sum",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; text read through the MediaWiki extracts API."
+      }
+    },
+    "nsgeo-issue-40": {
+      "citation": "nsgeo issue #40: Dewow and sliding background removal silently zero the line when the window is one sample",
+      "url": "https://github.com/JamesZDonline/nsgeo/issues/40",
+      "exists": {
+        "checked_via": "https://github.com/JamesZDonline/nsgeo/issues/40",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; body and comments read through the GitHub API."
+      }
+    },
+    "nsgeo-issue-43": {
+      "citation": "nsgeo issue #43: running_mean spreads one NaN/inf along the whole axis — dewow, gain_agc, background_sliding",
+      "url": "https://github.com/JamesZDonline/nsgeo/issues/43",
+      "exists": {
+        "checked_via": "https://github.com/JamesZDonline/nsgeo/issues/43",
+        "checked_on": "2026-10-16",
+        "note": "curl -sIL ended in HTTP 200; body and comments read through the GitHub API."
+      }
+    }
+  },
+  "claims": {
+    "dewow-wow-name": {
+      "evidence": "read",
+      "look": "Section 'Dewow'.",
+      "quote": "Remove the low-frequency components (the so-called “wow”) of the GPR record"
+    },
+    "dewow-wow-origin": {
+      "evidence": "memory",
+      "look": "Ch. 5 (pp. 141–176), the part of the basic processing section on dewow (time-domain filtering of low-frequency 'wow').",
+      "quote": ""
+    },
+    "dewow-usual-fix": {
+      "evidence": "memory",
+      "look": "Ch. 5 (pp. 141–176), the part of the basic processing section on dewow (time-domain filtering of low-frequency 'wow').",
+      "quote": ""
+    },
+    "dewow-boxcar": {
+      "evidence": "read",
+      "look": "Lead section.",
+      "quote": "Because the boxcar function outlines its filter coefficients, it is called a boxcar filter."
+    },
+    "dewow-low-pass": {
+      "evidence": "read",
+      "look": "Moving average, lead section; Low-pass filter, lead section.",
+      "quote": "Moving average: “in signal processing it is viewed as a low-pass finite impulse response filter.” Low-pass filter: “Low-pass filters provide a smoother form of a signal, removing the short-term fluctuations and leaving the longer-term trend.”"
+    },
+    "dewow-high-pass": {
+      "evidence": "read",
+      "look": "High-pass filter, lead section; Low-pass filter, lead section.",
+      "quote": "High-pass filter: “passes signals with a frequency higher than a certain cutoff frequency and attenuates signals with frequencies lower than the cutoff frequency.” Low-pass filter: “A low-pass filter is the complement of a high-pass filter.”"
+    },
+    "dewow-sinc": {
+      "evidence": "read",
+      "look": "Sinc function, lead section; Moving average, section 'Simple moving average'.",
+      "quote": "Sinc function: “The normalized sinc function is the Fourier transform of the rectangular function with no scaling.” Moving average: “Its frequency response is a type of low-pass filter called sinc-in-frequency (or, in discrete time, is a Dirichlet kernel).”"
+    },
+    "dewow-other-filters": {
+      "evidence": "read",
+      "look": "Section 'Dewow'.",
+      "quote": "Remove the low-frequency components (the so-called “wow”) of the GPR record using: a running median filter (type = \"runnmed\") a running mean filter (type = \"runmean\") a Gaussian filter (type = \"Gaussian\")"
+    },
+    "dewow-passes-fast": {
+      "evidence": "read",
+      "look": "Section 'Simple moving average'.",
+      "quote": "A major drawback of the SMA is that it lets through a significant amount of the signal shorter than the window length. This can lead to unexpected artifacts, such as peaks in the smoothed result appearing where there were troughs in the data."
+    },
+    "dewow-dirichlet": {
+      "evidence": "read",
+      "look": "Section 'Applications'.",
+      "quote": "In signal processing, the Dirichlet kernel is often called the periodic sinc function … This kernel is also the Fourier Transform of a discrete time moving average filter."
+    }
+  }
+}

@@ -1,0 +1,64 @@
+/* nsgeo help pages: the one shared stylesheet. Offline: no fonts, images or imports. */
+
+:root {
+  --bg: #fbfaf7; --fg: #1d1d1b; --muted: #5e5c57; --rule: #dedbd3;
+  --accent: #1f4e79; --warn-bg: #fff6e0; --warn-rule: #e3c26b;
+  --card: #ffffff; --code: #f1efe9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1c1e; --fg: #e9e7e2; --muted: #a7a49c; --rule: #3a3b3e;
+    --accent: #8ab8e6; --warn-bg: #2f2918; --warn-rule: #8c7432;
+    --card: #232427; --code: #2b2c30;
+  }
+  img.fig { background: #fff; }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+       font: 17px/1.6 "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif; }
+.sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+a { color: var(--accent); }
+code { font: 0.86em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+       background: var(--code); padding: 0.05em 0.3em; border-radius: 3px; }
+img { max-width: 100%; height: auto; }
+math[display="block"] { margin: 0.9em 0; font-size: 1.08em; overflow-x: auto; overflow-y: hidden; }
+
+/* page frame */
+.page { max-width: 780px; margin: 0 auto; padding: 36px 16px 80px; }
+.page header { border-bottom: 1px solid var(--rule); padding-bottom: 14px; margin-bottom: 8px; }
+.kicker { font-size: 13px; color: var(--muted); letter-spacing: 0.05em; text-transform: uppercase; }
+.page h1 { font-size: 40px; line-height: 1.1; margin: 6px 0 6px; }
+.meta { font-size: 14px; color: var(--muted); }
+nav.toc { font-size: 14px; margin: 14px 0 0; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+nav.toc a { text-decoration: none; }
+.page h2 { font-size: 24px; margin: 46px 0 6px; padding-top: 6px; }
+.page h2 .lvl { display: block; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+                color: var(--muted); font-weight: 600; }
+.page h3 { font-size: 18px; margin: 26px 0 4px; }
+.lede { font-size: 20px; line-height: 1.6; }
+
+/* figures */
+figure { margin: 22px 0; }
+figcaption { font-size: 14px; color: var(--muted); line-height: 1.45; margin-top: 6px; }
+
+/* settings */
+.setting { border: 1px solid var(--rule); border-radius: 8px; padding: 4px 18px 10px;
+           background: var(--card); margin: 14px 0; }
+.setting h3 { margin-top: 14px; }
+.setting h3 .unit { font-size: 14px; color: var(--muted); font-weight: 400; }
+table.t { border-collapse: collapse; font-size: 14px; margin: 10px 0; width: 100%; }
+table.t th, table.t td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule); }
+.small { font-size: 15px; }
+
+/* asides and the deep section */
+.note { background: var(--warn-bg); border-left: 4px solid var(--warn-rule); padding: 10px 14px;
+        border-radius: 0 6px 6px 0; margin: 16px 0; }
+.deep { border-top: 2px solid var(--rule); margin-top: 52px; }
+.source-path { font-size: 14px; color: var(--muted); }
+
+/* references and footer */
+ol.refs { font-size: 15px; padding-left: 1.2em; }
+ol.refs li { margin: 6px 0; }
+footer { margin-top: 48px; font-size: 13px; color: var(--muted); border-top: 1px solid var(--rule);
+         padding-top: 12px; }

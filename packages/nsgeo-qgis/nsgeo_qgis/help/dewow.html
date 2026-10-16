@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dewow · nsgeo help</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="page">
+  <header>
+    <div class="kicker sans">nsgeo processing step</div>
+    <h1>Dewow</h1>
+    <div class="meta sans">Step name <code>dewow</code> · one setting: <b>Window</b> (ns, default 4) · works on each trace by itself</div>
+    <nav class="toc sans">
+      <a href="#plain">In plain words</a><a href="#pictures">What it does to a line</a><a href="#method">The method</a>
+      <a href="#settings">Settings</a><a href="#know">Things to know</a><a href="#nsgeo">How nsgeo does it</a><a href="#refs">Further reading</a>
+    </nav>
+  </header>
+
+  <section id="plain">
+    <h2><span class="lvl sans">In plain words</span>A slow drift, taken away</h2>
+    <p class="lede">Each time the radar sends a pulse into the ground, it records the signal that comes back over a very short span of time. That recording is called a trace. A trace can also contain a slow drift, called “wow”, that has nothing to do with what is buried. The drift shifts the trace up or down and changes only gradually, while echoes from buried objects rise and fall much faster. Dewow estimates the drift and removes it. At each point in the trace, it takes the average over a short stretch of time around that point and subtracts that average. What is left is the faster part of the signal, which carries the echoes.</p>
+  </section>
+
+  <section id="pictures">
+    <h2><span class="lvl sans">Pictures</span>What it does to a line</h2>
+    <figure>
+      <img class="fig" src="img/dewow_trace.png" alt="A single trace with its running mean drawn over it, and the trace after the mean is subtracted">
+      <figcaption>One trace from the middle of the campus line (trace 317), raw. Top: the recorded trace in grey, and in red the running mean that dewow subtracts at the default 4 ns window. Bottom: the trace after dewow. This line has almost no drift to begin with, so the red curve mostly follows the slower swings of the radar pulse itself.</figcaption>
+    </figure>
+    <figure>
+      <img class="fig" src="img/dewow_panels.png" alt="Three radargram panels: before dewow, after dewow, and what dewow removed">
+      <figcaption>The whole campus line, raw data, down to 50 ns two-way time. Left: before. Middle: after dewow at the default 4 ns window. Right: what was removed (input minus output), the same view as the Processing panel’s <b>Difference</b> button. Each panel is scaled on its own (99th-percentile clip), so the right panel looks far stronger than it is: what dewow removed here is 2.9% of the line’s energy.</figcaption>
+    </figure>
+  </section>
+
+  <section id="method">
+    <h2><span class="lvl sans">The method</span>A running mean, subtracted</h2>
+    <p><span data-claim="dewow-wow-name" data-source="rgpr-tutorial">In GPR processing, <em>wow</em> is the name for the low-frequency part of the recorded data.</span> <span data-claim="dewow-wow-origin" data-source="cassidy2009">It shows up as a slow drift that decays down each trace, and is usually explained as the receiver electronics being swamped by the strong early arrivals (the air and ground waves) and then slowly recovering, or as inductive coupling between the antenna and the ground.</span></p>
+    <p><span data-claim="dewow-usual-fix" data-source="cassidy2009">The usual fix, called dewow, is to estimate the slow part of each trace with a running mean and subtract it.</span> <span data-claim="dewow-boxcar" data-source="wp-moving-average">A running mean is a <a href="https://en.wikipedia.org/wiki/Moving_average" data-source="wp-moving-average">moving average</a>; because every sample in the window counts equally, it is also called a boxcar filter.</span> For a trace <i>x</i>(<i>t</i>) and a window of length <i>W</i>:</p>
+    <math display="block"><mrow><mi>y</mi><mo>(</mo><mi>t</mi><mo>)</mo></mrow><mo>=</mo><mrow><mi>x</mi><mo>(</mo><mi>t</mi><mo>)</mo></mrow><mo>−</mo><mfrac><mn>1</mn><mi>W</mi></mfrac><msubsup><mo>∫</mo><mrow><mi>t</mi><mo>−</mo><mi>W</mi><mo>/</mo><mn>2</mn></mrow><mrow><mi>t</mi><mo>+</mo><mi>W</mi><mo>/</mo><mn>2</mn></mrow></msubsup><mrow><mi>x</mi><mo>(</mo><mi>τ</mi><mo>)</mo></mrow><mspace width="0.17em"></mspace><mi>d</mi><mi>τ</mi></math>
+    <p><span data-claim="dewow-low-pass" data-source="wp-moving-average wp-low-pass-filter">A running mean is a <a href="https://en.wikipedia.org/wiki/Low-pass_filter" data-source="wp-low-pass-filter">low-pass filter</a>: it keeps slow changes and smooths away fast ones.</span> <span data-claim="dewow-high-pass" data-source="wp-high-pass-filter wp-low-pass-filter">Subtracting it from the original therefore makes a <a href="https://en.wikipedia.org/wiki/High-pass_filter" data-source="wp-high-pass-filter">high-pass filter</a>, which takes away slow changes and keeps fast ones.</span> In frequency terms, the fraction of each frequency <i>f</i> that survives, by amplitude, is</p>
+    <math display="block"><mrow><mi>H</mi><mo>(</mo><mi>f</mi><mo>)</mo></mrow><mo>=</mo><mn>1</mn><mo>−</mo><mrow><mi>sinc</mi><mo>(</mo><mi>f</mi><mi>W</mi><mo>)</mo></mrow><mo>,</mo><mspace width="1em"></mspace><mrow><mi>sinc</mi><mo>(</mo><mi>u</mi><mo>)</mo></mrow><mo>=</mo><mfrac><mrow><mi>sin</mi><mo>(</mo><mi>π</mi><mi>u</mi><mo>)</mo></mrow><mrow><mi>π</mi><mi>u</mi></mrow></mfrac></math>
+    <p><span data-claim="dewow-sinc" data-source="wp-sinc-function wp-moving-average">where <a href="https://en.wikipedia.org/wiki/Sinc_function" data-source="wp-sinc-function">sinc</a> is the frequency response of a boxcar.</span> <span data-claim="dewow-other-filters" data-source="rgpr-tutorial">Other software estimates the slow part in other ways: the free GPR package <a href="https://emanuelhuber.github.io/RGPR/02_RGPR_tutorial_basic-GPR-data-processing/" data-source="rgpr-tutorial">RGPR</a>, for example, offers a running median, a running mean or a Gaussian filter for its dewow.</span> nsgeo uses the running mean.</p>
+    <figure>
+      <img class="fig" src="img/dewow_response.png" alt="Frequency response of dewow with a 4 ns window, rising from zero to about 1.21 near 366 MHz">
+      <figcaption>Measured, not drawn from the formula: nsgeo’s dewow run on a single spike at this file’s sample interval (0.2165 ns), with the default 4 ns window. The faint dotted line at 0.71 marks half power: below about 193 MHz, more than half the power is removed. The curve peaks at 1.21 near 366 MHz, meaning those frequencies come out about 21% <em>stronger</em> than they went in. The red line marks 350 MHz, the frequency in the campus antenna’s model name (HS350US). See “Things to know”.</figcaption>
+    </figure>
+  </section>
+
+  <section id="settings">
+    <h2><span class="lvl sans">Settings</span>What you can change</h2>
+    <div class="setting" data-param="window_ns">
+      <h3>Window <span class="unit sans">ns · default 4</span></h3>
+      <p>How long a stretch of time is averaged at each point. A <b>longer</b> window gives a smoother average that follows only the slowest changes, so less is removed. A <b>shorter</b> window lets the average follow quicker changes, so more is removed, including more of the radar pulse.</p>
+      <p>The window is used as a whole number of samples: <i>W</i> divided by the sample interval, rounded (one sample is 0.2165 ns on the campus line). The table gives the window actually used.</p>
+      <p><b>Very short windows.</b> A window that rounds to zero samples is refused: the step stops with an error saying the window is “shorter than one sample”. Despite that wording, the refusal covers only windows up to half a sample (0.108 ns on the campus line). A window that rounds to exactly one sample, about 0.11 to 0.32 ns on the campus line, is accepted and removes everything: the average of one sample is that sample, so every value comes out zero, with no warning. This is <a href="https://github.com/JamesZDonline/nsgeo/issues/40" data-source="nsgeo-issue-40">nsgeo issue #40</a>. Negative windows are refused outright.</p>
+      <table class="t sans">
+        <thead><tr><th>Window</th><th>Samples used<br>(campus line)</th><th>More than half the power<br>removed below</th><th>Strongest boost</th></tr></thead>
+        <tbody>
+          <tr><td>2 ns</td><td>9 (1.95 ns)</td><td>≈ 389 MHz</td><td>+23% near 737 MHz</td></tr>
+          <tr><td>4 ns (default)</td><td>18 (3.90 ns)</td><td>≈ 193 MHz</td><td>+21% near 366 MHz</td></tr>
+          <tr><td>8 ns</td><td>37 (8.01 ns)</td><td>≈ 95 MHz</td><td>+22% near 179 MHz</td></tr>
+        </tbody>
+      </table>
+      <p class="small">Measured by running nsgeo’s dewow on a single spike at the campus line’s sample interval. Both frequency columns scale with the window. From the formula in “The method”, the half-power point is about 0.75 / <i>W</i> and the boost peaks near 1.43 / <i>W</i>, where <i>W</i> is the window actually used.</p>
+    </div>
+  </section>
+
+  <section id="know">
+    <h2><span class="lvl sans">Things to know</span>Side effects</h2>
+    <ul>
+      <li><b>It can’t tell wow from slow parts of the real signal.</b> Anything slower than the window is treated as drift, including the low-frequency part of genuine reflections. The campus line has almost no drift to begin with: its raw traces already average to almost exactly zero (in 95% of them the mean is under 0.05% of the trace’s RMS amplitude). On this line dewow removes 2.9% of the energy, and 99.5% of that comes from before 10 ns two-way time, where the radar pulse itself arrives (see the pictures).</li>
+      <li><b>It boosts some frequencies a little.</b> <span data-claim="dewow-passes-fast" data-source="wp-moving-average">A running mean lets through some of the signal that is faster than its window, and can put peaks where the data has troughs.</span> Subtracting it then adds that part back on top of the original, so frequencies around 1.43 / <i>W</i> come out stronger: by 21% to 23% for the three windows in the Settings table (measured). With the default window the peak is near 366 MHz, close to the 350 MHz in the campus antenna’s model name (HS350US).</li>
+      <li><b>It works on one trace at a time.</b> Neighbouring traces are never compared. A feature that repeats in every trace, such as a flat band along the whole line, is filtered like everything else in its trace, not singled out. Removing what repeats from trace to trace is what the background-removal steps do.</li>
+      <li><b>The top and bottom of each trace are averaged over fewer samples.</b> Near the ends there isn’t a full window, so the average uses fewer samples and the edges are high-passed less strongly (details below).</li>
+      <li><b>One bad value spoils the rest of its trace.</b> If a trace contains a NaN (not-a-number) or an infinite value, for example from an earlier step, every sample from just under half a window above it to the bottom of that trace comes out NaN or infinite, not only the samples whose window contains it. On the campus line, one NaN at sample 100 of a trace turns 420 of its 512 samples into NaN. Other traces are unaffected. This is <a href="https://github.com/JamesZDonline/nsgeo/issues/43" data-source="nsgeo-issue-43">nsgeo issue #43</a>.</li>
+    </ul>
+  </section>
+
+  <section id="nsgeo" class="deep">
+    <h2><span class="lvl sans">How nsgeo does it</span>The exact computation</h2>
+    <p>Each trace is a column of <i>n</i> samples <i>x</i><sub>0</sub> … <i>x</i><sub><i>n</i>−1</sub>, spaced Δ<i>t</i> apart, held as 64-bit floats. The window in nanoseconds, <i>W</i>, becomes a whole number of samples with Python’s <code>round</code>, which sends exact halves to the even neighbour:</p>
+    <math display="block"><mi>w</mi><mo>=</mo><mi>round</mi><mo>(</mo><mi>W</mi><mo>/</mo><mi>Δ</mi><mi>t</mi><mo>)</mo><mo>,</mo><mspace width="1.5em"></mspace><mi>h</mi><mo>=</mo><mo>⌊</mo><mi>w</mi><mo>/</mo><mn>2</mn><mo>⌋</mo></math>
+    <p>If <i>w</i> &lt; 1 the step raises an error (“shorter than one sample; nothing to remove”). If <i>w</i> = 1 the running mean is a copy of the trace, so <i>y</i> = 0 everywhere (issue #40). If <i>w</i> is longer than the trace, it is cut to <i>n</i>. For every sample <i>i</i>, the averaging window runs from <i>lo</i><sub><i>i</i></sub> up to (but not including) <i>hi</i><sub><i>i</i></sub>:</p>
+    <math display="block"><msub><mi>lo</mi><mi>i</mi></msub><mo>=</mo><mi>max</mi><mo>(</mo><mn>0</mn><mo>,</mo><mi>i</mi><mo>−</mo><mi>h</mi><mo>)</mo><mo>,</mo><mspace width="1.5em"></mspace><msub><mi>hi</mi><mi>i</mi></msub><mo>=</mo><mi>min</mi><mo>(</mo><mi>n</mi><mo>,</mo><mi>i</mi><mo>−</mo><mi>h</mi><mo>+</mo><mi>w</mi><mo>)</mo></math>
+    <math display="block"><msub><mi>m</mi><mi>i</mi></msub><mo>=</mo><mfrac><mn>1</mn><mrow><msub><mi>hi</mi><mi>i</mi></msub><mo>−</mo><msub><mi>lo</mi><mi>i</mi></msub></mrow></mfrac><munderover><mo>∑</mo><mrow><mi>k</mi><mo>=</mo><msub><mi>lo</mi><mi>i</mi></msub></mrow><mrow><msub><mi>hi</mi><mi>i</mi></msub><mo>−</mo><mn>1</mn></mrow></munderover><msub><mi>x</mi><mi>k</mi></msub><mo>,</mo><mspace width="1.5em"></mspace><msub><mi>y</mi><mi>i</mi></msub><mo>=</mo><msub><mi>x</mi><mi>i</mi></msub><mo>−</mo><msub><mi>m</mi><mi>i</mi></msub></math>
+    <p>The output is 64-bit floats with the same shape, sample interval and start time as the input.</p>
+    <h3>Choices this makes that the textbook formula doesn’t</h3>
+    <ul>
+      <li><b>Rounding.</b> The window actually used is <i>w</i>·Δ<i>t</i>, not <i>W</i>. On the campus line, 4 ns becomes 18 samples, or 3.90 ns.</li>
+      <li><b>Shrinking edges.</b> The trace is not padded. Within about half a window of the top or bottom, the mean is taken over fewer samples: at <i>i</i> = 0 only the first <i>w</i> − <i>h</i>, and at <i>i</i> = <i>n</i> − 1 only the last <i>h</i> + 1 (9 and 10 at the default window on the campus line). The edges are therefore high-passed less strongly than the middle.</li>
+      <li><b>Even windows are off-centre by half a sample.</b> For even <i>w</i>, the window covers <i>h</i> samples before <i>i</i> and <i>h</i> − 1 after. With 18 samples that is 9 before and 8 after, so the subtracted mean is centred half a sample (≈ 0.11 ns on the campus line) early. Odd windows are centred.</li>
+      <li><b>Discrete response.</b> Away from the edges, the subtracted mean’s response is <i>D</i><sub><i>w</i></sub>(<i>f</i>) = sin(π<i>f w</i>Δ<i>t</i>) / (<i>w</i> sin(π<i>f</i>Δ<i>t</i>)), the sampled cousin of the sinc above. <span data-claim="dewow-dirichlet" data-source="wp-dirichlet-kernel">In signal processing this periodic sinc is also called the <a href="https://en.wikipedia.org/wiki/Dirichlet_kernel" data-source="wp-dirichlet-kernel">Dirichlet kernel</a>, the frequency response of a discrete moving average.</span> For odd <i>w</i>, <i>H</i>(<i>f</i>) = 1 − <i>D</i><sub><i>w</i></sub>(<i>f</i>); for even <i>w</i>, the half-sample offset adds a phase, <i>H</i>(<i>f</i>) = 1 − <i>D</i><sub><i>w</i></sub>(<i>f</i>) e<sup>−iπ<i>f</i>Δ<i>t</i></sup>. Well below the Nyquist frequency (about 2300 MHz here) both stay close to the continuous formula: below 1000 MHz they differ from it by at most 0.011 for the three windows in the Settings table (measured). They also explain why the table’s peaks differ slightly from the continuous formula’s 1.217: 1.227 at 9 samples, where the periodic sinc departs from the sinc, and 1.214 at 18 samples, lowered by the half-sample offset. The response figure was measured, and it matches these formulas to rounding error.</li>
+      <li><b>Speed.</b> The sums come from a <a href="https://en.wikipedia.org/wiki/Prefix_sum" data-source="wp-prefix-sum">cumulative sum</a>, <i>S</i><sub>0</sub> = 0 and <i>S</i><sub><i>k</i></sub> = <i>x</i><sub>0</sub> + … + <i>x</i><sub><i>k</i>−1</sub>, so that <i>m</i><sub><i>i</i></sub> = (<i>S</i><sub><i>hi</i></sub> − <i>S</i><sub><i>lo</i></sub>) / (<i>hi</i> − <i>lo</i>) and the cost doesn’t depend on the window length. The result matches a direct sum up to floating-point rounding; on the campus line, whose samples are whole numbers, the two agree exactly. The cumulative sum is also why one NaN or infinite value spreads to the bottom of its trace (issue #43).</li>
+    </ul>
+    <p class="sans source-path">Source: <code>nsgeo/processing/dewow.py</code> and <code>running_mean</code> in <code>nsgeo/processing/_util.py</code>, under <code>packages/nsgeo-core/src/</code>.</p>
+  </section>
+
+  <section id="refs">
+    <h2><span class="lvl sans">Further reading</span>Sources</h2>
+    <ol class="refs">
+      <li data-source="cassidy2009">Cassidy, N. J. (2009). Ground penetrating radar data processing, modelling and analysis. In H. M. Jol (Ed.), <i>Ground Penetrating Radar: Theory and Applications</i> (pp. 141–176). Elsevier. <a href="https://doi.org/10.1016/B978-0-444-53348-7.00005-3" data-source="cassidy2009">doi:10.1016/B978-0-444-53348-7.00005-3</a>. The volume’s processing chapter, and the source of the account of wow in “The method”.</li>
+      <li data-source="annan2009">Annan, A. P. (2009). Electromagnetic principles of ground penetrating radar. In the same volume (pp. 1–40). <a href="https://doi.org/10.1016/B978-0-444-53348-7.00001-6" data-source="annan2009">doi:10.1016/B978-0-444-53348-7.00001-6</a>. The volume’s opening chapter, on the physics behind GPR.</li>
+      <li data-source="conyers2013">Conyers, L. B. (2013). <i>Ground-Penetrating Radar for Archaeology</i> (3rd ed.). AltaMira Press.</li>
+      <li data-source="rgpr-tutorial">Huber, E. (2020). <a href="https://emanuelhuber.github.io/RGPR/02_RGPR_tutorial_basic-GPR-data-processing/" data-source="rgpr-tutorial">Basic GPR data processing</a>. RGPR tutorial, free online. Its “Dewow” section lists the three filters RGPR offers.</li>
+      <li data-source="wp-ground-penetrating-radar wp-moving-average wp-low-pass-filter wp-high-pass-filter wp-sinc-function wp-dirichlet-kernel wp-prefix-sum">Wikipedia: <a href="https://en.wikipedia.org/wiki/Ground-penetrating_radar" data-source="wp-ground-penetrating-radar">Ground-penetrating radar</a> · <a href="https://en.wikipedia.org/wiki/Moving_average" data-source="wp-moving-average">Moving average</a> · <a href="https://en.wikipedia.org/wiki/Low-pass_filter" data-source="wp-low-pass-filter">Low-pass filter</a> · <a href="https://en.wikipedia.org/wiki/High-pass_filter" data-source="wp-high-pass-filter">High-pass filter</a> · <a href="https://en.wikipedia.org/wiki/Sinc_function" data-source="wp-sinc-function">Sinc function</a> · <a href="https://en.wikipedia.org/wiki/Dirichlet_kernel" data-source="wp-dirichlet-kernel">Dirichlet kernel</a> · <a href="https://en.wikipedia.org/wiki/Prefix_sum" data-source="wp-prefix-sum">Prefix sum</a></li>
+    </ol>
+  </section>
+
+  <footer class="sans">Figures: campus training line, GSSI SIR-4000 with an HS350US antenna, made by running nsgeo’s own step code on the raw file.</footer>
+</main>
+</body>
+</html>
