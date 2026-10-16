@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M8 pick tool — acceptance walkthrough</title>
+<style>
+  :root {
+    --bg: #f6f6f4;       --panel: #ffffff;   --ink: #1c1c1e;
+    --muted: #5d5d66;    --line: #dcdcd6;    --line-soft: #ececE6;
+    --pass: #1f7a3d;     --fail: #c0392b;    --skip: #b8860b;  --na: #6b6b76;
+    --pick: #e0421b;     --accent: #2f6fb2;  --warn: #d35400;
+    --pass-bg: #e6f3ea;  --fail-bg: #fbeae8; --skip-bg: #fdf3dd; --na-bg: #eeeeef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;     --panel: #202024;   --ink: #e9e9ec;
+      --muted: #a0a0ab;  --line: #35353c;    --line-soft: #2a2a30;
+      --pass: #5fce8a;   --fail: #ff7b6b;    --skip: #e8bf5a;  --na: #9a9aa6;
+      --pass-bg: #18291f; --fail-bg: #2c1a18; --skip-bg: #2b2415; --na-bg: #26262b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px 18px 80px; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .92em; }
+  h1 { font-size: 1.6rem; margin: 0 0 6px; letter-spacing: -.01em; }
+  h2 { font-size: 1.1rem; margin: 30px 0 10px; letter-spacing: -.005em; }
+  p  { margin: 0 0 10px; }
+  a  { color: var(--accent); }
+
+  /* ---- header ---- */
+  .meta { color: var(--muted); font-size: .85rem; margin-bottom: 14px; }
+  .meta code { background: var(--line-soft); padding: 1px 5px; border-radius: 4px; }
+  .banner {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 18px;
+  }
+  .banner p:last-child { margin-bottom: 0; }
+
+  /* ---- sticky scoreboard ---- */
+  .board {
+    position: sticky; top: 0; z-index: 20; background: var(--bg);
+    padding: 10px 0 12px; border-bottom: 1px solid var(--line); margin-bottom: 18px;
+  }
+  .tally { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .pill {
+    font-size: .8rem; font-weight: 600; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel);
+  }
+  .pill.p { color: var(--pass); border-color: var(--pass); }
+  .pill.f { color: var(--fail); border-color: var(--fail); }
+  .pill.s { color: var(--skip); border-color: var(--skip); }
+  .pill.n { color: var(--na);   border-color: var(--na); }
+  .pill.todo { color: var(--muted); }
+  .bar { height: 6px; border-radius: 3px; background: var(--line-soft); margin-top: 10px; overflow: hidden; display: flex; }
+  .bar > i { display: block; height: 100%; }
+  .bar .bp { background: var(--pass); } .bar .bf { background: var(--fail); }
+  .bar .bs { background: var(--skip); } .bar .bn { background: var(--na); }
+
+  /* ---- sections ---- */
+  .sec-label {
+    font-size: .72rem; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); margin: 26px 0 8px; font-weight: 700;
+  }
+
+  /* ---- step card ---- */
+  .step {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 4px solid var(--line); border-radius: 10px;
+    padding: 13px 15px; margin-bottom: 9px;
+  }
+  .step[data-state="pass"] { border-left-color: var(--pass); background: var(--pass-bg); }
+  .step[data-state="fail"] { border-left-color: var(--fail); background: var(--fail-bg); }
+  .step[data-state="skip"] { border-left-color: var(--skip); background: var(--skip-bg); }
+  .step[data-state="na"]   { border-left-color: var(--na);   background: var(--na-bg); }
+  .step.decision { border-left-color: var(--warn); }
+  .step.decision[data-state] { }
+  .step-head { display: flex; gap: 10px; align-items: baseline; }
+  .num {
+    font-variant-numeric: tabular-nums; font-weight: 700; color: var(--muted);
+    min-width: 1.6em; font-size: .95rem;
+  }
+  .title { font-weight: 600; }
+  .detail { color: var(--muted); margin: 6px 0 0 calc(1.6em + 10px); font-size: .93rem; }
+  .detail p { margin: 0 0 7px; }
+  .detail p:last-child { margin-bottom: 0; }
+  .crit {
+    margin-top: 8px; padding: 8px 10px; border-radius: 7px;
+    background: var(--skip-bg); border: 1px solid var(--line);
+    font-size: .88rem;
+  }
+  .crit.hard { background: var(--fail-bg); }
+  .crit b { color: var(--warn); }
+  .crit.hard b { color: var(--fail); }
+
+  /* ---- 4-state control ---- */
+  .states { display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 0 calc(1.6em + 10px); }
+  .states input { position: absolute; opacity: 0; pointer-events: none; }
+  .states label {
+    cursor: pointer; user-select: none; font-size: .82rem; font-weight: 600;
+    padding: 5px 13px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--muted); line-height: 1.2;
+  }
+  .states label:hover { border-color: var(--muted); }
+  .states input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .states input[value="pass"]:checked + label { background: var(--pass); border-color: var(--pass); color: #fff; }
+  .states input[value="fail"]:checked + label { background: var(--fail); border-color: var(--fail); color: #fff; }
+  .states input[value="skip"]:checked + label { background: var(--skip); border-color: var(--skip); color: #fff; }
+  .states input[value="na"]:checked   + label { background: var(--na);   border-color: var(--na);   color: #fff; }
+
+  .note { margin: 9px 0 0 calc(1.6em + 10px); }
+  .note textarea {
+    width: 100%; min-height: 34px; resize: vertical; padding: 7px 9px;
+    border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+    color: var(--ink); font: inherit; font-size: .9rem;
+  }
+  .note textarea::placeholder { color: var(--muted); opacity: .75; }
+  .note textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+
+  /* ---- decisions ---- */
+  .qa { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+  .qa h3 { margin: 0 0 4px; font-size: .98rem; }
+  .qa .why { color: var(--muted); font-size: .9rem; margin-bottom: 9px; }
+  .qa .opt { display: block; margin: 5px 0; cursor: pointer; font-size: .92rem; }
+  .qa .opt input { margin-right: 7px; }
+  .qa .rec { color: var(--pass); font-weight: 600; font-size: .78rem; }
+
+  /* ---- report ---- */
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+  button {
+    font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer;
+    padding: 8px 15px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink);
+  }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger  { color: var(--fail); }
+  #out {
+    width: 100%; min-height: 240px; padding: 11px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px;
+    line-height: 1.45; white-space: pre; overflow-wrap: normal; overflow-x: auto;
+  }
+  .said { color: var(--pass); font-size: .85rem; font-weight: 600; align-self: center; }
+  footer { margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .8rem; }
+  @media (max-width: 560px) {
+    .detail, .states, .note { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>M8 — the pick tool: acceptance walkthrough</h1>
+<div class="meta">
+  Branch <code>nsgeo-m8</code> @ <code>bcf7f96</code> ·
+  pure 367 passed / 2 skipped · QGIS 520 passed / 0 skipped · ruff + mypy clean
+</div>
+
+<div class="banner">
+  <p><strong>Already done for you:</strong> <code>dev_link.py --profile ns_geo</code> has been run — the
+  profile's plugin symlink now points at <code>.worktrees/nsgeo-m8</code>. Enable <strong>nsgeo</strong>
+  under <em>Plugins → Manage and Install Plugins → Installed</em>.</p>
+  <p>Your answers save to this browser as you go, so you can close the tab mid-walkthrough.
+  At the end, <strong>Generate report</strong> produces markdown you can paste straight back to me.</p>
+  <p style="margin-bottom:0"><strong>Four steps need a decision, not just a result</strong> — 13, 14, 15 and 16.
+  Three of the four questions at the bottom are open too.</p>
+</div>
+
+<div class="board">
+  <div class="tally" id="tally"></div>
+  <div class="bar" id="bar"></div>
+</div>
+
+<div id="steps"></div>
+
+<h2>Decisions</h2>
+<p class="meta" style="margin-top:-4px">I asked these before building and proceeded on my defaults, so
+nothing was blocked. The walkthrough may change your mind — Q1 especially, where the final reviewer
+independently argued for the option I'd defaulted against.</p>
+<div id="questions"></div>
+
+<h2>Report</h2>
+<div class="actions">
+  <button class="primary" id="gen">Generate report</button>
+  <button id="copy">Copy to clipboard</button>
+  <button id="dl">Download .md</button>
+  <button class="danger" id="reset">Reset everything</button>
+  <span class="said" id="said"></span>
+</div>
+<textarea id="out" readonly placeholder="Click Generate report — the markdown appears here, ready to paste back."></textarea>
+
+<footer>
+  Steps 13–16 came out of code review, not the original plan. Step 15's migration is the one
+  irreversible thing in this milestone. The full decision record — 20 rulings with their evidence —
+  is at <code>docs/superpowers/sdd/2026-09-19-nsgeo-qgis-plan3-m8/progress.md</code>.
+</footer>
+
+</div>
+
+<script>
+const STEPS = [
+  { g: "Does it work at all" },
+  { n:1, t:"Open a site, open a line, turn <code>Pick</code> on.",
+    d:"The pointer over the radargram becomes a crosshair." },
+  { n:2, t:"Click the radargram.",
+    d:"A red marker appears where you clicked, and a red point appears on the map, on that line, at that trace." },
+  { n:3, t:"Turn <code>Pick</code> off and Shift+click.",
+    d:"Same result. A single pick never needs a mode change." },
+  { n:4, t:"Open the <code>picks</code> attribute table.",
+    d:"One row per pick. <code>line_key</code>, <code>trace</code>, <code>distance_m</code>, <code>time_ns</code>, <code>depth_m</code>, <code>velocity_m_ns</code>, <code>stack_json</code> and <code>created</code> filled; <code>feature_id</code> and <code>seq</code> empty." },
+  { n:5, t:"Close QGIS <em>without saving the site</em>, then reopen.",
+    d:"The picks are still there. They are written the moment you make them — <code>Save site</code> has nothing to do with them." },
+  { n:6, t:"Click in the axis margin, outside the radargram itself.",
+    d:"No pick. The click handler runs for the whole widget, and the time axis does not clamp, so a click there would otherwise have authored a pick at a time before the record starts — which <code>add_pick</code> would then clamp into range and make look plausible." },
+
+  { g: "The invariant — picks go to the working line" },
+  { n:7, t:"Hover another line to preview it, then Shift+click it.",
+    d:"<b>No pick is made</b>, and the message bar says the pick goes to the working line. Click five times and you get five messages — deliberately, for now (Q2)." },
+  { n:8, t:"Hover a line that already has picks.",
+    d:"Its own picks show on the previewed radargram; move away and the working line's come back. Reading is not authoring." },
+  { n:9, t:"With a preview showing, check the processing dock.",
+    d:"It still shows the <em>working</em> line, not the previewed one. Steps you add land on the working line." },
+
+  { g: "Navigation" },
+  { n:10, t:"Select a pick on the map with QGIS's ordinary Select tool.",
+    d:"The profile opens that pick's line and the cursor lands on its trace." },
+  { n:11, t:"Select a DZX mark on the map.",
+    d:"Same jump. Then try to edit the <code>marks</code> layer — QGIS refuses, it is read-only and derived." },
+  { n:12, t:"Close the site, then open a new line.",
+    d:"The <code>Pick</code> action greys out while no line is open, and the crosshair is gone when you come back." },
+
+  { g: "These need a decision, not just a result" },
+  { n:13, t:"Toggle Editing on <code>picks</code>, then author a pick from the profile.",
+    cls:"decision",
+    d:"<code>write_pick</code> goes straight through the data provider, which the layer's open edit buffer knows nothing about. Does the pick appear immediately, only once you end the edit session, or not at all? Does committing the buffer afterwards disturb it?",
+    crit:"<b>Exit criterion:</b> if it is invisible until the session ends, the fix is <code>write_pick</code> refusing while the layer is editable, with a message — not a documentation note. A pick that reports success and cannot be seen is exactly the silence this milestone spent its effort eliminating everywhere else." },
+  { n:14, t:"Check <code>depth_m</code> on a pick near the very top of a real radargram.",
+    cls:"decision", hard:true,
+    d:"All ten real GSSI files carry <code>position_ns = −11.0864</code> — the record starts <em>before</em> time zero — so a pick clamped to the start of the record gets a <b>negative depth</b>, measured at −0.44 m on this data.",
+    crit:"<b>The final reviewer called this blocking and I agree.</b> It is honest (time is the truth, depth is derived from it) but it will look wrong in an attribute table, and it is being written into an authored table nothing can regenerate. Answer Q4 below before real rows exist." },
+  { n:15, t:"Open a site package created <em>before</em> this branch.",
+    cls:"decision", hard:true,
+    d:"The one irreversible thing in this milestone: every existing package takes the <code>_rebuild_picks</code> migration on next open. Confirm the pick count is unchanged, the attributes survived, and the two new columns are empty.",
+    crit:"<b>Why this one matters most:</b> the whole-branch review found two ways this could have silently destroyed every pick and logged success. Both are closed and tested — but real authored rows are the test that counts. If you have no pre-M8 package to hand, mark this <em>N/A</em> and say so." },
+  { n:16, t:"Make a pick, then move or rotate its grid.",
+    cls:"decision",
+    d:"Lines and marks move; <b>existing picks stay where they were authored</b>. A CRS change, by contrast, <em>does</em> re-project them. The log warns when this happens and the README says so.",
+    crit:"I ruled against re-placement logic: it would overwrite picks the README invites you to move by hand, and new write logic on the unrecoverable table inside a final fix wave was the wrong risk. Tell me whether the warning is enough, or whether this wants a real fix next milestone." },
+
+  { g: "Teardown" },
+  { n:17, t:"Unload the plugin with picks on screen.",
+    d:"No crash, and nothing left behind on the canvas." },
+  { n:18, t:"Pan and zoom the map while hovering lines, with picks present.",
+    d:"Preview and picks keep working. This is the claim that justifies not using a map tool." }
+];
+
+const QUESTIONS = [
+  { id:"symbol", q:"A fixed symbol for the <code>picks</code> layer?",
+    why:"Today it gets QGIS's default random symbol, a different colour per site. The final reviewer: <em>“on a busy basemap that can be a near-invisible dot in an arbitrary colour — the difference between <b>renders</b> and <b>renders findably</b>.”</em>",
+    opts:[
+      {v:"style once at table creation", l:"Style once, at table creation", rec:true,
+       d:"Consistent red picks on a fresh site; your own styling survives, because it is never reapplied."},
+      {v:"leave it to QGIS's default (what is built)", l:"Leave it to QGIS",
+       d:"What is built today."},
+      {v:"style on every site open, like lines and grids", l:"Style on every site open",
+       d:"Always consistent, like <code>lines</code> — but your own styling is lost each time."}
+    ]},
+  { id:"refusal", q:"How loud should a refused pick be?",
+    why:"Step 7. Five clicks on a previewed line currently give five message-bar lines.",
+    opts:[
+      {v:"one message per click (what is built)", l:"One per click", rec:true,
+       d:"What is built. Every click gets an answer."},
+      {v:"only the first refusal per preview", l:"Once per preview",
+       d:"Say it on the first refused click, then stay quiet until the preview changes."}
+    ]},
+  { id:"note", q:"Should a new pick prompt for a note?",
+    why:"The schema has a <code>note</code> field and the spec says “an empty note”. A modal per pick would make a picking session painful.",
+    opts:[
+      {v:"empty, edited later in the attribute table (what is built)", l:"Empty", rec:true,
+       d:"What is built, and what the spec says. Notes go in afterwards, in the attribute table."},
+      {v:"a sticky note field beside the Pick toggle", l:"A sticky note field",
+       d:"One text box beside the toggle, whose current value is stamped on every pick you make that session."}
+    ]},
+  { id:"depth", q:"Negative <code>depth_m</code> near the top of a record (step 14)",
+    why:"Real files start at <code>position_ns = −11.0864</code>, so a pick at the start of the record records a depth of about −0.44 m.",
+    opts:[
+      {v:"record it honestly, negative and all (what is built)", l:"Record it honestly", rec:true,
+       d:"What is built. Time is the truth; depth follows it, sign and all."},
+      {v:"floor depth_m at zero", l:"Floor depth_m at zero",
+       d:"Never write a negative depth; <code>time_ns</code> still carries the truth."},
+      {v:"clamp the pick itself to t >= 0", l:"Clamp the pick itself to t ≥ 0",
+       d:"No pick above the surface at all, rather than a pick with a negative depth."}
+    ]}
+];
+
+const KEY = "nsgeo-m8-walkthrough-v1";
+const STATES = [["pass","Pass"],["fail","Fail"],["skip","Skip"],["na","N/A"]];
+let data = load();
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(KEY)) || {steps:{}, notes:{}, answers:{}}; }
+  catch (e) { return {steps:{}, notes:{}, answers:{}}; }
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(data)); } catch (e) { /* private window */ }
+}
+function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function plain(html) {
+  const d = document.createElement("div"); d.innerHTML = html;
+  return (d.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+/* ---- render steps ---- */
+const stepsEl = document.getElementById("steps");
+STEPS.forEach(s => {
+  if (s.g) {
+    const h = document.createElement("div");
+    h.className = "sec-label"; h.textContent = s.g;
+    stepsEl.appendChild(h);
+    return;
+  }
+  const card = document.createElement("div");
+  card.className = "step" + (s.cls ? " " + s.cls : "");
+  card.id = "step-" + s.n;
+  const cur = data.steps[s.n];
+  if (cur) card.dataset.state = cur;
+
+  let html = '<div class="step-head"><span class="num">' + s.n + '</span>'
+           + '<span class="title">' + s.t + '</span></div>'
+           + '<div class="detail"><p>' + s.d + '</p></div>';
+  if (s.crit) html += '<div class="detail"><div class="crit' + (s.hard ? " hard" : "") + '">' + s.crit + '</div></div>';
+
+  html += '<div class="states">';
+  STATES.forEach(([v, label]) => {
+    const id = "s" + s.n + v;
+    html += '<input type="radio" name="step' + s.n + '" id="' + id + '" value="' + v + '"'
+          + (cur === v ? " checked" : "") + '>'
+          + '<label for="' + id + '">' + label + '</label>';
+  });
+  html += '</div>';
+  html += '<div class="note"><textarea placeholder="Notes — what happened, what you expected'
+        + (s.crit ? ", your decision" : "") + '">'
+        + esc(data.notes[s.n] || "") + '</textarea></div>';
+
+  card.innerHTML = html;
+  stepsEl.appendChild(card);
+
+  card.querySelectorAll('input[type=radio]').forEach(r => {
+    r.addEventListener("change", () => {
+      data.steps[s.n] = r.value; card.dataset.state = r.value; save(); tally();
+    });
+  });
+  const ta = card.querySelector("textarea");
+  ta.addEventListener("input", () => { data.notes[s.n] = ta.value; save(); });
+});
+
+/* ---- render questions ---- */
+const qEl = document.getElementById("questions");
+QUESTIONS.forEach(q => {
+  const box = document.createElement("div");
+  box.className = "qa";
+  let html = "<h3>" + q.q + "</h3><div class='why'>" + q.why + "</div>";
+  q.opts.forEach((o, i) => {
+    const id = "q_" + q.id + "_" + i;
+    html += '<label class="opt" for="' + id + '">'
+          + '<input type="radio" name="q_' + q.id + '" id="' + id + '" value="' + esc(o.v) + '"'
+          + (data.answers[q.id] === o.v ? " checked" : "") + '>'
+          + '<b>' + o.l + '</b>' + (o.rec ? ' <span class="rec">recommended</span>' : '')
+          + ' — ' + o.d + '</label>';
+  });
+  box.innerHTML = html;
+  qEl.appendChild(box);
+  box.querySelectorAll("input").forEach(r => {
+    r.addEventListener("change", () => { data.answers[q.id] = r.value; save(); });
+  });
+});
+
+/* ---- tally ---- */
+function counts() {
+  const c = { pass:0, fail:0, skip:0, na:0, total:0 };
+  STEPS.forEach(s => {
+    if (s.g) return;
+    c.total++;
+    const v = data.steps[s.n];
+    if (v) c[v]++;
+  });
+  c.todo = c.total - c.pass - c.fail - c.skip - c.na;
+  return c;
+}
+function tally() {
+  const c = counts();
+  document.getElementById("tally").innerHTML =
+      '<span class="pill p">' + c.pass + ' pass</span>'
+    + '<span class="pill f">' + c.fail + ' fail</span>'
+    + '<span class="pill s">' + c.skip + ' skip</span>'
+    + '<span class="pill n">' + c.na   + ' n/a</span>'
+    + '<span class="pill todo">' + c.todo + ' to do</span>';
+  const pct = v => (v / c.total * 100).toFixed(3) + "%";
+  document.getElementById("bar").innerHTML =
+      '<i class="bp" style="width:' + pct(c.pass) + '"></i>'
+    + '<i class="bf" style="width:' + pct(c.fail) + '"></i>'
+    + '<i class="bs" style="width:' + pct(c.skip) + '"></i>'
+    + '<i class="bn" style="width:' + pct(c.na)   + '"></i>';
+}
+tally();
+
+/* ---- report ---- */
+function report() {
+  const c = counts();
+  const L = [];
+  L.push("# M8 pick tool — walkthrough results");
+  L.push("");
+  L.push("Branch `nsgeo-m8` @ `bcf7f96` · run " + new Date().toISOString().slice(0, 16).replace("T", " "));
+  L.push("");
+  L.push("**" + c.pass + " pass · " + c.fail + " fail · " + c.skip + " skip · " + c.na + " n/a"
+         + (c.todo ? " · " + c.todo + " NOT RUN" : "") + "**");
+
+  const fails = STEPS.filter(s => !s.g && data.steps[s.n] === "fail");
+  if (fails.length) {
+    L.push("");
+    L.push("## Failures");
+    fails.forEach(s => {
+      L.push("");
+      L.push("### " + s.n + " · " + plain(s.t));
+      const n = (data.notes[s.n] || "").trim();
+      L.push(n ? n : "_(no notes)_");
+    });
+  }
+
+  L.push("");
+  L.push("## All steps");
+  L.push("");
+  L.push("| # | Step | Result | Notes |");
+  L.push("|---|---|---|---|");
+  STEPS.forEach(s => {
+    if (s.g) return;
+    const v = data.steps[s.n];
+    const r = v ? ({pass:"PASS", fail:"**FAIL**", skip:"skip", na:"n/a"})[v] : "_not run_";
+    const n = (data.notes[s.n] || "").replace(/\s*\n\s*/g, " ").replace(/\|/g, "\\|").trim();
+    L.push("| " + s.n + " | " + plain(s.t).replace(/\|/g, "\\|") + " | " + r + " | " + (n || "") + " |");
+  });
+
+  L.push("");
+  L.push("## Decisions");
+  L.push("");
+  QUESTIONS.forEach(q => {
+    const a = data.answers[q.id];
+    L.push("- **" + plain(q.q) + "** — " + (a ? a : "_unanswered_"));
+  });
+
+  const notRun = STEPS.filter(s => !s.g && !data.steps[s.n]);
+  if (notRun.length) {
+    L.push("");
+    L.push("_Not run: " + notRun.map(s => s.n).join(", ") + "._");
+  }
+  L.push("");
+  return L.join("\n");
+}
+
+const out  = document.getElementById("out");
+const said = document.getElementById("said");
+function flash(msg) { said.textContent = msg; setTimeout(() => { said.textContent = ""; }, 2600); }
+
+document.getElementById("gen").addEventListener("click", () => {
+  out.value = report();
+  out.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  flash("Report generated.");
+});
+document.getElementById("copy").addEventListener("click", async () => {
+  if (!out.value) out.value = report();
+  try {
+    await navigator.clipboard.writeText(out.value);
+    flash("Copied.");
+  } catch (e) {
+    out.focus(); out.select();
+    try { document.execCommand("copy"); flash("Copied."); }
+    catch (e2) { flash("Select the text below and copy manually."); }
+  }
+});
+document.getElementById("dl").addEventListener("click", () => {
+  if (!out.value) out.value = report();
+  const blob = new Blob([out.value], { type: "text/markdown" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "m8-walkthrough-results.md";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  flash("Downloaded.");
+});
+document.getElementById("reset").addEventListener("click", () => {
+  if (!confirm("Clear every result, note and answer?")) return;
+  data = { steps:{}, notes:{}, answers:{} };
+  save();
+  location.reload();
+});
+</script>
+</body>
+</html>

@@ -1143,6 +1143,46 @@ def test_time_ticks_are_actually_rendered_in_the_left_margin(view):
     assert QColor(shot.pixel(r.left() - 2, between_ticks_y)).red() > 200
 
 
+def test_topmost_tick_labels_skip_the_axis_caption_band(view):
+    """Issue #7: a tick label whose band reaches into the caption band at the
+    top of a vertical margin is painted on top of the "ns"/"m" caption.
+    The reported collision is the "0" under an active `time_zero` step
+    (the axis starts at exactly 0, the tick sits at local y = 0, and its
+    16-px label band [0, 16] covers the caption band [0, MARGIN_TOP + 10])
+    -- but the collision is not unique to that case: the fixture itself
+    (t0_ns = -4.0) already places its "0" tick at y = 16.5, still inside
+    the band, and so would any line whose zero offset is small enough.
+
+    `_paint_axes` must therefore skip the *label* while a tick's local y
+    is still within the caption band (the tick mark keeps painting: it
+    never reaches the caption), and must not skip the first tick below
+    the band -- the fixture's "20" at y = 99.0 -- pinning the skip's
+    lower bound to the band itself rather than half the axis.
+    """
+    v, rg = view
+    _, y0 = v._time_ticks(v.transform)[0]  # "0", inside the band (fixture: y = 16.5)
+    assert v._label_in_caption_band(y0)
+    _, y20 = v._time_ticks(v.transform)[1]  # "20", far below the band (fixture: y = 99.0)
+    assert not v._label_in_caption_band(y20)
+
+
+def test_top_tick_keeps_its_mark_when_its_label_is_skipped(view):
+    """Consumption check for the issue #7 skip: with `t0_ns = 0.0` (the
+    `time_zero` case) the "0" tick sits at the very top of the axis. Its
+    *label* must go -- it would sit on the caption -- but its *mark*,
+    r.left()-4 to r.left() at y = r.top(), must not: a `continue` placed
+    before the `drawLine`, or an over-broad skip, would drop it with the
+    label, and the value test above (which does not paint at all) plus
+    the band test (which asserts the decision, not the draw) would not
+    catch that.
+    """
+    v, rg = view
+    v.set_axes(rg.n_traces, rg.n_samples, 0.0, rg.dt_ns)  # the time_zero case: axis starts at 0
+    shot = v.grab_image()
+    r = v.image_rect()
+    assert QColor(shot.pixel(r.left() - 2, r.top())).red() < 150  # the mark: axis colour
+
+
 def test_distance_ticks_are_actually_rendered_at_the_bottom(view):
     v, rg = view
     shot = v.grab_image()
@@ -1376,3 +1416,81 @@ def test_the_band_is_actually_painted_under_the_picks(view):
     # The pick, inside that same y-range, must read exactly the same --
     # proves the band sits UNDER it, not over it.
     assert pick_after == pick_before, PICK_COLOUR.name()
+
+
+# ---- picking: only inside the radargram (M8) -------------------------------
+
+
+def test_a_shift_click_outside_the_image_rect_is_not_a_pick(view):
+    """M8 adopts `pick_requested`, so where it fires is now load bearing.
+    The press handler runs for the whole widget, including the axis
+    margins, and `ViewTransform.time_of_y` does not clamp -- a shift
+    click on the time-axis labels reaches it with a negative local y and
+    used to emit a pick at a time before the record starts.
+    `session.add_pick` clamps such a time into the record, which is
+    exactly what would make the bad pick look plausible once written;
+    refusing it here is what keeps it from being authored at all.
+
+    MARGIN_LEFT is 56 and MARGIN_TOP is 8 (profile_view.py:42), so both
+    out-of-rect points below are real widget coordinates, not clamped to
+    zero.
+
+    Final review, Minor 7: the guard in `mousePressEvent` is
+    `0 <= x < width and 0 <= y < height`, and only the low side (negative
+    x, negative y) had a test -- `x >= width`/`y >= height` is a
+    beyond-spec addition (nothing in the plan asked for the right/bottom
+    margins to refuse a pick too) with nothing else pinning it. Added a
+    point in the right margin, `r.right() + 5`, alongside the pre-existing
+    ones.
+    """
+    v, _rg = view
+    picks = []
+    v.pick_requested.connect(lambda t, ns: picks.append((t, ns)))
+    r = v.image_rect()
+    assert r.left() >= 10 and r.top() >= 5, "the margins must be wide enough to click in"
+
+    # Inside the radargram: a pick.
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        QPoint(r.left() + 10, r.top() + 10),
+    )
+    assert len(picks) == 1
+
+    # In the left margin (the time axis), above the top edge, and in the
+    # right margin (the depth axis): not picks.
+    for pos in (
+        QPoint(r.left() - 5, r.top() + 10),
+        QPoint(r.left() + 10, r.top() - 5),
+        QPoint(r.right() + 5, r.top() + 10),
+    ):
+        QTest.mouseClick(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, pos)
+    assert len(picks) == 1
+
+
+def test_pick_mode_also_ignores_a_click_outside_the_radargram(view):
+    """The same bound applies to the mode, not only to Shift+click --
+    with pick mode on, the whole widget is a crosshair, so the margins
+    are the easiest place to click by accident."""
+    v, _rg = view
+    picks = []
+    v.pick_requested.connect(lambda t, ns: picks.append((t, ns)))
+    v.set_pick_mode(True)
+    r = v.image_rect()
+
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() - 5, r.top() + 10),
+    )
+    assert picks == []
+
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(r.left() + 10, r.top() + 10),
+    )
+    assert len(picks) == 1

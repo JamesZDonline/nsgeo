@@ -20,19 +20,16 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parents[2] / "nsgeo_qgis"
 
 # Declared with no consumer anywhere, each with the reason it survives.
-# Anything NOT listed here, and not in SHADOWED_CONNECT_COUNTS below, must
-# have a connect.
+# Anything NOT listed here, and not in SHADOWED below, must have a connect.
 #
 # NOTE: spec §1's orphan table and §6's "the three existing orphans" are
-# both wrong. The real set is SEVEN: the four below, plus
-# `ProfileDock.pick_requested` and `ParamForm.error` (both invisible to a
-# name-keyed check -- see SHADOWED_CONNECT_COUNTS) and
-# `ProfileView.set_pick_mode`, an uncalled method rather than a signal, so
-# it is outside what this automated check can see at all (spec §6's manual
-# half -- Task 5's brief, Step 7).
+# both wrong. `ProfileDock.pick_requested` gained its consumer in M8's
+# Task 3 (plugin.py wires it to `_on_pick_requested`); `SiteSession.
+# picks_changed` gained its in Task 4 (`ProfileDock._on_picks_changed`,
+# see profile_dock.py) and has left this set entirely. What is left is
+# `ParamForm.error` (invisible to a name-keyed check -- see SHADOWED,
+# below) plus the three dead `SurveyDock` signals this set still holds.
 KNOWN_UNCONSUMED = {
-    # Adopted by M8, the pick tool (spec §4.1): session.add_pick emits it.
-    "picks_changed",
     # Dead API from Plan 2: plugin.py's toolbar actions do New, Open and
     # Save, and SurveyDock's own signals for them were never wired to
     # anything. Deleting them is Plan 2 cleanup, not M7 work -- pulling it
@@ -63,9 +60,13 @@ KNOWN_UNCONSUMED = {
 # *already-pinned* one drifting undetected.
 SHADOWED = {
     # ProfileView.pick_requested is connected (profile_dock.py wires it to
-    # `_pick`). ProfileDock's own pick_requested -- a separate declaration
-    # that happens to share the name -- is not: the real orphan.
-    "pick_requested": {"declared": 2, "connects": 1},
+    # `_pick`). ProfileDock's own pick_requested is connected too as of
+    # M8: plugin.py wires it to `_on_pick_requested`, which calls
+    # session.add_pick. Both declarations now have a consumer, so this
+    # entry no longer hides an orphan -- it stays pinned because a
+    # name-keyed count still cannot tell the two apart, and dropping to
+    # one connect again would mean one of them had been orphaned.
+    "pick_requested": {"declared": 2, "connects": 2},
     # ProfileDock.error is connected (plugin.py wires it to `self.message`).
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is
