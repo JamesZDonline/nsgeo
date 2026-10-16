@@ -9,9 +9,8 @@ import numpy as np
 from nsgeo.io.dzt import DztHeader
 from nsgeo.processing import Radargram, build_step
 
-from help_tools.figures.common import antenna_mhz, panels, save, stack_of
+from help_tools.figures.common import DPI, antenna_mhz, panels, save, stack_of
 
-DPI = 150
 SPIKE_SAMPLES = 8192
 
 
@@ -97,7 +96,6 @@ def make(rg: Radargram, header: DztHeader, out_dir: Path) -> list[Path]:
             "After dewow (window 4 ns)",
             "What dewow removed",
             header,
-            dpi=DPI,
         ),
         _response_figure(rg.dt_ns, header, out_dir / "dewow_response.png"),
     ]

@@ -68,11 +68,28 @@ def test_saved_figures_are_palette_pngs(tmp_path):
         assert im.format == "PNG" and im.mode in ("P", "L")
 
 
-def test_panels_full_depth_when_t_max_is_none(tmp_path):
+def _panel_ylim(monkeypatch, tmp_path, **kw):
     rg, hdr = common.load_radargram(synthetic_dzt(tmp_path / "raw", "T.DZT"))
     stack = common.stack_of(rg, [build_step("dewow")])
-    out = common.panels(stack, 0, tmp_path / "p.png", "A", "R", hdr, t_max_ns=None)
-    assert out.is_file()
+    seen = {}
+
+    def spy(fig, path, **_):
+        seen["ylim"] = fig.axes[0].get_ylim()
+        return path
+
+    monkeypatch.setattr(common, "save", spy)
+    common.panels(stack, 0, tmp_path / "p.png", "A", "R", hdr, **kw)
+    return seen["ylim"], rg.times_ns()
+
+
+def test_panels_full_depth_when_t_max_is_none(monkeypatch, tmp_path):
+    ylim, t = _panel_ylim(monkeypatch, tmp_path, t_max_ns=None)
+    assert ylim == pytest.approx((t[-1], t[0]))
+
+
+def test_panels_default_depth_is_50_ns(monkeypatch, tmp_path):
+    ylim, t = _panel_ylim(monkeypatch, tmp_path)
+    assert ylim == pytest.approx((50.0, t[0]))
 
 
 def test_response_is_a_real_magnitude():

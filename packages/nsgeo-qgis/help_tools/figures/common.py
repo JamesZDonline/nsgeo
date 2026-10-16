@@ -27,7 +27,9 @@ from nsgeo.io.dzt import DztHeader, read_header, read_samples  # noqa: E402
 from nsgeo.processing import Radargram, StepStack  # noqa: E402
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, colormap, to_rgb8  # noqa: E402
 
-__all__ = ["antenna_mhz", "load_radargram", "panels", "save", "stack_of"]
+DPI = 150  # one resolution for every recipe
+
+__all__ = ["DPI", "antenna_mhz", "load_radargram", "panels", "save", "stack_of"]
 
 
 def load_radargram(dzt: Path) -> tuple[Radargram, DztHeader]:
@@ -56,7 +58,7 @@ def antenna_mhz(header: DztHeader) -> int | None:
     return int(match.group()) if match else None
 
 
-def save(fig, path: Path, *, dpi: int = 120) -> Path:
+def save(fig, path: Path, *, dpi: int = DPI) -> Path:
     """Write `fig` to `path` as a compact PNG, close it, and return `path`.
 
     The image is quantized to an 8-bit palette (at most 256 colours) and the PNG
@@ -70,7 +72,7 @@ def save(fig, path: Path, *, dpi: int = 120) -> Path:
     plt.close(fig)
     buf.seek(0)
     with Image.open(buf) as im:
-        small = im.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+        small = im.convert("RGB").quantize(colors=256)
     path.parent.mkdir(parents=True, exist_ok=True)
     small.save(path, format="PNG", optimize=True)
     return path
@@ -99,7 +101,7 @@ def panels(
     header: DztHeader,
     t_max_ns: float | None = 50.0,
     *,
-    dpi: int = 120,
+    dpi: int = DPI,
 ) -> Path:
     """The before / after / difference figure for step `index` of `stack`.
 
@@ -108,6 +110,10 @@ def panels(
     (99th percentile) with the default colormap. The y axis is two-way time, down
     to `t_max_ns` (`None` means the full trace). The x axis is distance, or trace
     number when the header has no `traces_per_metre`.
+
+    Serves only steps that keep the sample count: `StepStack.difference` raises
+    otherwise, and all three panels share the after-panel time axis. A step that
+    changes the time axis (time_zero) needs its own figure.
     """
     before = stack.intermediate(index - 1) if index else stack.source
     after = stack.intermediate(index)
