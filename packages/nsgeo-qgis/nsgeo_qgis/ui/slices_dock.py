@@ -2180,7 +2180,10 @@ class SlicesDock(QgsDockWidget):
         else:
             self._scope = "grid"  # first: the site's cancel spins the event loop
             self._site.leave()
-            self.engine.on_grid_moved = None  # R-P5: M11's self re-preparation again
+            # Final review D2: `on_grid_moved` stays `_mark_grid_stale` until
+            # `_run_pending_grid_prepare` sees no site task live. A cancel
+            # whose bounded wait gave up leaves the site's task reading, and
+            # M11's self re-preparation on a move would start beside it.
             site_scope.show_scope_widgets(self)
             self._resume_grid(top)
 
@@ -2211,8 +2214,8 @@ class SlicesDock(QgsDockWidget):
             self._on_prepared()
         else:
             self.refresh_slice()
-        if self._grid_prepare_pending:
-            self._run_pending_grid_prepare()
+        # Always: it also hands This grid's moves back to its engine (D2).
+        self._run_pending_grid_prepare()
 
     def _grid_record(self) -> tuple[Any, Any] | None:
         grid_id = self.grid_combo.currentText()
@@ -2252,8 +2255,11 @@ class SlicesDock(QgsDockWidget):
 
     # ---- R-P5: This grid never prepares while the site shows ---------------
     def _mark_grid_stale(self) -> None:
-        """This grid's engine's `on_grid_moved` while the site shows. The engine
-        has cleared its lines (R-P2); preparing them again waits for This grid."""
+        """This grid's engine's `on_grid_moved` while the site shows, or while a
+        site task outlives leaving it (D2). The engine has cleared its lines
+        (R-P2); preparing them again waits for This grid and a stopped site.
+        In This grid scope `_resume_grid` has already started the retry that
+        runs it: the hook is only still installed while that retry runs."""
         try:
             self._grid_prepare_pending = True
         except Exception as exc:  # noqa: BLE001 -- called from a grids_changed slot
@@ -2261,12 +2267,20 @@ class SlicesDock(QgsDockWidget):
 
     def _run_pending_grid_prepare(self) -> None:
         """Run the owed This-grid preparation once no site task is live, else
-        retry in 50 ms. Never blocks. Also the retry timer's slot."""
+        retry in 50 ms. Never blocks. Also the retry timer's slot.
+
+        Final review D2: only here, once no site task is live, does This
+        grid's engine get M11's self re-preparation on a move back
+        (`on_grid_moved = None`). Until then a move is `_mark_grid_stale`'s.
+        """
         try:
-            if self._scope != "grid" or not self._grid_prepare_pending:
+            if self._scope != "grid":
                 return
             if self.site_engine.has_live_task:
                 self._grid_retry.start()
+                return
+            self.engine.on_grid_moved = None  # R-P5: M11's self re-preparation again
+            if not self._grid_prepare_pending:
                 return
             self._grid_prepare_pending = False
             self.prepare()

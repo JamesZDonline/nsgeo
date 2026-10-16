@@ -381,11 +381,19 @@ class SiteEngine(QObject):
             self._report(f"could not release a dropped grid's engine: {exc}")
 
     def _drop_grid(self, grid_id: str) -> None:
-        self._drop_engine(grid_id)
-        self._states.pop(grid_id, None)
-        self._errors.pop(grid_id, None)
+        """Forget a grid, then release its engine (final review D1).
+
+        Off the queue and out of the states FIRST: `_drop_engine` can wait
+        for the grid's task in a nested event loop, and a retry firing in
+        there once the task has ended would otherwise find the grid still
+        queued, nothing live, and dispatch it on the engine being released
+        -- whose `_preparing` would never clear, stalling the queue.
+        """
         if grid_id in self._queue:
             self._queue.remove(grid_id)
+        self._states.pop(grid_id, None)
+        self._errors.pop(grid_id, None)
+        self._drop_engine(grid_id)
 
     @staticmethod
     def _fingerprint(grid: Any) -> tuple[Any, ...]:

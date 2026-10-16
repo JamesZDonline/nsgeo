@@ -821,6 +821,44 @@ def test_leaving_the_site_waits_out_a_task_that_outlived_its_cancel(plugin, monk
     assert counter.max_concurrent == 1
 
 
+def test_moving_this_grids_grid_while_a_site_task_outlives_its_cancel_never_overlaps(
+    plugin, monkeypatch
+):
+    """Final review D2 (trap 1). Leaving Whole site cancels the site's task;
+    when the bounded wait gives up, the task is still reading a line. This
+    grid's engine must go on handing a move to the dock (`_mark_grid_stale`)
+    rather than re-preparing itself (M11) until no site task is live --
+    else moving its grid inside that window starts a second preparation.
+    A line takes 0.8 s here, so the window is wide."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.8)
+    dock = plugin.slices_dock
+    session = plugin.session
+    dock.site_scope_button.click()
+    assert spin_until(lambda: counter.concurrent == 1)  # the site reads A's first line
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
+    assert not dock.engine.is_running, "This grid waits for the site's task"
+    assert spin_until(lambda: dock.engine.is_prepared, 30_000)
+    assert counter.max_concurrent == 1, (
+        f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
+    )
+    assert dock.engine.frame is not None and dock.engine.frame.origin == (500.0, 690.0)
+    assert dock.engine.on_grid_moved is None, "M11's own re-preparation, once the site stopped"
+
+
+def test_leaving_an_idle_site_hands_this_grids_moves_straight_back(plugin):
+    """Final review D2's other half: with no site task live, leaving Whole
+    site gives This grid's engine M11's own re-preparation on a move back
+    at once."""
+    dock = whole_site(plugin)
+    assert dock.engine.on_grid_moved is not None  # R-P5, while the site shows
+    dock.grid_scope_button.click()
+    assert not dock.site_engine.has_live_task
+    assert dock.engine.on_grid_moved is None
+
+
 def test_unload_with_the_site_scope_open_leaves_nothing_running(
     fake_iface, site3, answer_modal, monkeypatch
 ):

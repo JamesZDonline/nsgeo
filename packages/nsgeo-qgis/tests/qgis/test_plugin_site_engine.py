@@ -218,6 +218,42 @@ def test_a_dropped_grid_whose_preparation_outlives_its_cancel_wait_holds_back_ev
     assert not site.has_live_task
 
 
+def test_a_retry_inside_a_dropped_grids_cancel_wait_does_not_re_dispatch_it(
+    site3, make_site, monkeypatch
+):
+    """Final review D1. Dropping a grid whose task is still live waits for
+    that task inside `cancel_preparation`, a nested event loop, and the
+    retry timer can fire in there. Were the dropped grid still queued, a
+    retry after its task ended would find nothing live and dispatch it
+    again -- on an engine about to be released, whose `_preparing` would
+    then never clear, stalling every grid behind it. The retry is made to
+    fire at exactly that moment: the grid must already be off the queue."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    site = make_site(site3.session)
+    site.set_source(site3.source())
+    assert spin_until(lambda: counter.calls >= 1), "A's first line was never read"
+    site.cancel()  # the 1 ms wait gives up: A's task still reads a line
+    engine_a = site.engine_for("A")
+    assert engine_a.has_live_task
+    site.set_source(site3.source())  # resumed: A heads the queue, held back by its task
+    assert site.grid_state("A") == "queued"
+
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 5_000)
+    real_cancel = engine_a.cancel_preparation
+
+    def cancel_then_retry() -> None:
+        real_cancel()  # A's task ends inside this wait ...
+        site._dispatch_next()  # ... and the retry timer fires inside it too
+
+    monkeypatch.setattr(engine_a, "cancel_preparation", cancel_then_retry)
+    site.set_source(site3.source("BC"))  # A dropped
+    assert site.wait_until_idle(10_000), "the queue stalled behind the dropped grid"
+    assert site.ready_grids == ("B", "C")
+    assert site.engine_for("A") is None and not site.has_live_task
+    assert counter.max_concurrent == 1
+
+
 def test_a_moved_grid_whose_preparation_outlives_its_cancel_wait_is_held_back(
     site3, make_site, monkeypatch
 ):
