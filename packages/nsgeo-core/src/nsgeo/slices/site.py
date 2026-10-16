@@ -150,6 +150,94 @@ def compose(lattice: SiteLattice, layers: Sequence[tuple[np.ndarray, np.ndarray]
     return out.reshape(lattice.height, lattice.width).astype(np.float32)
 
 
+@dataclass(frozen=True, eq=False)
+class Footprint:
+    """Where one layer lands on a lattice: a window, and the cell ids inside it.
+
+    The window is lattice rows `[row0, row1)` and columns `[col0, col1)`;
+    `ids` is `(row1 - row0, col1 - col0)`, the frame cell under each pixel
+    centre, -1 outside the frame. Every pixel outside the window is -1 in
+    the whole-lattice gather this stands for, so `compose_footprints` over
+    windows gives exactly what `compose` gives over the whole lattice
+    (final review I1): a 50 m grid at 30 degrees touches about a tenth of a
+    ten-grid site's half-pitch lattice. Built tight by `footprint`.
+
+    `eq=False`, as for `Seam`: an ndarray field.
+    """
+
+    row0: int
+    row1: int
+    col0: int
+    col1: int
+    ids: np.ndarray
+
+    def __post_init__(self) -> None:
+        shape = (self.row1 - self.row0, self.col1 - self.col0)
+        if self.ids.shape != shape:
+            raise ValueError(f"ids must be {shape} for this window, got {self.ids.shape}")
+
+    @property
+    def n_pixels(self) -> int:
+        return int(self.ids.size)
+
+
+def footprint(ids: np.ndarray, row0: int = 0, col0: int = 0) -> Footprint:
+    """The tight window around the placed pixels of a block of cell ids.
+
+    `ids` is `(rows, cols)` with its top-left pixel at lattice `(row0,
+    col0)`: a whole-lattice gather reshaped to `(height, width)`, or a
+    padded window around one frame. Only rows and columns that place a
+    pixel (an id >= 0) are kept, so every edge of the window places one.
+    With no placed pixel the footprint is empty, at `(row0, col0)`.
+    """
+    ids = np.asarray(ids)
+    if ids.ndim != 2:
+        raise ValueError(f"ids must be 2-D, got shape {ids.shape}")
+    placed = ids >= 0
+    rows = np.flatnonzero(placed.any(axis=1))
+    cols = np.flatnonzero(placed.any(axis=0))
+    if rows.size == 0:
+        return Footprint(row0, row0, col0, col0, np.empty((0, 0), dtype=ids.dtype))
+    r0, r1 = int(rows[0]), int(rows[-1]) + 1
+    c0, c1 = int(cols[0]), int(cols[-1]) + 1
+    return Footprint(row0 + r0, row0 + r1, col0 + c0, col0 + c1, ids[r0:r1, c0:c1].copy())
+
+
+def compose_footprints(
+    lattice: SiteLattice, layers: Sequence[tuple[Footprint, np.ndarray]]
+) -> np.ndarray:
+    """`compose`, each layer accumulated over its own window only (final review I1).
+
+    Each layer is `(footprint, values)`, `values` the frame's `(ny, nx)`
+    array. The same sums and counts in the same layer order as `compose`,
+    so the result is bit-identical to `compose` over the whole-lattice
+    gathers the footprints stand for. Raises ValueError for a window that
+    is not on the lattice.
+    """
+    total = np.zeros((lattice.height, lattice.width), dtype=float)
+    count = np.zeros((lattice.height, lattice.width), dtype=np.int64)
+    for where, values in layers:
+        if not (
+            0 <= where.row0 <= where.row1 <= lattice.height
+            and 0 <= where.col0 <= where.col1 <= lattice.width
+        ):
+            raise ValueError(
+                f"window rows {where.row0}:{where.row1}, cols {where.col0}:{where.col1} "
+                f"is not on the {lattice.height} x {lattice.width} lattice"
+            )
+        if where.n_pixels == 0:
+            continue
+        flat = np.asarray(values, dtype=float).reshape(-1)
+        got = flat[np.clip(where.ids, 0, flat.size - 1)]
+        ok = (where.ids >= 0) & np.isfinite(got)
+        window = (slice(where.row0, where.row1), slice(where.col0, where.col1))
+        total[window] += np.where(ok, got, 0.0)
+        count[window] += ok
+    out = np.full(lattice.n_pixels, np.nan, dtype=float)
+    np.divide(total.reshape(-1), count.reshape(-1), out=out, where=count.reshape(-1) > 0)
+    return out.reshape(lattice.height, lattice.width).astype(np.float32)
+
+
 def site_axis(
     bounds: Iterable[tuple[float, float]], t0_ns: float, t1_ns: float, dz_ns: float
 ) -> ZAxis | None:

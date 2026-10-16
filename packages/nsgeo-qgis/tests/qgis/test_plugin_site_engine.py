@@ -654,6 +654,26 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     assert errors == [], errors
 
 
+def test_a_rotated_site_composes_exactly_as_whole_lattice_gathers_would(site3, make_site):
+    """Final review I1: each grid's gather is kept to its own window on the
+    lattice, and composed there only. B laid at 30 degrees halves the pitch
+    (Ruling 2) and overlaps C at a corner, which must still average. The
+    tick is bit-identical to `compose` over whole-lattice gathers."""
+    session = site3.session
+    session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=30.0))
+    site, errors = prepared(make_site, site3)
+    lattice = site.lattice
+    assert lattice.pixel == RES.cell / 2
+    drawn = site.slice_at(20.0, 5.0, **TICK)
+    shown, _ = expected_shown(site, session, 20.0, 5.0, **TICK)
+    centres = lattice.pixel_centres()
+    gathers = {g: site.engine_for(g).frame.cell_index(centres) for g in shown}
+    assert ((gathers["B"] >= 0) & (gathers["C"] >= 0)).sum() > 50, "B and C must overlap"
+    expected = compose(lattice, [(gathers[g], shown[g]) for g in shown])
+    assert np.array_equal(drawn.array, expected, equal_nan=True)
+    assert errors == [], errors
+
+
 def test_grids_too_far_apart_for_the_lattice_are_refused_by_pixel_count(site3, make_site):
     """Spec 4.7: M11's cell cap applies to the lattice, which spans the
     grids' bounding box -- mostly empty for grids far apart."""

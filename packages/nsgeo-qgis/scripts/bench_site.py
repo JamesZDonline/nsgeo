@@ -6,7 +6,12 @@ the z range the prepared lines share, thickness 5 ns, fill radius 1.5 line
 spacings. Runs offscreen in `.venv-qgis` with no plugin and no iface:
 
     QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python \\
-        packages/nsgeo-qgis/scripts/bench_site.py [--samples 128] [--tpm 60]
+        packages/nsgeo-qgis/scripts/bench_site.py [--samples 128] [--tpm 60] \\
+        [--azimuths 0 30]
+
+Each site is timed north-up and laid at each further bearing (final review
+I1): a rotated grid halves the lattice pitch (Ruling 2), so a site at 30
+degrees has about four times the lattice pixels of the same site north-up.
 
 Synthetic lines are fine for timing (spec 4.8). A tick's cost goes with
 traces (traces per metre) and frame size, not with the samples per trace,
@@ -51,8 +56,12 @@ RADIUS_SPACINGS = 1.5
 N_WINDOWS = 20
 
 
-def write_site(folder: Path, size_m: float, samples: int, tpm: float) -> list:
-    """Ten adjacent grids of lines along y, as `[(grid, [(path, offset), ...]), ...]`."""
+def write_site(folder: Path, size_m: float, samples: int, tpm: float, azimuth: float = 0.0) -> list:
+    """Ten adjacent grids of lines along y, as `[(grid, [(path, offset), ...]), ...]`.
+
+    At `azimuth` the whole block of grids is turned about the first one's
+    origin, so the grids still meet edge to edge along their own axes.
+    """
     from nsgeo.geometry.grid import Grid
     from tests.synthetic import write_dzt
 
@@ -61,10 +70,12 @@ def write_site(folder: Path, size_m: float, samples: int, tpm: float) -> list:
     data = (rng.normal(size=(samples, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000
     n_lines = int(round(size_m / SPACING))
+    x_hat, y_hat = Grid("axes", (0.0, 0.0), azimuth, 1.0, 1.0, "EPSG:32616", SPACING).axes()
     grids = []
     for g in range(N_GRIDS):
-        origin = (500_000.0 + (g % COLUMNS) * size_m, 4_000_000.0 + (g // COLUMNS) * size_m)
-        grid = Grid(f"G{g}", origin, 0.0, size_m, size_m, "EPSG:32616", SPACING)
+        step = (g % COLUMNS) * size_m * x_hat + (g // COLUMNS) * size_m * y_hat
+        origin = (500_000.0 + float(step[0]), 4_000_000.0 + float(step[1]))
+        grid = Grid(f"G{g}", origin, azimuth, size_m, size_m, "EPSG:32616", SPACING)
         lines = []
         sub = folder / grid.id
         sub.mkdir(parents=True)
@@ -90,7 +101,7 @@ def ms(seconds: float) -> float:
     return seconds * 1000.0
 
 
-def bench(size_m: float, samples: int, tpm: float, workdir: Path) -> dict:
+def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float = 0.0) -> dict:
     from nsgeo.geometry.placement import GridPlacement
     from nsgeo.model.survey import Line
     from nsgeo.render import PercentileClip
@@ -106,10 +117,10 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path) -> dict:
         radius_cells_for,
     )
 
-    folder = workdir / f"site_{int(size_m)}m"
+    folder = workdir / f"site_{int(size_m)}m_{azimuth:g}deg"
     folder.mkdir()
     started = time.perf_counter()
-    grids = write_site(folder / "raw", size_m, samples, tpm)
+    grids = write_site(folder / "raw", size_m, samples, tpm, azimuth)
     written_s = time.perf_counter() - started
 
     session = SiteSession()
@@ -211,6 +222,8 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path) -> dict:
         resident_mb = sum(site.engine_for(g).estimate.cube_bytes for g in site.ready_grids) / 1e6
         return {
             "size": size_m,
+            "azimuth": azimuth,
+            "pixel": site.lattice.pixel,
             "lines": len(lines),
             "traces": int(round(size_m * tpm)),
             "lattice": f"{site.lattice.width} x {site.lattice.height}",
@@ -248,6 +261,9 @@ def main() -> int:
     ap.add_argument("--samples", type=int, default=128, help="samples per trace (default 128)")
     ap.add_argument("--tpm", type=float, default=60.0, help="traces per metre (default 60)")
     ap.add_argument("--sizes", type=float, nargs="+", default=[20.0, 50.0])
+    ap.add_argument(
+        "--azimuths", type=float, nargs="+", default=[0.0, 30.0], help="bearings (degrees)"
+    )
     ap.add_argument("--workdir", type=Path, default=None, help="where to write the lines")
     args = ap.parse_args()
 
@@ -261,8 +277,9 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(dir=args.workdir) as tmp:
             for size in args.sizes:
-                rows.append(bench(size, args.samples, args.tpm, Path(tmp)))
-                print(f"done: {size:g} m", file=sys.stderr, flush=True)
+                for azimuth in args.azimuths:
+                    rows.append(bench(size, args.samples, args.tpm, Path(tmp), azimuth))
+                    print(f"done: {size:g} m at {azimuth:g} deg", file=sys.stderr, flush=True)
     finally:
         app.exitQgis()
 
@@ -273,15 +290,16 @@ def main() -> int:
         f"radius {RADIUS_SPACINGS:g} spacings; {N_WINDOWS} windows per timing.\n"
     )
     print(
-        "| site | lines | traces/line | lattice | engine mode | prepare site (s) "
+        "| site | bearing | lines | traces/line | lattice (pixel) | engine mode | prepare site (s) "
         "| first tick, incl. cube builds (ms) | slice_at median / p90 (ms) "
         "| edge median / p90 (ms) "
         "| shared_limit (ms) | one-grid baseline median / p90 (ms) |"
     )
-    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         print(
-            f"| {N_GRIDS} x {r['size']:g} m | {r['lines']} | {r['traces']} | {r['lattice']} "
+            f"| {N_GRIDS} x {r['size']:g} m | {r['azimuth']:g}° | {r['lines']} | {r['traces']} "
+            f"| {r['lattice']} ({r['pixel']:g} m) "
             f"| {r['modes']} | {r['prep_s']:.1f} | {r['first_ms']:.0f} "
             f"| {r['median_ms']:.1f} / {r['p90_ms']:.1f} "
             f"| {r['edge_median_ms']:.1f} / {r['edge_p90_ms']:.1f} "
@@ -292,7 +310,8 @@ def main() -> int:
     print()
     for r in rows:
         print(
-            f"{N_GRIDS} x {r['size']:g} m: {r['status']}; site axis {r['nz']} levels; "
+            f"{N_GRIDS} x {r['size']:g} m at {r['azimuth']:g}°: {r['status']}; "
+            f"site axis {r['nz']} levels; "
             f"set_resolution {r['geometry_ms']:.0f} ms; one grid's tick is "
             f"{r['baseline_bin_ms']:.1f} ms binning + "
             f"{r['baseline_median_ms'] - r['baseline_bin_ms']:.1f} ms fill (medians); "

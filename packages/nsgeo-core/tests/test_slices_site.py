@@ -13,6 +13,7 @@ from nsgeo.processing.base import Radargram
 from nsgeo.slices import (
     NORMALISATION_METHODS,
     CubeFrame,
+    Footprint,
     PreparedLine,
     Seam,
     SiteLattice,
@@ -20,8 +21,10 @@ from nsgeo.slices import (
     ZAxis,
     background_level,
     compose,
+    compose_footprints,
     edge_match_solve,
     find_seams,
+    footprint,
     grid_axis,
     lattice_pixel,
     normalise,
@@ -147,6 +150,79 @@ def test_compose_of_one_layer_is_that_layer_resampled():
     expected, _ = to_north_up(values, frame)
     np.testing.assert_array_equal(out, expected)
     assert out[0, 0] == 8.0  # row 0 is north: the frame's top row
+
+
+# --- footprints (final review I1) ------------------------------------------------
+
+
+def _gathers(lat, frames):
+    """Each frame's whole-lattice gather and its footprint, as compose and
+    compose_footprints take them."""
+    full = [frame.cell_index(lat.pixel_centres()) for frame in frames]
+    return full, [footprint(ids.reshape(lat.height, lat.width)) for ids in full]
+
+
+def test_a_footprint_is_the_tight_window_around_every_placed_pixel():
+    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
+    lat = SiteLattice.covering(
+        [slice_extent(frame), (30.0, 0.0, 31.0, 1.0)], lattice_pixel(0.25, [33.0]), CRS
+    )
+    (ids,), (where,) = _gathers(lat, [frame])
+    grid = ids.reshape(lat.height, lat.width)
+    assert where.ids.shape == (where.row1 - where.row0, where.col1 - where.col0)
+    np.testing.assert_array_equal(where.ids, grid[where.row0 : where.row1, where.col0 : where.col1])
+    outside = np.ones_like(grid, dtype=bool)
+    outside[where.row0 : where.row1, where.col0 : where.col1] = False
+    assert (grid[outside] == -1).all(), "a placed pixel outside the window"
+    # Tight: every edge row and column of the window places a pixel.
+    for edge in (where.ids[0], where.ids[-1], where.ids[:, 0], where.ids[:, -1]):
+        assert (edge >= 0).any()
+    assert where.n_pixels < lat.n_pixels // 2  # the point of it
+    empty = footprint(np.full((4, 5), -1))
+    assert empty.n_pixels == 0 and empty.ids.shape == (0, 0)
+
+
+def test_footprint_compose_equals_full_compose_on_a_rotated_frame():
+    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
+    other = CubeFrame((12.0, 4.0), 0.0, 0.25, 8, 8, CRS)  # apart: the windows do not meet
+    lat = SiteLattice.covering(
+        [slice_extent(frame), slice_extent(other)], lattice_pixel(0.25, [33.0, 0.0]), CRS
+    )
+    full, fps = _gathers(lat, [frame, other])
+    values = [np.arange(30 * 25, dtype=float).reshape(25, 30) + 1.0, np.full((8, 8), -2.5)]
+    out = compose_footprints(lat, list(zip(fps, values)))
+    assert out.dtype == np.float32 and out.shape == (lat.height, lat.width)
+    assert np.array_equal(out, compose(lat, list(zip(full, values))), equal_nan=True)
+
+
+def test_footprint_compose_still_averages_overlapping_layers():
+    a = CubeFrame((3.0, 4.0), 20.0, 0.25, 30, 25, CRS)
+    b = CubeFrame((6.0, 5.0), 50.0, 0.25, 30, 25, CRS)
+    lat = SiteLattice.covering(
+        [slice_extent(a), slice_extent(b)], lattice_pixel(0.25, [20.0, 50.0]), CRS
+    )
+    full, fps = _gathers(lat, [a, b])
+    rng = np.random.default_rng(12)
+    va, vb = rng.normal(size=(25, 30)), rng.normal(size=(25, 30)) + 3.0
+    va[3, 4] = vb[10, 11] = np.nan  # an unpopulated cell is skipped, not averaged in
+    both = (full[0] >= 0) & (full[1] >= 0)
+    assert both.sum() > 100, "the frames must overlap"
+    out = compose_footprints(lat, [(fps[0], va), (fps[1], vb)])
+    assert np.array_equal(out, compose(lat, [(full[0], va), (full[1], vb)]), equal_nan=True)
+    pixel = np.flatnonzero(
+        both & np.isfinite(va.ravel()[full[0]]) & np.isfinite(vb.ravel()[full[1]])
+    )[0]
+    mean = (va.ravel()[full[0][pixel]] + vb.ravel()[full[1][pixel]]) / 2.0
+    assert out.ravel()[pixel] == np.float32(mean)
+
+
+def test_compose_footprints_refuses_a_window_off_the_lattice():
+    lat = SiteLattice(0.0, 2.0, 1.0, 3, 2, CRS)
+    ids = np.zeros((1, 2), dtype=np.intp)
+    with pytest.raises(ValueError, match="lattice"):
+        compose_footprints(lat, [(Footprint(1, 2, 2, 4, ids), np.ones((1, 1)))])
+    with pytest.raises(ValueError, match="ids"):
+        Footprint(0, 1, 0, 1, ids)
 
 
 # --- the window mapping --------------------------------------------------------
@@ -592,6 +668,9 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam():
         covered |= (ids >= 0) & np.isfinite(v.ravel()[np.clip(ids, 0, None)])
     out = compose(lat, layers)
     np.testing.assert_array_equal(np.isfinite(out).ravel(), covered)
+    # Final review I1: composing each half over its own window gives the same bits.
+    windows = [(footprint(ids.reshape(lat.height, lat.width)), v) for ids, v in layers]
+    assert np.array_equal(compose_footprints(lat, windows), out, equal_nan=True)
 
 
 def _chain_slices(k, g_b, g_c):

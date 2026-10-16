@@ -55,8 +55,8 @@ callback arrives from inside the engine's `clear()`, before
 registration no longer matching the one it was dispatched against.
 
 **Caches**, all dropped on any resolution change, grid edit or source
-change: the gathers (lattice pixel -> grid cell, once per grid per
-lattice, spec 4.7) and the seams (once per geometry, from each ready
+change: the gathers (each grid's `Footprint` on the lattice, once per
+grid per lattice, spec 4.7) and the seams (once per geometry, from each ready
 grid's coverage, which does not depend on the window).
 
 **Progress** (spec 4.2): each engine reports lines done through its own
@@ -77,13 +77,15 @@ from typing import Any
 import numpy as np
 from nsgeo.slices import (
     CubeFrame,
+    Footprint,
     Seam,
     SiteLattice,
     SliceWindow,
     ZAxis,
-    compose,
+    compose_footprints,
     fill,
     find_seams,
+    footprint,
     grid_axis,
     lattice_pixel,
     limit_over_slices,
@@ -183,7 +185,7 @@ class SiteEngine(QObject):
         self._resolution: Resolution | None = None
         self._site_z: ZAxis | None = None
         self._lattice: SiteLattice | None = None
-        self._gathers: dict[str, np.ndarray] = {}
+        self._gathers: dict[str, Footprint] = {}
         self._seams: tuple[Seam, ...] | None = None
         self._redraw_ms: float | None = None
         # One timer, restarted, rather than a `QTimer.singleShot` per busy
@@ -706,20 +708,24 @@ class SiteEngine(QObject):
         self._gathers = {}
         self._seams = None
 
-    def _gather(self, grid_id: str, lattice: SiteLattice) -> np.ndarray:
-        """`(n_pixels,)` cell ids of `grid_id`'s frame under each lattice pixel, -1 outside.
+    def _gather(self, grid_id: str, lattice: SiteLattice) -> Footprint:
+        """`grid_id`'s frame cell under each lattice pixel, kept to its own window.
 
         Once per grid per lattice (spec 4.7). Only the pixels inside the
         frame's extent (plus one) are looked up, and, for a frame in
-        another CRS, transformed into it first.
+        another CRS, transformed into it first. The result is a
+        `Footprint`, the tight window around the placed pixels (final
+        review I1): every pixel outside it is outside the frame, so the
+        tick composes over the window alone. A whole-lattice array per
+        grid made a rotated site, at half the pitch (Ruling 2), cost a
+        full-lattice pass per grid per tick.
         """
-        ids = self._gathers.get(grid_id)
-        if ids is not None:
-            return ids
+        cached = self._gathers.get(grid_id)
+        if cached is not None:
+            return cached
         frame = self._engines[grid_id].frame
         if frame is None:
             raise RuntimeError(f"grid {grid_id!r} has no frame")
-        ids = np.full(lattice.n_pixels, -1, dtype=np.intp)
         xmin, ymin, xmax, ymax = self._extent_in(frame, lattice.crs)
         p = lattice.pixel
         col0 = max(0, math.floor((xmin - lattice.x0) / p) - 1)
@@ -736,9 +742,12 @@ class SiteEngine(QObject):
             centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
             if frame.crs != lattice.crs:
                 centres = self._transform(centres, lattice.crs, frame.crs)
-            ids[(rows[:, None] * lattice.width + cols[None, :]).ravel()] = frame.cell_index(centres)
-        self._gathers[grid_id] = ids
-        return ids
+            ids = frame.cell_index(centres).reshape(row1 - row0, col1 - col0)
+            gathered = footprint(ids, row0, col0)
+        else:
+            gathered = footprint(np.empty((0, 0), dtype=np.intp))
+        self._gathers[grid_id] = gathered
+        return gathered
 
     def _site_seams(self) -> tuple[Seam, ...]:
         """Seams between the ready grids, once per geometry (spec 4.6.1).
@@ -839,7 +848,7 @@ class SiteEngine(QObject):
         windows, shown, factors = self._shown(
             top_ns, thickness_ns, radius_spacings, method, manual, coverage
         )
-        array = compose(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
+        array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
         self._record_redraw((time.perf_counter() - started) * 1000.0)
         return SiteSlice(array=array, lattice=lattice, windows=windows, factors=factors)
 
