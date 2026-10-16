@@ -45,19 +45,24 @@ ignored, because whoever cancelled already set the state.
 per-grid engine exists, so `_on_grids_changed` runs BEFORE each engine's
 own handler. Inside that call the engines have not reacted yet: a moved
 grid's engine still holds lines binned at the old registration. So it
-reads no engine state. It drops the caches and handles grids that no
-longer exist (those engines are disposed, not consulted). A moved grid
-is driven by `_on_grid_moved`, which runs after its engine has cleared,
-and the geometry is rebuilt there -- never in the synchronous slot. A
-preparation whose grid moved under it is not marked ready or failed: its
-callback arrives from inside the engine's `clear()`, before
-`_on_grid_moved`, and `_on_engine_prepared` recognises it by the grid's
-registration no longer matching the one it was dispatched against.
+reads no engine state. It drops the caches the edit made stale and
+handles grids that no longer exist (those engines are disposed, not
+consulted). A moved grid is driven by `_on_grid_moved`, which runs after
+its engine has cleared, and the geometry is rebuilt there -- never in the
+synchronous slot. A preparation whose grid moved under it is not marked
+ready or failed: its callback arrives from inside the engine's `clear()`,
+before `_on_grid_moved`, and `_on_engine_prepared` recognises it by the
+grid's registration no longer matching the one it was dispatched against.
 
-**Caches**, all dropped on any resolution change, grid edit or source
-change: the gathers (each grid's `Footprint` on the lattice, once per
-grid per lattice, spec 4.7) and the seams (once per geometry, from each ready
-grid's coverage, which does not depend on the window).
+**Caches**: the gathers (each grid's `Footprint` on the lattice, once per
+grid per lattice, spec 4.7) and the seams (once per geometry, from each
+ready grid's coverage, which does not depend on the window). Both are
+dropped whenever the geometry is rebuilt: a resolution change, or a grid
+becoming ready, moving or leaving. A grid edit drops only what it changes
+(final review I2): a gather when that grid's registration changed, the
+seams when any registration or line spacing did. A velocity edit
+relabels depths and drops neither; `grids_changed` does not say which
+grid changed, so `_seen` records what the caches were derived from.
 
 **Progress** (spec 4.2): each engine reports lines done through its own
 `on_progress`, bound to its grid id; `grid_progress` and `on_changed`
@@ -187,6 +192,9 @@ class SiteEngine(QObject):
         self._lattice: SiteLattice | None = None
         self._gathers: dict[str, Footprint] = {}
         self._seams: tuple[Seam, ...] | None = None
+        #: Each site grid's (registration, line spacing) as of the last
+        #: `set_source` or `grids_changed`: what the caches derive from.
+        self._seen: dict[str, tuple[tuple[Any, ...], float]] = {}
         self._redraw_ms: float | None = None
         # One timer, restarted, rather than a `QTimer.singleShot` per busy
         # check: every callback ends by asking for the next dispatch, and
@@ -274,6 +282,7 @@ class SiteEngine(QObject):
         for grid_id in [g for g in self._states if g not in wanted]:
             self._drop_grid(grid_id)
         self._source = source
+        self._seen = self._grid_snapshot()
         self._active = True
         for choice in source.grids:
             grid_id = choice.grid_id
@@ -530,8 +539,7 @@ class SiteEngine(QObject):
         try:
             if self._disposed or self._source is None or not self.session.is_open:
                 return
-            # A spacing edit changes the seams; a move changes a gather.
-            self._drop_caches()
+            self._drop_stale_caches()
             existing = {grid.id for grid in self.session.site.grids}
             gone = [c.grid_id for c in self._source.grids if c.grid_id not in existing]
             if not gone:
@@ -707,6 +715,45 @@ class SiteEngine(QObject):
     def _drop_caches(self) -> None:
         self._gathers = {}
         self._seams = None
+
+    def _grid_snapshot(self) -> dict[str, tuple[tuple[Any, ...], float]]:
+        """Each site grid's registration and line spacing: what the caches derive from."""
+        if not self.session.is_open:
+            return {}
+        return {
+            grid.id: (self._fingerprint(grid), float(grid.default_spacing))
+            for grid in self.session.site.grids
+        }
+
+    def _drop_stale_caches(self) -> None:
+        """After a grid edit, drop only the caches it changed (final review I2).
+
+        A gather depends on its grid's registration, so it goes when that
+        grid's fingerprint changed (or the grid came or went). The seams
+        depend on every registration and line spacing (Ruling 3's width),
+        so they go when any of those changed. A velocity-only edit changes
+        neither: it relabels depths, and the next tick reuses everything.
+        """
+        before, now = self._seen, self._grid_snapshot()
+        self._seen = now
+        for grid_id in set(before) | set(now):
+            old, new = before.get(grid_id), now.get(grid_id)
+            if old == new:
+                continue
+            self._seams = None
+            if old is None or new is None or old[0] != new[0]:
+                self._gathers.pop(grid_id, None)
+
+    def values_key(self) -> tuple[Any, ...]:
+        """What a grid edit can change in the values drawn (final review I2).
+
+        Each ready grid's registration and line spacing -- the spacing sets
+        the fill radius in cells and the seam width. Never its velocity,
+        which only relabels depths. For a cache of something measured over
+        the drawn values, such as the dock's shared stretch.
+        """
+        snapshot = self._grid_snapshot()
+        return tuple((grid_id, snapshot.get(grid_id)) for grid_id in self.ready_grids)
 
     def _gather(self, grid_id: str, lattice: SiteLattice) -> Footprint:
         """`grid_id`'s frame cell under each lattice pixel, kept to its own window.
@@ -963,6 +1010,7 @@ class SiteEngine(QObject):
         self._site_z = None
         self._lattice = None
         self._drop_caches()
+        self._seen = {}
         self._redraw_ms = None
         if had_anything:
             self._notify_changed()

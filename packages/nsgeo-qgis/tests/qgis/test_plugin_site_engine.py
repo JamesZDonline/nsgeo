@@ -752,6 +752,54 @@ def test_a_velocity_edit_does_not_re_prepare_or_change_the_slice(site3, make_sit
     assert errors == [], errors
 
 
+def test_a_velocity_edit_keeps_every_other_grids_cube_and_every_cache(
+    site3, make_site, monkeypatch
+):
+    """Final review I2. `grids_changed` fires for any grid's edit and says
+    not which. A velocity edit to B used to drop every resident cube in the
+    site, every gather and the seams, so the next tick rebuilt them all on
+    the UI thread. Only B's own cube goes now (Ruling Q: a cube freezes the
+    velocity it was built under); the slice is unchanged."""
+    counter = LoadCounter(monkeypatch)
+    site, errors = prepared(make_site, site3)
+    for g in "ABC":
+        site.engine_for(g).set_always_resident(True)
+    tick = {"radius_spacings": 1.5, "method": "edge", "manual": {}}
+    before = site.slice_at(20.0, 5.0, **tick)
+    assert all(site.engine_for(g).has_cube for g in "ABC")
+    gathers = dict(site._gathers)
+    seams = site._seams
+    assert set(gathers) == {"A", "B", "C"} and seams
+    calls = counter.calls
+
+    site3.session.set_grid_velocity("B", VelocityModel.constant(0.09))
+    assert site.wait_until_idle(5_000)
+    assert counter.calls == calls, "a velocity edit re-prepared"
+    assert site.engine_for("A").has_cube and site.engine_for("C").has_cube
+    assert not site.engine_for("B").has_cube, "Ruling Q: B's cube froze B's old velocity"
+    assert all(site._gathers.get(g) is gathers[g] for g in "ABC"), "a gather was dropped"
+    assert site._seams is seams, "the seams were dropped"
+    after = site.slice_at(20.0, 5.0, **tick)
+    assert np.array_equal(after.array, before.array, equal_nan=True)
+    assert site.engine_for("B").has_cube, "B's cube is built again on use"
+    assert errors == [], errors
+
+
+def test_a_spacing_edit_drops_the_seams_but_no_gather(site3, make_site):
+    """Final review I2's other half: a spacing edit changes the seam width
+    (Ruling 3), so the seams go; it moves no frame, so every gather stays."""
+    session = site3.session
+    site, _ = prepared(make_site, site3)
+    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    gathers, seams = dict(site._gathers), site._seams
+    session.replace_grid(dataclasses.replace(session.grid("C"), default_spacing=2.0))
+    assert site.wait_until_idle(5_000)
+    assert site._seams is None
+    assert all(site._gathers.get(g) is gathers[g] for g in "ABC")
+    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    assert site._seams is not seams and site._seams is not None
+
+
 def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     site, _ = prepared(make_site, site3)
     assert site.status_text().endswith("slices redraw in —")

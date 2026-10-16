@@ -74,11 +74,15 @@ them live here:
   undetected, measured as a silent, uniform 4-cell shift (1 m at a
   0.25 m cell) with no exception and no change in total coverage. A
   velocity-only edit is deliberately excluded from the fingerprint,
-  since that relabels depths without rebinning -- but it still drops any
-  resident `_cube` (never the lines or the plans), because `cube()`
-  freezes a `Provenance` snapshot at build time and `provenance()` reads
-  velocity live; without this, an export's recorded velocity would depend
-  on whether a cube happened to be resident.
+  since that relabels depths without rebinning -- but an edit to the
+  chosen grid's velocity still drops any resident `_cube` (never the
+  lines or the plans), because `cube()` freezes a `Provenance` snapshot
+  at build time and `provenance()` reads velocity live; without this, an
+  export's recorded velocity would depend on whether a cube happened to
+  be resident. Only the chosen grid's own edit does (M12 final review
+  I2): `grids_changed` fires for every grid, and a site holds one engine
+  per grid, so dropping on any edit threw away every resident cube in
+  the site for one grid's velocity.
 * **Two real preparations must never run at once.** `_generation` decides
   whose RESULT is kept, never whether a superseded task is still actually
   executing -- and two of them reading the same lines on two worker
@@ -215,6 +219,10 @@ class SliceEngine(QObject):
         #: `grids_changed` (see `_on_grids_changed`/`_grid_fingerprint`,
         #: Ruling M).
         self._grid_fp: tuple[Any, ...] | None = None
+        #: The chosen grid itself, as of the last `set_source` or
+        #: `grids_changed` (M12 final review I2): whether an edit that
+        #: moved nothing was to THIS grid -- its velocity -- or to another.
+        self._grid_seen: Any = None
         self._cube: SliceCube | None = None
         self._mode = "streaming"
         self._always_resident = False
@@ -529,6 +537,7 @@ class SliceEngine(QObject):
             self._plans = None
             self._cube = None
             self._grid_fp = None
+            self._grid_seen = None
             self._redraw_ms = None
             self._choice = choice
             if choice is None or not self.session.is_open:
@@ -568,6 +577,7 @@ class SliceEngine(QObject):
             # change in total coverage.
             grid = frames.get(choice.grid_id)
             self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
+            self._grid_seen = grid
             for key in choice.line_keys:
                 try:
                     line = self.session.line_for_key(key)
@@ -854,7 +864,11 @@ class SliceEngine(QObject):
         streaming source (no cube held) always reads the fresh one. Only
         `self._cube` is dropped -- the prepared lines and the plans do not
         depend on velocity at all, so dropping them would pay 0.9 s for
-        nothing.
+        nothing -- and only when the chosen grid itself changed
+        (`_grid_seen`, M12 final review I2). An edit to another grid
+        leaves this cube's provenance true; a site's `SiteEngine` holds
+        one engine per grid, and dropping every cube for one grid's
+        velocity rebuilt them all on the UI thread on the next tick.
         """
         if self._choice is None:
             return
@@ -876,7 +890,9 @@ class SliceEngine(QObject):
             except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
                 self._report(f"could not re-prepare after the grid changed: {exc}")
             return
-        self._cube = None
+        if grid != self._grid_seen:
+            self._cube = None  # Ruling Q: this grid's velocity changed
+        self._grid_seen = grid
 
     def _hand_over_the_move(self, grid_id: str) -> None:
         """R-P2 (M12): the chosen grid moved and an owner re-prepares.
@@ -1145,6 +1161,7 @@ class SliceEngine(QObject):
         self._frame = None
         self._z = None
         self._grid_fp = None
+        self._grid_seen = None
         self._cube = None
         self._redraw_ms = None
         self._running = False

@@ -569,8 +569,13 @@ class SiteScope:
         self.send_source()
 
     def on_session_changed(self) -> None:
-        """A session signal while the site shows (from `rebuild_source`)."""
-        self.limit_cache = None  # a spacing or velocity edit changes the stretch
+        """A session signal while the site shows (from `rebuild_source`).
+
+        The cached stretch is not dropped here (final review I2): its key
+        holds everything a session edit can change in the values drawn
+        (`display_limit`), so a velocity edit, which only relabels depths,
+        keeps it, and a spacing edit or a move does not.
+        """
         self.send_source()
         self.refresh_rows()
         self.update_export_button()
@@ -865,7 +870,10 @@ class SiteScope:
         """Spec 4.5: shared across the site by default, measured after
         normalisation and the manual gains (`SiteEngine.shared_limit`).
         Cached by everything it measures over and never by the slider: it
-        costs seconds on a large streaming site (Task 3's measurement)."""
+        costs seconds on a large streaming site (Task 3's measurement).
+        `values_key` is each ready grid's registration and line spacing
+        (final review I2): a grid edit re-measures only when it changes
+        the values drawn, never for a velocity edit."""
         dock = self.dock
         shown = self.slice
         if dock.coverage_check.isChecked():
@@ -892,6 +900,7 @@ class SiteScope:
             tuple(sorted(gains.items())),
             radius,
             self.unipolar(),
+            self.engine.values_key(),
         )
         if self.limit_cache is None or self.limit_cache[0] != key:
             value = self.engine.shared_limit(

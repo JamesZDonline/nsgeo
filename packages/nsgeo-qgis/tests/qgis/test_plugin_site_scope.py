@@ -452,6 +452,33 @@ def test_the_shared_stretch_is_measured_once_not_on_every_slider_move(plugin, mo
     assert calls == ["background"]
 
 
+def test_a_velocity_edit_keeps_the_site_stretch_and_a_spacing_edit_re_measures_it(
+    plugin, monkeypatch
+):
+    """Final review I2: the cached stretch goes only on a change to the
+    values drawn. A velocity edit relabels depths; a spacing edit changes
+    each grid's fill radius in cells and the seams."""
+    dock = whole_site(plugin)
+    session = plugin.session
+    site = dock.site_engine
+    real = site.shared_limit
+    calls: list[str] = []
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["method"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site, "shared_limit", counted)
+    assert dock.stretch_combo.currentIndex() == 0  # shared across the site
+    session.set_grid_velocity("B", VelocityModel.constant(0.09))
+    _events()
+    assert calls == [], "a velocity edit re-measured the stretch"
+    assert dock.current_site_slice() is not None
+    session.replace_grid(dataclasses.replace(session.grid("B"), default_spacing=3.0))
+    _events()
+    assert calls == ["none"]
+
+
 # ---- coalescing (ruling T3-g) ----------------------------------------------------------
 
 
