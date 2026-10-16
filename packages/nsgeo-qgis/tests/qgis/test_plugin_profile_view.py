@@ -529,7 +529,9 @@ def test_hover_outside_the_image_rect_emits_nothing(view):
     v.trace_hovered.connect(got.append)
     r = v.image_rect()
     assert r.left() > 5  # sanity: widget x=5 really is left of image_rect for this fixture
-    QTest.mouseMove(v, QPoint(5, r.top() + 20))  # left margin: local x = 5 - r.left() < 0
+    # send_hover, not QTest.mouseMove: on Qt 6 a swallowed move would leave
+    # `got == []` true without the guard ever running (M9 spec 3.2c).
+    send_hover(v, QPoint(5, r.top() + 20))  # left margin: local x = 5 - r.left() < 0
     assert got == []
 
 
