@@ -672,7 +672,7 @@ class NsgeoPlugin:
 
         The cube id is `<grid_id>__<name>`, `name` being the stem of the
         file numpy ACTUALLY wrote (Important 1, same fix round) --
-        `Path(npz_path).stem`, not `Path(path).stem`. `store._npz_path`'s
+        `Path(npz_path).stem`, not `Path(path).stem`. `store.npz_path`'s
         own docstring names exactly this hazard: a user-typed name with a
         dot that is not an extension (a version tag, e.g. "cube.v1")
         keeps that dot in the file numpy writes ("cube.v1.npz") but the

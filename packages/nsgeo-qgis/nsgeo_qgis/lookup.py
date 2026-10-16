@@ -14,10 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from nsgeo.geometry.placement import GridPlacement
-from nsgeo.io.dzt import DztError, read_header, trace_count
-from nsgeo.io.dzx import DzxError, DzxInfo, read_dzx
-from nsgeo.model.survey import Line
+from nsgeo.geometry import GridPlacement
+from nsgeo.io import DztError, DzxError, DzxInfo, read_dzx, read_header, trace_count
+from nsgeo.model import Line
 
 _TRAILING = re.compile(r"(\d+)\s*$")
 

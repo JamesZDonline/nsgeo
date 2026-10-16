@@ -10,27 +10,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import nsgeo
 import nsgeo_qgis
 
 SRC = Path(nsgeo_qgis.__file__).parent
 
 FORBIDDEN_ROOTS = {"PyQt5", "PyQt6", "PySide2", "PySide6", "matplotlib", "scipy"}
-ALLOWED_FROM_PROCESSING = {
-    "StepStack",
-    "Step",
-    "build_step",
-    "available_steps",
-    "get_step",
-    "Radargram",
-    "ParamSpec",
-    "REQUIRED",
-    "default_params",
-    "required_params",
-    # Pure arithmetic (Nyquist frequency from a sample interval), not signal
-    # processing: shared so the plugin's "this file's Nyquist" fact and
-    # Bandpass's own guard use one formula instead of two that can drift.
-    "nyquist_mhz",
-}
 
 
 def _py_files() -> list[Path]:
@@ -57,8 +42,46 @@ def test_no_direct_qt_or_forbidden_imports() -> None:
     assert not offenders, "forbidden imports:\n" + "\n".join(offenders)
 
 
-def _processing_offenders(path: Path) -> list[tuple[int, str]]:
-    """(lineno, message) for each disallowed use of nsgeo.processing in `path`.
+def _declared_all(path: Path) -> set[str] | None:
+    """The names in a module's top-level `__all__` list, or None if it has none."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+            and isinstance(node.value, (ast.List, ast.Tuple))
+        ):
+            return {
+                e.value
+                for e in node.value.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            }
+    return None
+
+
+def _public_api() -> dict[str, set[str]]:
+    """`"nsgeo.<x>"` -> its `__all__`, for each public module, plus `"nsgeo"`.
+
+    A public module is one level below `nsgeo` (`x/__init__.py` or `x.py`)
+    and declares `__all__`. Read from the source, so the allowlist cannot
+    drift from the core's own declaration.
+    """
+    root = Path(nsgeo.__file__).parent
+    public: dict[str, set[str]] = {"nsgeo": {"__version__"}}
+    for child in sorted(root.iterdir()):
+        if child.name.startswith("_"):
+            continue
+        source = child / "__init__.py" if child.is_dir() else child
+        if source.suffix != ".py" or not source.is_file():
+            continue
+        names = _declared_all(source)
+        if names is not None:
+            public[f"nsgeo.{child.stem}"] = names
+    return public
+
+
+def _core_import_offenders(path: Path, public: dict[str, set[str]]) -> list[tuple[int, str]]:
+    """(lineno, message) for each use of the core outside its named API.
 
     Standalone so it can be proven against a scratch file directly, not only
     through the package tree the test below scans.
@@ -66,30 +89,53 @@ def _processing_offenders(path: Path) -> list[tuple[int, str]]:
     offenders: list[tuple[int, str]] = []
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            if node.module == "nsgeo.processing":
-                bad = {a.name for a in node.names} - ALLOWED_FROM_PROCESSING
-                if bad:
-                    offenders.append((node.lineno, str(sorted(bad))))
-            elif node.module.startswith("nsgeo.processing."):
-                offenders.append((node.lineno, node.module))
-            elif node.module == "nsgeo" and any(a.name == "processing" for a in node.names):
-                # `from nsgeo import processing` (or `... as X`) reaches the
-                # same internals as `import nsgeo.processing` — both forbidden.
-                offenders.append((node.lineno, "from nsgeo import processing"))
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            if node.module.split(".")[0] != "nsgeo":
+                continue
+            if node.module not in public:
+                offenders.append((node.lineno, f"from {node.module} import"))
+                continue
+            bad = {a.name for a in node.names} - public[node.module]
+            if bad:
+                offenders.append((node.lineno, f"{node.module}: {sorted(bad)}"))
         elif isinstance(node, ast.Import):
             for a in node.names:
-                if a.name.startswith("nsgeo.processing"):
+                if a.name.split(".")[0] == "nsgeo" and a.name != "nsgeo":
                     offenders.append((node.lineno, f"import {a.name}"))
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "nsgeo"
+            and node.attr not in public["nsgeo"]
+        ):
+            offenders.append((node.lineno, f"nsgeo.{node.attr}"))
     return offenders
 
 
-def test_processing_is_used_only_through_its_public_surface() -> None:
+def test_plugin_imports_only_the_named_core_api() -> None:
+    public = _public_api()
     offenders = []
     for path in _py_files():
-        for lineno, msg in _processing_offenders(path):
+        for lineno, msg in _core_import_offenders(path, public):
             offenders.append(f"{path.relative_to(SRC)}:{lineno}: {msg}")
-    assert not offenders, "processing internals imported by the plugin:\n" + "\n".join(offenders)
+    assert not offenders, "core imported outside its named API:\n" + "\n".join(offenders)
+
+
+def test_the_checker_flags_each_kind_of_offence(tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch.py"
+    scratch.write_text(
+        "from nsgeo.slices.store import npz_path\n"
+        "from nsgeo.processing import register\n"
+        "import nsgeo.processing\n"
+        "import nsgeo\n"
+        "x = nsgeo.slices\n"
+        "ok = nsgeo.__version__\n"
+        "from nsgeo.geometry import Grid\n"
+        "from nsgeo_qgis.layers import Whatever\n",
+        encoding="utf-8",
+    )
+    found = _core_import_offenders(scratch, _public_api())
+    assert sorted(line for line, _ in found) == [1, 2, 3, 5]
 
 
 def test_package_init_imports_no_qgis_at_module_level() -> None:

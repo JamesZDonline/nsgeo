@@ -123,13 +123,13 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
+    clear_kernel_cache,
     fill,
     limit_over_slices,
     plan_line,
     plan_windows,
     stream_slice,
 )
-from nsgeo.slices.fill import clear_kernel_cache
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 

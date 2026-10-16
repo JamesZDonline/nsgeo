@@ -21,8 +21,8 @@ import math
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry.grid import Grid
-from nsgeo.model.survey import Line, Profile, Site
+from nsgeo.geometry import Grid
+from nsgeo.model import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.velocity import VelocityModel, resolve_velocity

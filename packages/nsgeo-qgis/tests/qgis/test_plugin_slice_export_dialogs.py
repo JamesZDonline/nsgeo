@@ -94,14 +94,14 @@ def test_export_geotiff_refuses_a_click_before_preparation(plugin, message_log, 
 
 
 def test_save_cube_with_dotted_names_produces_distinct_records(plugin, tmp_path, answer_modal):
-    """Important 1: `store._npz_path`'s own hazard -- a user-typed name
+    """Important 1: `store.npz_path`'s own hazard -- a user-typed name
     with a dot that is NOT an extension. The dialog string must be typed
-    WITHOUT ".npz" for this to reproduce (`_npz_path` appends it): typing
+    WITHOUT ".npz" for this to reproduce (`npz_path` appends it): typing
     "cube.v1" and "cube.v2" -- not "cube.v1.npz" -- is exactly the
     coordinator's own table. `Path("cube.v1").stem` is "cube" (pathlib
     treats ".v1" as the extension), so deriving the id from the RAW
     dialog string collided both saves onto "A__cube"; deriving it from
-    `Path(npz_path).stem` (the file `_npz_path` actually wrote,
+    `Path(npz_path).stem` (the file `npz_path` actually wrote,
     "cube.v1.npz") keeps them apart. A first version of this test typed
     the ".npz" suffix explicitly and passed against the pre-fix code too
     -- it never exercised the collision at all, since `path` and
@@ -111,7 +111,7 @@ def test_save_cube_with_dotted_names_produces_distinct_records(plugin, tmp_path,
     _prepare(plugin)
     dock = plugin.slices_dock
 
-    target1 = tmp_path / "slices" / "cube.v1"  # no .npz -- _npz_path appends it
+    target1 = tmp_path / "slices" / "cube.v1"  # no .npz -- npz_path appends it
     target1.parent.mkdir(parents=True, exist_ok=True)
     answer_modal(QFileDialog, "getSaveFileName", (str(target1), "nsgeo cube (*.npz)"))
     dock.save_button.click()
