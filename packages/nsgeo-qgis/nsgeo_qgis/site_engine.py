@@ -97,6 +97,7 @@ from nsgeo.slices import (
     normalise,
     site_axis,
     slice_extent,
+    snap_azimuth,
     window_on,
 )
 from qgis.core import (
@@ -593,11 +594,21 @@ class SiteEngine(QObject):
             return
         lattice = self._covering_lattice(ready, res.cell)
         if lattice.n_pixels > MAX_FRAME_CELLS:
+            # Final review M5: a rotated grid quarters the pixel (Ruling 2),
+            # often the real reason, so the refusal says so when it applies.
+            rotated = (
+                f" A rotated grid puts the site on a half-cell pitch ({lattice.pixel:g} m "
+                f"for a {res.cell:g} m cell), four times the pixels of the same grids "
+                "north-up."
+                if lattice.pixel < res.cell
+                else ""
+            )
             raise ValueError(
                 f"the site lattice would be {lattice.width} x {lattice.height} = "
                 f"{lattice.n_pixels:,} pixels at {lattice.pixel:g} m, more than the "
                 f"{MAX_FRAME_CELLS:,} a slice can be drawn at: the included grids are too "
-                "far apart for this cell size. Choose a coarser cell or include fewer grids"
+                f"far apart for this cell size.{rotated} Choose a coarser cell or include "
+                "fewer grids"
             )
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
@@ -647,7 +658,10 @@ class SiteEngine(QObject):
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
             extents.append(self._extent_in(frame, site_crs))
-            azimuths.append(self._azimuth_in(frame, site_crs))
+            # Ruling F-5 (final review D3): a frame a hair off a right angle
+            # -- a datum-only CRS shift -- is axis-aligned in effect.
+            far_corner_m = math.hypot(frame.nx, frame.ny) * frame.cell
+            azimuths.append(snap_azimuth(self._azimuth_in(frame, site_crs), far_corner_m, cell))
         return SiteLattice.covering(extents, lattice_pixel(cell, azimuths), site_crs)
 
     @staticmethod
@@ -700,7 +714,9 @@ class SiteEngine(QObject):
         """The frame's bearing in the site CRS, for `lattice_pixel` (Ruling 2).
 
         A grid laid north-up in another zone is turned by the difference in
-        meridian convergence, so it counts as rotated on the site lattice.
+        meridian convergence, so it counts as rotated on the site lattice --
+        unless the turn is too small to move its far corner by 1% of a cell
+        (`snap_azimuth`, Ruling F-5), as for a datum-only shift.
         """
         if frame.crs == crs:
             return frame.azimuth

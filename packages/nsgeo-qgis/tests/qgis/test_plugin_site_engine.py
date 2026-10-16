@@ -693,6 +693,46 @@ def test_grids_too_far_apart_for_the_lattice_are_refused_by_pixel_count(site3, m
     assert site.lattice is None
 
 
+def test_a_refusal_with_a_rotated_grid_names_the_half_cell_pitch(site3, make_site):
+    """Final review M5: a rotated grid puts the site on a half-cell pitch
+    (Ruling 2) -- four times the pixels, and often the actual reason the
+    lattice is refused -- so the message says so, and only then."""
+    session = site3.session
+    session.replace_grid(dataclasses.replace(session.grid("C"), origin=(5000.0, 5000.0)))
+    site = make_site(session)
+    site.set_source(site3.source())
+    assert site.wait_until_idle(60_000)
+    with pytest.raises(ValueError, match="pixels") as north_up:
+        site.set_resolution(RES)
+    assert "half-cell" not in str(north_up.value)
+
+    session.replace_grid(dataclasses.replace(session.grid("C"), azimuth=30.0))
+    assert site.wait_until_idle(60_000)
+    with pytest.raises(ValueError, match="pixels") as rotated:
+        site.set_resolution(RES)
+    text = str(rotated.value)
+    assert "at 0.125 m" in text
+    assert "rotated grid puts the site on a half-cell pitch (0.125 m for a 0.25 m cell)" in text
+    assert text.endswith("Choose a coarser cell or include fewer grids")
+
+
+@pytest.mark.parametrize(
+    ("azimuth", "pitch"),
+    [(1e-6, 1.0), (90.0 + 1e-6, 1.0), (2.0, 0.5), (0.01, 1.0), (0.02, 0.5)],
+)
+def test_a_grid_a_hair_off_north_keeps_the_full_cell_pitch(site3, make_site, azimuth, pitch):
+    """Final review D3 (Ruling F-5): a frame counts as axis-aligned when its
+    deviation moves its far corner under 1% of a cell. B is 6 x 6 m, so its
+    far corner is 8.49 m out: 0.01 degrees moves it 1.5 mm (under 2.5 mm,
+    1% of 0.25 m) and 0.02 degrees 3.0 mm (over). Measured along one side
+    (6 m) instead, 0.02 degrees would be 2.1 mm and wrongly snap."""
+    session = site3.session
+    session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=azimuth))
+    site, errors = prepared(make_site, site3)
+    assert site.lattice.pixel == RES.cell * pitch
+    assert errors == [], errors
+
+
 def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     session = site3.session
     site, errors = prepared(make_site, site3)

@@ -30,6 +30,9 @@ MIN_SEAM_CELLS = 20
 
 _SNAP = 1e-6  # levels: window and axis snapping
 _RIGHT_ANGLE_TOL_DEG = 1e-9
+#: Ruling F-5: how far, in cells, a frame's far corner may sit from where an
+#: axis-aligned frame's would and the frame still count as axis-aligned.
+AXIS_SNAP_CELLS = 0.01
 
 
 def _snap_eps(coords: Iterable[float], pixel: float) -> float:
@@ -110,6 +113,26 @@ class SiteLattice:
         )
 
 
+def snap_azimuth(azimuth_deg: float, extent_m: float, cell: float) -> float:
+    """The nearest multiple of 90 degrees if the frame is axis-aligned in effect.
+
+    Ruling F-5 (final review D3). A frame counts as axis-aligned when its
+    deviation from the nearest right angle moves its far corner by less
+    than `AXIS_SNAP_CELLS` (1%) of a cell across the frame's own extent:
+    `extent_m * |sin(deviation)| < 0.01 * cell`, `extent_m` the distance
+    from the frame's origin to its far corner. Otherwise `azimuth_deg` is
+    returned unchanged. A grid laid north-up in a CRS that differs from the
+    site's by a datum shift alone comes out microdegrees off; taken at face
+    value it halves the lattice pitch (Ruling 2) and quadruples the pixels
+    for a turn no pixel can see. Feed the result to `lattice_pixel`.
+    """
+    right = 90.0 * round(azimuth_deg / 90.0)
+    deviation = math.radians(azimuth_deg - right)
+    if extent_m * abs(math.sin(deviation)) < AXIS_SNAP_CELLS * cell:
+        return right
+    return azimuth_deg
+
+
 def lattice_pixel(cell: float, azimuths: Iterable[float]) -> float:
     """The lattice pitch for a site (Ruling 2): `cell`, or `cell / 2` if any frame is rotated.
 
@@ -117,7 +140,8 @@ def lattice_pixel(cell: float, azimuths: Iterable[float]) -> float:
     axis-aligned (each cell holds exactly one pixel centre at pitch = cell),
     but does lose cells in a rotated frame. At half the pitch a rotated
     square still contains a lattice point. An azimuth counts as a multiple
-    of 90 degrees within 1e-9 degrees.
+    of 90 degrees within 1e-9 degrees; `snap_azimuth` decides first whether
+    a frame a hair off a right angle is axis-aligned in effect (Ruling F-5).
     """
     for az in azimuths:
         if abs(az - 90.0 * round(az / 90.0)) > _RIGHT_ANGLE_TOL_DEG:

@@ -32,6 +32,7 @@ from nsgeo.slices import (
     seam_masks,
     site_axis,
     slice_extent,
+    snap_azimuth,
     stream_slice,
     to_north_up,
     window_on,
@@ -127,6 +128,23 @@ def test_lattice_pixel_is_the_cell_for_right_angles_and_half_for_anything_else()
     assert lattice_pixel(0.25, [0.0, 2.0]) == 0.125
     assert lattice_pixel(0.25, [90.0 + 5e-10]) == 0.25
     assert lattice_pixel(0.25, [90.0 + 1e-8]) == 0.125
+
+
+def test_a_frame_a_hair_off_a_right_angle_counts_as_axis_aligned():
+    """Ruling F-5 (final review D3): axis-aligned when the deviation from a
+    right angle moves the far corner by under 1% of a cell across the
+    frame's own extent, `extent * |sin(deviation)| < 0.01 * cell`. A
+    datum-only CRS shift no longer quadruples the lattice."""
+    cell, extent = 0.25, math.hypot(6.0, 6.0)
+    for azimuth, want in ((1e-6, 0.0), (90.0 + 1e-6, 90.0), (-1e-6, 0.0), (270.0 - 1e-6, 270.0)):
+        assert snap_azimuth(azimuth, extent, cell) == want
+        assert lattice_pixel(cell, [snap_azimuth(azimuth, extent, cell)]) == cell
+    assert snap_azimuth(2.0, extent, cell) == 2.0
+    assert lattice_pixel(cell, [snap_azimuth(2.0, extent, cell)]) == cell / 2
+    # The threshold itself: 0.9% and 1.1% of a cell at the far corner.
+    for fraction, snapped in ((0.009, True), (0.011, False)):
+        azimuth = 90.0 + math.degrees(math.asin(fraction * cell / extent))
+        assert (snap_azimuth(azimuth, extent, cell) == 90.0) is snapped, fraction
 
 
 def test_compose_averages_overlaps_and_leaves_uncovered_pixels_nodata():
