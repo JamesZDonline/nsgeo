@@ -67,6 +67,8 @@ header.bar h1 { font-size: 1.1rem; font-weight: 600; margin: 0; text-wrap: balan
 .item.done { border-color: var(--ok); }
 .item.flag { border-color: var(--bad); }
 .where { display: flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; align-items: center; font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); letter-spacing: 0.03em; }
+.unsaved { color: var(--bad); border: 1px solid var(--bad); border-radius: 3px; padding: 0 0.4rem; text-transform: uppercase; font-weight: 500; }
+.retry { font: inherit; font-size: 0.82rem; color: var(--accent-fg); background: var(--accent); border: 0; border-radius: 4px; padding: 0.15rem 0.7rem; cursor: pointer; }
 .kind { text-transform: uppercase; font-weight: 500; color: var(--accent); }
 .text { font-family: var(--font-text); font-size: 1rem; margin: 0; padding-left: 0.75rem; border-left: 3px solid var(--line); max-width: 65ch; overflow-wrap: anywhere; }
 .ev { font-size: 0.85rem; display: grid; gap: 0.25rem; }
@@ -142,29 +144,63 @@ function link(href, text) {
 }
 function mark(id) { return marks.get(id) || { exists: "unchecked", says: "unchecked", note: "" }; }
 
-const notices = { load: "", error: "", sub: "", ro: "" };
-function setNotice(kind, text) {
-  notices[kind] = text;
-  const n = document.getElementById("notice");
-  const shown = notices.error || notices.sub || notices.ro || notices.load;
-  n.textContent = shown; n.hidden = !shown; n.className = "notice" + (notices.error || notices.sub ? " err" : "");
-}
-
+const notices = { load: "", sub: "", ro: "" };
 const FATAL = ["invalid_argument", "transform_error", "revoked", "not_granted", "capability_disabled", "capability_removed"];
 const CODES = ["resource_exhausted", "quota_exceeded", "unavailable"].concat(FATAL);
 function codeOf(e) { return e && CODES.includes(e.code) ? e.code : "unavailable"; }   // unknown codes act as unavailable
-function why(code) {
-  if (code === "resource_exhausted") return "Saving too fast. Wait a moment, then tick it again.";
-  if (code === "quota_exceeded") return "The store is full, so this could not be saved.";
-  return "The store did not answer. Your mark is kept on this page. Tick it again to retry.";
-}
-const failed = new Map();   // item id -> message of its last failed write
+// Pauses before each automatic retry of one item, by error code. After the last, the item waits for
+// the viewer (Retry now, or any new edit). A full store is never retried by itself.
+const DELAYS = { unavailable: [2000, 6000, 20000], resource_exhausted: [6000, 20000], quota_exceeded: [] };
+const failed = new Map();   // item id -> {code, tries, timer} for an item whose last write was rejected
+let fatalText = "";
 
-// Writes to one document run one at a time; each step sends the latest values of the fields
-// that changed, so a burst of ticks becomes one write. Unsaved state (dirty) is never
-// overwritten by a snapshot.
+// Unsaved means the page holds a value the store does not: a rejected write, or an edit that cannot be
+// sent yet (read-only, or waiting for the connection).
+function isUnsaved(id) {
+  const d = dirty.get(id);
+  return failed.has(id) || !!(d && d.size && (!writable || fatal));
+}
+function unsavedIds() { return [...rows.keys()].filter(isUnsaved); }
+function reasonsFor(ids) {
+  const codes = new Set(ids.map(i => (failed.get(i) || {}).code).filter(Boolean));
+  const out = [];
+  if (codes.has("quota_exceeded")) out.push("The store is full.");
+  if (codes.has("resource_exhausted")) out.push("Saving too fast, so retries are slow.");
+  if (codes.has("unavailable")) out.push("The store did not answer.");
+  return out.join(" ");
+}
+function listText(ids) {
+  const shown = ids.slice(0, 3).join(", ") + (ids.length > 3 ? " and " + (ids.length - 3) + " more" : "");
+  return ids.length + (ids.length === 1 ? " mark is" : " marks are") + " not saved yet: " + shown + ".";
+}
+// The notice is worked out from the current state every time, never set one event at a time.
+let lastNotice = "";
+function renderNotice() {
+  const u = unsavedIds();
+  let text = "", err = false, retry = false;
+  if (fatal) { text = fatalText + (u.length ? " " + listText(u) : ""); err = true; }
+  else if (u.length) {
+    text = [listText(u), reasonsFor(u), notices.sub].filter(Boolean).join(" ");
+    err = true; retry = writable;
+  } else if (notices.sub) { text = notices.sub; err = true; }
+  else text = notices.ro || notices.load;
+  const key = text + "|" + err + "|" + retry;
+  if (key === lastNotice) return;
+  lastNotice = key;
+  const n = document.getElementById("notice");
+  n.textContent = text; n.hidden = !text; n.className = "notice" + (err ? " err" : "");
+  if (retry) {
+    const b = el("button", { type: "button", id: "retry-now", class: "retry", text: "Retry now" });
+    b.addEventListener("click", retryAll);
+    n.append(" ", b);
+  }
+}
+function setNotice(kind, text) { notices[kind] = text; renderNotice(); }
+
+// Writes happen only from a viewer action, a per-item retry timer, the Retry now button, or once when
+// saving becomes possible again after a reconnect. Never from an ordinary snapshot.
 function save(id, patch) {
-  if (!db || fatal) return;
+  if (!db) return;
   const cur = mark(id);
   const changed = Object.keys(patch).filter(k => cur[k] !== patch[k]);
   if (!changed.length) return;
@@ -172,8 +208,8 @@ function save(id, patch) {
   const d = dirty.get(id) || new Set();
   changed.forEach(k => d.add(k));
   dirty.set(id, d);
-  paint(id); progress();
-  if (writable) schedule(id);
+  paint(id); progress(); renderNotice();
+  if (writable && !fatal) { const f = failed.get(id); if (f) { clearTimeout(f.timer); f.timer = null; } schedule(id); }
 }
 
 function schedule(id) {
@@ -184,15 +220,15 @@ function schedule(id) {
   step.then(() => { if (chains.get(id) === step) { chains.delete(id); pending.delete(id); } });
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function attempt(fn) {
-  try { return await fn(); } catch (e) {
-    if (codeOf(e) !== "unavailable") throw e;
-    await sleep(300 + Math.random() * 400);     // one retry after a short randomized delay
-    return fn();
-  }
+function retryItem(id) {
+  if (!db || fatal || !writable) return;
+  const f = failed.get(id);
+  if (f) { clearTimeout(f.timer); f.timer = null; }
+  if (dirty.has(id)) schedule(id);
 }
+function retryAll() { for (const id of unsavedIds()) retryItem(id); }
+
+function stopTimers() { for (const f of failed.values()) { clearTimeout(f.timer); f.timer = null; } }
 
 async function flush(id) {
   const d = dirty.get(id);
@@ -202,29 +238,37 @@ async function flush(id) {
   const fields = Object.fromEntries([...d].map(k => [k, latest[k]]));
   try {
     const ref = db.doc("checks/" + id);
-    const create = () => attempt(() => ref.set({ exists: latest.exists, says: latest.says, note: latest.note }));
+    const create = () => ref.set({ exists: latest.exists, says: latest.says, note: latest.note });
     if (known.has(id)) {
-      try { await attempt(() => ref.update(fields)); }
+      try { await ref.update(fields); }
       catch (e) { if (codeOf(e) === "invalid_argument") await create(); else throw e; }  // the doc vanished
     } else {
       await create();
     }
     known.add(id);
-    failed.delete(id);
-    if (!failed.size) setNotice("error", "");
+    const f = failed.get(id);
+    if (f) { clearTimeout(f.timer); failed.delete(id); }
   } catch (e) {
     const code = codeOf(e);
     const s = dirty.get(id) || new Set();
     d.forEach(k => s.add(k));
-    dirty.set(id, s);                                // keep the unsaved values for a retry
+    dirty.set(id, s);                                // keep the unsaved values
     if (FATAL.includes(code)) {
-      fatal = true; writable = false; enable(false);
-      setNotice("error", "Saving \u201c" + id + "\u201d was refused, so the page is read-only for the rest of this visit. Reload to try again.");
+      fatal = true; writable = false; stopTimers(); enable(false);
+      fatalText = code === "invalid_argument" || code === "transform_error"
+        ? "The store refused a save, so the page is read-only for the rest of this visit. Reload to try again."
+        : "Saving is no longer available in this view, so the page is read-only for the rest of this visit.";
+      for (const [rid] of rows) paint(rid);
     } else {
-      failed.set(id, why(code));
-      setNotice("error", "Could not save \u201c" + id + "\u201d. " + why(code));
+      const f = failed.get(id) || { tries: 0, timer: null };
+      clearTimeout(f.timer); f.code = code;
+      const delays = DELAYS[code] || [];
+      f.timer = f.tries < delays.length ? setTimeout(() => retryItem(id), delays[f.tries]) : null;
+      f.tries++;
+      failed.set(id, f);
     }
   }
+  paint(id); renderNotice();
 }
 
 function tri(id, field, title, hint) {
@@ -253,10 +297,13 @@ function buildItem(item) {
   note.addEventListener("input", () => { clearTimeout(timers.get(id)); timers.set(id, setTimeout(commit, NOTE_DELAY)); });
   note.addEventListener("change", commit);
 
+  const badge = el("span", { class: "unsaved", text: "Not saved" });
+  badge.hidden = true;
   const where = el("div", { class: "kind-row where" },
     el("span", { class: "kind", text: item.kind === "ref" ? "reference" : item.kind }),
     el("span", { text: item.page + " / " + item.section }),
-    el("span", { text: id }));
+    el("span", { text: id }),
+    badge);
   const body = [where, el("p", { class: "text", text: item.text })];
   if (item.kind === "claim") {
     const ev = el("div", { class: "ev" });
@@ -278,16 +325,17 @@ function buildItem(item) {
   body.push(el("div", { class: "checks" }, ex.fs, sy.fs),
     el("label", { class: "notel", for: id + "-note" }, "Note", note));
   const node = el("article", { class: "item", id: "item-" + id }, ...body);
-  rows.set(id, { el: node, exists: ex.radios, says: sy.radios, note, item });
+  rows.set(id, { el: node, exists: ex.radios, says: sy.radios, note, item, badge });
   return node;
 }
 
 function paint(id) {
   const r = rows.get(id), m = mark(id);
   for (const f of FIELDS) for (const s of STATES) r[f][s].checked = s === norm(m[f]);
-  if (document.activeElement !== r.note && r.note.value !== (m.note || "")) r.note.value = m.note || "";
+  if (document.activeElement !== r.note && !timers.has(id) && r.note.value !== (m.note || "")) r.note.value = m.note || "";
   const both = norm(m.exists) !== "unchecked" && norm(m.says) !== "unchecked";
   const flagged = norm(m.exists) === "wrong" || norm(m.says) === "wrong";
+  r.badge.hidden = !isUnsaved(id);
   r.el.classList.toggle("done", both && !flagged);
   r.el.classList.toggle("flag", flagged);
 }
@@ -352,7 +400,11 @@ function onSnap(snap) {
   // A cached first snapshot may be partial. Writing then could replace marks not loaded yet.
   if (cache) return;
   setNotice("sub", "");
-  if (!fatal) { writable = true; enable(true); for (const id of [...dirty.keys()]) schedule(id); }
+  const was = writable;
+  if (!fatal) { writable = true; enable(true); }
+  // Saving became possible again: send what was held back, once. Ordinary snapshots never write.
+  for (const [rid] of rows) paint(rid);
+  if (!was && writable) for (const id of [...dirty.keys()]) retryItem(id);
   setNotice("load", "");
 }
 
@@ -362,6 +414,7 @@ function subscribe(n) {
     onSnap(snap);
   }, e => {
     writable = false; enable(false); setNotice("load", "");
+    for (const [rid] of rows) paint(rid);
     if (FATAL.includes(codeOf(e)) || n >= SUB_RETRIES) {
       setNotice("sub", "Could not load your saved marks, so the page is read-only. Reload to try again.");
       return;
