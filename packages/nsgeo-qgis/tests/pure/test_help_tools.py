@@ -525,7 +525,9 @@ def test_render_leaves_no_script_or_comment_opener_in_the_json(tmp_path):
     assert json.loads(body[len("const L = ") : -1]) == ledger
 
 
-@pytest.mark.parametrize("bad", ["has space", "a/b", "..", ".", "x" * 201, "é-claim", ""])
+@pytest.mark.parametrize(
+    "bad", ["has space", "a/b", "..", ".", "x" * 201, "é-claim", "", "t-claim\n"]
+)
 def test_a_bad_item_id_is_refused(tmp_path, bad):
     write_valid_help(tmp_path, edits=(('data-claim="t-claim"', f'data-claim="{bad}"'),))
     base = valid_sources()
@@ -592,3 +594,23 @@ def test_the_committed_ledger_builds_and_its_template_renders(tmp_path):
     assert len(ids) == len(set(ids)) and ids
     html = render_checking_page(ledger, TEMPLATE)
     assert "/*__LEDGER__*/null" not in html
+
+
+def test_a_source_that_is_only_linked_is_not_also_a_ref_item(tmp_path):
+    # the claim cites u-src, the link cites t-src, and #refs lists t-src: no ref item for it
+    write_valid_help(tmp_path, edits=(('data-source="t-src">Wow', 'data-source="u-src">Wow'),))
+    base = valid_sources()
+    src2 = replace(base.sources["t-src"], id="u-src")
+    items = build_ledger(tmp_path, Sources({**base.sources, "u-src": src2}, base.claims))["items"]
+    assert [i["kind"] for i in items] == ["claim", "link"]
+
+
+def test_a_source_in_two_ref_entries_gets_one_ref_item(tmp_path):
+    ref = '<li data-source="t-src">A reference.</li>'
+    twice = ref + '<li data-source="r-src">First.</li><li data-source="r-src">Second.</li>'
+    write_valid_help(tmp_path, edits=((ref, twice),))
+    base = valid_sources()
+    src2 = replace(base.sources["t-src"], id="r-src")
+    items = build_ledger(tmp_path, Sources({**base.sources, "r-src": src2}, base.claims))["items"]
+    refs = [(i["id"], i["text"]) for i in items if i["kind"] == "ref"]
+    assert refs == [("ref-dewow-r-src", "First.")]

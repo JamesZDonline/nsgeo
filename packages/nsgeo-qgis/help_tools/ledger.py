@@ -100,7 +100,7 @@ def _check_ids(items: list[dict]) -> None:
     problems = []
     for item in items:
         iid = item["id"]
-        if not _ID.match(iid) or iid in (".", ".."):
+        if not _ID.fullmatch(iid) or iid in (".", ".."):
             problems.append(f"item id {iid!r} is not a valid document id")
         elif iid in seen:
             problems.append(f"item id {iid!r} appears more than once")

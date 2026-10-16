@@ -116,6 +116,7 @@ const FIELDS = ["exists", "says"];
 const LABELS = { unchecked: "Not yet", ok: "Yes", wrong: "No" };
 const CLASSES = { unchecked: "u", ok: "k", wrong: "w" };
 const NOTE_DELAY = 800;
+const SUB_RETRIES = 3;
 const rows = new Map();     // item id -> {el, exists, says, note, item}
 const marks = new Map();    // item id -> {exists, says, note}
 const known = new Set();    // ids whose document exists in the store
@@ -141,18 +142,29 @@ function link(href, text) {
 }
 function mark(id) { return marks.get(id) || { exists: "unchecked", says: "unchecked", note: "" }; }
 
-const notices = { load: "", error: "", ro: "" };
+const notices = { load: "", error: "", sub: "", ro: "" };
 function setNotice(kind, text) {
   notices[kind] = text;
   const n = document.getElementById("notice");
-  const shown = notices.error || notices.ro || notices.load;
-  n.textContent = shown; n.hidden = !shown; n.className = "notice" + (notices.error ? " err" : "");
+  const shown = notices.error || notices.sub || notices.ro || notices.load;
+  n.textContent = shown; n.hidden = !shown; n.className = "notice" + (notices.error || notices.sub ? " err" : "");
 }
 
+const FATAL = ["invalid_argument", "transform_error", "revoked", "not_granted", "capability_disabled", "capability_removed"];
+const CODES = ["resource_exhausted", "quota_exceeded", "unavailable"].concat(FATAL);
+function codeOf(e) { return e && CODES.includes(e.code) ? e.code : "unavailable"; }   // unknown codes act as unavailable
+function why(code) {
+  if (code === "resource_exhausted") return "Saving too fast. Wait a moment, then tick it again.";
+  if (code === "quota_exceeded") return "The store is full, so this could not be saved.";
+  return "The store did not answer. Your mark is kept on this page. Tick it again to retry.";
+}
+const failed = new Map();   // item id -> message of its last failed write
+
 // Writes to one document run one at a time; each step sends the latest values of the fields
-// that changed, so a burst of ticks becomes one write.
+// that changed, so a burst of ticks becomes one write. Unsaved state (dirty) is never
+// overwritten by a snapshot.
 function save(id, patch) {
-  if (!db || !writable) return;
+  if (!db || fatal) return;
   const cur = mark(id);
   const changed = Object.keys(patch).filter(k => cur[k] !== patch[k]);
   if (!changed.length) return;
@@ -160,12 +172,26 @@ function save(id, patch) {
   const d = dirty.get(id) || new Set();
   changed.forEach(k => d.add(k));
   dirty.set(id, d);
-  pending.add(id);
   paint(id); progress();
+  if (writable) schedule(id);
+}
+
+function schedule(id) {
+  pending.add(id);
   const prev = chains.get(id) || Promise.resolve();
   const step = prev.then(() => flush(id));
   chains.set(id, step);
   step.then(() => { if (chains.get(id) === step) { chains.delete(id); pending.delete(id); } });
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function attempt(fn) {
+  try { return await fn(); } catch (e) {
+    if (codeOf(e) !== "unavailable") throw e;
+    await sleep(300 + Math.random() * 400);     // one retry after a short randomized delay
+    return fn();
+  }
 }
 
 async function flush(id) {
@@ -176,23 +202,27 @@ async function flush(id) {
   const fields = Object.fromEntries([...d].map(k => [k, latest[k]]));
   try {
     const ref = db.doc("checks/" + id);
-    const create = () => ref.set({ exists: latest.exists, says: latest.says, note: latest.note });
-    const send = () => (known.has(id) ? ref.update(fields) : create());
-    try {
-      await send();
-    } catch (e) {
-      if (e && e.code === "unavailable") await send();     // one retry for a transient failure
-      else if (e && e.code === "invalid_argument" && known.has(id)) await create();
-      else throw e;
+    const create = () => attempt(() => ref.set({ exists: latest.exists, says: latest.says, note: latest.note }));
+    if (known.has(id)) {
+      try { await attempt(() => ref.update(fields)); }
+      catch (e) { if (codeOf(e) === "invalid_argument") await create(); else throw e; }  // the doc vanished
+    } else {
+      await create();
     }
     known.add(id);
+    failed.delete(id);
+    if (!failed.size) setNotice("error", "");
   } catch (e) {
-    d.forEach(k => { const s = dirty.get(id) || new Set(); s.add(k); dirty.set(id, s); });
-    if (e && e.code === "invalid_argument") {
+    const code = codeOf(e);
+    const s = dirty.get(id) || new Set();
+    d.forEach(k => s.add(k));
+    dirty.set(id, s);                                // keep the unsaved values for a retry
+    if (FATAL.includes(code)) {
       fatal = true; writable = false; enable(false);
-      setNotice("error", "Saving was refused, so the page is read-only for the rest of this visit. Reload to try again.");
+      setNotice("error", "Saving \u201c" + id + "\u201d was refused, so the page is read-only for the rest of this visit. Reload to try again.");
     } else {
-      setNotice("error", "Could not save the last mark. Check your connection and tick it again.");
+      failed.set(id, why(code));
+      setNotice("error", "Could not save \u201c" + id + "\u201d. " + why(code));
     }
   }
 }
@@ -307,6 +337,41 @@ function enable(on) {
   }
 }
 
+function onSnap(snap) {
+  const cache = !!(snap.metadata && snap.metadata.fromCache);
+  if (!cache) known.clear();            // a cached snapshot may be partial: it never removes anything
+  for (const d of snap.docs) {
+    known.add(d.id);
+    if (pending.has(d.id) || dirty.has(d.id) || !rows.has(d.id)) continue;   // keep unsaved ticks and notes
+    const v = d.data() || {};
+    marks.set(d.id, { exists: norm(v.exists), says: norm(v.says), note: typeof v.note === "string" ? v.note : "" });
+  }
+  if (!cache) for (const id of [...marks.keys()]) if (!known.has(id) && !pending.has(id) && !dirty.has(id)) marks.delete(id);
+  for (const [id] of rows) paint(id);
+  progress();
+  // A cached first snapshot may be partial. Writing then could replace marks not loaded yet.
+  if (cache) return;
+  setNotice("sub", "");
+  if (!fatal) { writable = true; enable(true); for (const id of [...dirty.keys()]) schedule(id); }
+  setNotice("load", "");
+}
+
+function subscribe(n) {
+  db.collection("checks").onSnapshot(snap => {
+    if (!(snap.metadata && snap.metadata.fromCache)) n = 0;     // a live snapshot proves the link
+    onSnap(snap);
+  }, e => {
+    writable = false; enable(false); setNotice("load", "");
+    if (FATAL.includes(codeOf(e)) || n >= SUB_RETRIES) {
+      setNotice("sub", "Could not load your saved marks, so the page is read-only. Reload to try again.");
+      return;
+    }
+    // A dead listener is only recovered by subscribing again, with a growing pause.
+    setNotice("sub", "Lost the connection to your saved marks. Reconnecting\u2026");
+    setTimeout(() => subscribe(n + 1), 1000 * 2 ** n + Math.random() * 500);
+  });
+}
+
 render();
 setNotice("load", "Loading your saved marks…");
 (async () => {
@@ -316,21 +381,6 @@ setNotice("load", "Loading your saved marks…");
     setNotice("ro", "Read-only. Saving isn't available in this view. The ledger below still shows every item and source.");
     return;
   }
-  db.collection("checks").onSnapshot(snap => {
-    known.clear();
-    for (const d of snap.docs) {
-      known.add(d.id);
-      if (pending.has(d.id) || !rows.has(d.id)) continue;   // keep what the viewer just ticked
-      const v = d.data() || {};
-      marks.set(d.id, { exists: norm(v.exists), says: norm(v.says), note: typeof v.note === "string" ? v.note : "" });
-    }
-    for (const id of [...marks.keys()]) if (!known.has(id) && !pending.has(id)) marks.delete(id);
-    for (const [id] of rows) paint(id);
-    progress();
-    // A cached first snapshot may be partial. Writing then could replace marks not loaded yet.
-    if (snap.metadata && snap.metadata.fromCache) return;
-    if (!fatal) { writable = true; enable(true); }
-    setNotice("load", "");
-  }, () => { writable = false; enable(false); setNotice("load", ""); setNotice("error", "Could not load your saved marks, so the page is read-only. Reload to try again."); });
+  subscribe(0);
 })();
 </script>
