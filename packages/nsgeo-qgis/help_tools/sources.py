@@ -58,7 +58,11 @@ def load_sources(directory: Path = SOURCES_DIR) -> Sources:
         if not isinstance(data, dict):
             bad("top level must be an object")
             continue
-        for sid, raw in (data.get("sources") or {}).items():
+        section = data.get("sources") or {}
+        if not isinstance(section, dict):
+            bad("sources: must be an object")
+            section = {}
+        for sid, raw in section.items():
             raw = raw if isinstance(raw, dict) else {}
             exists = raw.get("exists")
             exists = exists if isinstance(exists, dict) else {}
@@ -79,7 +83,11 @@ def load_sources(directory: Path = SOURCES_DIR) -> Sources:
             elif sid not in sources:
                 sources[sid] = src
                 source_file[sid] = name
-        for cid, raw in (data.get("claims") or {}).items():
+        section = data.get("claims") or {}
+        if not isinstance(section, dict):
+            bad("claims: must be an object")
+            section = {}
+        for cid, raw in section.items():
             raw = raw if isinstance(raw, dict) else {}
             evidence = raw.get("evidence")
             quote = str(raw.get("quote") or "")

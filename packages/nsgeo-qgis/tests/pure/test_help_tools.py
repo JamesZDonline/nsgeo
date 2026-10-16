@@ -56,18 +56,19 @@ def test_load_sources_reports_every_problem_at_once(tmp_path):
 
 
 def test_shared_sources_merge_and_conflicts_are_named(tmp_path):
-    write(tmp_path / "a.json", {"sources": {"s": OK_SOURCE}, "claims": {"a-1": MEMORY}})
-    write(tmp_path / "b.json", {"sources": {"s": OK_SOURCE}, "claims": {"b-1": MEMORY}})
+    write(tmp_path / "a.json", {"sources": {"cassidy2009": OK_SOURCE}, "claims": {"a-1": MEMORY}})
+    write(tmp_path / "b.json", {"sources": {"cassidy2009": OK_SOURCE}, "claims": {"b-1": MEMORY}})
     merged = load_sources(tmp_path)
-    assert set(merged.sources) == {"s"} and merged.claims["b-1"].page == "b"
+    assert set(merged.sources) == {"cassidy2009"} and merged.claims["b-1"].page == "b"
     write(
         tmp_path / "b.json",
-        {"sources": {"s": {**OK_SOURCE, "citation": "D"}}, "claims": {"a-1": MEMORY}},
+        {"sources": {"cassidy2009": {**OK_SOURCE, "citation": "D"}}, "claims": {"a-1": MEMORY}},
     )
     with pytest.raises(ValueError) as e:
         load_sources(tmp_path)
-    assert "s" in str(e.value) and "a.json" in str(e.value) and "b.json" in str(e.value)
-    assert "a-1" in str(e.value)  # the duplicated claim id is named too
+    msg = str(e.value)
+    assert "b.json: cassidy2009: differs" in msg and "a.json" in msg
+    assert "a-1" in msg
 
 
 def test_empty_or_missing_directory_loads_empty(tmp_path):
@@ -77,7 +78,7 @@ def test_empty_or_missing_directory_loads_empty(tmp_path):
 
 def test_read_claim_with_a_quote_is_accepted(tmp_path):
     claim = {"evidence": "read", "look": "p. 3", "quote": "wow"}
-    write(tmp_path / "p.json", {"sources": {"s": OK_SOURCE}, "claims": {"c": claim}})
+    write(tmp_path / "p.json", {"sources": {"cassidy2009": OK_SOURCE}, "claims": {"c": claim}})
     assert load_sources(tmp_path).claims["c"].quote == "wow"
 
 
@@ -86,8 +87,24 @@ def test_the_committed_sources_load():
 
 
 def test_a_source_conflict_alone_is_an_error(tmp_path):
-    write(tmp_path / "a.json", {"sources": {"s": OK_SOURCE}, "claims": {}})
-    write(tmp_path / "b.json", {"sources": {"s": {**OK_SOURCE, "citation": "D"}}, "claims": {}})
+    write(tmp_path / "a.json", {"sources": {"cassidy2009": OK_SOURCE}, "claims": {}})
+    write(
+        tmp_path / "b.json",
+        {"sources": {"cassidy2009": {**OK_SOURCE, "citation": "D"}}, "claims": {}},
+    )
     with pytest.raises(ValueError) as e:
         load_sources(tmp_path)
-    assert "s" in str(e.value) and "a.json" in str(e.value) and "b.json" in str(e.value)
+    msg = str(e.value)
+    assert "b.json: cassidy2009: differs" in msg and "a.json" in msg
+
+
+def test_a_non_object_section_is_reported_with_the_other_files_problems(tmp_path):
+    write(tmp_path / "a.json", {"sources": ["x"], "claims": {}})
+    write(tmp_path / "b.json", {"sources": {}, "claims": {"c1": {**MEMORY, "evidence": "guess"}}})
+    write(tmp_path / "c.json", {"sources": {}, "claims": "x"})
+    with pytest.raises(ValueError) as e:
+        load_sources(tmp_path)
+    msg = str(e.value)
+    assert "a.json: sources: must be an object" in msg
+    assert "b.json: c1: evidence" in msg
+    assert "c.json: claims: must be an object" in msg
