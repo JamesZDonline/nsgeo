@@ -225,6 +225,7 @@ def test_a_preparation_that_outlives_its_cancel_wait_holds_back_every_other(
     site.cancel()
     assert any("did not stop in time" in msg for msg in errors), errors
     assert site.is_running, "A's cancelled task is still reading a line"
+    assert site.has_live_task and site.engine_for("A").has_live_task
 
     site.set_source(site3.source())
     assert site.wait_until_idle(60_000)
@@ -232,6 +233,62 @@ def test_a_preparation_that_outlives_its_cancel_wait_holds_back_every_other(
         f"a grid started while a cancelled task still ran (max={counter.max_concurrent})"
     )
     assert site.ready_grids == ("A", "B", "C")
+    assert not site.has_live_task
+
+
+def test_a_dropped_grid_whose_preparation_outlives_its_cancel_wait_holds_back_every_other(
+    site3, make_site, monkeypatch
+):
+    """Ruling T3-b. Dropping a grid while it prepares cancels its engine;
+    when that bounded wait gives up, the engine's task is still reading a
+    line. Disposing the engine at once would run M11's `clear()`, which
+    reports it not running, and forget it -- the next grid would then start
+    beside the old task. It must stay where the dispatcher can see it (a
+    retiring engine) until its task has really ended."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    errors: list[str] = []
+    site = make_site(site3.session, on_error=errors.append)
+    site.set_source(site3.source())
+    assert spin_until(lambda: counter.calls >= 1), "A's first line was never read"
+
+    site.set_source(site3.source("BC"))  # A dropped mid-preparation
+    assert site.engine_for("A") is None
+    assert site.has_live_task, "A's abandoned task is still reading a line"
+    assert site.wait_until_idle(60_000)
+
+    assert counter.max_concurrent == 1, (
+        f"a grid started beside a dropped grid's task (max={counter.max_concurrent})"
+    )
+    assert site.ready_grids == ("B", "C")
+    assert [site.grid_state(g) for g in "BC"] == ["ready", "ready"]
+    assert not site.has_live_task
+
+
+def test_a_moved_grid_whose_preparation_outlives_its_cancel_wait_is_held_back(
+    site3, make_site, monkeypatch
+):
+    """Ruling T3-b, R-P2's path. A move clears the grid's engine (M11's
+    `clear()`, which reports it not running even when its wait gave up)
+    and hands the grid back to the queue at once. The dispatcher must see
+    the abandoned task (`has_live_task`) and wait for it, or the grid is
+    re-prepared beside its own old task."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    session = site3.session
+    site = make_site(session)
+    site.set_resolution(RES)
+    site.set_source(site3.source())
+    assert spin_until(lambda: counter.calls >= 1), "A's first line was never read"
+
+    session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
+    assert site.wait_until_idle(60_000)
+
+    assert counter.max_concurrent == 1, (
+        f"the moved grid re-prepared beside its own old task (max={counter.max_concurrent})"
+    )
+    assert site.ready_grids == ("A", "B", "C")
+    assert site.engine_for("A").frame.origin == (500.0, 690.0)
 
 
 def test_a_moved_grid_re_prepares_through_the_queue_never_alongside_another(
@@ -290,19 +347,23 @@ def test_a_grid_moved_while_it_prepares_is_re_queued_not_failed(site3, make_site
 def test_closing_the_site_mid_preparation_clears_without_overlap(site3, make_site, monkeypatch):
     """`site_closed` mid-preparation, then the next site's preparation.
 
-    Errors are not asserted: M11's `SliceEngine.dispose()` reports "did not
-    stop in time" twice when the site closes under a preparation, because
-    its `finished` stays silent for a site that is gone and each confirm
-    wait runs out (pre-existing; recorded in the M12 Task 3 report)."""
+    Ruling T3-e: the close is prompt and silent -- the closed site's task
+    ends its own confirm wait instead of leaving it to time out and report
+    "did not stop in time"."""
     counter = LoadCounter(monkeypatch, delay=0.05)
     session = site3.session
-    site = make_site(session)
+    errors: list[str] = []
+    site = make_site(session, on_error=errors.append)
     site.set_resolution(RES)
     site.set_source(site3.source())
     assert spin_until(lambda: site.grid_state("B") == "preparing")
 
+    started = time.perf_counter()
     session.close_site()
-    assert not site.is_running
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    assert errors == [], errors
+    assert elapsed_ms < slices_engine._CANCEL_TIMEOUT_MS, f"close took {elapsed_ms:.0f} ms"
+    assert not site.is_running and not site.has_live_task
     assert site.ready_grids == ()
     assert site.lattice is None
     assert site.engine_for("A") is None
@@ -330,7 +391,8 @@ def test_grids_prepare_in_order_and_each_is_drawn_as_soon_as_ready(site3, make_s
     site.set_source(site3.source())
     assert site.wait_until_idle(60_000)
 
-    assert list(dict.fromkeys(seen)) == [("A",), ("A", "B"), ("A", "B", "C")]
+    # (`on_changed` also fires as grids are queued and start: ready is still ().)
+    assert list(dict.fromkeys(r for r in seen if r)) == [("A",), ("A", "B"), ("A", "B", "C")]
     drawn = first["slice"]
     assert set(drawn.windows) == {"A"}
     assert (drawn.lattice.x0, drawn.lattice.width, drawn.lattice.height) == (500.0, 24, 24)
@@ -368,6 +430,50 @@ def test_dropping_a_grid_from_the_source_releases_it_and_keeps_the_rest(
     assert site.ready_grids == ("A", "B")
     assert site.engine_for("C") is None
     assert site.lattice.width == 48
+
+
+def test_each_grid_reports_its_progress_while_it_prepares(site3, make_site, monkeypatch):
+    """Spec 4.2, ruling T3-d: the grid list shows "preparing n of m".
+    `on_changed` fires when a grid starts and on each line it finishes."""
+    LoadCounter(monkeypatch, delay=0.02)
+    seen: list[tuple[str, tuple[int, int] | None]] = []
+    site = make_site(site3.session)
+    site.on_changed = lambda: seen.append((site.grid_state("B"), site.grid_progress("B")))
+    site.set_source(site3.source())
+    assert site.grid_progress("A") == (0, 4)
+    assert site.grid_progress("B") is None  # queued
+    assert site.wait_until_idle(60_000)
+
+    preparing = [progress for state, progress in seen if state == "preparing"]
+    assert preparing and preparing[0] == (0, 4), seen
+    assert any(done >= 1 for done, _ in preparing), f"no progress step reported: {seen}"
+    assert all(total == 4 and 0 <= done <= 4 for done, total in preparing), seen
+    assert [done for done, _ in preparing] == sorted(done for done, _ in preparing)
+    assert seen[-1] == ("ready", None)
+    assert all(site.grid_progress(g) is None for g in "ABC")
+
+
+def test_dropping_a_grid_or_emptying_its_lines_is_announced_even_before_it_is_ready(
+    site3, make_site, monkeypatch
+):
+    """Ruling T3-f: the dock's grid list must hear about a drop, or a grid
+    becoming "no lines", whether or not the grid was ready yet."""
+    LoadCounter(monkeypatch, delay=0.05)
+    changes: list[dict[str, str]] = []
+    site = make_site(site3.session)
+    site.on_changed = lambda: changes.append(
+        {g: site.grid_state(g) for g in "ABC" if g in site._states}
+    )
+    site.set_source(site3.source())
+    assert site.grid_state("C") == "queued"
+
+    changes.clear()
+    no_lines = SourceChoice(grid_id="B", preset="p", transform="amp_envelope", line_keys=())
+    site.set_source(SiteSource(transform="amp_envelope", grids=(site3.choice("A"), no_lines)))
+    assert changes, "dropping queued C and emptying queued B announced nothing"
+    assert changes[-1].get("B") == "no lines" and "C" not in changes[-1]
+    assert site.wait_until_idle(60_000)
+    assert site.ready_grids == ("A",)
 
 
 def test_a_grid_with_no_lines_is_listed_and_skipped(site3, make_site, monkeypatch):

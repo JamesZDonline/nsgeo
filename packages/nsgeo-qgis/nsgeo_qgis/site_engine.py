@@ -11,22 +11,30 @@ reason `slices_engine.py` gives.
 1).** Two at once segfaulted M11. Each `SliceEngine` already stops its own
 previous task before starting another; nothing in it stops two engines
 overlapping. So no engine here prepares except through `_dispatch_next`,
-which starts the head of a queue only when none of its own engines and
-none of the `exclusive_with` peers (the dock's engine) `is_running`, and
-otherwise looks again in `_RETRY_MS`. It never blocks. Every path that
-could start a preparation some other way is closed:
+which starts the head of a queue only when no task may still be
+executing -- `SliceEngine.has_live_task` over its own engines, the
+retiring ones, and the `exclusive_with` peers (the dock's engine) -- and
+otherwise looks again in `_RETRY_MS`. It never blocks. `has_live_task`,
+not `is_running` (ruling T3-b): M11's `clear()`, and so `dispose()`, set
+`is_running` False when their bounded confirm wait gives up with the
+task still reading a line; `has_live_task` stays True until the task's
+`finished` has run. Every path that could start a preparation some other
+way is closed:
 
 * a grid that moves: `SliceEngine` would re-prepare itself from its
   `grids_changed` slot (M11, Ruling M). These engines are built with
   `on_grid_moved` (R-P2), so a move clears the engine and calls
-  `_on_grid_moved`, which re-queues the grid;
-* a grid whose source changes while it prepares, `cancel()`, a grid
-  dropped from the source, and `clear()`: each cancels and confirms
-  (`cancel_preparation`/`dispose`, bounded by one line's processing)
-  before anything else is dispatched. When that bounded wait gives up,
-  `cancel_preparation` leaves `is_running` True until the task really
-  ends, and the dispatcher's check of its own engines is what holds the
-  next grid back.
+  `_on_grid_moved`, which re-queues the grid. If that `clear()`'s wait
+  gave up, the old task is still live and the gate holds the grid back;
+* a grid whose source changes while it prepares, and `cancel()`: the
+  engine is cancelled and confirmed (`cancel_preparation`, bounded by
+  about one line's processing) and stays in `_engines`, so a task that
+  outlives the wait is still seen by the gate;
+* a grid dropped from the source (by `set_source`, by becoming "no
+  lines", or by being deleted from the session) and `clear()`:
+  `_drop_engine` cancels while the engine is still tracked, and an engine
+  whose task outlived the wait is parked as retiring -- still in the
+  gate -- and disposed by `_reap_retired` once the task has ended.
 
 `_preparing` names the grid the dispatcher started. An engine's
 `on_prepared` counts only for that grid; a callback from a preparation
@@ -51,11 +59,9 @@ change: the gathers (lattice pixel -> grid cell, once per grid per
 lattice, spec 4.7) and the seams (once per geometry, from each ready
 grid's coverage, which does not depend on the window).
 
-**Residual risk, inherited from M11.** `SliceEngine.clear()` and
-`dispose()` force `is_running` False even when their bounded wait gave
-up. A grid moved while its own preparation outlives that wait could then
-be re-dispatched beside the old task. `cancel_preparation` has no such
-gap; this one is M11's accepted "rare residual overlap".
+**Progress** (spec 4.2): each engine reports lines done through its own
+`on_progress`, bound to its grid id; `grid_progress` and `on_changed`
+carry it to the grid list.
 """
 
 from __future__ import annotations
@@ -114,6 +120,10 @@ _RETRY_MS = 50
 _EDGE_POINTS = 8
 
 
+def _ignore() -> None:
+    """A retiring engine's `on_grid_moved`: its moves no longer matter."""
+
+
 @dataclass(frozen=True, eq=False)
 class SiteSlice:
     """One tick of the site view.
@@ -155,6 +165,12 @@ class SiteEngine(QObject):
         self._states: dict[str, str] = {}
         #: The first error reported during the current preparation, per grid.
         self._errors: dict[str, str] = {}
+        #: (lines done, lines total) of the grid being prepared (spec 4.2).
+        self._progress: dict[str, tuple[int, int]] = {}
+        #: Engines dropped while their task outlived the cancel's bounded
+        #: wait (ruling T3-b): out of the source, still in the dispatch
+        #: gate, disposed by `_reap_retired` once the task has ended.
+        self._retiring: list[SliceEngine] = []
         self._queue: list[str] = []
         self._preparing: str | None = None
         #: The preparing grid's registration when it was dispatched.
@@ -177,6 +193,10 @@ class SiteEngine(QObject):
         self._retry.setSingleShot(True)
         self._retry.setInterval(_RETRY_MS)
         self._retry.timeout.connect(self._dispatch_next)
+        self._reaper = QTimer(self)
+        self._reaper.setSingleShot(True)
+        self._reaper.setInterval(_RETRY_MS)
+        self._reaper.timeout.connect(self._reap_retired)
         session.site_closed.connect(self._on_site_closed)
         session.grids_changed.connect(self._on_grids_changed)
 
@@ -200,10 +220,27 @@ class SiteEngine(QObject):
 
     @property
     def is_running(self) -> bool:
-        """Whether a grid is preparing or waiting to, or an engine is still busy."""
+        """Whether a grid is preparing or waiting to, or a task is still live."""
         if self._preparing is not None or (self._active and bool(self._queue)):
             return True
-        return any(engine.is_running for engine in self._engines.values())
+        return self.has_live_task
+
+    @property
+    def has_live_task(self) -> bool:
+        """Whether any preparation task of this site may still be executing.
+
+        Over every engine it owns, retiring ones included, by
+        `SliceEngine.has_live_task` (ruling T3-b). For whoever must hold
+        another engine back -- the dock's, in Task 5 -- until the site's
+        work has really stopped.
+        """
+        return any(e.has_live_task for e in (*self._engines.values(), *self._retiring))
+
+    def grid_progress(self, grid_id: str) -> tuple[int, int] | None:
+        """`(lines done, lines total)` while `grid_id` prepares, else None (spec 4.2)."""
+        if self._states.get(grid_id) != "preparing":
+            return None
+        return self._progress.get(grid_id)
 
     def grid_state(self, grid_id: str) -> str:
         try:
@@ -231,6 +268,7 @@ class SiteEngine(QObject):
         old = {c.grid_id: c for c in self._source.grids} if self._source is not None else {}
         wanted = {c.grid_id for c in source.grids}
         ready_before = self.ready_grids
+        states_before = dict(self._states)
         for grid_id in [g for g in self._states if g not in wanted]:
             self._drop_grid(grid_id)
         self._source = source
@@ -251,6 +289,9 @@ class SiteEngine(QObject):
         self._queue = [c.grid_id for c in source.grids if self._states.get(c.grid_id) == "queued"]
         if self.ready_grids != ready_before:
             self._rebuild_geometry_reporting()
+        # Ruling T3-f: a drop, or a grid becoming "no lines", is news to the
+        # grid list whether or not the grid was ready.
+        if self.ready_grids != ready_before or self._states != states_before:
             self._notify_changed()
         self._dispatch_next()
 
@@ -269,6 +310,7 @@ class SiteEngine(QObject):
                 self.session,
                 on_prepared=functools.partial(self._on_engine_prepared, grid_id),
                 on_error=functools.partial(self._on_engine_error, grid_id),
+                on_progress=functools.partial(self._on_engine_progress, grid_id),
                 parent=self,
                 on_grid_moved=functools.partial(self._on_grid_moved, grid_id),
             )
@@ -276,11 +318,55 @@ class SiteEngine(QObject):
         return engine
 
     def _drop_engine(self, grid_id: str) -> None:
+        """Release a grid's engine without ever losing sight of a live task.
+
+        Ruling T3-b. The engine is cancelled while it is still in
+        `_engines`: the confirm wait spins the event loop, and a retry that
+        fires inside it must still see the engine. If the bounded wait gave
+        up, `dispose()` now would run M11's `clear()`, which reports the
+        engine idle while its task still reads a line -- so it is parked
+        as retiring instead, inside the dispatch gate, and disposed by
+        `_reap_retired` once the task has ended.
+        """
         if self._preparing == grid_id:
-            self._preparing = None  # set first: `dispose` waits, and the wait calls back
-        engine = self._engines.pop(grid_id, None)
-        if engine is not None:
+            self._preparing = None  # set first: the cancel waits, and the wait calls back
+        self._progress.pop(grid_id, None)
+        engine = self._engines.get(grid_id)
+        if engine is None:
+            return
+        if engine.has_live_task:
+            engine.cancel_preparation()
+            if self._engines.get(grid_id) is not engine:
+                return  # a call from inside that wait already released it
+        del self._engines[grid_id]
+        if engine.has_live_task:
+            self._retire(engine)
+        else:
             engine.dispose()
+
+    def _retire(self, engine: SliceEngine) -> None:
+        # Nothing it does now is a result. The move hook becomes a no-op,
+        # not None: None would bring back M11's self-dispatch on a move.
+        engine.on_prepared = None
+        engine.on_progress = None
+        engine.on_grid_moved = _ignore
+        self._retiring.append(engine)
+        self._reaper.start()
+
+    def _reap_retired(self) -> None:
+        """Dispose retiring engines whose task has ended (a timer slot)."""
+        try:
+            alive = []
+            for engine in self._retiring:
+                if engine.has_live_task:
+                    alive.append(engine)
+                else:
+                    engine.dispose()
+            self._retiring = alive
+            if alive and not self._disposed:
+                self._reaper.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not release a dropped grid's engine: {exc}")
 
     def _drop_grid(self, grid_id: str) -> None:
         self._drop_engine(grid_id)
@@ -302,10 +388,16 @@ class SiteEngine(QObject):
             return None
 
     # ---- preparation, one at a time ---------------------------------------
-    def _anything_running(self) -> bool:
-        return any(e.is_running for e in self._engines.values()) or any(
-            peer.is_running for peer in self._exclusive_with
-        )
+    def _anything_live(self) -> bool:
+        """The dispatch gate (Ruling 1, ruling T3-b): may any task still execute?
+
+        `has_live_task`, never `is_running`: M11's `clear()` sets
+        `is_running` False when its wait gives up with the task still
+        reading. Over this site's engines, the retiring ones, and the
+        `exclusive_with` peers.
+        """
+        engines = (*self._engines.values(), *self._retiring, *self._exclusive_with)
+        return any(engine.has_live_task for engine in engines)
 
     def _dispatch_next(self) -> None:
         """Start the queue's head if nothing else is preparing (Ruling 1).
@@ -337,7 +429,7 @@ class SiteEngine(QObject):
     def _start_next(self) -> None:
         if not self._active or self._preparing is not None or not self._queue:
             return
-        if self._anything_running():
+        if self._anything_live():
             self._retry.start()
             return
         grid_id = self._queue.pop(0)
@@ -350,6 +442,11 @@ class SiteEngine(QObject):
         self._preparing_fp = self._registration(grid_id)
         self._states[grid_id] = "preparing"
         self._errors.pop(grid_id, None)
+        self._progress[grid_id] = (0, len(choice.line_keys))
+        self._notify_changed()  # spec 4.2: "preparing 0 of n" in the list
+        if self._preparing != grid_id or not self._active or self._disposed:
+            self._dispatch_again = True  # the callback changed the plan
+            return
         try:
             engine.set_source(choice)
         except Exception as exc:  # noqa: BLE001 -- a refused preset fails this grid only
@@ -373,6 +470,7 @@ class SiteEngine(QObject):
             if self._registration(grid_id) != self._preparing_fp:
                 return  # the grid moved under it; `_on_grid_moved` re-queues it
             self._preparing = None
+            self._progress.pop(grid_id, None)
             if engine.is_prepared:
                 self._states[grid_id] = "ready"
             else:
@@ -383,6 +481,16 @@ class SiteEngine(QObject):
             self._dispatch_next()
         except Exception as exc:  # noqa: BLE001 -- called from QgsTask's finished
             self._report(f"could not finish preparing grid {grid_id!r}: {exc}")
+
+    def _on_engine_progress(self, grid_id: str, done: int, total: int) -> None:
+        """A line finished (spec 4.2's "preparing n of m"); announced through `on_changed`."""
+        try:
+            if self._disposed or grid_id != self._preparing:
+                return
+            self._progress[grid_id] = (int(done), int(total))
+            self._notify_changed()
+        except Exception as exc:  # noqa: BLE001 -- reached from a task's signal
+            self._report(f"could not report grid {grid_id!r}'s progress: {exc}")
 
     def _on_engine_error(self, grid_id: str, message: str) -> None:
         with contextlib.suppress(Exception):
@@ -810,7 +918,7 @@ class SiteEngine(QObject):
         """
         self._stop_dispatching()
         for engine in list(self._engines.values()):
-            if engine.is_running:
+            if engine.has_live_task:
                 engine.cancel_preparation()
 
     def _stop_dispatching(self) -> None:
@@ -829,20 +937,18 @@ class SiteEngine(QObject):
     def clear(self) -> None:
         """Drop the source, every engine and the geometry (`site_closed`).
 
-        Each engine's `dispose()` cancels and confirms its own preparation,
-        so no separate `cancel_preparation` comes first: on `site_closed`
-        the session is already gone, the cancelled task's `finished` stays
-        silent (M11: "a different site owns the notification"), and every
-        confirm wait runs to its full `_CANCEL_TIMEOUT_MS` -- one more wait
-        here would add a quarter of a second and a spurious warning.
+        Each engine goes the way `_drop_engine` sends it: cancelled while
+        still tracked, then disposed -- or, if its task outlived the
+        cancel's bounded wait, kept as retiring until the task ends, so the
+        next site's first grid cannot start beside it (trap 1).
         """
         had_anything = self._source is not None or bool(self._engines)
         self._stop_dispatching()
-        engines, self._engines = self._engines, {}
-        for engine in engines.values():
-            engine.dispose()
+        for grid_id in list(self._engines):
+            self._drop_engine(grid_id)
         self._states.clear()
         self._errors.clear()
+        self._progress.clear()
         self._source = None
         self._resolution = None
         self._site_z = None
@@ -853,14 +959,20 @@ class SiteEngine(QObject):
             self._notify_changed()
 
     def dispose(self) -> None:
+        """Tear down. A retiring engine is disposed now too: its own
+        `dispose()` cancels and waits, bounded, as M11's teardown does."""
         self._disposed = True
         self._retry.stop()
+        self._reaper.stop()
         with contextlib.suppress(TypeError, RuntimeError):
             self.session.site_closed.disconnect(self._on_site_closed)
         with contextlib.suppress(TypeError, RuntimeError):
             self.session.grids_changed.disconnect(self._on_grids_changed)
         self.on_changed = None
         self.clear()
+        retiring, self._retiring = self._retiring, []
+        for engine in retiring:
+            engine.dispose()
         self.on_error = None
 
     def wait_until_idle(self, timeout_ms: int = 60_000) -> bool:
