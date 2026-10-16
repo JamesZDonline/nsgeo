@@ -33,7 +33,7 @@ def _run():
         plugin_dir = os.path.join(profile, "python", "plugins", "nsgeo_qgis")
 
         info = installer_plugins.getInstalledPlugin("nsgeo_qgis", path=plugin_dir, readOnly=False)
-        out["installer_accepts"] = info.get("error", "") == ""
+        out["installer_accepts"] = info["error"] == ""
         out["installer_error_details"] = info.get("error_details", "")
 
         out["loads"] = loadPlugin("nsgeo_qgis") is True
