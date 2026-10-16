@@ -728,6 +728,7 @@ class SlicesDock(QgsDockWidget):
             self._included_is_default = True
             self._dz_z_seeded_for = None
             self._seed_resolution_defaults(grid_id)
+            self._restore_remembered_source(grid_id)
             return
         if self._included_is_default:
             self._included = self._default_included(grid_id)
@@ -735,6 +736,47 @@ class SlicesDock(QgsDockWidget):
             return
         valid = set(self.session.keys()) if self.session.is_open else set()
         self._included = tuple(k for k in self._included if k in valid)
+
+    def _restore_remembered_source(self, grid_id: str | None) -> None:
+        """M12 spec 4.2: bring back the preset and lines the user chose for
+        `grid_id` the last time (`SiteSession.slice_source`). A restore, not
+        a choice: the preset is selected inside the `_updating` guard so it
+        does not read as a user change, and nothing is remembered here. A
+        remembered preset that no longer exists is skipped; remembered line
+        keys are filtered to the ones still on the grid, in survey order. A
+        remembered `lines` of None means "every line", so it stays a
+        default and a line imported later is still picked up."""
+        entry = self.session.slice_source(grid_id) if grid_id and self.session.is_open else None
+        if entry is None:
+            return
+        preset = entry.get("preset")
+        if (
+            preset
+            and preset != self.preset_combo.currentText()
+            and self.preset_combo.findText(preset) >= 0
+        ):
+            self._updating += 1
+            try:
+                self.preset_combo.setCurrentText(preset)
+            finally:
+                self._updating -= 1
+        lines = entry.get("lines")
+        if lines is not None:
+            wanted = set(lines)
+            self._included = tuple(k for k in self._default_included(grid_id) if k in wanted)
+            self._included_is_default = False
+
+    def _remember_source(self) -> None:
+        """Record the user's own choice for the selected grid. Called only
+        from a real user change (`_on_source_changed`, `set_included`),
+        never from `rebuild_source`'s first computation: opening a site
+        must not mark it dirty."""
+        grid_id = self.grid_combo.currentText()
+        preset = self.preset_combo.currentText()
+        if not grid_id or not preset or not self.session.is_open:
+            return
+        lines = None if self._included_is_default else self._included
+        self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
 
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
@@ -877,6 +919,7 @@ class SlicesDock(QgsDockWidget):
         self._update_included_label()
         self._refresh_source_status()
         if changed:
+            self._remember_source()
             self.prepare()
 
     def _live_preset_steps(self, preset_name: str) -> list[dict]:
@@ -1014,6 +1057,7 @@ class SlicesDock(QgsDockWidget):
             self._pending_palette = None
             self._mark_cube_unsaved()
             self._sync_included()
+            self._remember_source()
             self._update_included_label()
             self.prepare()
         except Exception as exc:  # noqa: BLE001 -- a slot on currentTextChanged

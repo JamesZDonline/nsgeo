@@ -1189,3 +1189,66 @@ def test_a_pick_on_a_real_line_lands_in_that_files_own_time_window(qgis_app, tmp
     assert layers.feature_count("picks") == 2
     layers.detach()
     project.clear()
+
+
+def test_remembering_an_unchanged_source_does_not_mark_dirty(session):
+    session.add_grid(GRID)
+    session.save()
+    session.remember_slice_source("A", preset="p", lines=("k1", "k2"))
+    assert session.dirty
+    session.save()
+    session.remember_slice_source("A", preset="p", lines=("k1", "k2"))
+    assert not session.dirty
+    session.remember_slice_source("A", preset="p", lines=None)
+    assert session.dirty
+
+
+def test_a_remembered_source_round_trips_keeps_gain_and_is_a_copy(session):
+    session.add_grid(GRID)
+    assert session.slice_source("A") is None and session.grid_gain("A") == 1.0
+    session.set_grid_gain("A", 2.0)
+    session.remember_slice_source("A", preset="p", lines=("k1",))
+    assert session.grid_gain("A") == 2.0
+    session.set_grid_gain("A", 3.0)
+    got = session.slice_source("A")
+    assert got == {"gain": 3.0, "preset": "p", "lines": ["k1"]}
+    got["lines"].append("zz")
+    assert session.slice_source("A")["lines"] == ["k1"]
+    session.set_site_view(grids=("A",))
+    view = session.site_view()
+    view["grids"].append("zz")
+    assert session.site_view() == {"grids": ["A"]}
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_set_grid_gain_refuses_zero_and_negative(session, bad):
+    session.add_grid(GRID)
+    session.save()
+    with pytest.raises(ValueError, match="gain"):
+        session.set_grid_gain("A", bad)
+    assert session.slice_source("A") is None and not session.dirty
+
+
+def test_set_site_view_refuses_an_unknown_method(session):
+    session.save()
+    with pytest.raises(ValueError, match="normalisation"):
+        session.set_site_view(normalisation="sharpen")
+    assert session.site_view() == {} and not session.dirty
+
+
+def test_set_site_view_merges_and_is_quiet_when_unchanged(session):
+    session.set_site_view(grids=("A",), transform="none")
+    session.set_site_view(normalisation="edge")
+    assert session.site_view() == {"grids": ["A"], "transform": "none", "normalisation": "edge"}
+    session.save()
+    session.set_site_view(normalisation="edge")
+    assert not session.dirty
+
+
+def test_removing_a_grid_prunes_its_source_and_its_site_view_entry(session):
+    session.add_grid(GRID)
+    session.remember_slice_source("A", preset="p", lines=None)
+    session.set_site_view(grids=("A", "B"))
+    session.remove_grid("A")
+    assert session.slice_source("A") is None
+    assert session.site_view()["grids"] == ["B"]

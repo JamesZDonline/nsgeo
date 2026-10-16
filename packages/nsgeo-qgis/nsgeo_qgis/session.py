@@ -14,6 +14,7 @@ none of this is protected by a lock.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import datetime as _dt
 import json
@@ -25,6 +26,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.model.survey import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
+from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
@@ -492,6 +494,9 @@ class SiteSession(QObject):
         if users:
             raise ValueError(f"grid {grid_id!r} still has {len(users)} line(s); remove them first")
         site.grids.remove(self.grid(grid_id))
+        site.slice_sources.pop(grid_id, None)
+        if grid_id in site.site_view.get("grids", []):
+            site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
         self._set_dirty(True)
         self.grids_changed.emit()
 
@@ -698,6 +703,66 @@ class SiteSession(QObject):
         is that method for cubes.
         """
         self._require_site().cubes[cube_id] = dict(record)
+        self._set_dirty(True)
+
+    # ---- slice sources and the site view ---------------------------------------
+    def slice_source(self, grid_id: str) -> dict[str, Any] | None:
+        """A copy of the grid's remembered slice source, or None."""
+        entry = self._require_site().slice_sources.get(grid_id)
+        return None if entry is None else copy.deepcopy(entry)
+
+    def _update_source(self, grid_id: str, **changes: Any) -> None:
+        sources = self._require_site().slice_sources
+        old = sources.get(grid_id)
+        new = {**(old or {}), **changes}
+        if new == old:
+            return
+        sources[grid_id] = new
+        self._set_dirty(True)
+
+    def remember_slice_source(
+        self, grid_id: str, *, preset: str, lines: tuple[str, ...] | None
+    ) -> None:
+        """Remember the user's preset and line choice for a grid (`lines=None`
+        is "every line"). Keeps an existing gain."""
+        self._update_source(grid_id, preset=preset, lines=None if lines is None else list(lines))
+
+    def grid_gain(self, grid_id: str) -> float:
+        entry = self._require_site().slice_sources.get(grid_id, {})
+        return float(entry.get("gain", 1.0))
+
+    def set_grid_gain(self, grid_id: str, gain: float) -> None:
+        if not (math.isfinite(gain) and gain > 0):
+            raise ValueError(f"gain must be a positive number, got {gain!r}")
+        self._update_source(grid_id, gain=float(gain))
+
+    def site_view(self) -> dict[str, Any]:
+        """A copy of the remembered site-view choices."""
+        return copy.deepcopy(self._require_site().site_view)
+
+    def set_site_view(
+        self,
+        *,
+        grids: tuple[str, ...] | None = None,
+        transform: str | None = None,
+        normalisation: str | None = None,
+    ) -> None:
+        """Merge the given site-view choices; None leaves a field as it is."""
+        if normalisation is not None and normalisation not in NORMALISATION_METHODS:
+            raise ValueError(
+                f"unknown normalisation {normalisation!r}; expected one of {NORMALISATION_METHODS}"
+            )
+        view = self._require_site().site_view
+        new = dict(view)
+        if grids is not None:
+            new["grids"] = list(grids)
+        if transform is not None:
+            new["transform"] = transform
+        if normalisation is not None:
+            new["normalisation"] = normalisation
+        if new == view:
+            return
+        self._require_site().site_view = new
         self._set_dirty(True)
 
     # ---- current line, samples, cursor ------------------------------------
