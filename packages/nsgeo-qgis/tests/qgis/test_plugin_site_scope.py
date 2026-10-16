@@ -1,0 +1,731 @@
+"""The Slices dock's Whole site scope, driven through the plugin (M12 Task 5).
+
+Spec 4.1-4.5. `site3` (conftest) is three adjacent 6 x 6 m grids, A, B and
+C, four lines each; the plugin opens it in its own session, as a user would.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import re
+
+import numpy as np
+import pytest
+from nsgeo.slices import plan_windows, window_depths_m
+from nsgeo.velocity import VelocityModel
+from nsgeo_qgis import plugin as plugin_module
+from nsgeo_qgis import slices_engine
+from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
+from osgeo import gdal
+from plugin_testing import LoadCounter, spin_until
+from qgis.PyQt.QtCore import QCoreApplication, Qt
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+
+GRID_X = {"A": (500.0, 506.0), "B": (506.0, 512.0), "C": (512.0, 518.0)}
+
+
+def _open(fake_iface, site, answer_modal):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.open_site(site.json_path)
+    dock = plugin.slices_dock
+    # This grid's automatic first preparation (A), as on any survey open.
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    return plugin
+
+
+def _close(plugin, answer_modal):
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    dock = plugin.slices_dock
+    if dock is not None:
+        dock.site_engine.wait_until_idle(20_000)
+        dock.engine.wait_for_preparation(20_000)
+    plugin.unload()
+
+
+@pytest.fixture
+def plugin(fake_iface, site3, answer_modal):
+    plugin = _open(fake_iface, site3, answer_modal)
+    yield plugin
+    _close(plugin, answer_modal)
+
+
+@pytest.fixture
+def open_plugin(fake_iface, answer_modal):
+    """`plugin`, on a site of the test's own making (`site3_factory`)."""
+    made = []
+
+    def make(site):
+        made.append(_open(fake_iface, site, answer_modal))
+        return made[-1]
+
+    yield make
+    for p in made:
+        _close(p, answer_modal)
+
+
+def _events(n: int = 5) -> None:
+    for _ in range(n):
+        QCoreApplication.processEvents()
+
+
+def settle(dock) -> None:
+    """Wait for the site to finish preparing, then let its coalesced tick run."""
+    assert dock.site_engine.wait_until_idle(60_000), "the site did not finish preparing"
+    _events()
+
+
+def whole_site(plugin):
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    settle(dock)
+    return dock
+
+
+def columns(shown, grid_id):
+    """The lattice columns inside a grid's footprint (site3's grids are side by side)."""
+    lattice = shown.lattice
+    x0, x1 = GRID_X[grid_id]
+    first = int(round((x0 - lattice.x0) / lattice.pixel))
+    last = int(round((x1 - lattice.x0) / lattice.pixel))
+    return slice(first, last)
+
+
+def _uniform_source(session, preset: str) -> None:
+    for grid_id in "ABC":
+        session.remember_slice_source(grid_id, preset=preset, lines=None)
+
+
+# ---- the switch ----------------------------------------------------------------
+
+
+def test_the_scope_switch_swaps_the_source_controls(plugin):
+    dock = plugin.slices_dock
+    assert dock.scope() == "grid"
+    assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
+    assert not dock.source_group.isHidden()
+    assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
+    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.save_button.isHidden()
+    assert dock.export_button.text() == "Export GeoTIFF…"
+    assert dock.stretch_combo.itemText(0) == "shared across the cube"
+
+    whole_site(plugin)
+    assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
+    assert dock.source_group.isHidden()
+    assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
+    assert dock.radius_spin.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.save_button.isHidden()
+    assert dock.export_button.text() == "Export site GeoTIFF…"
+    assert dock.stretch_combo.itemText(0) == "shared across the site"
+    assert dock.stretch_combo.currentIndex() == 0
+    table = dock.site_panel.table
+    headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+    assert headers == ["✓", "Grid", "Preset", "Lines", "State"]
+    assert dock.site_panel.included() == ("A", "B", "C")  # every grid with lines
+    assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
+    assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
+    # Normalisation is off by default (spec 4.6).
+    assert dock.normalisation_panel.method() == "none"
+    spin = dock.radius_spacing_spin
+    assert spin.suffix() == " × line spacing"
+    assert (spin.minimum(), spin.maximum(), spin.singleStep(), spin.value()) == (0, 10, 0.25, 1.5)
+    assert "A 2.25 m" in spin.toolTip()  # 1.5 x A's 1.5 m spacing
+
+    dock.grid_scope_button.click()
+    assert dock.scope() == "grid"
+    assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
+    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert dock.export_button.text() == "Export GeoTIFF…"
+    assert dock.stretch_combo.itemText(0) == "shared across the cube"
+
+
+def test_whole_site_draws_one_layer_covering_every_grid(plugin):
+    dock = whole_site(plugin)
+    layer = plugin.slice_layer.layer
+    assert layer is not None and layer.name() == SITE_LAYER_NAME
+    extent = layer.extent()
+    assert extent.xMinimum() == pytest.approx(500.0) and extent.xMaximum() == pytest.approx(518.0)
+    assert extent.yMinimum() == pytest.approx(700.0) and extent.yMaximum() == pytest.approx(706.0)
+    previews = [
+        lyr
+        for lyr in plugin.layers.project.mapLayers().values()
+        if lyr.name() in (LAYER_NAME, SITE_LAYER_NAME)
+    ]
+    assert previews == [layer]
+    shown = dock.current_site_slice()
+    for grid_id in "ABC":
+        assert shown.windows[grid_id] is not None
+        assert np.isfinite(shown.array[:, columns(shown, grid_id)]).any(), grid_id
+
+    # Both scopes drawn: switching renames the one layer in place.
+    dock.grid_scope_button.click()
+    assert plugin.slice_layer.layer.id() == layer.id()
+    assert layer.name() == LAYER_NAME
+    assert dock.current_site_slice() is None
+    whole_site(plugin)
+    assert plugin.slice_layer.layer.id() == layer.id()
+    assert layer.name() == SITE_LAYER_NAME
+
+
+def test_one_slider_moves_every_grid(plugin):
+    dock = whole_site(plugin)
+    dock.slice_slider.setValue(20)
+    _events()
+    first = dock.current_site_slice()
+    dock.slice_slider.setValue(60)
+    _events()
+    second = dock.current_site_slice()
+    for grid_id in "ABC":
+        assert second.windows[grid_id].k0 - first.windows[grid_id].k0 == 40, grid_id
+        region = columns(first, grid_id)
+        assert not np.array_equal(
+            first.array[:, region], second.array[:, region], equal_nan=True
+        ), grid_id
+
+
+def test_switching_scope_keeps_the_window_time(plugin):
+    dock = plugin.slices_dock
+    # A coarser This-grid dz, so the same slider index is a different time
+    # on the two axes: only carrying the time keeps the window.
+    dock.dz_spin.setValue(dock.dz_spin.value() * 3)
+    dock.flush_debounce()
+    dock.slice_slider.setValue(30)
+    grid_z = dock.engine.z
+    grid_top = grid_z.t0_ns + 30 * grid_z.dz_ns
+
+    whole_site(plugin)
+    site_z = dock.site_engine.site_z
+    assert site_z.dz_ns != pytest.approx(grid_z.dz_ns)
+    site_top = site_z.t0_ns + dock.slice_slider.value() * site_z.dz_ns
+    assert abs(site_top - grid_top) <= site_z.dz_ns / 2 + 1e-9
+    lo = float(re.search(r"· ([-\d.]+)–", dock.readout.text()).group(1))
+    assert lo == pytest.approx(site_top, abs=0.05)
+    assert dock.thickness_spin.value() == pytest.approx(5.0)  # the thickness is shared too
+
+    dock.slice_slider.setValue(dock.slice_slider.value() + 7)
+    _events()
+    site_top = site_z.t0_ns + dock.slice_slider.value() * site_z.dz_ns
+    dock.grid_scope_button.click()
+    assert dock.engine.z == grid_z, "This grid comes back at its own resolution"
+    back_top = grid_z.t0_ns + dock.slice_slider.value() * grid_z.dz_ns
+    assert abs(back_top - site_top) <= grid_z.dz_ns / 2 + 1e-9
+
+
+# ---- the grid list --------------------------------------------------------------
+
+
+def test_unticking_a_grid_removes_it_from_the_map(plugin):
+    dock = whole_site(plugin)
+    shown = dock.current_site_slice()
+    assert np.isfinite(shown.array[:, columns(shown, "B")]).any()
+    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+    settle(dock)
+    shown = dock.current_site_slice()
+    assert "B" not in shown.windows
+    assert np.isnan(shown.array[:, columns(shown, "B")]).all()
+    assert np.isfinite(shown.array[:, columns(shown, "A")]).any()
+    assert plugin.session.site_view()["grids"] == ["A", "C"]
+    assert dock.site_panel.table.item(1, 4).text() == "not included"
+
+
+def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
+    """Ruling T3-d: spec 4.2's "preparing n of m" in the State column."""
+    LoadCounter(monkeypatch, delay=0.05)
+    dock = plugin.slices_dock
+    seen: set[str] = set()
+    dock.site_scope_button.click()
+
+    def watch() -> bool:
+        seen.update(dock.site_panel.table.item(r, 4).text() for r in range(3))
+        return not dock.site_engine.is_running
+
+    assert spin_until(watch, 60_000)
+    assert {"preparing 1 of 4", "preparing 2 of 4"} <= seen, seen
+    assert "queued" in seen
+
+
+def test_choose_lines_acts_on_the_selected_grid_only(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    session = plugin.session
+    counter = LoadCounter(monkeypatch)
+    this_grid = dock.included_keys()
+    b_keys = dock.line_choice_keys("B")
+    assert len(b_keys) == 4
+
+    dock.site_panel.select_grid("B")
+    assert dock.site_panel.choose_button.text() == "Choose lines for B…"
+    assert dock.line_choice_grid() == "B"
+    dock.site_panel.choose_button.click()
+    dialog = plugin._line_choice_dialog
+    assert dialog is not None and dialog.grid_id == "B"
+    dialog.set_included(b_keys[0], False)
+    dialog.accept()
+    settle(dock)
+
+    assert counter.calls == 3, "only B re-prepares, with its three lines"
+    assert dock.included_keys() == this_grid, "This grid's own lines are not touched"
+    assert session.slice_source("B")["lines"] == list(b_keys[1:])
+    assert session.slice_source("A") is None
+    assert dock.site_panel.table.item(1, 3).text() == "3 / 4"
+    assert dock.site_engine.engine_for("B").line_count == 3
+
+
+def test_a_line_choice_is_dropped_when_the_selection_moved_meanwhile(plugin, fake_iface):
+    """M11's Ruling Z, for the site: the grid at `finished` must be the one
+    the chooser was opened for."""
+    dock = whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    plugin.open_line_choice_dialog()
+    dialog = plugin._line_choice_dialog
+    dock.site_panel.select_grid("C")
+    dialog.select_none()
+    dialog.accept()
+    assert plugin.session.slice_source("B") is None
+    assert plugin.session.slice_source("C") is None
+    item = fake_iface.messageBar().currentItem()
+    assert item is not None and "grid changed" in item.text()
+
+
+def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
+    """Ruling T2-c: `set_site_view` does not validate the transform, so a
+    stored one that is no longer offered must not break the switch. The
+    fallback is what This grid shows (here not the panel's own "none")."""
+    dock = plugin.slices_dock
+    dock.transform_combo.setCurrentText("amp_envelope")
+    assert dock.engine.wait_for_preparation(20_000)
+    plugin.session.set_site_view(transform="amp_gone_since")
+    whole_site(plugin)
+    assert dock.site_panel.transform() == "amp_envelope"
+    assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
+
+
+def test_lines_chosen_in_the_site_for_this_grids_grid_are_what_this_grid_shows(plugin):
+    """Spec 4.2: This grid reads and writes the same record the site does."""
+    dock = whole_site(plugin)
+    a_keys = dock.line_choice_keys("A")
+    dock.site_panel.select_grid("A")
+    dock.set_included_for("A", a_keys[:2])
+    settle(dock)
+    assert dock.site_engine.engine_for("A").line_count == 2
+    dock.grid_scope_button.click()
+    assert dock.included_keys() == a_keys[:2]
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.line_count == 2
+
+
+# ---- normalisation and gain -------------------------------------------------------
+
+
+def test_the_method_combo_changes_the_drawn_values(site3_factory, open_plugin):
+    site = site3_factory(scale={"B": 4.0})
+    _uniform_source(site.session, "raw")  # no AGC, so B stays four times as bright
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    plain = dock.current_site_slice()
+    assert all(f == (1.0, 0.0) for f in plain.factors.values())
+
+    dock.normalisation_panel.method_combo.setCurrentIndex(1)  # Background level
+    _events()
+    evened = dock.current_site_slice()
+    assert dock.normalisation_panel.method() == "background"
+    assert plugin.session.site_view()["normalisation"] == "background"
+    assert evened.factors["B"][0] < 0.5 < evened.factors["A"][0]
+    region = columns(plain, "B")
+    assert not np.array_equal(plain.array[:, region], evened.array[:, region], equal_nan=True)
+
+
+def test_the_gain_spin_scales_only_the_selected_grid(plugin):
+    dock = whole_site(plugin)
+    panel = dock.normalisation_panel
+    before = dock.current_site_slice().array.copy()
+    assert not panel.gain_spin.isEnabled() or dock.site_panel.selected_grid() == "A"
+
+    dock.site_panel.select_grid("B")
+    assert panel.gain_spin.isEnabled() and panel.gain_spin.value() == 1.0
+    panel.gain_spin.setValue(2.0)
+    _events()
+    after = dock.current_site_slice()
+    for grid_id in "AC":
+        region = columns(after, grid_id)
+        assert np.array_equal(after.array[:, region], before[:, region], equal_nan=True), grid_id
+    region = columns(after, "B")
+    np.testing.assert_allclose(after.array[:, region], 2.0 * before[:, region], rtol=1e-6)
+    assert plugin.session.grid_gain("B") == 2.0
+    assert plugin.session.grid_gain("A") == plugin.session.grid_gain("C") == 1.0
+    assert after.factors["B"] == (2.0, 0.0)
+
+    panel.reset_button.click()
+    _events()
+    assert panel.gain_spin.value() == 1.0
+    assert np.array_equal(dock.current_site_slice().array, before, equal_nan=True)
+
+
+def test_the_gain_spin_steps_by_a_useful_increment(plugin):
+    """Trap 7: M11 shipped spin boxes that stepped by Qt's default 1.0."""
+    dock = whole_site(plugin)
+    spin = dock.normalisation_panel.gain_spin
+    assert spin.singleStep() == pytest.approx(0.05)
+    assert spin.prefix() == "×" and spin.decimals() == 2
+    assert (spin.minimum(), spin.maximum()) == (pytest.approx(0.10), pytest.approx(10.00))
+    dock.site_panel.select_grid(None)
+    assert not spin.isEnabled() and not dock.normalisation_panel.reset_button.isEnabled()
+    dock.site_panel.select_grid("C")
+    spin.stepUp()
+    assert spin.value() == pytest.approx(1.05)
+    assert plugin.session.grid_gain("C") == pytest.approx(1.05)
+
+
+# ---- the readout -------------------------------------------------------------------
+
+
+def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, open_plugin):
+    site = site3_factory(samples={"C": 128})  # C records a quarter of the time
+    v_a = VelocityModel(layers=((0.0, 0.10),))
+    v_b = VelocityModel(layers=((0.0, 0.06),))
+    site.session.set_grid_velocity("A", v_a)
+    site.session.set_grid_velocity("B", v_b)
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    site_z = dock.site_engine.site_z
+    dock.slice_slider.setValue(int(round((60.0 - site_z.t0_ns) / site_z.dz_ns)))
+    _events()
+
+    shown = dock.current_site_slice()
+    assert shown.windows["C"] is None
+    assert re.fullmatch(r"slice \d+ / \d+ · [-\d.]+–[-\d.]+ ns", dock.readout.text())
+    parts = dock.site_depths_label.text().split(" · ")
+    expected = []
+    for grid_id, velocity in (("A", v_a), ("B", v_b)):
+        z = dock.site_engine.engine_for(grid_id).z
+        lo, hi = window_depths_m(z, shown.windows[grid_id], velocity)
+        expected.append(f"{grid_id} {lo:.2f}–{hi:.2f} m")
+    assert parts == [*expected, "C no data"]
+    assert expected[0] != expected[1].replace("B", "A"), "each grid's own velocity"
+    assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": dock.site_velocities()["C"]}
+    assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
+
+
+def test_the_profile_band_follows_the_site_window(plugin):
+    dock = whole_site(plugin)
+    windows: list[tuple[float, float]] = []
+    dock.window_changed.connect(lambda lo, hi: windows.append((lo, hi)))
+    dock.slice_slider.setValue(15)
+    _events()
+    site_z = dock.site_engine.site_z
+    top = site_z.t0_ns + 15 * site_z.dz_ns
+    assert windows and windows[-1][0] == pytest.approx(top)
+    windows.clear()
+    dock.reannounce_window()
+    assert windows[-1][0] == pytest.approx(top)
+
+
+def test_the_shared_stretch_is_measured_once_not_on_every_slider_move(plugin, monkeypatch):
+    """Task 3 measured `shared_limit` at ~3 s on a large streaming site: it
+    is cached by what it measures over, never by the slider."""
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    real = site.shared_limit
+    calls: list[str] = []
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs["method"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(site, "shared_limit", counted)
+    for value in (3, 17, 40):
+        dock.slice_slider.setValue(value)
+        _events()
+    assert calls == []
+    dock.normalisation_panel.method_combo.setCurrentIndex(1)
+    _events()
+    assert calls == ["background"]
+    dock.slice_slider.setValue(8)
+    _events()
+    assert calls == ["background"]
+
+
+# ---- coalescing (ruling T3-g) ----------------------------------------------------------
+
+
+def test_a_burst_of_slider_moves_draws_once_with_the_last_value(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    real = site.slice_at
+    tops: list[float] = []
+
+    def counted(top_ns, *args, **kwargs):
+        tops.append(top_ns)
+        return real(top_ns, *args, **kwargs)
+
+    monkeypatch.setattr(site, "slice_at", counted)
+    for value in (5, 9, 14, 22, 31):
+        dock.slice_slider.setValue(value)
+    assert tops == [], "nothing is drawn until the event loop runs"
+    _events()
+    site_z = site.site_z
+    assert tops == [pytest.approx(site_z.t0_ns + 31 * site_z.dz_ns)]
+    assert dock.current_site_slice().windows["A"].k0 == 31
+
+
+# ---- persistence -----------------------------------------------------------------------
+
+
+def test_the_site_view_survives_save_and_reopen(plugin):
+    dock = whole_site(plugin)
+    session = plugin.session
+    assert not session.dirty, "showing the site is not a change to the survey"
+    dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
+    dock.site_panel.transform_combo.setCurrentText("amp_envelope")
+    dock.normalisation_panel.method_combo.setCurrentIndex(2)  # Edge match
+    dock.site_panel.select_grid("B")
+    dock.normalisation_panel.gain_spin.setValue(1.5)
+    settle(dock)
+    assert session.dirty
+    session.save()
+
+    session.open_site(session.json_path)
+    assert dock.scope() == "grid", "the scope is not persisted"
+    assert dock.engine.wait_for_preparation(20_000)
+    dock = whole_site(plugin)
+    assert not session.dirty
+    assert dock.site_panel.included() == ("A", "B")
+    assert dock.site_panel.transform() == "amp_envelope"
+    assert dock.normalisation_panel.method() == "edge"
+    dock.site_panel.select_grid("B")
+    assert dock.normalisation_panel.gain_spin.value() == pytest.approx(1.5)
+    assert dock.site_engine.ready_grids == ("A", "B")
+    assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
+    assert dock.current_site_slice().factors["B"][0] != 1.0
+
+
+# ---- export -----------------------------------------------------------------------------
+
+
+def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, tmp_path):
+    dock = whole_site(plugin)
+    dock.normalisation_panel.method_combo.setCurrentIndex(1)
+    _events()
+    target = tmp_path / "out" / "site.tif"
+    target.parent.mkdir()
+    calls = answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    assert dock.export_button.isEnabled()
+    dock.export_button.click()
+
+    assert calls[0][0][2].endswith("slices/site.tif"), calls[0]
+    ds = gdal.Open(str(target))
+    try:
+        md = ds.GetMetadata()
+        assert md["NSGEO_SITE_NORMALISATION"] == "background"
+        assert md["NSGEO_SITE_TRANSFORM"] == "none"
+        assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 1.5
+        assert [g["grid_id"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == ["A", "B", "C"]
+        thickness, step = dock.thickness_step_levels()  # the dock's own, on the site axis
+        assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1
+        assert "B" in json.loads(ds.GetRasterBand(1).GetMetadataItem("NSGEO_GRID_FACTORS"))
+    finally:
+        ds = None
+    names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
+    assert "site" in names
+    assert plugin.layers.group.findLayer(
+        next(lyr for lyr in plugin.layers.project.mapLayers().values() if lyr.name() == "site").id()
+    )
+
+
+def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
+    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+):
+    """M11's Ruling AH, for the site: the companion follows the coverage
+    toggle, and its failure is reported on its own terms, after the main
+    file has been written and added."""
+    dock = whole_site(plugin)
+    dock.coverage_check.setChecked(True)
+    _events()
+    target = tmp_path / "with_coverage.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert (tmp_path / "with_coverage_coverage.tif").exists()
+    names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
+    assert {"with_coverage", "with_coverage_coverage"} <= set(names)
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plugin_module, "write_site_coverage", broken)
+    second = tmp_path / "second.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(second), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert second.exists()
+    assert "second" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
+    texts = [
+        fake_iface.messageBar().items()[i].text()
+        for i in range(len(fake_iface.messageBar().items()))
+    ]
+    assert any("coverage companion" in t and "disk full" in t for t in texts), texts
+    assert not any("could not export the site GeoTIFF" in t for t in texts), texts
+
+
+def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
+    """Ruling T4-a: the file must not silently leave out a grid still preparing."""
+    LoadCounter(monkeypatch, delay=0.05)
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    enabled_while_busy: list[bool] = []
+
+    def watch() -> bool:
+        if dock.site_engine.is_running:
+            enabled_while_busy.append(dock.export_button.isEnabled())
+        return not dock.site_engine.is_running
+
+    assert spin_until(watch, 60_000)
+    _events()
+    assert enabled_while_busy and not any(enabled_while_busy)
+    assert dock.export_button.isEnabled()
+
+
+def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path, fake_iface):
+    """Ruling T4-a: an included grid with no lines is named in the success message."""
+    session = plugin.session
+    dock = whole_site(plugin)
+    session.remember_slice_source("C", preset="p", lines=())
+    session.lines_changed.emit()  # the survey changed: the site follows
+    settle(dock)
+    assert dock.site_engine.grid_state("C") == "no lines"
+    target = tmp_path / "left_out.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    text = fake_iface.messageBar().currentItem().text()
+    assert "exported" in text and "C (no lines)" in text, text
+
+
+def test_a_failed_site_export_leaves_no_file_and_adds_no_layer(
+    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+):
+    """Ruling T4-b: a half-written GeoTIFF reads as valid zeros."""
+    dock = whole_site(plugin)
+    target = tmp_path / "broken.tif"
+
+    def fail_part_way(site_engine, path, *args, **kwargs):
+        path.write_bytes(b"II*\x00 the first band, then the disk filled")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(plugin_module, "export_site", fail_part_way)
+    before = set(plugin.layers.project.mapLayers())
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert not target.exists()
+    assert set(plugin.layers.project.mapLayers()) == before
+    text = fake_iface.messageBar().currentItem().text()
+    assert "could not export the site GeoTIFF" in text and "disk full" in text
+
+
+# ---- concurrency (trap 1, ruling R-P5) ------------------------------------------------------
+
+
+def test_editing_a_grid_in_site_scope_never_overlaps_preparations(plugin, monkeypatch):
+    """R-P5. SiteEngine waits for This grid's engine; nothing else made This
+    grid's engine wait for the site. A grid moved while the site prepares
+    would re-prepare This grid's engine from its own `grids_changed` slot
+    (M11), and `rebuild_source` would auto-prepare it on the session signal
+    -- either one a second preparation beside the site's."""
+    counter = LoadCounter(monkeypatch, delay=0.2)
+    dock = plugin.slices_dock
+    session = plugin.session
+    assert dock.engine.choice.grid_id == "A" and dock.engine.is_prepared
+    dock.site_scope_button.click()
+    # B has read one line and has three to go (about 0.6 s): a preparation
+    # This grid's engine started now would overlap it. Measured: such a task
+    # reads its first line ~0.2 s after it is dispatched, so a shorter
+    # remainder let the overlap slip past the counter.
+    assert spin_until(lambda: dock.site_engine.grid_progress("B") == (1, 4))
+
+    session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
+    session.lines_changed.emit()
+    settle(dock)
+    assert counter.max_concurrent == 1, (
+        f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
+    )
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    assert not dock.engine.is_prepared and not dock.engine.has_live_task
+
+    dock.grid_scope_button.click()
+    assert spin_until(lambda: dock.engine.is_running or dock.engine.is_prepared)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert counter.max_concurrent == 1
+    assert dock.engine.is_prepared
+    assert dock.engine.frame is not None and dock.engine.frame.origin == (500.0, 690.0)
+    _events()
+    assert dock.current_values() is not None, "This grid is drawn again"
+
+
+def test_flipping_scope_mid_preparation_never_overlaps_and_settles(plugin, monkeypatch):
+    counter = LoadCounter(monkeypatch, delay=0.04)
+    dock = plugin.slices_dock
+    # This grid starts a preparation of its own, and the site is asked for
+    # straight after it: the site waits for it (Ruling 1).
+    dock.transform_combo.setCurrentText("amp_envelope")
+    assert dock.engine.is_running
+    dock.site_scope_button.click()
+    assert spin_until(lambda: dock.site_engine.grid_state("A") == "preparing")
+    dock.grid_scope_button.click()
+    assert not dock.site_engine.is_running, "leaving the site stops its preparation"
+    assert dock.site_engine.grid_state("B") == "queued"
+    dock.site_scope_button.click()
+    assert spin_until(lambda: dock.site_engine.grid_state("B") == "preparing")
+    dock.grid_scope_button.click()
+    assert not dock.site_engine.is_running
+    dock.site_scope_button.click()
+    settle(dock)
+
+    assert counter.max_concurrent == 1, (
+        f"two preparations ran at once (max_concurrent={counter.max_concurrent})"
+    )
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    assert dock.current_site_slice() is not None
+    dock.grid_scope_button.click()
+    assert dock.engine.is_prepared and dock.engine.choice.transform == "amp_envelope"
+
+
+def test_leaving_the_site_waits_out_a_task_that_outlived_its_cancel(plugin, monkeypatch):
+    """R-P5's other half: `set_scope("grid")` runs an owed This-grid
+    preparation only once no site task is live. Here the site's cancel gives
+    up (1 ms wait) with its task still reading a line."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    dock = plugin.slices_dock
+    session = plugin.session
+    dock.site_scope_button.click()
+    assert spin_until(lambda: counter.calls >= 1)
+    # A moves: This grid's engine owes A again, and the site re-queues it.
+    session.replace_grid(dataclasses.replace(session.grid("A"), origin=(500.0, 690.0)))
+    assert spin_until(lambda: dock.site_engine.grid_state("A") == "preparing")
+    assert spin_until(lambda: counter.concurrent == 1)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    assert not dock.engine.is_running, "This grid waits for it"
+    assert spin_until(lambda: dock.engine.is_prepared, 30_000)
+    assert counter.max_concurrent == 1
+
+
+def test_unload_with_the_site_scope_open_leaves_nothing_running(
+    fake_iface, site3, answer_modal, monkeypatch
+):
+    LoadCounter(monkeypatch, delay=0.05)
+    plugin = _open(fake_iface, site3, answer_modal)
+    dock = plugin.slices_dock
+    site_engine, engine = dock.site_engine, dock.engine
+    dock.site_scope_button.click()
+    assert spin_until(lambda: site_engine.grid_state("B") == "preparing")
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+    assert not site_engine.has_live_task and not engine.has_live_task
+    assert spin_until(lambda: False, 300) is False  # let anything stray fire; nothing may raise
+    assert not site_engine.has_live_task

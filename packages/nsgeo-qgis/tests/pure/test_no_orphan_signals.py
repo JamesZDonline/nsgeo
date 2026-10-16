@@ -75,6 +75,10 @@ SHADOWED = {
     # the same way ProfileDock's is -- declared rises to 3, connects to 2,
     # and ParamForm.error stays the one genuine orphan of the three.
     "error": {"declared": 3, "connects": 2},
+    # M12 Task 5: SlicesDock.choose_lines_requested (plugin.py connects it to
+    # open_line_choice_dialog) and SiteSourcePanel's own, carrying the grid
+    # id (slices_dock.py connects it to re-emit the dock's). Both consumed.
+    "choose_lines_requested": {"declared": 2, "connects": 2},
 }
 
 

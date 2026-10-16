@@ -67,6 +67,7 @@ from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
 from nsgeo_qgis.slice_export import (
     apply_temporal_properties,
     cube_record,
@@ -74,7 +75,7 @@ from nsgeo_qgis.slice_export import (
     save_cube_npz,
     write_coverage,
 )
-from nsgeo_qgis.slice_layer import SliceLayer
+from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
@@ -418,6 +419,11 @@ class NsgeoPlugin:
             # the cyclic collector happens not to have run. dispose()
             # disconnects them (and frees the kernel cache) deterministically,
             # before the session it is connected to is torn down below.
+            #
+            # M12: the site scope first -- its timers, This grid's move hook
+            # and the `SiteEngine`, which cancels and waits out its own task
+            # -- so nothing it owns can start or outlive the teardown.
+            self.slices_dock.dispose_site()
             self.slices_dock.engine.dispose()
         if self.depth_scroll is not None:
             self.depth_scroll.dispose()
@@ -636,6 +642,24 @@ class NsgeoPlugin:
             dock, layer = self.slices_dock, self.slice_layer
             if dock is None or layer is None:
                 return
+            if dock.scope() == "site":
+                # M12 spec 4.5: one layer over every included grid, already
+                # north-up on the site lattice.
+                shown = dock.current_site_slice()
+                if shown is None:
+                    layer.clear()
+                    return
+                layer.update_north_up(
+                    shown.array,
+                    shown.lattice.geotransform,
+                    shown.lattice.crs,
+                    limit=dock.display_limit(),
+                    colormap_name=dock.palette_combo.currentText(),
+                    unipolar=dock.display_unipolar(),
+                    subtitle=dock.readout.text(),
+                    name=SITE_LAYER_NAME,
+                )
+                return
             values, frame = dock.current_values(), dock.current_frame()
             if values is None or frame is None:
                 layer.clear()
@@ -775,6 +799,9 @@ class NsgeoPlugin:
             if not self.session.is_open or self.slices_dock is None:
                 return
             dock = self.slices_dock
+            if dock.scope() == "site":
+                self.export_site_geotiff()
+                return
             engine = dock.engine
             if not engine.is_prepared:
                 self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
@@ -841,6 +868,103 @@ class NsgeoPlugin:
                 self.message(message)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
+
+    def export_site_geotiff(self) -> None:
+        """`export_geotiff` in site scope: one GeoTIFF over every included grid.
+
+        M12 spec 4.7, following M11's `export_geotiff`: a path defaulting to
+        `slices/site.tif`, the dock's own thickness and step levels, method,
+        radius, gains and velocities, then the layer in the site group with
+        its bands on the Temporal Controller, and -- when the coverage toggle
+        is on -- the companion in its own `try` (Ruling AH).
+
+        Ruling T4-a: no grid is left out silently. The button is disabled
+        while an included grid prepares (the dock), and the message names
+        any included grid the file does not hold. Ruling T4-b: a failed
+        export removes what it had written, and adds no layer.
+        """
+        assert self.session is not None
+        try:
+            if not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            site = dock.site_engine
+            if not site.ready_grids or site.lattice is None or site.site_z is None:
+                self.message(
+                    "prepare the site's grids before exporting.", Qgis.MessageLevel.Warning
+                )
+                return
+            default_path = self.session.root / "slices" / "site.tif"
+            path, _ = QFileDialog.getSaveFileName(
+                self.iface.mainWindow(),
+                "Export site GeoTIFF",
+                str(default_path),
+                "GeoTIFF (*.tif *.tiff)",
+            )
+            if not path:
+                return
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            thickness_levels, step_levels = dock.thickness_step_levels()
+            # A file the dialog chose to replace is the user's until this
+            # export has written over it; only then is a failure's leftover ours.
+            before = target.stat().st_mtime_ns if target.exists() else None
+            try:
+                plan = export_site(
+                    site,
+                    target,
+                    thickness_levels,
+                    step_levels,
+                    transform=dock.site_panel.transform(),
+                    method=dock.normalisation_panel.method(),
+                    radius_spacings=dock.radius_spacing_spin.value(),
+                    gains=dock.site_gains(),
+                    velocities=dock.site_velocities(),
+                )
+            except Exception:
+                # Ruling T4-b: a half-written file would read as valid zeros.
+                with contextlib.suppress(OSError):
+                    if target.exists() and target.stat().st_mtime_ns != before:
+                        target.unlink()
+                raise
+            layer = QgsRasterLayer(path, target.stem, "gdal")
+            if not layer.isValid():
+                self.message(
+                    f"the exported site GeoTIFF at {path} could not be reopened as a layer",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            apply_site_temporal_properties(layer, plan)
+            self.layers.project.addMapLayer(layer, False)
+            if self.layers.group is not None:
+                self.layers.group.addLayer(layer)
+
+            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            if dock.coverage_check.isChecked():
+                coverage_path = target.with_name(f"{target.stem}_coverage.tif")
+                try:
+                    write_site_coverage(site, target, plan)
+                    coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
+                    if not coverage_layer.isValid():
+                        raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
+                    self.layers.project.addMapLayer(coverage_layer, False)
+                    if self.layers.group is not None:
+                        self.layers.group.addLayer(coverage_layer)
+                    parts.append(f"coverage to {coverage_path}")
+                except Exception as exc:  # noqa: BLE001 -- Ruling AH, as in export_geotiff
+                    self.message(
+                        f"the site GeoTIFF exported, but the coverage companion at "
+                        f"{coverage_path} could not be written: {exc}",
+                        Qgis.MessageLevel.Warning,
+                    )
+            left_out = dock.site_left_out()
+            if left_out:
+                parts.append(f"left out {', '.join(left_out)}")
+                self.message(", ".join(parts), Qgis.MessageLevel.Warning)
+            else:
+                self.message(", ".join(parts))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not export the site GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 
     def _toggle_pick_mode(self, checked: bool) -> None:
         """The Pick toolbar toggle. Drives the dock, never the view
@@ -1293,6 +1417,11 @@ class NsgeoPlugin:
         same reasoning) and the `show()`/`raise_()`/`activateWindow()` set
         both other dialogs here use on every path, not just some of them.
 
+        M12: the grid is `dock.line_choice_grid()` -- This grid's, or the
+        site list's selected row -- and the result is committed through
+        `dock.set_included_for`, which in site scope re-prepares that grid
+        only.
+
         `finished` re-checks the dock's CURRENT grid against `grid_id`
         (fix round 3, Ruling Z): the dialog is modeless and binds
         `grid_id` once, at open time, but nothing stops the user from
@@ -1306,7 +1435,8 @@ class NsgeoPlugin:
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
                 return
-            grid_id = self.slices_dock.grid_combo.currentText()
+            # M12: This grid's grid, or the site list's selected row.
+            grid_id = self.slices_dock.line_choice_grid()
             if not grid_id:
                 self.message("Choose a grid before choosing lines.", Qgis.MessageLevel.Warning)
                 return
@@ -1317,20 +1447,20 @@ class NsgeoPlugin:
                 return
             dock = self.slices_dock
             dialog = LineChoiceDialog(
-                self.session, grid_id, dock.included_keys(), self.iface.mainWindow()
+                self.session, grid_id, dock.line_choice_keys(grid_id), self.iface.mainWindow()
             )
 
             def finished(result: int) -> None:
                 try:
                     if result == QDialog.DialogCode.Accepted and self.slices_dock is not None:
-                        if self.slices_dock.grid_combo.currentText() != grid_id:
+                        if self.slices_dock.line_choice_grid() != grid_id:
                             self.message(
                                 "the grid changed while choosing lines; "
                                 "the line choice was not applied",
                                 Qgis.MessageLevel.Warning,
                             )
                         else:
-                            self.slices_dock.set_included(dialog.included_keys())
+                            self.slices_dock.set_included_for(grid_id, dialog.included_keys())
                 except Exception as exc:  # noqa: BLE001 -- a slot on finished
                     self.message(
                         f"could not apply the line choice: {exc}", Qgis.MessageLevel.Warning
