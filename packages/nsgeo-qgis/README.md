@@ -28,8 +28,10 @@ alongside it as conveniences that can be recomputed.
 Picks are authored data. They live in the site GeoPackage's `picks` table,
 which is the one table `survey.nsgeo.json` cannot regenerate, and they are
 written the moment you make them — there is nothing to save. The table is
-editable in QGIS like any other layer, so a pick can be given a note, moved,
-or deleted with the ordinary tools.
+editable in QGIS like any other layer, so a pick can be given a note or
+deleted with the ordinary tools. Do not drag a pick to a new place on the map:
+it keeps the trace, time and distance it was made at, so the point and its
+record would no longer agree. To move a pick, delete it and pick again.
 
 Picks go on the **working line** — the one the processing dock is bound to —
 never on a line you are only previewing by hovering the map. Shift+clicking a
@@ -44,8 +46,8 @@ A pick's position on the map is fixed at the moment you make it. Moving,
 resizing or reorienting a grid afterwards does **not** move any pick already
 recorded against a line on that grid — the line itself redraws in its new
 place, but the pick does not follow, and the plugin logs a warning rather
-than silently re-placing it (re-placing on every refresh could just as
-easily overwrite a pick you moved by hand). Changing a grid's CRS is the
+than silently re-placing it (re-placing on every refresh would rewrite
+authored data without asking). Changing a grid's CRS is the
 exception: that re-projects every pick, the same way it re-projects
 everything else in the package.
 
