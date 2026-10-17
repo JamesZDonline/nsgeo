@@ -100,8 +100,11 @@ any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
   Click a line to open it. Right-click a grid for **Edit grid…**, **Import DZT
-  files…**, **Set velocity…** and **Remove grid**. Right-click a line for
-  **Open** and **Remove line from site**.
+  files…**, **Set velocity…** and **Remove grid**, which removes the grid along
+  with its lines. Right-click a line for **Open** and **Remove line from site**.
+  To remove several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click
+  to select them, then press Delete or right-click the selection. Removing never
+  deletes the DZT files, and nothing changes on disk until you save the site.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. **Fit** fits the whole line

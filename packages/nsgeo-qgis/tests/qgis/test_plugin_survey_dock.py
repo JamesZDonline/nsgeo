@@ -13,7 +13,9 @@ from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QPoint, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMenu, QMessageBox
+from qgis.PyQt.QtGui import QKeyEvent
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QAbstractItemView, QApplication, QFileDialog, QMenu, QMessageBox
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -63,10 +65,24 @@ def test_tree_follows_session_changes(dock):
     assert "empty" in dock.tree.topLevelItem(0).child(1).text(0)
 
 
+def _click(dock, item, modifier=Qt.KeyboardModifier.NoModifier):
+    """A real left click on `item`, through the tree's own mouse handling,
+    so the selection it makes is the one a user's click would make.
+
+    Shown first: a never-shown dock's tree viewport is a few pixels tall
+    (measured: 90x6), so the click would land outside it and hit nothing.
+    """
+    if not dock.isVisible():
+        dock.resize(400, 600)
+        dock.show()
+    pos = dock.tree.visualItemRect(item).center()
+    QTest.mouseClick(dock.tree.viewport(), Qt.MouseButton.LeftButton, modifier, pos)
+
+
 def test_clicking_a_line_opens_it_and_selection_follows_the_session(dock):
     session, dock = dock
     item = dock.item_for_key("raw/FILE__002.DZT")
-    dock.tree.itemClicked.emit(item, 0)
+    _click(dock, item)
     assert session.current_key == "raw/FILE__002.DZT"
     session.open_line("raw/FILE__003.DZT")
     assert dock.tree.currentItem() is dock.item_for_key("raw/FILE__003.DZT")
@@ -90,8 +106,10 @@ def test_context_actions_remove_lines_and_grids(dock):
     session, dock = dock
     dock.remove_line_action("raw/FILE__001.DZT", confirm=False)
     assert "raw/FILE__001.DZT" not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
-    with pytest.raises(ValueError):
-        dock.remove_grid_action("A", confirm=False)
+    # A grid that still has lines goes, and takes them with it (#31).
+    dock.remove_grid_action("A", confirm=False)
+    assert session.site.grids == []
+    assert session.keys() == []
 
 
 def test_closing_the_site_empties_the_tree(dock):
@@ -662,9 +680,6 @@ def test_removing_a_line_from_the_menu_takes_no_for_an_answer(dock, answer_modal
 
 def test_removing_a_grid_from_the_menu_takes_no_for_an_answer(dock, answer_modal, message_log):
     session, dock = dock
-    # A grid with no lines in it: remove_grid refuses one that still has
-    # lines for an unrelated reason, which would make "nothing was
-    # removed" true whatever the answer was.
     session.add_grid(Grid("B", (0.0, 0.0), 0.0, 1.0, 1.0, "EPSG:32616", 0.5))
     answer_modal(QMenu, "exec", None)
     no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
@@ -682,3 +697,217 @@ def test_removing_a_grid_from_the_menu_takes_no_for_an_answer(dock, answer_modal
     _action(_right_click(dock, b_item), "Remove grid").trigger()
     assert len(yes) == 1
     assert [g.id for g in session.site.grids] == ["A"]
+
+
+# ---- #31: remove many lines at once, and a grid that still has lines ------
+# Reported from the M7 walkthrough: removing a 40-line grid took 40
+# separate confirmations. Whatever goes, the one confirmation has to say
+# exactly what, and that the DZT files themselves are left alone.
+
+KEYS = [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
+
+
+def _select(dock, *items):
+    dock.tree.clearSelection()
+    for item in items:
+        item.setSelected(True)
+
+
+def _grid_item(dock, grid_id):
+    root = dock.tree.topLevelItem(0)
+    return next(
+        root.child(i) for i in range(root.childCount()) if dock.grid_id_of(root.child(i)) == grid_id
+    )
+
+
+def _add_grid_b_with_a_line(session, tmp_path):
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+    session.add_lines([Line.open(p, GridPlacement("B", "y", 0.0, 0.0, 1, p.stem))])
+    return "raw/FILE__009.DZT"
+
+
+def _press(dock, key):
+    QTest.keyClick(dock.tree, key)
+
+
+def test_the_tree_selects_many_items_at_once(dock):
+    session, dock = dock
+    assert dock.tree.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+
+
+def test_ctrl_and_shift_clicks_select_lines_without_opening_them(dock, message_log):
+    session, dock = dock
+    first, second, third = (dock.item_for_key(k) for k in KEYS)
+
+    _click(dock, first)
+    assert session.current_key == KEYS[0]
+
+    # Building a selection must not load every file it touches: opening a
+    # line reads its DZT, and the open line is what the profile shows.
+    _click(dock, third, Qt.KeyboardModifier.ControlModifier)
+    assert {dock.key_of(i) for i in dock.tree.selectedItems()} == {KEYS[0], KEYS[2]}
+    assert session.current_key == KEYS[0]
+
+    _click(dock, first)  # a plain click starts over with just that line
+    _click(dock, third, Qt.KeyboardModifier.ShiftModifier)
+    assert {dock.key_of(i) for i in dock.tree.selectedItems()} == set(KEYS)
+    assert session.current_key == KEYS[0]
+
+    _click(dock, second)  # ...and a plain click inside a selection opens that line
+    assert [dock.key_of(i) for i in dock.tree.selectedItems()] == [KEYS[1]]
+    assert session.current_key == KEYS[1]
+    assert message_log == []
+
+
+def test_delete_removes_every_selected_line_after_one_confirmation(dock, answer_modal):
+    session, dock = dock
+    for key in KEYS:
+        session.append_step(key, build_step("dewow"))
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[2]))
+
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    _press(dock, Qt.Key.Key_Delete)
+    assert len(no) == 1
+    assert session.keys() == KEYS
+
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+
+    assert len(yes) == 1
+    text = yes[0][0][2]
+    assert "2 lines" in text and KEYS[0] in text and KEYS[2] in text
+    assert KEYS[1] not in text
+    assert session.keys() == [KEYS[1]]
+    assert list(session.site.stacks) == [KEYS[1]]
+
+
+def test_backspace_removes_the_selection_too(dock, answer_modal):
+    # A Mac keyboard's "delete" key sends Backspace.
+    session, dock = dock
+    _select(dock, dock.item_for_key(KEYS[1]))
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Backspace)
+    assert len(yes) == 1
+    assert KEYS[1] not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+
+
+def test_delete_with_nothing_removable_selected_asks_nothing(dock):
+    # The site row is not removable; nothing selected is nothing to do.
+    # Either would raise here if it reached a prompt: this tier forbids
+    # an unanswered QMessageBox.question.
+    session, dock = dock
+    _select(dock, dock.tree.topLevelItem(0))
+    _press(dock, Qt.Key.Key_Delete)
+    dock.tree.clearSelection()
+    _press(dock, Qt.Key.Key_Delete)
+    assert session.keys() == KEYS
+
+
+def test_the_tree_keeps_delete_from_an_application_shortcut(dock):
+    # QGIS binds keys of its own; a ShortcutOverride the tree accepts is
+    # what makes Delete reach the tree instead of whatever QGIS action
+    # shares the key while the tree has focus.
+    session, dock = dock
+    for key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        event = QKeyEvent(QEvent.Type.ShortcutOverride, key, Qt.KeyboardModifier.NoModifier)
+        event.setAccepted(False)
+        QApplication.sendEvent(dock.tree, event)
+        assert event.isAccepted()
+    # ...but only the bare key: Ctrl+Delete is still QGIS's to have.
+    event = QKeyEvent(
+        QEvent.Type.ShortcutOverride, Qt.Key.Key_Delete, Qt.KeyboardModifier.ControlModifier
+    )
+    event.setAccepted(False)
+    QApplication.sendEvent(dock.tree, event)
+    assert not event.isAccepted()
+
+
+def test_removing_a_grid_names_its_lines_and_takes_them_with_it(dock, answer_modal, message_log):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+
+    _action(_right_click(dock, _grid_item(dock, "A")), "Remove grid").trigger()
+
+    assert len(yes) == 1
+    text = yes[0][0][2]
+    assert "grid A and its 3 lines" in text
+    assert "DZT files" in text and "not touched" in text
+    assert "until you save" in text
+    assert session.site.grids == []
+    assert session.keys() == []
+    assert message_log == []
+
+
+def test_the_menu_on_a_selection_offers_one_removal_for_all_of_it(dock, answer_modal, message_log):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
+    _select(dock, first, second)
+
+    menu = _right_click(dock, first)
+    assert _texts(menu) == ["Remove 2 lines from site"]
+
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _action(menu, "Remove 2 lines from site").trigger()
+    assert len(yes) == 1
+    assert session.keys() == [KEYS[2]]
+    assert message_log == []
+
+
+def test_right_clicking_outside_the_selection_gets_that_items_own_menu(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    assert _texts(_right_click(dock, dock.item_for_key(KEYS[2]))) == [
+        "Open",
+        "Set velocity override…",
+        "Remove line from site",
+    ]
+
+
+def test_a_grid_and_a_line_from_another_grid_go_together(dock, tmp_path, answer_modal):
+    session, dock = dock
+    b_key = _add_grid_b_with_a_line(session, tmp_path)
+    # Grid A's own lines are selected too: they go with the grid, and the
+    # prompt must not count them twice.
+    _select(dock, _grid_item(dock, "A"), dock.item_for_key(KEYS[0]), dock.item_for_key(b_key))
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+
+    _press(dock, Qt.Key.Key_Delete)
+
+    assert len(yes) == 1
+    text = yes[0][0][2]
+    assert "grid A and its 3 lines" in text and b_key in text
+    assert [g.id for g in session.site.grids] == ["B"]
+    assert session.keys() == []
+
+
+def test_a_long_selection_is_summarised_not_listed_in_full(dock, tmp_path, answer_modal):
+    session, dock = dock
+    extra = []
+    for i in range(12):
+        p = synthetic_dzt(tmp_path / "raw", f"EXTRA_{i:02d}.DZT")
+        extra.append(Line.open(p, GridPlacement("A", "y", 2.0 + i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(extra)
+    keys = session.keys()
+    _select(dock, *(dock.item_for_key(k) for k in keys))
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+
+    _press(dock, Qt.Key.Key_Delete)
+
+    text = yes[0][0][2]
+    assert "15 lines" in text
+    assert keys[0] in text and keys[-1] not in text
+    assert "and 5 more" in text
+    assert session.keys() == []
+
+
+def test_removing_one_line_says_so_in_the_singular(dock, answer_modal):
+    session, dock = dock
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    dock.remove_line_action(KEYS[0])
+    text = yes[0][0][2]
+    assert text.startswith(f"Remove {KEYS[0]} from the site?")
+    assert "The DZT file on disk is not touched" in text and "picks on this line" in text
