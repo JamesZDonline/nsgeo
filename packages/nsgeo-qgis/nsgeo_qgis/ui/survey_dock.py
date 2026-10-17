@@ -314,6 +314,11 @@ class SurveyDock(QgsDockWidget):
     def _follow_current(self, key: str) -> None:
         try:
             item = self.item_for_key(key) if key else None
+            # Twice on purpose. The bare call is the only one that moves
+            # Qt's Shift anchor (a later Shift-click must range from this
+            # line); the explicit command then undoes the toggle a held
+            # Ctrl would have made of it (see _SELECT_ONLY).
+            self.tree.setCurrentItem(item)
             self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
@@ -412,7 +417,13 @@ class SurveyDock(QgsDockWidget):
         geometry as well as its lines, so a grid row caught in a range of
         lines must not turn "remove these lines" into "remove that grid".
         """
-        items = self.tree.selectedItems()
+        # Walked in tree order: selectedItems() is in the order the items
+        # were selected, and the prompt lists what goes in tree order.
+        items = []
+        it = QTreeWidgetItemIterator(self.tree, QTreeWidgetItemIterator.IteratorFlag.Selected)
+        while it.value():
+            items.append(it.value())
+            it += 1
         keys = []
         for item in items:
             key = self.key_of(item)

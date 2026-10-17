@@ -996,3 +996,26 @@ def test_removing_one_line_says_so_in_the_singular(dock, answer_modal):
     text = yes[0][0][2]
     assert text.startswith(f"Remove {KEYS[0]} from the site?")
     assert "The DZT file on disk is not touched" in text and "picks on this line" in text
+
+
+def test_a_shift_click_ranges_from_a_line_opened_elsewhere(dock):
+    # Opening a line from the map moves the tree to it; the next
+    # Shift-click must range from there, not from the last line clicked
+    # in the tree. Only QAbstractItemView.setCurrentIndex moves Qt's
+    # Shift anchor -- a setCurrentItem with an explicit selection command
+    # goes straight to the selection model and leaves the anchor behind.
+    session, dock = dock
+    _click(dock, dock.item_for_key(KEYS[0]))
+    session.open_line(KEYS[2])
+    _click(dock, dock.item_for_key(KEYS[1]), Qt.KeyboardModifier.ShiftModifier)
+    assert sorted(dock.key_of(i) for i in dock.tree.selectedItems()) == [KEYS[1], KEYS[2]]
+
+
+def test_the_removal_prompt_lists_lines_in_tree_order_not_click_order(dock, answer_modal):
+    session, dock = dock
+    dock.tree.clearSelection()
+    for key in (KEYS[2], KEYS[0], KEYS[1]):
+        _click(dock, dock.item_for_key(key), Qt.KeyboardModifier.ControlModifier)
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+    assert "\n".join(KEYS) in yes[0][0][2]
