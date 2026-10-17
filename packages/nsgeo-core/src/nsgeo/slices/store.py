@@ -29,7 +29,7 @@ class CubeStoreError(Exception):
     """Raised when a cube file is missing, unreadable, or not a cube."""
 
 
-def _npz_path(path: str | Path) -> Path:
+def npz_path(path: str | Path) -> Path:
     """Normalise to the `.npz` name `np.savez_compressed` actually writes.
 
     `np.savez_compressed` APPENDS `.npz` unless the name already ends with
@@ -63,7 +63,7 @@ def _meta(cube: SliceCube) -> dict[str, Any]:
 
 def save_cube(cube: SliceCube, path: str | Path) -> None:
     """Write `cube` to `path`, creating parent directories as needed."""
-    path = _npz_path(path)
+    path = npz_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         path,
@@ -85,7 +85,7 @@ def load_cube(path: str | Path) -> SliceCube:
     from "not built yet".
     """
     try:
-        path = _npz_path(path)
+        path = npz_path(path)
     except ValueError as exc:
         raise CubeStoreError(f"{path!r} is not a usable cube path: {exc}") from exc
     if not path.exists():

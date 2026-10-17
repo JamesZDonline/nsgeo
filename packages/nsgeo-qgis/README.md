@@ -28,8 +28,10 @@ alongside it as conveniences that can be recomputed.
 Picks are authored data. They live in the site GeoPackage's `picks` table,
 which is the one table `survey.nsgeo.json` cannot regenerate, and they are
 written the moment you make them — there is nothing to save. The table is
-editable in QGIS like any other layer, so a pick can be given a note, moved,
-or deleted with the ordinary tools.
+editable in QGIS like any other layer, so a pick can be given a note or
+deleted with the ordinary tools. Do not drag a pick to a new place on the map:
+it keeps the trace, time and distance it was made at, so the point and its
+record would no longer agree. To move a pick, delete it and pick again.
 
 Picks go on the **working line** — the one the processing dock is bound to —
 never on a line you are only previewing by hovering the map. Shift+clicking a
@@ -44,8 +46,8 @@ A pick's position on the map is fixed at the moment you make it. Moving,
 resizing or reorienting a grid afterwards does **not** move any pick already
 recorded against a line on that grid — the line itself redraws in its new
 place, but the pick does not follow, and the plugin logs a warning rather
-than silently re-placing it (re-placing on every refresh could just as
-easily overwrite a pick you moved by hand). Changing a grid's CRS is the
+than silently re-placing it (re-placing on every refresh would rewrite
+authored data without asking). Changing a grid's CRS is the
 exception: that re-projects every pick, the same way it re-projects
 everything else in the package.
 
@@ -53,6 +55,12 @@ everything else in the package.
 
 ```bash
 python packages/nsgeo-qgis/scripts/dev_link.py      # symlink into the QGIS profile
+```
+
+For QGIS 4, whose profiles live under `QGIS4/`, add `--qgis-major 4`:
+
+```bash
+python packages/nsgeo-qgis/scripts/dev_link.py --qgis-major 4
 ```
 
 Then enable **nsgeo** in QGIS's plugin manager. The plugin finds the core source
@@ -71,3 +79,16 @@ QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/te
 ```
 
 The `qgis/` directory skips itself when `qgis` is not importable.
+
+To test against either QGIS major without installing it, run the suite in the
+official image with `scripts/in_qgis_docker.sh`. It copies the worktree to a
+throwaway `/work`, installs pytest, and makes the real-data symlinks resolve:
+
+```bash
+packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:4.2 \
+    python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
+packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:3.44 \
+    python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
+```
+
+CI runs the same two images. On Qt 6, the dock-width test is an expected failure.

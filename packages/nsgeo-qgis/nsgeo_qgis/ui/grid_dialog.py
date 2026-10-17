@@ -11,8 +11,7 @@ import math
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry.fit import fit_grid_from_corners
-from nsgeo.geometry.grid import Grid
+from nsgeo.geometry import Grid, fit_grid_from_corners
 from nsgeo.velocity import VelocityModel
 from qgis.core import (
     Qgis,

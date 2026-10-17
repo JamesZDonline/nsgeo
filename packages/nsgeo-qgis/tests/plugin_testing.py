@@ -6,7 +6,7 @@ import threading
 import time
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pytest
@@ -79,6 +79,41 @@ def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None
         Qt.KeyboardModifier.NoModifier,
     )
     QApplication.sendEvent(widget, ev)
+
+
+def send_hover(widget: Any, local_pos: Any) -> None:
+    """A buttonless mouse move, sent directly as a `QMouseEvent`.
+
+    `QTest.mouseMove` keeps cursor state that, on Qt 6, leaks across test
+    files and can swallow a later hover (spec M9 3.2c); this reaches the
+    widget's `mouseMoveEvent` every time. Qt imports are local, as above.
+    """
+    from qgis.PyQt.QtCore import Qt
+
+    send_move_while_pressed(widget, local_pos, held_button=Qt.MouseButton.NoButton)
+
+
+def connect_message_log(slot: Callable[[str, str, int], None]) -> Callable[[], None]:
+    """Connect `slot(message, tag, int(level))` to the app's `QgsMessageLog`.
+
+    QGIS 4 dropped the three-argument `messageReceived` for
+    `messageReceivedWithFormat` (which adds a text-format argument, dropped
+    here); QGIS 3 only has `messageReceived`. Returns the matching
+    disconnect.
+    """
+    from qgis.core import QgsApplication
+
+    log = QgsApplication.messageLog()
+
+    def _on_message(msg: str, tag: str, level: Any, *_format: Any) -> None:
+        slot(msg, tag, int(level))
+
+    if hasattr(log, "messageReceivedWithFormat"):
+        signal = log.messageReceivedWithFormat
+    else:
+        signal = log.messageReceived
+    signal.connect(_on_message)
+    return lambda: signal.disconnect(_on_message)
 
 
 def send_double_click(widget: Any, local_pos: Any, button: Any = None) -> None:

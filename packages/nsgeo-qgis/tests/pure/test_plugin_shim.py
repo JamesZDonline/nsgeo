@@ -47,3 +47,12 @@ def test_missing_core_names_both_places_it_looked(tmp_path):
 def test_plugin_version_comes_from_metadata():
     v = plugin_version()
     assert v and v[0].isdigit()
+
+
+def test_build_label_names_the_commit_in_a_zip(tmp_path):
+    (tmp_path / "VERSION").write_text("core=0.1.0\ncommit=" + "ab12" * 10 + "\n")
+    assert nsgeo_qgis.build_label(tmp_path) == "build ab12ab12ab12"
+
+
+def test_build_label_says_development_checkout_without_one(tmp_path):
+    assert nsgeo_qgis.build_label(tmp_path) == "development checkout"
