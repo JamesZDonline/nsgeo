@@ -8,8 +8,8 @@ only requested through a signal and answered by the plugin object.
 
 Several items can be selected at once (#31): Ctrl- or Shift-click builds a
 selection without opening anything, and Delete -- or the context menu on
-the selection -- removes all of it after one confirmation. A grid goes
-with its lines.
+the selection -- removes it after one confirmation. A grid goes with its
+lines, and only when nothing but grids is selected (see _selected_targets).
 
 Signal/slot hazard: an exception raised inside a slot connected via
 `connect()` never reaches whatever emitted the signal -- PyQt prints the
@@ -27,9 +27,10 @@ from typing import Any
 
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
-from qgis.PyQt.QtCore import QEvent, QObject, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QItemSelectionModel, QObject, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QLabel,
     QMenu,
     QMessageBox,
@@ -56,6 +57,11 @@ _CHORD_MODIFIERS = (
 )
 # How many line keys a removal prompt lists before it summarises the rest.
 _LISTED_KEYS = 10
+# Moving the current item to a line must select just that line. A bare
+# setCurrentItem() takes its selection command from whatever modifier keys
+# are held at that moment, so with Ctrl down it TOGGLES the line -- out of
+# the selection, if it was already in it.
+_SELECT_ONLY = QItemSelectionModel.SelectionFlag.ClearAndSelect
 
 
 class SurveyDock(QgsDockWidget):
@@ -258,10 +264,10 @@ class SurveyDock(QgsDockWidget):
         # than "this is the line open in the profile view right now".
         key = self.session.current_key
         if key:
-            self.tree.setCurrentItem(self.item_for_key(key))
+            self.tree.setCurrentItem(self.item_for_key(key), 0, _SELECT_ONLY)
             return
         item = self._item_for_identity(previous) if previous is not None else None
-        self.tree.setCurrentItem(item)
+        self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
 
     # ---- lookups ----------------------------------------------------------
     def kind_of(self, item: QTreeWidgetItem | None) -> str | None:
@@ -293,12 +299,14 @@ class SurveyDock(QgsDockWidget):
             _log(f"could not open line {key!r}: {exc}", Qgis.MessageLevel.Critical)
 
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
-        # Open a line only when the click left it the one thing selected,
-        # i.e. a plain click. A Ctrl- or Shift-click is building a
-        # selection, and opening every line it touches would read each
-        # DZT file in turn and keep switching the profile. Read off the
-        # selection rather than the click's modifiers: Qt has already
-        # applied the click to the selection by the time it emits this.
+        # Open a line only on a plain click. A Ctrl- or Shift-click is
+        # building a selection, and opening every line it touches would
+        # read each DZT file in turn and keep switching the profile. The
+        # selection check alone is not enough: a Ctrl-click with nothing
+        # else selected also leaves the line the only thing selected.
+        held = QApplication.keyboardModifiers()
+        if held & Qt.KeyboardModifier.ControlModifier or held & Qt.KeyboardModifier.ShiftModifier:
+            return
         key = self.key_of(item)
         if key is not None and item.isSelected() and len(self.tree.selectedItems()) == 1:
             self._open_line(key)
@@ -306,7 +314,7 @@ class SurveyDock(QgsDockWidget):
     def _follow_current(self, key: str) -> None:
         try:
             item = self.item_for_key(key) if key else None
-            self.tree.setCurrentItem(item)
+            self.tree.setCurrentItem(item, 0, _SELECT_ONLY)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
                 f"could not follow the current line in the tree: {exc}", Qgis.MessageLevel.Critical
@@ -326,17 +334,17 @@ class SurveyDock(QgsDockWidget):
             kind = self.kind_of(item)
             grid_ids, keys = self._selected_targets()
             if (
-                item is not None
+                kind in ("grid", "line")
                 and item.isSelected()
                 and len(self.tree.selectedItems()) > 1
                 and (grid_ids or keys)
             ):
-                # Right-clicking inside a selection acts on all of it.
-                # Right-clicking outside one is handled by Qt before this
-                # runs: the press selects just that item.
+                # Right-clicking a grid or line inside a selection acts on
+                # the selection. Right-clicking outside one is handled by
+                # Qt before this runs: the press selects just that item.
                 menu.addAction(
                     f"Remove {self._count_phrase(grid_ids, keys)} from site",
-                    self.remove_selected_action,
+                    lambda: self.remove_selected_action(),
                 )
             elif kind == "site" or item is None:
                 menu.addAction("Add grid…", self.add_grid_requested.emit)
@@ -394,33 +402,38 @@ class SurveyDock(QgsDockWidget):
                 raise
 
     def _selected_targets(self) -> tuple[list[str], list[str]]:
-        """(grid ids, line keys) selected, in tree order. A line on a
-        selected grid is left out of the keys: it goes with its grid, and
-        counting it twice would overstate what is about to go."""
+        """(grid ids, line keys) to remove for the current selection, in
+        tree order.
+
+        A selection holding any line removes lines only, every selected
+        line whatever its grid. Grids go -- each with all its lines -- only
+        when nothing but grids is selected. A Shift-range across grids
+        sweeps up the grid rows it passes, and removing a grid deletes its
+        geometry as well as its lines, so a grid row caught in a range of
+        lines must not turn "remove these lines" into "remove that grid".
+        """
         items = self.tree.selectedItems()
-        grid_ids = [g for g in (self.grid_id_of(i) for i in items) if g is not None]
-        chosen = set(grid_ids)
         keys = []
         for item in items:
             key = self.key_of(item)
             if key is None:
                 continue
             try:
-                line = self.session.line_for_key(key)
+                self.session.line_for_key(key)
             except KeyError:
                 continue  # already gone from the session: nothing left to remove
-            if getattr(line.placement, "grid_id", None) not in chosen:
-                keys.append(key)
-        return grid_ids, keys
+            keys.append(key)
+        if keys:
+            return [], keys
+        return [g for g in (self.grid_id_of(i) for i in items) if g is not None], []
 
     @staticmethod
     def _count_phrase(grid_ids: list[str], keys: list[str]) -> str:
-        parts = []
         if grid_ids:
-            parts.append(f"{len(grid_ids)} grid{'s' if len(grid_ids) != 1 else ''}")
-        if keys:
-            parts.append(f"{len(keys)} line{'s' if len(keys) != 1 else ''}")
-        return " and ".join(parts)
+            if len(grid_ids) == 1:
+                return "1 grid and its lines"
+            return f"{len(grid_ids)} grids and their lines"
+        return f"{len(keys)} line{'s' if len(keys) != 1 else ''}"
 
     def _removal_text(self, grid_ids: list[str], keys: list[str]) -> str:
         """The confirmation for a removal: exactly what goes, and what
@@ -437,7 +450,7 @@ class SurveyDock(QgsDockWidget):
         if len(keys) == 1:
             things.append(keys[0])
         elif keys:
-            things.append(f"{len(keys)} {'other ' if grid_ids else ''}lines")
+            things.append(f"{len(keys)} lines")
         if len(things) == 1:
             parts = [f"Remove {things[0]} from the site?"]
         else:
@@ -457,7 +470,7 @@ class SurveyDock(QgsDockWidget):
                 "The DZT files on disk are not touched, and picks on these lines "
                 "stay in the picks layer."
             )
-        parts.append("Nothing is written until you save the site.")
+        parts.append("Nothing is saved to the site file until you choose Save site.")
         return "\n\n".join(parts)
 
     # ---- keyboard ----------------------------------------------------------

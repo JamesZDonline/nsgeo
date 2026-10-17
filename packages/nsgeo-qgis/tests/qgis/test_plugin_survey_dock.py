@@ -35,7 +35,13 @@ def dock(qgis_app, tmp_path):
             Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1 if i % 2 == 0 else -1, p.stem))
         )
     session.add_lines(lines)
-    return session, dock
+    yield session, dock
+    # `_click` shows this parentless dock; one left shown for the garbage
+    # collector to destroy segfaults at interpreter exit (measured: exit
+    # 139 after an otherwise passing `-k` run). Same teardown as
+    # test_plugin_profile_dock.py's shown dock.
+    dock.hide()
+    dock.deleteLater()
 
 
 def test_tree_mirrors_site_grids_and_lines(dock):
@@ -834,7 +840,7 @@ def test_removing_a_grid_names_its_lines_and_takes_them_with_it(dock, answer_mod
     text = yes[0][0][2]
     assert "grid A and its 3 lines" in text
     assert "DZT files" in text and "not touched" in text
-    assert "until you save" in text
+    assert "until you choose Save site" in text
     assert session.site.grids == []
     assert session.keys() == []
     assert message_log == []
@@ -867,21 +873,100 @@ def test_right_clicking_outside_the_selection_gets_that_items_own_menu(dock, ans
     ]
 
 
-def test_a_grid_and_a_line_from_another_grid_go_together(dock, tmp_path, answer_modal):
+def test_a_shift_range_across_grids_removes_lines_never_the_grid_it_crosses(
+    dock, tmp_path, answer_modal
+):
+    # A Shift-range from grid A into grid B sweeps up grid B's own row on
+    # the way. Removing a grid deletes its geometry as well as its lines,
+    # so a selection holding any line removes lines only: a grid goes only
+    # when nothing but grids is selected.
     session, dock = dock
     b_key = _add_grid_b_with_a_line(session, tmp_path)
-    # Grid A's own lines are selected too: they go with the grid, and the
-    # prompt must not count them twice.
-    _select(dock, _grid_item(dock, "A"), dock.item_for_key(KEYS[0]), dock.item_for_key(b_key))
+    _click(dock, dock.item_for_key(KEYS[1]))
+    _click(dock, dock.item_for_key(b_key), Qt.KeyboardModifier.ShiftModifier)
+    assert _grid_item(dock, "B").isSelected()  # the hazard this test is about
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
 
     _press(dock, Qt.Key.Key_Delete)
 
-    assert len(yes) == 1
     text = yes[0][0][2]
-    assert "grid A and its 3 lines" in text and b_key in text
-    assert [g.id for g in session.site.grids] == ["B"]
+    assert "3 lines" in text and "grid" not in text
+    assert [g.id for g in session.site.grids] == ["A", "B"]
+    assert session.keys() == [KEYS[0]]
+
+
+def test_a_shift_click_with_nothing_selected_never_takes_a_grid(dock, answer_modal):
+    # From a fresh tree the range runs from the site row down, through
+    # grid A's row, to the clicked line.
+    session, dock = dock
+    dock.tree.clearSelection()
+    _click(dock, dock.item_for_key(KEYS[0]), Qt.KeyboardModifier.ShiftModifier)
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+
+    _press(dock, Qt.Key.Key_Delete)
+
+    assert [g.id for g in session.site.grids] == ["A"]
+    assert KEYS[0] not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    assert len(session.keys()) == 2
+    assert len(yes) == 1
+
+
+def test_selected_grids_go_together_with_all_their_lines(dock, tmp_path, answer_modal):
+    session, dock = dock
+    _add_grid_b_with_a_line(session, tmp_path)
+    _select(dock, _grid_item(dock, "A"), _grid_item(dock, "B"))
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, _grid_item(dock, "A"))
+    assert _texts(menu) == ["Remove 2 grids and their lines from site"]
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+
+    _action(menu, "Remove 2 grids and their lines from site").trigger()
+
+    text = yes[0][0][2]
+    assert "grid A and its 3 lines" in text and "grid B and its 1 line" in text
+    assert session.site.grids == []
     assert session.keys() == []
+
+
+def test_ctrl_click_with_nothing_selected_selects_without_opening(dock, message_log):
+    # The state a user starts in: a site just opened, or a removal just
+    # done. A Ctrl-click there must start a selection, not open the line
+    # (and opening it then let the held Ctrl toggle it straight back out).
+    session, dock = dock
+    dock.tree.clearSelection()
+    _click(dock, dock.item_for_key(KEYS[1]), Qt.KeyboardModifier.ControlModifier)
+    _click(dock, dock.item_for_key(KEYS[2]), Qt.KeyboardModifier.ControlModifier)
+    assert [dock.key_of(i) for i in dock.tree.selectedItems()] == [KEYS[1], KEYS[2]]
+    assert session.current_key is None
+    assert message_log == []
+
+
+def test_a_line_opened_while_ctrl_is_held_is_selected_not_toggled(dock):
+    # Opening a line from elsewhere (the map) moves the tree to it; a
+    # modifier key still held at that moment must not turn that move into
+    # a toggle that leaves the opened line unselected. The Ctrl press is a
+    # real key event: Qt reads the held modifiers from its own C++ state,
+    # which patching QApplication.keyboardModifiers from Python never
+    # reaches.
+    session, dock = dock
+    # Already selected, next to another selected line: a toggle would
+    # deselect the opened line and leave the other one.
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[2]))
+    QTest.keyPress(dock.tree, Qt.Key.Key_Control, Qt.KeyboardModifier.ControlModifier)
+    try:
+        session.open_line(KEYS[2])
+        selected = [dock.key_of(i) for i in dock.tree.selectedItems()]
+    finally:
+        QTest.keyRelease(dock.tree, Qt.Key.Key_Control)
+    assert selected == [KEYS[2]]
+
+
+def test_right_clicking_the_site_row_in_a_selection_still_offers_add_grid(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    root = dock.tree.topLevelItem(0)
+    _select(dock, root, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    assert _texts(_right_click(dock, root)) == ["Add grid…"]
 
 
 def test_a_long_selection_is_summarised_not_listed_in_full(dock, tmp_path, answer_modal):

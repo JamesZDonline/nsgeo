@@ -340,6 +340,22 @@ def test_remove_grid_with_lines_takes_the_grid_and_only_its_lines(session, tmp_p
     assert order == [("line_opened", ""), ("grids_changed",), ("lines_changed",)]
 
 
+def test_removed_lines_can_be_imported_again_and_saved(session, tmp_path):
+    # The point of #31: clear out a bad import and do it again. The same
+    # files must import cleanly, without the dropped stacks coming back.
+    _two_grids(session, tmp_path)
+    session.append_step("raw/FILE__001.DZT", build_step("dewow"))
+    session.remove_grid("A", with_lines=True)
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 3))
+    session.save()
+
+    reopened = SiteSession()
+    reopened.open_site(tmp_path / SURVEY_FILE)
+    assert reopened.keys_on_grid("A") == [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
+    assert "raw/FILE__001.DZT" not in reopened.site.stacks
+
+
 def test_remove_grid_with_lines_on_an_empty_grid_says_nothing_about_lines(session, tmp_path):
     session.add_grid(GRID)
     changed = Spy(session.lines_changed)
