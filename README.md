@@ -2,9 +2,11 @@
 
 Near-surface geophysics: survey processing, analysis, and visualisation.
 
-A cross-platform toolstack for GPR, magnetometry, conductivity, and resistivity
-data — built as an independent core library with thin front-end layers, starting
-with a QGIS plugin.
+nsgeo processes GPR surveys inside QGIS, so each profile is seen and worked on in
+its map context. It is built as an independent core library with a thin QGIS
+plugin on top. Today it reads GSSI DZT files. The core is laid out so that other
+instruments, such as magnetometry, conductivity and resistivity, can be added later
+without touching the plugin.
 
 > **Status: 0.1.0, the first release, experimental.** The QGIS plugin imports
 > DZT files into grids placed on the map, links the map and the profile both
@@ -29,6 +31,33 @@ Nothing else needs installing. The
 upgrading, a first session from DZT files to slices, where your data lives, and
 the known issues.
 
+## What it does
+
+- **Sites, grids and lines.** Place a grid on the map from GNSS corners, by
+  digitising it, or from an existing polygon. Then import GSSI DZT files into it,
+  single- or multi-channel, with their DZX marks. Each grid carries a velocity,
+  which sets the depth scale.
+- **The map and the profile, linked both ways.** Hover a line on the map to
+  preview its radargram. Moving along the profile moves a marker along the line
+  on the map, and a range selected on the profile lights up on the map.
+- **Processing, under your control.** Each line has a stack of steps, and
+  **nothing runs automatically**. The steps are time-zero, dewow, bandpass,
+  three gains (AGC, parametric, and a manual gain curve you drag on the profile),
+  background removal (full-line mean, sliding window, or SVD), and amplitude
+  transforms (absolute value, square, envelope). Stacks can be saved as presets
+  and applied to a whole grid. A difference view shows what a step removed.
+- **Display.** Display gain and colour tables change only how the profile looks,
+  never the data.
+- **Picks.** Click the profile to record a pick at a trace and two-way time. Picks
+  are stored in the site's GeoPackage as a QGIS point layer, with the distance
+  along the line and the depth.
+- **Time and depth slices.** Bin a grid's processed lines into a volume, step
+  through slices on the map as a live raster layer, and export them as GeoTIFFs.
+
+Not built yet: migration, fitting a velocity from hyperbolas, and instruments
+other than GPR. Known issues and smaller gaps are tracked in the
+[issues](https://github.com/JamesZDonline/nsgeo/issues).
+
 ## Why
 
 Most GPR software makes you choose between processing your profiles and seeing
@@ -42,41 +71,32 @@ geophysics visible underneath.
 
 | Package | Licence | Contents |
 |---|---|---|
-| [`packages/nsgeo-core`](packages/nsgeo-core) | MIT | Readers, data model, geometry, processing. Pure Python, numpy only. No QGIS, no Qt. |
+| [`packages/nsgeo-core`](packages/nsgeo-core) | MIT | Readers, data model, geometry, processing, slices. Pure Python, numpy only. No QGIS, no Qt. |
 | [`packages/nsgeo-qgis`](packages/nsgeo-qgis) | GPL-2.0-or-later | QGIS plugin: docks, map tools, rendering. No signal processing. |
 
 The boundary is strict and load-bearing. The core has no `qgis` or `PyQt`
 import anywhere, which keeps it testable without a QGIS runtime, reusable by
 other front ends, and extensible to new instruments without touching UI code.
+The plugin imports only the core's named public API, which
+[`packages/nsgeo-core/README.md`](packages/nsgeo-core/README.md) documents.
 
 The core requires **numpy and nothing else**, because QGIS ships its own Python
 interpreter that users on Windows and macOS generally cannot `pip install` into.
-A numpy-only core can be safely vendored into the plugin zip. scipy is an
-optional accelerator with a numpy fallback; matplotlib is not used.
+A numpy-only core can be safely vendored into the plugin zip. scipy and
+matplotlib are not used: the bandpass and the slice gridding use numpy's FFT,
+and everything else is plain numpy.
 
-## v1 scope
-
-Load GSSI DZT files, organise them into sites and grids, view profiles, and
-apply user-controlled processing.
-
-- DZT reader, single- and multi-channel
-- Site / Grid / Line / Profile model, with grid georeferencing from GNSS
-  corners, on-map digitising, or existing polygons
-- A processing step stack — **nothing runs automatically** — covering time-zero,
-  dewow, three gain steps including a draggable manual gain curve, bandpass, and
-  background removal by full-line mean, sliding window, or SVD
-- Profile viewer with real-time display gain and a difference view showing what
-  a background step actually removed
-- Bidirectional map ↔ profile cursor synchronisation
-- Anomaly picking from the profile into a QGIS point layer
-
-Migration, velocity analysis, and other instruments are designed for but out of
-scope for v1. Time and depth slices, first planned for later, shipped in 0.1.0.
+To work on the code, see
+[`packages/nsgeo-qgis/README.md`](packages/nsgeo-qgis/README.md) for the
+development install, the tests, and building the zip.
 
 ## Design
 
-The full design document lives at
-[`docs/superpowers/specs/2026-09-10-nsgeo-gpr-qgis-design.md`](docs/superpowers/specs/2026-09-10-nsgeo-gpr-qgis-design.md).
+The design documents live in
+[`docs/superpowers/specs/`](docs/superpowers/specs/), starting with the original
+[GPR and QGIS design](docs/superpowers/specs/2026-09-10-nsgeo-gpr-qgis-design.md).
+Each milestone's implementation plan is in
+[`docs/superpowers/plans/`](docs/superpowers/plans/).
 
 ## A note on survey data
 
