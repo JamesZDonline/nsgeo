@@ -5,6 +5,11 @@ signal processing (a test enforces it).
 
 ## Features
 
+The [getting-started guide](../../docs/guide/getting-started.md) describes
+everything the plugin does: sites and grids, import, processing, picks, and time
+and depth slices. The two sections below record how the map link and picking
+behave in more detail.
+
 ### The map ↔ profile link
 
 Hovering a line on the map canvas previews its radargram in the profile
@@ -91,4 +96,41 @@ packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:3.44 \
     python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
 ```
 
-CI runs the same two images. On Qt 6, the dock-width test is an expected failure.
+CI runs the same two images. On Qt 6, the dock-width test is an expected failure
+until #50 settles the Slices panel's width.
+
+## Building the release zip
+
+```bash
+python packages/nsgeo-qgis/scripts/build_zip.py      # writes dist/nsgeo_qgis-<version>.zip
+```
+
+The zip holds one folder, `nsgeo_qgis/`, with the core vendored at
+`nsgeo_qgis/_vendor/nsgeo/`. `_vendor/VERSION` records the commit, which About
+shows as `build <12 hex>`; a development checkout shows `development checkout`
+instead. The zip is built from tracked files only. The build refuses a dirty
+tree unless given `--allow-dirty`, and refuses any file type outside its
+allowlist.
+
+To check a zip in real QGIS, install it into a fresh profile and start QGIS under
+xvfb with the smoke probe:
+
+```bash
+packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:4.2 \
+    bash packages/nsgeo-qgis/scripts/smoke_install.sh dist/nsgeo_qgis-<version>.zip
+```
+
+## Releasing
+
+The plugin and core versions move together. `metadata.txt`, `nsgeo/__init__.py`
+and the core's `pyproject.toml` must agree, and a test checks that they do. To
+release:
+
+1. Add `docs/releases/<version>.md`. It becomes the GitHub release's text, so use
+   absolute links.
+2. Merge to `main` and wait for CI to go green.
+3. Push the tag `v<version>`.
+
+CI then builds the zip with `--tag`, which refuses a tag that does not match the
+version or has no release notes. It smoke-tests the zip in QGIS 3.40, 3.44 and
+4.2, and publishes a GitHub release with the zip attached.
