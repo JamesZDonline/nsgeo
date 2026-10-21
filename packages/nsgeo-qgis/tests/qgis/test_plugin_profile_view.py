@@ -1650,7 +1650,9 @@ def test_hovering_the_line_shows_a_resize_cursor(view):
     send_hover(v, QPoint(r.left() + 100, r.top() + 50))
     assert v.cursor().shape() == Qt.CursorShape.ArrowCursor
     v.set_pick_mode(True)
+    # Pick wins the press, so the line must not advertise a drag in pick mode.
     send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
     send_hover(v, QPoint(r.left() + 100, r.top() + 50))
     assert v.cursor().shape() == Qt.CursorShape.CrossCursor
 
@@ -1660,3 +1662,22 @@ def test_clear_forgets_the_cutoff(view):
     v.set_cutoff(40.0)
     v.clear()
     assert v.cutoff_ns is None
+
+
+def test_a_new_press_abandons_a_grab_whose_release_was_lost(view):
+    v, _ = view
+    got, sel = [], []
+    v.cutoff_dragged.connect(got.append)
+    v.range_selected.connect(lambda a, b: sel.append((a, b)))
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns != 40.0
+    # No release, no button-less move: a second press arrives far from the line.
+    _press_left(v, r.left() + 100, r.top() + 50)
+    assert v.cutoff_ns == 40.0
+    _send_move_while_pressed(v, QPoint(r.left() + 300, r.top() + 50))
+    _release_left(v, r.left() + 300, r.top() + 50)
+    assert got == []
+    assert v.cutoff_ns == 40.0
+    assert sel == [(28, 86)]

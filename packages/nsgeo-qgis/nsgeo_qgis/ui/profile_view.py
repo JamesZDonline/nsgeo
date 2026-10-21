@@ -590,6 +590,14 @@ class ProfileView(QWidget):
             self._pan_last = event_pos(event)
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            # A grab still set here lost its release (focus stolen mid-
+            # drag) and no button-less move has cleaned it up yet. Abandon
+            # it before deciding what this press is, or its stale state
+            # would follow the next gesture and emit from the wrong one.
+            if self._cutoff_grab is not None:
+                self._cutoff_ns = self._cutoff_grab
+                self._cutoff_grab = None
+                self.update()
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
                 # Only inside the radargram itself. This handler runs for
@@ -677,7 +685,9 @@ class ProfileView(QWidget):
                 b = self.transform.trace_index_at(x)
                 self.set_selection(a, b)
             return
-        if self._near_cutoff(x, y):
+        # Pick wins the press over the grab, so in pick mode the line must
+        # not advertise a drag.
+        if self._near_cutoff(x, y) and not self._pick_mode:
             self.setCursor(Qt.CursorShape.SizeVerCursor)
         else:
             self.setCursor(
