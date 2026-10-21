@@ -554,7 +554,7 @@ def test_an_unedited_field_commits_the_exact_value_it_was_built_from(qgis_app):
     got = []
     f.committed.connect(got.append)
     f.commit()
-    assert all(c == {"end_ns": exact} for c in got)
+    assert got == [{"end_ns": exact}]
     f.set_value("end_ns", "-10.5")
     f.commit()
-    assert got[-1] == {"end_ns": -10.5}
+    assert got == [{"end_ns": exact}, {"end_ns": -10.5}]

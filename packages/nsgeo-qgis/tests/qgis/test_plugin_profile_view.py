@@ -24,7 +24,7 @@ from nsgeo_qgis.ui.profile_view import (
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtCore import QPoint, QPointF, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
@@ -785,6 +785,35 @@ def test_mouse_move_survives_a_broken_pan_transform_instead_of_leaking_to_qt(vie
 
     assert not excepthook_calls, f"exception leaked out of mouseMoveEvent: {excepthook_calls}"
     assert v.transform == before  # panned() never returned; last good transform kept
+
+
+def test_mouse_press_and_release_report_a_failure_instead_of_leaking_to_qt(
+    view, monkeypatch, message_log
+):
+    """Both are Qt-invoked overrides with real logic in them now (the
+    cutoff grab, the lost-release abandon, the selection commit), so each
+    guards its own body the way `mouseMoveEvent` does. Forced here by
+    making a helper each one calls raise, as the pan test above does."""
+    v, _ = view
+    excepthook_calls: list[tuple] = []
+    monkeypatch.setattr(sys, "excepthook", lambda *a: excepthook_calls.append(a))
+    r, t, ly = _on_line(v)
+
+    def boom(*_):
+        raise RuntimeError("simulated")
+
+    monkeypatch.setattr(v, "_near_cutoff", boom)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    assert not excepthook_calls, f"exception leaked out of mousePressEvent: {excepthook_calls}"
+    assert [m for m in message_log if "mouse press" in m and "simulated" in m]
+
+    monkeypatch.undo()
+    monkeypatch.setattr(sys, "excepthook", lambda *a: excepthook_calls.append(a))
+    monkeypatch.setattr(v, "clear_selection", boom)
+    _press_left(v, r.left() + 100, r.top() + 50)  # a plain click: its release clears
+    _release_left(v, r.left() + 100, r.top() + 50)
+    assert not excepthook_calls, f"exception leaked out of mouseReleaseEvent: {excepthook_calls}"
+    assert [m for m in message_log if "mouse release" in m and "simulated" in m]
 
 
 def test_shift_click_and_pick_mode_request_picks(view):
@@ -1557,6 +1586,23 @@ def test_the_cutoff_dims_the_samples_below_it(view):
     assert QColor(shot.pixel(x, line)).red() >= 150
 
 
+def test_the_cutoff_label_stays_inside_the_image_near_its_top(view):
+    """The label sits above the line, and the paint is clipped to the image.
+    A line within the label's height of the top, which is where a "keep one
+    sample" drag leaves it, would have its label clipped away: there it
+    goes below the line instead."""
+    v, _ = view
+    r, t = v.image_rect(), v.transform
+    v.set_cutoff(-4.0 + 0.5)  # one sample kept: the line 2 px below the top
+    near_top = v._cutoff_label_rect(r, t)
+    assert QRectF(r).contains(near_top)
+    assert near_top.top() >= r.top() + t.y_of_time(-3.5)
+    v.set_cutoff(40.0)
+    mid = v._cutoff_label_rect(r, t)
+    assert QRectF(r).contains(mid)
+    assert mid.bottom() <= r.top() + t.y_of_time(40.0)
+
+
 def test_the_label_names_the_time_and_the_depth():
     assert cutoff_label(40.0, None) == "40.0 ns"
     assert cutoff_label(40.0, VelocityModel.constant(0.08)) == "40.0 ns \u00b7 1.60 m"
@@ -1713,6 +1759,21 @@ def test_clear_forgets_the_cutoff(view):
     v.set_cutoff(40.0)
     v.clear()
     assert v.cutoff_ns is None
+
+
+def test_clear_puts_the_normal_cursor_back(view):
+    """Hovering the line sets the resize cursor, and only another hover over
+    the image resets it. With no line open there is none to come, so
+    `clear()` resets it itself, to the cursor pick mode calls for."""
+    v, _ = view
+    r, t, ly = _on_line(v)
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    v.clear()
+    assert v.cursor().shape() == Qt.CursorShape.ArrowCursor
+    v.set_pick_mode(True)
+    v.clear()
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
 
 
 def test_a_new_press_abandons_a_grab_whose_release_was_lost(view):

@@ -791,6 +791,12 @@ class ProfileDock(QgsDockWidget):
         row = self._selected_row if row is None else row
         if self._preview_key is not None or self._working_key is None or row < 0:
             return -1
+        # `close_site` drops the site before it emits `line_opened("")`, so
+        # a slot that runs before this dock's own `_open` (the Processing
+        # panel's `step_selected(-1)`, when that panel was built first) can
+        # still see the old working key here.
+        if not self.session.is_open:
+            return -1
         entries = self.session.stack_for(self._working_key, insert=False).entries
         if row >= len(entries) or time_param_name(entries[row][0]) is None:
             return -1

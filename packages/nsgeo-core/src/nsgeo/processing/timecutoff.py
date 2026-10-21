@@ -19,10 +19,14 @@ class TimeCutoff:
 
     def __init__(self, end_ns: float) -> None:
         end = float(end_ns)
-        # A NaN would fall through every comparison in `apply` and reach
-        # math.ceil; an infinity would be a silent no-op or a crash there.
-        # Neither is a time, so refuse at construction, where build_step and
-        # a preset load both pass through.
+        # Neither a NaN nor an infinity would pass `apply` silently, but both
+        # would fail badly there. math.ceil raises ValueError for a NaN
+        # ("cannot convert float NaN to integer", nothing about the cutoff)
+        # and OverflowError for an infinity, which a caller's handler for a
+        # bad step's ValueError does not catch. Either would also wait for
+        # the first render, after build_step or a preset load had accepted
+        # it. Neither is a time, so refuse at construction, which both of
+        # those pass through.
         if not math.isfinite(end):
             raise ValueError(f"time_cutoff end_ns must be finite, got {end_ns!r}")
         self.end_ns = end

@@ -23,6 +23,9 @@ raw mouse/wheel event feeds such a value straight into the transform, so
 both guard their own bodies broadly (`except Exception`, not just
 `ValueError`) and fall back to leaving `self.transform` at its last good
 value rather than let the widget silently stop responding to input.
+`mousePressEvent` and `mouseReleaseEvent` feed nothing into the transform,
+but they carry the cutoff grab and the selection commit, so they guard
+their bodies the same way.
 """
 
 from __future__ import annotations
@@ -255,6 +258,12 @@ class ProfileView(QWidget):
         self._cutoff_ns = None
         self._cutoff_grab = None
         self._message = "no line open"
+        # A hover over the line left the resize cursor up, and only the next
+        # hover over the image would reset it; with no line open there is
+        # no image to hover.
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+        )
         self.update()
 
     # ---- view changes -----------------------------------------------------
@@ -420,16 +429,32 @@ class ProfileView(QWidget):
             return None
         return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
 
+    def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:
+        """Where the line's label is drawn, or None when the line is hidden.
+        Factored out the same way `_selection_bounds` is, and for the same
+        reason: a plain rect a test can assert on without rendering a
+        pixel."""
+        y = self._cutoff_y(t)
+        if y is None:
+            return None
+        yy = r.top() + y
+        # Above the line, unless that would put it above the image, where
+        # the paint clip hides it: a line dragged up to keep one sample
+        # sits within a label's height of the top.
+        top = yy - 18 if yy - 18 >= r.top() else yy + 2
+        return QRectF(r.left(), top, r.width() - 4, 16)
+
     def _paint_cutoff(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         y = self._cutoff_y(t)
-        if y is None or self._cutoff_ns is None:
+        label = self._cutoff_label_rect(r, t)
+        if y is None or label is None or self._cutoff_ns is None:
             return
         yy = r.top() + y
         p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
         p.setPen(QPen(CUTOFF_COLOUR, 2))
         p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
         p.drawText(
-            QRectF(r.left(), yy - 18, r.width() - 4, 16),
+            label,
             int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
             cutoff_label(self._cutoff_ns, self._velocity),
         )
@@ -589,6 +614,15 @@ class ProfileView(QWidget):
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802
         if self.transform is None:
             return
+        try:
+            self._handle_mouse_press(event)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring:
+            # a Qt-invoked virtual method, guarded for the reason
+            # mouseMoveEvent's own comment gives.
+            _log(f"could not handle the mouse press: {exc}", Qgis.MessageLevel.Warning)
+
+    def _handle_mouse_press(self, event: Any) -> None:
+        assert self.transform is not None  # only called from mousePressEvent's own guard
         x, y = self._local(event)
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = event_pos(event)
@@ -716,6 +750,14 @@ class ProfileView(QWidget):
             self.trace_hovered.emit(self.transform.trace_index_at(x))
 
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
+        try:
+            self._handle_mouse_release(event)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring:
+            # a Qt-invoked virtual method, guarded for the reason
+            # mouseMoveEvent's own comment gives.
+            _log(f"could not handle the mouse release: {exc}", Qgis.MessageLevel.Warning)
+
+    def _handle_mouse_release(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = None
             return

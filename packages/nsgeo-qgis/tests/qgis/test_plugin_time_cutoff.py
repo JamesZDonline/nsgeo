@@ -148,3 +148,35 @@ def test_the_difference_view_over_a_selected_cutoff_keeps_the_line(
     assert prof.difference_label.text() == ""
     assert len(errors) == 1 and "sample count" in errors[0]
     _unload(plugin, answer_modal)
+
+
+def test_a_dragged_cutoff_survives_an_unedited_commit_of_the_form(
+    fake_iface, tmp_path, answer_modal
+):
+    """R3 from the line's side. A drag writes an exact end time, and the
+    form follows it with a rounding of that time. Focus leaving the field
+    commits the form, which must not write the rounding back: that would
+    move the cutoff by a sample and dirty the session on a focus change.
+    Swept along the record, and checked to have met ends the form's text
+    cannot hold exactly, or the sweep would prove nothing."""
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    pd, prof = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("dewow")
+    pd.add_step("time_cutoff")
+    rg = s.stack_for(key).source
+    changed = []
+    s.stack_changed.connect(changed.append)
+    lossy = 0
+    for m in range(1, rg.n_samples, 7):
+        end = rg.t0_ns + m * rg.dt_ns
+        prof.view.cutoff_dragged.emit(end)
+        assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+        text = pd.form.editors["end_ns"].text()
+        assert float(text) == pytest.approx(end, rel=1e-5, abs=1e-9)
+        lossy += float(text) != end
+        changed.clear()
+        pd.form.commit()
+        assert changed == [], f"{m} samples: {text!r} was written back"
+        assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+    assert lossy > 0
+    _unload(plugin, answer_modal)

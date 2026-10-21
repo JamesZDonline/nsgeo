@@ -11,6 +11,7 @@ from nsgeo.processing import build_step
 from nsgeo.render import PercentileClip, colormap_names
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
+from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
 from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
@@ -1410,7 +1411,7 @@ def test_dragging_the_line_writes_the_step(opened):
     assert dock.view.cutoff_ns == pytest.approx(end - 10 * rg.dt_ns)
 
 
-def test_a_drag_to_the_same_time_writes_nothing(opened):
+def test_a_drag_to_the_same_time_writes_nothing(opened, message_log):
     session, dock, key, line = opened
     _, _, end = _cutoff_setup(session, key, line)
     dock.set_selected_step(0)
@@ -1418,6 +1419,8 @@ def test_a_drag_to_the_same_time_writes_nothing(opened):
     session.stack_changed.connect(changed.append)
     dock.view.cutoff_dragged.emit(end)
     assert changed == []
+    # A slot that crashed and logged would write nothing too.
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
 
 
 def test_a_grab_released_where_it_began_leaves_the_session_clean(opened, message_log):
@@ -1446,12 +1449,13 @@ def test_a_grab_released_where_it_began_leaves_the_session_clean(opened, message
     assert not [m for m in message_log if "could not move the time cutoff" in m]
 
 
-def test_a_drag_with_nothing_selected_writes_nothing(opened):
+def test_a_drag_with_nothing_selected_writes_nothing(opened, message_log):
     session, dock, key, line = opened
     stack, rg, end = _cutoff_setup(session, key, line)
     dock.set_selected_step(-1)
     dock.view.cutoff_dragged.emit(end - 10 * rg.dt_ns)
     assert stack.entries[0][0].params["end_ns"] == pytest.approx(end)
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
 
 
 def test_selecting_between_two_ordinary_steps_does_not_rerender(opened, monkeypatch):
@@ -1466,7 +1470,7 @@ def test_selecting_between_two_ordinary_steps_does_not_rerender(opened, monkeypa
     assert renders == []
 
 
-def test_a_preview_hides_the_line_and_refuses_a_drag(previewing):
+def test_a_preview_hides_the_line_and_refuses_a_drag(previewing, message_log):
     dock, session, keys = previewing
     stack = session.stack_for(keys[0])
     rg = stack.source
@@ -1478,6 +1482,7 @@ def test_a_preview_hides_the_line_and_refuses_a_drag(previewing):
     assert dock.view.cutoff_ns is None
     dock.view.cutoff_dragged.emit(end - 10 * rg.dt_ns)
     assert stack.entries[0][0].params["end_ns"] == pytest.approx(end)
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
     session.set_preview(None)
     assert dock.view.cutoff_ns == pytest.approx(end)
 
@@ -1541,6 +1546,47 @@ def test_opening_an_unloaded_line_hides_the_cutoff_until_it_loads(one_loaded, me
     assert not [m for m in message_log if "could not move the time cutoff" in m]
     session.set_profiles(keys[1], lines[1].load())
     assert dock.view.cutoff_ns == pytest.approx(end_b)
+
+
+@pytest.fixture
+def processing_first(qgis_app, tmp_path):
+    """A Processing panel built BEFORE the profile dock, so its slots on the
+    session's signals run first. plugin.py builds them the other way round.
+    Torn down the same way `opened` is."""
+    session = SiteSession()
+    processing = ProcessingDock(session)
+    dock = ProfileDock(session)
+    processing.step_selected.connect(dock.set_selected_step)
+    dock.resize(900, 360)
+    dock.show()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=240)
+    line = Line.open(p, GridPlacement("A", "y", 0.0, 0.0, -1, "FILE__001"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    yield session, processing, dock, key, line
+    dock.hide()
+    dock.deleteLater()
+    processing.deleteLater()
+
+
+def test_closing_the_site_with_the_cutoff_selected_is_quiet_in_either_order(
+    processing_first, message_log
+):
+    """`close_site` drops the site, then emits `line_opened("")`. The
+    Processing panel answers that with `step_selected(-1)`, and when that
+    reaches `set_selected_step` before this dock's own `_open` has dropped
+    the working line, `_cutoff_row` reads that line's stack from a site
+    that is gone. Only plugin.py's construction order kept it quiet."""
+    session, processing, dock, key, line = processing_first
+    _cutoff_setup(session, key, line)
+    processing.list.setCurrentRow(0)
+    assert dock.view.cutoff_ns is not None
+    session.close_site()
+    assert not [m for m in message_log if "could not follow the selected step" in m]
+    assert dock.view.cutoff_ns is None
 
 
 def test_switching_lines_reads_the_new_lines_step_at_the_selected_row(previewing):
