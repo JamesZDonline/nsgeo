@@ -58,6 +58,10 @@ class ParamForm(QWidget):
         # curve-kind params (none exist yet, but the schema allows it)
         # would otherwise silently overwrite one's value with the other's.
         self._curve_values: dict[str, Any] = {}
+        # name -> (text shown, value it was built from) for numeric editors.
+        # The text is rounded (`:g`); an editor left alone must report the
+        # exact value, not its rounding (see `values`).
+        self._shown: dict[str, tuple[str, Any]] = {}
         self.step_name: str | None = None
         # A depth counter, not a bool (matching ProcessingDock._updating, for
         # the same reason): set_step() calls clear() before taking its own
@@ -82,6 +86,7 @@ class ParamForm(QWidget):
             self.editors = {}
             self._specs = ()
             self._curve_values = {}
+            self._shown = {}
             self.step_name = None
             self.message.setText("")
         finally:
@@ -122,6 +127,7 @@ class ParamForm(QWidget):
             edit.setStyleSheet(REQUIRED_STYLE)
         else:
             edit.setText(f"{value:g}" if isinstance(value, float) else str(value))
+            self._shown[spec.name] = (edit.text(), value)
         edit.textChanged.connect(self._on_edited)
         edit.editingFinished.connect(self.commit)
         return edit
@@ -167,7 +173,13 @@ class ParamForm(QWidget):
                 text = editor.text().strip()
                 if not text:
                     raise ValueError(f"{spec.label} is required")
-                out[spec.name] = self._parse_number(spec, text)
+                shown = self._shown.get(spec.name)
+                # Unchanged text keeps the exact value it displays a
+                # rounding of: committing on focus-out must not move a
+                # dragged cutoff by a sample.
+                out[spec.name] = (
+                    shown[1] if shown and text == shown[0] else self._parse_number(spec, text)
+                )
         return out
 
     def _parse_number(self, spec: ParamSpec, text: str) -> int | float:

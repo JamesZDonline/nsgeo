@@ -480,10 +480,16 @@ class ProcessingDock(QgsDockWidget):
             return
         specs = get_step(name).schema()
         required = [s for s in specs if s.required]
-        if required and all(s.kind == "curve" for s in required):
-            # The identity curve is not a guess: seed it and let the strip edit it.
+        if required and all(s.kind in ("curve", "time") for s in required):
+            # Neither seed is a guess. The identity curve changes nothing and
+            # the strip edits it; a time parameter starts at the end of the
+            # record the new step will receive, so a cutoff there is a
+            # no-op and the line is dragged in from it.
             t0, dt, n = self.time_axis()
-            params = {s.name: identity_curve(t0, dt, n) for s in required}
+            params = {
+                s.name: identity_curve(t0, dt, n) if s.kind == "curve" else t0 + n * dt
+                for s in required
+            }
             params.update(default_params(name))
             self.session.append_step(key, build_step(name, **params))
             self.list.setCurrentRow(self.list.count() - 1)

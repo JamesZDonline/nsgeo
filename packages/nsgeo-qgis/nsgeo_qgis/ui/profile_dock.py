@@ -17,6 +17,16 @@ top-level widget with no parent of its own, so it must tear it down itself
 teardown -- see `test_plugin_profile_view.py`'s `make_view` fixture for
 the same hazard and pattern this file's own tests copy.
 
+The time cutoff: a step with a `time`-kind parameter (`time_param_name`)
+is drawn as a draggable line, and while its row is selected the image
+shows the stack with that step bypassed so there is something below the
+line to drag it over. The *cutoff row* is that selected row, but only when
+no preview is up, a working line is open and the step now at that row has
+a time parameter. It is resolved against the live stack at every render and
+every drag, never cached: a line switch or a stack edit can change what sits
+at the selected row, and a remembered "this is the cutoff" would then
+bypass, or write onto, the wrong step.
+
 Signal/slot hazard: an exception raised inside a slot connected via
 `connect()` never reaches whatever emitted the signal -- PyQt prints the
 traceback to stderr and `emit()` returns as if the slot had succeeded (see
@@ -41,7 +51,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing import Radargram, StepStack
+from nsgeo.processing import Radargram, StepStack, build_step
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.core import Qgis
@@ -62,6 +72,16 @@ from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gain_strip import GainStrip
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
+
+
+def time_param_name(step: Any) -> str | None:
+    """The name of a step's time-kind parameter, if it has one. Decided by
+    the schema's kind, never by the step's name, as `plugin.py`'s
+    `_curve_param_name` does for the gain curve."""
+    for spec in type(step).schema():
+        if spec.kind == "time":
+            return str(spec.name)
+    return None
 
 
 def velocity_source(session: SiteSession, key: str) -> str:
@@ -123,6 +143,11 @@ class ProfileDock(QgsDockWidget):
         self._preview_key: str | None = None
         self._strip_was_visible = False
         self._deferred_strip: tuple[list[list[float]], Any] | None = None
+        # The Processing panel's selected row, and the step object the
+        # cutoff line was last read from. Neither says which step is the
+        # cutoff: see `_cutoff_row` and the module docstring.
+        self._selected_row = -1
+        self._cutoff_step: Any = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -214,6 +239,7 @@ class ProfileDock(QgsDockWidget):
         self.view.selection_cleared.connect(self._selection_cleared)
         self.view.pick_requested.connect(self._pick)
         self.view.view_changed.connect(self._sync_strip_mapping)
+        self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
 
         session.line_opened.connect(self._on_line_opened)
@@ -661,6 +687,9 @@ class ProfileDock(QgsDockWidget):
         try:
             if self._effective_difference_index >= 0:
                 return stack.difference(self._effective_difference_index)
+            row = self._cutoff_row()
+            if row >= 0:
+                return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
             # The differenced step changes the sample count
@@ -699,6 +728,8 @@ class ProfileDock(QgsDockWidget):
     def _render(self) -> None:
         rg = self.current_radargram()
         if rg is None:
+            self.view.set_cutoff(None)
+            self._cutoff_step = None
             return
         distance = None
         if self._key is not None:
@@ -724,6 +755,74 @@ class ProfileDock(QgsDockWidget):
             step_text = f"Difference: {entries[self._effective_difference_index][0].name}"
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
+        self._show_cutoff()
+
+    def _cutoff_row(self, row: int | None = None) -> int:
+        """`row` (default: the selected one) when it is the cutoff row, else
+        -1. Resolved against the live working stack on every call, never
+        cached: see the module docstring."""
+        row = self._selected_row if row is None else row
+        if self._preview_key is not None or self._working_key is None or row < 0:
+            return -1
+        entries = self.session.stack_for(self._working_key, insert=False).entries
+        if row >= len(entries) or time_param_name(entries[row][0]) is None:
+            return -1
+        return row
+
+    def _show_cutoff(self) -> None:
+        row = self._cutoff_row()
+        if row < 0 or self._working_key is None:
+            self._cutoff_step = None
+            self.view.set_cutoff(None)
+            return
+        step = self.session.stack_for(self._working_key, insert=False).entries[row][0]
+        name = time_param_name(step)
+        assert name is not None
+        self._cutoff_step = step
+        self.view.set_cutoff(float(step.params[name]))
+
+    def set_selected_step(self, row: int) -> None:
+        """`ProcessingDock.step_selected`: remember the row, and re-render
+        when it is, or was, a cutoff row (the image and the line both
+        depend on it). A stack edit re-renders through `_on_stack_changed`
+        already, and the `step_selected` echo of a drag arrives with the
+        row unchanged, so neither renders a second time here."""
+        try:
+            if row == self._selected_row:
+                return
+            was = self._cutoff_row() >= 0
+            self._selected_row = row
+            if was or self._cutoff_row() >= 0:
+                self._render()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not follow the selected step: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_cutoff_dragged(self, end_ns: float) -> None:
+        try:
+            row = self._cutoff_row()
+            key = self._working_key
+            if row < 0 or key is None:
+                return
+            step = self.session.stack_for(key, insert=False).entries[row][0]
+            # The identity check `plugin.py`'s `_on_gain_points` makes: the
+            # line was drawn from `_cutoff_step`, and a drag released over
+            # some other step must not write onto it.
+            if step is not self._cutoff_step:
+                return
+            name = time_param_name(step)
+            if name is None or step.params[name] == end_ns:
+                return
+            try:
+                new = build_step(step.name, **{**step.params, name: end_ns})
+            except ValueError as exc:
+                self.error.emit(str(exc))
+                return
+            # Recorded before replace_step, as `_on_gain_points` does: the
+            # re-render it triggers reads this very object back.
+            self._cutoff_step = new
+            self.session.replace_step(key, row, new)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not move the time cutoff: {exc}", Qgis.MessageLevel.Critical)
 
     def _sync_strip_mapping(self) -> None:
         if self.view.transform is not None:

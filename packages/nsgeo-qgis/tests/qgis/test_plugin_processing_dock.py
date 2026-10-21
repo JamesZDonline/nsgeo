@@ -264,3 +264,13 @@ def test_apply_button_click_confirms_before_applying(opened, answer_modal):
     other = session.keys()[1]
     assert len(session.stack_for(other)) == 0
     assert "cancelled" in dock.status.text()
+
+
+def test_adding_a_time_cutoff_seeds_the_record_end_and_changes_nothing(opened):
+    session, dock, key = opened
+    t0, dt, n = dock.time_axis()
+    dock.add_step("time_cutoff")
+    stack = session.stack_for(key)
+    assert stack.entries[-1][0].params["end_ns"] == pytest.approx(t0 + n * dt)
+    assert stack.result().n_samples == n
+    assert dock.list.currentRow() == len(stack) - 1

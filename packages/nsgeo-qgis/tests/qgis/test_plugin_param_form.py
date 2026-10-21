@@ -526,3 +526,35 @@ def test_removing_the_selected_row_shows_the_step_that_slides_into_it(opened):
     assert dock.list.currentRow() == 0
     assert dock.form.step_name == "gain_agc"
     assert set(dock.form.editors) == {"window_ns", "target", "eps"}
+
+
+def test_a_time_param_is_a_number_field_with_its_unit(qgis_app):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": 40.0})
+    assert isinstance(f.editors["end_ns"], QLineEdit)
+    assert f.editors["end_ns"].text() == "40"
+    assert f._layout.labelForField(f.editors["end_ns"]).text() == "Cutoff (ns)"
+    got = []
+    f.committed.connect(got.append)
+    f.set_value("end_ns", "35.5")
+    f.commit()
+    assert got == [{"end_ns": 35.5}]
+
+
+def test_an_unedited_field_commits_the_exact_value_it_was_built_from(qgis_app):
+    """The form shows floats with `:g` (6 significant digits); a dragged
+    cutoff on the real HS350 axis is not representable that way, and
+    committing the rounded text back (focus leaving the field does) would
+    move the cutoff by a sample."""
+    t0, dt = -11.086392402648926, 0.21653111279010773
+    exact = t0 + 2 * dt
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": exact})
+    assert f.editors["end_ns"].text() != repr(exact)
+    got = []
+    f.committed.connect(got.append)
+    f.commit()
+    assert all(c == {"end_ns": exact} for c in got)
+    f.set_value("end_ns", "-10.5")
+    f.commit()
+    assert got[-1] == {"end_ns": -10.5}

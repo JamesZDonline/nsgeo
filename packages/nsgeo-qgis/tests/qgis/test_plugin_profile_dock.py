@@ -1324,3 +1324,112 @@ def test_the_picks_binding_survives_a_site_close_and_reopen(dock_with_picks, tmp
     assert picks.addFeature(f)
 
     assert dock.view._picks == [(9, 15.0)]
+
+
+# ---- time cutoff (draggable late-time clip) ----------------------------------------
+
+
+def _cutoff_setup(session, key, line, *extra_steps):
+    """Load `line`, then give its stack `[time_cutoff(end), *extra_steps]`
+    with `end` 200 samples in. Returns (stack, rg, end)."""
+    session.set_profiles(key, line.load())
+    stack = session.stack_for(key)
+    rg = stack.source
+    end = rg.t0_ns + 200 * rg.dt_ns
+    session.append_step(key, build_step("time_cutoff", end_ns=end))
+    for step in extra_steps:
+        session.append_step(key, step)
+    return stack, rg, end
+
+
+def test_selecting_a_cutoff_step_shows_the_whole_record_with_the_line(opened):
+    session, dock, key, line = opened
+    _, _, end = _cutoff_setup(session, key, line)
+    dock.set_selected_step(0)
+    assert dock.image.rg.n_samples == 512
+    assert dock.view.cutoff_ns == pytest.approx(end)
+    dock.set_selected_step(-1)
+    assert dock.image.rg.n_samples == 200
+    assert dock.view.cutoff_ns is None
+
+
+def test_steps_after_the_cutoff_still_apply_while_it_is_selected(opened):
+    session, dock, key, line = opened
+    stack, _, _ = _cutoff_setup(session, key, line, build_step("gain_agc", window_ns=10.0))
+    dock.set_selected_step(0)
+    assert np.array_equal(dock.image.rg.data, stack.result_bypassing(0).data)
+
+
+def test_dragging_the_line_writes_the_step(opened):
+    session, dock, key, line = opened
+    stack, rg, end = _cutoff_setup(session, key, line)
+    dock.set_selected_step(0)
+    dock.view.cutoff_dragged.emit(end - 10 * rg.dt_ns)
+    assert stack.entries[0][0].params["end_ns"] == pytest.approx(end - 10 * rg.dt_ns)
+    assert session.dirty
+    assert dock.view.cutoff_ns == pytest.approx(end - 10 * rg.dt_ns)
+
+
+def test_a_drag_to_the_same_time_writes_nothing(opened):
+    session, dock, key, line = opened
+    _, _, end = _cutoff_setup(session, key, line)
+    dock.set_selected_step(0)
+    changed = []
+    session.stack_changed.connect(changed.append)
+    dock.view.cutoff_dragged.emit(end)
+    assert changed == []
+
+
+def test_a_drag_with_nothing_selected_writes_nothing(opened):
+    session, dock, key, line = opened
+    stack, rg, end = _cutoff_setup(session, key, line)
+    dock.set_selected_step(-1)
+    dock.view.cutoff_dragged.emit(end - 10 * rg.dt_ns)
+    assert stack.entries[0][0].params["end_ns"] == pytest.approx(end)
+
+
+def test_selecting_between_two_ordinary_steps_does_not_rerender(opened, monkeypatch):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow", window_ns=10.0))
+    session.append_step(key, build_step("background_mean"))
+    renders = []
+    monkeypatch.setattr(dock, "_render", lambda: renders.append(1))
+    dock.set_selected_step(0)
+    dock.set_selected_step(1)
+    assert renders == []
+
+
+def test_a_preview_hides_the_line_and_refuses_a_drag(previewing):
+    dock, session, keys = previewing
+    stack = session.stack_for(keys[0])
+    rg = stack.source
+    end = rg.t0_ns + 200 * rg.dt_ns
+    session.append_step(keys[0], build_step("time_cutoff", end_ns=end))
+    dock.set_selected_step(0)
+    assert dock.view.cutoff_ns == pytest.approx(end)
+    session.set_preview(keys[1], 5)
+    assert dock.view.cutoff_ns is None
+    dock.view.cutoff_dragged.emit(end - 10 * rg.dt_ns)
+    assert stack.entries[0][0].params["end_ns"] == pytest.approx(end)
+    session.set_preview(None)
+    assert dock.view.cutoff_ns == pytest.approx(end)
+
+
+def test_switching_lines_reads_the_new_lines_step_at_the_selected_row(previewing):
+    dock, session, keys = previewing
+    a, b = keys
+    rg_a = session.stack_for(a).source
+    end_a = rg_a.t0_ns + 200 * rg_a.dt_ns
+    end_b = rg_a.t0_ns + 100 * rg_a.dt_ns
+    session.append_step(a, build_step("dewow", window_ns=10.0))
+    session.append_step(a, build_step("time_cutoff", end_ns=end_a))
+    session.append_step(b, build_step("time_cutoff", end_ns=end_b))
+    session.append_step(b, build_step("dewow", window_ns=10.0))
+    dock.set_selected_step(1)
+    assert dock.view.cutoff_ns == pytest.approx(end_a)
+    session.open_line(b)
+    assert dock.view.cutoff_ns is None
+    assert dock.image.rg.n_samples == 100
+    dock.set_selected_step(0)
+    assert dock.view.cutoff_ns == pytest.approx(end_b)
