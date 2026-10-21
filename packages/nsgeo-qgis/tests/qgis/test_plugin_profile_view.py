@@ -1578,6 +1578,57 @@ def test_dragging_the_cutoff_emits_the_snapped_time_once_on_release(view):
     assert v.cutoff_ns == got[0]
 
 
+def test_a_grab_released_where_it_began_emits_the_start_value(view):
+    """Review Focus 5 (ruling R6): the grab zone is +-5 px, so most presses
+    land off the line's own pixel. Here the press is 4.5 px below the line
+    (two samples), the pointer wiggles 1 px and comes back. Snapping the
+    line to the pointer moved it on the first move; the user meant nothing."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    x, y = r.left() + 100, r.top() + ly + 4
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y + 1))
+    assert v.cutoff_ns == 40.0
+    _send_move_while_pressed(v, QPoint(x, y))
+    _release_left(v, x, y)
+    assert got == [40.0]
+
+
+def test_a_wobble_inside_the_threshold_keeps_an_off_grid_value_exactly(view):
+    """R6's threshold, not just its offset. A typed cutoff, or one carried
+    onto this line by "Apply to grid", need not sit on this line's sample
+    grid: 40.2 ns here. A 2-px tremor that ends where it ends (not back at
+    the press) is still a click, so the line keeps 40.2; snapping it would
+    give 40.5 and the release would write that."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v, 40.2)
+    x, y = r.left() + 100, r.top() + ly + 2
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y + 2))
+    _release_left(v, x, y + 2)
+    assert got == [40.2]
+
+
+def test_a_drag_from_off_the_line_moves_it_by_the_pointer_travel(view):
+    """R6: the grab keeps the press-to-line offset. The line (40 ns) is at
+    local y 181.5 (4.125 px/ns from -4 ns); the press is at 186, 4.5 px
+    below it. Dragged up 40 px, the line belongs at 141.5 px, 30.30 ns,
+    which snaps to 30.5. Snapping the pointer itself (146 px) gives 31.5."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    x, y = r.left() + 100, r.top() + ly + 4
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y - 40))
+    _release_left(v, x, y - 40)
+    assert got == [30.5]
+
+
 def test_dragging_above_the_record_keeps_one_sample(view):
     v, _ = view
     got = []

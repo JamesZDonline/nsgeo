@@ -12,8 +12,8 @@ from nsgeo.render import PercentileClip, colormap_names
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
-from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtCore import Qt
+from plugin_testing import send_move_while_pressed, synthetic_dzt
+from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QStyle
 
@@ -457,6 +457,46 @@ def test_set_difference_index_shows_what_a_step_actually_removed(opened):
     dock.set_difference_index(-1)
     assert dock.difference_label.text() == ""
     np.testing.assert_array_equal(dock.image.rg.data, after_data)
+
+
+def test_a_declined_difference_falls_back_to_the_ordinary_result(opened):
+    """Ruling R7. With the difference view on background_mean, aiming it at
+    time_zero (which changes the sample count) is declined, once, and the
+    view shows the ordinary result. It used to keep background_mean's
+    difference on screen with the button already off."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=40))
+    session.append_step(key, build_step("background_mean"))
+    stack = session.stack_for(key)
+    dock.set_difference_index(1)
+    np.testing.assert_array_equal(dock.image.rg.data, stack.difference(1).data)
+    errors, cleared = [], []
+    dock.error.connect(errors.append)
+    dock.difference_cleared.connect(lambda: cleared.append(1))
+    dock.set_difference_index(0)
+    assert dock.image.rg.n_samples == 472
+    np.testing.assert_array_equal(dock.image.rg.data, stack.result().data)
+    assert dock.difference_label.text() == ""
+    assert len(errors) == 1 and "sample count" in errors[0]
+    assert cleared == [1]
+
+
+def test_a_step_failing_under_the_difference_view_is_reported_once(opened):
+    """A difference reads the stack's intermediates, so a step that fails
+    upstream of it fails the difference and the ordinary result alike, with
+    the same message. Declining the one and then reporting the other must
+    not put that message on the bar twice."""
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    session.append_step(key, build_step("background_mean"))
+    dock.set_difference_index(1)
+    errors = []
+    dock.error.connect(errors.append)
+    session.replace_step(key, 0, build_step("bandpass", low_mhz=100.0, high_mhz=90_000.0))
+    assert len(errors) == 1 and "Nyquist" in errors[0]
+    assert dock.difference_label.text() == ""
 
 
 def test_switching_lines_clears_the_cursor_and_selection(opened):
@@ -1380,6 +1420,32 @@ def test_a_drag_to_the_same_time_writes_nothing(opened):
     assert changed == []
 
 
+def test_a_grab_released_where_it_began_leaves_the_session_clean(opened, message_log):
+    """Review Focus 5 through the real view. The test above emits the
+    identical value at the dock; a real hand presses a few pixels off the
+    line, wobbles, and lets go. Here that is 4 px off (about 8 samples on
+    this 512-sample, 266-px image) and a 1-px wiggle. Saved first, so a
+    write would show as the session turning dirty."""
+    session, dock, key, line = opened
+    stack, rg, end = _cutoff_setup(session, key, line)
+    dock.set_selected_step(0)
+    session.save()
+    assert not session.dirty
+    changed = []
+    session.stack_changed.connect(changed.append)
+    v = dock.view
+    r = v.image_rect()
+    x, y = r.left() + 100, r.top() + round(v._cutoff_y(v.transform)) + 4
+    QTest.mousePress(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+    send_move_while_pressed(v, QPoint(x, y + 1))
+    send_move_while_pressed(v, QPoint(x, y))
+    QTest.mouseRelease(v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x, y))
+    assert changed == []
+    assert not session.dirty
+    assert stack.entries[0][0].params["end_ns"] == end
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
+
+
 def test_a_drag_with_nothing_selected_writes_nothing(opened):
     session, dock, key, line = opened
     stack, rg, end = _cutoff_setup(session, key, line)
@@ -1414,6 +1480,67 @@ def test_a_preview_hides_the_line_and_refuses_a_drag(previewing):
     assert stack.entries[0][0].params["end_ns"] == pytest.approx(end)
     session.set_preview(None)
     assert dock.view.cutoff_ns == pytest.approx(end)
+
+
+@pytest.fixture
+def one_loaded(qgis_app, tmp_path):
+    """Two lines, only the first (open) one loaded. `previewing` loads
+    both, which dodges the case the first hover over any line is: the
+    loader starts on `preview_changed`, so the preview shows before its
+    samples exist, and a load that fails leaves it that way."""
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=240)
+        line = Line.open(p, GridPlacement("A", "y", i * 2.0, 0.0, -1, p.stem))
+        session.add_lines([line])
+        lines.append(line)
+    keys = session.keys()
+    session.open_line(keys[0])
+    session.set_profiles(keys[0], lines[0].load())
+    rg = session.stack_for(keys[0]).source
+    end = rg.t0_ns + 200 * rg.dt_ns
+    session.append_step(keys[0], build_step("time_cutoff", end_ns=end))
+    dock.set_selected_step(0)
+    assert dock.view.cutoff_ns == pytest.approx(end)
+    yield dock, session, keys, lines, rg, end
+    # Parentless top-level widget: torn down explicitly. See `opened`.
+    dock.hide()
+    dock.deleteLater()
+
+
+def test_a_preview_of_an_unloaded_line_hides_the_cutoff(one_loaded, message_log):
+    dock, session, keys, _, rg, end = one_loaded
+    session.set_preview(keys[1], 5)
+    assert dock.view.cutoff_ns is None
+    dock.view.cutoff_dragged.emit(end - 50 * rg.dt_ns)
+    assert session.stack_for(keys[0]).entries[0][0].params["end_ns"] == end
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
+    session.set_preview(None)
+    assert dock.view.cutoff_ns == pytest.approx(end)
+
+
+def test_opening_an_unloaded_line_hides_the_cutoff_until_it_loads(one_loaded, message_log):
+    """The second line has its own cutoff at the selected row, as a saved
+    project's would, so the line comes back at that line's own time once
+    its samples arrive. Until then nothing is drawn to drag, and a drag
+    signal writes onto neither line."""
+    dock, session, keys, lines, rg, end = one_loaded
+    end_b = end - 50 * rg.dt_ns
+    session.append_step(keys[1], build_step("time_cutoff", end_ns=end_b))
+    session.open_line(keys[1])
+    assert dock.view.cutoff_ns is None
+    dock.view.cutoff_dragged.emit(end - 80 * rg.dt_ns)
+    assert session.stack_for(keys[0]).entries[0][0].params["end_ns"] == end
+    assert session.stack_for(keys[1]).entries[0][0].params["end_ns"] == end_b
+    assert not [m for m in message_log if "could not move the time cutoff" in m]
+    session.set_profiles(keys[1], lines[1].load())
+    assert dock.view.cutoff_ns == pytest.approx(end_b)
 
 
 def test_switching_lines_reads_the_new_lines_step_at_the_selected_row(previewing):

@@ -109,6 +109,10 @@ class ProfileView(QWidget):
         # drag is in progress. Kept so a drag whose release never arrives
         # (see `_handle_mouse_move`) can put the line back.
         self._cutoff_grab: float | None = None
+        # Where that drag's press landed, and the line's offset from it (both
+        # local y). Read only while `_cutoff_grab` is set.
+        self._cutoff_press_y = 0.0
+        self._cutoff_offset = 0.0
         self._pick_mode = False
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
@@ -616,10 +620,13 @@ class ProfileView(QWidget):
                     self.transform.trace_index_at(x), self.transform.time_of_y(y)
                 )
                 return
-            if self._near_cutoff(x, y):
+            line = self._cutoff_y(self.transform)
+            if line is not None and self._near_cutoff(x, y):
                 # Not `_press`: its release would commit or clear a
                 # selection, which a drag of this line must never do.
                 self._cutoff_grab = self._cutoff_ns
+                self._cutoff_press_y = y
+                self._cutoff_offset = line - y
                 return
             self._press = event_pos(event)
             self._dragging = False
@@ -675,7 +682,19 @@ class ProfileView(QWidget):
                 self._cutoff_grab = None
                 self.update()
             else:
-                self._cutoff_ns = self.transform.snap_cutoff(self.transform.time_of_y(y))
+                # The grab zone is +-CUTOFF_GRAB_PX, so most presses land off
+                # the line's own pixel. Snapping the line to the pointer
+                # moved it on the first move, and a press, a wobble and a
+                # release where it began wrote an edit nobody made. So the
+                # line holds its exact start value until the pointer has
+                # travelled past the drag threshold, and from then on moves
+                # by the pointer's travel, keeping the press-to-line offset.
+                if abs(y - self._cutoff_press_y) <= DRAG_THRESHOLD_PX:
+                    self._cutoff_ns = self._cutoff_grab
+                else:
+                    self._cutoff_ns = self.transform.snap_cutoff(
+                        self.transform.time_of_y(y + self._cutoff_offset)
+                    )
                 self.update()
                 return
         if self._press is not None:

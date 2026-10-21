@@ -44,7 +44,9 @@ to trace index" -- see `_safe_distance`) -- vanish silently.
 e.g. a bandpass whose high cut exceeds Nyquist, or a difference view whose
 step index no longer exists, or changes the sample count) is turned into
 the `error` signal instead of an exception, so a bad step leaves the
-previous render on screen with a message rather than blanking the view.
+previous render on screen with a message rather than blanking the view. A
+difference view it cannot give is declined with a message, and the
+ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 """
 
 from __future__ import annotations
@@ -435,6 +437,14 @@ class ProfileDock(QgsDockWidget):
             self._render()
         else:
             self.channel_combo.hide()
+            # No `_render` on this branch, so nothing else would take down
+            # the previous line's cutoff. The first hover over any line
+            # lands here (its load starts on `preview_changed`), and a
+            # load that fails stays here: left up, the line could be
+            # dragged with nothing behind it to write to. `line_loaded`'s
+            # render puts it back.
+            self._cutoff_step = None
+            self.view.set_cutoff(None)
             self.view.set_axes(
                 line.n_traces,
                 line.header.n_samples,
@@ -684,46 +694,63 @@ class ProfileDock(QgsDockWidget):
         stack: StepStack = self.session.stack_for(self._key, insert=self._preview_key is None)
         if stack.source is None:
             return None
-        try:
-            if self._effective_difference_index >= 0:
+        declined: str | None = None
+        if self._effective_difference_index >= 0:
+            # Its own `try`, and a declined difference falls through to the
+            # ordinary view below rather than returning None. Returning None
+            # left whatever was on screen: another step's difference, with
+            # the button already off, or the cutoff's bypass with its line
+            # taken down. Nothing re-renders afterwards either, because
+            # `difference_cleared`'s echo reaches `set_difference_index(-1)`
+            # with the index already -1 and stops at its early-out.
+            try:
                 return stack.difference(self._effective_difference_index)
+            except ValueError as exc:
+                # The differenced step changes the sample count
+                # (StepStack.difference's own guard) -- already a
+                # human-facing message, unlike the IndexError sibling below.
+                declined = str(exc)
+                self._decline_difference(declined)
+            except IndexError:
+                # The differenced index no longer exists at all --
+                # StepStack.difference/intermediate both raise a developer-
+                # facing IndexError for an out-of-range index (stack.py: "step
+                # index 1 out of range (0..0)"), which is exactly what
+                # applying a shorter preset, or removing the differenced
+                # step, produces. Left uncaught here, it escaped into the
+                # render slots' broad `except Exception`: logged Critical,
+                # the image frozen on the stale render, `diff_button` still
+                # checked, and `difference_label` still naming a step that no
+                # longer exists -- no visible crash, just silently wrong. Its
+                # own text is not shown to the user (unlike the ValueError
+                # above): 0-based indices and a raw range are implementation
+                # detail, not something a message bar should say.
+                self._decline_difference("the differenced step no longer exists in this stack")
+        try:
             row = self._cutoff_row()
             if row >= 0:
                 return stack.result_bypassing(row)
             return stack.result()
         except ValueError as exc:
-            # The differenced step changes the sample count
-            # (StepStack.difference's own guard) -- already a
-            # human-facing message, unlike the IndexError sibling below.
-            return self._decline_difference(str(exc))
-        except IndexError:
-            # The differenced index no longer exists at all --
-            # StepStack.difference/intermediate both raise a developer-
-            # facing IndexError for an out-of-range index (stack.py: "step
-            # index 1 out of range (0..0)"), which is exactly what
-            # applying a shorter preset, or removing the differenced
-            # step, produces. Left uncaught here, it escaped into the
-            # render slots' broad `except Exception`: logged Critical,
-            # the image frozen on the stale render, `diff_button` still
-            # checked, and `difference_label` still naming a step that no
-            # longer exists -- no visible crash, just silently wrong. Its
-            # own text is not shown to the user (unlike the ValueError
-            # above): 0-based indices and a raw range are implementation
-            # detail, not something a message bar should say.
-            return self._decline_difference("the differenced step no longer exists in this stack")
+            # A bad step (a bandpass past Nyquist, say): reported, and the
+            # previous render stays on screen. A step that fails upstream of
+            # a difference fails that difference first, with this same
+            # message, which the decline above has already shown.
+            if str(exc) != declined:
+                self.error.emit(str(exc))
+            return None
 
     def _decline_difference(self, message: str) -> None:
         """Report `message` and revert an active difference view: shared
-        by both branches of `current_radargram`'s except clause above, so
-        the reset-clear-emit sequence -- and the `difference_cleared`
-        guard that keeps it a no-op when no difference was showing --
-        cannot drift between them."""
+        by both except branches of `current_radargram`'s difference `try`
+        above, so the reset-clear-emit sequence -- and the
+        `difference_cleared` guard that keeps it a no-op when no
+        difference was showing -- cannot drift between them."""
         self.error.emit(message)
         if self._difference_index >= 0:
             self._difference_index = -1
             self.difference_label.setText("")
             self.difference_cleared.emit()
-        return None
 
     def _render(self) -> None:
         rg = self.current_radargram()

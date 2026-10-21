@@ -6,6 +6,7 @@ plugin can show, plus the real-data check.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
@@ -84,4 +85,66 @@ def test_a_real_line_clips_where_the_line_is_dropped(fake_iface, tmp_path, answe
     stack = s.stack_for(key)
     again = StepStack.from_dicts(stack.to_dicts())
     assert again.entries[1][0].params["end_ns"] == end
+    _unload(plugin, answer_modal)
+
+
+def _clip(plugin, s, key, keep):
+    """Drag the selected cutoff to `keep` samples in; returns that end time."""
+    rg = s.stack_for(key).source
+    end = rg.t0_ns + keep * rg.dt_ns
+    plugin.profile_dock.view.cutoff_dragged.emit(end)
+    assert s.stack_for(key).result().n_samples == keep
+    return end
+
+
+def test_selecting_the_cutoff_with_the_difference_view_on_shows_the_line(
+    fake_iface, tmp_path, answer_modal
+):
+    """Ruling R7, order 1. Selecting a new row re-aims an active difference
+    view at it, and a cutoff changes the sample count, so the difference is
+    declined. That decline must still leave the cutoff's own view, the
+    whole record with the line over it, not background_mean's difference
+    with no line and no way back but another row."""
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    pd, prof = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("dewow")
+    pd.add_step("background_mean")
+    pd.add_step("time_cutoff")
+    end = _clip(plugin, s, key, 200)
+    pd.list.setCurrentRow(1)
+    pd.diff_button.setChecked(True)
+    assert prof.difference_label.text() == "Difference: background_mean"
+    errors = []
+    prof.error.connect(errors.append)
+    pd.list.setCurrentRow(2)
+    stack = s.stack_for(key)
+    assert prof.image.rg.n_samples == stack.source.n_samples
+    np.testing.assert_array_equal(prof.image.rg.data, stack.result_bypassing(2).data)
+    assert prof.view.cutoff_ns == end
+    assert not pd.diff_button.isChecked()
+    assert prof.difference_label.text() == ""
+    assert len(errors) == 1 and "sample count" in errors[0]
+    _unload(plugin, answer_modal)
+
+
+def test_the_difference_view_over_a_selected_cutoff_keeps_the_line(
+    fake_iface, tmp_path, answer_modal
+):
+    """Ruling R7, order 2: the cutoff is selected first, then Difference is
+    pressed. Declined as above, and the line stays, rather than the whole
+    unclipped record shown with no line and no veil."""
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    pd, prof = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("dewow")
+    pd.add_step("time_cutoff")
+    end = _clip(plugin, s, key, 200)
+    errors = []
+    prof.error.connect(errors.append)
+    pd.diff_button.setChecked(True)
+    stack = s.stack_for(key)
+    np.testing.assert_array_equal(prof.image.rg.data, stack.result_bypassing(1).data)
+    assert prof.view.cutoff_ns == end
+    assert not pd.diff_button.isChecked()
+    assert prof.difference_label.text() == ""
+    assert len(errors) == 1 and "sample count" in errors[0]
     _unload(plugin, answer_modal)
