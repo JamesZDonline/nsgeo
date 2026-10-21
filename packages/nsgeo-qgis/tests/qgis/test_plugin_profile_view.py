@@ -19,6 +19,7 @@ from nsgeo_qgis.ui.profile_view import (
     MARGIN_TOP,
     PICK_COLOUR,
     ProfileView,
+    cutoff_label,
 )
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
@@ -1491,3 +1492,171 @@ def test_pick_mode_also_ignores_a_click_outside_the_radargram(view):
         QPoint(r.left() + 10, r.top() + 10),
     )
     assert len(picks) == 1
+
+
+# ---- the time-cutoff line ---------------------------------------------------
+def _press_left(v, x, y):
+    QTest.mousePress(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y))
+    )
+
+
+def _release_left(v, x, y):
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y))
+    )
+
+
+def _on_line(v, cutoff_ns=40.0):
+    """Shows the line at `cutoff_ns` and returns (rect, transform, local line y)."""
+    v.set_cutoff(cutoff_ns)
+    r = v.image_rect()
+    return r, v.transform, round(v._cutoff_y(v.transform))
+
+
+def test_the_cutoff_line_sits_at_its_time(view):
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    v.set_cutoff(40.0)
+    t = v.transform
+    assert v._cutoff_y(t) == pytest.approx(t.y_of_time(40.0))
+    assert v.cutoff_ns == 40.0
+
+
+def test_a_cutoff_past_the_record_is_drawn_at_its_bottom_edge(view):
+    v, _ = view
+    v.set_cutoff(1e6)
+    t = v.transform
+    assert v._cutoff_y(t) == pytest.approx(t.y_of_time(t.t_end))
+
+
+def test_set_cutoff_none_hides_it_and_a_non_finite_one_is_logged(view, message_log):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.set_cutoff(None)
+    assert v._cutoff_y(v.transform) is None
+    v.set_cutoff(float("nan"))
+    assert v._cutoff_y(v.transform) is None
+    assert len(message_log) == 1
+
+
+def test_the_cutoff_dims_the_samples_below_it(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_cutoff(30.0)
+    shot = v.grab_image()
+    r = v.image_rect()
+    t = v.transform
+    line = r.top() + round(t.y_of_time(30.0))
+    x = r.left() + 20
+    above = QColor(shot.pixel(x, line - 10)).value()
+    below = QColor(shot.pixel(x, line + 10)).value()
+    assert below > above
+    assert QColor(shot.pixel(x, line)).red() >= 150
+
+
+def test_the_label_names_the_time_and_the_depth():
+    assert cutoff_label(40.0, None) == "40.0 ns"
+    assert cutoff_label(40.0, VelocityModel.constant(0.08)) == "40.0 ns \u00b7 1.60 m"
+
+
+def test_dragging_the_cutoff_emits_the_snapped_time_once_on_release(view):
+    v, _ = view
+    got, ranges, cleared = [], [], []
+    v.cutoff_dragged.connect(got.append)
+    v.range_selected.connect(lambda a, b: ranges.append((a, b)))
+    v.selection_cleared.connect(lambda: cleared.append(1))
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    y2 = round(t.y_of_time(20.3))
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + y2))
+    _release_left(v, r.left() + 100, r.top() + y2)
+    assert got == [pytest.approx(t.snap_cutoff(t.time_of_y(y2)))]
+    assert ranges == [] and cleared == []
+    assert v.cutoff_ns == got[0]
+
+
+def test_dragging_above_the_record_keeps_one_sample(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() - 50))
+    _release_left(v, r.left() + 100, r.top() - 50)
+    assert got == [pytest.approx(-4.0 + 0.5)]
+
+
+def test_a_press_away_from_the_line_still_selects_a_range(view):
+    v, _ = view
+    sel, got = [], []
+    v.range_selected.connect(lambda a, b: sel.append((a, b)))
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + 50)
+    _send_move_while_pressed(v, QPoint(r.left() + 300, r.top() + 50))
+    _release_left(v, r.left() + 300, r.top() + 50)
+    assert sel == [(28, 86)]
+    assert got == []
+
+
+def test_pick_mode_wins_over_the_cutoff_grab(view):
+    v, _ = view
+    picks, got = [], []
+    v.pick_requested.connect(lambda i, tm: picks.append((i, tm)))
+    v.cutoff_dragged.connect(got.append)
+    v.set_pick_mode(True)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _release_left(v, r.left() + 100, r.top() + ly)
+    assert len(picks) == 1
+    assert got == []
+
+
+def test_a_move_without_the_button_abandons_the_drag(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns != 40.0
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns == 40.0
+    _release_left(v, r.left() + 100, r.top() + ly - 40)
+    assert got == []
+
+
+def test_set_cutoff_during_a_drag_abandons_it(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    v.set_cutoff(30.0)
+    _release_left(v, r.left() + 100, r.top() + ly - 40)
+    assert got == []
+    assert v.cutoff_ns == 30.0
+
+
+def test_hovering_the_line_shows_a_resize_cursor(view):
+    v, _ = view
+    r, t, ly = _on_line(v)
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    send_hover(v, QPoint(r.left() + 100, r.top() + 50))
+    assert v.cursor().shape() == Qt.CursorShape.ArrowCursor
+    v.set_pick_mode(True)
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    send_hover(v, QPoint(r.left() + 100, r.top() + 50))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+
+
+def test_clear_forgets_the_cutoff(view):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.clear()
+    assert v.cutoff_ns is None

@@ -37,6 +37,9 @@ KNOWN_UNCONSUMED = {
     "new_site_requested",
     "open_site_requested",
     "save_requested",
+    # Time cutoff Task 2 declares it on ProfileView; Task 3 connects it in
+    # profile_dock.py and removes this entry.
+    "cutoff_dragged",
 }
 
 # A signal name declared by more than one class cannot be judged by a

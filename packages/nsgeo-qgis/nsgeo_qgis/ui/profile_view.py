@@ -1,5 +1,6 @@
 """The profile viewer: a QWidget that paints a cached radargram image
-through a ViewTransform, with axes, a cursor, a selection band and picks.
+through a ViewTransform, with axes, a cursor, a selection band, picks, a
+slice band and the draggable time-cutoff line.
 
 Measured: drawing a sub-rectangle of the cached image costs about 3 ms per
 frame at any zoom, so pan and zoom never touch numpy.
@@ -62,6 +63,22 @@ SLICE_BAND_COLOUR = QColor(80, 200, 255, 48)
 SLICE_BAND_EDGE = QColor(80, 200, 255, 170)
 MIN_BAND_PX = 2.0
 
+# The time-cutoff line (late-time clip). Magenta, so it reads as neither the
+# cyan slice band, the blue selection nor the orange cursor; the dim veil
+# over everything below it says "this part is hidden", not just "a line".
+CUTOFF_COLOUR = QColor(214, 39, 140)
+CUTOFF_DIM = QColor(250, 250, 250, 170)
+CUTOFF_GRAB_PX = 5
+
+
+def cutoff_label(end_ns: float, velocity: VelocityModel | None) -> str:
+    """The line's caption: its time, and its depth when a velocity is known."""
+    label = f"{end_ns:.1f} ns"
+    if velocity is not None:
+        depth = float(velocity.depth_at(np.array([end_ns]))[0])
+        label += f" \u00b7 {depth:.2f} m"
+    return label
+
 
 class ProfileView(QWidget):
     trace_hovered = pyqtSignal(int)
@@ -69,6 +86,10 @@ class ProfileView(QWidget):
     selection_cleared = pyqtSignal()
     pick_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
     view_changed = pyqtSignal()
+    # Emitted once, on the release that ends a drag of the cutoff line, with
+    # the snapped end time (ns). Always emitted, even for an unmoved line:
+    # the no-op guard lives with the consumer.
+    cutoff_dragged = pyqtSignal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -83,6 +104,11 @@ class ProfileView(QWidget):
         self._selection = (-1, -1)
         self._picks: list[tuple[int, float]] = []
         self._slice_band: tuple[float, float] | None = None
+        self._cutoff_ns: float | None = None
+        # The value the line had when a drag of it began; not None means a
+        # drag is in progress. Kept so a drag whose release never arrives
+        # (see `_handle_mouse_move`) can put the line back.
+        self._cutoff_grab: float | None = None
         self._pick_mode = False
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
@@ -188,6 +214,25 @@ class ProfileView(QWidget):
         self._slice_band = None
         self.update()
 
+    @property
+    def cutoff_ns(self) -> float | None:
+        """The end time drawn now, live during a drag; None when hidden."""
+        return self._cutoff_ns
+
+    def set_cutoff(self, end_ns: float | None) -> None:
+        """Show the cutoff line at `end_ns`, or hide it with None.
+
+        A drag in progress is abandoned (no emit): the caller has just
+        said where the line is, and the release that follows must not
+        overwrite that with a stale gesture.
+        """
+        self._cutoff_grab = None
+        if end_ns is not None and not math.isfinite(end_ns):
+            _log(f"set_cutoff: non-finite end time {end_ns}; line hidden instead")
+            end_ns = None
+        self._cutoff_ns = end_ns
+        self.update()
+
     def set_picks(self, picks: list[tuple[int, float]]) -> None:
         self._picks = list(picks)
         self.update()
@@ -203,6 +248,8 @@ class ProfileView(QWidget):
         self._selection = (-1, -1)
         self._picks = []
         self._slice_band = None
+        self._cutoff_ns = None
+        self._cutoff_grab = None
         self._message = "no line open"
         self.update()
 
@@ -306,6 +353,7 @@ class ProfileView(QWidget):
                 painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
             painter.setClipRect(r)
             self._paint_slice_band(painter, r, t)
+            self._paint_cutoff(painter, r, t)
             self._paint_selection(painter, r, t)
             self._paint_picks(painter, r, t)
             self._paint_cursor(painter, r, t)
@@ -358,6 +406,41 @@ class ProfileView(QWidget):
         p.setPen(QPen(SLICE_BAND_EDGE, 1, Qt.PenStyle.DashLine))
         p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
         p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
+
+    def _cutoff_y(self, t: ViewTransform) -> float | None:
+        """Local (unoffset) y of the cutoff line, or None when hidden.
+        Clamped into the record, so a cutoff past it (or a line carried
+        over onto a shorter one) sits on the bottom edge rather than off
+        the widget."""
+        if self._cutoff_ns is None:
+            return None
+        return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
+
+    def _paint_cutoff(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        y = self._cutoff_y(t)
+        if y is None or self._cutoff_ns is None:
+            return
+        yy = r.top() + y
+        p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
+        p.setPen(QPen(CUTOFF_COLOUR, 2))
+        p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
+        p.drawText(
+            QRectF(r.left(), yy - 18, r.width() - 4, 16),
+            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            cutoff_label(self._cutoff_ns, self._velocity),
+        )
+
+    def _near_cutoff(self, x: float, y: float) -> bool:
+        """True when a local point is inside the image and within the grab
+        distance of the line. The image bound matters for the same reason
+        as the pick gesture's: the handlers run for the axis margins too."""
+        if self.transform is None:
+            return False
+        line = self._cutoff_y(self.transform)
+        if line is None:
+            return False
+        inside = 0 <= x < self.transform.width and 0 <= y < self.transform.height
+        return inside and abs(y - line) <= CUTOFF_GRAB_PX
 
     def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
         """Local (unoffset by `r.left()`) x-bounds of the selection band, or
@@ -525,6 +608,11 @@ class ProfileView(QWidget):
                     self.transform.trace_index_at(x), self.transform.time_of_y(y)
                 )
                 return
+            if self._near_cutoff(x, y):
+                # Not `_press`: its release would commit or clear a
+                # selection, which a drag of this line must never do.
+                self._cutoff_grab = self._cutoff_ns
+                return
             self._press = event_pos(event)
             self._dragging = False
 
@@ -570,6 +658,18 @@ class ProfileView(QWidget):
                 self.view_changed.emit()
                 self.update()
                 return
+        if self._cutoff_grab is not None:
+            # Same lesson as `_pan_last` above: trust the event's actual
+            # buttons, not the bookkeeping. A release lost mid-drag (focus
+            # change) would otherwise leave the line glued to the pointer.
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._cutoff_ns = self._cutoff_grab
+                self._cutoff_grab = None
+                self.update()
+            else:
+                self._cutoff_ns = self.transform.snap_cutoff(self.transform.time_of_y(y))
+                self.update()
+                return
         if self._press is not None:
             if abs(pos.x() - self._press.x()) > DRAG_THRESHOLD_PX:
                 self._dragging = True
@@ -577,6 +677,12 @@ class ProfileView(QWidget):
                 b = self.transform.trace_index_at(x)
                 self.set_selection(a, b)
             return
+        if self._near_cutoff(x, y):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+            )
         if 0 <= x < self.transform.width:
             self.trace_hovered.emit(self.transform.trace_index_at(x))
 
@@ -595,6 +701,11 @@ class ProfileView(QWidget):
         # mousePressEvent ever arms `_press`/`_dragging` for, so it is the
         # only one release should act on here.
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._cutoff_grab is not None:
+            self._cutoff_grab = None
+            if self._cutoff_ns is not None:
+                self.cutoff_dragged.emit(self._cutoff_ns)
             return
         if self._press is not None and self.transform is not None:
             if self._dragging:
