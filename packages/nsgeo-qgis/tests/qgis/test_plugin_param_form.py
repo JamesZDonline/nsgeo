@@ -11,7 +11,9 @@ from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtWidgets import QComboBox, QDialog, QLineEdit
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import QComboBox, QDialog, QDoubleSpinBox, QLineEdit
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -531,7 +533,7 @@ def test_removing_the_selected_row_shows_the_step_that_slides_into_it(opened):
 def test_a_time_param_is_a_number_field_with_its_unit(qgis_app):
     f = ParamForm()
     f.set_step("time_cutoff", {"end_ns": 40.0})
-    assert isinstance(f.editors["end_ns"], QLineEdit)
+    assert isinstance(f.editors["end_ns"], QDoubleSpinBox)
     assert f.editors["end_ns"].text() == "40"
     assert f._layout.labelForField(f.editors["end_ns"]).text() == "Cutoff (ns)"
     got = []
@@ -549,7 +551,7 @@ def test_an_unedited_field_commits_the_exact_value_it_was_built_from(qgis_app):
     t0, dt = -11.086392402648926, 0.21653111279010773
     exact = t0 + 2 * dt
     f = ParamForm()
-    f.set_step("time_cutoff", {"end_ns": exact})
+    f.set_step("time_cutoff", {"end_ns": exact}, time_range=(t0 + dt, t0 + 300 * dt), time_step=dt)
     assert f.editors["end_ns"].text() != repr(exact)
     got = []
     f.committed.connect(got.append)
@@ -558,3 +560,76 @@ def test_an_unedited_field_commits_the_exact_value_it_was_built_from(qgis_app):
     f.set_value("end_ns", "-10.5")
     f.commit()
     assert got == [{"end_ns": exact}, {"end_ns": -10.5}]
+
+
+def _type_and_commit(spin, text):
+    """Type into the spinbox's own line edit and press Enter: the real path
+    from keystroke to `editingFinished` to the form's commit."""
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, text)
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+def _ranged_form(end=40.0):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": end}, time_range=(-3.5, 100.0), time_step=0.5)
+    got = []
+    f.committed.connect(got.append)
+    return f, f.editors["end_ns"], got
+
+
+@pytest.mark.parametrize(
+    ("typed", "limit"), [("-20", -3.5), ("500", 100.0), ("100.1", 100.0), ("-3.6", -3.5)]
+)
+def test_a_cutoff_typed_outside_the_range_snaps_to_the_nearest_limit(qgis_app, typed, limit):
+    f, spin, got = _ranged_form()
+    _type_and_commit(spin, typed)
+    assert spin.value() == limit
+    assert got == [{"end_ns": limit}]
+    assert f.message.text() == ""  # no note
+
+
+def test_a_cutoff_typed_inside_the_range_is_kept_as_typed(qgis_app):
+    f, spin, got = _ranged_form()
+    _type_and_commit(spin, "12.3456789")
+    assert got == [{"end_ns": 12.3456789}]
+
+
+def test_a_cutoff_arrow_step_is_one_sample(qgis_app):
+    f, spin, got = _ranged_form()
+    spin.stepUp()
+    assert spin.value() == 40.5
+    spin.stepDown()
+    spin.stepDown()
+    assert spin.value() == 39.5
+    assert spin.text() == "39.5"
+
+
+def test_a_cutoff_without_a_range_is_effectively_unbounded(qgis_app):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": 40.0})
+    spin = f.editors["end_ns"]
+    got = []
+    f.committed.connect(got.append)
+    _type_and_commit(spin, "-2500")
+    assert got == [{"end_ns": -2500.0}]
+
+
+def test_a_spinbox_cutoff_built_at_a_limit_commits_unchanged(qgis_app):
+    f, spin, got = _ranged_form(end=100.0)
+    f.commit()
+    assert got == [{"end_ns": 100.0}]
+
+
+def test_a_snap_shows_the_limit_even_when_the_field_already_held_it(qgis_app):
+    f, spin, got = _ranged_form(end=100.0)
+    _type_and_commit(spin, "500")
+    assert spin.text() == "100"
+    assert spin.value() == 100.0
+
+
+def test_an_arrow_step_commits(qgis_app):
+    f, spin, got = _ranged_form()
+    spin.stepUp()
+    assert got == [{"end_ns": 40.5}]

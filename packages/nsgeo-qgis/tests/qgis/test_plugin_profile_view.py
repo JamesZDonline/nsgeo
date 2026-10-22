@@ -1603,6 +1603,32 @@ def test_the_cutoff_label_stays_inside_the_image_near_its_top(view):
     assert mid.bottom() <= r.top() + t.y_of_time(40.0)
 
 
+def test_the_cutoff_label_is_a_tag_sized_to_its_text(view):
+    v, _ = view
+    r, t = v.image_rect(), v.transform
+    v.set_cutoff(40.0)
+    tag = v._cutoff_label_rect(r, t)
+    text = v.fontMetrics().horizontalAdvance(cutoff_label(40.0, None))
+    assert text < tag.width() <= text + 16  # a few px of padding either side
+    assert tag.right() == pytest.approx(r.right() - 3, abs=2)  # right-aligned
+    v.set_cutoff(-4.0 + 0.5)
+    assert QRectF(r).contains(v._cutoff_label_rect(r, t))
+
+
+def test_the_cutoff_label_is_white_text_on_a_magenta_tag(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_cutoff(60.0)
+    shot = v.grab_image()
+    r, t = v.image_rect(), v.transform
+    tag = v._cutoff_label_rect(r, t)
+    # Left padding strip: inside the tag, clear of the glyphs.
+    px = QColor(shot.pixel(int(tag.left()) + 1, int(tag.center().y())))
+    assert px.red() >= 150 and px.green() < 100
+
+
 def test_the_label_names_the_time_and_the_depth():
     assert cutoff_label(40.0, None) == "40.0 ns"
     assert cutoff_label(40.0, VelocityModel.constant(0.08)) == "40.0 ns \u00b7 1.60 m"

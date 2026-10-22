@@ -59,6 +59,18 @@ def dest_index(start: int, row: int) -> int:
     return row if row <= start else row - 1
 
 
+def needs_dialog(name: str) -> bool:
+    """True when adding `name` has to ask the user for values.
+
+    A step whose every required parameter is a curve or a time is seeded
+    from the record instead (see `ProcessingDock.add_step_with_dialog`), so
+    it adds straight away. The Add step menu label and that seeding branch
+    both ask this, so they cannot disagree.
+    """
+    required = [s for s in get_step(name).schema() if s.required]
+    return bool(required) and not all(s.kind in ("curve", "time") for s in required)
+
+
 class ProcessingDock(QgsDockWidget):
     step_selected = pyqtSignal(int)  # -1 when nothing is selected
     add_step_requested = pyqtSignal(str)  # steps with REQUIRED params
@@ -116,7 +128,7 @@ class ProcessingDock(QgsDockWidget):
         self.add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.add_menu = QMenu(self.add_button)
         for name in available_steps():
-            text = f"{name}  (needs values)" if required_params(name) else name
+            text = f"{name}  (needs values)" if needs_dialog(name) else name
             # `checked=False` absorbs whatever `addAction`'s convenience
             # overload passes the slot -- binding the zero-argument
             # `triggered()` overload is an implementation detail of that
@@ -351,7 +363,11 @@ class ProcessingDock(QgsDockWidget):
         if shown == self._shown and step is self._shown_step:
             return  # an echo of our own commit, or add_step()'s second emit
         self._shown, self._shown_step = shown, step
-        self.form.set_step(step.name, step.params)
+        range_kwargs: dict[str, Any] = {}
+        if any(spec.kind == "time" for spec in get_step(step.name).schema()):
+            t0, dt, n = self.input_axis(row)
+            range_kwargs = {"time_range": (t0 + dt, t0 + n * dt), "time_step": dt}
+        self.form.set_step(step.name, step.params, **range_kwargs)
 
     def _on_form_committed(self, params: dict[str, Any]) -> None:
         key = self.key()
@@ -421,6 +437,28 @@ class ProcessingDock(QgsDockWidget):
         self.session.append_step(key, build_step(name, **default_params(name)))
         self.list.setCurrentRow(self.list.count() - 1)
 
+    def input_axis(self, row: int) -> tuple[float, float, int]:
+        """(t0_ns, dt_ns, n_samples) of what the step at `row` receives:
+        the stack's state after the step above it, or the source when it is
+        first. Bounds a time field to the record that step can clip, so a
+        `time_zero` ahead of it moves the lower limit. Falls back the way
+        `time_axis` does when the stack does not evaluate cleanly."""
+        key = self.key()
+        assert key is not None
+        stack = self.session.stack_for(key)
+        if stack.source is not None:
+            try:
+                rg = stack.intermediate(row - 1) if row > 0 else stack.source
+            except ValueError as exc:
+                _log(
+                    f"input_axis: stack does not evaluate cleanly ({exc}); "
+                    "bounding the field against the raw source axis instead"
+                )
+                rg = stack.source
+            return rg.t0_ns, rg.dt_ns, rg.n_samples
+        h = self.session.line_for_key(key).header
+        return h.position_ns, h.dt_ns, h.n_samples
+
     def time_axis(self) -> tuple[float, float, int]:
         """(t0_ns, dt_ns, n_samples) of the input a step appended right now
         would actually receive: the stack's own `result()` when it
@@ -478,9 +516,8 @@ class ProcessingDock(QgsDockWidget):
         key = self.key()
         if key is None:
             return
-        specs = get_step(name).schema()
-        required = [s for s in specs if s.required]
-        if required and all(s.kind in ("curve", "time") for s in required):
+        if not needs_dialog(name):
+            required = [s for s in get_step(name).schema() if s.required]
             # Neither seed is a guess. The identity curve changes nothing and
             # the strip edits it; a time parameter starts at the end of the
             # record the new step will receive, so a cutoff there is a

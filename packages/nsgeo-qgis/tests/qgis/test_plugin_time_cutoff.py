@@ -13,6 +13,8 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import StepStack, build_step
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -180,3 +182,42 @@ def test_a_dragged_cutoff_survives_an_unedited_commit_of_the_form(
         assert s.stack_for(key).entries[1][0].params["end_ns"] == end
     assert lossy > 0
     _unload(plugin, answer_modal)
+
+
+def _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal, path):
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path, path)
+    dock = plugin.processing_dock
+    s.append_step(key, build_step("time_zero", mode="first_break", threshold=0.25))
+    dock.add_step("time_cutoff")
+    zeroed = s.stack_for(key).intermediate(0)
+    end = zeroed.t0_ns + zeroed.n_samples * zeroed.dt_ns
+    assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+    before = plugin.profile_dock.image.rg.n_samples
+    spin = dock.form.editors["end_ns"]
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "99999")
+    dock.list.setCurrentRow(0)  # focus out: selecting another step
+    assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+    assert plugin.profile_dock.image.rg.n_samples == before == zeroed.n_samples
+    # And the same through Enter.
+    dock.list.setCurrentRow(1)
+    spin = dock.form.editors["end_ns"]
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "99999")
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+    assert spin.value() == pytest.approx(end)
+    assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+    _unload(plugin, answer_modal)
+
+
+@needs_real_data
+def test_typing_past_the_end_on_a_real_line_leaves_the_record_whole(
+    fake_iface, tmp_path, answer_modal
+):
+    _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal, REAL_DZT[0])
+
+
+def test_typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal):
+    _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal, None)

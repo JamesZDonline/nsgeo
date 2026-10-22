@@ -72,6 +72,8 @@ MIN_BAND_PX = 2.0
 CUTOFF_COLOUR = QColor(214, 39, 140)
 CUTOFF_DIM = QColor(250, 250, 250, 170)
 CUTOFF_GRAB_PX = 5
+CUTOFF_TAG_PAD_X = 5
+CUTOFF_TAG_PAD_Y = 2
 
 
 def cutoff_label(end_ns: float, velocity: VelocityModel | None) -> str:
@@ -430,32 +432,40 @@ class ProfileView(QWidget):
         return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
 
     def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:
-        """Where the line's label is drawn, or None when the line is hidden.
-        Factored out the same way `_selection_bounds` is, and for the same
-        reason: a plain rect a test can assert on without rendering a
-        pixel."""
+        """The label's tag, or None when the line is hidden. Sized to the
+        text plus padding, right-aligned. Factored out the same way
+        `_selection_bounds` is, and for the same reason: a plain rect a
+        test can assert on without rendering a pixel."""
         y = self._cutoff_y(t)
-        if y is None:
+        if self._cutoff_ns is None or y is None:
             return None
+        text = cutoff_label(self._cutoff_ns, self._velocity)
+        fm = self.fontMetrics()
+        w = fm.horizontalAdvance(text) + 2 * CUTOFF_TAG_PAD_X
+        h = fm.height() + 2 * CUTOFF_TAG_PAD_Y
         yy = r.top() + y
         # Above the line, unless that would put it above the image, where
         # the paint clip hides it: a line dragged up to keep one sample
-        # sits within a label's height of the top.
-        top = yy - 18 if yy - 18 >= r.top() else yy + 2
-        return QRectF(r.left(), top, r.width() - 4, 16)
+        # sits within a tag's height of the top.
+        top = yy - h - 2 if yy - h - 2 >= r.top() else yy + 2
+        return QRectF(r.right() + 1 - 3 - w, top, w, h)
 
     def _paint_cutoff(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         y = self._cutoff_y(t)
-        label = self._cutoff_label_rect(r, t)
-        if y is None or label is None or self._cutoff_ns is None:
+        tag = self._cutoff_label_rect(r, t)
+        if y is None or tag is None or self._cutoff_ns is None:
             return
         yy = r.top() + y
         p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
         p.setPen(QPen(CUTOFF_COLOUR, 2))
         p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
+        # White on a magenta tag: magenta text straight onto the radargram
+        # was hard to read.
+        p.fillRect(tag, CUTOFF_COLOUR)
+        p.setPen(QColor(255, 255, 255))
         p.drawText(
-            label,
-            int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+            tag,
+            int(Qt.AlignmentFlag.AlignCenter),
             cutoff_label(self._cutoff_ns, self._velocity),
         )
 

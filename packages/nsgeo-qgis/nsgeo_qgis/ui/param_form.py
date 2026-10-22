@@ -1,8 +1,9 @@
 """One generic parameter form, built from a step's schema().
 
 No step name appears here. `kind` picks the editor: float and int are line
-edits (so a REQUIRED field can be blank), choice is a combo box, curve is a
-label pointing at the gain strip. Commit builds the step through the core,
+edits (so a REQUIRED field can be blank), time is a bounded number spinbox
+(`TimeSpinBox`), choice is a combo box, curve is a label pointing at the gain
+strip. Commit builds the step through the core,
 so the core's validation is the only validation.
 
 `message` lives in its own outer layout, never as a row inside the
@@ -19,12 +20,15 @@ moment it touches `self.message` again.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from nsgeo.processing import REQUIRED, ParamSpec, Step, build_step, get_step
 from qgis.PyQt.QtCore import pyqtSignal
+from qgis.PyQt.QtGui import QValidator
 from qgis.PyQt.QtWidgets import (
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -32,7 +36,74 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.log import log as _log
+
 REQUIRED_STYLE = "QLineEdit { border: 1px solid #d1702f; background: #fff8f2; }"
+
+# What a number can look like while it is still being typed.
+_PARTIAL_NUMBER = re.compile(r"[+-]?(\d+\.?\d*|\.\d*)?([eE][+-]?\d*)?")
+UNBOUNDED_NS = 1e9
+
+
+class TimeSpinBox(QDoubleSpinBox):
+    """A number field bounded to a range that still lets any number be typed.
+
+    A stock `QDoubleSpinBox` refuses keystrokes that would leave the range
+    and reverts a committed out-of-range value to the old one. Here every
+    finite number is accepted as text and clamped to the nearest limit when
+    committed, so `-20` or `500` can be typed and end at a limit. The text is
+    shown the way the form's other number fields are (`:g`); `decimals` is
+    high so a value typed inside the range is kept as typed, not rounded to
+    a sample or to a few places.
+    """
+
+    # An arrow or wheel step is a finished edit: `editingFinished` does not
+    # follow one.
+    stepped = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setDecimals(10)
+        self.setRange(-UNBOUNDED_NS, UNBOUNDED_NS)
+        self.setKeyboardTracking(False)
+
+    def validate(self, text: str, pos: int) -> tuple[QValidator.State, str, int]:
+        try:
+            probe = text.strip()
+            try:
+                finite = math.isfinite(float(probe))
+            except ValueError:
+                state = (
+                    QValidator.State.Intermediate
+                    if _PARTIAL_NUMBER.fullmatch(probe)
+                    else QValidator.State.Invalid
+                )
+            else:
+                state = QValidator.State.Acceptable if finite else QValidator.State.Invalid
+            return state, text, pos
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"TimeSpinBox.validate: {exc!r}")
+            return QValidator.State.Invalid, text, pos
+
+    def stepBy(self, steps: int) -> None:
+        try:
+            super().stepBy(steps)
+            self.stepped.emit()
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"TimeSpinBox.stepBy: {exc!r}")
+
+    def valueFromText(self, text: str) -> float:
+        try:
+            value = float(text.strip())
+        except ValueError:
+            return self.value()
+        except Exception as exc:
+            _log(f"TimeSpinBox.valueFromText: {exc!r}")
+            return self.value()
+        return min(max(value, self.minimum()), self.maximum())
+
+    def textFromValue(self, value: float) -> str:
+        return f"{value:g}"
 
 
 class ParamForm(QWidget):
@@ -61,7 +132,9 @@ class ParamForm(QWidget):
         # name -> (text shown, value it was built from) for numeric editors.
         # The text is rounded (`:g`); an editor left alone must report the
         # exact value, not its rounding (see `values`).
-        self._shown: dict[str, tuple[str, Any]] = {}
+        self._shown: dict[str, tuple[Any, Any]] = {}
+        self._time_range: tuple[float, float] | None = None
+        self._time_step = 1.0
         self.step_name: str | None = None
         # A depth counter, not a bool (matching ProcessingDock._updating, for
         # the same reason): set_step() calls clear() before taking its own
@@ -92,8 +165,18 @@ class ParamForm(QWidget):
         finally:
             self._updating -= 1
 
-    def set_step(self, name: str, params: dict[str, Any] | None = None) -> None:
+    def set_step(
+        self,
+        name: str,
+        params: dict[str, Any] | None = None,
+        time_range: tuple[float, float] | None = None,
+        time_step: float | None = None,
+    ) -> None:
+        """Show `name`'s editors. `time_range` bounds a time field and
+        `time_step` is its arrow step; neither means unbounded and 1 ns."""
         self.clear()
+        self._time_range = time_range
+        self._time_step = time_step if time_step else 1.0
         self.step_name = name
         self._specs = get_step(name).schema()
         self._updating += 1
@@ -121,6 +204,8 @@ class ParamForm(QWidget):
         if spec.kind == "curve":
             self._curve_values[spec.name] = None if value is REQUIRED else value
             return QLabel("edited in the profile viewer's gain strip")
+        if spec.kind == "time":
+            return self._make_time_editor(spec, value)
         edit = QLineEdit()
         if value is REQUIRED:
             edit.setPlaceholderText("required")
@@ -131,6 +216,26 @@ class ParamForm(QWidget):
         edit.textChanged.connect(self._on_edited)
         edit.editingFinished.connect(self.commit)
         return edit
+
+    def _make_time_editor(self, spec: ParamSpec, value: Any) -> QWidget:
+        spin = TimeSpinBox()
+        if self._time_range is not None:
+            spin.setRange(*self._time_range)
+        spin.setSingleStep(self._time_step)
+        if value is not REQUIRED:
+            spin.setValue(float(value))
+            # `setValue` rounds to `decimals()` and the text to 6 digits; an
+            # editor left alone must report the exact value it was built
+            # from. A value the range clamped is not kept. The test is
+            # "did `setValue` move it by more than its own rounding", not
+            # `minimum() <= value`: `setRange` rounds the limits too, so an
+            # exact value sitting on a limit can compare just outside it.
+            if abs(spin.value() - value) < 10 ** -(spin.decimals() - 1):
+                self._shown[spec.name] = (spin.value(), value)
+        spin.valueChanged.connect(self._on_edited)
+        spin.editingFinished.connect(self.commit)
+        spin.stepped.connect(self.commit)
+        return spin
 
     def _on_edited(self, *_: Any) -> None:
         if not self._updating:
@@ -144,6 +249,9 @@ class ParamForm(QWidget):
             if index < 0:
                 raise ValueError(f"{text!r} is not one of this field's choices")
             editor.setCurrentIndex(index)
+        elif isinstance(editor, QDoubleSpinBox):
+            editor.lineEdit().setText(text)
+            editor.interpretText()
         elif isinstance(editor, QLineEdit):
             editor.setText(text)
 
@@ -168,6 +276,11 @@ class ParamForm(QWidget):
                 if curve_value is None:
                     raise ValueError(f"{spec.label}: no control points yet")
                 out[spec.name] = curve_value
+            elif isinstance(editor, QDoubleSpinBox):
+                shown = self._shown.get(spec.name)
+                out[spec.name] = (
+                    shown[1] if shown and editor.value() == shown[0] else editor.value()
+                )
             else:
                 assert isinstance(editor, QLineEdit)
                 text = editor.text().strip()
