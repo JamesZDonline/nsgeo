@@ -24,8 +24,8 @@ import re
 from typing import Any
 
 from nsgeo.processing import REQUIRED, ParamSpec, Step, build_step, get_step
-from qgis.PyQt.QtCore import pyqtSignal
-from qgis.PyQt.QtGui import QValidator
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QValidator, QWheelEvent
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -66,18 +66,17 @@ class TimeSpinBox(QDoubleSpinBox):
         self.setDecimals(10)
         self.setRange(-UNBOUNDED_NS, UNBOUNDED_NS)
         self.setKeyboardTracking(False)
-        # `touched`: the user typed or stepped since the form built this
-        # field (R10); an untouched field reports the value it was built
-        # from, whatever the range or the display rounding say.
+        # `touched` (R10, R12): the user changed the value since the form
+        # built this field -- `valueFromText` parsed text that differs from
+        # the display of the current value, or a step happened. An
+        # untouched field reports the value it was built from. Qt
+        # interprets the display text on Return and on focus-out whether or
+        # not anything was typed, and reverts a cleared or partial entry
+        # without calling `valueFromText` at all; none of those is an edit.
         self.touched = False
-        # Text typed and not yet interpreted. Qt interprets the display text
-        # on Return and on focus-out whether or not anything was typed, and
-        # the display is a 6-digit rounding: only typed text may replace
-        # the value.
-        self._text_dirty = False
         self._exact_range: tuple[float, float] | None = None
-        self.lineEdit().textEdited.connect(self._on_text_edited)
-        self.editingFinished.connect(self._on_finished)
+        # The wheel scrolls the panel unless the field is the one in use.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     def set_exact_range(self, low: float, high: float) -> None:
         """`setRange` rounds the limits to `decimals()`; the exact ones are
@@ -98,14 +97,16 @@ class TimeSpinBox(QDoubleSpinBox):
     def edit_text(self, text: str) -> None:
         """Set the text as if typed, and interpret it."""
         self.lineEdit().setText(text)
-        self.touched = self._text_dirty = True
         self.interpretText()
 
-    def _on_text_edited(self, _text: str) -> None:
-        self.touched = self._text_dirty = True
-
-    def _on_finished(self) -> None:
-        self._text_dirty = False
+    def wheelEvent(self, event: QWheelEvent | None) -> None:
+        try:
+            if event is not None and not self.hasFocus():
+                event.ignore()  # let the panel scroll
+                return
+            super().wheelEvent(event)
+        except Exception as exc:  # a Qt override: never let it escape
+            _log(f"TimeSpinBox.wheelEvent: {exc!r}")
 
     def validate(self, text: str, pos: int) -> tuple[QValidator.State, str, int]:
         try:
@@ -129,16 +130,16 @@ class TimeSpinBox(QDoubleSpinBox):
         try:
             super().stepBy(steps)  # interprets typed text first, if any
             self.touched = True
-            self._text_dirty = False
             self.stepped.emit()
         except Exception as exc:  # a Qt override: never let it escape
             _log(f"TimeSpinBox.stepBy: {exc!r}")
 
     def valueFromText(self, text: str) -> float:
         try:
-            if not self._text_dirty:
-                return self.value()
+            if text.strip() == self.textFromValue(self.value()):
+                return self.value()  # the display, not an edit (R12)
             value = float(text.strip())
+            self.touched = True
             return min(max(value, self.minimum()), self.maximum())
         except Exception as exc:
             _log(f"TimeSpinBox.valueFromText: {exc!r}")

@@ -15,7 +15,7 @@ from nsgeo.processing import StepStack, build_step
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QLineEdit, QMessageBox
+from qgis.PyQt.QtWidgets import QApplication, QLineEdit, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -41,6 +41,16 @@ def _unload(plugin, answer_modal):
     # The session is dirty by now; see test_plugin_gain_strip.py's
     # `test_plugin_routes_strip_edits_through_replace_step`.
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    host = getattr(plugin, "_test_host", None)
+    if host is not None:
+        # Hand the form back to its dock before the host goes: a parentless
+        # top-level left alive over the form crashes the process at exit.
+        dock = plugin.processing_dock
+        dock.form_area.addWidget(dock.form)
+        host.close()
+        host.deleteLater()
+        QApplication.processEvents()
+        plugin._test_host = None
     plugin.unload()
 
 
@@ -303,7 +313,9 @@ def test_an_untouched_cutoff_above_its_range_survives_return_and_focus_out(
     pd.add_step("time_cutoff")  # seeded at the record end of what row 0 left: 20 samples
     pd.add_step("time_cutoff")
     stored = rg.t0_ns + rg.n_samples * rg.dt_ns
-    s.replace_step(key, 2, build_step("time_cutoff", end_ns=stored))  # above row 1's range
+    s.replace_step(
+        key, 2, build_step("time_cutoff", end_ns=stored)
+    )  # above row 2's range (row 1's output)
     pd.list.setCurrentRow(2)
     spin = pd.form.editors["end_ns"]
     assert spin.maximum() < stored  # the stored value is outside the range
