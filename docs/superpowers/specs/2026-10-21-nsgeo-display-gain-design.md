@@ -27,13 +27,13 @@ dragging, the strip shows how close each depth is to that point.
 
 ---
 
-## 2. Starting state, measured on `main` at `c4701e8`
+## 2. Starting state, measured on `main` at `c4701e8`, rechecked at `87fcaa3` (time cutoff merged)
 
 | What | Where | State |
 |---|---|---|
 | Display limit | `nsgeo_qgis/render/qimage.py:52` | `RadargramImage.__init__` takes `PercentileClip(percentile).limit(rg.data)` from the radargram it renders. `with_display` and `with_radargram` both rebuild it. |
 | Percentile slider | `ui/profile_dock.py:132-154`, `:262` | 50.0–100.0 %, inverted appearance, default 99.0. `_display_changed` rebuilds the image with the new percentile. Never saved. |
-| Render path | `ui/profile_dock.py:648` `current_radargram`, `:699` `_render` | `stack.result()`, or `stack.difference(i)` while Difference is on. A preview of another line renders that line's stack through the same path. |
+| Render path | `ui/profile_dock.py:684` `current_radargram`, `:755` `_render` | `stack.result()`, or `stack.difference(i)` while Difference is on, or `stack.result_bypassing(row)` while the time cutoff's row is selected (`:730-732`). A preview of another line renders that line's stack through the same path. The limit is taken from whichever of these is shown. |
 | Cached intermediates | `nsgeo-core/.../processing/stack.py:98` `_ensure`, `:115` `intermediate` | The output of every step is cached. Editing step *i* invalidates *i* onward. The input to step *i* is `intermediate(i - 1)`, or `source` when *i* = 0. |
 | Gain strip | `ui/gain_strip.py` | 96 px fixed width (`:105`). Paints a grey dashed 0 dB line (`ZERO_COLOUR`, `:97`, `:221`), the blue curve and its handles, and the dB range at the top. Shown only while a step with a curve-kind parameter is selected. |
 | Which step is "the gain curve" | `plugin.py:508` `_curve_param_name` | Decided by the schema's `kind == "curve"`, never by the step's name. |
@@ -88,6 +88,8 @@ dragging, the strip shows how close each depth is to that point.
     the cutoff skipped while its row is selected. The limit still comes from the real stack, with
     the cutoff applied and only the gain curves skipped. So selecting or deselecting the cutoff
     row moves the line's dimmed tail in and out of view without shifting the profile's brightness.
+    This applies with or without a gain curve, so it changes the merged cutoff slightly: today the
+    limit is taken over the bypassed record while the cutoff row is selected.
 12. For unipolar output (`stack.output_unipolar`, an `amp_*` step after the curve) the band is
     one-sided, from the centre towards the positive limit, matching how the profile draws it.
 
@@ -186,7 +188,8 @@ A drag must stay interactive within the existing render budget (~120 ms for a 51
 
 **Anti-goals** (failures even if everything above technically works):
 
-- Any profile **without** a gain curve looking different from today.
+- Any profile **without** a gain curve looking different from today, other than while the time
+  cutoff's row is selected (call 11).
 - A profile going blank or solid because of where a step sits relative to a gain curve.
 - The image's brightness visibly jumping when any step, the gain curve or the time cutoff, is
   selected or deselected.
@@ -217,8 +220,10 @@ hurt a user, each of which needs a test that actually feeds it:
 5. Difference on while the gain curve is selected: today's scale, and the strip draws the curve
    only.
 6. A preview of another line while a gain curve is selected on the working line.
-7. Envelope by the strided or scaled route against a full `np.percentile(..., axis=1)` on a real
-   line: same answer within a stated tolerance.
+7. The envelope against a full `np.percentile(..., axis=1)` on every real line: identical. (The plan
+   takes the strided route with a 2048-trace cap, and every real line is under it. A strided subset
+   at stride 2 measured up to 0.14 of the limit off on FILE__001, so the cap is set high enough that
+   ordinary lines never take that path.)
 8. Cursor at `-1`, at trace 0 and at the last trace.
 
 Then the standing build-and-walkthrough: deploy to a QGIS profile, publish a walkthrough page with
@@ -232,13 +237,13 @@ because it embeds a real line.
 ## 9. Left to the builder
 
 - Where "bypass every gain curve" lives. A core `StepStack` method is the natural home. **The time
-  cutoff is being built in parallel** (`nsgeo-time-cutoff`; its Task 1 landed at `d5b1f70` on
-  2026-10-21). It adds `StepStack.result_bypassing(index)` for a single index, which deliberately
-  caches nothing and re-runs every step after the bypassed one on each call. That is fine for the
+  cutoff is merged** (#59, `87fcaa3`). It added `StepStack.result_bypassing(index)` for a single
+  index, which deliberately caches nothing and re-runs every step after the bypassed one on each
+  call. That is fine for the
   cutoff but not for a drag (§5). Generalise it to a set of indices rather than add a second
   mechanism, and give the reference a cache that survives `replace_step` on a gain curve but not
-  on any other change. The cutoff's Task 3 also rewrites `ProfileDock.current_radargram()` and
-  `_render()`, the two functions §4.1 changes, so call 11 has to be honoured there.
+  on any other change. The cutoff rewrote `ProfileDock.current_radargram()` and `_render()`, the
+  two functions §4.1 changes, so call 11 has to be honoured there.
 - How `RadargramImage` receives the reference or its limit (an extra argument, or a `Normalizer`
   passed in).
 - How the strip receives the envelope, the cursor trace and the limit from `ProfileDock`.
