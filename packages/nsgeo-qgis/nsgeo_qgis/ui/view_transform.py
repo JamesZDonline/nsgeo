@@ -95,6 +95,13 @@ class ViewTransform:
     def time_of_y(self, y: float) -> float:
         return self.time_lo + y / self.height * (self.time_hi - self.time_lo)
 
+    def snap_cutoff(self, time_ns: float) -> float:
+        """Round a time to the nearest sample boundary, keeping at least one
+        sample and never passing `t_end`: a cutoff line dragged anywhere
+        lands on a boundary the `time_cutoff` step can actually express."""
+        m = round((time_ns - self.t0_ns) / self.dt_ns)
+        return self.t0_ns + min(max(m, 1), self.n_samples) * self.dt_ns
+
     def trace_index_at(self, x: float) -> int:
         # max(0, ...) on the upper bound first: n_traces == 0 must clamp to 0,
         # never to -1, which would be numpy's "last trace" rather than "no trace".

@@ -408,16 +408,23 @@ def test_a_velocity_only_grid_edit_does_not_re_prepare(sourced):
 
 
 def test_removing_the_chosen_grid_is_reported_rather_than_left_stale(sourced):
-    """`remove_grid` refuses to remove a grid that still has lines
-    (`ValueError`, `session.py`'s own guard) -- it does NOT remove them
-    for you. So the reachable way a chosen grid disappears out from under
-    a prepared source is: the lines are removed or reassigned first, THEN
-    the now-empty grid is removed. This test drives it that way."""
+    """One way a chosen grid disappears out from under a prepared source:
+    the lines are removed or reassigned first, THEN the now-empty grid is
+    removed. The next test covers the other, the grid going with its
+    lines in one step (#31)."""
     engine, session, errors, _ = sourced
     _prepare(engine, session)
     for key in list(session.keys()):
         session.remove_line(key)
     session.remove_grid("A")
+    assert not engine.is_prepared
+    assert any("A" in msg for _, msg in errors), errors
+
+
+def test_removing_the_chosen_grid_with_its_lines_is_reported_too(sourced):
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    session.remove_grid("A", with_lines=True)
     assert not engine.is_prepared
     assert any("A" in msg for _, msg in errors), errors
 

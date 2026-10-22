@@ -119,6 +119,28 @@ class StepStack:
         self._ensure(index)
         return self._cache[index]
 
+    def result_bypassing(self, index: int) -> Radargram:
+        """What `result()` would be with step `index` switched off.
+
+        Lets a front end show the data a step is about to hide (the part of
+        the record a time cutoff removes) without toggling the step. The
+        prefix before `index` comes from the cache; everything after is run
+        fresh and NOT cached, because those intermediates belong to a chain
+        the stack does not actually have. `result()` stays the real chain.
+        """
+        if not 0 <= index < len(self._entries):
+            raise IndexError(f"step index {index} out of range (0..{len(self._entries) - 1})")
+        if index:
+            current = self.intermediate(index - 1)
+        else:
+            if self._source is None:
+                raise ValueError("stack has no source radargram")
+            current = self._source
+        for step, enabled in self._entries[index + 1 :]:
+            if enabled:
+                current = step.apply(current)
+        return current
+
     def difference(self, index: int) -> Radargram:
         """What step `index` removed: the input minus the output.
 
