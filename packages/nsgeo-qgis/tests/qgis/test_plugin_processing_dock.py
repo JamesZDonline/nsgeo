@@ -4,12 +4,12 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import available_steps
+from nsgeo.processing import available_steps, build_step
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
-from qgis.PyQt.QtWidgets import QDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -37,6 +37,10 @@ def test_add_menu_lists_the_registry_and_marks_required_steps(opened):
     assert [t.split(" ")[0] for t in texts] == available_steps()
     assert any(t.startswith("bandpass") and "needs values" in t for t in texts)
     assert not any(t.startswith("dewow") and "needs values" in t for t in texts)
+    # These two add straight away, seeded from the record: no dialog, so no
+    # promise of one.
+    assert "time_cutoff" in texts
+    assert "gain_curve" in texts
 
 
 def test_add_menu_action_triggers_add_step(opened, drive_dialog):
@@ -264,3 +268,51 @@ def test_apply_button_click_confirms_before_applying(opened, answer_modal):
     other = session.keys()[1]
     assert len(session.stack_for(other)) == 0
     assert "cancelled" in dock.status.text()
+
+
+def test_adding_a_time_cutoff_seeds_the_record_end_and_changes_nothing(opened):
+    session, dock, key = opened
+    t0, dt, n = dock.time_axis()
+    dock.add_step("time_cutoff")
+    stack = session.stack_for(key)
+    assert stack.entries[-1][0].params["end_ns"] == pytest.approx(t0 + n * dt)
+    assert stack.result().n_samples == n
+    assert dock.list.currentRow() == len(stack) - 1
+
+
+def test_the_cutoff_spinbox_spans_the_record_as_the_cutoff_step_receives_it(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("time_zero", mode="sample", sample=5))
+    dock.add_step("time_cutoff")
+    zeroed = session.stack_for(key).intermediate(0)
+    assert zeroed.n_samples < session.stack_for(key).source.n_samples
+    spin = dock.form.editors["end_ns"]
+    assert isinstance(spin, QDoubleSpinBox)
+    assert spin.minimum() == pytest.approx(zeroed.t0_ns + zeroed.dt_ns)
+    assert spin.maximum() == pytest.approx(zeroed.t0_ns + zeroed.n_samples * zeroed.dt_ns)
+    assert spin.singleStep() == pytest.approx(zeroed.dt_ns)
+
+
+def test_the_cutoff_spinbox_range_for_a_first_step_is_the_source(opened):
+    session, dock, key = opened
+    dock.add_step("time_cutoff")
+    src = session.stack_for(key).source
+    spin = dock.form.editors["end_ns"]
+    assert spin.minimum() == pytest.approx(src.t0_ns + src.dt_ns)
+    assert spin.maximum() == pytest.approx(src.t0_ns + src.n_samples * src.dt_ns)
+
+
+def test_the_cutoff_spinbox_falls_back_to_the_source_when_an_earlier_step_fails(
+    opened, message_log
+):
+    session, dock, key = opened
+    session.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=600.0))
+    dock.add_step("time_cutoff")
+    src = session.stack_for(key).source
+    # Break the earlier step after the fact: a high cut past Nyquist.
+    session.replace_step(key, 0, build_step("bandpass", low_mhz=100.0, high_mhz=1e9))
+    dock.list.setCurrentRow(0)
+    dock.list.setCurrentRow(1)
+    spin = dock.form.editors["end_ns"]
+    assert spin.maximum() == pytest.approx(src.t0_ns + src.n_samples * src.dt_ns)
+    assert any("does not evaluate cleanly" in m for m in message_log)

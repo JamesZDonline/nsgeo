@@ -227,3 +227,15 @@ def test_nice_ticks():
         nice_ticks(0.0, 4.0, target=8), [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
     )
     assert nice_ticks(5.0, 5.0).size == 0
+
+
+def test_snap_cutoff_rounds_to_the_nearest_sample_boundary():
+    t = ViewTransform.fit(100, 200, -4.0, 0.5, 400, 300)
+    assert t.snap_cutoff(20.3) == pytest.approx(20.5)  # (20.3 + 4) / 0.5 = 48.6 -> 49
+    assert t.snap_cutoff(20.2) == pytest.approx(20.0)
+
+
+def test_snap_cutoff_clamps_into_the_record():
+    t = ViewTransform.fit(100, 200, -4.0, 0.5, 400, 300)
+    assert t.snap_cutoff(-100.0) == pytest.approx(-3.5)  # one sample kept
+    assert t.snap_cutoff(1e6) == pytest.approx(t.t_end)

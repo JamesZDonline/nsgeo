@@ -11,7 +11,18 @@ from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from plugin_testing import synthetic_dzt
-from qgis.PyQt.QtWidgets import QComboBox, QDialog, QLineEdit
+from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtGui import QWheelEvent
+from qgis.PyQt.QtTest import QTest
+from qgis.PyQt.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -392,7 +403,7 @@ def test_time_axis_logs_when_it_falls_back_to_source(opened, message_log):
     session, dock, key = opened
     session.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=5000.0))
     dock.time_axis()
-    assert any("time_axis" in m and "raw source" in m for m in message_log)
+    assert any("input_axis" in m and "raw source" in m for m in message_log)
 
 
 def test_add_step_with_dialog_opens_a_real_modal_and_accepts(opened, drive_dialog):
@@ -526,3 +537,320 @@ def test_removing_the_selected_row_shows_the_step_that_slides_into_it(opened):
     assert dock.list.currentRow() == 0
     assert dock.form.step_name == "gain_agc"
     assert set(dock.form.editors) == {"window_ns", "target", "eps"}
+
+
+def test_a_time_param_is_a_number_field_with_its_unit(qgis_app):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": 40.0})
+    assert isinstance(f.editors["end_ns"], QDoubleSpinBox)
+    assert f.editors["end_ns"].text() == "40"
+    assert f._layout.labelForField(f.editors["end_ns"]).text() == "Cutoff (ns)"
+    got = []
+    f.committed.connect(got.append)
+    f.set_value("end_ns", "35.5")
+    f.commit()
+    assert got == [{"end_ns": 35.5}]
+
+
+def test_an_unedited_field_commits_the_exact_value_it_was_built_from(qgis_app):
+    """The form shows floats with `:g` (6 significant digits); a dragged
+    cutoff on the real HS350 axis is not representable that way, and
+    committing the rounded text back (focus leaving the field does) would
+    move the cutoff by a sample."""
+    t0, dt = -11.086392402648926, 0.21653111279010773
+    exact = t0 + 2 * dt
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": exact}, time_range=(t0 + dt, t0 + 300 * dt), time_step=dt)
+    assert f.editors["end_ns"].text() != repr(exact)
+    got = []
+    f.committed.connect(got.append)
+    f.commit()
+    assert got == [{"end_ns": exact}]
+    f.set_value("end_ns", "-10.5")
+    f.commit()
+    assert got == [{"end_ns": exact}, {"end_ns": -10.5}]
+
+
+def _type_and_commit(spin, text):
+    """Type into the spinbox's own line edit and press Enter: the real path
+    from keystroke to `editingFinished` to the form's commit."""
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, text)
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+def _ranged_form(end=40.0):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": end}, time_range=(-3.5, 100.0), time_step=0.5)
+    got = []
+    f.committed.connect(got.append)
+    return f, f.editors["end_ns"], got
+
+
+@pytest.mark.parametrize(
+    ("typed", "limit"), [("-20", -3.5), ("500", 100.0), ("100.1", 100.0), ("-3.6", -3.5)]
+)
+def test_a_cutoff_typed_outside_the_range_snaps_to_the_nearest_limit(qgis_app, typed, limit):
+    f, spin, got = _ranged_form()
+    _type_and_commit(spin, typed)
+    assert spin.value() == limit
+    assert got == [{"end_ns": limit}]
+    assert f.message.text() == ""  # no note
+
+
+def test_a_cutoff_typed_inside_the_range_is_kept_as_typed(qgis_app):
+    f, spin, got = _ranged_form()
+    _type_and_commit(spin, "12.3456789")
+    assert got == [{"end_ns": 12.3456789}]
+
+
+def test_a_cutoff_arrow_step_is_one_sample(qgis_app):
+    f, spin, got = _ranged_form()
+    spin.stepUp()
+    assert spin.value() == 40.5
+    spin.stepDown()
+    spin.stepDown()
+    assert spin.value() == 39.5
+    assert spin.text() == "39.5"
+
+
+def test_a_cutoff_without_a_range_is_effectively_unbounded(qgis_app):
+    f = ParamForm()
+    f.set_step("time_cutoff", {"end_ns": 40.0})
+    spin = f.editors["end_ns"]
+    got = []
+    f.committed.connect(got.append)
+    _type_and_commit(spin, "-2500")
+    assert got == [{"end_ns": -2500.0}]
+
+
+def test_a_spinbox_cutoff_built_at_a_limit_commits_unchanged(qgis_app):
+    f, spin, got = _ranged_form(end=100.0)
+    f.commit()
+    assert got == [{"end_ns": 100.0}]
+
+
+def test_a_snap_shows_the_limit_even_when_the_field_already_held_it(qgis_app):
+    f, spin, got = _ranged_form(end=100.0)
+    _type_and_commit(spin, "500")
+    assert spin.text() == "100"
+    assert spin.value() == 100.0
+
+
+def test_an_arrow_step_commits(qgis_app):
+    f, spin, got = _ranged_form()
+    spin.stepUp()
+    assert got == [{"end_ns": 40.5}]
+
+
+HS350_T0, HS350_DT = -11.086392402648926, 0.21653111279010773
+
+
+def _hs350_form(end, n=512):
+    f = ParamForm()
+    f.set_step(
+        "time_cutoff",
+        {"end_ns": end},
+        time_range=(HS350_T0 + HS350_DT, HS350_T0 + n * HS350_DT),
+        time_step=HS350_DT,
+    )
+    got = []
+    f.committed.connect(got.append)
+    return f, f.editors["end_ns"], got
+
+
+def test_return_with_nothing_typed_commits_the_exact_value(qgis_app):
+    """Qt's spinbox interprets its 6-digit display text on Return even
+    when nothing was typed; that must not replace the built-from value."""
+    for m in (1, 2, 99, 100, 300, 511, 512):  # 512 is the seeded limit
+        end = HS350_T0 + m * HS350_DT
+        f, spin, got = _hs350_form(end)
+        QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+        assert f.values() == {"end_ns": end}, m
+        assert got == [] or got == [{"end_ns": end}], m
+
+
+def test_an_arrow_step_then_return_keeps_the_stepped_value(qgis_app):
+    f, spin, got = _hs350_form(HS350_T0 + 100 * HS350_DT)
+    spin.stepDown()
+    stepped = got[-1]["end_ns"]
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    assert f.values() == {"end_ns": stepped}
+    assert stepped == pytest.approx(HS350_T0 + 99 * HS350_DT, abs=1e-9)
+
+
+@pytest.mark.parametrize("stored", [120.0, -50.0])
+def test_an_untouched_field_reports_a_stored_value_outside_the_range(qgis_app, stored):
+    f, spin, got = _ranged_form(end=stored)
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    f.commit()
+    assert f.values() == {"end_ns": stored}
+    assert all(c == {"end_ns": stored} for c in got)
+
+
+def test_a_snap_lands_on_the_exact_limits_not_their_rounding(qgis_app):
+    n = 512
+    f, spin, got = _hs350_form(HS350_T0 + 100 * HS350_DT, n)
+    _type_and_commit(spin, "-99")
+    assert got[-1] == {"end_ns": HS350_T0 + HS350_DT}
+    _type_and_commit(spin, "9999")
+    assert got[-1] == {"end_ns": HS350_T0 + n * HS350_DT}
+
+
+def test_a_focus_out_commits_what_was_typed(qgis_app):
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    f, spin, got = _ranged_form()
+    other = QLineEdit()
+    lay.addWidget(f)
+    lay.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    spin.setFocus()
+    assert spin.hasFocus()
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "500")
+    other.setFocus()
+    assert not spin.hasFocus()
+    assert got == [{"end_ns": 100.0}]
+    assert spin.value() == 100.0
+    host.close()
+
+
+def test_the_spinbox_overrides_do_not_raise_on_bad_input(qgis_app, message_log):
+    from nsgeo_qgis.ui.param_form import TimeSpinBox
+
+    spin = TimeSpinBox()
+    assert isinstance(spin.textFromValue("not a number"), str)
+    assert any("textFromValue" in m for m in message_log)
+
+
+FINE_T0, FINE_DT = float(__import__("numpy").float32(-1.2345678)), 0.0117
+
+
+def _axis_form(t0, dt, m, n=512):
+    f = ParamForm()
+    end = t0 + m * dt
+    f.set_step("time_cutoff", {"end_ns": end}, time_range=(t0 + dt, t0 + n * dt), time_step=dt)
+    got = []
+    f.committed.connect(got.append)
+    return f, f.editors["end_ns"], got, end
+
+
+def _gesture_clear(spin):
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClick(edit, Qt.Key.Key_Backspace)
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+def _gesture_partial(spin):
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "-")
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+def _gesture_digit_and_back(spin):
+    edit = spin.lineEdit()
+    QTest.keyClick(edit, Qt.Key.Key_End)
+    QTest.keyClicks(edit, "5")
+    QTest.keyClick(edit, Qt.Key.Key_Backspace)
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+def _gesture_retype_display(spin):
+    edit = spin.lineEdit()
+    shown = spin.text()
+    edit.selectAll()
+    QTest.keyClicks(edit, shown)
+    QTest.keyClick(edit, Qt.Key.Key_Return)
+
+
+@pytest.mark.parametrize(
+    "gesture",
+    [_gesture_clear, _gesture_partial, _gesture_digit_and_back, _gesture_retype_display],
+)
+@pytest.mark.parametrize(("t0", "dt"), [(HS350_T0, HS350_DT), (FINE_T0, FINE_DT)])
+def test_a_gesture_that_changes_nothing_writes_nothing(qgis_app, gesture, t0, dt):
+    """R12: text equal to the display, or a cleared or partial entry Qt
+    reverts, is not an edit; the field keeps the exact value."""
+    lossy = 0
+    for m in (1, 2, 17, 99, 100, 300, 301, 511, 512):
+        f, spin, got, end = _axis_form(t0, dt, m)
+        lossy += float(spin.text()) != end
+        gesture(spin)
+        assert f.values() == {"end_ns": end}, (gesture.__name__, m)
+        assert got == [] or got == [{"end_ns": end}], (gesture.__name__, m, got)
+    assert lossy > 0
+
+
+def test_a_partial_entry_then_focus_out_writes_nothing(qgis_app):
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    f, spin, got, end = _axis_form(HS350_T0, HS350_DT, 300)
+    other = QLineEdit()
+    lay.addWidget(f)
+    lay.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    spin.setFocus()
+    assert spin.hasFocus()
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "-")
+    other.setFocus()
+    assert not spin.hasFocus()
+    assert f.values() == {"end_ns": end}
+    assert got == [] or got == [{"end_ns": end}]
+    host.close()
+    host.deleteLater()
+
+
+def test_a_real_typed_change_still_commits_after_the_r12_rule(qgis_app):
+    f, spin, got, end = _axis_form(HS350_T0, HS350_DT, 300)
+    _type_and_commit(spin, "12.5")
+    assert got[-1] == {"end_ns": 12.5}
+
+
+def _wheel(widget, dy=120):
+    return QWheelEvent(
+        QPointF(2, 2),
+        QPointF(2, 2),
+        QPoint(0, 0),
+        QPoint(0, dy),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+
+
+def test_the_wheel_steps_the_spinbox_only_when_it_has_focus(qgis_app):
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    f, spin, got, end = _axis_form(HS350_T0, HS350_DT, 300)
+    other = QLineEdit()
+    lay.addWidget(f)
+    lay.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    other.setFocus()
+    assert not spin.hasFocus()
+    got.clear()  # the host gave the spinbox focus first; leaving it committed
+    ev = _wheel(spin)
+    QApplication.sendEvent(spin, ev)
+    assert not ev.isAccepted()  # left for the panel to scroll
+    assert spin.value() == pytest.approx(end, abs=1e-9) and got == []
+    spin.setFocus()
+    assert spin.hasFocus()
+    QApplication.sendEvent(spin, _wheel(spin))
+    assert spin.value() == pytest.approx(end + HS350_DT, abs=1e-9)
+    assert len(got) == 1
+    host.close()
+    host.deleteLater()
