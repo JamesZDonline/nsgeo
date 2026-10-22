@@ -12,6 +12,7 @@ from nsgeo.processing import (  # noqa: F401  (registers the built-in steps)
     bandpass,
     dewow,
     gain,
+    timecutoff,
     timezero,
 )
 from nsgeo.processing.base import (

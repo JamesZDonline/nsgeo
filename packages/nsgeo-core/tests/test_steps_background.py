@@ -86,6 +86,7 @@ def test_svd_rejects_negative_components():
 
 _STEP_PARAMS = {
     "time_zero": {"mode": "sample", "sample": 4},
+    "time_cutoff": {"end_ns": 10.0},
     "dewow": {"window_ns": 4.0},
     "gain_agc": {"window_ns": 4.0},
     "gain_parametric": {},

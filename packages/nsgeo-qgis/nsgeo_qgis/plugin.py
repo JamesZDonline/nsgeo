@@ -292,6 +292,7 @@ class NsgeoPlugin:
         self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
+        self.processing_dock.step_selected.connect(self.profile_dock.set_selected_step)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
         self.profile_dock.difference_cleared.connect(
             lambda: self.processing_dock.diff_button.setChecked(False)

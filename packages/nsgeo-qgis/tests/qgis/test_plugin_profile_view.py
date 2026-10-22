@@ -19,11 +19,12 @@ from nsgeo_qgis.ui.profile_view import (
     MARGIN_TOP,
     PICK_COLOUR,
     ProfileView,
+    cutoff_label,
 )
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
@@ -786,6 +787,35 @@ def test_mouse_move_survives_a_broken_pan_transform_instead_of_leaking_to_qt(vie
     assert v.transform == before  # panned() never returned; last good transform kept
 
 
+def test_mouse_press_and_release_report_a_failure_instead_of_leaking_to_qt(
+    view, monkeypatch, message_log
+):
+    """Both are Qt-invoked overrides with real logic in them now (the
+    cutoff grab, the lost-release abandon, the selection commit), so each
+    guards its own body the way `mouseMoveEvent` does. Forced here by
+    making a helper each one calls raise, as the pan test above does."""
+    v, _ = view
+    excepthook_calls: list[tuple] = []
+    monkeypatch.setattr(sys, "excepthook", lambda *a: excepthook_calls.append(a))
+    r, t, ly = _on_line(v)
+
+    def boom(*_):
+        raise RuntimeError("simulated")
+
+    monkeypatch.setattr(v, "_near_cutoff", boom)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    assert not excepthook_calls, f"exception leaked out of mousePressEvent: {excepthook_calls}"
+    assert [m for m in message_log if "mouse press" in m and "simulated" in m]
+
+    monkeypatch.undo()
+    monkeypatch.setattr(sys, "excepthook", lambda *a: excepthook_calls.append(a))
+    monkeypatch.setattr(v, "clear_selection", boom)
+    _press_left(v, r.left() + 100, r.top() + 50)  # a plain click: its release clears
+    _release_left(v, r.left() + 100, r.top() + 50)
+    assert not excepthook_calls, f"exception leaked out of mouseReleaseEvent: {excepthook_calls}"
+    assert [m for m in message_log if "mouse release" in m and "simulated" in m]
+
+
 def test_shift_click_and_pick_mode_request_picks(view):
     v, rg = view
     picks = []
@@ -1491,3 +1521,310 @@ def test_pick_mode_also_ignores_a_click_outside_the_radargram(view):
         QPoint(r.left() + 10, r.top() + 10),
     )
     assert len(picks) == 1
+
+
+# ---- the time-cutoff line ---------------------------------------------------
+def _press_left(v, x, y):
+    QTest.mousePress(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y))
+    )
+
+
+def _release_left(v, x, y):
+    QTest.mouseRelease(
+        v, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(int(x), int(y))
+    )
+
+
+def _on_line(v, cutoff_ns=40.0):
+    """Shows the line at `cutoff_ns` and returns (rect, transform, local line y)."""
+    v.set_cutoff(cutoff_ns)
+    r = v.image_rect()
+    return r, v.transform, round(v._cutoff_y(v.transform))
+
+
+def test_the_cutoff_line_sits_at_its_time(view):
+    v, _ = view
+    v.set_axes(100, 200, 0.0, 0.5)
+    v.set_cutoff(40.0)
+    t = v.transform
+    assert v._cutoff_y(t) == pytest.approx(t.y_of_time(40.0))
+    assert v.cutoff_ns == 40.0
+
+
+def test_a_cutoff_past_the_record_is_drawn_at_its_bottom_edge(view):
+    v, _ = view
+    v.set_cutoff(1e6)
+    t = v.transform
+    assert v._cutoff_y(t) == pytest.approx(t.y_of_time(t.t_end))
+
+
+def test_set_cutoff_none_hides_it_and_a_non_finite_one_is_logged(view, message_log):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.set_cutoff(None)
+    assert v._cutoff_y(v.transform) is None
+    v.set_cutoff(float("nan"))
+    assert v._cutoff_y(v.transform) is None
+    assert len(message_log) == 1
+
+
+def test_the_cutoff_dims_the_samples_below_it(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_cutoff(30.0)
+    shot = v.grab_image()
+    r = v.image_rect()
+    t = v.transform
+    line = r.top() + round(t.y_of_time(30.0))
+    x = r.left() + 20
+    above = QColor(shot.pixel(x, line - 10)).value()
+    below = QColor(shot.pixel(x, line + 10)).value()
+    assert below > above
+    assert QColor(shot.pixel(x, line)).red() >= 150
+
+
+def test_the_cutoff_label_stays_inside_the_image_near_its_top(view):
+    """The label sits above the line, and the paint is clipped to the image.
+    A line within the label's height of the top, which is where a "keep one
+    sample" drag leaves it, would have its label clipped away: there it
+    goes below the line instead."""
+    v, _ = view
+    r, t = v.image_rect(), v.transform
+    v.set_cutoff(-4.0 + 0.5)  # one sample kept: the line 2 px below the top
+    near_top = v._cutoff_label_rect(r, t)
+    assert QRectF(r).contains(near_top)
+    assert near_top.top() >= r.top() + t.y_of_time(-3.5)
+    v.set_cutoff(40.0)
+    mid = v._cutoff_label_rect(r, t)
+    assert QRectF(r).contains(mid)
+    assert mid.bottom() <= r.top() + t.y_of_time(40.0)
+
+
+def test_the_cutoff_label_is_a_tag_sized_to_its_text(view):
+    v, _ = view
+    r, t = v.image_rect(), v.transform
+    v.set_cutoff(40.0)
+    tag = v._cutoff_label_rect(r, t)
+    text = v.fontMetrics().horizontalAdvance(cutoff_label(40.0, None))
+    assert text < tag.width() <= text + 16  # a few px of padding either side
+    assert tag.right() == pytest.approx(r.right() - 3, abs=2)  # right-aligned
+    v.set_cutoff(-4.0 + 0.5)
+    assert QRectF(r).contains(v._cutoff_label_rect(r, t))
+
+
+def test_a_tag_wider_than_the_image_keeps_its_left_edge_inside(view):
+    v, _ = view
+    v.set_cutoff(40.0)
+    t = v.transform
+    narrow = QRect(10, 5, 30, 100)
+    tag = v._cutoff_label_rect(narrow, t)
+    assert tag.left() >= narrow.left()
+
+
+def test_the_cutoff_label_is_white_text_on_a_magenta_tag(view):
+    v, _ = view
+    black = QImage(200, 128, QImage.Format.Format_RGB32)
+    black.fill(QColor(0, 0, 0))
+    v.set_image(black)
+    v.set_cutoff(60.0)
+    shot = v.grab_image()
+    r, t = v.image_rect(), v.transform
+    tag = v._cutoff_label_rect(r, t)
+    # Left padding strip: inside the tag, clear of the glyphs.
+    px = QColor(shot.pixel(int(tag.left()) + 1, int(tag.center().y())))
+    assert px.red() >= 150 and px.green() < 100
+
+
+def test_the_label_names_the_time_and_the_depth():
+    assert cutoff_label(40.0, None) == "40.0 ns"
+    assert cutoff_label(40.0, VelocityModel.constant(0.08)) == "40.0 ns \u00b7 1.60 m"
+
+
+def test_dragging_the_cutoff_emits_the_snapped_time_once_on_release(view):
+    v, _ = view
+    got, ranges, cleared = [], [], []
+    v.cutoff_dragged.connect(got.append)
+    v.range_selected.connect(lambda a, b: ranges.append((a, b)))
+    v.selection_cleared.connect(lambda: cleared.append(1))
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    y2 = round(t.y_of_time(20.3))
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + y2))
+    _release_left(v, r.left() + 100, r.top() + y2)
+    assert got == [pytest.approx(t.snap_cutoff(t.time_of_y(y2)))]
+    assert ranges == [] and cleared == []
+    assert v.cutoff_ns == got[0]
+
+
+def test_a_grab_released_where_it_began_emits_the_start_value(view):
+    """Review Focus 5 (ruling R6): the grab zone is +-5 px, so most presses
+    land off the line's own pixel. Here the press is 4.5 px below the line
+    (two samples), the pointer wiggles 1 px and comes back. Snapping the
+    line to the pointer moved it on the first move; the user meant nothing."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    x, y = r.left() + 100, r.top() + ly + 4
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y + 1))
+    assert v.cutoff_ns == 40.0
+    _send_move_while_pressed(v, QPoint(x, y))
+    _release_left(v, x, y)
+    assert got == [40.0]
+
+
+def test_a_wobble_inside_the_threshold_keeps_an_off_grid_value_exactly(view):
+    """R6's threshold, not just its offset. A typed cutoff, or one carried
+    onto this line by "Apply to grid", need not sit on this line's sample
+    grid: 40.2 ns here. A 2-px tremor that ends where it ends (not back at
+    the press) is still a click, so the line keeps 40.2; snapping it would
+    give 40.5 and the release would write that."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v, 40.2)
+    x, y = r.left() + 100, r.top() + ly + 2
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y + 2))
+    _release_left(v, x, y + 2)
+    assert got == [40.2]
+
+
+def test_a_drag_from_off_the_line_moves_it_by_the_pointer_travel(view):
+    """R6: the grab keeps the press-to-line offset. The line (40 ns) is at
+    local y 181.5 (4.125 px/ns from -4 ns); the press is at 186, 4.5 px
+    below it. Dragged up 40 px, the line belongs at 141.5 px, 30.30 ns,
+    which snaps to 30.5. Snapping the pointer itself (146 px) gives 31.5."""
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    x, y = r.left() + 100, r.top() + ly + 4
+    _press_left(v, x, y)
+    _send_move_while_pressed(v, QPoint(x, y - 40))
+    _release_left(v, x, y - 40)
+    assert got == [30.5]
+
+
+def test_dragging_above_the_record_keeps_one_sample(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() - 50))
+    _release_left(v, r.left() + 100, r.top() - 50)
+    assert got == [pytest.approx(-4.0 + 0.5)]
+
+
+def test_a_press_away_from_the_line_still_selects_a_range(view):
+    v, _ = view
+    sel, got = [], []
+    v.range_selected.connect(lambda a, b: sel.append((a, b)))
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + 50)
+    _send_move_while_pressed(v, QPoint(r.left() + 300, r.top() + 50))
+    _release_left(v, r.left() + 300, r.top() + 50)
+    assert sel == [(28, 86)]
+    assert got == []
+
+
+def test_pick_mode_wins_over_the_cutoff_grab(view):
+    v, _ = view
+    picks, got = [], []
+    v.pick_requested.connect(lambda i, tm: picks.append((i, tm)))
+    v.cutoff_dragged.connect(got.append)
+    v.set_pick_mode(True)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _release_left(v, r.left() + 100, r.top() + ly)
+    assert len(picks) == 1
+    assert got == []
+
+
+def test_a_move_without_the_button_abandons_the_drag(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns != 40.0
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns == 40.0
+    _release_left(v, r.left() + 100, r.top() + ly - 40)
+    assert got == []
+
+
+def test_set_cutoff_during_a_drag_abandons_it(view):
+    v, _ = view
+    got = []
+    v.cutoff_dragged.connect(got.append)
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    v.set_cutoff(30.0)
+    _release_left(v, r.left() + 100, r.top() + ly - 40)
+    assert got == []
+    assert v.cutoff_ns == 30.0
+
+
+def test_hovering_the_line_shows_a_resize_cursor(view):
+    v, _ = view
+    r, t, ly = _on_line(v)
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    send_hover(v, QPoint(r.left() + 100, r.top() + 50))
+    assert v.cursor().shape() == Qt.CursorShape.ArrowCursor
+    v.set_pick_mode(True)
+    # Pick wins the press, so the line must not advertise a drag in pick mode.
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+    send_hover(v, QPoint(r.left() + 100, r.top() + 50))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+
+
+def test_clear_forgets_the_cutoff(view):
+    v, _ = view
+    v.set_cutoff(40.0)
+    v.clear()
+    assert v.cutoff_ns is None
+
+
+def test_clear_puts_the_normal_cursor_back(view):
+    """Hovering the line sets the resize cursor, and only another hover over
+    the image resets it. With no line open there is none to come, so
+    `clear()` resets it itself, to the cursor pick mode calls for."""
+    v, _ = view
+    r, t, ly = _on_line(v)
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    v.clear()
+    assert v.cursor().shape() == Qt.CursorShape.ArrowCursor
+    v.set_pick_mode(True)
+    v.clear()
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+
+
+def test_a_new_press_abandons_a_grab_whose_release_was_lost(view):
+    v, _ = view
+    got, sel = [], []
+    v.cutoff_dragged.connect(got.append)
+    v.range_selected.connect(lambda a, b: sel.append((a, b)))
+    r, t, ly = _on_line(v)
+    _press_left(v, r.left() + 100, r.top() + ly)
+    _send_move_while_pressed(v, QPoint(r.left() + 100, r.top() + ly - 40))
+    assert v.cutoff_ns != 40.0
+    # No release, no button-less move: a second press arrives far from the line.
+    _press_left(v, r.left() + 100, r.top() + 50)
+    assert v.cutoff_ns == 40.0
+    _send_move_while_pressed(v, QPoint(r.left() + 300, r.top() + 50))
+    _release_left(v, r.left() + 300, r.top() + 50)
+    assert got == []
+    assert v.cutoff_ns == 40.0
+    assert sel == [(28, 86)]

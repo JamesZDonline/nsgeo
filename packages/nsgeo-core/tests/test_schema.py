@@ -28,7 +28,7 @@ from tests.synthetic import write_dzt
 
 def _placeholder(spec: ParamSpec):
     """Any value acceptable to the constructor, so `params` can be compared."""
-    if spec.kind == "float":
+    if spec.kind in ("float", "time"):
         return 1.0
     if spec.kind == "int":
         return 1
@@ -55,11 +55,17 @@ def test_non_required_defaults_build_and_apply(name):
     assert isinstance(out, Radargram)
 
 
-def test_only_the_two_known_steps_have_required_params():
+def test_only_the_known_steps_have_required_params():
     """Do not invent default passband frequencies; the identity curve is the
-    front end's job. Nothing else may become required by accident."""
+    front end's job. Nothing else may become required by accident. A cutoff
+    time is the same kind of thing: any default would silently hide data, so
+    the user must place the line."""
     req = {n: required_params(n) for n in available_steps() if required_params(n)}
-    assert req == {"bandpass": ("low_mhz", "high_mhz"), "gain_curve": ("points",)}
+    assert req == {
+        "bandpass": ("low_mhz", "high_mhz"),
+        "gain_curve": ("points",),
+        "time_cutoff": ("end_ns",),
+    }
 
 
 @pytest.mark.parametrize("name", available_steps())

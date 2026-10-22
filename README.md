@@ -44,8 +44,9 @@ the known issues.
   **nothing runs automatically**. The steps are time-zero, dewow, bandpass,
   three gains (AGC, parametric, and a manual gain curve you drag on the profile),
   background removal (full-line mean, sliding window, or SVD), and amplitude
-  transforms (absolute value, square, envelope). Stacks can be saved as presets
-  and applied to a whole grid. A difference view shows what a step removed.
+  transforms (absolute value, square, envelope), plus a time cutoff you drag on
+  the profile. Stacks can be saved as presets and applied to a whole grid. A
+  difference view shows what a step removed.
 - **Display.** Display gain and colour tables change only how the profile looks,
   never the data.
 - **Picks.** Click the profile to record a pick at a trace and two-way time. Picks
