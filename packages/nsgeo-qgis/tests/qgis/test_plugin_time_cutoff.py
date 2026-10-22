@@ -15,7 +15,7 @@ from nsgeo.processing import StepStack, build_step
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QLineEdit, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -184,6 +184,24 @@ def test_a_dragged_cutoff_survives_an_unedited_commit_of_the_form(
     _unload(plugin, answer_modal)
 
 
+def _show_form_with_other_field(plugin):
+    """Moves the panel's form into a shown, active host so its spinbox can
+    really hold focus, and returns a line edit elsewhere to move focus to.
+    (The dock itself is never activated under the offscreen platform.)"""
+    from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
+
+    host = QWidget()
+    layout = QVBoxLayout(host)
+    other = QLineEdit()
+    layout.addWidget(plugin.processing_dock.form)
+    layout.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    plugin._test_host = host  # keep it alive for the test
+    return other
+
+
 def _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal, path):
     plugin, s, key = _plugin_with_line(fake_iface, tmp_path, path)
     dock = plugin.processing_dock
@@ -193,15 +211,27 @@ def _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_mo
     end = zeroed.t0_ns + zeroed.n_samples * zeroed.dt_ns
     assert s.stack_for(key).entries[1][0].params["end_ns"] == end
     before = plugin.profile_dock.image.rg.n_samples
+    other = _show_form_with_other_field(plugin)
+    changed = []
+    s.stack_changed.connect(changed.append)
+    committed = []
+    dock.form.committed.connect(committed.append)
+
+    # Focus out: really focus the spinbox, type, then move focus away.
     spin = dock.form.editors["end_ns"]
+    spin.setFocus()
+    assert spin.hasFocus()
     edit = spin.lineEdit()
     edit.selectAll()
     QTest.keyClicks(edit, "99999")
-    dock.list.setCurrentRow(0)  # focus out: selecting another step
+    other.setFocus()
+    assert not spin.hasFocus()
+    assert len(committed) == 1  # the focus-out really committed
     assert s.stack_for(key).entries[1][0].params["end_ns"] == end
     assert plugin.profile_dock.image.rg.n_samples == before == zeroed.n_samples
-    # And the same through Enter.
-    dock.list.setCurrentRow(1)
+    assert changed == []
+
+    # And through Enter.
     spin = dock.form.editors["end_ns"]
     edit = spin.lineEdit()
     edit.selectAll()
@@ -209,6 +239,7 @@ def _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_mo
     QTest.keyClick(edit, Qt.Key.Key_Return)
     assert spin.value() == pytest.approx(end)
     assert s.stack_for(key).entries[1][0].params["end_ns"] == end
+    assert changed == []
     _unload(plugin, answer_modal)
 
 
@@ -221,3 +252,70 @@ def test_typing_past_the_end_on_a_real_line_leaves_the_record_whole(
 
 def test_typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal):
     _typing_past_the_end_leaves_the_record_whole(fake_iface, tmp_path, answer_modal, None)
+
+
+def _return_with_nothing_typed_writes_nothing(fake_iface, tmp_path, answer_modal, path):
+    """R10 through the assembled plugin: Return in an untouched field must
+    not turn the exact end time into its 6-digit display."""
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path, path)
+    pd, prof = plugin.processing_dock, plugin.profile_dock
+    pd.add_step("time_cutoff")
+    rg = s.stack_for(key).source
+    changed = []
+    s.stack_changed.connect(changed.append)
+    lossy = 0
+    for m in [rg.n_samples, *range(1, rg.n_samples, 11)]:  # the seeded limit, then a sweep
+        end = rg.t0_ns + m * rg.dt_ns
+        if m != rg.n_samples:
+            prof.view.cutoff_dragged.emit(end)
+        spin = pd.form.editors["end_ns"]
+        lossy += float(spin.text()) != end
+        changed.clear()
+        dirty = s.dirty
+        QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+        assert changed == [], f"{m} samples: Return wrote {spin.text()!r}"
+        assert s.stack_for(key).entries[0][0].params["end_ns"] == end
+        assert s.dirty == dirty
+    assert lossy > 0
+    _unload(plugin, answer_modal)
+
+
+def test_return_with_nothing_typed_writes_nothing(fake_iface, tmp_path, answer_modal):
+    _return_with_nothing_typed_writes_nothing(fake_iface, tmp_path, answer_modal, None)
+
+
+@needs_real_data
+def test_return_with_nothing_typed_writes_nothing_on_a_real_line(
+    fake_iface, tmp_path, answer_modal
+):
+    _return_with_nothing_typed_writes_nothing(fake_iface, tmp_path, answer_modal, REAL_DZT[0])
+
+
+def test_an_untouched_cutoff_above_its_range_survives_return_and_focus_out(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    pd = plugin.processing_dock
+    rg = s.stack_for(key).source
+    pd.add_step("time_cutoff")
+    pd.list.setCurrentRow(0)
+    plugin.profile_dock.view.cutoff_dragged.emit(rg.t0_ns + 20 * rg.dt_ns)
+    pd.add_step("time_cutoff")  # seeded at the record end of what row 0 left: 20 samples
+    pd.add_step("time_cutoff")
+    stored = rg.t0_ns + rg.n_samples * rg.dt_ns
+    s.replace_step(key, 2, build_step("time_cutoff", end_ns=stored))  # above row 1's range
+    pd.list.setCurrentRow(2)
+    spin = pd.form.editors["end_ns"]
+    assert spin.maximum() < stored  # the stored value is outside the range
+    other = _show_form_with_other_field(plugin)
+    changed = []
+    s.stack_changed.connect(changed.append)
+    spin.setFocus()
+    assert spin.hasFocus()
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    other.setFocus()
+    assert not spin.hasFocus()
+    pd.form.commit()
+    assert changed == []
+    assert s.stack_for(key).entries[2][0].params["end_ns"] == stored
+    _unload(plugin, answer_modal)

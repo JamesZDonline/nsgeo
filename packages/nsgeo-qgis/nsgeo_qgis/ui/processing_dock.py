@@ -452,7 +452,7 @@ class ProcessingDock(QgsDockWidget):
             except ValueError as exc:
                 _log(
                     f"input_axis: stack does not evaluate cleanly ({exc}); "
-                    "bounding the field against the raw source axis instead"
+                    "using the raw source axis instead (seed or field bound)"
                 )
                 rg = stack.source
             return rg.t0_ns, rg.dt_ns, rg.n_samples
@@ -482,19 +482,7 @@ class ProcessingDock(QgsDockWidget):
         off the drawn axis with nothing said otherwise."""
         key = self.key()
         assert key is not None
-        stack = self.session.stack_for(key)
-        if stack.source is not None:
-            try:
-                rg = stack.result()
-            except ValueError as exc:
-                _log(
-                    f"time_axis: stack does not evaluate cleanly ({exc}); "
-                    "seeding a new step against the raw source axis instead"
-                )
-                rg = stack.source
-            return rg.t0_ns, rg.dt_ns, rg.n_samples
-        h = self.session.line_for_key(key).header
-        return h.position_ns, h.dt_ns, h.n_samples
+        return self.input_axis(len(self.session.stack_for(key).entries))
 
     def build_add_dialog(self, name: str) -> AddStepDialog:
         key = self.key()

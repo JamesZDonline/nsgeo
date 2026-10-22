@@ -66,6 +66,46 @@ class TimeSpinBox(QDoubleSpinBox):
         self.setDecimals(10)
         self.setRange(-UNBOUNDED_NS, UNBOUNDED_NS)
         self.setKeyboardTracking(False)
+        # `touched`: the user typed or stepped since the form built this
+        # field (R10); an untouched field reports the value it was built
+        # from, whatever the range or the display rounding say.
+        self.touched = False
+        # Text typed and not yet interpreted. Qt interprets the display text
+        # on Return and on focus-out whether or not anything was typed, and
+        # the display is a 6-digit rounding: only typed text may replace
+        # the value.
+        self._text_dirty = False
+        self._exact_range: tuple[float, float] | None = None
+        self.lineEdit().textEdited.connect(self._on_text_edited)
+        self.editingFinished.connect(self._on_finished)
+
+    def set_exact_range(self, low: float, high: float) -> None:
+        """`setRange` rounds the limits to `decimals()`; the exact ones are
+        kept so a snap reports them, not their rounding."""
+        self.setRange(low, high)
+        self._exact_range = (low, high)
+
+    def exact_value(self) -> float:
+        value = self.value()
+        if self._exact_range is not None:
+            low, high = self._exact_range
+            if value == self.minimum():
+                return low
+            if value == self.maximum():
+                return high
+        return value
+
+    def edit_text(self, text: str) -> None:
+        """Set the text as if typed, and interpret it."""
+        self.lineEdit().setText(text)
+        self.touched = self._text_dirty = True
+        self.interpretText()
+
+    def _on_text_edited(self, _text: str) -> None:
+        self.touched = self._text_dirty = True
+
+    def _on_finished(self) -> None:
+        self._text_dirty = False
 
     def validate(self, text: str, pos: int) -> tuple[QValidator.State, str, int]:
         try:
@@ -87,23 +127,29 @@ class TimeSpinBox(QDoubleSpinBox):
 
     def stepBy(self, steps: int) -> None:
         try:
-            super().stepBy(steps)
+            super().stepBy(steps)  # interprets typed text first, if any
+            self.touched = True
+            self._text_dirty = False
             self.stepped.emit()
         except Exception as exc:  # a Qt override: never let it escape
             _log(f"TimeSpinBox.stepBy: {exc!r}")
 
     def valueFromText(self, text: str) -> float:
         try:
+            if not self._text_dirty:
+                return self.value()
             value = float(text.strip())
-        except ValueError:
-            return self.value()
+            return min(max(value, self.minimum()), self.maximum())
         except Exception as exc:
             _log(f"TimeSpinBox.valueFromText: {exc!r}")
             return self.value()
-        return min(max(value, self.minimum()), self.maximum())
 
     def textFromValue(self, value: float) -> str:
-        return f"{value:g}"
+        try:
+            return f"{value:g}"
+        except Exception as exc:
+            _log(f"TimeSpinBox.textFromValue: {exc!r}")
+            return str(value)
 
 
 class ParamForm(QWidget):
@@ -220,18 +266,14 @@ class ParamForm(QWidget):
     def _make_time_editor(self, spec: ParamSpec, value: Any) -> QWidget:
         spin = TimeSpinBox()
         if self._time_range is not None:
-            spin.setRange(*self._time_range)
+            spin.set_exact_range(*self._time_range)
         spin.setSingleStep(self._time_step)
         if value is not REQUIRED:
             spin.setValue(float(value))
-            # `setValue` rounds to `decimals()` and the text to 6 digits; an
-            # editor left alone must report the exact value it was built
-            # from. A value the range clamped is not kept. The test is
-            # "did `setValue` move it by more than its own rounding", not
-            # `minimum() <= value`: `setRange` rounds the limits too, so an
-            # exact value sitting on a limit can compare just outside it.
-            if abs(spin.value() - value) < 10 ** -(spin.decimals() - 1):
-                self._shown[spec.name] = (spin.value(), value)
+            # `setValue` rounds to `decimals()` and clamps to the range, and
+            # the text is 6 digits; an untouched editor reports the exact
+            # value it was built from, in or out of the range (R3, R10).
+            self._shown[spec.name] = (None, value)
         spin.valueChanged.connect(self._on_edited)
         spin.editingFinished.connect(self.commit)
         spin.stepped.connect(self.commit)
@@ -250,8 +292,7 @@ class ParamForm(QWidget):
                 raise ValueError(f"{text!r} is not one of this field's choices")
             editor.setCurrentIndex(index)
         elif isinstance(editor, QDoubleSpinBox):
-            editor.lineEdit().setText(text)
-            editor.interpretText()
+            editor.edit_text(text)
         elif isinstance(editor, QLineEdit):
             editor.setText(text)
 
@@ -278,9 +319,8 @@ class ParamForm(QWidget):
                 out[spec.name] = curve_value
             elif isinstance(editor, QDoubleSpinBox):
                 shown = self._shown.get(spec.name)
-                out[spec.name] = (
-                    shown[1] if shown and editor.value() == shown[0] else editor.value()
-                )
+                assert isinstance(editor, TimeSpinBox)
+                out[spec.name] = shown[1] if shown and not editor.touched else editor.exact_value()
             else:
                 assert isinstance(editor, QLineEdit)
                 text = editor.text().strip()

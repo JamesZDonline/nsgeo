@@ -24,7 +24,7 @@ from nsgeo_qgis.ui.profile_view import (
 from nsgeo_qgis.ui.view_transform import ViewTransform
 from plugin_testing import REAL_DZT, needs_real_data, send_hover
 from plugin_testing import send_move_while_pressed as _send_move_while_pressed
-from qgis.PyQt.QtCore import QPoint, QPointF, QRectF, Qt
+from qgis.PyQt.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from qgis.PyQt.QtGui import QColor, QImage, QWheelEvent
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QApplication
@@ -1613,6 +1613,15 @@ def test_the_cutoff_label_is_a_tag_sized_to_its_text(view):
     assert tag.right() == pytest.approx(r.right() - 3, abs=2)  # right-aligned
     v.set_cutoff(-4.0 + 0.5)
     assert QRectF(r).contains(v._cutoff_label_rect(r, t))
+
+
+def test_a_tag_wider_than_the_image_keeps_its_left_edge_inside(view):
+    v, _ = view
+    v.set_cutoff(40.0)
+    t = v.transform
+    narrow = QRect(10, 5, 30, 100)
+    tag = v._cutoff_label_rect(narrow, t)
+    assert tag.left() >= narrow.left()
 
 
 def test_the_cutoff_label_is_white_text_on_a_magenta_tag(view):

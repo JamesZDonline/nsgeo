@@ -448,7 +448,7 @@ class ProfileView(QWidget):
         # the paint clip hides it: a line dragged up to keep one sample
         # sits within a tag's height of the top.
         top = yy - h - 2 if yy - h - 2 >= r.top() else yy + 2
-        return QRectF(r.right() + 1 - 3 - w, top, w, h)
+        return QRectF(max(r.left(), r.right() + 1 - 3 - w), top, w, h)
 
     def _paint_cutoff(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         y = self._cutoff_y(t)

@@ -13,7 +13,7 @@ from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QComboBox, QDialog, QDoubleSpinBox, QLineEdit
+from qgis.PyQt.QtWidgets import QComboBox, QDialog, QDoubleSpinBox, QLineEdit, QVBoxLayout, QWidget
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -394,7 +394,7 @@ def test_time_axis_logs_when_it_falls_back_to_source(opened, message_log):
     session, dock, key = opened
     session.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=5000.0))
     dock.time_axis()
-    assert any("time_axis" in m and "raw source" in m for m in message_log)
+    assert any("input_axis" in m and "raw source" in m for m in message_log)
 
 
 def test_add_step_with_dialog_opens_a_real_modal_and_accepts(opened, drive_dialog):
@@ -633,3 +633,96 @@ def test_an_arrow_step_commits(qgis_app):
     f, spin, got = _ranged_form()
     spin.stepUp()
     assert got == [{"end_ns": 40.5}]
+
+
+HS350_T0, HS350_DT = -11.086392402648926, 0.21653111279010773
+
+
+def _hs350_form(end, n=512):
+    f = ParamForm()
+    f.set_step(
+        "time_cutoff",
+        {"end_ns": end},
+        time_range=(HS350_T0 + HS350_DT, HS350_T0 + n * HS350_DT),
+        time_step=HS350_DT,
+    )
+    got = []
+    f.committed.connect(got.append)
+    return f, f.editors["end_ns"], got
+
+
+def test_return_with_nothing_typed_commits_the_exact_value(qgis_app):
+    """Qt's spinbox interprets its 6-digit display text on Return even
+    when nothing was typed; that must not replace the built-from value."""
+    for m in (1, 2, 99, 100, 300, 511, 512):  # 512 is the seeded limit
+        end = HS350_T0 + m * HS350_DT
+        f, spin, got = _hs350_form(end)
+        QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+        assert f.values() == {"end_ns": end}, m
+        assert got == [] or got == [{"end_ns": end}], m
+
+
+def test_an_arrow_step_then_return_keeps_the_stepped_value(qgis_app):
+    f, spin, got = _hs350_form(HS350_T0 + 100 * HS350_DT)
+    spin.stepDown()
+    stepped = got[-1]["end_ns"]
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    assert f.values() == {"end_ns": stepped}
+    assert stepped == pytest.approx(HS350_T0 + 99 * HS350_DT, abs=1e-9)
+
+
+def test_typing_the_displayed_text_is_still_an_edit(qgis_app):
+    end = HS350_T0 + 100 * HS350_DT
+    f, spin, got = _hs350_form(end)
+    shown = spin.text()
+    _type_and_commit(spin, shown)
+    assert got[-1] == {"end_ns": float(shown)}
+    assert float(shown) != end
+
+
+@pytest.mark.parametrize("stored", [120.0, -50.0])
+def test_an_untouched_field_reports_a_stored_value_outside_the_range(qgis_app, stored):
+    f, spin, got = _ranged_form(end=stored)
+    QTest.keyClick(spin.lineEdit(), Qt.Key.Key_Return)
+    f.commit()
+    assert f.values() == {"end_ns": stored}
+    assert all(c == {"end_ns": stored} for c in got)
+
+
+def test_a_snap_lands_on_the_exact_limits_not_their_rounding(qgis_app):
+    n = 512
+    f, spin, got = _hs350_form(HS350_T0 + 100 * HS350_DT, n)
+    _type_and_commit(spin, "-99")
+    assert got[-1] == {"end_ns": HS350_T0 + HS350_DT}
+    _type_and_commit(spin, "9999")
+    assert got[-1] == {"end_ns": HS350_T0 + n * HS350_DT}
+
+
+def test_a_focus_out_commits_what_was_typed(qgis_app):
+    host = QWidget()
+    lay = QVBoxLayout(host)
+    f, spin, got = _ranged_form()
+    other = QLineEdit()
+    lay.addWidget(f)
+    lay.addWidget(other)
+    host.show()
+    host.activateWindow()
+    QTest.qWaitForWindowActive(host)
+    spin.setFocus()
+    assert spin.hasFocus()
+    edit = spin.lineEdit()
+    edit.selectAll()
+    QTest.keyClicks(edit, "500")
+    other.setFocus()
+    assert not spin.hasFocus()
+    assert got == [{"end_ns": 100.0}]
+    assert spin.value() == 100.0
+    host.close()
+
+
+def test_the_spinbox_overrides_do_not_raise_on_bad_input(qgis_app, message_log):
+    from nsgeo_qgis.ui.param_form import TimeSpinBox
+
+    spin = TimeSpinBox()
+    assert isinstance(spin.textFromValue("not a number"), str)
+    assert any("textFromValue" in m for m in message_log)
