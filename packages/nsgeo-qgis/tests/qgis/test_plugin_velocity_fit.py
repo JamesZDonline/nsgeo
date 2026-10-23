@@ -4,10 +4,15 @@ view wired as `plugin.py` wires them. Real Qt mouse events, not handler calls.
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
+from nsgeo.velocity_fit import fit_hyperbola
 from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
@@ -199,3 +204,258 @@ def test_a_velocity_press_near_the_cutoff_line_adds_a_point_and_takes_no_grab(pl
     assert v._cutoff_grab is None
     assert len(plugin.profile_dock.velocity_points()) == 1
     assert v.cutoff_ns == 40.0
+
+
+# ---- fitting, the strip, and the buttons ----------------------------------
+#
+# Points go in through the view's own `velocity_point_requested` signal, the
+# path a click takes after the view has turned pixels into (trace, ns): the
+# pixel rounding of a real click would blur the exact numbers these tests pin.
+# The 60-trace fixture lines are 1 m long (60 traces per metre).
+
+TRACES_PER_M = 60.0
+TRUE_V = 0.1
+TRUE_T0 = 20.0
+APEX_TRACE = 30
+
+
+def _hyperbola_ns(trace: int) -> float:
+    dx = (trace - APEX_TRACE) / TRACES_PER_M
+    return math.sqrt(TRUE_T0**2 + (4.0 / TRUE_V**2) * dx**2)
+
+
+def _click_hyperbola(plugin, traces=(APEX_TRACE, 15, 45, 5, 55)):
+    v = _view(plugin)
+    for tr in traces:
+        v.velocity_point_requested.emit(tr, _hyperbola_ns(tr))
+
+
+def _velocity_on(plugin):
+    _check(plugin.act_velocity)
+    return plugin.profile_dock
+
+
+def test_the_strip_is_hidden_until_velocity_mode_is_on(plugin):
+    dock = plugin.profile_dock
+    assert dock.velocity_strip.isHidden()
+    _check(plugin.act_velocity)
+    assert not dock.velocity_strip.isHidden()
+    plugin.act_velocity.setChecked(False)
+    plugin.act_velocity.triggered.emit(False)
+    assert dock.velocity_strip.isHidden()
+
+
+def test_five_points_produce_a_velocity_and_a_sigma_in_the_strip(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+
+    fit = dock.velocity_fit_result()
+    assert fit is not None
+    assert fit.v_m_ns == pytest.approx(TRUE_V, rel=1e-2)
+    assert fit.n_points == 5
+    text = dock.velocity_readout.text()
+    assert "±" in text
+    assert "0.1000" in text  # a fixed four decimals, so the read-out does not jitter
+    assert "5 pts" in text
+
+
+def test_the_fitted_curve_is_handed_to_the_view_in_traces_and_ns(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+
+    curve = _view(plugin)._velocity_curve
+    assert len(curve) == 200
+    traces = [c[0] for c in curve]
+    assert min(traces) == pytest.approx(0.0) and max(traces) == pytest.approx(59.0)
+    tr, t = min(curve, key=lambda c: c[1])  # the apex: the curve's earliest time
+    assert tr == pytest.approx(APEX_TRACE, abs=0.5)
+    assert t == pytest.approx(dock.velocity_fit_result().t0_ns, abs=0.01)
+    for tr, t in curve:  # and it follows the clicked data's own curve
+        assert t == pytest.approx(
+            math.sqrt(TRUE_T0**2 + (4 / TRUE_V**2) * ((tr - 30) / 60) ** 2), abs=0.25
+        )
+
+
+def test_three_points_show_the_solvers_own_refusal_and_no_curve(plugin):
+    dock = _velocity_on(plugin)
+    traces = (APEX_TRACE, 15, 45)
+    _click_hyperbola(plugin, traces)
+
+    x = np.array([tr / TRACES_PER_M for tr in traces])
+    t = np.array([_hyperbola_ns(tr) for tr in traces])
+    with pytest.raises(ValueError) as refusal:
+        fit_hyperbola(x, t, x[0])
+    assert str(refusal.value) in dock.velocity_readout.text()  # verbatim, not paraphrased
+    assert dock.velocity_fit_result() is None
+    assert _view(plugin)._velocity_curve == []
+
+
+def test_a_line_with_no_traces_per_metre_explains_instead_of_raising(plugin, tmp_path):
+    s = plugin.session
+    path = synthetic_dzt(tmp_path / "raw", "TIMEMODE.DZT", n_traces=60, traces_per_metre=0.0)
+    line = Line.open(path, GridPlacement("A", "y", 3.0, 0.0))
+    s.add_lines([line])
+    key = s.line_key(line)
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    dock = _velocity_on(plugin)
+
+    _view(plugin).velocity_point_requested.emit(10, 25.0)  # must not raise out of the slot
+
+    assert "distance calibration" in dock.velocity_readout.text()
+    assert dock.velocity_fit_result() is None
+    assert _view(plugin)._velocity_curve == []
+
+
+def test_a_radargram_not_at_time_zero_warns_and_names_the_step(plugin):
+    dock = _velocity_on(plugin)
+    assert dock.view.transform.t0_ns != pytest.approx(0.0, abs=0.5)
+    assert "time_zero" in dock.velocity_note.text()
+
+
+def test_after_a_time_zero_step_there_is_no_warning(plugin):
+    s = plugin.session
+    # The fixture header puts sample 0 at -11.086 ns; sample 51 is its zero.
+    s.append_step(s.keys()[0], build_step("time_zero", mode="sample", sample=51))
+    dock = _velocity_on(plugin)
+    assert dock.view.transform.t0_ns == pytest.approx(0.0, abs=0.5)
+    assert dock.velocity_note.text() == ""
+
+
+def test_apply_to_line_sets_the_line_velocity(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    v = dock.velocity_fit_result().v_m_ns
+
+    dock.apply_line_button.click()
+
+    assert s.resolved_velocity(key).surface_velocity == pytest.approx(v)
+    assert s.line_for_key(key).velocity is not None
+    assert "line override" in dock.velocity_label.text()
+    assert s.dirty
+
+
+def test_apply_to_grid_sets_the_grid_velocity(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    v = dock.velocity_fit_result().v_m_ns
+
+    dock.apply_grid_button.click()
+
+    assert s.grid("A").velocity.surface_velocity == pytest.approx(v)
+    assert s.resolved_velocity(s.keys()[1]).surface_velocity == pytest.approx(v)  # the other line
+
+
+def test_save_fit_stores_it_without_changing_any_velocity(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    before = s.resolved_velocity(key)
+    label_before = dock.velocity_label.text()
+    _click_hyperbola(plugin)
+    fit = dock.velocity_fit_result()
+
+    dock.save_fit_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity is None and s.grid("A").velocity is None  # nothing was applied
+    assert s.resolved_velocity(key) == before
+    assert dock.velocity_label.text() == label_before
+    assert len(line.velocity_fits) == 1
+    fit_id, stored = next(iter(line.velocity_fits.items()))
+    assert line.velocity_from_fit == fit_id
+    assert stored.v_m_ns == pytest.approx(fit.v_m_ns)
+    assert stored.apex_trace == APEX_TRACE
+    assert [p[0] for p in stored.points] == [30, 15, 45, 5, 55]  # trace indices, not metres
+    assert s.dirty
+
+
+def test_save_fit_twice_keeps_both_under_distinct_ids(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    dock.save_fit_button.click()
+    assert len(s.line_for_key(s.keys()[0]).velocity_fits) == 2
+
+
+def test_the_buttons_are_disabled_until_there_is_a_fit(plugin):
+    dock = _velocity_on(plugin)
+    for b in (dock.apply_line_button, dock.apply_grid_button, dock.save_fit_button):
+        assert not b.isEnabled()
+    _click_hyperbola(plugin)
+    for b in (dock.apply_line_button, dock.apply_grid_button, dock.save_fit_button):
+        assert b.isEnabled()
+
+
+def test_clear_empties_the_points_the_fit_and_the_curve(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    assert dock.velocity_fit_result() is not None
+
+    dock.clear_velocity_button.click()
+
+    assert dock.velocity_points() == []
+    assert dock.velocity_fit_result() is None
+    assert _view(plugin)._velocity_points == [] and _view(plugin)._velocity_curve == []
+    assert not dock.apply_line_button.isEnabled()
+
+
+def test_discarding_a_point_refits(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    _view(plugin).velocity_point_discarded.emit(4)
+    assert dock.velocity_fit_result().n_points == 4
+    _view(plugin).velocity_point_discarded.emit(3)
+    assert dock.velocity_fit_result() is None  # three points: the solver refuses
+
+
+def test_opening_another_line_resets_the_strip(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    plugin.session.open_line(plugin.session.keys()[1])
+    assert dock.velocity_fit_result() is None
+    assert "±" not in dock.velocity_readout.text()
+
+
+def test_a_line_collected_against_the_axis_still_fits_and_draws_at_the_right_trace(
+    plugin, tmp_path
+):
+    s = plugin.session
+    path = synthetic_dzt(tmp_path / "raw", "REVERSED.DZT", n_traces=60)
+    line = Line.open(path, GridPlacement("A", "y", 4.0, 1.0, -1))  # metres fall as traces rise
+    s.add_lines([line])
+    key = s.line_key(line)
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    dock = _velocity_on(plugin)
+
+    _click_hyperbola(plugin)  # the same traces; the metres now run the other way
+
+    fit = dock.velocity_fit_result()
+    assert fit.v_m_ns == pytest.approx(TRUE_V, rel=1e-2)
+    tr, _ = min(_view(plugin)._velocity_curve, key=lambda c: c[1])
+    assert tr == pytest.approx(APEX_TRACE, abs=0.5)
+
+
+def test_add_velocity_fit_and_set_velocity_from_fit_dirty_and_announce(plugin):
+    from nsgeo.velocity_fit import StoredFit
+
+    s = plugin.session
+    key = s.keys()[0]
+    stored = StoredFit(
+        20.0, 0.1, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "2026-10-23T00:00:00+00:00"
+    )
+    s._set_dirty(False)
+    heard = []
+    s.lines_changed.connect(lambda: heard.append(1))
+
+    fit_id = s.add_velocity_fit(key, stored)
+
+    assert s.line_for_key(key).velocity_fits[fit_id] == stored
+    assert s.dirty and heard == [1]
+    heard.clear()
+    s.set_velocity_from_fit(key, fit_id)
+    assert s.line_for_key(key).velocity_from_fit == fit_id and heard == [1]
+    s.set_velocity_from_fit(key, None)
+    assert s.line_for_key(key).velocity_from_fit is None
+    assert s.add_velocity_fit(key, stored) != fit_id
