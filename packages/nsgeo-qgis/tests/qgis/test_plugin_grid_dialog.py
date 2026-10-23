@@ -2187,6 +2187,83 @@ def test_a_failed_transform_hides_that_element(session, project_crs, real_canvas
     d._refresh_overlay()
     assert d.overlay.corners[0] is not None
     assert d.overlay.corners[1] is None
+    assert d.fit_status.text() == "the map cannot show the +X corner in EPSG:32616"
+
+
+def test_a_clean_refresh_restores_the_fit_line_and_leaves_other_messages(
+    session, project_crs, real_canvas, monkeypatch
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_site(d)
+    d.fit_corners()
+    fit_line = d.fit_status.text()
+    assert fit_line
+    from nsgeo_qgis.ui import grid_dialog
+    from qgis.core import QgsCsException
+
+    real = grid_dialog.QgsCoordinateTransform
+
+    class Failing:
+        def __init__(self, *a: Any) -> None:
+            self._t = real(*a)
+
+        def transform(self, p: Any, *rest: Any) -> Any:
+            if abs(p.x() - SITE_CORNERS[0][0]) < 1e-6 or abs(p.x() - SITE_CORNERS[1][0]) < 1e-6:
+                raise QgsCsException()
+            return self._t.transform(p, *rest)
+
+    monkeypatch.setattr(grid_dialog, "QgsCoordinateTransform", Failing)
+    d._refresh_overlay()
+    assert d.fit_status.text() == (
+        "the map cannot show the origin and +X corners and the grid in EPSG:32616"
+    )
+    assert d._fit_line == fit_line  # never written into the Fit line
+    monkeypatch.setattr(grid_dialog, "QgsCoordinateTransform", real)
+    d._refresh_overlay()
+    assert d.fit_status.text() == fit_line
+    # another message showing: a clean refresh leaves it alone
+    d.fit_status.setText("something else")
+    d._refresh_overlay()
+    assert d.fit_status.text() == "something else"
+
+
+def test_a_non_finite_transform_is_reported_like_a_failed_one(
+    session, project_crs, real_canvas, monkeypatch
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 2, *SITE_CORNERS[2])
+    from nsgeo_qgis.ui import grid_dialog
+
+    class Nan:
+        def __init__(self, *a: Any) -> None:
+            pass
+
+        def transform(self, p: Any, *rest: Any) -> Any:
+            return QgsPointXY(float("inf"), 0.0)
+
+    monkeypatch.setattr(grid_dialog, "QgsCoordinateTransform", Nan)
+    d._refresh_overlay()
+    assert d.overlay.corners[2] is None
+    assert d.fit_status.text() == "the map cannot show the +X+Y corner in EPSG:32616"
+
+
+def test_a_failure_while_drawing_leaves_the_overlay_as_it_was(
+    session, project_crs, real_canvas, monkeypatch
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    before = list(d.overlay.corners)
+    _type_row(d, 1, *SITE_CORNERS[1])
+    monkeypatch.setattr(d, "_grid_outline", lambda: 1 / 0)
+    d._refresh_overlay()
+    assert d.overlay.corners[1] is not None  # (applied by the earlier, good refresh)
+    monkeypatch.undo()
+    _type_row(d, 2, *SITE_CORNERS[2])
+    monkeypatch.setattr(d, "_grid_outline", lambda: 1 / 0)
+    now = list(d.overlay.corners)
+    d._refresh_overlay()
+    assert d.overlay.corners == now and before != now
+    assert d.fit_status.text().startswith("could not draw the map overlay")
 
 
 def test_overlay_paints_its_marks(session, project_crs, real_canvas):

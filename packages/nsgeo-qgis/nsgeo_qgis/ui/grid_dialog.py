@@ -107,6 +107,11 @@ _FORM_LABELS = (
 )
 
 
+def _join(names: list[str]) -> str:
+    """ "a", "a and b", "a, b and c"."""
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
 def _label(text: str, width: int) -> QLabel:
     label = QLabel(text)
     label.setMinimumWidth(width)
@@ -161,6 +166,10 @@ class GridDialog(QDialog):
         self._typed = [False, False]
         self._measured: tuple[float | None, float | None] | None = None
         self._fit_line = ""  # the last Fit's message; errors only cover it
+        # What the map overlay could not draw this refresh, and the message
+        # it put on fit_status for that (never in _fit_line).
+        self._overlay_failed: list[str] = []
+        self._overlay_message = ""
         self._offsets: list[float | None] = [None] * 4
         layout.addWidget(self._build_corner_group())
 
@@ -304,9 +313,10 @@ class GridDialog(QDialog):
             self.overlay.dispose()
 
     def _to_canvas(
-        self, crs: QgsCoordinateReferenceSystem, points: list[QgsPointXY]
+        self, crs: QgsCoordinateReferenceSystem, points: list[QgsPointXY], what: str
     ) -> list[QgsPointXY] | None:
-        """`points` from `crs` into the canvas CRS, or None when that fails."""
+        """`points` from `crs` into the canvas CRS, or None when that fails
+        (`what` is then noted for `_refresh_overlay`'s one message)."""
         assert self.canvas is not None
         target = self.canvas.mapSettings().destinationCrs()
         if not crs.isValid() or not target.isValid():
@@ -315,8 +325,10 @@ class GridDialog(QDialog):
             xform = QgsCoordinateTransform(crs, target, QgsProject.instance())
             out = [xform.transform(p) for p in points]
         except QgsCsException:
+            self._overlay_failed.append(what)
             return None
         if not all(math.isfinite(p.x()) and math.isfinite(p.y()) for p in out):
+            self._overlay_failed.append(what)
             return None
         return out
 
@@ -331,27 +343,58 @@ class GridDialog(QDialog):
         else:
             rings = geometry.asPolygon()
             ring = rings[0] if rings else []
-        return self._to_canvas(layer.crs(), [QgsPointXY(p) for p in ring]) if ring else None
+        if not ring:
+            return None
+        return self._to_canvas(layer.crs(), [QgsPointXY(p) for p in ring], "the chosen polygon")
 
     def _refresh_overlay(self, *_: Any) -> None:
-        # A slot on many signals: report, never raise.
+        # A slot on many signals: report, never raise. All three payloads are
+        # worked out before any is applied, so a failure part-way cannot leave
+        # the drawn outline disagreeing with "off by".
         overlay = self.overlay
         if overlay is None or overlay.disposed:
             return
         try:
+            self._overlay_failed = []
             tags: list[tuple[QgsPointXY, str] | None] = []
-            for row in range(len(CORNER_ROLES)):
+            for row, role in enumerate(CORNER_ROLES):
                 point = self.corner_point(row)
-                moved = None if point is None else self._to_canvas(self.corners_crs.crs(), [point])
-                if moved is None:
-                    tags.append(None)
-                else:
-                    tags.append((moved[0], tag_text(CORNER_ROLES[row], self.corner_source(row))))
+                moved = (
+                    None
+                    if point is None
+                    else self._to_canvas(self.corners_crs.crs(), [point], role)
+                )
+                tags.append(
+                    None if moved is None else (moved[0], tag_text(role, self.corner_source(row)))
+                )
+            ring = self._chosen_ring()
+            outline = self._grid_outline()
             overlay.set_corners(tags)
-            overlay.set_polygon(self._chosen_ring())
-            overlay.set_grid(self._grid_outline())
+            overlay.set_polygon(ring)
+            overlay.set_grid(outline)
+            self._report_overlay_failures()
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
             self.fit_status.setText(f"could not draw the map overlay: {exc}")
+
+    def _report_overlay_failures(self) -> None:
+        """One transient message on fit_status for what the overlay could not
+        draw; a clean refresh takes back only its own message."""
+        failed = self._overlay_failed
+        if not failed:
+            if self._overlay_message and self.fit_status.text() == self._overlay_message:
+                self.fit_status.setText(self._fit_line)
+            self._overlay_message = ""
+            return
+        assert self.canvas is not None
+        corners = [r for r in CORNER_ROLES if r in failed]
+        items = []
+        if corners:
+            noun = "corner" if len(corners) == 1 else "corners"
+            items.append(f"the {_join(corners)} {noun}")
+        items += [w for w in ("the chosen polygon", "the grid") if w in failed]
+        crs = self.canvas.mapSettings().destinationCrs().authid()
+        self._overlay_message = f"the map cannot show {_join(items)} in {crs}"
+        self.fit_status.setText(self._overlay_message)
 
     def _grid_outline(self) -> list[QgsPointXY] | None:
         """The form's grid as four corners in the canvas CRS, or None while it
@@ -370,7 +413,9 @@ class GridDialog(QDialog):
             0.5,
         )
         world = grid.to_world(np.array([[0, 0], [sx, 0], [sx, sy], [0, sy]], dtype=float))
-        return self._to_canvas(grid_crs, [QgsPointXY(float(x), float(y)) for x, y in world])
+        return self._to_canvas(
+            grid_crs, [QgsPointXY(float(x), float(y)) for x, y in world], "the grid"
+        )
 
     def _grid_drawable(self, grid_crs: QgsCoordinateReferenceSystem) -> bool:
         """Whether the form describes a grid: an origin that is not (0, 0),
