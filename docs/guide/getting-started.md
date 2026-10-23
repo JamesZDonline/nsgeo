@@ -189,7 +189,9 @@ Click **Import DZT…** (or right-click the grid, then **Import DZT files…**).
 2. Set **Spacing across** (the line spacing), **First line at** (the offset of
    the first line), **Start along** (where a line run in the + direction
    begins), and the **Direction**: **alternate (zigzag)**, **all +1** or
-   **all -1**.
+   **all -1**. **First line at** starts at half the spacing, so the first line
+   sits in the middle of its strip like the others, and follows **Spacing
+   across** until you type a value of your own.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at

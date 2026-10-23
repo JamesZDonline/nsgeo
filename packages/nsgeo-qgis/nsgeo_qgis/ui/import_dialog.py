@@ -120,6 +120,10 @@ class ImportDialog(QDialog):
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
         self._updating = False
+        # #69: whether "First line at" holds a value the user gave it, and
+        # so no longer follows the spacing (see _follow_spacing).
+        self._first_offset_own = False
+        self._following = False
         self.setWindowTitle("Import DZT files")
         self.resize(900, 520)
         layout = QVBoxLayout(self)
@@ -211,6 +215,8 @@ class ImportDialog(QDialog):
         layout.addWidget(self.buttons)
 
         self.grid_combo.currentIndexChanged.connect(self._grid_changed)
+        self.spacing.valueChanged.connect(self._follow_spacing)
+        self.first_offset.valueChanged.connect(self._first_offset_changed)
         self.axis_combo.currentIndexChanged.connect(self._replan)
         for s in (self.spacing, self.first_offset, self.start_along):
             s.valueChanged.connect(self._replan)
@@ -222,6 +228,7 @@ class ImportDialog(QDialog):
             self.label_number,
         ):
             b.toggled.connect(self._replan)
+        self._follow_spacing()
         self._grid_changed()
 
     # ---- options ------------------------------------------------------------
@@ -254,6 +261,22 @@ class ImportDialog(QDialog):
         gid = self.grid_combo.currentData()
         self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
         self._replan()
+
+    def _follow_spacing(self, *_: Any) -> None:
+        """#69: "First line at" is half the spacing, so the first line sits
+        in the middle of its strip like every line after it -- until the
+        user gives it a value of their own, which then stays put."""
+        if self._first_offset_own:
+            return
+        self._following = True
+        try:
+            self.first_offset.setValue(self.spacing.value() / 2)
+        finally:
+            self._following = False
+
+    def _first_offset_changed(self, *_: Any) -> None:
+        if not self._following:
+            self._first_offset_own = True
 
     def retarget(self, grid_id: str) -> None:
         """Point the dialog at `grid_id`, but only while it has no files.

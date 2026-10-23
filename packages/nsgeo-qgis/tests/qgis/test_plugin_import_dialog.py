@@ -60,17 +60,17 @@ def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
         "FILE__002",
         "FILE__003",
     ]
-    assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.00", "0.50", "1.00"]
+    assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.25", "0.75", "1.25"]
     assert d.table.item(1, COL_DIR).text() == "−1"
     d.set_include(1, False)
     assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == [
-        "0.00",
-        "0.50",
+        "0.25",
+        "0.75",
     ]
     d.set_offset(2, 3.25)
     d.set_include(1, True)
     assert d.rows[2].offset == 3.25 and d.rows[2].offset_edited
-    assert d.table.item(1, COL_OFFSET).text() == "0.50"
+    assert d.table.item(1, COL_OFFSET).text() == "0.75"
 
 
 def test_remove_and_reorder(session, tmp_path):
@@ -80,11 +80,11 @@ def test_remove_and_reorder(session, tmp_path):
     d.table.selectRow(2)
     d.move_selected(-1)
     assert [r.path.stem for r in d.rows] == ["FILE__001", "FILE__003", "FILE__002"]
-    assert [r.offset for r in d.rows] == [0.0, 0.5, 1.0]
+    assert [r.offset for r in d.rows] == [0.25, 0.75, 1.25]
     d.table.selectRow(0)
     d.remove_selected()
     assert [r.path.stem for r in d.rows] == ["FILE__003", "FILE__002"]
-    assert d.rows[0].offset == 0.0
+    assert d.rows[0].offset == 0.25
 
 
 def test_accept_adds_lines_and_fills_the_layer(session, tmp_path):
@@ -268,9 +268,9 @@ def test_bad_offset_entry_is_reported_and_reverted_not_crashed(session, tmp_path
     d = ImportDialog(session, grid_id="A")
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     d.table.item(0, COL_OFFSET).setText("not-a-number")  # must not raise
-    assert d.rows[0].offset == 0.0 and not d.rows[0].offset_edited  # untouched
+    assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited  # untouched
     assert "not a number" in d.status.text()
-    assert d.table.item(0, COL_OFFSET).text() == "0.00"  # reverted, not left showing garbage
+    assert d.table.item(0, COL_OFFSET).text() == "0.25"  # reverted, not left showing garbage
 
 
 def test_hand_edited_label_survives_a_later_replan(session, tmp_path):
@@ -695,3 +695,29 @@ def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opene
     assert _import_from_toolbar(three_grids) is first
     assert first.grid_combo.currentData() == "D"
     assert first.windowTitle() == "Import DZT files into D"
+
+
+# ---- #69: "First line at" starts at half the line spacing ------------------
+
+
+def test_first_line_at_starts_at_half_the_grids_line_spacing(session):
+    # Centred in its strip, like every line after it: 0.25 m at 0.5 m spacing.
+    d = ImportDialog(session, grid_id="A")
+    assert d.spacing.value() == 0.5
+    assert d.first_offset.value() == 0.25
+    assert d.options().first_offset == 0.25
+
+
+def test_first_line_at_follows_the_spacing_until_the_user_sets_it(session):
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 1.0))
+    d = ImportDialog(session, grid_id="A")
+    d.spacing.setValue(0.4)
+    assert d.first_offset.value() == 0.2
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("B"))  # spacing 1.0 from the grid
+    assert d.first_offset.value() == 0.5
+
+    d.first_offset.setValue(0.1)  # the user's own value
+    d.spacing.setValue(2.0)
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
+
+    assert d.first_offset.value() == 0.1
