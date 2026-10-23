@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import zlib
 from pathlib import Path
 from typing import Any, Callable
@@ -153,3 +155,52 @@ def send_double_click(widget: Any, local_pos: Any, button: Any = None) -> None:
     send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
     send(QEvent.Type.MouseButtonDblClick, btn)
     send(QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)
+
+
+class LoadCounter:
+    """`Line.load`, counted -- and optionally slowed -- under a lock.
+
+    M11's `test_two_different_choices_back_to_back_never_run_concurrently`
+    pattern: the sleep widens the few milliseconds a real read holds a
+    worker thread into a window long enough that a counter under a lock
+    catches two preparations overlapping deterministically, which is
+    stronger evidence than timing and safer than waiting for a segfault.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, delay: float = 0.0) -> None:
+        from nsgeo.model.survey import Line
+
+        self.delay = delay
+        self.calls = 0
+        self.concurrent = 0
+        self.max_concurrent = 0
+        lock = threading.Lock()
+        real_load = Line.load
+
+        def load(line: Line) -> list:
+            with lock:
+                self.calls += 1
+                self.concurrent += 1
+                self.max_concurrent = max(self.max_concurrent, self.concurrent)
+            try:
+                if self.delay:
+                    time.sleep(self.delay)
+                return real_load(line)
+            finally:
+                with lock:
+                    self.concurrent -= 1
+
+        monkeypatch.setattr(Line, "load", load)
+
+
+def spin_until(predicate, timeout_ms: int = 20_000) -> bool:
+    """Run the event loop until `predicate()` holds, or time out. qgis tier only."""
+    from qgis.PyQt.QtCore import QCoreApplication, QEventLoop
+
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while not predicate():
+        if time.monotonic() > deadline:
+            return False
+        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
+        time.sleep(0.002)
+    return True

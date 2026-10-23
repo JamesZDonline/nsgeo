@@ -61,6 +61,8 @@ from nsgeo_qgis.log import log as _log
 _remove = os.remove
 _CREATION_OPTIONS = ["INTERLEAVE=BAND", "TILED=NO", "BIGTIFF=IF_SAFER"]
 LAYER_NAME = "Slice (live preview)"
+#: M12 spec 4.5: the same one layer, renamed while the dock shows the whole site.
+SITE_LAYER_NAME = "Site slice (live preview)"
 
 
 def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShader:
@@ -115,6 +117,11 @@ class SliceLayer(QObject):
         #: shader on every tick of the depth slider is waste, and the
         #: renderer is what makes the layer flicker if replaced needlessly.
         self._renderer_key: tuple[str, float, bool] | None = None
+        #: The name this class last gave the layer (`LAYER_NAME` or
+        #: `SITE_LAYER_NAME`), or `None` before the first. Compared with the
+        #: requested name rather than `layer.name()`, so a user's rename is
+        #: not undone on the next tick.
+        self._name: str | None = None
 
     # ---- the one thing this class does -------------------------------
     def update(
@@ -127,15 +134,60 @@ class SliceLayer(QObject):
         unipolar: bool,
         subtitle: str,
     ) -> None:
+        """One grid's slice: resampled north-up, then drawn by `update_north_up`."""
         try:
             array, geotransform = to_north_up(values, frame)
+            self.update_north_up(
+                array,
+                geotransform,
+                frame.crs,
+                limit=limit,
+                colormap_name=colormap_name,
+                unipolar=unipolar,
+                subtitle=subtitle,
+            )
+        except Exception as exc:  # noqa: BLE001 -- reached from a slider slot
+            _log(f"could not draw the slice layer: {exc}")
+
+    def update_north_up(
+        self,
+        array: np.ndarray,
+        geotransform: tuple[float, ...],
+        crs: str,
+        *,
+        limit: float,
+        colormap_name: str,
+        unipolar: bool,
+        subtitle: str,
+        name: str = LAYER_NAME,
+    ) -> None:
+        """Draw an array that is already north-up on `geotransform` (M12: the
+        site lattice, spec 4.5). Every path to the map comes through here, so
+        each one writes a fresh file and repoints, never rewrites the file the
+        layer reads (the Windows rule in the module docstring).
+
+        `name` renames the existing layer in place, rather than rebuilding
+        it, so switching scope never churns the layer tree. It is applied
+        only when it differs from the name this class last gave the layer
+        -- a scope switch -- so a rename by the user survives every tick in
+        between (0.1.0's rule for `_repoint`).
+
+        The extent and CRS are checked explicitly. Under M11's
+        `reloadData()` the provider took the new extent and CRS but the
+        LAYER kept those it was created with (verified on QGIS 3.44), and
+        the site's lattice grows as grids become ready while a grid in
+        another CRS shares this layer. `setDataSource` moves both itself
+        (measured on QGIS 3.44.7), so the checks are a guard that costs
+        nothing: each is a no-op whenever the layer already agrees.
+        """
+        try:
             self._serial += 1
             new_path = self._dir / f"slice-{self._serial:06d}.tif"
             try:
-                self._write(new_path, array, geotransform, frame.crs)
+                self._write(new_path, array, tuple(geotransform), crs)
                 if self._layer_gone():
                     self.layer = None
-                    self._create_layer(new_path)
+                    self._create_layer(new_path, name)
                 else:
                     self._repoint(new_path)
                     self._ensure_group_membership()
@@ -146,6 +198,15 @@ class SliceLayer(QObject):
                 self._sweep()
             if self.layer is None:
                 return
+            if self._name != name:
+                self.layer.setName(name)
+                self._name = name
+            extent = self.layer.dataProvider().extent()
+            if self.layer.extent() != extent:
+                self.layer.setExtent(extent)
+            wanted = QgsCoordinateReferenceSystem(crs)
+            if wanted.isValid() and self.layer.crs() != wanted:
+                self.layer.setCrs(wanted)
             key = (colormap_name, float(limit), bool(unipolar))
             if key != self._renderer_key:
                 self._apply_renderer(colormap_name, limit, unipolar)
@@ -246,7 +307,7 @@ class SliceLayer(QObject):
         self,
         path: Path,
         array: np.ndarray,
-        geotransform: tuple[float, float, float, float, float, float],
+        geotransform: tuple[float, ...],
         crs: str,
     ) -> None:
         # Fix round 1, Important 5 / Ruling AA: scoped to this method only
@@ -310,14 +371,15 @@ class SliceLayer(QObject):
                     dataset.Close()
                     dataset = None
 
-    def _create_layer(self, path: Path) -> None:
-        layer = QgsRasterLayer(str(path), LAYER_NAME, "gdal")
+    def _create_layer(self, path: Path, name: str = LAYER_NAME) -> None:
+        layer = QgsRasterLayer(str(path), name, "gdal")
         # addToLegend=False: this is a scratch preview, not a durable
         # artefact, and it joins the site's own group below like every
         # other layer here -- it does not sit unparented at legend root.
         self.layers.project.addMapLayer(layer, False)
         self.layer = layer
         self.path = path
+        self._name = name
         # A fresh layer has never had a renderer built for it.
         self._renderer_key = None
         self._ensure_group_membership()

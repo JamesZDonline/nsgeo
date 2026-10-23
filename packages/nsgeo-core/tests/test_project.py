@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -404,3 +405,77 @@ def test_a_full_cubes_record_round_trips_unchanged_even_with_an_absolute_array(t
     reloaded = load_site(path).cubes
     assert reloaded == site.cubes
     assert reloaded["out-of-tree"]["array"] == "/home/someone/scratch/cube.npz"
+
+
+def _two_grid_site():
+    g = _grid()
+    return Site(grids=[dataclasses.replace(g, id="A"), dataclasses.replace(g, id="B")], lines=[])
+
+
+def test_slice_sources_and_site_view_round_trip(tmp_path):
+    site = _two_grid_site()
+    site.slice_sources = {
+        "A": {"preset": "slice-standard", "lines": ["data/L0.DZT"], "gain": 1.5},
+        "B": {"preset": "slice-raw", "lines": None},
+    }
+    site.site_view = {"grids": ["A", "B"], "transform": "amp_envelope", "normalisation": "edge"}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    loaded = load_site(path)
+    assert loaded.slice_sources == site.slice_sources
+    assert loaded.site_view == site.site_view
+
+
+def test_a_survey_without_them_loads_with_empty_defaults(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": []}))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {}
+    assert loaded.site_view == {}
+
+
+@pytest.mark.parametrize("key", ["slice_sources", "site_view"])
+@pytest.mark.parametrize("bad", [[], 5, "x"], ids=["list", "int", "str"])
+def test_a_wrong_top_level_type_is_a_project_error(tmp_path, key, bad):
+    path = tmp_path / "survey.nsgeo.json"
+    path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": [], key: bad}))
+    with pytest.raises(ProjectError, match=f"'{key}' must be an object"):
+        load_site(path)
+
+
+def test_an_entry_for_an_unknown_grid_is_dropped_on_load(tmp_path):
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {"A": {"preset": "p"}, "GONE": {"preset": "q"}}
+    doc["site_view"] = {"grids": ["A", "GONE"], "transform": "none"}
+    path.write_text(json.dumps(doc))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {"A": {"preset": "p"}}
+    assert loaded.site_view == {"grids": ["A"], "transform": "none"}
+
+
+def test_a_wrong_typed_inner_value_reads_as_unset(tmp_path):
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {
+        "A": {"preset": 3, "lines": "L0", "gain": -2.0},
+        "B": {"preset": "ok", "gain": 0.0},
+        "GONE": 7,
+    }
+    doc["site_view"] = {"grids": "A", "transform": 4}
+    path.write_text(json.dumps(doc))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {"A": {}, "B": {"preset": "ok"}}
+    assert loaded.site_view == {}
+
+
+def test_empty_ones_are_not_written(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(Site(), path)
+    doc = json.loads(path.read_text())
+    assert "slice_sources" not in doc
+    assert "site_view" not in doc

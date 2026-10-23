@@ -1594,3 +1594,188 @@ def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
+
+
+# ---- M12 Task 2: each grid remembers its own slice source -------------------
+GRID_B = Grid("B", (520.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
+
+
+def _line(tmp_path, grid_id, name, offset):
+    return Line.open(
+        synthetic_dzt(tmp_path / "raw", f"{name}.DZT", n_traces=60),
+        GridPlacement(grid_id, "y", offset, 0.0, 1, name),
+    )
+
+
+@pytest.fixture
+def docked_two_grids(qgis_app, tmp_path):
+    """`docked`, plus a second grid "B" with its own synthetic lines and a
+    second preset "q", so a grid switch has something to restore."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines([_line(tmp_path, "B", f"FILE__01{i}", 1.0 + i) for i in range(2)])
+    session.site.presets["p"] = list(PRESET)
+    session.site.presets["q"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    yield dock, session
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def _grid_keys(session, grid_id):
+    return tuple(
+        k
+        for k in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        if getattr(session.line_for_key(k).placement, "grid_id", None) == grid_id
+    )
+
+
+def test_opening_a_site_does_not_mark_it_dirty(docked_two_grids):
+    dock, session = docked_two_grids
+    dock.engine.wait_for_preparation(20_000)
+    assert not session.dirty
+    assert session.slice_source("A") is None
+
+
+def test_switching_grid_away_and_back_restores_that_grids_preset_and_lines(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.preset_combo.setCurrentText("q")
+    dock.set_included(a_keys[:2])
+    dock.grid_combo.setCurrentText("B")
+    assert dock.included_keys() == _grid_keys(session, "B")
+    # B shows "p" so A's "q" must genuinely be restored on the way back,
+    # not merely still be showing.
+    dock.preset_combo.setCurrentText("p")
+    dock.grid_combo.setCurrentText("A")
+    assert dock.preset_combo.currentText() == "q"
+    assert dock.included_keys() == a_keys[:2]
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_default_line_choice_picks_up_a_line_imported_later(docked_two_grids, tmp_path):
+    dock, session = docked_two_grids
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")
+    assert session.slice_source("A")["lines"] is None
+    dock.grid_combo.setCurrentText("B")
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    dock.grid_combo.setCurrentText("A")
+    assert len(dock.included_keys()) == 4
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_choosing_lines_remembers_them_for_that_grid_only(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:1])
+    assert session.slice_source("A")["lines"] == list(a_keys[:1])
+    assert session.slice_source("B") is None
+    assert session.dirty
+
+
+def test_a_remembered_line_that_left_the_grid_is_filtered_out(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    dock.grid_combo.setCurrentText("B")
+    session.remove_line(a_keys[0])
+    dock.grid_combo.setCurrentText("A")
+    assert dock.included_keys() == (a_keys[1],)
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_reopening_a_survey_restores_a_remembered_source_without_dirtying_or_rewriting_it(
+    docked_two_grids,
+):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.preset_combo.setCurrentText("q")  # not the first preset
+    dock.set_included(a_keys[1:])
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    stored = session.slice_source("A")
+    assert stored == {"preset": "q", "lines": list(a_keys[1:])}
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.grid_combo.currentText() == "A"
+        assert dock2.preset_combo.currentText() == "q"
+        assert dock2.included_keys() == a_keys[1:]
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert not reopened.dirty
+        assert reopened.slice_source("A") == stored
+    finally:
+        dock2.engine.wait_for_preparation(20_000)
+        dock2.engine.dispose()
+        dock2.deleteLater()
+
+
+def test_picking_a_saved_cube_remembers_its_preset_and_lines_for_that_grid(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.preset_combo.setCurrentText("q")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(
+        thickness_ns=4.0,
+        step_ns=2.0,
+        radius_m=0.5,
+        palette=dock.palette_combo.currentText(),
+        stretch="this slice",
+        coverage=False,
+    )
+    _save_cube(dock, session, "A__c", view)
+    # Move A's remembered source elsewhere, so only the cube pick can bring q back.
+    dock.preset_combo.setCurrentText("p")
+    dock.set_included(a_keys[:1])
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("A")["preset"] == "p"
+
+    dock.cube_combo.setCurrentText("A__c")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")
+    dock.preset_combo.setCurrentText("p")
+    dock.grid_combo.setCurrentText("A")
+    assert dock.preset_combo.currentText() == "q"
+    assert dock.included_keys() == a_keys[:2]
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+@pytest.mark.parametrize("remembered", [(), ("raw/elsewhere/FILE__900.DZT",)])
+def test_an_empty_remembered_line_set_is_the_default(docked_two_grids, tmp_path, remembered):
+    """Final review D4: a remembered `lines` that leaves no line on the grid --
+    an empty choice, or lines that have all left it -- is the default, every
+    line, and stays the default: a line imported later is picked up."""
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=remembered)
+    dock.grid_combo.setCurrentText("A")
+    assert dock.included_keys() == a_keys
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    assert len(dock.included_keys()) == 4
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_grids):
+    """Final review D4: an old-format cube record names no line list, so
+    picking it remembers `lines=None` ("every line"), not an empty choice.
+    The dock itself still restores its empty inclusion set (M11)."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__old", view)
+    del record["lines"]  # written before cube records carried their lines
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.included_keys() == ()
+    assert session.slice_source("A")["lines"] is None

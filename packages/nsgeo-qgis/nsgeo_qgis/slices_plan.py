@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from nsgeo.processing import available_steps, get_step
+from nsgeo.slices import SliceWindow, ZAxis, plan_windows
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -39,6 +40,19 @@ NO_TRANSFORM = ""
 
 #: Measured, spec 7.4: streaming costs ~0.14 ms per line per tick.
 STREAM_MS_PER_LINE = 0.14
+
+#: The lines that figure was measured on: spec 7 took every timing on "the
+#: ten real files cycled to the stated line count", which hold 606-666
+#: traces each, 630 on average.
+MEASURED_TRACES_PER_LINE = 630
+
+#: Streaming's cost per trace per tick (ruling T3-c, M12). Streaming
+#: resamples and bins every trace of every line in the window, so its cost
+#: goes with traces, not lines: M12's site benchmark streamed 100 lines of
+#: 3000 traces in ~44 ms a tick (0.44 ms a line), where a per-line rate
+#: called it 14 ms and imperceptible. Measured against that, this rate
+#: predicts 0.67 ms a line -- on the cautious side.
+STREAM_MS_PER_TRACE = STREAM_MS_PER_LINE / MEASURED_TRACES_PER_LINE
 
 #: One 60 Hz frame. Below this, streaming is imperceptible.
 FRAME_BUDGET_MS = 16.0
@@ -61,6 +75,32 @@ class SourceChoice:
     preset: str
     transform: str
     line_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SiteSource:
+    """What goes into a site slice: one transform, and each grid's own source.
+
+    One transform for the whole site (spec 4.2): the grids are composed
+    into one layer with one renderer, so they must agree on polarity, and
+    the transform decides polarity. Each grid keeps its own preset and its
+    own included lines. Order is the order grids are prepared in.
+    """
+
+    transform: str
+    grids: tuple[SourceChoice, ...]
+
+    def __post_init__(self) -> None:
+        seen: set[str] = set()
+        for choice in self.grids:
+            if choice.transform != self.transform:
+                raise ValueError(
+                    f"grid {choice.grid_id!r} is set to the transform {choice.transform!r}, "
+                    f"but the site uses {self.transform!r}; a site has one transform"
+                )
+            if choice.grid_id in seen:
+                raise ValueError(f"grid {choice.grid_id!r} is listed twice in the site source")
+            seen.add(choice.grid_id)
 
 
 @dataclass(frozen=True)
@@ -204,11 +244,16 @@ def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstim
 
 def choose_residency(
     estimate: MemoryEstimate,
-    n_lines: int,
+    n_traces: int,
     budget_bytes: int = DEFAULT_BUDGET_BYTES,
     always_resident: bool = False,
 ) -> str:
-    """`"resident"` or `"streaming"`, from the line count and the budget.
+    """`"resident"` or `"streaming"`, from the prepared trace count and the budget.
+
+    M11's rule, costed per trace (ruling T3-c): stream while a tick costs
+    no more than a frame, otherwise hold the cube if it fits the budget.
+    `n_traces` is the total over every prepared line -- a line count alone
+    misjudged 3000-trace lines about threefold.
 
     Three tiers are described in spec 7.4; two exist. The third -- one
     line at a time, memory-mapped off disk -- is unmeasured there, was
@@ -218,7 +263,7 @@ def choose_residency(
     """
     if always_resident:
         return "resident"
-    if n_lines * STREAM_MS_PER_LINE <= FRAME_BUDGET_MS:
+    if n_traces * STREAM_MS_PER_TRACE <= FRAME_BUDGET_MS:
         # Imperceptible. Holding a cube here would spend memory to buy
         # nothing a person can see.
         return "streaming"
@@ -273,3 +318,50 @@ def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
     if not shift_held or angle_delta_y == 0:
         return 0
     return 1 if angle_delta_y < 0 else -1
+
+
+# ---- the site view (M12) --------------------------------------------------
+
+#: Ruling 4 (M12): the most windows the site's shared stretch is measured
+#: over. Every one is binned, filled, normalised and adjusted for every
+#: grid, so a ten-grid site measured at every window would cost seconds
+#: per change -- and a display percentile does not need every window.
+SITE_LIMIT_WINDOWS = 12
+
+
+def radius_cells_for(spacing_m: float, radius_spacings: float, cell: float) -> int:
+    """A grid's fill radius in cells, from a multiple of its own line spacing.
+
+    Spec 4.4: in site scope the radius is a multiple of each grid's
+    spacing, because one radius in metres would over-smooth a finely
+    spaced grid and leave stripes in a coarse one. Rounded exactly as the
+    dock's `radius_cells` rounds metres, so at equal spacings the site and
+    This grid fill identically.
+    """
+    if not cell > 0.0:
+        raise ValueError(f"cell must be positive, got {cell}")
+    return max(0, int(round(radius_spacings * spacing_m / cell)))
+
+
+def limit_windows(
+    z: ZAxis, thickness_levels: int, max_windows: int = SITE_LIMIT_WINDOWS
+) -> tuple[SliceWindow, ...]:
+    """The windows the site's shared stretch is measured over (Ruling 4).
+
+    `plan_windows(z, thickness, thickness)` -- abutting windows at the
+    displayed thickness, never raw levels (trap 4) -- plus the thinner
+    tail window `display.shared_limit` adds when the thickness does not
+    divide the axis. Past `max_windows`, an evenly spread subset that
+    always keeps the first window and the last.
+    """
+    if max_windows < 2:
+        raise ValueError(f"max_windows must be at least 2, got {max_windows}")
+    windows = list(plan_windows(z, thickness_levels, thickness_levels))
+    if windows[-1].k1 < z.nz:
+        windows.append(SliceWindow(windows[-1].k1, z.nz))
+    n = len(windows)
+    if n <= max_windows:
+        return tuple(windows)
+    # The step is more than one window, so the rounded positions are distinct.
+    picks = [int(round(i * (n - 1) / (max_windows - 1))) for i in range(max_windows)]
+    return tuple(windows[i] for i in picks)
