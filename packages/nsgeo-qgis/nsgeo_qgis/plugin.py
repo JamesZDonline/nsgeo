@@ -1320,6 +1320,11 @@ class NsgeoPlugin:
             # may be gone by now.
             self.message(str(exc), Qgis.MessageLevel.Critical)
             return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            # e.g. ValueError from a header with a non-positive epsr, which
+            # loads fine and fails when its velocity is resolved.
+            self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
+            return
         try:
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return

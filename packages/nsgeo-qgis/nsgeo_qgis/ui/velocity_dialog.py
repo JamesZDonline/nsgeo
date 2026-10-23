@@ -72,6 +72,7 @@ class VelocityDialog(QDialog):
         self.spin.setRange(0.0, 0.3)
         self.spin.setDecimals(4)
         self.spin.setSingleStep(0.001)
+        self.spin.setSpecialValueText("required")
         self.spin.setValue(session.resolved_velocity(key).surface_velocity)
         form.addRow("Velocity (m/ns)", self.spin)
         layout.addLayout(form)
@@ -102,6 +103,8 @@ class VelocityDialog(QDialog):
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
         layout.addWidget(buttons)
 
+        self.spin.valueChanged.connect(self._validate)
+        self._validate()
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.clear_button.clicked.connect(self._on_clear)
         buttons.accepted.connect(self.accept)
@@ -135,6 +138,10 @@ class VelocityDialog(QDialog):
     def velocity(self) -> VelocityModel | None:
         if self._cleared:
             return None
+        fit_id = self.selected_fit_id()
+        if fit_id is not None:
+            # The fit's own velocity, not the spin box's 4-dp rounding of it.
+            return VelocityModel.constant(self._fits[fit_id].v_m_ns)
         return VelocityModel.constant(self.spin.value())
 
     # ---- driving the dialog --------------------------------------------------
@@ -152,6 +159,16 @@ class VelocityDialog(QDialog):
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
 
+    def _validate(self, *_: object) -> None:
+        try:
+            # Zero is the "required" placeholder, and not a velocity.
+            self.apply_button.setEnabled(self.spin.value() > 0)
+        except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
+            QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
+
     def _on_clear(self) -> None:
-        self._cleared = True
-        self.accept()
+        try:
+            self._cleared = True
+            self.accept()
+        except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
+            QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
