@@ -17,7 +17,8 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from plugin_testing import synthetic_dzt
+from plugin_testing import drag_in_layers_panel, synthetic_dzt
+from qgis.core import QgsVectorLayer
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -181,6 +182,52 @@ def test_export_geotiff_adds_a_layer_to_the_slices_group(plugin, tmp_path, answe
     assert plugin.layers.group is not None
     assert plugin.layers.group.findLayer(layer.id()) is not None
     assert layer.temporalProperties().isActive()
+
+
+def _export(plugin, tmp_path, answer_modal):
+    _prepare(plugin)
+    target = tmp_path / "slices" / "cube.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    plugin.slices_dock.export_button.click()
+    assert target.exists()
+    return next(v for v in plugin.layers.project.mapLayers().values() if v.source() == str(target))
+
+
+def test_an_export_joins_the_site_group_after_the_user_dragged_it(
+    plugin, tmp_path, answer_modal, message_log
+):
+    """#68: a drag in the Layers panel replaces the group's node with a copy.
+    The export still finds the group, and does not report a failure."""
+    plugin, s = plugin
+    project = plugin.layers.project
+    root = project.layerTreeRoot()
+    imagery = QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory")
+    project.addMapLayer(imagery)
+    try:
+        drag_in_layers_panel(project, plugin.layers.group, root, len(root.children()))
+
+        layer = _export(plugin, tmp_path, answer_modal)
+
+        assert plugin.layers.group.findLayer(layer.id()) is not None
+        assert not any("could not export" in m for m in message_log)
+    finally:
+        project.removeMapLayer(imagery.id())
+
+
+def test_an_export_after_the_user_deleted_the_site_group_still_shows(
+    plugin, tmp_path, answer_modal, qgis_app
+):
+    """With the group gone, the exported layer goes on top of the Layers
+    panel rather than into the project with no place in the panel."""
+    plugin, s = plugin
+    project = plugin.layers.project
+    project.layerTreeRoot().removeChildNode(plugin.layers.group)
+    qgis_app.processEvents()  # the project drops the group's layers on a queued call
+
+    layer = _export(plugin, tmp_path, answer_modal)
+
+    assert project.layerTreeRoot().children()[0].layerId() == layer.id()
 
 
 def test_export_geotiff_warns_when_fill_radius_is_zero(plugin, tmp_path, answer_modal, message_log):

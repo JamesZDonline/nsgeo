@@ -285,3 +285,23 @@ def named_layer(kind: str, name: str, features: dict[str, Any], crs: str = "EPSG
 def feature_id(layer: Any, name: str) -> int:
     """The id of `layer`'s feature called `name`."""
     return next(f.id() for f in layer.getFeatures() if f["name"] == name)
+
+
+def drag_in_layers_panel(project: Any, node: Any, parent: Any, row: int) -> None:
+    """Move layer-tree `node` to `row` of `parent` the way a drag in the
+    Layers panel does. That is not a move: QgsLayerTreeModel serialises the
+    node, builds a NEW one at the drop and deletes the original, so a Python
+    reference to the old node is left dangling."""
+    from qgis.core import QgsLayerTreeModel
+    from qgis.PyQt.QtCore import Qt
+
+    model = QgsLayerTreeModel(project.layerTreeRoot())
+    model.setFlag(QgsLayerTreeModel.Flag.AllowNodeReorder)
+    source = node.parent()
+    source_row = next(i for i, child in enumerate(source.children()) if child is node)
+    source_index = model.node2index(source)
+    mime = model.mimeData([model.node2index(node)])
+    assert model.dropMimeData(mime, Qt.DropAction.MoveAction, row, 0, model.node2index(parent))
+    if source is parent and row <= source_row:
+        source_row += 1  # the copy went in above the original
+    assert model.removeRows(source_row, 1, source_index)
