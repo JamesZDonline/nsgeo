@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +28,6 @@ from qgis.PyQt.QtCore import QEvent, QPoint, Qt
 from qgis.PyQt.QtWidgets import QAbstractItemView, QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-LOCAL = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]])
 
 SITE = Grid("S", (518_204.112, 4_000_731.508), 10.0, 20.0, 20.0, "EPSG:32616", 0.5)
 SITE_CORNERS = SITE.to_world(np.array([[0, 0], [20, 0], [20, 20], [0, 20]], dtype=float))
@@ -1497,7 +1497,8 @@ def test_fit_status_keeps_the_last_fit_line_through_row_changes(session):
     d.fit_corners()
     line = d.fit_status.text()
     measured = d.measured_size()
-    d.corner_table.item(0, COL_A).setText(f"{SITE_CORNERS[0][0]:.6f}")
+    d.corner_table.item(0, COL_A).setText(f"{SITE_CORNERS[0][0] + 1.0:.6f}")  # a real edit
+    assert d.corner_point(0).x() == pytest.approx(SITE_CORNERS[0][0] + 1.0)
     assert d.fit_status.text() == line
     d.rotate_corners()
     assert d.fit_status.text() == line
@@ -1535,6 +1536,147 @@ def test_a_half_filled_row_reads_as_empty_and_blocks_fit(session):
     d.fit_corners()
     assert d.fit_status.text() == "+X has only one coordinate: fill both or clear it"
     assert d.origin_x.value() == 0.0
+
+
+def test_fit_refuses_a_row_whose_text_did_not_parse(session):
+    d = _utm_dialog(session)
+    for row in (1, 2, 3):
+        _type_row(d, row, *SITE_CORNERS[row])
+    d.corner_table.item(0, COL_A).setText("518204,112")
+    d.corner_table.item(0, COL_B).setText(f"{SITE_CORNERS[0][1]:.6f}")
+    assert d.corner_point(0) is None
+    d.fit_corners()
+    assert d.fit_status.text() == "origin: '518204,112' is not a number: fix it or clear the row"
+    assert d.origin_x.value() == 0.0
+    assert d.measured_size() is None
+
+
+def _lonlat_typed(d: GridDialog) -> None:
+    for row, p in enumerate(_wgs84_ring()):
+        _type_row(d, row, p.x(), p.y())
+
+
+def test_degrees_typed_as_metres_are_refused(session):
+    d = _utm_dialog(session)
+    _lonlat_typed(d)
+    d.fit_corners()
+    text = d.fit_status.text()
+    assert text.startswith("the corners are only 0.") and text.endswith(
+        " m apart in EPSG:32616: check that Corners in is the CRS they were measured in"
+    )
+    assert (d.origin_x.value(), d.origin_y.value(), d.azimuth.value()) == (0.0, 0.0, 0.0)
+    assert (d.size_x.value(), d.size_y.value()) == (10.0, 10.0)
+    assert d.crs_widget.crs() == UTM16
+    assert d.measured_size() is None
+
+
+def test_degrees_typed_as_metres_leave_an_existing_grid_alone(session):
+    grid = dataclasses.replace(SITE, velocity=VelocityModel.constant(0.08))
+    session.add_grid(grid)
+    d = GridDialog(session, grid=grid)
+    d.corners_crs.setCrs(UTM16)
+    assert d.sizes_typed() == (True, True)
+    _lonlat_typed(d)
+    d.fit_corners()
+    assert d.fit_status.text().startswith("the corners are only ")
+    assert d.result_grid() == grid
+
+
+def test_fill_refuses_a_layer_without_a_crs(qgis_app, session, plan_layer):
+    layer = plan_layer(_wgs84_ring())
+    layer.setCrs(QgsCoordinateReferenceSystem())
+    assert not layer.crs().isValid()
+    d = _utm_dialog(session)
+    d.set_corner(0, QgsPointXY(*SITE_CORNERS[0]), UTM16, "typed")
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    assert d.fit_status.text() == "plan has no CRS: set one in its Layer Properties"
+    assert d.corner_source(0) == "typed"
+    assert d.corner_point(1) is None
+
+
+def test_metres_typed_under_lon_lat_are_refused_as_such(session):
+    d = _utm_dialog(session)
+    d.corners_crs.setCrs(WGS84)
+    _type_site(d)
+    d.fit_corners()
+    assert d.fit_status.text() == (
+        "these are not longitudes and latitudes: "
+        "check that Corners in is the CRS they were measured in"
+    )
+    assert d.origin_x.value() == 0.0
+    assert d._lonlat(QgsPointXY(0.0, 91.0), WGS84) is None
+    assert d._lonlat(QgsPointXY(181.0, 0.0), WGS84) is None
+
+
+def test_a_refused_fit_puts_an_automatic_crs_back(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(10.0)
+    anchor = d._anchor
+    d.corners_crs.setCrs(WGS84)
+    mirrored = ((0, 0), (0, 0.0002), (0.0002, 0.0002), (0.0002, 0))
+    for row, (dx, dy) in enumerate(mirrored):
+        d.set_corner(row, QgsPointXY(-70.0 + dx, 36.0 + dy), WGS84, "typed")
+    d.fit_corners()
+    assert "mirrored" in d.fit_status.text()
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert d.crs_is_auto()
+    assert (d.origin_x.value(), d.origin_y.value(), d.azimuth.value()) == (
+        SITE.origin[0],
+        SITE.origin[1],
+        10.0,
+    )
+    assert d._anchor == anchor
+
+
+def test_a_successful_automatic_switch_clears_a_stale_hand_pick_message(
+    session, project_crs, real_canvas
+):
+    project_crs(UTM16)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    d.origin_x.setValue(1e8)  # outside UTM 16N's domain: the hand pick cannot convert
+    d.origin_y.setValue(1e8)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32617"))
+    assert "could not convert" in d.crs_hint.text()
+    d.origin_x.setValue(0.0)
+    d.origin_y.setValue(0.0)
+    d.corners_crs.setCrs(WGS84)
+    for row, (dx, dy) in enumerate(((0, 0), (0.0002, 0), (0.0002, 0.0002), (0, 0.0002))):
+        d.set_corner(row, QgsPointXY(-70.0 + dx, 36.0 + dy), WGS84, "typed")
+    d.fit_corners()
+    assert d.crs_widget.crs().authid() == "EPSG:32619"
+    assert "could not convert" not in d.crs_hint.text()
+
+
+def test_an_automatic_switch_that_cannot_convert_says_so(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    d.origin_x.setValue(1e8)
+    d.origin_y.setValue(1e8)
+    d._apply_auto_crs(QgsCoordinateReferenceSystem("EPSG:32617"), "")
+    assert "could not convert the grid into EPSG:32617" in d.crs_hint.text()
+
+
+def test_the_project_reason_for_a_crs_that_does_not_reach_the_spot(session):
+    # No real CRS makes the transform raise at a lon/lat, so the branch is
+    # called directly.
+    d = GridDialog(session)
+    assert d._project_reason(UTM16, "outside", None) == (
+        "the project CRS (EPSG:32616) does not reach this location"
+    )
+
+
+def test_the_site_note_is_only_shown_when_the_site_differs_from_the_project(
+    session, project_crs, real_canvas
+):
+    project_crs(UTM16)
+    session.add_grid(SITE)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    assert d.crs_widget.crs() == UTM16
+    assert d.crs_hint.text() == ""
 
 
 def test_a_fit_that_is_not_square_says_so(session):
@@ -2299,7 +2441,8 @@ def test_a_persistent_overlay_failure_does_not_replace_the_fit_line(
     _type_row(d, 0, *SITE_CORNERS[0])  # persistent: cannot reach the canvas
     d._set_fit_line("rigid fit RMS 0.00 m")
     assert d._overlay_message.startswith("the map cannot show")
-    _type_row(d, 0, *SITE_CORNERS[0])  # a good row change: the Fit line returns
+    d.fit_status.setText("an error")  # covers the Fit line
+    _type_row(d, 0, SITE_CORNERS[0][0] + 1.0, SITE_CORNERS[0][1])  # a real edit: the line returns
     assert d.fit_status.text() == "rigid fit RMS 0.00 m"
     d.size_x.setValue(d.size_x.value() + 1.0)  # same failure: nothing replaced
     assert d.fit_status.text() == "rigid fit RMS 0.00 m"
@@ -2358,7 +2501,7 @@ def test_overlay_stays_while_the_dialog_is_hidden_mid_pick(real_iface, tmp_path,
 
 
 @pytest.mark.parametrize("how", ["ok", "cancel", "close mid-pick", "unload", "destroyed"])
-def test_overlay_leaves_nothing_behind(real_iface, tmp_path, qgis_app, how):
+def test_overlay_leaves_nothing_behind(real_iface, tmp_path, qgis_app, answer_modal, how):
     import nsgeo_qgis
 
     iface = real_iface(UTM16, QgsRectangle(0, 0, 800, 600))
@@ -2400,7 +2543,10 @@ def test_overlay_leaves_nothing_behind(real_iface, tmp_path, qgis_app, how):
         assert _scene_count(qgis_app, canvas) == baseline
     assert sip.isdeleted(item)
     overlay.dispose()  # idempotent
-    if how not in ("unload", "ok"):  # (an accepted grid leaves unsaved changes to ask about)
+    if how == "ok":  # an accepted grid leaves unsaved changes to ask about
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+    elif how != "unload":
         plugin.unload()
 
 

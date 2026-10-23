@@ -383,6 +383,14 @@ def test_corner_frame_refuses_corners_in_a_line():
         corner_frame(line)
 
 
+def test_corner_frame_sees_collinear_points_at_utm_magnitudes():
+    # exactly collinear, but the raw shoelace sum of numbers this large is
+    # rounding noise well above the degenerate-area threshold
+    line = [(518_204.112 + 0.1 * t, 4_000_731.508 + 0.1 * t) for t in (0, 1, 2)] + [None]
+    with pytest.raises(ValueError, match="in a line"):
+        corner_frame([line[0], line[1], line[2], None])
+
+
 def test_roles_from_ring_puts_the_origin_where_plus_y_points_north():
     pts, idx = roles_from_ring(W + [W[0]])
     assert idx == [0, 1, 2, 3]

@@ -290,7 +290,11 @@ class CornerFrame:
 
 
 def _signed_area(pts: np.ndarray) -> float:
-    x, y = pts[:, 0], pts[:, 1]
+    # Centred first: at UTM magnitudes (northings ~4e6) the raw shoelace sum
+    # is a difference of ~1e13-sized products, and its rounding noise would
+    # swamp the area of a narrow or exactly collinear set.
+    centred = pts - pts.mean(axis=0)
+    x, y = centred[:, 0], centred[:, 1]
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 

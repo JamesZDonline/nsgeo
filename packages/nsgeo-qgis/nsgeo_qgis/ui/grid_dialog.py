@@ -9,6 +9,7 @@ fills the form, which the user can still edit.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -76,6 +77,12 @@ COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
 CRS_SCALE_WARN = 0.001  # 0.1%
 CRS_SCALE_REFUSE = 0.02  # ~2%
 
+# A measured grid side shorter than this (metres) is not a grid: it is
+# degrees read as metres, or a CRS that is not the one the corners were
+# measured in. A degree-sized grid fits to RMS 0.000 and would move an
+# existing grid thousands of kilometres.
+MIN_MEASURED_SIZE = 0.1
+
 
 def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) -> QDoubleSpinBox:
     s = QDoubleSpinBox()
@@ -105,6 +112,25 @@ _FORM_LABELS = (
     "Default spacing (m)",
     "Velocity (m/ns)",
 )
+
+
+def _is_number(text: str) -> bool:
+    try:
+        return math.isfinite(float(text))
+    except ValueError:
+        return False
+
+
+@dataclass(frozen=True)
+class _GridSnapshot:
+    """The grid CRS and numbers as a Fit found them (to put back on a refusal)."""
+
+    crs: QgsCoordinateReferenceSystem  # what crs_widget showed
+    grid_crs: QgsCoordinateReferenceSystem  # what the numbers are in
+    numbers: tuple[float, float, float]  # origin E, N, azimuth
+    anchor: tuple[QgsCoordinateReferenceSystem, float, float, float] | None
+    auto_note: str
+    crs_message: str
 
 
 def _join(names: list[str]) -> str:
@@ -152,7 +178,8 @@ class GridDialog(QDialog):
         # Full-precision ground anchor (R10): (CRS, E, N, azimuth) in the last
         # metric CRS the grid was in. A spin box rounds to 3 decimals, which in
         # degrees is ~100 m, so a hand pick converts from here, not from the
-        # boxes; a hand edit of the numbers while the CRS is not metric drops it.
+        # boxes; a hand edit of the numbers while the CRS is not metric
+        # re-derives only the part that was edited (R11).
         self._anchor: tuple[QgsCoordinateReferenceSystem, float, float, float] | None = None
         self._setting_numbers = False  # the dialog is writing origin/azimuth
         self.setWindowTitle(f"Grid · {grid.id}" if grid else "New grid")
@@ -748,6 +775,11 @@ class GridDialog(QDialog):
         if not ring:
             self.fit_status.setText("this feature has no rings to read corners from")
             return
+        if not layer.crs().isValid():
+            # A transform from an invalid CRS is the identity: it would put
+            # the layer's numbers in the rows as if they were Corners in.
+            self.fit_status.setText(f"{layer.name()} has no CRS: set one in its Layer Properties")
+            return
         target = self.corners_crs.crs()
         try:
             xform = QgsCoordinateTransform(layer.crs(), target, QgsProject.instance())
@@ -798,58 +830,121 @@ class GridDialog(QDialog):
         return out
 
     def fit_corners(self) -> None:
-        # clicked slot: every failure becomes a message in fit_status.
+        # clicked slot: every failure becomes a message in fit_status. A
+        # refused Fit changes nothing, including an automatic CRS switched
+        # in by this same Fit.
+        snapshot = self._grid_snapshot()
         try:
-            half = self._half_filled_row()
-            if half is not None:
+            unreadable = self._unreadable_row()
+            if unreadable is not None:
+                self._set_fit_line(unreadable)
+                return
+            corners_crs = self.corners_crs.crs()
+            if corners_crs.isGeographic() and any(
+                self._lonlat(e[0], corners_crs) is None for e in self._corners if e is not None
+            ):
                 self._set_fit_line(
-                    f"{CORNER_ROLES[half]} has only one coordinate: fill both or clear it"
+                    "these are not longitudes and latitudes: "
+                    "check that Corners in is the CRS they were measured in"
                 )
                 return
             if self._crs_auto:
                 self._settle_crs_from_corners()
-            grid_crs = self.crs_widget.crs()
-            if not grid_crs.authid() or grid_crs.mapUnits() != Qgis.DistanceUnit.Meters:
-                self._set_fit_line("set a metric CRS for the grid first")
-                return
-            try:
-                points = self._corners_in_grid_crs(grid_crs)
-            except QgsCsException:
-                self._set_fit_line(f"could not convert the corners into {grid_crs.authid()}")
-                return
-            try:
-                frame = corner_frame(points)
-                fit = fit_grid_from_corners(frame.local, frame.world)
-            except ValueError as exc:
-                self._set_fit_line(str(exc))
-                return
-            self._write_numbers(grid_crs, fit.origin[0], fit.origin[1], fit.azimuth)
-            self._sizing = True
-            try:
-                for axis, box, measured in (
-                    (0, self.size_x, frame.size_x),
-                    (1, self.size_y, frame.size_y),
-                ):
-                    if measured is not None and not self._typed[axis]:
-                        box.setValue(measured)
-            finally:
-                self._sizing = False
-            self._measured = (frame.size_x, frame.size_y)
-            rms = f"{fit.residual_rms:.3f}"
-            line = f"rigid fit RMS {rms} m from {len(frame.rows)} corners"
-            if rms != "0.000":
-                line += " · not quite square: see off by"
-            self._set_fit_line(line)
-            self._refresh_derived()
+            if not self._fit_corners(snapshot):
+                self._restore_grid(snapshot)
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self._restore_grid(snapshot)
             self._set_fit_line(f"fit failed: {exc}")
 
-    def _half_filled_row(self) -> int | None:
+    def _fit_corners(self, snapshot: _GridSnapshot) -> bool:
+        """The fit proper; False when it refused (and said why)."""
+        grid_crs = self.crs_widget.crs()
+        if not grid_crs.authid() or grid_crs.mapUnits() != Qgis.DistanceUnit.Meters:
+            self._set_fit_line("set a metric CRS for the grid first")
+            return False
+        try:
+            points = self._corners_in_grid_crs(grid_crs)
+        except QgsCsException:
+            self._set_fit_line(f"could not convert the corners into {grid_crs.authid()}")
+            return False
+        try:
+            frame = corner_frame(points)
+            fit = fit_grid_from_corners(frame.local, frame.world)
+        except ValueError as exc:
+            self._set_fit_line(str(exc))
+            return False
+        measured_sizes = [m for m in (frame.size_x, frame.size_y) if m is not None]
+        if measured_sizes and min(measured_sizes) < MIN_MEASURED_SIZE:
+            self._set_fit_line(
+                f"the corners are only {min(measured_sizes):.4f} m apart in "
+                f"{self.corners_crs.crs().authid()}: "
+                "check that Corners in is the CRS they were measured in"
+            )
+            return False
+        if grid_crs != snapshot.crs:
+            self._crs_message = ""  # the grid was rewritten by this Fit
+        self._write_numbers(grid_crs, fit.origin[0], fit.origin[1], fit.azimuth)
+        self._sizing = True
+        try:
+            for axis, box, measured in (
+                (0, self.size_x, frame.size_x),
+                (1, self.size_y, frame.size_y),
+            ):
+                if measured is not None and not self._typed[axis]:
+                    box.setValue(measured)
+        finally:
+            self._sizing = False
+        self._measured = (frame.size_x, frame.size_y)
+        rms = f"{fit.residual_rms:.3f}"
+        line = f"rigid fit RMS {rms} m from {len(frame.rows)} corners"
+        if rms != "0.000":
+            line += " · not quite square: see off by"
+        self._set_fit_line(line)
+        self._validate()
+        self._refresh_derived()
+        return True
+
+    def _grid_snapshot(self) -> _GridSnapshot:
+        return _GridSnapshot(
+            self.crs_widget.crs(),
+            self._grid_crs,
+            (self.origin_x.value(), self.origin_y.value(), self.azimuth.value()),
+            self._anchor,
+            self._auto_note,
+            self._crs_message,
+        )
+
+    def _restore_grid(self, snap: _GridSnapshot) -> None:
+        """Put the grid CRS, origin, azimuth, anchor and CRS hint back exactly
+        as `snap`."""
+        now = (self.origin_x.value(), self.origin_y.value(), self.azimuth.value())
+        if self.crs_widget.crs() != snap.crs or now != snap.numbers:
+            self._write_crs(snap.crs)
+            self._grid_crs = snap.grid_crs
+            self._setting_numbers = True
+            try:
+                for box, value in zip((self.origin_x, self.origin_y, self.azimuth), snap.numbers):
+                    box.setValue(value)
+            finally:
+                self._setting_numbers = False
+        self._anchor = snap.anchor
+        self._auto_note, self._crs_message = snap.auto_note, snap.crs_message
+        self._validate()
+        self._refresh_derived()
+
+    def _unreadable_row(self) -> str | None:
+        """Why Fit cannot use the table as it stands: the first row (in role
+        order) that holds text but no point, or None. Such a row is not an
+        empty one, and dropping it would fit the others without saying."""
         for row in range(4):
-            if self._corners[row] is None:
-                texts = [self.corner_table.item(row, c).text().strip() for c in (COL_A, COL_B)]
-                if sum(bool(t) for t in texts) == 1:
-                    return row
+            if self._corners[row] is not None:
+                continue
+            texts = [self.corner_table.item(row, c).text().strip() for c in (COL_A, COL_B)]
+            if sum(bool(t) for t in texts) == 1:
+                return f"{CORNER_ROLES[row]} has only one coordinate: fill both or clear it"
+            for text in texts:
+                if text and not _is_number(text):
+                    return f"{CORNER_ROLES[row]}: {text!r} is not a number: fix it or clear the row"
         return None
 
     # ---- typed sizes ------------------------------------------------------
@@ -1041,7 +1136,10 @@ class GridDialog(QDialog):
             ).transform(point)
         except QgsCsException:
             return None
-        return out if math.isfinite(out.x()) and math.isfinite(out.y()) else None
+        if not (math.isfinite(out.x()) and math.isfinite(out.y())):
+            return None
+        # Not a position on Earth: metres read as degrees.
+        return out if abs(out.y()) <= 90.0 and abs(out.x()) <= 180.0 else None
 
     def _canvas_centre(self) -> QgsPointXY | None:
         """The map canvas's centre as lon/lat, or None when there is none to use."""
@@ -1067,6 +1165,8 @@ class GridDialog(QDialog):
             return "the project CRS has no authority code"
         if kind == "units":
             return f"the project CRS ({crs.authid()}) is in {QgsUnitTypes.toString(crs.mapUnits())}"
+        if kind == "outside":
+            return f"the project CRS ({crs.authid()}) does not reach this location"
         return f"the project CRS ({crs.authid()}) is off by {(scale_error or 0.0) * 100:.1f}% here"
 
     def _choose_crs(self, lonlat: QgsPointXY) -> tuple[QgsCoordinateReferenceSystem, str]:
@@ -1076,7 +1176,8 @@ class GridDialog(QDialog):
         project = QgsProject.instance().crs()
         site = self._site_crs()
         if site is not None and self._usable_at(site, lonlat)[0] is None:
-            return site, "picked for you: the CRS the site's other grids use"
+            note = "" if site == project else "picked for you: the CRS the site's other grids use"
+            return site, note
         kind, scale_error = self._usable_at(project, lonlat)
         if kind is None:
             return project, ""
@@ -1091,8 +1192,10 @@ class GridDialog(QDialog):
             old = self._grid_crs
             self._write_crs(crs)
             # The grid stays where it is on the ground; a failed conversion
-            # is left to the Fit that follows, which rewrites both numbers.
-            self._convert_grid(old, crs)
+            # is shown in the CRS hint (a Fit that follows rewrites both
+            # numbers, or restores them if it refuses).
+            error = self._convert_grid(old, crs)
+            self._crs_message = error or ""
         self._auto_note = note
         self._validate()
         self._refresh_derived()
@@ -1122,9 +1225,10 @@ class GridDialog(QDialog):
     ) -> str | None:
         """Move Origin E/N and Azimuth from `old` to `new`, keeping the grid
         where it is on the ground (C11); the azimuth is the bearing from the
-        origin to a point 100 m along +Y. Nothing happens while the origin is
-        still (0, 0). Returns a message when it could not, and then changes
-        nothing."""
+        origin to the transformed point one step along +Y (the chord rule of
+        `_chord`: 100 source units, or 0.001 degrees in a geographic CRS).
+        Nothing happens while the origin is still (0, 0). Returns a message
+        when it could not, and then changes nothing."""
         if (
             (self.origin_x.value() == 0.0 and self.origin_y.value() == 0.0)
             or not old.isValid()

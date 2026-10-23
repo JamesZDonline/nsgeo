@@ -137,8 +137,8 @@ processing, a pick and slices.
 - Grids use a projected coordinate reference system (CRS) in metres, such as your
   UTM zone, never latitude and longitude or feet. You do not have to choose one:
   the grid window picks a suitable one for you (see Step 2), starting from the
-  project's CRS. To choose it yourself, set the project's CRS first: click the CRS
-  shown at the bottom right of the QGIS window.
+  project's CRS. To choose it yourself, pick it in the grid window's **CRS** box.
+  (If the site already has grids, their CRS comes before the project's.)
 
 ### Step 1: New site
 
@@ -165,18 +165,19 @@ far (see [What the map shows](#what-the-map-shows)).
      readings). The **from** column says `typed`.
    - **Pick** a corner on the map. The window hides, and the message bar names the
      corner to click. Click the map, and the window comes back. The click snaps to
-     a nearby point (such as a GPS point) and then to a vertex, and **from** names
+     a nearby point (such as a GPS point) or, failing that, to a vertex, and **from** names
      what it snapped to, for example `G4 · gps`, or `free click` when there was
      nothing close. Right-click or **Esc** cancels.
    - **Pick all** walks the four corners in order. Right-click skips a corner and
      leaves its row as it was. **Esc** stops and keeps what you have picked.
-   - **Fill** from a polygon. Choose a polygon **Layer** and **Feature** (or
-     click **Pick on map** and click the polygon), then **Fill**. The polygon must
+   - **Fill** from a polygon. Choose a polygon in the layer list and the feature
+     list (or click **Pick on map** and click the polygon), then click **Fill**. The polygon must
      have four corners. nsgeo gives them their roles so the grid is the right way
      round, with the origin at the corner whose +Y edge points closest to north.
      **from** shows each one as, for example, `v2 NE`.
-   - **⟳ Rotate** moves every role one corner round the polygon, if the origin
-     landed on the wrong corner. Four presses return to the start.
+   - **⟳ Rotate** moves the roles one corner round, however the rows were filled,
+     if the origin landed on the wrong corner. The two **Size** boxes swap with
+     them. Four presses return to the start.
    - **Clear** empties the table.
 
    Picking and filling never fit the grid by themselves.
@@ -184,9 +185,12 @@ far (see [What the map shows](#what-the-map-shows)).
    fixes rotation and position, never scale, and sets **Origin E, N** and
    **Azimuth**. It also fills **Size X, Y (m)** from the distances between your
    corners, unless you typed a size yourself. The status line gives the *rigid fit
-   RMS*, which is 0 for exact corners. A large value can mean the corners were not
-   surveyed square, or that two of the rows are swapped. nsgeo refuses corners
-   that run the wrong way round, and says so.
+   RMS*, which is 0 for exact corners. A large value means the corners are not quite
+   square: look at **off by** to see which corner is furthest out. nsgeo refuses
+   corners that run the wrong way round or, with three or more, have rows swapped, and
+   corners that are only centimetres apart (usually degrees typed under a metric
+   **Corners in**, or the wrong **Corners in**), and it says so. It also refuses
+   while a row holds text that is not a number. A refused Fit changes nothing.
 4. Check the numbers, and change any you like. **off by** in the table shows, for
    each corner, how far in metres it is from the matching corner of the grid as
    the form describes it now. It is blank until that grid can be drawn: the
