@@ -1077,9 +1077,9 @@ def test_unipolar_output_gives_a_one_sided_band(curve_dock):
 def _add_second_line(session, tmp_path, *, load):
     p = synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")
     line = Line.open(p, GridPlacement("A", "y", 1.0))
-    first = session.keys()[0]
     session.add_lines([line])
-    key_b = next(k for k in session.keys() if k != first)
+    key_b = session.keys()[-1]
+    assert key_b != session.keys()[0]
     if load:
         session.set_profiles(key_b, line.load())
     return key_b
