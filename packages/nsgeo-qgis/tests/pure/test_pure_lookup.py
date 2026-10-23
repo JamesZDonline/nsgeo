@@ -371,7 +371,8 @@ def test_corner_frame_refuses_crossed_corners(a, b):
 
 def test_corner_frame_refuses_crossed_corners_with_noise():
     offsets = [(0.03, -0.02), (-0.04, 0.01), (0.02, 0.05), (-0.01, -0.03)]
-    pts = [(p[0] + o[0], p[1] + o[1]) for p, o in zip(W, offsets, strict=True)]
+    assert len(offsets) == len(W)  # zip(strict=True) is Python 3.10+; CI runs 3.9
+    pts = [(p[0] + o[0], p[1] + o[1]) for p, o in zip(W, offsets)]
     pts[2], pts[3] = pts[3], pts[2]
     with pytest.raises(ValueError, match="out of order"):
         corner_frame(pts)

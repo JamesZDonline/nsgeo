@@ -1009,7 +1009,7 @@ def test_pick_polygon_on_map_selects_layer_and_feature(qgis_app, real_iface, tmp
         assert _pump(qgis_app, lambda: t.dialog.feature_picker.feature().id() == east)
         chosen = t.dialog.chosen_polygon()
         assert chosen is not None and chosen[0] is plots
-        assert chosen[1].equals(plots.getFeature(east).geometry())
+        assert chosen[1].asWkt() == plots.getFeature(east).geometry().asWkt()
         t.dialog.reject()
         t.plugin.unload()
     finally:
@@ -1796,6 +1796,22 @@ def test_fill_without_a_feature_reports_a_message(session):
     assert d.fit_status.text() == "select a polygon feature first"
 
 
+def test_the_feature_list_follows_the_layer_list_not_its_signal(qgis_app, session, plan_layer):
+    # A polygon layer added while the window is open: the layer list selects
+    # it on its own. QGIS 3.44 announces that as layerChanged(<the layer>);
+    # QGIS 4.2 as layerChanged(None) (measured in qgis/qgis:4.2, PR #80's
+    # CI), which left the feature list empty and Fill impossible. The
+    # feature list must follow what the layer list shows, whatever the
+    # signal carried.
+    d = GridDialog(session)
+    layer = plan_layer([QgsPointXY(*p) for p in SITE_CORNERS], crs="EPSG:32616")
+    qgis_app.processEvents()
+    assert d.layer_combo.currentLayer() is layer
+    assert d.feature_picker.layer() is layer
+    d.layer_combo.layerChanged.emit(None)  # what QGIS 4.2 sends
+    assert d.feature_picker.layer() is layer
+
+
 def test_fill_reports_an_empty_geometry(qgis_app, session, plan_layer):
     layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "plan", "memory")
     layer.dataProvider().addFeatures([QgsFeature()])
@@ -1895,7 +1911,7 @@ def test_set_polygon_feature_refuses_a_layer_the_list_does_not_offer(qgis_app, s
         assert d.feature_picker.layer() is chosen
         picked = d.chosen_polygon()
         assert picked is not None and picked[0] is chosen
-        assert picked[1].equals(chosen.getFeature(b).geometry())
+        assert picked[1].asWkt() == chosen.getFeature(b).geometry().asWkt()
     finally:
         QgsProject.instance().removeMapLayer(chosen.id())
 

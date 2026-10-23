@@ -525,7 +525,8 @@ class GridDialog(QDialog):
         self.layer_combo = QgsMapLayerComboBox()
         self.layer_combo.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
         self.feature_picker = QgsFeaturePickerWidget()
-        self.layer_combo.layerChanged.connect(self.feature_picker.setLayer)
+        self.layer_combo.layerChanged.connect(self._follow_layer_list)
+        self.layer_combo.currentIndexChanged.connect(self._follow_layer_list)
         self.feature_picker.setLayer(self.layer_combo.currentLayer())
         polygon_row = QHBoxLayout()
         polygon_row.addWidget(self.layer_combo, 1)
@@ -712,6 +713,24 @@ class GridDialog(QDialog):
             self.fit_status.setText(f"could not rotate the corners: {exc}")
 
     # ---- fill from a polygon ----------------------------------------------
+    def _follow_layer_list(self, *_: Any) -> None:
+        # The feature list follows whatever the layer list shows, read here,
+        # never from a signal's argument. When the first polygon layer is
+        # added to the project, QGIS 3.44 emits currentIndexChanged(0) then
+        # layerChanged(<layer>), but QGIS 4.2 emits layerChanged(None) while
+        # the index is still -1 and then only currentIndexChanged(0) (both
+        # traced in qgis/qgis:3.44 and :4.2). Following layerChanged alone
+        # left the feature list empty on 4.2, so this listens to both.
+        try:
+            layer = self.layer_combo.currentLayer()
+            shown = self.feature_picker.layer()
+            if (layer is None) != (shown is None) or (
+                layer is not None and shown is not None and layer.id() != shown.id()
+            ):
+                self.feature_picker.setLayer(layer)
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not list that layer's features: {exc}")
+
     def set_polygon_feature(self, layer: QgsVectorLayer, fid: int) -> bool:
         """Select a polygon in both lists (the map pick's way in).
 
