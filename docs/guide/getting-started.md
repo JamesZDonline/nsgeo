@@ -134,10 +134,11 @@ processing, a pick and slices.
 ### Before you start
 
 - Make a new, empty folder for the site. Everything nsgeo writes goes into it.
-- Choose a projected coordinate reference system (CRS) in metres for the grid,
-  such as your UTM zone. Grids cannot use latitude and longitude, or feet. The
-  grid window starts from the project's CRS, so set that first: click the CRS
-  shown at the bottom right of the QGIS window.
+- Grids use a projected coordinate reference system (CRS) in metres, such as your
+  UTM zone, never latitude and longitude or feet. You do not have to choose one:
+  the grid window picks a suitable one for you (see Step 2), starting from the
+  project's CRS. To choose it yourself, pick it in the grid window's **CRS** box.
+  (If the site already has grids, their CRS comes before the project's.)
 
 ### Step 1: New site
 
@@ -152,30 +153,84 @@ the site folder lets the whole site move as one folder (see
 ### Step 2: Place a grid
 
 nsgeo imports lines into a grid, so place the grid first. Click **Add grid…**
-(or right-click the site in **nsgeo Survey**). The **New grid** window opens.
+(or right-click the site in **nsgeo Survey**). The **New grid** window opens. It
+stays open while you work on the map, and the map shows what you have entered so
+far (see [What the map shows](#what-the-map-shows)).
 
-1. Type an **Id** for the grid, and check the **CRS**. A note under the CRS
-   explains anything that stops it being used.
-2. Place the grid with one of the three tabs:
-   - **GNSS corners**: for each surveyed corner (**origin**, **+X**, **+X+Y**,
-     **+Y**), type its grid position (**local x**, **local y**, in metres) and
-     its surveyed position (**world E**, **world N**). You need at least two
-     corners. Click **Fit**. The fit fixes rotation and position only, never
-     scale. The *rigid fit RMS* it reports is 0 for exact corners. A large value
-     can mean the corners were not surveyed square, or that the **+X** and
-     **+Y** rows are swapped.
-   - **Digitise on map**: click **Pick on map**, then click the grid origin on
-     the map, then a point along the +Y edge. Right-click cancels.
-   - **From polygon**: choose a polygon **Layer** and a **Feature**, say which
-     vertex is the **Origin corner** and which is the **+Y corner**, and click
-     **Use polygon**. The polygon layer must use a projected CRS in metres.
-3. Check **Size X, Y (m)** and **Default spacing (m)**. The azimuth is measured
-   clockwise from north to the grid's +Y axis.
-4. Enter **Velocity (m/ns)**. It is required, and it sets the depth scale for the
+1. Type an **Id** for the grid.
+2. Fill the **Corners** table. It has four rows: **origin**, **+X**, **+X+Y** and
+   **+Y**. Fill as many as you have, and any of these ways in any mix:
+   - **Type** a corner's two coordinates. Choose the CRS they are in with
+     **Corners in** first (it can be latitude and longitude, such as GPS
+     readings). The **from** column says `typed`.
+   - **Pick** a corner on the map. The window hides, and the message bar names the
+     corner to click. Click the map, and the window comes back. The click snaps to
+     a nearby point (such as a GPS point) or, failing that, to a vertex, and **from** names
+     what it snapped to, for example `G4 · gps`, or `free click` when there was
+     nothing close. Right-click or **Esc** cancels.
+   - **Pick all** walks the four corners in order. Right-click skips a corner and
+     leaves its row as it was. **Esc** stops and keeps what you have picked.
+   - **Fill** from a polygon. Choose a polygon in the layer list and the feature
+     list (or click **Pick on map** and click the polygon), then click **Fill**. The polygon must
+     have four corners. nsgeo gives them their roles so the grid is the right way
+     round, with the origin at the corner whose +Y edge points closest to north.
+     **from** shows each one as, for example, `v2 NE`.
+   - **⟳ Rotate** moves the roles one corner round, however the rows were filled,
+     if the origin landed on the wrong corner. The two **Size** boxes swap with
+     them. Four presses return to the start.
+   - **Clear** empties the table.
+
+   Picking and filling never fit the grid by themselves.
+3. Click **Fit**. It needs at least two corners next to each other. The fit
+   fixes rotation and position, never scale, and sets **Origin E, N** and
+   **Azimuth**. It also fills **Size X, Y (m)** from the distances between your
+   corners, unless you typed a size yourself. The status line gives the *rigid fit
+   RMS*, which is 0 for exact corners. A large value means the corners are not quite
+   square: look at **off by** to see which corner is furthest out. nsgeo refuses
+   corners that run the wrong way round or, with three or more, have rows swapped, and
+   corners that are only centimetres apart (usually degrees typed under a metric
+   **Corners in**, or the wrong **Corners in**), and it says so. It also refuses
+   while a row holds text that is not a number. A refused Fit changes nothing.
+4. Check the numbers, and change any you like. **off by** in the table shows, for
+   each corner, how far in metres it is from the matching corner of the grid as
+   the form describes it now. It is blank until that grid can be drawn: the
+   origin must not be (0, 0), both sizes must be above 0, and the CRS must be
+   usable there.
+5. **Size.** A size you type is kept, and the grid extends from the origin by
+   that amount. If the corners measure something different, a note under the size
+   says so, for example `the corners measure 20.41 × 19.87 m · your size is kept`.
+   Click **Use these** to take the measured size instead. Check **Default spacing
+   (m)** too. The azimuth is measured clockwise from north to the grid's +Y axis.
+6. Enter **Velocity (m/ns)**. It is required, and it sets the depth scale for the
    grid's profiles and slices. A working estimate is fine, because you can change
    it later with **Set velocity…**.
-5. Click **OK**. It stays greyed out until the Id, CRS, size and velocity are all
+7. Click **OK**. It stays greyed out until the Id, CRS, size and velocity are all
    usable.
+
+**The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until
+you choose one yourself, nsgeo uses the first of these that suits the map's
+location: the CRS of the site's earlier grids, the project CRS, or the UTM zone
+under the map centre. When you click **Fit**, it decides again from your corners.
+If it picked a UTM zone for you, the note under the CRS says so and why, for
+example `picked for you: the project CRS (EPSG:4326) is in degrees`. So corners
+in latitude and longitude, in a project set to latitude and longitude, give a
+grid in the right UTM zone with no conversion by hand. If you choose a CRS
+yourself, nsgeo keeps it, and converts the origin and azimuth into it. A note
+under the CRS explains anything that stops a CRS being used.
+
+#### What the map shows
+
+While the window is open, even while it is hidden for a pick, the map shows:
+
+- each filled corner as a magenta dot with a tag naming its role (`origin`, or
+  `origin · v0 SW` for a polygon corner);
+- the polygon you chose, outlined;
+- the grid as the form describes it now, as a blue dashed outline with a magenta
+  arrow from the origin along +Y. It follows the form as you type, with no Fit
+  needed, and appears once the origin, sizes and CRS can be drawn.
+
+Everything on the map goes away when the window closes. Nothing is added to the
+project's layers.
 
 The grid appears on the map in a layer group named **nsgeo ·** followed by the
 site folder's name. The group goes in at the top of the Layers panel, above any

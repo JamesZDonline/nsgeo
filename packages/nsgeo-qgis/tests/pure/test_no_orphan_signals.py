@@ -66,7 +66,12 @@ SHADOWED = {
     # entry no longer hides an orphan -- it stays pinned because a
     # name-keyed count still cannot tell the two apart, and dropping to
     # one connect again would mean one of them had been orphaned.
-    "pick_requested": {"declared": 2, "connects": 2},
+    #
+    # Grid-dialog rework: GridDialog.pick_requested(int) is a third
+    # declaration, and its consumer the third connect: plugin.py's
+    # open_grid_dialog wires it to `_start_pick` (#63, Task 5). All three
+    # declarations are consumed.
+    "pick_requested": {"declared": 3, "connects": 3},
     # ProfileDock.error is connected (plugin.py wires it to `self.message`).
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is

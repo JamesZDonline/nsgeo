@@ -5,15 +5,20 @@ import pytest
 from nsgeo.geometry.fit import fit_grid_from_corners
 from nsgeo.geometry.grid import Grid
 from nsgeo_qgis.lookup import (
+    CORNER_ROLES,
     ImportOptions,
-    corners_from_polygon,
+    compass_label,
+    corner_frame,
     identity_curve,
     nearest_trace,
     plan_import,
     recompute_offsets,
+    roles_from_ring,
+    rotate_roles,
     rows_to_lines,
     sort_files,
     trailing_number,
+    utm_epsg,
 )
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 
@@ -139,26 +144,6 @@ def test_nearest_trace_within_tolerance():
     assert nearest_trace({}, (0.0, 0.0), tolerance=1.0) is None
 
 
-def test_corners_from_polygon_yields_a_fittable_rectangle():
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    ring = [tuple(p) for p in world] + [tuple(world[0])]  # closed ring, as QGIS gives it
-    corners = corners_from_polygon(ring, origin_index=0, plus_y_index=3)
-    assert corners.size_x == pytest.approx(5.0) and corners.size_y == pytest.approx(11.0)
-    fit = fit_grid_from_corners(corners.local, corners.world)
-    assert fit.azimuth == pytest.approx(30.0, abs=1e-6)
-    assert fit.residual_rms < 1e-9
-    assert fit.origin == pytest.approx((500.0, 700.0))
-
-
-def test_corners_from_polygon_rejects_non_adjacent_plus_y():
-    ring = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
-    with pytest.raises(ValueError, match="adjacent"):
-        corners_from_polygon(ring, origin_index=0, plus_y_index=2)
-    with pytest.raises(ValueError, match="four"):
-        corners_from_polygon(ring[:3], origin_index=0, plus_y_index=1)
-
-
 def test_identity_curve_spans_the_time_axis_at_zero_db():
     assert identity_curve(-11.0, 0.5, 5) == [[-11.0, 0.0], [-9.0, 0.0]]
 
@@ -256,41 +241,6 @@ def test_reversed_lines_are_placed_within_the_grid_on_real_files():
     assert overruns == 1  # exactly FILE__008
 
 
-def test_corners_from_polygon_rejects_a_mirrored_plus_y_pick():
-    """Finding 2: only a *diagonal* plus_y_index was rejected. Of the two
-    corners adjacent to the origin, exactly one yields a right-handed
-    frame; the other silently mirrors +X and +Y onto each other's corners.
-    fit_grid_from_corners forbids reflection by construction, so the
-    mirrored pick still returns a plausible-looking grid (same size,
-    azimuth, and origin as the correct pick) with only a large
-    residual_rms to show for it."""
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    ring = [tuple(p) for p in world] + [tuple(world[0])]
-    with pytest.raises(ValueError, match="mirrored"):
-        corners_from_polygon(ring, origin_index=1, plus_y_index=2)
-
-
-def test_corners_from_polygon_mirror_check_is_winding_independent():
-    """Finding 2, continued: the mirror check must key off world-coordinate
-    handedness, not the ring's own traversal direction. Reversing the
-    ring's vertex order must not change which pick is flagged: the same
-    physical +Y corner is still accepted, and the same physical +X corner
-    (now offered as a plausible plus_y_index) is still rejected."""
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    reversed_ring = [tuple(world[i]) for i in (0, 3, 2, 1)]
-    reversed_ring = reversed_ring + [reversed_ring[0]]
-    # index 1 of the reversed ring is world[3], the true +Y corner: valid.
-    corners = corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=1)
-    assert corners.size_x == pytest.approx(5.0) and corners.size_y == pytest.approx(11.0)
-    fit = fit_grid_from_corners(corners.local, corners.world)
-    assert fit.residual_rms < 1e-9
-    # index 3 of the reversed ring is world[1], the true +X corner: mirrored.
-    with pytest.raises(ValueError, match="mirrored"):
-        corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=3)
-
-
 def test_reversed_direction_note_is_idempotent_and_clears_once_grid_length_is_known(tmp_path):
     """Round 2 regression: the reversed-direction note (added when a
     direction=-1 row can't be positioned because grid_size_along is
@@ -317,3 +267,202 @@ def test_reversed_direction_note_is_idempotent_and_clears_once_grid_length_is_kn
     recompute_offsets(rows, known)
     assert "reversed direction" not in reversed_row.note  # cleared, not left stale
     assert reversed_row.start_along == pytest.approx(11.0)
+
+
+# --- corner rules ---------------------------------------------------------
+
+G = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
+W = [tuple(p) for p in G.to_world(np.array([[0, 0], [5, 0], [5, 11], [0, 11]], dtype=float))]
+
+
+def _pts(*rows):
+    return [W[i] if i in rows else None for i in range(4)]
+
+
+def test_corner_roles_order():
+    assert CORNER_ROLES == ("origin", "+X", "+X+Y", "+Y")
+
+
+@pytest.mark.parametrize(
+    "lon, lat, epsg",
+    [
+        (-86.8, 36.1, 32616),
+        (-84.0, 10.0, 32617),
+        (-84.000001, 10.0, 32616),
+        (180.0, 0.0, 32601),
+        (-180.0, 0.0, 32601),
+        (179.99, 0.0, 32660),
+        (0.5, -0.0001, 32731),
+        (0.5, 84.0, 32631),
+    ],
+)
+def test_utm_epsg_picks_the_zone(lon, lat, epsg):
+    assert utm_epsg(lon, lat) == epsg
+
+
+@pytest.mark.parametrize("lon, lat", [(0.0, 84.01), (0.0, -84.01), (float("nan"), 0.0)])
+def test_utm_epsg_is_none_where_utm_is_undefined(lon, lat):
+    assert utm_epsg(lon, lat) is None
+
+
+@pytest.mark.parametrize("rows", [(0, 1), (0, 3), (0, 1, 2), (1, 2, 3), (0, 1, 2, 3)])
+def test_corner_frame_recovers_the_grid(rows):
+    f = corner_frame(_pts(*rows))
+    fit = fit_grid_from_corners(f.local, f.world)
+    assert f.rows == rows
+    assert fit.origin == pytest.approx(G.origin, abs=1e-9)
+    assert fit.azimuth == pytest.approx(30.0, abs=1e-9)
+    assert fit.residual_rms < 1e-9
+
+
+def test_corner_frame_measures_each_axis_from_its_own_edges():
+    f = corner_frame(_pts(0, 1))
+    assert (f.size_x, f.size_y) == (pytest.approx(5.0), None)
+    pts = _pts(0, 1, 2, 3)
+    x_hat, _ = G.axes()
+    pts[2] = tuple(np.asarray(pts[2]) + 0.4 * x_hat)
+    assert corner_frame(pts).size_x == pytest.approx(5.2, abs=1e-9)  # mean of 5.0 and 5.4
+
+
+@pytest.mark.parametrize(
+    "rows, message",
+    [
+        ((0,), "at least two corners"),
+        ((0, 2), "don't fix the size along X"),
+        ((1, 3), "don't fix the size along X"),
+        ((1, 2), "don't fix the size along X"),
+    ],
+)
+def test_corner_frame_refuses_corners_that_do_not_fix_the_grid(rows, message):
+    with pytest.raises(ValueError, match=message):
+        corner_frame(_pts(*rows))
+
+
+def test_corner_frame_refuses_the_wrong_slot_count():
+    with pytest.raises(ValueError, match="expected four corner slots, got 3"):
+        corner_frame([W[0], W[1], W[2]])
+
+
+def test_corner_frame_names_y_when_y_is_unfixed():
+    with pytest.raises(ValueError, match="don't fix the size along Y"):
+        corner_frame(_pts(2, 3))
+
+
+def test_corner_frame_refuses_coincident_corners():
+    with pytest.raises(ValueError, match="coincide"):
+        corner_frame([W[0], W[0], None, None])
+
+
+def test_corner_frame_refuses_mirrored_corners():
+    four = [W[0], W[3], W[2], W[1]]
+    with pytest.raises(ValueError, match="mirrored"):
+        corner_frame(four)
+    with pytest.raises(ValueError, match="mirrored"):
+        corner_frame([W[0], W[3], None, W[1]])
+
+
+@pytest.mark.parametrize("a, b", [(0, 1), (1, 2), (2, 3), (3, 0)])
+def test_corner_frame_refuses_crossed_corners(a, b):
+    pts = list(W)
+    pts[a], pts[b] = pts[b], pts[a]
+    with pytest.raises(ValueError, match="out of order"):
+        corner_frame(pts)
+
+
+def test_corner_frame_refuses_crossed_corners_with_noise():
+    offsets = [(0.03, -0.02), (-0.04, 0.01), (0.02, 0.05), (-0.01, -0.03)]
+    assert len(offsets) == len(W)  # zip(strict=True) is Python 3.10+; CI runs 3.9
+    pts = [(p[0] + o[0], p[1] + o[1]) for p, o in zip(W, offsets)]
+    pts[2], pts[3] = pts[3], pts[2]
+    with pytest.raises(ValueError, match="out of order"):
+        corner_frame(pts)
+
+
+def test_corner_frame_refuses_corners_in_a_line():
+    line = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), None]
+    with pytest.raises(ValueError, match="in a line"):
+        corner_frame(line)
+
+
+def test_corner_frame_sees_collinear_points_at_utm_magnitudes():
+    # exactly collinear, but the raw shoelace sum of numbers this large is
+    # rounding noise well above the degenerate-area threshold
+    line = [(518_204.112 + 0.1 * t, 4_000_731.508 + 0.1 * t) for t in (0, 1, 2)] + [None]
+    with pytest.raises(ValueError, match="in a line"):
+        corner_frame([line[0], line[1], line[2], None])
+
+
+def test_roles_from_ring_puts_the_origin_where_plus_y_points_north():
+    pts, idx = roles_from_ring(W + [W[0]])
+    assert idx == [0, 1, 2, 3]
+    assert pts == W
+
+
+@pytest.mark.parametrize("az", [0, 30, 100, 200, 300])
+def test_roles_from_ring_default_plus_y_is_within_45_degrees_of_north(az):
+    g = Grid("A", (500.0, 700.0), float(az), 5.0, 11.0, "EPSG:32616", 0.5)
+    ring = [tuple(p) for p in g.to_world(np.array([[0, 0], [5, 0], [5, 11], [0, 11]], dtype=float))]
+    pts, _ = roles_from_ring(ring)
+    dx, dy = pts[3][0] - pts[0][0], pts[3][1] - pts[0][1]
+    assert abs(np.degrees(np.arctan2(dx, dy))) <= 45.0 + 1e-9
+
+
+def test_roles_from_ring_is_winding_independent():
+    pts, idx = roles_from_ring([W[3], W[2], W[1], W[0], W[3]])
+    assert pts == W
+    assert idx == [3, 2, 1, 0]
+
+
+def test_roles_from_ring_ignores_a_repeated_vertex():
+    pts, idx = roles_from_ring([W[0], W[1], W[1], W[2], W[3], W[0]])
+    assert len(pts) == 4 and idx == [0, 1, 2, 3]
+
+
+def test_roles_from_ring_refuses_anything_but_four_corners():
+    with pytest.raises(ValueError, match="got 3"):
+        roles_from_ring(W[:3])
+    with pytest.raises(ValueError, match="got 5"):
+        roles_from_ring(W + [(1.0, 2.0)])
+
+
+def test_rotate_roles_keeps_the_frame_right_handed():
+    rolled = rotate_roles(W)
+    assert rolled == [W[1], W[2], W[3], W[0]]
+    f = corner_frame(rolled)
+    assert fit_grid_from_corners(f.local, f.world).residual_rms < 1e-9
+
+
+def test_rotate_roles_moves_empty_rows_too():
+    rows = ["a", None, "c", None]
+    assert rotate_roles(rows) == [None, "c", None, "a"]
+    out = rows
+    for _ in range(4):
+        out = rotate_roles(out)
+    assert out == rows
+
+
+@pytest.mark.parametrize(
+    "dx, dy, label",
+    [
+        (0, 1, "N"),
+        (1, 1, "NE"),
+        (1, 0, "E"),
+        (1, -1, "SE"),
+        (0, -1, "S"),
+        (-1, -1, "SW"),
+        (-1, 0, "W"),
+        (-1, 1, "NW"),
+        (0.38, 1, "N"),
+        (0.42, 1, "NE"),
+    ],
+)
+def test_compass_label(dx, dy, label):
+    assert compass_label((10.0 + dx, 20.0 + dy), (10.0, 20.0)) == label
+
+
+def test_roles_from_ring_tie_goes_to_the_lower_vertex_on_either_winding():
+    g = Grid("A", (500.0, 700.0), 45.0, 5.0, 5.0, "EPSG:32616", 0.5)
+    sq = [tuple(p) for p in g.to_world(np.array([[0, 0], [5, 0], [5, 5], [0, 5]], dtype=float))]
+    for ring, lowest_tied in ((sq, 0), (sq[::-1], 2)):
+        _, idx = roles_from_ring(ring)
+        assert idx[0] == lowest_tied

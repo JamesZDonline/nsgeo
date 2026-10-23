@@ -33,8 +33,8 @@ the known issues.
 
 ## What it does
 
-- **Sites, grids and lines.** Place a grid on the map from GNSS corners, by
-  digitising it, or from an existing polygon. Then import GSSI DZT files into it,
+- **Sites, grids and lines.** Grids are placed from corners typed, picked on the
+  map or read from a polygon. Then import GSSI DZT files into a grid,
   single- or multi-channel, with their DZX marks. Each grid carries a velocity,
   which sets the depth scale.
 - **The map and the profile, linked both ways.** Hover a line on the map to

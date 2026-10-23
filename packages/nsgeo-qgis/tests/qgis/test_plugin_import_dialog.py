@@ -434,7 +434,7 @@ def test_unload_closes_a_hidden_import_dialog(fake_iface, tmp_path, answer_modal
     # even with unload()'s reject() swapped for close(), because
     # QDialog.closeEvent calls reject() anyway when the dialog isVisible()
     # -- it never actually exercised the fix. Nothing in ImportDialog's
-    # own flow hides itself today (unlike GridDialog's digitise pick), but
+    # own flow hides itself today (unlike GridDialog's map pick), but
     # unload() must not assume a dialog is always visible: close() on a
     # hidden one just accepts the close event and finished() never fires
     # at all (verified for GridDialog directly: hidden + close() -> 0
