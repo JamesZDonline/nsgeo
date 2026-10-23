@@ -59,8 +59,7 @@ def _flagged(plugin, a, b):
     dialog flags, and the dialog."""
     s, key = plugin.session, plugin.session.keys()[0]
     ids = [
-        s.add_velocity_fit(key, _stored(18.0 + 23 * i, v, sg))
-        for i, (v, sg) in enumerate((a, b))
+        s.add_velocity_fit(key, _stored(18.0 + 23 * i, v, sg)) for i, (v, sg) in enumerate((a, b))
     ]
     dialog = _dialog(plugin)
     return ids, dialog.flagged_fit_ids(), dialog
@@ -123,7 +122,8 @@ def test_the_dialog_opens_seeded_with_the_resolved_velocity(plugin):
 
 
 def test_the_spin_box_is_a_four_decimal_velocity_bounded_at_the_speed_of_light_in_air(plugin):
-    spin = _dialog(plugin).spin
+    dialog = _dialog(plugin)
+    spin = dialog.spin
     assert (spin.minimum(), spin.maximum(), spin.decimals(), spin.singleStep()) == (
         0.0,
         0.3,
@@ -176,7 +176,7 @@ def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_
     fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
     s.set_line_velocity(key, VelocityModel.constant(0.09))
     s.set_velocity_from_fit(key, fit_id)
-    assert velocity_source(s, key) == "line"
+    assert velocity_source(s, key) == "line override"
     drive_dialog(QDialog, "exec", lambda d: d.clear_button.click())
 
     plugin.open_velocity_dialog(key)
@@ -184,7 +184,7 @@ def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_
     line = s.line_for_key(key)
     assert line.velocity is None
     assert line.velocity_from_fit is None
-    assert velocity_source(s, key) != "line"  # falls back to the grid, then the header
+    assert velocity_source(s, key) != "line override"  # falls back to the grid, then the header
     assert fit_id in line.velocity_fits  # the measurement itself is kept
 
 
@@ -255,7 +255,7 @@ def test_flagging_is_per_pair_so_the_fit_that_agrees_with_both_neighbours_is_not
     # are inside it; a-c gap 0.005 is outside it.
     s, key = plugin.session, plugin.session.keys()[0]
     a = s.add_velocity_fit(key, _stored(10.0, 0.0900, 0.003))
-    b = s.add_velocity_fit(key, _stored(30.0, 0.0925, 0.003))
+    s.add_velocity_fit(key, _stored(30.0, 0.0925, 0.003))
     c = s.add_velocity_fit(key, _stored(50.0, 0.0950, 0.003))
     assert _dialog(plugin).flagged_fit_ids() == frozenset({a, c})
 

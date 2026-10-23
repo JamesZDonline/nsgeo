@@ -385,6 +385,7 @@ class ProfileDock(QgsDockWidget):
         # as if it belonged here.
         self._velocity_points = []
         self.view.set_velocity_fit([], [])
+        self.view.set_saved_velocity_fits([])
         self._difference_index = -1
         self.difference_label.setText("")
         if was_diff:
@@ -770,6 +771,30 @@ class ProfileDock(QgsDockWidget):
         t = hyperbola_time(fit, d0 + step * traces)
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
+    def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
+        """The working line's stored fits as (trace, ns) curves. Empty for a
+        line with no distance calibration, which could not have been fitted."""
+        if self._working_key is None or not self.session.is_open:
+            return []
+        fits = self.session.line_for_key(self._working_key).velocity_fits
+        try:
+            _, d0, step = self._velocity_axis()
+        except ValueError:
+            return []
+        return [
+            self.velocity_curve_points(
+                HyperbolaFit(
+                    apex_x_m=d0 + step * f.apex_trace,
+                    t0_ns=f.t0_ns,
+                    v_m_ns=f.v_m_ns,
+                    v_stderr_m_ns=f.v_stderr_m_ns,
+                    rms_ns=f.rms_ns,
+                    n_points=len(f.points),
+                )
+            )
+            for f in fits.values()
+        ]
+
     def _velocity_time_zero_note(self) -> str:
         t = self.view.transform
         # time_zero crops whole samples, so half a sample is the closest
@@ -820,6 +845,10 @@ class ProfileDock(QgsDockWidget):
                 # The points and curve belong to the working line; painting
                 # them over a hovered one would put them on the wrong axes.
                 self.view.set_velocity_fit([], [])
+            # Saved fits belong to the working line too, never a hovered one.
+            self.view.set_saved_velocity_fits(
+                self._saved_velocity_curves() if self._preview_key is None else []
+            )
             fit_ok = self._velocity_fit is not None
             self.apply_line_button.setEnabled(fit_ok)
             self.save_fit_button.setEnabled(fit_ok)

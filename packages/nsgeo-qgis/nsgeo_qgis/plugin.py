@@ -82,6 +82,7 @@ from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
+from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
 
@@ -1305,7 +1306,32 @@ class NsgeoPlugin:
         dialog.activateWindow()
 
     def open_velocity_dialog(self, key: str) -> None:
-        self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+        """Set or clear the line's velocity override, from a typed number or a
+        saved fit. Modal: it is a short question about one line, and the answer
+        is applied the moment it closes.
+
+        `velocity_from_fit` names the fit that produced the override, so every
+        route here keeps it true: applying a fit points at it, a typed number
+        clears it, and clearing the override clears both."""
+        try:
+            dialog = VelocityDialog(self.session, key, parent=self.iface.mainWindow())
+        except (KeyError, ProjectError) as exc:
+            # The key was captured when a context menu was built; the line
+            # may be gone by now.
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+            return
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            model = dialog.velocity()
+            self.session.set_line_velocity(key, model)
+            self.session.set_velocity_from_fit(
+                key, dialog.selected_fit_id() if model is not None else None
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
+        finally:
+            dialog.deleteLater()
 
     def open_line_choice_dialog(self) -> None:
         """Spec 9.1's one dialog. Modeless, like every dialog here.

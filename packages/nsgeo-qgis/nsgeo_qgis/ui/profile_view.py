@@ -129,6 +129,7 @@ class ProfileView(QWidget):
         # dock's business, never this widget's.
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_curve: list[tuple[float, float]] = []
+        self._saved_velocity_curves: list[list[tuple[float, float]]] = []
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
         self._dragging = False
@@ -271,6 +272,12 @@ class ProfileView(QWidget):
         self._velocity_curve = list(curve)
         self.update()
 
+    def set_saved_velocity_fits(self, curves: list[list[tuple[float, float]]]) -> None:
+        """The line's already-measured fits as (trace, ns) curves, drawn faint
+        beneath the working fit, which `set_velocity_fit` carries."""
+        self._saved_velocity_curves = [list(c) for c in curves]
+        self.update()
+
     def clear(self) -> None:
         self.transform = None
         self._image = None
@@ -279,6 +286,7 @@ class ProfileView(QWidget):
         self._picks = []
         self._velocity_points = []
         self._velocity_curve = []
+        self._saved_velocity_curves = []
         self._slice_band = None
         self._cutoff_ns = None
         self._cutoff_grab = None
@@ -550,6 +558,17 @@ class ProfileView(QWidget):
         ]
 
     def _paint_velocity_fit(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        faint = QColor(CURSOR_COLOUR)
+        faint.setAlpha(90)
+        for saved in self._saved_velocity_curves:
+            if len(saved) >= 2:
+                p.setPen(QPen(faint, 1))
+                spts = [
+                    QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
+                    for trace, time_ns in saved
+                ]
+                for a, b in zip(spts, spts[1:], strict=False):
+                    p.drawLine(a, b)
         if len(self._velocity_curve) >= 2:
             p.setPen(QPen(CURSOR_COLOUR, 2))
             pts = [
