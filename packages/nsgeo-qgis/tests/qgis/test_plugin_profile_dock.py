@@ -8,12 +8,12 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
-from nsgeo.render import PercentileClip, colormap_names
+from nsgeo.render import PercentileClip, colormap_names, to_index8
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
-from plugin_testing import send_move_while_pressed, synthetic_dzt
+from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QStyle
@@ -1606,3 +1606,180 @@ def test_switching_lines_reads_the_new_lines_step_at_the_selected_row(previewing
     assert dock.image.rg.n_samples == 100
     dock.set_selected_step(0)
     assert dock.view.cutoff_ns == pytest.approx(end_b)
+
+
+# ---- the display limit is measured with the gain curves switched off (#6) ----
+
+FLAT = [[-11.0, 0.0], [99.0, 0.0]]
+DEEP = [[-11.0, 0.0], [40.0, 0.0], [99.0, 30.0]]
+
+
+def _clip(dock):
+    return PercentileClip(dock.percentile).limit
+
+
+def test_without_a_gain_curve_the_limit_is_taken_from_what_is_shown(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    result = session.stack_for(key).result()
+    assert dock.image.reference is result
+    assert dock.image.limit == _clip(dock)(result.data)
+
+
+def test_a_gain_curve_edit_never_moves_the_limit(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=FLAT))
+    limit0 = dock.image.limit
+    session.replace_step(key, 1, build_step("gain_curve", points=DEEP))
+    assert dock.image.limit == limit0
+    # today's rule (the percentile of what is shown) would have moved it
+    assert _clip(dock)(session.stack_for(key).result().data) > limit0
+
+
+def test_a_curve_edit_reuses_the_cached_reference(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=FLAT))
+    before = dock.image.reference
+    session.replace_step(key, 1, build_step("gain_curve", points=DEEP))
+    assert dock.image.reference is before
+
+
+def test_agc_after_a_gain_curve_does_not_blank_the_profile(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("gain_curve", points=[[-11.0, 12.0], [99.0, 12.0]]))
+    session.append_step(key, build_step("gain_agc"))
+    stack = session.stack_for(key)
+    clip = _clip(dock)
+    assert dock.image.limit == clip(stack.result_bypassing(0).data)
+    # the hazard is real: the unprocessed record's scale would blank the AGC output
+    assert clip(stack.source.data) > 1e3 * dock.image.limit
+    assert np.std(to_index8(stack.result().data, dock.image.limit)) > 20
+
+
+def test_two_gain_curves_are_both_left_out_of_the_scale(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    # Row 0 has a real gain (FLAT is 0 dB, a numerical no-op that would let
+    # an implementation bypassing only the last curve pass).
+    session.append_step(key, build_step("gain_curve", points=[[-11.0, 12.0], [99.0, 12.0]]))
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=DEEP))
+    stack = session.stack_for(key)
+    clip = _clip(dock)
+    assert clip(stack.result_bypassing(0, 2).data) != clip(stack.result_bypassing(2).data)
+    assert dock.image.limit == clip(stack.result_bypassing(0, 2).data)
+
+
+def test_a_disabled_gain_curve_leaves_todays_scale(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=DEEP))
+    session.set_step_enabled(key, 1, False)
+    assert dock.image.reference is session.stack_for(key).result()
+
+
+def test_the_difference_view_keeps_the_scale_of_what_is_shown(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=DEEP))
+    dock.set_difference_index(1)
+    stack = session.stack_for(key)
+    assert dock.image.limit == _clip(dock)(stack.difference(1).data)
+
+
+@pytest.mark.parametrize("with_curve", [True, False], ids=["curve", "no curve"])
+def test_selecting_the_cutoff_row_never_changes_the_brightness(opened, with_curve):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow"))
+    if with_curve:
+        session.append_step(key, build_step("gain_curve", points=DEEP))
+    session.append_step(key, build_step("time_cutoff", end_ns=50.0))
+    cutoff_row = 2 if with_curve else 1
+    stack = session.stack_for(key)
+    limit0 = dock.image.limit
+    dock.set_selected_step(cutoff_row)
+    assert dock.image.rg.n_samples > stack.result().n_samples  # the bypass is shown
+    assert dock.image.limit == limit0
+    dock.set_selected_step(-1)
+    assert dock.image.limit == limit0
+
+
+def test_a_preview_takes_its_scale_from_its_own_gain_curve(opened, tmp_path):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    p2 = synthetic_dzt(tmp_path / "raw", "FILE__002.DZT", n_traces=240)
+    line2 = Line.open(p2, GridPlacement("A", "y", 1.0, 0.0, -1, "FILE__002"))
+    session.add_lines([line2])
+    (key2,) = set(session.keys()) - {key}
+    session.set_profiles(key2, line2.load())
+    session.append_step(key2, build_step("gain_curve", points=DEEP))
+    session.set_preview(key2, 5)
+    expected = _clip(dock)(session.stack_for(key2).result_bypassing(0).data)
+    assert dock.image.limit == expected
+
+
+def test_the_percentile_slider_says_what_it_measures(opened):
+    _, dock, _, _ = opened
+    assert "gain curve" in dock.percentile_slider.toolTip()
+
+
+@needs_real_data
+def test_a_real_line_balanced_by_a_gain_curve_keeps_its_limit(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    line = Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, -1, "REAL"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.25))
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    session.append_step(key, build_step("background_sliding", window_traces=200))
+    stack = session.stack_for(key)
+    t0 = stack.intermediate(2).t0_ns
+    points = [[t0, 0.0], [50.0, 40.0], [stack.intermediate(2).t0_ns + 1e4, 40.0]]
+    session.append_step(key, build_step("gain_curve", points=points))
+    limit0 = dock.image.limit
+    expected = _clip(dock)(stack.intermediate(2).data)
+    assert limit0 == expected
+    raised = [[t, db + 6.0] for t, db in points]
+    session.replace_step(key, 3, build_step("gain_curve", points=raised))
+    assert dock.image.limit == limit0
+
+
+@needs_real_data
+def test_raising_only_the_deep_point_leaves_the_shallow_pixels_alone(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    line = Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, -1, "REAL"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.25))
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    session.append_step(key, build_step("background_sliding", window_traces=200))
+    stack = session.stack_for(key)
+    t0 = stack.intermediate(2).t0_ns
+    dt = stack.intermediate(2).dt_ns
+    t_end = t0 + 1e4
+    points = [[t0, 0.0], [50.0, 0.0], [t_end, 40.0]]
+    session.append_step(key, build_step("gain_curve", points=points))
+    k = int((50.0 - t0) / dt)  # rows before the curve leaves 0 dB
+    assert k > 0
+    limit0 = dock.image.limit
+    shallow0 = to_index8(stack.result().data[:k], limit0)
+    session.replace_step(key, 3, build_step("gain_curve", points=[*points[:2], [t_end, 52.0]]))
+    assert dock.image.limit == limit0
+    np.testing.assert_array_equal(to_index8(stack.result().data[:k], dock.image.limit), shallow0)

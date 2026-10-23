@@ -8,7 +8,7 @@ import pytest
 from nsgeo.io.dzt import read_header, read_samples
 from nsgeo.model.survey import Profile
 from nsgeo.processing import Radargram
-from nsgeo.render import DEFAULT_COLORMAP
+from nsgeo.render import DEFAULT_COLORMAP, PercentileClip
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.render.qimage import RadargramImage, rgb_to_qimage
 from nsgeo_qgis.ui.profile_view import (
@@ -127,6 +127,26 @@ def test_radargram_image_with_radargram_keeps_display_settings_swaps_data():
     assert ri2.rg is rg2
     assert (ri2.percentile, ri2.colormap_name, ri2.max_width) == (90.0, "seismic", ri.max_width)
     assert (ri2.image.width(), ri2.image.height()) == (64, 32)
+
+
+def test_the_limit_comes_from_the_reference_when_one_is_given():
+    rg = _rg()
+    ref = Radargram(data=rg.data * 10, dt_ns=rg.dt_ns, t0_ns=rg.t0_ns)
+    ri = RadargramImage(rg, reference=ref)
+    assert ri.limit == PercentileClip(99.0).limit(ref.data)
+    assert ri.reference is ref
+
+
+def test_display_and_radargram_changes_keep_or_replace_the_reference():
+    rg = _rg()
+    ref = Radargram(data=rg.data * 10, dt_ns=rg.dt_ns, t0_ns=rg.t0_ns)
+    ri = RadargramImage(rg, reference=ref)
+    ri90 = ri.with_display(percentile=90.0)
+    assert ri90.reference is ref
+    assert ri90.limit == PercentileClip(90.0).limit(ref.data)
+    rg2 = _rg(n_traces=64, n_samples=32)
+    assert ri.with_radargram(rg2).reference is rg2
+    assert ri.with_radargram(rg2, reference=ref).reference is ref
 
 
 @pytest.fixture
