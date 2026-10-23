@@ -20,9 +20,9 @@ it terminates the instant the dialog is hidden, from *any* cause, not only
 its own Ok/Cancel buttons (verified directly: a bare QDialog.exec() with a
 QTimer calling hide() returns immediately, before anything else runs). Any
 dialog whose flow needs the user to interact with something else first --
-GridDialog's digitise-on-map tab needs the canvas -- cannot be opened with
-exec() at all: hiding it to reach the canvas would silently end the exec()
-call in the same turn (Task 10 fix round 4, Finding 1 -- this shipped
+GridDialog's Pick buttons need the canvas -- cannot be opened with exec()
+at all: hiding it to reach the canvas would silently end the exec() call
+in the same turn (Task 10 fix round 4, Finding 1 -- this shipped
 undetected through three earlier review rounds because the test double for
 exec(), used everywhere, does not run a real event loop and so cannot
 observe this). open_grid_dialog() below is the pattern for a dialog like
@@ -49,6 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +57,8 @@ import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.velocity import VelocityModel
-from qgis.core import Qgis, QgsMessageLog, QgsRasterLayer, QgsSettings
+from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
+from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
@@ -64,8 +66,9 @@ from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
+from nsgeo_qgis.lookup import CORNER_ROLES
 from nsgeo_qgis.map_link import MapLink
-from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
+from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
 from nsgeo_qgis.slice_export import (
@@ -91,22 +94,24 @@ MENU = "&nsgeo"
 _TABIFIED_KEY = "nsgeo/slicesDockTabified"
 
 
-def _finish_with_digitise_tool(tool: DigitiseGridTool) -> None:
-    """Release a DigitiseGridTool nobody will use again.
+def _finish_with_pick_tool(tool: PickPointTool) -> None:
+    """Release a PickPointTool nobody will use again.
 
-    Final review, I4: `unsetMapTool()` -- all any of the three finalisers
-    below used to do -- frees neither the tool nor the `QgsRubberBand` its
-    constructor handed to the canvas's `QGraphicsScene`, so every
-    "Digitise on map" click left one more of each behind for the life of
-    the QGIS session. `dispose()` takes the band back (see its docstring
-    for why that cannot live in `deactivate()`); `deleteLater()` covers
-    the tool itself, which `QgsMapTool` parents to the canvas.
+    Final review, I4 (found on the two-click grid tool this one replaced):
+    `unsetMapTool()` -- all any finaliser used to do -- frees neither the
+    tool nor the canvas items it put in the canvas's `QGraphicsScene` (that
+    tool's `QgsRubberBand` then, the snap marker now), so every pick would
+    leave one more of each behind for the life of the QGIS session.
+    `dispose()` takes the items back (see its docstring for why that cannot
+    live in `deactivate()`); `deleteLater()` covers the tool itself, which
+    `QgsMapTool` parents to the canvas.
 
-    Idempotent and safe to call from any of the three finalisers,
-    including more than once for the same tool: `dispose()` is idempotent
-    on its own, and the `sip.isdeleted` guard is what makes a second
-    `deleteLater()` on an already-destroyed C++ object a no-op rather
-    than a RuntimeError out of a signal slot.
+    Idempotent and safe to call from any finaliser -- a pick's own ending
+    (`_arm_pick`'s `end`) or the dialog's `finished` -- including more than
+    once for the same tool: `dispose()` is idempotent on its own, and the
+    `sip.isdeleted` guard is what makes a second `deleteLater()` on an
+    already-destroyed C++ object a no-op rather than a RuntimeError out of
+    a signal slot.
 
     Deliberately does not touch the canvas: `cancelled` is emitted from
     inside `deactivate()`, i.e. while the canvas is part-way through
@@ -152,6 +157,9 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
         self._grid_dialog: GridDialog | None = None
+        #: The running map pick's instruction in the message bar, if any.
+        #: Only one pick runs at a time (see `_arm_pick`).
+        self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -364,16 +372,16 @@ class NsgeoPlugin:
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
         # open. reject() runs finished()'s own cleanup (releasing a
-        # still-active digitise tool, deleteLater()) via the same path
-        # as a normal Cancel, rather than leaving the dialog dangling
-        # with a reference to a session this method is about to tear
-        # down below.
+        # still-active pick tool and its message, deleteLater()) via the
+        # same path as a normal Cancel, rather than leaving the dialog
+        # dangling with a reference to a session this method is about to
+        # tear down below.
         #
         # Fix round 5, Finding 1: not close(). QDialog.closeEvent only
         # calls reject() when the dialog isVisible() -- on a hidden one
         # it just accepts the close event and finished() never fires at
         # all (verified directly: hidden + close() -> 0 finished
-        # emissions; hidden + reject() -> 1). _start_digitise() hides
+        # emissions; hidden + reject() -> 1). _start_pick() hides
         # the dialog deliberately, so "hidden mid-pick" is this
         # feature's ordinary state, not an edge case -- unload() must
         # work in exactly the state its own feature creates.
@@ -1118,14 +1126,14 @@ class NsgeoPlugin:
         # modeless. QDialog.exec()'s application-modal event loop
         # terminates the instant the dialog is hidden -- verified
         # directly: a bare QDialog.exec() with a QTimer calling hide()
-        # returns 0 in the same turn. _start_digitise()'s dialog.hide()
+        # returns 0 in the same turn. _start_pick()'s dialog.hide()
         # (called from a slot that only fires *while* exec() would be
         # running) would therefore end the modal loop before the user
-        # could click the canvas even once -- "digitise on map" could
-        # never actually work under a real event loop. show() instead
-        # of exec() means the rest of this method's old post-exec()
-        # logic (commit the result, release a still-active digitise
-        # tool, dispose the dialog) can no longer run synchronously
+        # could click the canvas even once -- a map pick could never
+        # actually work under a real event loop. show() instead of
+        # exec() means the rest of this method's old post-exec() logic
+        # (commit the result, release a still-active pick tool, dispose
+        # the dialog) can no longer run synchronously
         # after a blocking call; it lives in finished() below instead,
         # which fires exactly once for accept, reject, or the window
         # closed any other way.
@@ -1137,10 +1145,10 @@ class NsgeoPlugin:
             # one is already open, unlike the old exec()'s
             # application-modal block. Only one at a time: a second
             # would fight the first over the canvas's one map tool
-            # during a digitise pick.
+            # during a map pick.
             #
             # Fix round 5, Finding 5: show() too, not just raise_()/
-            # activateWindow() -- _start_digitise() hides the dialog
+            # activateWindow() -- _start_pick() hides the dialog
             # deliberately while a pick is in progress, and raising a
             # hidden window activates nothing visible. Without this,
             # re-triggering "Add grid" mid-pick was a silent no-op: no
@@ -1233,39 +1241,39 @@ class NsgeoPlugin:
                             self.message(str(exc), Qgis.MessageLevel.Critical)
             finally:
                 # Fix round 2, Finding 4 (still applies to a modeless
-                # dialog): finished() can fire while a digitise pick is
-                # still in progress -- the map tool active, with
-                # neither done() nor the tool's cancelled signal ever
-                # having fired to release it. Left alone, that tool
-                # would later call back into show_dialog() (a click, a
-                # switch to another tool) against a `dialog` about to
-                # be deleted, raising RuntimeError out of a
-                # signal-connected slot.
+                # dialog): finished() can fire while a map pick is still
+                # in progress -- the map tool active, with neither a
+                # click nor the tool's cancelled signal ever having fired
+                # to release it. Left alone, that tool would later call
+                # back into the pick's ending (a click, a switch to
+                # another tool) against a `dialog` about to be deleted,
+                # raising RuntimeError out of a signal-connected slot.
                 canvas = self.iface.mapCanvas()
                 tool = canvas.mapTool()
-                if isinstance(tool, DigitiseGridTool):
-                    # unsetMapTool() -> deactivate() -> cancelled ->
-                    # show_dialog() would otherwise re-show `dialog` --
+                if isinstance(tool, PickPointTool):
+                    # unsetMapTool() -> deactivate() -> cancelled -> the
+                    # pick's end() would otherwise re-show `dialog` --
                     # already finished here, and about to be
                     # deleteLater()'d below regardless -- for one
                     # event-loop turn before its own deletion actually
                     # runs (round 3, Finding 3). blockSignals() lets
-                    # deactivate()'s own cleanup (releasing the rubber
-                    # band) run without re-triggering show_dialog().
+                    # deactivate()'s own cleanup (clearing the snap
+                    # marker) run without re-triggering that.
                     tool.blockSignals(True)
                     canvas.unsetMapTool(tool)
                     # blockSignals() above is exactly why this cannot
-                    # lean on the `cancelled` connection's disposal:
-                    # that signal is suppressed here on purpose.
-                    _finish_with_digitise_tool(tool)
+                    # lean on the pick's own ending for the disposal or
+                    # the message: those are suppressed here on purpose.
+                    _finish_with_pick_tool(tool)
+                self._pop_pick_message()
                 # Fix round 1, Finding 3: `dialog` is parented to the
                 # main window and nothing else ever deleted it, so
                 # every grid dialog opened stayed alive (with its full
                 # widget tree) for the life of the QGIS session --
                 # harmless for one dialog, but a segfault at
                 # interpreter shutdown once enough of them pile up
-                # alongside a QgsMapCanvas/QgsRubberBand from the
-                # digitise flow (verified with gdb).
+                # alongside a QgsMapCanvas and the canvas items a map
+                # tool left in its scene (verified with gdb).
                 dialog.deleteLater()
                 self._grid_dialog = None
 
@@ -1291,10 +1299,213 @@ class NsgeoPlugin:
 
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
+        dialog.pick_requested.connect(lambda row: self._start_pick(dialog, [row]))
+        dialog.pick_all_requested.connect(
+            lambda: self._start_pick(dialog, list(range(len(CORNER_ROLES))))
+        )
+        dialog.pick_polygon_requested.connect(lambda: self._start_pick_polygon(dialog))
         self._grid_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    # ---- picking on the map (#63, spec §4.7) -------------------------------
+    def _start_pick(self, dialog: GridDialog, rows: list[int]) -> None:
+        """Pick corners on the map: one row, or Pick all's walk over `rows`.
+
+        The dialog hides while the canvas is clicked, and the message bar
+        names the corner to click (C3). Each click fills the current row
+        through `set_corner`, converting from the canvas CRS. A single
+        pick's right-click cancels it; Pick all's skips the corner and
+        leaves its row as it was, and Esc stops it, keeping what was
+        picked. A conversion `set_corner` refuses ends the pick too: the
+        dialog comes back with the reason in its status line. Picks never
+        fit (C1).
+        """
+        armed: Callable[[], None] | None = None
+        try:
+            canvas = self.iface.mapCanvas()
+            tool = PickPointTool(canvas)
+            queue = list(rows)
+
+            def prompt() -> str:
+                role = CORNER_ROLES[queue[0]]
+                if len(rows) == 1:
+                    return f"Click the {role} corner. Right-click or Esc cancels."
+                k = len(rows) - len(queue) + 1
+                return (
+                    f"Pick corners: click the {role} corner ({k} of {len(rows)}). "
+                    "Right-click skips it, Esc stops."
+                )
+
+            end = armed = self._arm_pick(dialog, tool, prompt())
+
+            def next_corner() -> None:
+                queue.pop(0)
+                if queue:
+                    self._say_pick(prompt())
+                else:
+                    end()
+
+            def picked(point: QgsPointXY, label: str) -> None:
+                # A slot on tool.picked: guarded, and a failure ends the pick.
+                try:
+                    crs = canvas.mapSettings().destinationCrs()
+                    if dialog.set_corner(queue[0], point, crs, label):
+                        next_corner()
+                    else:
+                        end()  # set_corner wrote the reason in the status line
+                except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+                    self.message(
+                        f"could not use the picked point: {exc}", Qgis.MessageLevel.Critical
+                    )
+                    end()
+
+            def skipped() -> None:
+                # A slot on tool.skipped (a right-click): guarded, as above.
+                # Pick all moves on; a single pick has no next corner, so
+                # skipping its one corner is its cancel.
+                try:
+                    next_corner()
+                except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+                    self.message(f"could not skip the corner: {exc}", Qgis.MessageLevel.Critical)
+                    end()
+
+            tool.picked.connect(picked)
+            tool.skipped.connect(skipped)
+        except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+            self.message(f"could not start picking: {exc}", Qgis.MessageLevel.Critical)
+            if armed is not None:
+                armed()
+
+    def _start_pick_polygon(self, dialog: GridDialog) -> None:
+        """Pick the polygon to fill the corners from (C5, #28): one click
+        chooses the topmost polygon feature under it in the dialog's layer
+        and feature lists. Right-click or Esc cancels."""
+        armed: Callable[[], None] | None = None
+        try:
+            tool = PickPointTool(self.iface.mapCanvas(), mode="polygon")
+            text = "Click the polygon to use. Right-click or Esc cancels."
+            end = armed = self._arm_pick(dialog, tool, text)
+
+            def polygon_picked(layer: Any, fid: int) -> None:
+                # A slot on tool.polygon_picked: guarded, and the pick ends
+                # however it went. A layer the dialog's list refuses is
+                # reported in its status line by set_polygon_feature.
+                try:
+                    dialog.set_polygon_feature(layer, fid)
+                except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+                    self.message(
+                        f"could not choose the picked polygon: {exc}", Qgis.MessageLevel.Critical
+                    )
+                finally:
+                    end()
+
+            tool.polygon_picked.connect(polygon_picked)
+            tool.skipped.connect(lambda: end())
+        except Exception as exc:  # noqa: BLE001 -- a slot: see the module docstring
+            self.message(f"could not start picking: {exc}", Qgis.MessageLevel.Critical)
+            if armed is not None:
+                armed()
+
+    def _arm_pick(self, dialog: GridDialog, tool: PickPointTool, text: str) -> Callable[[], None]:
+        """Hand the canvas to `tool` for `dialog`, and return the pick's `end`.
+
+        Hides the dialog (C3 -- possible only because it is modeless: see
+        open_grid_dialog()), sets the tool and says `text` in the message
+        bar. `end()` is the one way a pick finishes, however it finishes --
+        the last corner, a right-click, Esc, a switch to another map tool,
+        an exception -- and each of those is wired to it here or by the
+        caller. It finishes and unsets the tool, releases it and its canvas
+        items, pops the message and shows the dialog again; the dialog
+        comes back even if a step before it failed. Calling it twice is
+        harmless.
+
+        The one finisher that does not come through here is the dialog's
+        own `finished` (closed mid-pick): see open_grid_dialog().
+        """
+        canvas = self.iface.mapCanvas()
+        ended = False
+
+        def end(unset: bool = True) -> None:
+            nonlocal ended
+            if ended:
+                return
+            ended = True
+            try:
+                try:
+                    tool.finish()
+                    if unset and canvas.mapTool() is tool:
+                        canvas.unsetMapTool(tool)
+                finally:
+                    self._pop_pick_message()
+                    _finish_with_pick_tool(tool)
+            except Exception as exc:  # noqa: BLE001 -- reached from slots: see the module docstring
+                self.message(f"could not finish picking cleanly: {exc}", Qgis.MessageLevel.Warning)
+            finally:
+                if not sip.isdeleted(dialog):
+                    dialog.show()
+                    dialog.raise_()
+
+        def cancelled() -> None:
+            # Emitted from inside the tool's deactivate(), while the canvas
+            # is part-way through switching to another tool: there is
+            # nothing to unset, and unsetting would re-enter the switch.
+            end(unset=False)
+
+        def failed(reason: str) -> None:
+            # The tool caught an exception in a method Qt called (see
+            # pick_tool.py's module docstring): say so, and end the pick.
+            self.message(f"picking on the map failed: {reason}", Qgis.MessageLevel.Critical)
+            end()
+
+        tool.cancelled.connect(cancelled)
+        tool.stopped.connect(lambda: end())
+        tool.failed.connect(failed)
+        try:
+            running = canvas.mapTool()
+            if isinstance(running, PickPointTool):
+                # A pick is already running: the dialog was re-shown mid-pick
+                # (Add grid again) and a Pick pressed. That pick ends first,
+                # through its own cancelled path, so its dialog.show() and
+                # its message's removal happen before this one starts.
+                canvas.unsetMapTool(running)
+            # Modeless, so an ordinary hide: the canvas stays interactive
+            # (round 4, Finding 1 -- this is what exec() could not survive).
+            dialog.hide()
+            canvas.setMapTool(tool)
+            # Esc reaches the tool only through the canvas's key events.
+            canvas.setFocus()
+            self._say_pick(text)
+        except Exception:
+            end()
+            raise
+        return end
+
+    def _say_pick(self, text: str) -> None:
+        """Show `text` as the running pick's instruction, replacing the last.
+
+        One message for the whole pick, its text updated corner by corner.
+        If the user closed it, a fresh one is pushed.
+        """
+        bar = self.iface.messageBar()
+        item = self._pick_message
+        if item is not None and not sip.isdeleted(item) and item in bar.items():
+            item.setText(text)
+            return
+        item = bar.createMessage("nsgeo", text)
+        bar.pushWidget(item, Qgis.MessageLevel.Info)
+        self._pick_message = item
+
+    def _pop_pick_message(self) -> None:
+        """Take the running pick's instruction off the message bar, if it is
+        still there. Safe to call with no pick running."""
+        item, self._pick_message = self._pick_message, None
+        if item is None or sip.isdeleted(item):
+            return
+        bar = self.iface.messageBar()
+        if item in bar.items():
+            bar.popWidget(item)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,

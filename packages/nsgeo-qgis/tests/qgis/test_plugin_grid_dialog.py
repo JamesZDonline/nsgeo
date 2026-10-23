@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
+from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.grid_dialog import COL_A, COL_B, COL_FROM, COL_ROLE, GridDialog
+from plugin_testing import feature_id, named_layer, send_map_key, send_map_mouse
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -20,8 +22,9 @@ from qgis.core import (
     QgsRectangle,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+from qgis.PyQt.QtWidgets import QAbstractItemView, QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
 LOCAL = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]])
@@ -111,20 +114,19 @@ def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
     """Call open_grid_dialog() and return the GridDialog it just showed.
 
     Fix round 4, Finding 1: GridDialog is modeless (plugin.py's
-    open_grid_dialog() calls show(), not exec()) precisely so the
-    digitise flow can reach the canvas at all -- exec()'s
-    application-modal event loop terminates the instant the dialog is
-    hidden, so _start_digitise()'s dialog.hide() would otherwise end it
-    before a single canvas click landed (verified directly with a bare
-    QDialog; see the fix-round report). That also means these tests
-    never monkeypatch QDialog.exec (unlike `drive_dialog` in conftest.py,
-    which no test in this file uses any more but which is kept for a
-    future genuinely-modal dialog): open_grid_dialog() returns
-    immediately with a real, already-shown dialog tracked on the plugin
-    as `_grid_dialog`, and driving it -- typing into fields, clicking
-    digitise_button, emitting real canvasClicked signals, calling
-    accept()/reject() -- exercises the exact same code path a live QGIS
-    session would.
+    open_grid_dialog() calls show(), not exec()) precisely so a map pick
+    can reach the canvas at all -- exec()'s application-modal event loop
+    terminates the instant the dialog is hidden, so _start_pick()'s
+    dialog.hide() would otherwise end it before a single canvas click
+    landed (verified directly with a bare QDialog; see the fix-round
+    report). That also means these tests never monkeypatch QDialog.exec
+    (unlike `drive_dialog` in conftest.py, which no test in this file
+    uses any more but which is kept for a future genuinely-modal dialog):
+    open_grid_dialog() returns immediately with a real, already-shown
+    dialog tracked on the plugin as `_grid_dialog`, and driving it --
+    typing into fields, clicking a Pick button, sending real map-tool
+    events, calling accept()/reject() -- exercises the exact same code
+    path a live QGIS session would.
     """
     plugin.open_grid_dialog(grid_id)
     dialog = plugin._grid_dialog
@@ -331,49 +333,6 @@ def test_editing_an_existing_grid_prefills_and_keeps_its_id(session):
     assert d.result_grid().azimuth == 46.0 and d.result_grid().default_spacing == 0.25
 
 
-def test_digitise_tool_emits_after_two_clicks(qgis_app, fake_iface):
-    tool = DigitiseGridTool(fake_iface.mapCanvas())
-    got = []
-    tool.points_picked.connect(lambda a, b: got.append((a, b)))
-    tool.canvasClicked.emit(QgsPointXY(1.0, 2.0), Qt.MouseButton.LeftButton)
-    assert got == []
-    tool.canvasClicked.emit(QgsPointXY(1.0, 5.0), Qt.MouseButton.LeftButton)
-    assert len(got) == 1 and got[0][1].y() == 5.0
-
-
-def test_digitise_tool_right_click_before_any_pick_cancels(qgis_app, fake_iface):
-    # Fix round 1, Finding 4: a right-click is the universal QGIS "abort
-    # this tool" gesture. Before this fix it was treated like any other
-    # click -- it could set the origin outright.
-    canvas = fake_iface.mapCanvas()
-    tool = DigitiseGridTool(canvas)
-    canvas.setMapTool(tool)
-    cancelled, picked = [], []
-    tool.cancelled.connect(lambda: cancelled.append(True))
-    tool.points_picked.connect(lambda a, b: picked.append((a, b)))
-
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.RightButton)
-    assert cancelled == [True]
-    assert picked == []
-    assert canvas.mapTool() is None  # the abort deactivates the tool
-
-
-def test_digitise_tool_right_click_after_origin_cancels_not_completes(qgis_app, fake_iface):
-    # Worse than the no-op above: left-then-right used to *complete* the
-    # pick, defining the grid's +Y edge wherever the cursor landed.
-    canvas = fake_iface.mapCanvas()
-    tool = DigitiseGridTool(canvas)
-    canvas.setMapTool(tool)
-    cancelled, picked = [], []
-    tool.cancelled.connect(lambda: cancelled.append(True))
-    tool.points_picked.connect(lambda a, b: picked.append((a, b)))
-
-    tool.canvasClicked.emit(QgsPointXY(1.0, 2.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(QgsPointXY(9.0, 9.0), Qt.MouseButton.RightButton)
-    assert cancelled == [True]
-    assert picked == []
-
-
 def test_crs_widget_stays_usable_when_the_hint_is_showing(session):
     # Fix round 3, Finding 2: crs_hint shared a row with crs_widget (a
     # QHBoxLayout, the way velocity_hint shares with velocity), which
@@ -573,8 +532,8 @@ def test_open_grid_dialog_does_not_open_a_second_dialog_while_one_is_open(fake_i
     # application-modal block -- so "Add grid" can be triggered again
     # before the first one closes. open_grid_dialog() must not open a
     # second one on top of the first (it would fight the first over the
-    # canvas's one map tool during a digitise pick); it raises/
-    # activates the existing one instead.
+    # canvas's one map tool during a map pick); it raises/activates the
+    # existing one instead.
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
@@ -613,8 +572,8 @@ def test_open_grid_dialog_recovers_from_a_dialog_destroyed_outside_finished(fake
     # own dialog.deleteLater() calls, never otherwise flushed). That
     # segfaults here, but not from anything this fix touches: it is the
     # pre-existing, out-of-scope object-leak this file already documents
-    # (round 1, Finding 3's dialog leak; the DigitiseGridTool leak noted
-    # in plugin.py) becoming reachable only because this is the first
+    # (round 1, Finding 3's dialog leak; the map-tool leak noted in
+    # plugin.py) becoming reachable only because this is the first
     # test to force a flush at all. Passing `dialog` as the receiver
     # restricts the flush to events actually posted to it, which is all
     # this test is testing.
@@ -760,40 +719,527 @@ def test_finished_reports_when_a_different_site_was_opened_under_the_dialog(
     plugin.unload()
 
 
-def _scene_bands(canvas: Any) -> list:
-    """Every QgsRubberBand currently parked in the canvas's QGraphicsScene.
+# ---- pick on the map (#63) ---------------------------------------------------
+#
+# These are the digitise-flow tests Task 2 deleted with "Digitise on map",
+# ported to the corner picks that replace it (spec §4.7: "the tests that pin
+# those rules carry over rather than being deleted"). Each keeps the reason
+# its original existed. The flows that click run on a shown 1 m/px canvas
+# (`real_iface`) with G4 at (400, 300), so a pick can actually snap and the
+# snap marker is actually drawn.
 
-    Counted off the scene rather than off the tool deliberately: the band
-    is a QgsMapCanvasItem, so the scene -- not the tool, and not Python --
-    is what actually owns it. Dropping the tool's Python reference and
-    collecting proves nothing; only the scene's own item list does.
+PICK_TEXT = "Click the {} corner. Right-click or Esc cancels."
+PICK_ALL_TEXT = "Pick corners: click the {} corner ({} of 4). Right-click skips it, Esc stops."
+POLYGON_TEXT = "Click the polygon to use. Right-click or Esc cancels."
+
+
+def _pick_site(real_iface: Any, tmp_path: Any, crs: Any = UTM16, extent: Any = None) -> Any:
+    """A plugin on a shown canvas (1 m/px over (0, 0)-(800, 600) by default)
+    with G4 at (400, 300) on it, and its open dialog, corners in `crs`."""
+    import nsgeo_qgis
+
+    iface = real_iface(crs, extent or QgsRectangle(0, 0, 800, 600))
+    plugin = nsgeo_qgis.classFactory(iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    gps = named_layer("Point", "gps", {"G4": (400, 300)})
+    iface.mapCanvas().setLayers([gps])
+    dialog = _open(plugin)
+    dialog.corners_crs.setCrs(crs)
+    return SimpleNamespace(
+        iface=iface,
+        plugin=plugin,
+        canvas=iface.mapCanvas(),
+        bar=iface.messageBar(),
+        dialog=dialog,
+        gps=gps,
+    )
+
+
+def _bar(bar: Any) -> list[str]:
+    return [item.text() for item in bar.items()]
+
+
+def _row(dialog: GridDialog, row: int) -> tuple[tuple[float, float], str] | None:
+    point = dialog.corner_point(row)
+    return None if point is None else ((point.x(), point.y()), dialog.corner_source(row))
+
+
+def _scene_count(qgis_app: Any, canvas: Any) -> int:
+    """Items in the canvas's QGraphicsScene, after any pending deleteLater().
+
+    Counted off the scene, not off the tool: the snap marker is a
+    QgsMapCanvasItem, so the scene -- not the tool, and not Python -- is
+    what owns it. Dropping the tool's Python reference and collecting
+    proves nothing; only the scene's own item list does. processEvents()
+    does not run DeferredDelete, hence sendPostedEvents.
     """
-    from qgis.gui import QgsRubberBand
+    qgis_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    return len(canvas.scene().items())
 
-    return [item for item in canvas.scene().items() if isinstance(item, QgsRubberBand)]
+
+def test_pick_flow_fills_the_row_and_restores_the_dialog(real_iface, tmp_path):
+    # Ported from test_digitise_flow_through_the_plugin_fills_and_restores_the_dialog.
+    # Fix round 4, Finding 1 (critical): this is the test that exposed the
+    # bug. drive_dialog's exec() monkeypatch hid it completely: faking
+    # exec() to just call a driver callback directly never runs Qt's real
+    # application-modal event loop, so dialog.hide() never got the chance
+    # to terminate it -- which is exactly what it does for real (verified
+    # directly with a bare QDialog). No QDialog.exec anywhere in this test:
+    # open_grid_dialog() calls show(), and this drives the real,
+    # already-visible dialog exactly as a user would.
+    t = _pick_site(real_iface, tmp_path)
+    assert t.dialog.isVisible()
+    # Something else in the main window has the keyboard focus, as a dock
+    # often does in QGIS.
+    elsewhere = t.plugin.survey_dock.findChild(QAbstractItemView)
+    elsewhere.setFocus()
+    assert t.iface.mainWindow().focusWidget() is elsewhere
+
+    t.dialog.pick_buttons[1].click()
+    assert t.dialog.isHidden()  # out of the way so the canvas can be clicked
+    tool = t.canvas.mapTool()
+    assert isinstance(tool, PickPointTool)
+    assert _bar(t.bar) == [PICK_TEXT.format("+X")]
+    # Esc reaches the tool only through the canvas's key events, so the
+    # canvas is given the focus the hidden dialog had.
+    assert t.iface.mainWindow().focusWidget() is t.canvas
+
+    send_map_mouse(tool, "move", (408, 300))
+    send_map_mouse(tool, "release", (408, 300))
+
+    assert _row(t.dialog, 1) == ((400.0, 300.0), "G4 · gps")
+    assert t.dialog.isVisible()  # the dialog is restored
+    assert t.canvas.mapTool() is None  # the tool hands control back
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
 
 
-def test_a_disposed_digitise_tool_is_disposable_again_and_still_usable(qgis_app, fake_iface):
-    # Disposal has to be idempotent -- more than one finaliser can reach
-    # the same tool -- and it must NOT live in deactivate(), which fires
-    # on every tool switch and leaves the tool legitimately
-    # reactivatable. A tool whose band is gone must therefore still
-    # reset() and take clicks without raising: both touch self._band,
-    # and an exception out of canvasClicked is swallowed by Qt.
+def test_pick_all_walks_the_corners_with_skip_and_stop(real_iface, tmp_path):
+    # Spec §4.7: Pick all walks origin -> +X -> +X+Y -> +Y with "(n of 4)";
+    # a right-click skips the corner and leaves its row as it was, Esc
+    # stops and keeps what was picked.
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.pick_all_button.click()
+    tool = t.canvas.mapTool()
+    assert isinstance(tool, PickPointTool) and t.dialog.isHidden()
+    texts = [_bar(t.bar)]
+    send_map_mouse(tool, "release", (408, 300))  # origin: snaps to G4
+    texts.append(_bar(t.bar))
+    send_map_mouse(tool, "release", (200, 100), Qt.MouseButton.RightButton)  # skip +X
+    texts.append(_bar(t.bar))
+    send_map_mouse(tool, "release", (600, 500))  # +X+Y: a free click
+    texts.append(_bar(t.bar))
+    assert t.dialog.isHidden()  # still picking
+    send_map_key(tool, Qt.Key.Key_Escape)  # stop before +Y
+
+    assert texts == [
+        [PICK_ALL_TEXT.format("origin", 1)],
+        [PICK_ALL_TEXT.format("+X", 2)],
+        [PICK_ALL_TEXT.format("+X+Y", 3)],
+        [PICK_ALL_TEXT.format("+Y", 4)],
+    ]
+    assert [_row(t.dialog, r) for r in range(4)] == [
+        ((400.0, 300.0), "G4 · gps"),
+        None,
+        ((600.0, 500.0), "free click"),
+        None,
+    ]
+    assert t.dialog.isVisible() and t.canvas.mapTool() is None
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_pick_all_after_four_clicks_does_not_fit(real_iface, tmp_path):
+    # C1: Fit runs only when Fit is pressed. Four picks fill four rows and
+    # bring the dialog back; the form is untouched.
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.pick_all_button.click()
+    tool = t.canvas.mapTool()
+    corners = [(100.0, 100.0), (300.0, 100.0), (300.0, 250.0), (100.0, 250.0)]
+    for xy in corners:
+        send_map_mouse(tool, "release", xy)
+
+    assert [_row(t.dialog, r) for r in range(4)] == [(xy, "free click") for xy in corners]
+    assert (t.dialog.origin_x.value(), t.dialog.origin_y.value()) == (0.0, 0.0)
+    assert t.dialog.fit_status.text() == ""
+    assert t.dialog.isVisible() and t.canvas.mapTool() is None
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_single_pick_right_click_restores_the_dialog_untouched(real_iface, tmp_path):
+    # Ported from test_digitise_flow_right_click_restores_the_dialog_without_a_pick.
+    # Fix round 1, Finding 4: before that fix, a right-click meant to
+    # cancel instead completed the pick (or set the origin), and there was
+    # no way back short of killing QGIS if the pick was abandoned.
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.set_corner(1, QgsPointXY(10.0, 20.0), UTM16, "typed")
+    t.dialog.pick_buttons[1].click()
+    tool = t.canvas.mapTool()
+    send_map_mouse(tool, "move", (408, 300))
+    send_map_mouse(tool, "release", (408, 300), Qt.MouseButton.RightButton)  # cancel
+
+    assert t.canvas.mapTool() is None
+    assert t.dialog.isVisible()  # restored -- without completing the pick
+    assert _row(t.dialog, 1) == ((10.0, 20.0), "typed")  # untouched
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_switching_map_tools_mid_pick_restores_the_dialog(real_iface, tmp_path):
+    # Ported from test_digitise_flow_switching_map_tools_restores_the_dialog.
+    # Fix round 1, Finding 4: switching to a completely different map tool
+    # (e.g. Pan) mid-pick used to leave the dialog hidden forever, since
+    # only a completed pick ever restored it.
+    from qgis.gui import QgsMapToolPan
+
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.pick_all_button.click()
+    assert t.dialog.isHidden()
+    pan = QgsMapToolPan(t.canvas)
+    t.canvas.setMapTool(pan)
+
+    assert t.dialog.isVisible()
+    assert t.canvas.mapTool() is pan  # the user's choice of tool stands
+    assert _bar(t.bar) == []
+    t.canvas.unsetMapTool(pan)
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+@pytest.mark.parametrize("breaks", ["the tool", "the dialog"])
+def test_a_pick_that_fails_says_so_and_restores_the_dialog(real_iface, tmp_path, breaks):
+    # However a pick ends, an exception included, the tool is released,
+    # the instruction leaves the message bar and the dialog comes back --
+    # and the failure is said, not swallowed by Qt (conftest's
+    # _no_swallowed_slot_exceptions would fail this test if it were).
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.pick_buttons[0].click()
+    tool = t.canvas.mapTool()
+
+    def broken(*_args: object) -> None:
+        raise RuntimeError("it broke")
+
+    if breaks == "the tool":
+        tool._snap = broken  # inside the tool's own canvasReleaseEvent
+    else:
+        t.dialog.set_corner = broken  # inside plugin.py's `picked` slot
+    send_map_mouse(tool, "release", (100, 100))
+
+    assert t.dialog.isVisible() and t.canvas.mapTool() is None
+    assert _row(t.dialog, 0) is None
+    texts = _bar(t.bar)
+    assert len(texts) == 1 and "it broke" in texts[0]  # the error, not the instruction
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_a_pick_that_cannot_be_converted_ends_and_says_why(real_iface, tmp_path):
+    # A click set_corner cannot convert into "Corners in" ends the pick
+    # rather than silently staying on the same corner with the dialog
+    # hidden: the dialog comes back, its status line saying why. Latitude
+    # 95 is outside every CRS (see test_set_corner_converts_from_its_own_crs_...).
+    t = _pick_site(real_iface, tmp_path, crs=WGS84, extent=QgsRectangle(-0.4, 94.7, 0.4, 95.3))
+    t.dialog.corners_crs.setCrs(UTM16)
+    t.dialog.pick_all_button.click()
+    tool = t.canvas.mapTool()
+    event = send_map_mouse(tool, "release", QPoint(400, 300))
+    assert event.mapPoint().y() > 90
+
+    assert t.dialog.isVisible() and t.canvas.mapTool() is None
+    assert _bar(t.bar) == []
+    assert [_row(t.dialog, r) for r in range(4)] == [None] * 4
+    assert t.dialog.fit_status.text() == "could not convert that point into EPSG:32616"
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_a_pick_on_a_4326_canvas_lands_converted(real_iface, tmp_path):
+    # The canvas reports its clicks in its own CRS; the row is in "Corners
+    # in". A free click on a WGS84 canvas lands in UTM16 rows as exactly the
+    # transform of the clicked point.
+    t = _pick_site(real_iface, tmp_path, crs=WGS84, extent=_site_extent(WGS84))
+    t.canvas.setLayers([])
+    t.dialog.corners_crs.setCrs(UTM16)
+    t.dialog.pick_buttons[0].click()
+    tool = t.canvas.mapTool()
+    event = send_map_mouse(tool, "release", QPoint(400, 300))
+
+    expected = QgsCoordinateTransform(WGS84, UTM16, QgsProject.instance()).transform(
+        event.mapPoint()
+    )
+    got = t.dialog.corner_point(0)
+    assert got is not None
+    assert got.x() == pytest.approx(expected.x(), abs=1e-6)
+    assert got.y() == pytest.approx(expected.y(), abs=1e-6)
+    assert got.distance(QgsPointXY(*SITE.origin)) < 400  # and it is near the site
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_pick_polygon_on_map_selects_layer_and_feature(qgis_app, real_iface, tmp_path):
+    # C5 (#28): picking a polygon on the map chooses it in the layer and
+    # feature lists, which is what Fill then reads. The clicked feature is
+    # the layer's second, so a fid mix-up would show.
+    t = _pick_site(real_iface, tmp_path)
+    plots = named_layer(
+        "Polygon",
+        "plots",
+        {"west": [(0, 0), (50, 0), (50, 50)], "east": [(300, 200), (500, 200), (500, 400)]},
+    )
+    QgsProject.instance().addMapLayer(plots)
+    try:
+        east = feature_id(plots, "east")
+        t.canvas.setLayers([t.gps, plots])
+        t.dialog.pick_polygon_button.click()
+        tool = t.canvas.mapTool()
+        assert isinstance(tool, PickPointTool) and t.dialog.isHidden()
+        assert _bar(t.bar) == [POLYGON_TEXT]
+
+        send_map_mouse(tool, "release", (450, 300))  # inside "east"
+
+        assert t.dialog.isVisible() and t.canvas.mapTool() is None
+        assert _bar(t.bar) == []
+        assert t.dialog.layer_combo.currentLayer() is plots
+        assert _pump(qgis_app, lambda: t.dialog.feature_picker.feature().id() == east)
+        chosen = t.dialog.chosen_polygon()
+        assert chosen is not None and chosen[0] is plots
+        assert chosen[1].equals(plots.getFeature(east).geometry())
+        t.dialog.reject()
+        t.plugin.unload()
+    finally:
+        QgsProject.instance().removeMapLayer(plots.id())
+
+
+def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_path):
+    # Ported. Fix round 2, Finding 4: the dialog can finish (accept,
+    # reject, or the window closed outright) while a pick is still in
+    # progress, with neither a click nor the tool's own cancelled signal
+    # ever having fired to release it -- e.g. a keyboard shortcut, or (as
+    # simulated here) a caller that just gives up on the pick without
+    # clicking the map or right-clicking to abort. Before that fix this
+    # left a live map tool wired to a `dialog` open_grid_dialog was about
+    # to delete; a later click on it raised RuntimeError out of a
+    # signal-connected slot.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
     canvas = fake_iface.mapCanvas()
-    tool = DigitiseGridTool(canvas)
-    assert len(_scene_bands(canvas)) == 1
 
-    tool.dispose()
-    tool.dispose()  # idempotent
-    assert _scene_bands(canvas) == []
+    dialog = _open(plugin)
+    dialog.pick_buttons[0].click()
+    assert isinstance(canvas.mapTool(), PickPointTool)
+    dialog.reject()  # gives up on the pick entirely, tool still active -- must not raise
 
-    tool.reset()  # must not raise
-    picked = []
-    tool.points_picked.connect(lambda a, b: picked.append((a, b)))
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(QgsPointXY(2.0, 3.0), Qt.MouseButton.LeftButton)
-    assert len(picked) == 1  # still a working tool, just without its band
+    assert canvas.mapTool() is None  # released, not left stranded
+    assert _bar(fake_iface.messageBar()) == []  # and its instruction with it
+    plugin.unload()
+
+
+def test_open_grid_dialog_releases_a_stranded_tool_on_accept_without_flashing_the_dialog(
+    fake_iface, tmp_path, answer_modal
+):
+    # Ported. Fix round 3, Finding 3: releasing a still-active pick tool in
+    # finished()'s cleanup (round 2, Finding 4's fix) runs unsetMapTool()
+    # -> deactivate() -> cancelled -> the pick's own ending, which would
+    # otherwise re-show `dialog` -- already accepted here -- for one
+    # event-loop turn before deleteLater() actually destroys it.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+
+    dialog = _open(plugin)
+    dialog.pick_all_button.click()
+    assert isinstance(canvas.mapTool(), PickPointTool)
+    assert dialog.isHidden()
+    dialog.id_edit.setText("A")
+    dialog.velocity.setValue(0.08)
+    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    dialog.accept()  # accepted mid-pick, tool still active -- must not raise
+
+    assert canvas.mapTool() is None  # released
+    assert dialog.isHidden()  # never re-shown after being accepted
+    assert _bar(fake_iface.messageBar()) == []
+    assert plugin.session.grid("A").crs == "EPSG:32616"
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_open_grid_dialog_shows_the_existing_dialog_even_if_hidden_mid_pick(fake_iface, tmp_path):
+    # Ported. Fix round 5, Finding 5: re-triggering "Add grid" while the
+    # dialog is hidden (a pick in progress -- _start_pick() hides it
+    # deliberately) used to call only raise_()/activateWindow(), not
+    # show(): a hidden window raised and activated is still invisible, so
+    # the user got no window and no message at all.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+
+    dialog = _open(plugin)
+    dialog.pick_buttons[0].click()  # hides the dialog, arms the tool
+    assert dialog.isHidden()
+
+    plugin.open_grid_dialog(None)  # "Add grid" clicked again
+    assert plugin._grid_dialog is dialog  # still the same dialog...
+    assert dialog.isVisible()  # ...but now actually visible again
+
+    dialog.reject()
+    plugin.unload()
+
+
+def test_a_pick_started_while_one_runs_replaces_it(real_iface, tmp_path, qgis_app):
+    # The dialog re-shown mid-pick (above) has live Pick buttons. Pressing
+    # one ends the running pick before the new one hides the dialog --
+    # otherwise the old pick's ending would show the dialog again in the
+    # middle of the new pick, and its instruction would stay up.
+    t = _pick_site(real_iface, tmp_path)
+    t.dialog.pick_buttons[0].click()
+    first = t.canvas.mapTool()
+    t.plugin.open_grid_dialog(None)
+    assert t.dialog.isVisible()
+
+    t.dialog.pick_buttons[2].click()
+    second = t.canvas.mapTool()
+    assert isinstance(second, PickPointTool) and second is not first
+    assert t.dialog.isHidden()
+    assert _bar(t.bar) == [PICK_TEXT.format("+X+Y")]
+    send_map_mouse(second, "release", (408, 300))
+
+    assert [_row(t.dialog, r) for r in range(4)] == [
+        None,
+        None,
+        ((400.0, 300.0), "G4 · gps"),
+        None,
+    ]
+    assert t.dialog.isVisible() and t.canvas.mapTool() is None
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_unload_closes_a_dialog_hidden_mid_pick(fake_iface, tmp_path):
+    # Ported from test_unload_closes_a_dialog_hidden_mid_digitise_pick.
+    # Fix round 5, Finding 1: QDialog::closeEvent only calls reject() when
+    # the dialog isVisible() -- close() on a hidden one just accepts the
+    # close event, and finished() never fires at all (verified directly on
+    # a bare QDialog: hidden + close() -> 0 finished emissions; hidden +
+    # reject() -> 1). Hidden mid-pick is this feature's *ordinary* state --
+    # _start_pick() hides the dialog deliberately so the canvas can be
+    # clicked -- so unload() must work in exactly the state its own
+    # feature creates, not only the visible one. Left unfixed, this was
+    # user-reachable (not merely a leak): a canvas click would re-show the
+    # orphaned dialog over an unloaded plugin, and clicking OK would raise
+    # AttributeError on self.session (already None), swallowed to stderr
+    # -- the dialog closing as if the grid were saved when nothing was.
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = fake_iface.mapCanvas()
+
+    dialog = _open(plugin)
+    dialog.pick_buttons[0].click()
+    assert dialog.isHidden()
+    assert isinstance(canvas.mapTool(), PickPointTool)
+
+    plugin.unload()
+
+    assert plugin._grid_dialog is None
+    assert canvas.mapTool() is None
+    assert _bar(fake_iface.messageBar()) == []
+
+
+def test_completed_picks_leave_no_canvas_items(real_iface, tmp_path, qgis_app):
+    # Ported from test_completed_digitise_picks_do_not_pile_rubber_bands_into_the_scene.
+    # Final review, I4: a map tool's canvas items belong to the canvas's
+    # QGraphicsScene, and the old flow only ever called unsetMapTool(),
+    # which frees neither the tool nor them. Three attempts left three
+    # items behind -- invisible, but exactly the object plugin.py's round-1
+    # note implicates in a shutdown segfault "once enough of them pile up
+    # alongside a QgsMapCanvas". Here the item is the snap marker, so each
+    # pick first moves onto G4 to put one on the map. The tool itself must
+    # go too (deleteLater), not only its marker.
+    t = _pick_site(real_iface, tmp_path)
+    baseline = _scene_count(qgis_app, t.canvas)
+    tools = []
+    for row in range(3):
+        t.dialog.pick_buttons[row].click()
+        tool = t.canvas.mapTool()
+        tools.append(tool)
+        send_map_mouse(tool, "move", (408, 300))
+        assert _scene_count(qgis_app, t.canvas) == baseline + 1  # the marker is drawn
+        send_map_mouse(tool, "release", (408, 300))
+    assert _scene_count(qgis_app, t.canvas) == baseline
+    assert all(sip.isdeleted(tool) for tool in tools)
+    assert _bar(t.bar) == []
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+@pytest.mark.parametrize("abort", ["right-click", "esc", "switch tools"])
+def test_an_aborted_pick_leaves_no_canvas_items(real_iface, tmp_path, qgis_app, abort):
+    # Ported from test_an_aborted_digitise_pick_gives_its_rubber_band_back.
+    # An abort reaches the plugin through a different signal from a
+    # completed pick (skipped, stopped, cancelled), so each is a separate
+    # finaliser and needs the disposal of its own.
+    from qgis.gui import QgsMapToolPan
+
+    t = _pick_site(real_iface, tmp_path)
+    baseline = _scene_count(qgis_app, t.canvas)
+    t.dialog.pick_buttons[0].click()
+    tool = t.canvas.mapTool()
+    send_map_mouse(tool, "move", (408, 300))
+    assert _scene_count(qgis_app, t.canvas) == baseline + 1
+    pan = QgsMapToolPan(t.canvas)
+    if abort == "right-click":
+        send_map_mouse(tool, "release", (408, 300), Qt.MouseButton.RightButton)
+    elif abort == "esc":
+        send_map_key(tool, Qt.Key.Key_Escape)
+    else:
+        t.canvas.setMapTool(pan)
+
+    assert t.dialog.isVisible()  # round 1, Finding 4 still holds
+    assert _scene_count(qgis_app, t.canvas) == baseline
+    assert sip.isdeleted(tool)
+    assert _bar(t.bar) == []
+    if t.canvas.mapTool() is pan:
+        t.canvas.unsetMapTool(pan)
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+def test_a_dialog_closed_mid_pick_leaves_no_canvas_items(real_iface, tmp_path, qgis_app):
+    # Ported from test_a_dialog_closed_mid_pick_gives_the_rubber_band_back.
+    # The third finaliser: open_grid_dialog()'s finished() teardown, which
+    # blockSignals(True)s the tool precisely so `cancelled` does NOT run
+    # (round 3, Finding 3) -- so it cannot lean on the cancelled path's
+    # disposal, or its popping of the message, and must do its own.
+    t = _pick_site(real_iface, tmp_path)
+    baseline = _scene_count(qgis_app, t.canvas)
+    t.dialog.pick_buttons[0].click()
+    tool = t.canvas.mapTool()
+    send_map_mouse(tool, "move", (408, 300))
+    assert _scene_count(qgis_app, t.canvas) == baseline + 1
+    t.dialog.reject()  # gives up on the pick outright, tool still active
+
+    assert t.canvas.mapTool() is None
+    assert _scene_count(qgis_app, t.canvas) == baseline
+    assert sip.isdeleted(tool)
+    assert _bar(t.bar) == []
+    t.plugin.unload()
 
 
 # ---- one corner table and Fit (#63) ------------------------------------------
@@ -1278,6 +1724,37 @@ def test_set_polygon_feature_sets_both_combos_and_chosen_polygon_reads_them(
     assert d.layer_combo.currentLayer() == layer
     chosen = d.chosen_polygon()
     assert chosen is not None and chosen[0] == layer and not chosen[1].isNull()
+
+
+def test_set_polygon_feature_refuses_a_layer_the_list_does_not_offer(qgis_app, session):
+    # Task 3 review: chosen_polygon and Fill took the layer from the layer
+    # combo and the fid from the feature picker. The combo lists only this
+    # project's polygon layers; handed any other layer (a map pick can find
+    # a canvas layer that is not in the project), its setLayer() quietly
+    # drops the user's current choice instead, while the picker takes the
+    # fid regardless -- the two lists then name different layers. A layer
+    # the combo would refuse now changes neither, and the status line says
+    # why.
+    chosen = named_layer(
+        "Polygon", "plots", {"a": [(0, 0), (9, 0), (9, 9)], "b": [(20, 0), (29, 0), (29, 9)]}
+    )
+    stray = named_layer("Polygon", "stray", {"s": [(50, 0), (59, 0), (59, 9)]})
+    QgsProject.instance().addMapLayer(chosen)
+    try:
+        d = _utm_dialog(session)
+        b = feature_id(chosen, "b")
+        assert d.set_polygon_feature(chosen, b)
+        assert _pump(qgis_app, lambda: d.feature_picker.feature().id() == b)
+
+        assert not d.set_polygon_feature(stray, feature_id(stray, "s"))
+        assert "stray" in d.fit_status.text()
+        assert d.layer_combo.currentLayer() is chosen
+        assert d.feature_picker.layer() is chosen
+        picked = d.chosen_polygon()
+        assert picked is not None and picked[0] is chosen
+        assert picked[1].equals(chosen.getFeature(b).geometry())
+    finally:
+        QgsProject.instance().removeMapLayer(chosen.id())
 
 
 def test_pick_on_map_only_emits(session, qgis_app):

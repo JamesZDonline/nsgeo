@@ -1,7 +1,8 @@
 """Grid dialog: one corner table, one Fit, one set of numbers.
 
-Corners are typed (or, in later tasks, picked on the map or read from a
-polygon) into a single table in any CRS; Fit places the grid from them and
+Corners are typed, picked on the map (plugin.py runs the pick, through
+`pick_requested`/`pick_all_requested` and `set_corner`) or read from a
+polygon into a single table in any CRS; Fit places the grid from them and
 fills the form, which the user can still edit.
 """
 
@@ -525,15 +526,34 @@ class GridDialog(QDialog):
             self.fit_status.setText(f"could not rotate the corners: {exc}")
 
     # ---- fill from a polygon ----------------------------------------------
-    def set_polygon_feature(self, layer: QgsVectorLayer, fid: int) -> None:
-        """Select a polygon in both combos (the map pick's way in)."""
+    def set_polygon_feature(self, layer: QgsVectorLayer, fid: int) -> bool:
+        """Select a polygon in both lists (the map pick's way in).
+
+        The layer list offers only this project's polygon layers, and its
+        setLayer() answers any other layer by quietly dropping the current
+        choice, while the feature picker would take the fid regardless --
+        the two lists would then name different layers. A layer the list
+        does not offer therefore changes neither, and the status line says
+        why. Returns whether the polygon was selected.
+        """
+        offered = any(self.layer_combo.layer(i) is layer for i in range(self.layer_combo.count()))
+        if not offered:
+            self.fit_status.setText(
+                f"{layer.name()} is not a polygon layer of this project, so it cannot be chosen"
+            )
+            return False
         self.layer_combo.setLayer(layer)
         self.feature_picker.setLayer(layer)
         self.feature_picker.setFeature(fid)
+        return True
 
     def chosen_polygon(self) -> tuple[QgsVectorLayer, QgsGeometry] | None:
-        """The layer and geometry the combos name, or None."""
-        layer = self.layer_combo.currentLayer()
+        """The layer and geometry the lists name, or None.
+
+        Layer and fid both come from the feature picker, so they can never
+        belong to two different layers.
+        """
+        layer = self.feature_picker.layer()
         if not isinstance(layer, QgsVectorLayer):
             return None
         picked = self.feature_picker.feature()
@@ -552,7 +572,7 @@ class GridDialog(QDialog):
             self.fit_status.setText(f"could not fill from the polygon: {exc}")
 
     def _fill_from_polygon(self) -> None:
-        layer = self.layer_combo.currentLayer()
+        layer = self.feature_picker.layer()  # with its fid: see chosen_polygon
         picked = self.feature_picker.feature()
         if not isinstance(layer, QgsVectorLayer) or not picked.isValid():
             self.fit_status.setText("select a polygon feature first")
@@ -1069,9 +1089,9 @@ class GridDialog(QDialog):
             self._crs_message = f"could not change the grid CRS: {exc}"
 
     def _validate(self, *_: Any) -> None:
-        # One CRS guard, not one per path in: the project's own CRS,
-        # the digitise flow's canvas CRS (plugin.py's done()), and a
-        # hand-picked CRS in this widget all flow through crs_widget, so
+        # One CRS guard, not one per path in: the project's own CRS, the
+        # one picked automatically (_choose_crs), an existing grid's, and
+        # a hand-picked CRS in this widget all flow through crs_widget, so
         # checking it here once covers all of them (round 2, Finding 2)
         # -- rather than teaching every path that can set a CRS to
         # separately refuse a bad one.

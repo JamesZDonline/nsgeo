@@ -145,25 +145,41 @@ def _real_canvas(fake_iface, crs, extent):
     canvas.setExtent(extent)
     QgsApplication.processEvents()
     metric = crs.mapUnits() == Qgis.DistanceUnit.Meters
-    if metric and extent.width() == 800 and extent.height() == 600:
+    # approx, not ==: an extent built around real coordinates (518204.112 -
+    # 400, say) is 800 m wide only to within rounding, and an exact compare
+    # would skip the guard silently for exactly the extents tests use.
+    if metric and extent.width() == pytest.approx(800) and extent.height() == pytest.approx(600):
         assert canvas.mapUnitsPerPixel() == pytest.approx(1.0)
     return canvas
 
 
 @pytest.fixture
-def real_canvas(qgis_app):
-    """`_real_canvas` as a fixture: each window it shows is closed after."""
+def real_iface(qgis_app):
+    """A fresh `FakeIface` whose canvas is `_real_canvas`, for a plugin flow
+    that needs the shown canvas and the iface together (the plugin is built
+    from the iface). Each window it shows is closed after."""
     shown: list = []
 
     def make(crs, extent):
         iface = FakeIface()
         shown.append(iface)
-        return _real_canvas(iface, crs, extent)
+        _real_canvas(iface, crs, extent)
+        return iface
 
     yield make
     for iface in shown:
         iface.mainWindow().close()
         iface.mainWindow().deleteLater()
+
+
+@pytest.fixture
+def real_canvas(real_iface):
+    """`_real_canvas` as a fixture: each window it shows is closed after."""
+
+    def make(crs, extent):
+        return real_iface(crs, extent).mapCanvas()
+
+    return make
 
 
 @pytest.fixture(autouse=True)

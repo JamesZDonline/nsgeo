@@ -204,3 +204,84 @@ def spin_until(predicate, timeout_ms: int = 20_000) -> bool:
         QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 5)
         time.sleep(0.002)
     return True
+
+
+# ---- driving a map tool (#63) -------------------------------------------------
+
+
+def map_pixel(canvas: Any, x: float, y: float) -> Any:
+    """The canvas pixel (a QPoint) showing map point (x, y), in the canvas CRS."""
+    from qgis.core import QgsPointXY
+    from qgis.PyQt.QtCore import QPoint
+
+    p = canvas.getCoordinateTransform().transform(QgsPointXY(x, y))
+    return QPoint(round(p.x()), round(p.y()))
+
+
+def send_map_mouse(tool: Any, kind: str, at: Any, button: Any = None) -> Any:
+    """Drive a QgsMapTool the way its canvas does, and return the event.
+
+    `kind` is "move" or "release"; `at` is a pixel (a QPoint) or a map point
+    as an (x, y) pair in the canvas CRS. The QgsMapMouseEvent is built at
+    that pixel, so its map point is the canvas's own reading of the pixel,
+    and handed straight to the tool's `canvasMoveEvent`/`canvasReleaseEvent`
+    (spec plan, "Shared test geometry"). A release defaults to the left
+    button. Qt imports are local: the pure tier imports this module too.
+    """
+    from qgis.gui import QgsMapMouseEvent
+    from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+
+    canvas = tool.canvas()
+    pixel = at if isinstance(at, QPoint) else map_pixel(canvas, *at)
+    if kind == "move":
+        event = QgsMapMouseEvent(canvas, QEvent.Type.MouseMove, pixel, Qt.MouseButton.NoButton)
+        tool.canvasMoveEvent(event)
+    elif kind == "release":
+        btn = button if button is not None else Qt.MouseButton.LeftButton
+        event = QgsMapMouseEvent(canvas, QEvent.Type.MouseButtonRelease, pixel, btn)
+        tool.canvasReleaseEvent(event)
+    else:
+        raise ValueError(f"kind must be 'move' or 'release', not {kind!r}")
+    return event
+
+
+def send_map_key(tool: Any, key: Any) -> Any:
+    """A key press handed straight to a map tool's `keyPressEvent`; returns the
+    event. QgsMapCanvas hands a key press over already *accepted* (see
+    pick_tool.py's module docstring), so this does too."""
+    from qgis.PyQt.QtCore import QEvent, Qt
+    from qgis.PyQt.QtGui import QKeyEvent
+
+    event = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+    event.accept()
+    tool.keyPressEvent(event)
+    return event
+
+
+def named_layer(kind: str, name: str, features: dict[str, Any], crs: str = "EPSG:32616") -> Any:
+    """A memory layer with a `name` field shown as its display expression.
+
+    `kind` is "Point" or "Polygon"; `features` maps each feature's name to
+    an (x, y) pair for a point or a list of (x, y) ring vertices for a
+    polygon. Features are added in the dict's order.
+    """
+    from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsVectorLayer
+
+    layer = QgsVectorLayer(f"{kind}?crs={crs}&field=name:string", name, "memory")
+    made = []
+    for label, shape in features.items():
+        f = QgsFeature(layer.fields())
+        f.setAttribute("name", label)
+        if kind == "Point":
+            f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(*shape)))
+        else:
+            f.setGeometry(QgsGeometry.fromPolygonXY([[QgsPointXY(*p) for p in shape]]))
+        made.append(f)
+    layer.dataProvider().addFeatures(made)
+    layer.setDisplayExpression('"name"')
+    return layer
+
+
+def feature_id(layer: Any, name: str) -> int:
+    """The id of `layer`'s feature called `name`."""
+    return next(f.id() for f in layer.getFeatures() if f["name"] == name)
