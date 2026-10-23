@@ -830,9 +830,7 @@ class NsgeoPlugin:
                 )
                 return
             apply_temporal_properties(layer, plan)
-            self.layers.project.addMapLayer(layer, False)
-            if self.layers.group is not None:
-                self.layers.group.addLayer(layer)
+            self._add_exported_layer(layer)
 
             parts = [f"exported {len(plan.bands)} bands to {path}"]
             if dock.coverage_check.isChecked():
@@ -842,9 +840,7 @@ class NsgeoPlugin:
                     coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
                     if not coverage_layer.isValid():
                         raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
-                    self.layers.project.addMapLayer(coverage_layer, False)
-                    if self.layers.group is not None:
-                        self.layers.group.addLayer(coverage_layer)
+                    self._add_exported_layer(coverage_layer)
                     parts.append(f"coverage to {coverage_path}")
                 except Exception as exc:  # noqa: BLE001 -- Task 6 fix round 2, Minor 2: the
                     # main GeoTIFF above has already been written, its temporal properties
@@ -938,9 +934,7 @@ class NsgeoPlugin:
                 )
                 return
             apply_site_temporal_properties(layer, plan)
-            self.layers.project.addMapLayer(layer, False)
-            if self.layers.group is not None:
-                self.layers.group.addLayer(layer)
+            self._add_exported_layer(layer)
 
             parts = [f"exported {len(plan.bands)} bands to {path}"]
             if dock.coverage_check.isChecked():
@@ -950,9 +944,7 @@ class NsgeoPlugin:
                     coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
                     if not coverage_layer.isValid():
                         raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
-                    self.layers.project.addMapLayer(coverage_layer, False)
-                    if self.layers.group is not None:
-                        self.layers.group.addLayer(coverage_layer)
+                    self._add_exported_layer(coverage_layer)
                     parts.append(f"coverage to {coverage_path}")
                 except Exception as exc:  # noqa: BLE001 -- Ruling AH, as in export_geotiff
                     self.message(
@@ -1352,6 +1344,17 @@ class NsgeoPlugin:
         # click it.
         dialog.hide()
         canvas.setMapTool(tool)
+
+    def _add_exported_layer(self, layer: Any) -> None:
+        """Show an exported GeoTIFF in the site's group, below its tables.
+        With the group deleted by the user, on top of the Layers panel
+        instead: never in the project with no place in the panel (#68)."""
+        self.layers.project.addMapLayer(layer, False)
+        group = self.layers.group
+        if group is not None:
+            group.addLayer(layer)
+        else:
+            self.layers.project.layerTreeRoot().insertLayer(0, layer)
 
     def _import_from_toolbar(self) -> None:
         # #61: into the grid the Survey panel points at, not always the

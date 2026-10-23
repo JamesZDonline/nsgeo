@@ -21,7 +21,13 @@ from nsgeo_qgis.layers import (
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
-from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
+from plugin_testing import (
+    REAL_DZT,
+    connect_message_log,
+    drag_in_layers_panel,
+    needs_real_data,
+    synthetic_dzt,
+)
 from qgis.core import (
     NULL,
     Qgis,
@@ -32,7 +38,6 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsGeometry,
-    QgsLayerTreeModel,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
@@ -2318,23 +2323,6 @@ def _names(node):
     return [child.name() for child in node.children()]
 
 
-def _drag_in_layers_panel(project, node, parent, row):
-    """Move `node` to `row` of `parent` the way a drag in the Layers panel
-    does. That is not a move: QgsLayerTreeModel serialises the node, builds
-    a NEW one at the drop and deletes the original, so a Python reference
-    to the old node is left dangling."""
-    model = QgsLayerTreeModel(project.layerTreeRoot())
-    model.setFlag(QgsLayerTreeModel.Flag.AllowNodeReorder)
-    source = node.parent()
-    source_row = next(i for i, child in enumerate(source.children()) if child is node)
-    source_index = model.node2index(source)
-    mime = model.mimeData([model.node2index(node)])
-    assert model.dropMimeData(mime, Qt.DropAction.MoveAction, row, 0, model.node2index(parent))
-    if source is parent and row <= source_row:
-        source_row += 1  # the copy went in above the original
-    assert model.removeRows(source_row, 1, source_index)
-
-
 def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
     project = QgsProject.instance()
     project.clear()
@@ -2384,7 +2372,7 @@ def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
     root = project.layerTreeRoot()
     name = f"nsgeo · {session.site_name}"
     project.addMapLayer(QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory"))
-    _drag_in_layers_panel(project, layers.group, root, len(root.children()))
+    drag_in_layers_panel(project, layers.group, root, len(root.children()))
     assert _names(root) == ["imagery", name]
 
     project.removeMapLayer(layers.layers["lines"].id())
