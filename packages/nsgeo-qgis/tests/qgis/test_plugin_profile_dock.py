@@ -1665,11 +1665,15 @@ def test_agc_after_a_gain_curve_does_not_blank_the_profile(opened):
 def test_two_gain_curves_are_both_left_out_of_the_scale(opened):
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
-    session.append_step(key, build_step("gain_curve", points=FLAT))
+    # Row 0 has a real gain (FLAT is 0 dB, a numerical no-op that would let
+    # an implementation bypassing only the last curve pass).
+    session.append_step(key, build_step("gain_curve", points=[[-11.0, 12.0], [99.0, 12.0]]))
     session.append_step(key, build_step("dewow"))
     session.append_step(key, build_step("gain_curve", points=DEEP))
     stack = session.stack_for(key)
-    assert dock.image.limit == _clip(dock)(stack.result_bypassing(0, 2).data)
+    clip = _clip(dock)
+    assert clip(stack.result_bypassing(0, 2).data) != clip(stack.result_bypassing(2).data)
+    assert dock.image.limit == clip(stack.result_bypassing(0, 2).data)
 
 
 def test_a_disabled_gain_curve_leaves_todays_scale(opened):
