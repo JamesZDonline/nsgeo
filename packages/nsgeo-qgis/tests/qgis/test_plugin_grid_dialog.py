@@ -829,6 +829,18 @@ def test_typed_corners_fit_the_grid(session):
     assert d.fit_status.text() == "rigid fit RMS 0.000 m from 4 corners"
     assert all(o is not None and o < 1e-6 for o in d.corner_offsets())
     assert [d.corner_source(r) for r in range(4)] == ["typed"] * 4
+    # a box Fit wrote is not "typed"; Use these keeps it that way, so a
+    # second Fit on different corners overwrites both
+    assert d.sizes_typed() == (False, False)
+    d.use_measured_size()
+    for row, (e, n) in enumerate(
+        SITE.to_world(np.array([[0, 0], [30, 0], [30, 25], [0, 25]], float))
+    ):
+        _type_row(d, row, e, n)
+    d.fit_corners()
+    assert d.size_x.value() == pytest.approx(30.0, abs=1e-6)
+    assert d.size_y.value() == pytest.approx(25.0, abs=1e-6)
+    assert d.sizes_typed() == (False, False)
 
 
 def test_a_typed_size_survives_fit_and_the_grid_stays_pinned_at_the_origin(session):
@@ -862,7 +874,9 @@ def test_fit_does_not_depend_on_typed_sizes(session):
 
 
 def test_an_existing_grid_opens_with_both_sizes_typed(session):
-    d = GridDialog(session, TRUE)
+    # 10 x 10 is the spin boxes' own default, so _prefill's setValue emits no
+    # valueChanged: only the explicit marking makes these typed
+    d = GridDialog(session, Grid("T", (500.0, 700.0), 30.0, 10.0, 10.0, "EPSG:32616", 0.5))
     assert d.sizes_typed() == (True, True)
     assert GridDialog(session).sizes_typed() == (False, False)
 
@@ -966,14 +980,13 @@ def test_rotate_carries_sources_and_swaps_typed_sizes(session):
     d = _utm_dialog(session)
     _type_row(d, 0, *SITE_CORNERS[0])
     _type_row(d, 2, *SITE_CORNERS[2])
-    d.size_x.setValue(30.0)
-    d.size_y.setValue(20.0)
+    d.size_x.setValue(30.0)  # only size_x is typed; size_y stays at its default 10
     d.rotate_corners()
     assert d.corner_point(1).x() == pytest.approx(SITE_CORNERS[2][0])
     assert d.corner_point(0) is None and d.corner_point(2) is None
     assert d.corner_point(3).x() == pytest.approx(SITE_CORNERS[0][0])
-    assert (d.size_x.value(), d.size_y.value()) == (20.0, 30.0)
-    assert d.sizes_typed() == (True, True)
+    assert (d.size_x.value(), d.size_y.value()) == (10.0, 30.0)
+    assert d.sizes_typed() == (False, True)
     assert d.corner_table.item(1, COL_FROM).text() == "typed"
 
 
@@ -1018,3 +1031,60 @@ def test_corners_in_starts_on_the_project_crs_or_wgs84(session, project_crs):
     assert GridDialog(session).corners_crs.crs() == UTM16
     project_crs(QgsCoordinateReferenceSystem())
     assert GridDialog(session).corners_crs.crs() == WGS84
+
+
+def test_fit_status_keeps_the_last_fit_line_through_row_changes(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.fit_corners()
+    line = d.fit_status.text()
+    measured = d.measured_size()
+    d.corner_table.item(0, COL_A).setText(f"{SITE_CORNERS[0][0]:.6f}")
+    assert d.fit_status.text() == line
+    d.rotate_corners()
+    assert d.fit_status.text() == line
+    assert d.measured_size() == (measured[1], measured[0])
+    d.corners_crs.setCrs(WGS84)
+    assert d.fit_status.text() == line
+    assert d.measured_size() == (measured[1], measured[0])
+    # an error covers the line; the next good edit brings it back
+    d.corner_table.item(0, COL_A).setText("x")
+    assert "not a number" in d.fit_status.text()
+    d.corner_table.item(0, COL_A).setText("-86.0")
+    assert d.fit_status.text() == line
+    d.clear_corners()
+    assert d.fit_status.text() == ""
+    assert d.measured_size() is None
+
+
+def test_a_refused_fit_line_also_survives_a_row_change(session):
+    d = _utm_dialog(session)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    d.fit_corners()
+    refusal = d.fit_status.text()
+    assert refusal
+    d.set_corner(1, QgsPointXY(*SITE_CORNERS[1]), UTM16, "typed")
+    assert d.fit_status.text() == refusal
+
+
+def test_a_half_filled_row_reads_as_empty_and_blocks_fit(session):
+    d = _utm_dialog(session)
+    for row in (0, 2, 3):
+        _type_row(d, row, *SITE_CORNERS[row])
+    d.corner_table.item(1, COL_A).setText(f"{SITE_CORNERS[1][0]:.6f}")
+    assert d.corner_point(1) is None
+    assert d.fit_status.text() == "+X: needs both coordinates"
+    d.fit_corners()
+    assert d.fit_status.text() == "+X has only one coordinate: fill both or clear it"
+    assert d.origin_x.value() == 0.0
+
+
+def test_a_fit_that_is_not_square_says_so(session):
+    d = _utm_dialog(session)
+    for row, (e, n) in enumerate(SITE_CORNERS):
+        _type_row(d, row, e + (0.05 if row == 2 else 0.0), n)
+    d.fit_corners()
+    text = d.fit_status.text()
+    assert text.startswith("rigid fit RMS 0.0")
+    assert not text.startswith("rigid fit RMS 0.000")
+    assert text.endswith(" m from 4 corners · not quite square: see off by")

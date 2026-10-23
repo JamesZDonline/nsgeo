@@ -121,6 +121,7 @@ class GridDialog(QDialog):
         self._sizing = False  # the dialog is writing a size box: not "typed"
         self._typed = [False, False]
         self._measured: tuple[float | None, float | None] | None = None
+        self._fit_line = ""  # the last Fit's message; errors only cover it
         self._offsets: list[float | None] = [None] * 4
         layout.addWidget(self._build_corner_group())
 
@@ -322,10 +323,13 @@ class GridDialog(QDialog):
         finally:
             self._filling = False
 
+    def _set_fit_line(self, text: str) -> None:
+        self._fit_line = text
+        self.fit_status.setText(text)
+
     def _rows_changed(self) -> None:
-        # A row change makes the last Fit's measured sizes and message stale.
-        self._measured = None
-        self.fit_status.setText("")
+        # A good row change brings the last Fit's line back over any error.
+        self.fit_status.setText(self._fit_line)
         self._refresh_derived()
         self.corners_changed.emit()
 
@@ -396,6 +400,8 @@ class GridDialog(QDialog):
             self._rows_changed()
             if bad is not None:
                 self.fit_status.setText(f"{CORNER_ROLES[row]}: '{bad}' is not a number")
+            elif self._corners[row] is None and (vals[0] is None) != (vals[1] is None):
+                self.fit_status.setText(f"{CORNER_ROLES[row]}: needs both coordinates")
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
             self.fit_status.setText(f"could not read that cell: {exc}")
 
@@ -431,6 +437,8 @@ class GridDialog(QDialog):
     def clear_corners(self) -> None:
         try:
             self._corners = [None] * 4
+            self._measured = None
+            self._fit_line = ""
             for row in range(4):
                 self._write_row(row)
             self._rows_changed()
@@ -449,6 +457,8 @@ class GridDialog(QDialog):
             finally:
                 self._sizing = False
             self._typed = [self._typed[1], self._typed[0]]
+            if self._measured is not None:
+                self._measured = (self._measured[1], self._measured[0])
             for row in range(4):
                 self._write_row(row)
             self._rows_changed()
@@ -479,18 +489,24 @@ class GridDialog(QDialog):
         try:
             grid_crs = self.crs_widget.crs()
             if not grid_crs.authid() or grid_crs.mapUnits() != Qgis.DistanceUnit.Meters:
-                self.fit_status.setText("set a metric CRS for the grid first")
+                self._set_fit_line("set a metric CRS for the grid first")
+                return
+            half = self._half_filled_row()
+            if half is not None:
+                self._set_fit_line(
+                    f"{CORNER_ROLES[half]} has only one coordinate: fill both or clear it"
+                )
                 return
             try:
                 points = self._corners_in_grid_crs(grid_crs)
             except QgsCsException:
-                self.fit_status.setText(f"could not convert the corners into {grid_crs.authid()}")
+                self._set_fit_line(f"could not convert the corners into {grid_crs.authid()}")
                 return
             try:
                 frame = corner_frame(points)
                 fit = fit_grid_from_corners(frame.local, frame.world)
             except ValueError as exc:
-                self.fit_status.setText(str(exc))
+                self._set_fit_line(str(exc))
                 return
             self.origin_x.setValue(fit.origin[0])
             self.origin_y.setValue(fit.origin[1])
@@ -506,12 +522,22 @@ class GridDialog(QDialog):
             finally:
                 self._sizing = False
             self._measured = (frame.size_x, frame.size_y)
-            self.fit_status.setText(
-                f"rigid fit RMS {fit.residual_rms:.3f} m from {len(frame.rows)} corners"
-            )
+            rms = f"{fit.residual_rms:.3f}"
+            line = f"rigid fit RMS {rms} m from {len(frame.rows)} corners"
+            if rms != "0.000":
+                line += " · not quite square: see off by"
+            self._set_fit_line(line)
             self._refresh_derived()
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
-            self.fit_status.setText(f"fit failed: {exc}")
+            self._set_fit_line(f"fit failed: {exc}")
+
+    def _half_filled_row(self) -> int | None:
+        for row in range(4):
+            if self._corners[row] is None:
+                texts = [self.corner_table.item(row, c).text().strip() for c in (COL_A, COL_B)]
+                if sum(bool(t) for t in texts) == 1:
+                    return row
+        return None
 
     # ---- typed sizes ------------------------------------------------------
     def _size_edited(self, axis: int) -> None:
