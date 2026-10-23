@@ -417,6 +417,22 @@ def test_corner_frame_refuses_mirrored_corners():
         corner_frame([W[0], W[3], None, W[1]])
 
 
+@pytest.mark.parametrize("a, b", [(0, 1), (1, 2), (2, 3), (3, 0)])
+def test_corner_frame_refuses_crossed_corners(a, b):
+    pts = list(W)
+    pts[a], pts[b] = pts[b], pts[a]
+    with pytest.raises(ValueError, match="out of order"):
+        corner_frame(pts)
+
+
+def test_corner_frame_refuses_crossed_corners_with_noise():
+    offsets = [(0.03, -0.02), (-0.04, 0.01), (0.02, 0.05), (-0.01, -0.03)]
+    pts = [(p[0] + o[0], p[1] + o[1]) for p, o in zip(W, offsets, strict=True)]
+    pts[2], pts[3] = pts[3], pts[2]
+    with pytest.raises(ValueError, match="out of order"):
+        corner_frame(pts)
+
+
 def test_corner_frame_refuses_corners_in_a_line():
     line = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), None]
     with pytest.raises(ValueError, match="in a line"):
@@ -489,3 +505,11 @@ def test_rotate_roles_moves_empty_rows_too():
 )
 def test_compass_label(dx, dy, label):
     assert compass_label((10.0 + dx, 20.0 + dy), (10.0, 20.0)) == label
+
+
+def test_roles_from_ring_tie_goes_to_the_lower_vertex_on_either_winding():
+    g = Grid("A", (500.0, 700.0), 45.0, 5.0, 5.0, "EPSG:32616", 0.5)
+    sq = [tuple(p) for p in g.to_world(np.array([[0, 0], [5, 0], [5, 5], [0, 5]], dtype=float))]
+    for ring, lowest_tied in ((sq, 0), (sq[::-1], 2)):
+        _, idx = roles_from_ring(ring)
+        assert idx[0] == lowest_tied

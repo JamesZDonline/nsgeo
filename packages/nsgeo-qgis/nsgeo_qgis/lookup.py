@@ -321,6 +321,7 @@ CORNER_ROLES: tuple[str, str, str, str] = ("origin", "+X", "+X+Y", "+Y")
 
 _COINCIDENT = 1e-6  # metres: shorter than this, two corners are one point
 _DEGENERATE_AREA = 1e-9  # relative to the largest edge squared
+_BEARING_TIE = 1e-9  # degrees: bearings closer than this are a tie
 _COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 
@@ -349,6 +350,11 @@ def _signed_area(pts: np.ndarray) -> float:
     return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
 
 
+def _cross(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
+    """Signed area (times two) of the turn a -> b -> c; positive is anticlockwise."""
+    return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+
+
 def corner_frame(points: Sequence[tuple[float, float] | None]) -> CornerFrame:
     """Turn up to four picked corners (CORNER_ROLES order, None for an empty
     row) into the local frame a fit needs: origin (0, 0), +X (sx, 0),
@@ -356,7 +362,11 @@ def corner_frame(points: Sequence[tuple[float, float] | None]) -> CornerFrame:
 
     Mirrored corners are refused, not fitted. The fit forbids reflections, so
     it would return a plausible-looking frame with only a large RMS to show
-    for the mistake; naming the cause is the useful answer.
+    for the mistake; naming the cause is the useful answer. Four corners
+    whose consecutive turns disagree in sign are crossed (two rows swapped,
+    say Z order): a wrong correspondence like a mirrored set, and refused for
+    the same reason, rather than fitted into a bad frame or misreported as
+    "in a line".
     """
     if len(points) != 4:
         raise ValueError(f"expected four corner slots, got {len(points)}")
@@ -384,6 +394,13 @@ def corner_frame(points: Sequence[tuple[float, float] | None]) -> CornerFrame:
     sx, sy = size_x or 0.0, size_y or 0.0
     template = ((0.0, 0.0), (sx, 0.0), (sx, sy), (0.0, sy))
     local = np.array([template[r] for r in rows], dtype=float)
+    if len(rows) == 4:
+        turns = [
+            _cross(world[a], world[b], world[c])
+            for a, b, c in ((0, 1, 2), (1, 2, 3), (2, 3, 0), (3, 0, 1))
+        ]
+        if any(t > 0 for t in turns) and any(t < 0 for t in turns):
+            raise ValueError("these corners are out of order: check which row each corner is in")
     if len(rows) >= 3:
         spread = max(float(np.linalg.norm(a - b)) for a in world for b in world)
         area = _signed_area(world)
@@ -405,7 +422,8 @@ def roles_from_ring(
     and +Y the previous one, which keeps the frame right-handed. The origin
     is the vertex whose origin-to-+Y bearing is closest to north, so the
     default grid reads the way a surveyor would lay it; ties go to the lower
-    index so the result is stable.
+    vertex index (of the cleaned ring, whatever the winding) so the result
+    is stable.
     """
     pts = [(float(p[0]), float(p[1])) for p in ring]
     clean: list[tuple[float, float]] = []
@@ -424,7 +442,8 @@ def roles_from_ring(
         o = clean[order[k]]
         y = clean[order[k - 1]]
         bearing = abs(math.degrees(math.atan2(y[0] - o[0], y[1] - o[1])))
-        if bearing < best_bearing - 1e-9:
+        tie = abs(bearing - best_bearing) <= _BEARING_TIE
+        if bearing < best_bearing - _BEARING_TIE or (tie and order[k] < order[best_k]):
             best_k, best_bearing = k, bearing
     # origin, +X (next), +X+Y (opposite), +Y (previous; k + 3 wraps to k - 1)
     idx = [order[(best_k + d) % 4] for d in (0, 1, 2, 3)]
