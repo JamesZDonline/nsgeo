@@ -10,7 +10,14 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
-from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
+from nsgeo_qgis.layers import (
+    _PICKS_BACKUP,
+    _PICKS_REBUILD,
+    DERIVED,
+    LEGEND_ORDER,
+    TABLES,
+    SiteLayers,
+)
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
@@ -2355,6 +2362,21 @@ def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populated):
+    """The slice preview and exported GeoTIFFs sit below the tables. A table
+    reopened after the user removed it goes back above them, every table,
+    the bottom one included."""
+    session, layers, project = populated
+    preview = QgsVectorLayer("Polygon?crs=EPSG:32616", "Slice (live preview)", "memory")
+    project.addMapLayer(preview, False)
+    layers.group.addLayer(preview)
+    for name in LEGEND_ORDER:
+        project.removeMapLayer(layers.layers[name].id())
+        session.add_grid(Grid(f"G{name}", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+        assert _names(layers.group) == [*LEGEND_ORDER, "Slice (live preview)"], name
 
 
 def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):

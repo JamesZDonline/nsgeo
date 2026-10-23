@@ -708,8 +708,6 @@ class SiteLayers(QObject):
         top. A new group so fills in LEGEND_ORDER, and a table reopened after
         the user removed it goes back to its place, not under the slice
         preview, without undoing any rearranging the user has done."""
-        if name == "grids":
-            return len(group.children())
         above = {
             self.layers[n].id()
             for n in LEGEND_ORDER[: LEGEND_ORDER.index(name)]
