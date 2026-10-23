@@ -582,3 +582,46 @@ def test_the_curve_and_points_are_not_painted_over_a_previewed_line(plugin):
     s.clear_preview()  # and they come back when the preview ends
     assert len(_view(plugin)._velocity_curve) == 200
     assert len(_view(plugin)._velocity_points) == 5
+
+
+def _stub_fit(monkeypatch, v, sigma):
+    from nsgeo.velocity_fit import HyperbolaFit
+    from nsgeo_qgis.ui import profile_dock
+
+    monkeypatch.setattr(
+        profile_dock, "fit_hyperbola", lambda *a, **k: HyperbolaFit(0.5, 20.0, v, sigma, 0.09, 5)
+    )
+
+
+def test_a_sigma_over_a_fifth_of_v_adds_a_poorly_constrained_note(plugin, monkeypatch):
+    _stub_fit(monkeypatch, 0.1, 0.021)  # 21 %
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    text = dock.velocity_readout.text()
+    assert "poorly constrained" in text
+    assert "further along the limbs" in text
+    assert dock.apply_line_button.isEnabled()  # advice, not a gate
+
+
+def test_a_sigma_under_a_fifth_of_v_adds_no_note(plugin, monkeypatch):
+    _stub_fit(monkeypatch, 0.1, 0.019)  # 19 %
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    assert "poorly constrained" not in dock.velocity_readout.text()
+    assert "±" in dock.velocity_readout.text()
+
+
+def test_turning_velocity_mode_off_clears_the_working_marks_but_keeps_saved_fits(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    _click_hyperbola(plugin)
+    v = _view(plugin)
+    assert v._velocity_points and v._velocity_curve and v._saved_velocity_curves
+
+    plugin.act_velocity.setChecked(False)
+    plugin.act_velocity.triggered.emit(False)
+
+    assert v._velocity_points == []
+    assert v._velocity_curve == []
+    assert len(v._saved_velocity_curves) == 1  # what is already measured stays visible

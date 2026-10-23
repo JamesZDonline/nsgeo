@@ -169,6 +169,31 @@ def test_retyping_the_selected_fits_own_velocity_keeps_the_fit_as_the_source(plu
     assert dialog.selected_fit_id() == fit_id
 
 
+def test_a_measured_line_velocity_names_the_fit_it_came_from(plugin):
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.4, 0.09))
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    assert velocity_source(s, key) == "line override"  # typed: no pointer yet
+    s.set_velocity_from_fit(key, fit_id)
+    assert velocity_source(s, key) == "line override (fit at 18.4 ns)"
+    assert "fit at 18.4 ns" in plugin.profile_dock.velocity_label.text()
+
+
+def test_a_pointer_to_a_fit_that_is_gone_leaves_the_bare_source(plugin):
+    import dataclasses
+
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    line = s.line_for_key(key)
+    dangling = dataclasses.replace(line, velocity_from_fit="gone")  # as a hand-edited file
+    s._lines_by_key[key] = dangling
+    assert velocity_source(s, key) == "line override"
+
+
 def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_dialog):
     from nsgeo_qgis.ui.profile_dock import velocity_source
 
@@ -176,7 +201,7 @@ def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_
     fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
     s.set_line_velocity(key, VelocityModel.constant(0.09))
     s.set_velocity_from_fit(key, fit_id)
-    assert velocity_source(s, key) == "line override"
+    assert velocity_source(s, key) == "line override (fit at 18.0 ns)"
     drive_dialog(QDialog, "exec", lambda d: d.clear_button.click())
 
     plugin.open_velocity_dialog(key)

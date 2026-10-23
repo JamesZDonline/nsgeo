@@ -44,6 +44,20 @@ def test_the_reported_sigma_brackets_the_error_under_noise():
     assert abs(fit.v_m_ns - v) <= 3.0 * fit.v_stderr_m_ns
 
 
+def test_rms_is_in_nanoseconds_of_time_not_of_time_squared():
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.linspace(2.0, 8.0, 9)
+    t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+    t = t + np.random.default_rng(0).normal(0.0, 0.2, size=t.size)
+    fit = fit_hyperbola(x, t, apex_guess_m=x0, search_m=0.0)
+    # Independent of the implementation: the root-mean-square gap, in ns,
+    # between each clicked time and the curve built from the fitted v and t0.
+    curve = np.sqrt(fit.t0_ns**2 + (4.0 / fit.v_m_ns**2) * (x - x0) ** 2)
+    expected = np.sqrt(np.sum((t - curve) ** 2) / t.size)
+    assert 0.05 < expected < 0.5  # noise of 0.2 ns: ns, not ns squared
+    assert fit.rms_ns == pytest.approx(expected, rel=1e-6)
+
+
 def test_points_clustered_near_the_apex_report_a_large_sigma_while_the_residual_stays_quiet():
     v, t0, x0 = 0.1, 20.0, 5.0
 

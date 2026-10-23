@@ -159,8 +159,7 @@ def fit_hyperbola(
         if x_m.size < 4:
             raise ValueError(
                 "Searching for the apex fits three unknowns, so it needs at least "
-                f"4 points; got {x_m.size}. Click another point, or turn the "
-                "apex search off."
+                f"4 points; got {x_m.size}. Click another point."
             )
         apexes = np.linspace(apex_guess_m - search_m, apex_guess_m + search_m, _SEARCH_STEPS)
     else:

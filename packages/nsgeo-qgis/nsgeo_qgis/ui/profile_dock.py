@@ -91,7 +91,8 @@ def time_param_name(step: Any) -> str | None:
 
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
-    "line override", "Grid <id>", a header-dielectric fallback, or
+    "line override" (or "line override (fit at 18.4 ns)" when the override
+    was measured from a stored fit), "Grid <id>", a header-dielectric fallback, or
     "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
@@ -121,6 +122,10 @@ def velocity_source(session: SiteSession, key: str) -> str:
     grid = session.grid_for_line(line)
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
+        # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
+        if fit is not None:
+            return f"line override (fit at {fit.t0_ns:.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
         return f"Grid {grid.id}"
@@ -826,10 +831,18 @@ class ProfileDock(QgsDockWidget):
                     fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
                     curve = self.velocity_curve_points(fit)
                     self._velocity_fit = fit
-                    self.velocity_readout.setText(
+                    readout = (
                         f"v = {fit.v_m_ns:6.4f} ± {fit.v_stderr_m_ns:6.4f} m/ns"
                         f" · rms {fit.rms_ns:5.2f} ns · {fit.n_points:2d} pts"
                     )
+                    if fit.v_stderr_m_ns / fit.v_m_ns > 0.2:
+                        # Advice, not a gate (spec §5.4): sigma is what makes
+                        # "the tool can tell you it fitted badly" true.
+                        readout += (
+                            ". The velocity is poorly constrained; try points "
+                            "spread further along the limbs."
+                        )
+                    self.velocity_readout.setText(readout)
                 except ValueError as exc:
                     if self._line_has_no_distance_calibration():
                         self.velocity_readout.setText(
@@ -839,11 +852,13 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
-            if self._preview_key is None:
+            if self._preview_key is None and self._velocity_mode:
                 self.view.set_velocity_fit(self._velocity_points, curve)
             else:
                 # The points and curve belong to the working line; painting
                 # them over a hovered one would put them on the wrong axes.
+                # With the mode off they are scratch marks with no control to
+                # remove them. Saved fits, below, show regardless of mode.
                 self.view.set_velocity_fit([], [])
             # Saved fits belong to the working line too, never a hovered one.
             self.view.set_saved_velocity_fits(

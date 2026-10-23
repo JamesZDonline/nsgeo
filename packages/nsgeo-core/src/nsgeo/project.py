@@ -259,7 +259,7 @@ def load_site(path: str | Path) -> Site:
         # Fits are evidence; a selection naming a fit that is gone is dropped
         # rather than costing the user the file.
         from_fit = entry.get("velocity_from_fit")
-        if from_fit not in fits:
+        if not isinstance(from_fit, str) or from_fit not in fits:
             from_fit = None
         line = Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity)
         lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))

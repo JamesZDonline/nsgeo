@@ -465,6 +465,21 @@ def test_a_velocity_from_fit_naming_a_missing_fit_loads_as_no_selection(tmp_path
     assert set(loaded.velocity_fits) == {"f1"}
 
 
+@pytest.mark.parametrize("pointer", ['["f1"]', "{}", "7", "null"])
+def test_a_non_string_velocity_from_fit_loads_as_no_selection(tmp_path, site, pointer):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    text = out.read_text()
+    doc = json.loads(text)
+    doc["lines"][0]["velocity_fits"] = {"f1": _a_fit().to_dict()}
+    doc["lines"][0]["velocity_from_fit"] = "@@"
+    # Hand-written JSON, as a person editing the file would leave it.
+    out.write_text(json.dumps(doc).replace('"@@"', pointer))
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_from_fit is None
+    assert set(loaded.velocity_fits) == {"f1"}
+
+
 def test_a_malformed_fit_raises_project_error_naming_the_line(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)

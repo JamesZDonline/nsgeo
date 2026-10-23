@@ -141,7 +141,7 @@ Each is a real failure mode, not a formality.
 
 | Condition | Meaning |
 |---|---|
-| Fewer than 3 points | Two unknowns; the third is what makes the residual mean anything. |
+| Fewer than 4 points with the apex searched (fewer than 3 with the search off) | The unknowns are v and t₀, plus the apex position when it is searched, so a searched apex is a third unknown. One point beyond the unknowns is what makes the residual mean anything. |
 | Any non-finite or non-positive time | A point at or above t = 0 is not on a diffraction. |
 | Solved slope ≤ 0 | The points do not describe a downward-opening hyperbola — usually a limb clicked on the wrong side. |
 | `v > C_M_PER_NS` | Faster than light in vacuum. `velocity.py` already defines the constant; a fit returning this was given something that is not a diffraction. |

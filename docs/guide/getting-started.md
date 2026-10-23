@@ -89,9 +89,10 @@ stay exactly where they are.
 | **Add grid…** | Places a new grid on the map. |
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
+| **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
 
 **Save site**, **Add grid…** and **Import DZT…** stay greyed out until a site is
-open, and **Pick** until a line is open.
+open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -120,9 +121,10 @@ any other QGIS panel.
 If you close a panel, reopen it from **View → Panels**. The toolbar is under
 **View → Toolbars → nsgeo**.
 
-In 0.1.0, **Set velocity override…** on a line's right-click menu is not
-available yet. It only shows a message. Set the velocity on the grid instead
-(right-click the grid, then **Set velocity…**).
+**Set velocity override…** on a line's right-click menu sets or clears that line's
+own velocity. It also lists the velocity fits you have measured on the line, and
+you can apply one of them as the override. Without an override, the line uses its
+grid's velocity (right-click the grid, then **Set velocity…**).
 
 ---
 
