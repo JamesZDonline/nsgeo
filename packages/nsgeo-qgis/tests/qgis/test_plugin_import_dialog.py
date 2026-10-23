@@ -646,6 +646,12 @@ def test_toolbar_import_targets_the_grid_the_selected_lines_share(three_grids):
     assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
 
 
+def test_toolbar_import_prefers_a_selected_grid_row_over_selected_lines(three_grids):
+    # #61's order: a selected grid row first, the selected lines' grid second.
+    _select(three_grids, ("grid", "C"), ("line", "raw/FILE__001.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+
+
 def test_toolbar_import_falls_back_to_the_open_lines_grid(three_grids):
     three_grids.session.open_line("raw/FILE__003.DZT")
     _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__003.DZT"))
@@ -678,3 +684,14 @@ def test_an_open_import_dialog_with_files_keeps_its_grid(three_grids, tmp_path):
     assert _import_from_toolbar(three_grids) is first
     assert first.grid_combo.currentData() == "B"
     assert len(first.rows) == 1
+
+
+def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opened(three_grids):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    three_grids.session.add_grid(Grid("D", (800.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    _select(three_grids, ("grid", "D"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "D"
+    assert first.windowTitle() == "Import DZT files into D"

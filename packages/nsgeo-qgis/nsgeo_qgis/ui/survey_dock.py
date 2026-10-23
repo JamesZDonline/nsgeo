@@ -282,21 +282,23 @@ class SurveyDock(QgsDockWidget):
     def target_grid_id(self) -> str | None:
         """The grid this panel points at, for the toolbar's Import DZT (#61).
 
-        The grid the selection names -- selected grid rows, or the grids of
-        selected lines, when they all come to one grid -- else the open
-        line's grid, else None. A selection spanning grids names none
-        rather than have one picked for it.
+        In #61's order: the selected grid row; else the grid the selected
+        lines share; else the open line's grid; else None. Grid rows or
+        lines spread over several grids name none, rather than have one
+        picked for them.
         """
         try:
-            grid_ids = set()
+            grid_rows, line_grids = set(), set()
             for item in self.tree.selectedItems():
                 key = self.key_of(item)
                 if key is not None:
-                    grid_ids.add(self._grid_of_line(key))
+                    line_grids.add(self._grid_of_line(key))
                 elif self.kind_of(item) == "grid":
-                    grid_ids.add(self.grid_id_of(item))
-            if len(grid_ids) == 1:
-                return grid_ids.pop()
+                    grid_rows.add(self.grid_id_of(item))
+            line_grids.discard(None)  # a line placed on no grid names none
+            for named in (grid_rows, line_grids):
+                if len(named) == 1:
+                    return named.pop()
             key = self.session.current_key
             return self._grid_of_line(key) if key else None
         except Exception as exc:  # noqa: BLE001 -- see the module docstring:

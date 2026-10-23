@@ -126,9 +126,7 @@ class ImportDialog(QDialog):
 
         form = QFormLayout()
         self.grid_combo = QComboBox()
-        site = session.site
-        for g in site.grids if site else []:
-            self.grid_combo.addItem(g.id, g.id)
+        self._fill_grid_combo()
         if grid_id:
             self.grid_combo.setCurrentIndex(max(0, self.grid_combo.findData(grid_id)))
         self.axis_combo = QComboBox()
@@ -264,9 +262,19 @@ class ImportDialog(QDialog):
         Import DZT files..., switches its target to that grid. A half-built
         import is never moved to another grid behind the user's back.
         """
+        if self.rows:
+            return
+        if self.grid_combo.findData(grid_id) < 0:
+            self._fill_grid_combo()  # a grid added since the dialog opened
         index = self.grid_combo.findData(grid_id)
-        if not self.rows and index >= 0:
+        if index >= 0:
             self.grid_combo.setCurrentIndex(index)
+
+    def _fill_grid_combo(self) -> None:
+        self.grid_combo.clear()
+        site = self.session.site
+        for g in site.grids if site else []:
+            self.grid_combo.addItem(g.id, g.id)
 
     def options(self) -> ImportOptions:
         grid = self._grid()
