@@ -138,6 +138,12 @@ class GridDialog(QDialog):
         self._grid_crs = QgsCoordinateReferenceSystem()  # the CRS the form's numbers are in
         self._auto_note = ""  # why the dialog picked the CRS, when it did
         self._crs_message = ""  # a hand pick that could not be honoured
+        # Full-precision ground anchor (R10): (CRS, E, N, azimuth) in the last
+        # metric CRS the grid was in. A spin box rounds to 3 decimals, which in
+        # degrees is ~100 m, so a hand pick converts from here, not from the
+        # boxes; a hand edit of the numbers while the CRS is not metric drops it.
+        self._anchor: tuple[QgsCoordinateReferenceSystem, float, float, float] | None = None
+        self._setting_numbers = False  # the dialog is writing origin/azimuth
         self.setWindowTitle(f"Grid · {grid.id}" if grid else "New grid")
         layout = QVBoxLayout(self)
 
@@ -238,6 +244,8 @@ class GridDialog(QDialog):
         # was not wired at all before this round.
         self.origin_x.valueChanged.connect(self._validate)
         self.origin_y.valueChanged.connect(self._validate)
+        for w in (self.origin_x, self.origin_y, self.azimuth):
+            w.valueChanged.connect(self._on_numbers_edited)
         self.size_x.valueChanged.connect(lambda _v: self._size_edited(0))
         self.size_y.valueChanged.connect(lambda _v: self._size_edited(1))
         for w in (self.origin_x, self.origin_y, self.azimuth, self.size_x, self.size_y):
@@ -636,9 +644,7 @@ class GridDialog(QDialog):
             except ValueError as exc:
                 self._set_fit_line(str(exc))
                 return
-            self.origin_x.setValue(fit.origin[0])
-            self.origin_y.setValue(fit.origin[1])
-            self.azimuth.setValue(fit.azimuth)
+            self._write_numbers(grid_crs, fit.origin[0], fit.origin[1], fit.azimuth)
             self._sizing = True
             try:
                 for axis, box, measured in (
@@ -753,9 +759,7 @@ class GridDialog(QDialog):
         self.id_edit.setText(grid.id)
         self.id_edit.setEnabled(False)  # lines reference the id; renaming is a different feature
         self._write_crs(QgsCoordinateReferenceSystem(grid.crs))
-        self.origin_x.setValue(grid.origin[0])
-        self.origin_y.setValue(grid.origin[1])
-        self.azimuth.setValue(grid.azimuth)
+        self._write_numbers(self.crs_widget.crs(), grid.origin[0], grid.origin[1], grid.azimuth)
         self.size_x.setValue(grid.size_x)
         self.size_y.setValue(grid.size_y)
         self.spacing.setValue(grid.default_spacing)
@@ -947,14 +951,29 @@ class GridDialog(QDialog):
         origin to a point 100 m along +Y. Nothing happens while the origin is
         still (0, 0). Returns a message when it could not, and then changes
         nothing."""
-        ox, oy, az = self.origin_x.value(), self.origin_y.value(), self.azimuth.value()
-        if (ox == 0.0 and oy == 0.0) or not old.isValid() or not new.isValid():
+        if (
+            (self.origin_x.value() == 0.0 and self.origin_y.value() == 0.0)
+            or not old.isValid()
+            or not new.isValid()
+        ):
+            self._anchor = None
             return None
+        # From the anchor when there is one (full precision, always metric);
+        # otherwise best effort from the boxes, in `old`.
+        if self._anchor is not None:
+            src, ox, oy, az = self._anchor
+        else:
+            src, ox, oy, az = (
+                old,
+                self.origin_x.value(),
+                self.origin_y.value(),
+                self.azimuth.value(),
+            )
         try:
-            xform = QgsCoordinateTransform(old, new, QgsProject.instance())
+            xform = QgsCoordinateTransform(src, new, QgsProject.instance())
             p0 = xform.transform(QgsPointXY(ox, oy))
             new_az = az
-            if old.mapUnits() == Qgis.DistanceUnit.Meters:
+            if src.mapUnits() == Qgis.DistanceUnit.Meters:
                 a = math.radians(az)
                 p1 = xform.transform(QgsPointXY(ox + 100 * math.sin(a), oy + 100 * math.cos(a)))
                 new_az = math.degrees(math.atan2(p1.x() - p0.x(), p1.y() - p0.y())) % 360.0
@@ -962,15 +981,48 @@ class GridDialog(QDialog):
                 raise QgsCsException("not finite")
         except QgsCsException:
             return f"could not convert the grid into {new.authid()}; kept {old.authid()}"
-        for box, value in (
-            (self.origin_x, p0.x()),
-            (self.origin_y, p0.y()),
-            (self.azimuth, new_az),
-        ):
-            box.blockSignals(True)
-            box.setValue(value)
-            box.blockSignals(False)
+        self._write_numbers(new, p0.x(), p0.y(), new_az, keep_anchor=True)
         return None
+
+    def _write_numbers(
+        self,
+        crs: QgsCoordinateReferenceSystem,
+        x: float,
+        y: float,
+        az: float,
+        keep_anchor: bool = False,
+    ) -> None:
+        """The dialog's own write of Origin E/N and Azimuth, in `crs`. A metric
+        `crs` makes (x, y, az) the anchor at full precision; a non-metric one
+        leaves the anchor as it was when `keep_anchor`, else drops it."""
+        self._setting_numbers = True
+        try:
+            for box, value in ((self.origin_x, x), (self.origin_y, y), (self.azimuth, az)):
+                box.setValue(value)
+        finally:
+            self._setting_numbers = False
+        if crs.isValid() and crs.mapUnits() == Qgis.DistanceUnit.Meters:
+            self._anchor = (crs, x, y, az)
+        elif not keep_anchor:
+            self._anchor = None
+
+    def _on_numbers_edited(self, *_: Any) -> None:
+        # valueChanged slot: a hand edit (the dialog's own writes are guarded).
+        if self._setting_numbers:
+            return
+        try:
+            crs = self.crs_widget.crs()
+            if crs.isValid() and crs.mapUnits() == Qgis.DistanceUnit.Meters:
+                self._anchor = (
+                    crs,
+                    self.origin_x.value(),
+                    self.origin_y.value(),
+                    self.azimuth.value(),
+                )
+            else:
+                self._anchor = None
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self._crs_message = f"could not read the grid numbers: {exc}"
 
     def _on_grid_crs_changed(self, *_: Any) -> None:
         # crsChanged slot: a change outside _setting_crs is the user's pick.

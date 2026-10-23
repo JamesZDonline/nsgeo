@@ -1443,9 +1443,39 @@ def test_off_by_is_blank_unless_the_grid_crs_is_usable_at_the_origin(session, pr
     d.azimuth.setValue(11.0)
     assert all(o is not None for o in d.corner_offsets()[1:])
     for code in ("EPSG:4326", "EPSG:2264", "EPSG:3857"):  # degrees, US feet, 20% off
-        d.crs_widget.setCrs(UTM16)
-        d.origin_x.setValue(SITE.origin[0])
-        d.origin_y.setValue(SITE.origin[1])
+        d.crs_widget.setCrs(UTM16)  # the round trip must bring the grid back by itself
         d.crs_widget.setCrs(QgsCoordinateReferenceSystem(code))
         assert (d.origin_x.value(), d.origin_y.value()) != (0.0, 0.0), code
         assert d.corner_offsets() == [None] * 4, code
+
+
+@pytest.mark.parametrize("via", ["EPSG:4326", "EPSG:2264", "EPSG:32617"])
+def test_a_round_trip_through_any_crs_leaves_the_grid_where_it_was(session, project_crs, via):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(SITE.azimuth)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem(via))
+    d.crs_widget.setCrs(UTM16)
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-3)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-3)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-6)
+
+
+def test_a_hand_edit_in_a_non_metric_crs_wins_over_the_anchor(session, project_crs):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(SITE.azimuth)
+    d.crs_widget.setCrs(WGS84)
+    lon, lat = d.origin_x.value(), d.origin_y.value()
+    d.origin_x.setValue(lon + 0.01)  # about 0.9 km east: the user's own number
+    d.crs_widget.setCrs(UTM16)
+    want = QgsCoordinateTransform(WGS84, UTM16, QgsProject.instance()).transform(
+        QgsPointXY(lon + 0.01, lat)
+    )
+    assert (d.origin_x.value(), d.origin_y.value()) == pytest.approx((want.x(), want.y()), abs=1e-3)
+    assert abs(d.origin_x.value() - SITE.origin[0]) > 500
