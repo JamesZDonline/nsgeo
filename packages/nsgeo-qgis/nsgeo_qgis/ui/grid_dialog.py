@@ -1,8 +1,8 @@
-"""Grid dialog: three ways in, one set of numbers.
+"""Grid dialog: one corner table, one Fit, one set of numbers.
 
-GNSS corners (rigid least-squares fit with a residual shown as QC),
-digitising two points on the map, or reading a selected polygon feature.
-All three fill the same fields; the user can still edit any of them.
+Corners are typed (or, in later tasks, picked on the map or read from a
+polygon) into a single table in any CRS; Fit places the grid from them and
+fills the form, which the user can still edit.
 """
 
 from __future__ import annotations
@@ -17,35 +17,34 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsDistanceArea,
-    QgsMapLayerProxyModel,
     QgsPointXY,
     QgsProject,
     QgsUnitTypes,
 )
-from qgis.gui import QgsFeaturePickerWidget, QgsMapLayerComboBox, QgsProjectionSelectionWidget
+from qgis.gui import QgsProjectionSelectionWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from nsgeo_qgis.lookup import corners_from_polygon
+from nsgeo_qgis.lookup import CORNER_ROLES, corner_frame, rotate_roles
 from nsgeo_qgis.session import SiteSession
 
-CORNER_NAMES = ("origin", "+X", "+X+Y", "+Y")
+COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
 
 # Local scale-factor thresholds for _validate()'s CRS check (round 3,
 # Finding 1): |k - 1| where k is ground distance / declared distance at
@@ -98,7 +97,9 @@ def _label(text: str, width: int) -> QLabel:
 
 
 class GridDialog(QDialog):
-    digitise_requested = pyqtSignal()
+    pick_requested = pyqtSignal(int)
+    pick_all_requested = pyqtSignal()
+    corners_changed = pyqtSignal()
 
     def __init__(
         self,
@@ -113,11 +114,15 @@ class GridDialog(QDialog):
         self.setWindowTitle(f"Grid · {grid.id}" if grid else "New grid")
         layout = QVBoxLayout(self)
 
-        self.tabs = QTabWidget(self)
-        self.tabs.addTab(self._build_corner_tab(), "GNSS corners")
-        self.tabs.addTab(self._build_digitise_tab(), "Digitise on map")
-        self.tabs.addTab(self._build_polygon_tab(), "From polygon")
-        layout.addWidget(self.tabs)
+        # Row state: (point in corners_crs, source) or None, in CORNER_ROLES
+        # order. Full precision lives here; the cells show a rounded copy.
+        self._corners: list[tuple[QgsPointXY, str] | None] = [None] * 4
+        self._filling = False  # the dialog is writing cells: not a user edit
+        self._sizing = False  # the dialog is writing a size box: not "typed"
+        self._typed = [False, False]
+        self._measured: tuple[float | None, float | None] | None = None
+        self._offsets: list[float | None] = [None] * 4
+        layout.addWidget(self._build_corner_group())
 
         # Round 4, Finding 2: crs_hint needs to be a real sibling in the
         # *outer* QVBoxLayout, not a row inside a QFormLayout nested in
@@ -159,6 +164,16 @@ class GridDialog(QDialog):
         form_bottom.addRow(_label("Origin E, N", label_width), origin_row)
         form_bottom.addRow(_label("Azimuth (° cw from N to +Y)", label_width), self.azimuth)
         form_bottom.addRow(_label("Size X, Y (m)", label_width), size_row)
+        self.size_hint = QLabel("")
+        self.size_hint.setWordWrap(True)
+        self.use_measured_button = QPushButton("Use these")
+        self.use_measured_button.clicked.connect(self.use_measured_size)
+        hint_row = QHBoxLayout()
+        hint_row.addWidget(self.size_hint, 1)
+        hint_row.addWidget(self.use_measured_button)
+        self.size_hint.hide()
+        self.use_measured_button.hide()
+        form_bottom.addRow(_label("", label_width), hint_row)
         form_bottom.addRow(_label("Default spacing (m)", label_width), self.spacing)
         form_bottom.addRow(_label("Velocity (m/ns)", label_width), vel_row)
         layout.addLayout(form_top)
@@ -194,6 +209,11 @@ class GridDialog(QDialog):
         # was not wired at all before this round.
         self.origin_x.valueChanged.connect(self._validate)
         self.origin_y.valueChanged.connect(self._validate)
+        self.size_x.valueChanged.connect(lambda _v: self._size_edited(0))
+        self.size_y.valueChanged.connect(lambda _v: self._size_edited(1))
+        for w in (self.origin_x, self.origin_y, self.azimuth, self.size_x, self.size_y):
+            w.valueChanged.connect(self._refresh_derived)
+        self.crs_widget.crsChanged.connect(self._refresh_derived)
 
         project_crs = QgsProject.instance().crs()
         # Round 1 and 2 fell back to a placeholder CRS (first EPSG:4326,
@@ -210,229 +230,364 @@ class GridDialog(QDialog):
             self.crs_widget.setCrs(project_crs)
         if grid is not None:
             self._prefill(grid)
+            self._typed = [True, True]
         elif suggested_velocity is not None:
             self.velocity.setValue(suggested_velocity)
             self.velocity_hint.setText("from the header dielectric")
         self._validate()
+        self._refresh_derived()
 
-    # ---- tabs -------------------------------------------------------------
-    def _build_corner_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        self.corner_table = QTableWidget(4, 5)
-        self.corner_table.setHorizontalHeaderLabels(
-            ["corner", "local x", "local y", "world E", "world N"]
+    # ---- corner table -----------------------------------------------------
+    def _build_corner_group(self) -> QGroupBox:
+        box = QGroupBox("Corners")
+        v = QVBoxLayout(box)
+        project_crs = QgsProject.instance().crs()
+        self.corners_crs = QgsProjectionSelectionWidget()
+        self.corners_crs.setCrs(
+            project_crs if project_crs.isValid() else QgsCoordinateReferenceSystem("EPSG:4326")
         )
-        for row, name in enumerate(CORNER_NAMES):
-            item = QTableWidgetItem(name)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.corner_table.setItem(row, 0, item)
-            for col in range(1, 5):
+        self._prev_corners_crs = self.corners_crs.crs()
+        crs_row = QHBoxLayout()
+        crs_row.addWidget(QLabel("Corners in"))
+        crs_row.addWidget(self.corners_crs, 1)
+        v.addLayout(crs_row)
+
+        self.corner_table = QTableWidget(4, 6)
+        self.corner_table.verticalHeader().hide()
+        self.pick_buttons: list[QPushButton] = []
+        self._filling = True
+        for row, name in enumerate(CORNER_ROLES):
+            role = QTableWidgetItem(name)
+            role.setFlags(role.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.corner_table.setItem(row, COL_ROLE, role)
+            for col in (COL_A, COL_B):
                 self.corner_table.setItem(row, col, QTableWidgetItem(""))
+            for col in (COL_FROM, COL_OFF):
+                cell = QTableWidgetItem("")
+                cell.setFlags(cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.corner_table.setItem(row, col, cell)
+            button = QPushButton("Pick")
+            button.clicked.connect(lambda _checked=False, r=row: self.pick_requested.emit(r))
+            self.corner_table.setCellWidget(row, COL_PICK, button)
+            self.pick_buttons.append(button)
+        self._filling = False
+        self._set_headers()
+        self.corner_table.itemChanged.connect(self._on_cell_edited)
+        self.corners_crs.crsChanged.connect(self._on_corners_crs_changed)
         v.addWidget(self.corner_table)
-        row = QHBoxLayout()
+
+        buttons = QHBoxLayout()
+        self.pick_all_button = QPushButton("Pick all")
+        self.pick_all_button.clicked.connect(lambda _checked=False: self.pick_all_requested.emit())
+        self.rotate_button = QPushButton("⟳ Rotate")
+        self.rotate_button.clicked.connect(self.rotate_corners)
+        self.clear_button = QPushButton("Clear")
+        self.clear_button.clicked.connect(self.clear_corners)
         self.fit_button = QPushButton("Fit")
         self.fit_button.clicked.connect(self.fit_corners)
-        self.residual_label = QLabel("rigid fit: rotation + translation, no scale")
-        row.addWidget(self.fit_button)
-        row.addWidget(self.residual_label)
-        row.addStretch(1)
-        v.addLayout(row)
-        return w
+        for b in (self.pick_all_button, self.rotate_button, self.clear_button, self.fit_button):
+            buttons.addWidget(b)
+        buttons.addStretch(1)
+        v.addLayout(buttons)
+        self.fit_status = QLabel("")
+        self.fit_status.setWordWrap(True)
+        v.addWidget(self.fit_status)
+        return box
 
-    def _build_digitise_tab(self) -> QWidget:
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.addWidget(
-            QLabel(
-                "Click the grid origin on the map, then a point along the +Y edge. "
-                "Right-click to cancel the pick. Then enter the sizes."
+    def _geographic(self) -> bool:
+        return self.corners_crs.crs().isGeographic()
+
+    def _set_headers(self) -> None:
+        a, b = ("lon", "lat") if self._geographic() else ("E", "N")
+        self.corner_table.setHorizontalHeaderLabels(["corner", a, b, "from", "", "off by"])
+
+    def _fmt(self, value: float) -> str:
+        return f"{value:.8f}" if self._geographic() else f"{value:.3f}"
+
+    def _write_row(self, row: int) -> None:
+        entry = self._corners[row]
+        cells = (
+            ("", "", "")
+            if entry is None
+            else (
+                self._fmt(entry[0].x()),
+                self._fmt(entry[0].y()),
+                entry[1],
             )
         )
-        self.digitise_button = QPushButton("Pick on map")
-        self.digitise_button.clicked.connect(self.digitise_requested.emit)
-        v.addWidget(self.digitise_button)
-        v.addStretch(1)
-        return w
+        self._filling = True
+        try:
+            for col, text in zip((COL_A, COL_B, COL_FROM), cells):
+                self.corner_table.item(row, col).setText(text)
+        finally:
+            self._filling = False
 
-    def _build_polygon_tab(self) -> QWidget:
-        w = QWidget()
-        form = QFormLayout(w)
-        self.layer_combo = QgsMapLayerComboBox()
-        self.layer_combo.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
-        self.feature_picker = QgsFeaturePickerWidget()
-        self.layer_combo.layerChanged.connect(self.feature_picker.setLayer)
-        self.feature_picker.setLayer(self.layer_combo.currentLayer())
-        self.origin_combo = QComboBox()
-        self.plus_y_combo = QComboBox()
-        for i in range(4):
-            self.origin_combo.addItem(f"vertex {i}")
-            self.plus_y_combo.addItem(f"vertex {i}")
-        self.plus_y_combo.setCurrentIndex(3)
-        self.use_polygon_button = QPushButton("Use polygon")
-        self.use_polygon_button.clicked.connect(self.use_polygon)
-        form.addRow("Layer", self.layer_combo)
-        form.addRow("Feature", self.feature_picker)
-        form.addRow("Origin corner", self.origin_combo)
-        form.addRow("+Y corner", self.plus_y_combo)
-        form.addRow(self.use_polygon_button)
-        self.polygon_status = QLabel("")
-        form.addRow(self.polygon_status)
-        return w
+    def _rows_changed(self) -> None:
+        # A row change makes the last Fit's measured sizes and message stale.
+        self._measured = None
+        self.fit_status.setText("")
+        self._refresh_derived()
+        self.corners_changed.emit()
 
-    # ---- the three paths --------------------------------------------------
-    def set_corner_row(self, row: int, lx: float, ly: float, wx: float, wy: float) -> None:
-        for col, val in zip((1, 2, 3, 4), (lx, ly, wx, wy)):
-            self.corner_table.item(row, col).setText(f"{val:.6f}")
+    def corner_point(self, row: int) -> QgsPointXY | None:
+        entry = self._corners[row]
+        return None if entry is None else QgsPointXY(entry[0])
 
-    def _corner_arrays(self) -> tuple[np.ndarray, np.ndarray]:
-        local, world = [], []
-        for row in range(self.corner_table.rowCount()):
-            vals = [self.corner_table.item(row, c).text().strip() for c in range(1, 5)]
-            if not all(vals):
+    def corner_source(self, row: int) -> str:
+        entry = self._corners[row]
+        return "" if entry is None else entry[1]
+
+    def corner_offsets(self) -> list[float | None]:
+        return list(self._offsets)
+
+    def set_corner(
+        self, row: int, point: QgsPointXY, crs: QgsCoordinateReferenceSystem, source: str
+    ) -> bool:
+        target = self.corners_crs.crs()
+        converted = QgsPointXY(point)
+        if crs != target:
+            try:
+                xform = QgsCoordinateTransform(crs, target, QgsProject.instance())
+                converted = xform.transform(point)
+            except QgsCsException:
+                self.fit_status.setText(f"could not convert that point into {target.authid()}")
+                return False
+        self._corners[row] = (converted, source)
+        self._write_row(row)
+        self._rows_changed()
+        return True
+
+    def _on_cell_edited(self, item: QTableWidgetItem) -> None:
+        # itemChanged slot: report, never raise (Qt would swallow it).
+        if self._filling or item.column() not in (COL_A, COL_B):
+            return
+        try:
+            row = item.row()
+            prev = self._corners[row]
+            vals: list[float | None] = []
+            bad: str | None = None
+            for col, comp in ((COL_A, 0), (COL_B, 1)):
+                text = self.corner_table.item(row, col).text().strip()
+                if not text:
+                    vals.append(None)
+                    continue
+                kept = None if prev is None else (prev[0].x(), prev[0].y())[comp]
+                if kept is not None and text == self._fmt(kept):
+                    vals.append(kept)  # untouched cell: keep full precision
+                    continue
+                try:
+                    num = float(text)
+                    if not math.isfinite(num):
+                        raise ValueError(text)
+                    vals.append(num)
+                except ValueError:
+                    vals.append(None)
+                    bad = text
+            x, y = vals
+            if bad is None and x is not None and y is not None:
+                self._corners[row] = (QgsPointXY(x, y), "typed")
+            else:
+                self._corners[row] = None
+            self._filling = True
+            try:
+                self.corner_table.item(row, COL_FROM).setText("typed" if self._corners[row] else "")
+            finally:
+                self._filling = False
+            self._rows_changed()
+            if bad is not None:
+                self.fit_status.setText(f"{CORNER_ROLES[row]}: '{bad}' is not a number")
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not read that cell: {exc}")
+
+    def _on_corners_crs_changed(self, *_: Any) -> None:
+        try:
+            old, new = self._prev_corners_crs, self.corners_crs.crs()
+            if old == new:
+                return
+            if not new.isValid():
+                return
+            converted: list[tuple[QgsPointXY, str] | None] = []
+            try:
+                xform = QgsCoordinateTransform(old, new, QgsProject.instance())
+                for entry in self._corners:
+                    converted.append(
+                        None if entry is None else (xform.transform(entry[0]), entry[1])
+                    )
+            except QgsCsException:
+                self.fit_status.setText(f"could not convert the corners into {new.authid()}")
+                self.corners_crs.blockSignals(True)
+                self.corners_crs.setCrs(old)
+                self.corners_crs.blockSignals(False)
+                return
+            self._prev_corners_crs = new
+            self._corners = converted
+            self._set_headers()
+            for row in range(4):
+                self._write_row(row)
+            self._rows_changed()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not change the corners' CRS: {exc}")
+
+    def clear_corners(self) -> None:
+        try:
+            self._corners = [None] * 4
+            for row in range(4):
+                self._write_row(row)
+            self._rows_changed()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not clear the corners: {exc}")
+
+    def rotate_corners(self) -> None:
+        try:
+            self._corners = rotate_roles(self._corners)
+            # The old +Y edge is the new +X edge, so the sizes swap with it.
+            sx, sy = self.size_x.value(), self.size_y.value()
+            self._sizing = True
+            try:
+                self.size_x.setValue(sy)
+                self.size_y.setValue(sx)
+            finally:
+                self._sizing = False
+            self._typed = [self._typed[1], self._typed[0]]
+            for row in range(4):
+                self._write_row(row)
+            self._rows_changed()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not rotate the corners: {exc}")
+
+    # ---- fit --------------------------------------------------------------
+    def _corners_in_grid_crs(
+        self, grid_crs: QgsCoordinateReferenceSystem
+    ) -> list[tuple[float, float] | None]:
+        source = self.corners_crs.crs()
+        xform = (
+            None
+            if source == grid_crs
+            else QgsCoordinateTransform(source, grid_crs, QgsProject.instance())
+        )
+        out: list[tuple[float, float] | None] = []
+        for entry in self._corners:
+            if entry is None:
+                out.append(None)
                 continue
-            nums = [float(v) for v in vals]
-            local.append(nums[:2])
-            world.append(nums[2:])
-        return np.array(local, dtype=float), np.array(world, dtype=float)
+            p = entry[0] if xform is None else xform.transform(entry[0])
+            out.append((p.x(), p.y()))
+        return out
 
     def fit_corners(self) -> None:
-        # _corner_arrays() belongs inside the guard too: a hand-typed cell
-        # that is not a number (a stray letter, a stray space) makes its
-        # float(v) raise ValueError just as surely as a bad fit does, and
-        # this method is a QPushButton.clicked slot -- an uncaught
-        # exception here would be swallowed by Qt (see the module
-        # docstrings in plugin.py / survey_dock.py) rather than shown.
+        # clicked slot: every failure becomes a message in fit_status.
         try:
-            local, world = self._corner_arrays()
-            fit = fit_grid_from_corners(local, world)
-        except ValueError as exc:
-            self.residual_label.setText(str(exc))
-            return
-        # fit.origin is the world position of local (0, 0) *in the
-        # control points' own local frame* -- but a Grid's canonical
-        # rectangle spans local [0, size_x] x [0, size_y], and control
-        # points need not be anchored at that local origin (e.g. the
-        # origin stake is unreachable, so the crew surveys local
-        # (100, 50) to (137.5, 62.25) instead of (0, 0) to
-        # (37.5, 12.25)). Round 1 fixed size_x/size_y to the extent
-        # (max - min) but left fit.origin as-is, which put the *origin*
-        # 111.8 m from every one of the surveyed corners it was fitted
-        # to -- a correct azimuth and a 0.000 m residual on a grid whose
-        # own outline no longer contains the ground it was measured
-        # from. The true origin is the world position of local
-        # (min_x, min_y), i.e. fit.origin translated by that offset
-        # along the fitted axes.
-        mins = local.min(axis=0)
-        a = math.radians(fit.azimuth)
-        y_hat = np.array([math.sin(a), math.cos(a)])
-        x_hat = np.array([math.cos(a), -math.sin(a)])
-        origin = np.asarray(fit.origin) + mins[0] * x_hat + mins[1] * y_hat
-        self.origin_x.setValue(float(origin[0]))
-        self.origin_y.setValue(float(origin[1]))
-        self.azimuth.setValue(fit.azimuth)
-        self.size_x.setValue(float(local[:, 0].max() - local[:, 0].min()))
-        self.size_y.setValue(float(local[:, 1].max() - local[:, 1].min()))
-        # A nonzero RMS here has two very different causes, and this label
-        # cannot tell them apart: it may mean the physical corners just
-        # weren't surveyed perfectly square (the ordinary case), or it may
-        # mean the local/world correspondence itself is mirrored -- e.g.
-        # the +X and +Y world fixes were logged in swapped rows. Both look
-        # like "some residual"; fit_grid_from_corners forbids reflection,
-        # so a mirrored input still returns a plausible origin and azimuth
-        # rather than an obvious error. Saying only "not square" would send
-        # a user with a swapped-row blunder back out to re-measure a grid
-        # that was never wrong.
-        self.residual_label.setText(
-            f"rigid fit RMS {fit.residual_rms:.3f} m -- 0 for exact corners; a nonzero "
-            "residual can mean the corners weren't surveyed perfectly square, or that "
-            "the local/world correspondence is mirrored (check which corner is +X and "
-            "which is +Y)"
-        )
-
-    def set_digitised(self, origin_xy: tuple[float, float], along_xy: tuple[float, float]) -> None:
-        dx = along_xy[0] - origin_xy[0]
-        dy = along_xy[1] - origin_xy[1]
-        if math.hypot(dx, dy) == 0.0:
-            # atan2(0, 0) silently returns 0.0 -- a real-looking azimuth
-            # for a grid that was never actually defined. A double-click
-            # registering as two canvasClicked events at the same pixel is
-            # exactly the kind of "looked fine" bug this task warns about,
-            # so this must fail loudly rather than seed a plausible-but-
-            # meaningless frame.
-            raise ValueError("the two digitised points coincide; click two distinct points")
-        self.origin_x.setValue(origin_xy[0])
-        self.origin_y.setValue(origin_xy[1])
-        self.azimuth.setValue(math.degrees(math.atan2(dx, dy)) % 360.0)
-        self.tabs.setCurrentIndex(1)
-
-    def use_polygon(self) -> None:
-        feature = self.feature_picker.feature()
-        layer = self.layer_combo.currentLayer()
-        if layer is None or not feature.isValid() or feature.geometry().isNull():
-            self.polygon_status.setText("select a polygon feature first")
-            return
-        if layer.crs().isGeographic():
-            # corners_from_polygon/fit_grid_from_corners treat the ring's
-            # raw coordinates as metres. In a geographic CRS they are
-            # degrees: size_x/size_y come out as ~1e-3 (rounds to 0.00 at
-            # this dialog's 2 decimals, which is the only thing that
-            # currently stops OK from enabling), and a rigid fit of the
-            # ring to itself in degree units still finds a near-zero
-            # residual -- "rigid fit RMS 0.000 m" -- at an azimuth that is
-            # wrong by several degrees (1 degree of longitude is not 1
-            # degree of latitude in metres, away from the equator). A
-            # convincing success message on a wrong frame is exactly the
-            # failure mode this plan has already shipped twice, so this
-            # is refused outright rather than merely warned about.
-            #
-            # _validate()'s crs.isGeographic() check would also catch
-            # this (round 2, Finding 2) and keep OK disabled either way
-            # -- but only by disabling a button, silently, after this
-            # method has already gone on to compute and display exactly
-            # that convincing-but-wrong fit. Kept deliberately: refusing
-            # here means azimuth/size_x/size_y and polygon_status never
-            # show a plausible answer for this layer at all, rather than
-            # showing one that then can't be saved.
-            self.polygon_status.setText(
-                "this layer's CRS is geographic (degrees, not metres) -- reproject it "
-                "to a projected CRS before reading corners from it"
+            grid_crs = self.crs_widget.crs()
+            if not grid_crs.authid() or grid_crs.mapUnits() != Qgis.DistanceUnit.Meters:
+                self.fit_status.setText("set a metric CRS for the grid first")
+                return
+            try:
+                points = self._corners_in_grid_crs(grid_crs)
+            except QgsCsException:
+                self.fit_status.setText(f"could not convert the corners into {grid_crs.authid()}")
+                return
+            try:
+                frame = corner_frame(points)
+                fit = fit_grid_from_corners(frame.local, frame.world)
+            except ValueError as exc:
+                self.fit_status.setText(str(exc))
+                return
+            self.origin_x.setValue(fit.origin[0])
+            self.origin_y.setValue(fit.origin[1])
+            self.azimuth.setValue(fit.azimuth)
+            self._sizing = True
+            try:
+                for axis, box, measured in (
+                    (0, self.size_x, frame.size_x),
+                    (1, self.size_y, frame.size_y),
+                ):
+                    if measured is not None and not self._typed[axis]:
+                        box.setValue(measured)
+            finally:
+                self._sizing = False
+            self._measured = (frame.size_x, frame.size_y)
+            self.fit_status.setText(
+                f"rigid fit RMS {fit.residual_rms:.3f} m from {len(frame.rows)} corners"
             )
-            return
-        geom = feature.geometry()
+            self._refresh_derived()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"fit failed: {exc}")
+
+    # ---- typed sizes ------------------------------------------------------
+    def _size_edited(self, axis: int) -> None:
+        if not self._sizing:
+            self._typed[axis] = True
+
+    def sizes_typed(self) -> tuple[bool, bool]:
+        return (self._typed[0], self._typed[1])
+
+    def measured_size(self) -> tuple[float | None, float | None] | None:
+        return self._measured
+
+    def use_measured_size(self) -> None:
         try:
-            polygon = geom.asPolygon() if not geom.isMultipart() else geom.asMultiPolygon()[0]
-            ring = [(p.x(), p.y()) for p in polygon[0]]
-        except IndexError:
-            # isNull() is False for a geometry with zero rings (an empty
-            # polygon), so the guard above lets it through; asPolygon()
-            # then returns [] and polygon[0] raises. Same clicked-signal
-            # hazard as fit_corners() above: this must not disappear into
-            # stderr while the user stares at unchanged fields.
-            self.polygon_status.setText("this feature has no rings to read corners from")
-            return
+            if self._measured is None:
+                return
+            self._sizing = True
+            try:
+                for box, measured in zip((self.size_x, self.size_y), self._measured):
+                    if measured is not None:
+                        box.setValue(measured)
+            finally:
+                self._sizing = False
+            self._typed = [False, False]
+            self._refresh_derived()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not use the measured size: {exc}")
+
+    # ---- off-by and the size hint -----------------------------------------
+    def _refresh_derived(self, *_: Any) -> None:
         try:
-            corners = corners_from_polygon(
-                ring, self.origin_combo.currentIndex(), self.plus_y_combo.currentIndex()
-            )
-            fit = fit_grid_from_corners(corners.local, corners.world)
-        except ValueError as exc:
-            # corners_from_polygon's own message already names the fix
-            # ("pick the other corner adjacent to the origin for +Y"), so
-            # showing it verbatim is the actionable message -- not a
-            # traceback swallowed by the clicked-signal hazard (see the
-            # module docstrings in plugin.py / survey_dock.py), and not a
-            # silent no-op that leaves the user staring at unchanged
-            # fields with no idea why.
-            self.polygon_status.setText(str(exc))
-            return
-        self.origin_x.setValue(fit.origin[0])
-        self.origin_y.setValue(fit.origin[1])
-        self.azimuth.setValue(fit.azimuth)
-        self.size_x.setValue(corners.size_x)
-        self.size_y.setValue(corners.size_y)
-        self.crs_widget.setCrs(layer.crs())
-        self.polygon_status.setText(f"rigid fit RMS {fit.residual_rms:.3f} m")
+            self._refresh_off_by()
+            self._refresh_size_hint()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not update the corner offsets: {exc}")
+
+    def _refresh_off_by(self) -> None:
+        offsets: list[float | None] = [None] * 4
+        grid_crs = self.crs_widget.crs()
+        ox, oy = self.origin_x.value(), self.origin_y.value()
+        sx, sy = self.size_x.value(), self.size_y.value()
+        if grid_crs.authid() and not (ox == 0.0 and oy == 0.0) and sx > 0 and sy > 0:
+            try:
+                points = self._corners_in_grid_crs(grid_crs)
+                grid = Grid("_", (ox, oy), self.azimuth.value(), sx, sy, grid_crs.authid(), 0.5)
+                expect = grid.to_world(np.array([[0, 0], [sx, 0], [sx, sy], [0, sy]], dtype=float))
+                for i, p in enumerate(points):
+                    if p is not None:
+                        offsets[i] = float(np.hypot(p[0] - expect[i, 0], p[1] - expect[i, 1]))
+            except (QgsCsException, ValueError):
+                offsets = [None] * 4
+        self._offsets = offsets
+        self._filling = True
+        try:
+            for row, off in enumerate(offsets):
+                self.corner_table.item(row, COL_OFF).setText("" if off is None else f"{off:.2f} m")
+        finally:
+            self._filling = False
+
+    def _refresh_size_hint(self) -> None:
+        show = False
+        if self._measured is not None:
+            mx, my = self._measured
+            for axis, measured, box in ((0, mx, self.size_x), (1, my, self.size_y)):
+                if (
+                    measured is not None
+                    and self._typed[axis]
+                    and abs(measured - box.value()) >= 0.005
+                ):
+                    show = True
+            if show:
+                fx = "?" if mx is None else f"{mx:.2f}"
+                fy = "?" if my is None else f"{my:.2f}"
+                self.size_hint.setText(f"the corners measure {fx} × {fy} m · your size is kept")
+        self.size_hint.setVisible(show)
+        self.use_measured_button.setVisible(show)
 
     # ---- result -----------------------------------------------------------
     def _prefill(self, grid: Grid) -> None:

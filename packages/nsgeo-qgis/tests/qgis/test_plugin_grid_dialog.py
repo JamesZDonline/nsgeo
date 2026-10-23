@@ -9,7 +9,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.grid_dialog import GridDialog
+from nsgeo_qgis.ui.grid_dialog import COL_A, COL_B, COL_FROM, COL_ROLE, GridDialog
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -20,10 +20,26 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QEvent, Qt
-from qgis.PyQt.QtWidgets import QLabel, QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox
 
 TRUE = Grid("A", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
 LOCAL = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]])
+
+SITE = Grid("S", (518_204.112, 4_000_731.508), 10.0, 20.0, 20.0, "EPSG:32616", 0.5)
+SITE_CORNERS = SITE.to_world(np.array([[0, 0], [20, 0], [20, 20], [0, 20]], dtype=float))
+UTM16, WGS84 = QgsCoordinateReferenceSystem("EPSG:32616"), QgsCoordinateReferenceSystem("EPSG:4326")
+
+
+@pytest.fixture
+def project_crs(qgis_app):
+    """Set the project CRS for a test and put the original back after."""
+    original = QgsProject.instance().crs()
+
+    def _set(crs: QgsCoordinateReferenceSystem) -> None:
+        QgsProject.instance().setCrs(crs)
+
+    yield _set
+    QgsProject.instance().setCrs(original)
 
 
 @pytest.fixture
@@ -78,16 +94,6 @@ def _pump(app: object, condition: object, timeout: float = 2.0) -> bool:
         app.processEvents()
         time.sleep(0.01)
     return condition()
-
-
-def _select_sole_feature(qgis_app: object, dialog: GridDialog, layer: QgsVectorLayer) -> None:
-    """Select `layer`'s only feature in `dialog`'s polygon tab, waiting
-    out QgsFeaturePickerWidget's asynchronous population (see _pump)."""
-    dialog.layer_combo.setLayer(layer)
-    _pump(qgis_app, lambda: dialog.feature_picker.feature().isValid())
-    fid = next(layer.getFeatures()).id()
-    dialog.feature_picker.setFeature(fid)
-    _pump(qgis_app, lambda: dialog.feature_picker.feature().id() == fid)
 
 
 def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
@@ -159,16 +165,7 @@ def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
     finally:
         QgsProject.instance().setCrs(original_project_crs)
 
-    # 2. The digitise flow's canvas CRS (plugin.py's done() adopts
-    #    canvas.mapSettings().destinationCrs() unconditionally --
-    #    Concern 1 from round 1, confirmed geographic-canvas numbers in
-    #    the round 2 report). Simulated directly: from crs_widget's
-    #    point of view it is just another setCrs() call.
-    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
-    assert not d.ok_button.isEnabled()
-    assert "metres" in d.crs_hint.text().lower()
-
-    # 3a. A CRS the user picks by hand that is valid but has no
+    # 2a. A CRS the user picks by hand that is valid but has no
     #     authority code (round 1, Finding 2).
     custom = QgsCoordinateReferenceSystem.fromProj(
         "+proj=omerc +lat_0=36 +lonc=15 +alpha=30 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
@@ -178,7 +175,7 @@ def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
     assert not d.ok_button.isEnabled()
     assert "authority" in d.crs_hint.text().lower()
 
-    # 3b. ... or one the user picks that is geographic outright.
+    # 2b. ... or one the user picks that is geographic outright.
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
     assert not d.ok_button.isEnabled()
     assert "metres" in d.crs_hint.text().lower()
@@ -301,292 +298,6 @@ def test_crs_scale_check_skips_on_transform_failure_rather_than_refusing(session
     assert d._crs_scale_error(d.crs_widget.crs()) is None
     assert d.ok_button.isEnabled()
     assert d.crs_hint.text() == ""
-
-
-def test_corner_fit_fills_origin_azimuth_and_sizes(session):
-    d = GridDialog(session, suggested_velocity=0.0801)
-    world = TRUE.to_world(LOCAL)
-    for row, (lo, wo) in enumerate(zip(LOCAL, world)):
-        d.set_corner_row(row, lo[0], lo[1], wo[0], wo[1])
-    d.fit_corners()
-    assert d.origin_x.value() == pytest.approx(500.0, abs=1e-6)
-    assert d.origin_y.value() == pytest.approx(700.0, abs=1e-6)
-    assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
-    assert d.size_x.value() == pytest.approx(5.0) and d.size_y.value() == pytest.approx(11.0)
-    assert "0.000" in d.residual_label.text()
-    d.id_edit.setText("A")
-    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-    g = d.result_grid()
-    assert g.id == "A" and g.crs == "EPSG:32616"
-    assert g.velocity == VelocityModel.constant(0.0801)
-
-
-def test_corner_tab_residual_caption_distinguishes_mirrored_from_not_square(session):
-    # A data-entry blunder -- the +X and +Y world readings swapped, e.g.
-    # because the field crew logged the two GNSS fixes in the wrong rows
-    # -- is not "the grid wasn't surveyed square": fit_grid_from_corners
-    # forbids reflection, so it still returns a plausible-looking origin
-    # and azimuth, just with a large residual. The brief's caption ("0 =
-    # square") would mislead a user staring at this into re-measuring a
-    # perfectly good grid instead of checking which corner is which.
-    d = GridDialog(session)
-    world = TRUE.to_world(LOCAL)
-    swapped_world = world[[0, 3, 2, 1]]  # +X and +Y world fixes swapped
-    for row, (lo, wo) in enumerate(zip(LOCAL, swapped_world)):
-        d.set_corner_row(row, lo[0], lo[1], wo[0], wo[1])
-    d.fit_corners()
-    text = d.residual_label.text()
-    assert "0.000" not in text
-    assert "mirror" in text.lower()
-
-
-def test_corner_fit_places_control_points_not_anchored_at_the_local_origin(session):
-    # Fix round 1, Finding 5 fixed the *size* (max() -> max() - min()) but
-    # left fit.origin as-is: fit.origin is the world position of local
-    # (0, 0) *in the control points' own local frame*, which is not the
-    # same point as local (0, 0) of the fitted grid's own canonical
-    # [0, size_x] x [0, size_y] rectangle when the control points are
-    # offset (the origin stake is unreachable, so the crew surveys local
-    # (100, 50) .. (137.5, 62.25) instead of (0, 0) .. (37.5, 12.25)).
-    # Round 2, Finding 1: that left the *origin* 111.8 m from every one
-    # of the four corners it was fitted to -- a correct azimuth and a
-    # 0.000 m residual on a grid whose own outline no longer contains the
-    # ground it was measured from. Fixed by translating fit.origin by
-    # local.min(axis=0) along the fitted axes.
-    #
-    # True grid deliberately independent of this test's control points:
-    # world corners come from true_grid.to_world() of its *own* canonical
-    # rectangle, not of the offset local coordinates -- the offset is
-    # only how the crew recorded distances, not a claim about where the
-    # grid's own [0, size] rectangle sits.
-    true_grid = Grid("B", (5000.0, 8000.0), 200.0, 37.5, 12.25, "EPSG:32616", 0.5)
-    canonical = np.array([[0.0, 0.0], [37.5, 0.0], [37.5, 12.25], [0.0, 12.25]])
-    world = true_grid.to_world(canonical)
-    local_offset = np.array([[100.0, 50.0], [137.5, 50.0], [137.5, 62.25], [100.0, 62.25]])
-
-    d = GridDialog(session)
-    for row, (lo, wo) in enumerate(zip(local_offset, world)):
-        d.set_corner_row(row, lo[0], lo[1], wo[0], wo[1])
-    d.fit_corners()
-    assert d.origin_x.value() == pytest.approx(5000.0, abs=1e-6)
-    assert d.origin_y.value() == pytest.approx(8000.0, abs=1e-6)
-    assert d.azimuth.value() == pytest.approx(200.0, abs=1e-6)
-    assert d.size_x.value() == pytest.approx(37.5, abs=1e-6)
-    assert d.size_y.value() == pytest.approx(12.25, abs=1e-6)
-    assert "0.000" in d.residual_label.text()
-
-    # The real test: does the *fitted grid's own rectangle* land back on
-    # the four points it was surveyed from? (Round 1's fix alone put
-    # this at 111.8 m on all four corners -- correct size, wrong origin.)
-    fitted = Grid(
-        "B",
-        (d.origin_x.value(), d.origin_y.value()),
-        d.azimuth.value(),
-        d.size_x.value(),
-        d.size_y.value(),
-        "EPSG:32616",
-        0.5,
-    )
-    own_canonical = np.array(
-        [
-            [0.0, 0.0],
-            [d.size_x.value(), 0.0],
-            [d.size_x.value(), d.size_y.value()],
-            [0.0, d.size_y.value()],
-        ]
-    )
-    distances = np.linalg.norm(fitted.to_world(own_canonical) - world, axis=1)
-    assert distances == pytest.approx([0.0, 0.0, 0.0, 0.0], abs=1e-6)
-
-
-def test_fit_corners_reports_bad_numeric_entry_without_crashing(session):
-    # fit_corners() is a QPushButton.clicked slot; a hand-typed cell that
-    # is not a number must surface as a message, not disappear into
-    # stderr while the fields sit unchanged with no explanation (the
-    # reference implementation's _corner_arrays() call sat outside its
-    # own try/except, so this was not actually guarded).
-    d = GridDialog(session)
-    d.set_corner_row(0, 0.0, 0.0, 500.0, 700.0)
-    d.set_corner_row(1, 1.0, 2.0, 3.0, 4.0)
-    d.corner_table.item(1, 1).setText("not-a-number")
-    d.fit_corners()  # must not raise
-    assert "not-a-number" in d.residual_label.text()
-    assert d.origin_x.value() == 0.0  # untouched: no crash, no silent wrong answer
-
-
-def test_polygon_tab_reads_a_selected_feature(qgis_app, session):
-    layer = _memory_layer(TRUE.to_world(LOCAL))
-    QgsProject.instance().addMapLayer(layer)
-    try:
-        d = GridDialog(session)
-        _select_sole_feature(qgis_app, d, layer)
-        d.origin_combo.setCurrentIndex(0)
-        d.plus_y_combo.setCurrentIndex(3)
-        d.use_polygon()
-        assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
-        assert d.size_y.value() == pytest.approx(11.0, abs=1e-6)
-    finally:
-        QgsProject.instance().removeMapLayer(layer.id())
-
-
-def test_polygon_tab_rejects_the_mirrored_default_pick_and_the_other_corner_fixes_it(
-    qgis_app, session
-):
-    # Same rectangle as above, but digitised with the opposite winding
-    # (ring order v0, v3, v2, v1 instead of v0, v1, v2, v3). For *this*
-    # winding, plus_y_combo's brief-specified default of index 3 names
-    # the mirrored corner -- corners_from_polygon must reject it rather
-    # than silently return a plausible-but-wrong grid, and the dialog
-    # must recover cleanly when the user picks the other corner.
-    rev_local = LOCAL[[0, 3, 2, 1]]
-    layer = _memory_layer(TRUE.to_world(rev_local))
-    QgsProject.instance().addMapLayer(layer)
-    try:
-        d = GridDialog(session)
-        _select_sole_feature(qgis_app, d, layer)
-        d.origin_combo.setCurrentIndex(0)
-        assert d.plus_y_combo.currentIndex() == 3  # the brief's default
-
-        d.use_polygon()
-        assert "mirror" in d.polygon_status.text().lower()
-        # A rejected pick must not silently write a wrong-but-plausible
-        # grid: the fields stay at their untouched defaults.
-        assert d.azimuth.value() == 0.0
-        assert d.size_x.value() == 10.0 and d.size_y.value() == 10.0
-
-        d.plus_y_combo.setCurrentIndex(1)  # the other corner adjacent to the origin
-        d.use_polygon()
-        assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
-        assert d.size_x.value() == pytest.approx(5.0, abs=1e-6)
-        assert d.size_y.value() == pytest.approx(11.0, abs=1e-6)
-    finally:
-        QgsProject.instance().removeMapLayer(layer.id())
-
-
-def test_use_polygon_without_a_selected_feature_reports_a_message_not_a_crash(session):
-    d = GridDialog(session)
-    d.use_polygon()  # no layer ever selected
-    assert "polygon feature" in d.polygon_status.text().lower()
-    assert d.azimuth.value() == 0.0  # untouched
-
-
-def test_use_polygon_reports_an_empty_geometry_without_crashing(qgis_app, session):
-    # geometry.isNull() is False for an empty (zero-ring) polygon, so
-    # use_polygon()'s "select a feature first" guard lets it through;
-    # asPolygon() then returns [] and polygon[0] used to raise IndexError
-    # straight out of a clicked slot.
-    layer = QgsVectorLayer("Polygon?crs=EPSG:32616", "plan", "memory")
-    f = QgsFeature()
-    f.setGeometry(QgsGeometry.fromPolygonXY([]))
-    layer.dataProvider().addFeatures([f])
-    QgsProject.instance().addMapLayer(layer)
-    try:
-        d = GridDialog(session)
-        _select_sole_feature(qgis_app, d, layer)
-        d.use_polygon()  # must not raise
-        assert d.azimuth.value() == 0.0  # untouched
-        assert d.polygon_status.text()  # some explanation, not blank
-    finally:
-        QgsProject.instance().removeMapLayer(layer.id())
-
-
-def test_use_polygon_refuses_a_geographic_crs_layer(qgis_app, session):
-    # Fix round 1, Finding 1: corners_from_polygon/fit_grid_from_corners
-    # treat a ring's raw coordinates as metres. A geographic (degrees)
-    # layer breaks that silently rather than loudly: size_x/size_y come
-    # out as ~1e-3 (degrees), and a rigid fit of the ring to itself in
-    # degree units still finds a near-zero residual at a *wrong*
-    # azimuth (1 degree of longitude is not 1 degree of latitude in
-    # metres, away from the equator) -- "rigid fit RMS 0.000 m" on a
-    # frame that is actually several degrees off. Numerically verified
-    # (see the fix-round report) with a true 200 x 80 m, 30 degree
-    # grid at ~36N: before this fix, azimuth came back 26.31 degrees
-    # (3.69 degrees / ~5 m of cross-track error at the far corner) with
-    # residual_rms 6.45e-05 -- the caption's "0.000 m".
-    proj_crs = QgsCoordinateReferenceSystem("EPSG:32633")
-    true_grid = Grid("B", (500000.0, 3985000.0), 30.0, 200.0, 80.0, "EPSG:32633", 1.0)
-    local = np.array([[0.0, 0.0], [200.0, 0.0], [200.0, 80.0], [0.0, 80.0]])
-    world_proj = true_grid.to_world(local)
-    geo_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-    xform = QgsCoordinateTransform(proj_crs, geo_crs, QgsProject.instance())
-    ring_geo = [QgsPointXY(*xform.transform(QgsPointXY(x, y))) for x, y in world_proj]
-
-    layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "plan", "memory")
-    f = QgsFeature()
-    f.setGeometry(QgsGeometry.fromPolygonXY([ring_geo]))
-    layer.dataProvider().addFeatures([f])
-    QgsProject.instance().addMapLayer(layer)
-    try:
-        d = GridDialog(session)
-        crs_before = d.crs_widget.crs().authid()
-        _select_sole_feature(qgis_app, d, layer)
-        d.use_polygon()
-        assert "geographic" in d.polygon_status.text().lower()
-        assert d.azimuth.value() == 0.0  # untouched -- no wrong-but-plausible grid
-        assert d.size_x.value() == 10.0 and d.size_y.value() == 10.0
-        assert d.crs_widget.crs().authid() == crs_before  # not silently overwritten
-    finally:
-        QgsProject.instance().removeMapLayer(layer.id())
-
-
-def test_use_polygon_success_still_gets_a_visible_crs_refusal(qgis_app, session):
-    # Fix round 2, Finding 3, worst case: a layer in a valid, *non*
-    # geographic custom CRS with no authority code. use_polygon()'s own
-    # isGeographic() guard does not catch this (correctly -- the fit
-    # itself is genuinely fine), so it proceeds, reports success, and
-    # overwrites crs_widget with that CRS -- silently disabling OK
-    # before this fix, with nothing in polygon_status (which still,
-    # correctly, says the fit succeeded) explaining why.
-    custom = QgsCoordinateReferenceSystem.fromProj(
-        "+proj=omerc +lat_0=36 +lonc=15 +alpha=30 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
-    )
-    assert custom.isValid() and not custom.isGeographic() and not custom.authid()
-    layer = _memory_layer(TRUE.to_world(LOCAL))
-    layer.setCrs(custom)
-    QgsProject.instance().addMapLayer(layer)
-    try:
-        d = GridDialog(session)
-        d.id_edit.setText("A")
-        d.velocity.setValue(0.08)
-        _select_sole_feature(qgis_app, d, layer)
-        d.origin_combo.setCurrentIndex(0)
-        d.plus_y_combo.setCurrentIndex(3)
-        d.use_polygon()
-        assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)  # the fit is genuinely correct
-        assert "0.000" in d.polygon_status.text()
-        assert not d.ok_button.isEnabled()  # but its CRS has no authority code
-        assert "authority" in d.crs_hint.text().lower()
-    finally:
-        QgsProject.instance().removeMapLayer(layer.id())
-
-
-def test_digitised_points_set_origin_and_azimuth(session):
-    d = GridDialog(session)
-    d.set_digitised(
-        (500.0, 700.0), (500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30)))
-    )
-    assert (d.origin_x.value(), d.origin_y.value()) == (500.0, 700.0)
-    assert d.azimuth.value() == pytest.approx(30.0, abs=1e-6)
-
-
-def test_digitise_tab_instructions_mention_the_right_click_abort(session):
-    # The dialog hides itself during a pick (see digitise_button.click()
-    # elsewhere in this file), so there is no visible Cancel button while
-    # a pick is in progress -- the label is the only place a user can
-    # learn that right-click is the way out.
-    d = GridDialog(session)
-    labels = d.tabs.widget(1).findChildren(QLabel)
-    assert any("right-click" in lbl.text().lower() for lbl in labels)
-
-
-def test_set_digitised_rejects_coincident_points(session):
-    # atan2(0, 0) == 0.0 with no error: two clicks landing on the same
-    # point (a fast double-click reading as two canvasClicked events)
-    # would otherwise seed a plausible-looking but meaningless azimuth.
-    d = GridDialog(session)
-    with pytest.raises(ValueError):
-        d.set_digitised((500.0, 700.0), (500.0, 700.0))
-    assert d.azimuth.value() == 0.0  # untouched
 
 
 def test_editing_an_existing_grid_prefills_and_keeps_its_id(session):
@@ -845,198 +556,6 @@ def test_open_grid_dialog_reports_a_stale_grid_id_without_crashing(fake_iface, t
     plugin.unload()
 
 
-def test_digitise_flow_recovers_from_coincident_points(fake_iface, tmp_path):
-    # set_digitised() now rejects two clicks landing on the same point;
-    # the plugin's done() callback must still hand control back to the
-    # dialog (unset the map tool, show() it again) and tell the user why
-    # nothing was filled in, rather than leave the map tool stuck active
-    # with the dialog invisible and no explanation.
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    tool = canvas.mapTool()
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)  # same point
-
-    assert canvas.mapTool() is None  # control handed back regardless
-    assert not dialog.isHidden()
-    item = fake_iface.messageBar().currentItem()
-    assert item is not None and "coincide" in item.text()
-    assert dialog.azimuth.value() == 0.0  # untouched
-
-    dialog.reject()
-    plugin.unload()
-
-
-def test_digitise_flow_through_the_plugin_fills_and_restores_the_dialog(
-    fake_iface, tmp_path, answer_modal
-):
-    # Fix round 4, Finding 1 (critical): this is the test that exposed
-    # the bug. drive_dialog's exec() monkeypatch (used here in every
-    # earlier round) hid it completely: faking exec() to just call a
-    # driver callback directly never runs Qt's real application-modal
-    # event loop, so dialog.hide() below never got the chance to
-    # terminate it -- which is exactly what it does for real (verified
-    # directly with a bare QDialog; see the fix-round report). No
-    # QDialog.exec anywhere in this test: open_grid_dialog() now calls
-    # show(), and this drives the real, already-visible dialog exactly
-    # as a user would -- two real canvas clicks, then accept().
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    assert dialog.isVisible()
-
-    dialog.digitise_button.click()
-    assert dialog.isHidden()  # out of the way so the canvas can be clicked
-    tool = canvas.mapTool()
-    assert isinstance(tool, DigitiseGridTool)
-
-    tool.canvasClicked.emit(QgsPointXY(500.0, 700.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(
-        QgsPointXY(500.0 + 5.0 * np.sin(np.radians(30)), 700.0 + 5.0 * np.cos(np.radians(30))),
-        Qt.MouseButton.LeftButton,
-    )
-
-    assert canvas.mapTool() is None  # the tool hands control back
-    assert dialog.isVisible()  # and the dialog is restored
-    assert dialog.origin_x.value() == pytest.approx(500.0)
-    assert dialog.origin_y.value() == pytest.approx(700.0)
-    assert dialog.azimuth.value() == pytest.approx(30.0, abs=1e-6)
-
-    dialog.id_edit.setText("D")
-    dialog.velocity.setValue(0.08)
-    # done() adopts canvas.mapSettings().destinationCrs(), which is
-    # invalid on this bare test canvas (no project/layer ever set one)
-    # -- a real user's canvas has the project's CRS. Set one explicitly
-    # so this test's accept() reflects a real usable state rather than
-    # incidentally re-proving Finding 2 (crs="").
-    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-    dialog.accept()
-
-    grid = plugin.session.grid("D")
-    assert grid.azimuth == pytest.approx(30.0, abs=1e-6)
-    assert grid.crs == "EPSG:32616"
-    assert plugin._grid_dialog is None  # finished() cleared it
-    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
-    plugin.unload()
-
-
-def test_digitise_flow_right_click_restores_the_dialog_without_a_pick(fake_iface, tmp_path):
-    # Fix round 1, Finding 4: before this fix, a right-click meant to
-    # cancel instead completed the pick (or set the origin), and there
-    # was no way back short of killing QGIS if the pick was abandoned.
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert dialog.isHidden()
-    tool = canvas.mapTool()
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(QgsPointXY(2.0, 2.0), Qt.MouseButton.RightButton)  # abort
-
-    assert canvas.mapTool() is None
-    assert not dialog.isHidden()  # restored -- without ever completing the pick
-    assert dialog.azimuth.value() == 0.0  # untouched
-
-    dialog.reject()
-    plugin.unload()
-
-
-def test_digitise_flow_switching_map_tools_restores_the_dialog(fake_iface, tmp_path):
-    # Fix round 1, Finding 4: switching to a completely different map
-    # tool (e.g. Pan) mid-pick used to leave the dialog hidden forever,
-    # since only done() (a successful two-click pick) ever restored it.
-    import nsgeo_qgis
-    from qgis.gui import QgsMapToolPan
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert dialog.isHidden()
-    canvas.setMapTool(QgsMapToolPan(canvas))
-    assert not dialog.isHidden()
-
-    dialog.reject()
-    plugin.unload()
-
-
-def test_open_grid_dialog_releases_a_stranded_map_tool_on_close(fake_iface, tmp_path):
-    # Fix round 2, Finding 4: the dialog can finish (accept, reject, or
-    # the window closed outright) while a digitise pick is still in
-    # progress, with neither done() nor the tool's own cancelled signal
-    # ever having fired to release it -- e.g. a keyboard shortcut, or
-    # (as simulated here) a caller that just gives up on the pick
-    # without clicking the map or right-clicking to abort. Before this
-    # fix that left a live DigitiseGridTool wired to a `dialog`
-    # open_grid_dialog was about to delete; a later click on it raised
-    # RuntimeError out of a signal-connected slot.
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert isinstance(canvas.mapTool(), DigitiseGridTool)
-    dialog.reject()  # gives up on the pick entirely, tool still active -- must not raise
-
-    assert canvas.mapTool() is None  # released, not left stranded
-    plugin.unload()
-
-
-def test_open_grid_dialog_releases_a_stranded_tool_on_accept_without_flashing_the_dialog(
-    fake_iface, tmp_path, answer_modal
-):
-    # Fix round 3, Finding 3: releasing a still-active digitise tool in
-    # finished()'s cleanup (round 2, Finding 4's fix) runs
-    # unsetMapTool() -> deactivate() -> cancelled -> show_dialog(),
-    # which would otherwise re-show `dialog` -- already accepted here --
-    # for one event-loop turn before deleteLater() actually destroys it.
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert isinstance(canvas.mapTool(), DigitiseGridTool)
-    assert dialog.isHidden()
-    dialog.id_edit.setText("A")
-    dialog.velocity.setValue(0.08)
-    dialog.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
-    dialog.accept()  # accepted mid-pick, tool still active -- must not raise
-
-    assert canvas.mapTool() is None  # released
-    assert dialog.isHidden()  # never re-shown after being accepted
-    assert plugin.session.grid("A").crs == "EPSG:32616"
-    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
-    plugin.unload()
-
-
 def test_open_grid_dialog_does_not_open_a_second_dialog_while_one_is_open(fake_iface, tmp_path):
     # Fix round 4, Finding 1: modeless means the toolbar/dock stay
     # clickable while a grid dialog is open, unlike the old exec()'s
@@ -1056,30 +575,6 @@ def test_open_grid_dialog_does_not_open_a_second_dialog_while_one_is_open(fake_i
     assert plugin._grid_dialog is first  # no second dialog created
 
     first.reject()
-    plugin.unload()
-
-
-def test_open_grid_dialog_shows_the_existing_dialog_even_if_hidden_mid_pick(fake_iface, tmp_path):
-    # Fix round 5, Finding 5: re-triggering "Add grid" while the dialog
-    # is hidden (a digitise pick in progress -- _start_digitise() hides
-    # it deliberately) used to call only raise_()/activateWindow(), not
-    # show(): a hidden window raised and activated is still invisible,
-    # so the user got no window and no message at all.
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()  # hides the dialog, arms the tool
-    assert dialog.isHidden()
-
-    plugin.open_grid_dialog(None)  # "Add grid" clicked again
-    assert plugin._grid_dialog is dialog  # still the same dialog...
-    assert dialog.isVisible()  # ...but now actually visible again
-
-    dialog.reject()
     plugin.unload()
 
 
@@ -1164,40 +659,6 @@ def test_unload_closes_a_visible_grid_dialog(fake_iface, tmp_path):
     assert dialog.isVisible()
     plugin.unload()
     assert plugin._grid_dialog is None
-
-
-def test_unload_closes_a_dialog_hidden_mid_digitise_pick(fake_iface, tmp_path):
-    # Fix round 5, Finding 1: QDialog::closeEvent only calls reject()
-    # when the dialog isVisible() -- close() on a hidden one just
-    # accepts the close event, and finished() never fires at all
-    # (verified directly on a bare QDialog: hidden + close() -> 0
-    # finished emissions; hidden + reject() -> 1). Hidden mid-pick is
-    # this feature's *ordinary* state -- _start_digitise() hides the
-    # dialog deliberately so the canvas can be clicked -- so unload()
-    # must work in exactly the state its own feature creates, not only
-    # the visible one. Left unfixed, this was user-reachable (not
-    # merely a leak): two further canvas clicks would re-show the
-    # orphaned dialog over an unloaded plugin, and clicking OK would
-    # raise AttributeError on self.session (already None), swallowed to
-    # stderr -- the dialog closing as if the grid were saved when
-    # nothing was.
-    import nsgeo_qgis
-    from nsgeo_qgis.maptools.digitise_tool import DigitiseGridTool
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert dialog.isHidden()
-    assert isinstance(canvas.mapTool(), DigitiseGridTool)
-
-    plugin.unload()
-
-    assert plugin._grid_dialog is None
-    assert canvas.mapTool() is None
 
 
 def test_finished_reports_when_the_site_closed_under_the_dialog(fake_iface, tmp_path):
@@ -1301,98 +762,6 @@ def _scene_bands(canvas: Any) -> list:
     return [item for item in canvas.scene().items() if isinstance(item, QgsRubberBand)]
 
 
-def test_completed_digitise_picks_do_not_pile_rubber_bands_into_the_scene(
-    fake_iface, tmp_path, answer_modal
-):
-    # Final review, I4: DigitiseGridTool.__init__ builds a
-    # QgsRubberBand(canvas), which the canvas's QGraphicsScene owns.
-    # _start_digitise() builds a fresh tool per attempt and the old code
-    # only ever called unsetMapTool(), which frees neither. Three
-    # digitise attempts left three bands behind -- invisible (reset()
-    # clears their geometry) but exactly the object this file's own
-    # round-1 note implicates in a shutdown segfault "once enough of
-    # them pile up alongside a QgsMapCanvas".
-    import gc
-
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-    baseline = len(_scene_bands(canvas))
-
-    for _ in range(3):
-        dialog = _open(plugin)
-        dialog.digitise_button.click()
-        tool = canvas.mapTool()
-        assert isinstance(tool, DigitiseGridTool)
-        tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-        tool.canvasClicked.emit(QgsPointXY(2.0, 3.0), Qt.MouseButton.LeftButton)
-        dialog.reject()
-        del tool
-        gc.collect()
-
-    assert len(_scene_bands(canvas)) == baseline
-    plugin.unload()
-
-
-def test_an_aborted_digitise_pick_gives_its_rubber_band_back(fake_iface, tmp_path):
-    # The right-click abort reaches the tool through `cancelled`, not
-    # through done(): a separate finaliser, so it needs the disposal of
-    # its own. Same for a plain map-tool switch, which arrives at the
-    # same signal.
-    import gc
-
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-    baseline = len(_scene_bands(canvas))
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    tool = canvas.mapTool()
-    tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
-    tool.canvasClicked.emit(QgsPointXY(2.0, 2.0), Qt.MouseButton.RightButton)  # abort
-
-    assert not dialog.isHidden()  # round 1, Finding 4 still holds
-    del tool
-    gc.collect()
-    assert len(_scene_bands(canvas)) == baseline
-
-    dialog.reject()
-    plugin.unload()
-
-
-def test_a_dialog_closed_mid_pick_gives_the_rubber_band_back(fake_iface, tmp_path):
-    # The third finaliser: open_grid_dialog()'s finished() teardown,
-    # which blockSignals(True)s the tool precisely so `cancelled` does
-    # NOT run (round 3, Finding 3) -- so it cannot lean on the cancelled
-    # path's disposal and must do its own.
-    import gc
-
-    import nsgeo_qgis
-
-    plugin = nsgeo_qgis.classFactory(fake_iface)
-    plugin.initGui()
-    plugin.session.new_site(tmp_path)
-    canvas = fake_iface.mapCanvas()
-    baseline = len(_scene_bands(canvas))
-
-    dialog = _open(plugin)
-    dialog.digitise_button.click()
-    assert isinstance(canvas.mapTool(), DigitiseGridTool)
-    dialog.reject()  # gives up on the pick outright, tool still active
-
-    assert canvas.mapTool() is None
-    gc.collect()
-    assert len(_scene_bands(canvas)) == baseline
-    plugin.unload()
-
-
 def test_a_disposed_digitise_tool_is_disposable_again_and_still_usable(qgis_app, fake_iface):
     # Disposal has to be idempotent -- more than one finaliser can reach
     # the same tool -- and it must NOT live in deactivate(), which fires
@@ -1414,3 +783,238 @@ def test_a_disposed_digitise_tool_is_disposable_again_and_still_usable(qgis_app,
     tool.canvasClicked.emit(QgsPointXY(1.0, 1.0), Qt.MouseButton.LeftButton)
     tool.canvasClicked.emit(QgsPointXY(2.0, 3.0), Qt.MouseButton.LeftButton)
     assert len(picked) == 1  # still a working tool, just without its band
+
+
+# ---- one corner table and Fit (#63) ------------------------------------------
+
+
+def _utm_dialog(session) -> GridDialog:
+    d = GridDialog(session)
+    d.crs_widget.setCrs(UTM16)
+    d.corners_crs.setCrs(UTM16)
+    return d
+
+
+def _type_row(d: GridDialog, row: int, e: float, n: float) -> None:
+    d.corner_table.item(row, COL_A).setText(f"{e:.6f}")
+    d.corner_table.item(row, COL_B).setText(f"{n:.6f}")
+
+
+def _type_site(d: GridDialog) -> None:
+    for row, (e, n) in enumerate(SITE_CORNERS):
+        _type_row(d, row, e, n)
+
+
+def test_the_dialog_has_one_corner_table_and_no_tabs(session):
+    d = GridDialog(session)
+    assert not hasattr(d, "tabs")
+    assert not hasattr(d, "digitise_requested")
+    assert [d.corner_table.item(r, COL_ROLE).text() for r in range(4)] == [
+        "origin",
+        "+X",
+        "+X+Y",
+        "+Y",
+    ]
+
+
+def test_typed_corners_fit_the_grid(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.fit_corners()
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-6)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-6)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-6)
+    assert d.size_x.value() == pytest.approx(20.0, abs=1e-6)
+    assert d.size_y.value() == pytest.approx(20.0, abs=1e-6)
+    assert d.fit_status.text() == "rigid fit RMS 0.000 m from 4 corners"
+    assert all(o is not None and o < 1e-6 for o in d.corner_offsets())
+    assert [d.corner_source(r) for r in range(4)] == ["typed"] * 4
+
+
+def test_a_typed_size_survives_fit_and_the_grid_stays_pinned_at_the_origin(session):
+    d = _utm_dialog(session)
+    d.size_x.setValue(18.0)
+    _type_site(d)
+    d.fit_corners()
+    assert d.size_x.value() == 18.0
+    assert d.size_y.value() == pytest.approx(20.0, abs=1e-6)
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-6)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-6)
+    assert d.corner_offsets() == pytest.approx([0, 2, 2, 0], abs=1e-6)
+    assert not d.size_hint.isHidden()
+    assert d.size_hint.text() == "the corners measure 20.00 × 20.00 m · your size is kept"
+    d.use_measured_size()
+    assert d.size_x.value() == pytest.approx(20.0, abs=1e-6)
+    assert d.sizes_typed() == (False, False)
+    assert d.size_hint.isHidden()
+
+
+def test_fit_does_not_depend_on_typed_sizes(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.fit_corners()
+    first = (d.origin_x.value(), d.origin_y.value(), d.azimuth.value())
+    d.size_x.setValue(7.0)
+    d.size_y.setValue(9.0)
+    d.fit_corners()
+    assert (d.origin_x.value(), d.origin_y.value(), d.azimuth.value()) == pytest.approx(first)
+    assert (d.size_x.value(), d.size_y.value()) == (7.0, 9.0)
+
+
+def test_an_existing_grid_opens_with_both_sizes_typed(session):
+    d = GridDialog(session, TRUE)
+    assert d.sizes_typed() == (True, True)
+    assert GridDialog(session).sizes_typed() == (False, False)
+
+
+def test_off_by_follows_the_form_without_a_refit(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.fit_corners()
+    status = d.fit_status.text()
+    d.azimuth.setValue(11.0)
+    offsets = d.corner_offsets()
+    assert all(o is not None and o > 0.1 for o in offsets[1:])
+    assert d.fit_status.text() == status
+    d.origin_x.setValue(0.0)
+    d.origin_y.setValue(0.0)
+    assert d.corner_offsets() == [None] * 4
+
+
+def test_fit_refuses_coincident_corners(session):
+    d = _utm_dialog(session)
+    d.origin_x.setValue(111.0)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    _type_row(d, 1, *SITE_CORNERS[0])
+    d.fit_corners()
+    assert "coincide" in d.fit_status.text()
+    assert d.origin_x.value() == 111.0
+
+
+def test_fit_refuses_mirrored_corners(session):
+    d = _utm_dialog(session)
+    for row, src in zip(range(4), (0, 3, 2, 1)):
+        _type_row(d, row, *SITE_CORNERS[src])
+    d.fit_corners()
+    assert "mirrored" in d.fit_status.text()
+
+
+def test_fit_needs_a_metric_grid_crs(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.crs_widget.setCrs(WGS84)
+    d.fit_corners()
+    assert "metric CRS" in d.fit_status.text()
+    assert d.origin_x.value() == 0.0
+
+
+def test_a_non_number_cell_reports_and_leaves_the_row_empty(session):
+    d = _utm_dialog(session)
+    d.corner_table.item(0, COL_A).setText("518204,112")
+    assert d.corner_point(0) is None
+    assert "origin" in d.fit_status.text()
+    assert "not a number" in d.fit_status.text()
+
+
+def test_changing_corners_in_converts_the_points(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.corners_crs.setCrs(WGS84)
+    to_wgs = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance())
+    want = to_wgs.transform(QgsPointXY(*SITE_CORNERS[0]))
+    got = d.corner_point(0)
+    assert got.x() == pytest.approx(want.x(), abs=1e-9)
+    assert got.y() == pytest.approx(want.y(), abs=1e-9)
+    heads = [d.corner_table.horizontalHeaderItem(c).text() for c in (COL_A, COL_B)]
+    assert heads == ["lon", "lat"]
+    d.corners_crs.setCrs(UTM16)
+    back = d.corner_point(0)
+    assert back.x() == pytest.approx(SITE_CORNERS[0][0], abs=1e-6)
+    assert back.y() == pytest.approx(SITE_CORNERS[0][1], abs=1e-6)
+    heads = [d.corner_table.horizontalHeaderItem(c).text() for c in (COL_A, COL_B)]
+    assert heads == ["E", "N"]
+
+
+def test_a_geographic_corners_crs_shows_eight_decimals_and_keeps_full_precision(session):
+    d = _utm_dialog(session)
+    d.corners_crs.setCrs(WGS84)
+    d.set_corner(0, QgsPointXY(-86.123456789012, 36.123456789012), WGS84, "typed")
+    assert d.corner_table.item(0, COL_A).text() == "-86.12345679"
+    assert d.corner_point(0).x() == -86.123456789012
+    # editing the other cell must not round this one
+    d.corner_table.item(0, COL_B).setText("36.5")
+    assert d.corner_point(0).x() == -86.123456789012
+    assert d.corner_point(0).y() == 36.5
+
+
+def test_set_corner_converts_from_its_own_crs_and_reports_a_failed_transform(session):
+    d = _utm_dialog(session)
+    lonlat = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance()).transform(
+        QgsPointXY(*SITE_CORNERS[0])
+    )
+    assert d.set_corner(0, lonlat, WGS84, "free click")
+    assert d.corner_point(0).x() == pytest.approx(SITE_CORNERS[0][0], abs=1e-3)
+    assert d.corner_source(0) == "free click"
+    # latitude 95 is outside every CRS: the transform raises, the row stays as it was
+    before = d.corner_point(0)
+    assert not d.set_corner(0, QgsPointXY(0.0, 95.0), WGS84, "free click")
+    assert d.corner_point(0) == before
+    assert d.fit_status.text() == "could not convert that point into EPSG:32616"
+
+
+def test_rotate_carries_sources_and_swaps_typed_sizes(session):
+    d = _utm_dialog(session)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    _type_row(d, 2, *SITE_CORNERS[2])
+    d.size_x.setValue(30.0)
+    d.size_y.setValue(20.0)
+    d.rotate_corners()
+    assert d.corner_point(1).x() == pytest.approx(SITE_CORNERS[2][0])
+    assert d.corner_point(0) is None and d.corner_point(2) is None
+    assert d.corner_point(3).x() == pytest.approx(SITE_CORNERS[0][0])
+    assert (d.size_x.value(), d.size_y.value()) == (20.0, 30.0)
+    assert d.sizes_typed() == (True, True)
+    assert d.corner_table.item(1, COL_FROM).text() == "typed"
+
+
+def test_clear_empties_every_row_and_leaves_the_form(session):
+    d = _utm_dialog(session)
+    d.id_edit.setText("keep")
+    d.size_x.setValue(33.0)
+    _type_site(d)
+    d.clear_corners()
+    assert all(d.corner_point(r) is None for r in range(4))
+    assert all(d.corner_table.item(r, c).text() == "" for r in range(4) for c in (COL_A, COL_B))
+    assert d.id_edit.text() == "keep"
+    assert d.size_x.value() == 33.0
+
+
+def test_corners_changed_fires_on_every_row_change(session):
+    d = _utm_dialog(session)
+    d.set_corner(0, QgsPointXY(*SITE_CORNERS[0]), UTM16, "typed")
+    seen: list[int] = []
+    d.corners_changed.connect(lambda: seen.append(1))
+    d.corner_table.item(0, COL_A).setText("518205.000")
+    assert len(seen) == 1
+    d.set_corner(1, QgsPointXY(*SITE_CORNERS[1]), UTM16, "typed")
+    assert len(seen) == 2
+    d.rotate_corners()
+    assert len(seen) == 3
+    d.clear_corners()
+    assert len(seen) == 4
+
+
+def test_only_fit_fits(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.rotate_corners()
+    d.clear_corners()
+    _type_site(d)
+    assert (d.origin_x.value(), d.origin_y.value(), d.azimuth.value()) == (0.0, 0.0, 0.0)
+
+
+def test_corners_in_starts_on_the_project_crs_or_wgs84(session, project_crs):
+    project_crs(UTM16)
+    assert GridDialog(session).corners_crs.crs() == UTM16
+    project_crs(QgsCoordinateReferenceSystem())
+    assert GridDialog(session).corners_crs.crs() == WGS84

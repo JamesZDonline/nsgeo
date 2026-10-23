@@ -37,6 +37,14 @@ KNOWN_UNCONSUMED = {
     "new_site_requested",
     "open_site_requested",
     "save_requested",
+    # Grid-dialog rework (#63): Task 2 built the dialog and dropped the old
+    # plugin.py wiring; Task 5 connects these to the map-pick flow and
+    # removes this block. DigitiseGridTool's two go with it (Task 5
+    # replaces the tool).
+    "pick_all_requested",
+    "corners_changed",
+    "points_picked",
+    "cancelled",
 }
 
 # A signal name declared by more than one class cannot be judged by a
@@ -66,7 +74,11 @@ SHADOWED = {
     # entry no longer hides an orphan -- it stays pinned because a
     # name-keyed count still cannot tell the two apart, and dropping to
     # one connect again would mean one of them had been orphaned.
-    "pick_requested": {"declared": 2, "connects": 2},
+    #
+    # Grid-dialog rework: GridDialog.pick_requested(int) is a third
+    # declaration, unconnected until Task 5 wires it (connects then rises
+    # to 3).
+    "pick_requested": {"declared": 3, "connects": 2},
     # ProfileDock.error is connected (plugin.py wires it to `self.message`).
     # ParamForm's own error -- again a separate declaration sharing the
     # name -- is not: the real orphan, in a different file. ParamForm is

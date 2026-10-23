@@ -1287,68 +1287,10 @@ class NsgeoPlugin:
 
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
-        dialog.digitise_requested.connect(lambda: self._start_digitise(dialog))
         self._grid_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-
-    def _start_digitise(self, dialog: GridDialog) -> None:
-        canvas = self.iface.mapCanvas()
-        tool = DigitiseGridTool(canvas)
-
-        def show_dialog() -> None:
-            dialog.show()
-            dialog.raise_()
-
-        def done(origin: Any, along: Any) -> None:
-            # `done` is a slot on tool.points_picked (a pyqtSignal): an
-            # uncaught exception here would be swallowed by Qt (see the
-            # module docstring) and leave the map tool stuck active with
-            # the dialog hidden and no explanation -- e.g. a fast
-            # double-click that reads as two coincident canvasClicked
-            # events, which set_digitised() now rejects. The finally
-            # clause guarantees control always comes back to the dialog
-            # regardless of what failed.
-            try:
-                dialog.set_digitised((origin.x(), origin.y()), (along.x(), along.y()))
-                dialog.crs_widget.setCrs(canvas.mapSettings().destinationCrs())
-            except Exception as exc:  # noqa: BLE001 -- see the module docstring
-                self.message(
-                    f"could not use the digitised points: {exc}", Qgis.MessageLevel.Critical
-                )
-            finally:
-                canvas.unsetMapTool(tool)
-                _finish_with_digitise_tool(tool)
-                show_dialog()
-
-        def cancelled() -> None:
-            # `cancelled` fires from the tool's own deactivate(), by
-            # which point the canvas has already moved off this tool --
-            # so, unlike done() above, there is nothing to unset here,
-            # only the tool and its band to release.
-            _finish_with_digitise_tool(tool)
-            show_dialog()
-
-        tool.points_picked.connect(done)
-        # A right-click (QGIS's universal "abort this tool" gesture) or
-        # switching to a different map tool entirely both abandon the
-        # pick without completing it. Before round 1's fix, neither
-        # restored the dialog, and the user's only way out was killing
-        # QGIS (Task 10 fix round 1, Finding 4). DigitiseGridTool emits
-        # `cancelled` from deactivate() for exactly this case, and by
-        # then the canvas has already moved off this tool, so this path
-        # only restores the dialog and disposes of the tool -- unlike
-        # `done()` above, which must unset the tool from the canvas too.
-        tool.cancelled.connect(cancelled)
-        # dialog.hide() here is exactly what a modal exec() could never
-        # survive (round 4, Finding 1): hiding the dialog that owns the
-        # running exec() loop ends that loop immediately. GridDialog is
-        # modeless now (see open_grid_dialog()), so this is an ordinary
-        # hide -- the canvas stays interactive and the user can actually
-        # click it.
-        dialog.hide()
-        canvas.setMapTool(tool)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,
