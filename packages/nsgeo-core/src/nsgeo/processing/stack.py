@@ -14,12 +14,17 @@ from typing import Any
 
 from nsgeo.processing.base import Radargram, build_step, is_unipolar
 
+_BYPASS_MEMO_SIZE = 2
+
 
 class StepStack:
     def __init__(self) -> None:
         self._entries: list[tuple[Any, bool]] = []
         self._cache: list[Radargram] = []
         self._source: Radargram | None = None
+        # Results of result_bypassing, keyed by the set of bypassed indices,
+        # least recently used first. At most _BYPASS_MEMO_SIZE entries.
+        self._bypassed: dict[frozenset[int], Radargram] = {}
 
     # ---- source -------------------------------------------------------
     @property
@@ -30,6 +35,7 @@ class StepStack:
     def source(self, rg: Radargram) -> None:
         self._source = rg
         self._cache = []
+        self._drop_bypassed()
 
     # ---- inspection ---------------------------------------------------
     @property
@@ -64,22 +70,34 @@ class StepStack:
     def _invalidate_from(self, index: int) -> None:
         del self._cache[index:]
 
+    def _drop_bypassed(self, keep: int | None = None) -> None:
+        """Forget remembered bypass results, except those that bypass `keep`:
+        an edit confined to a bypassed step cannot change them."""
+        if keep is None:
+            self._bypassed.clear()
+        else:
+            self._bypassed = {k: v for k, v in self._bypassed.items() if keep in k}
+
     def append(self, step: Any) -> None:
         self._entries.append((step, True))
+        self._drop_bypassed()
         # No invalidation: the existing prefix is still valid.
 
     def insert(self, index: int, step: Any) -> None:
         self._entries.insert(index, (step, True))
         self._invalidate_from(index)
+        self._drop_bypassed()
 
     def remove(self, index: int) -> None:
         del self._entries[index]
         self._invalidate_from(index)
+        self._drop_bypassed()
 
     def replace_step(self, index: int, step: Any) -> None:
         enabled = self._entries[index][1]
         self._entries[index] = (step, enabled)
         self._invalidate_from(index)
+        self._drop_bypassed(keep=index)
 
     def move(self, src: int, dst: int) -> None:
         n = len(self._entries)
@@ -88,11 +106,13 @@ class StepStack:
         entry = self._entries.pop(src)
         self._entries.insert(dst, entry)
         self._invalidate_from(min(src, dst))
+        self._drop_bypassed()
 
     def set_enabled(self, index: int, flag: bool) -> None:
         step, _ = self._entries[index]
         self._entries[index] = (step, bool(flag))
         self._invalidate_from(index)
+        self._drop_bypassed()
 
     # ---- evaluation ---------------------------------------------------
     def _ensure(self, upto: int) -> None:
@@ -119,26 +139,49 @@ class StepStack:
         self._ensure(index)
         return self._cache[index]
 
-    def result_bypassing(self, index: int) -> Radargram:
-        """What `result()` would be with step `index` switched off.
+    def result_bypassing(self, *indices: int) -> Radargram:
+        """What `result()` would be with every step in `indices` switched off.
 
         Lets a front end show the data a step is about to hide (the part of
-        the record a time cutoff removes) without toggling the step. The
-        prefix before `index` comes from the cache; everything after is run
-        fresh and NOT cached, because those intermediates belong to a chain
-        the stack does not actually have. `result()` stays the real chain.
+        the record a time cutoff removes) or hold the display steady while a
+        gain curve is edited, without toggling anything. No indices is just
+        `result()`. The prefix before the smallest index comes from the
+        cache; everything after is run fresh, skipping the bypassed and the
+        disabled steps, and NOT cached, because those intermediates belong to
+        a chain the stack does not actually have. `result()` stays the real
+        chain.
+
+        The final result is remembered for the two most recently used index
+        sets, so repeated calls return the same object. `replace_step(i, ..)`
+        keeps the entries that bypass `i` (an edit confined to a bypassed step
+        cannot change them, which is what a gain-curve drag needs); every
+        other mutation drops them all.
         """
-        if not 0 <= index < len(self._entries):
-            raise IndexError(f"step index {index} out of range (0..{len(self._entries) - 1})")
-        if index:
-            current = self.intermediate(index - 1)
+        n = len(self._entries)
+        for i in indices:
+            if not 0 <= i < n:
+                raise IndexError(f"step index {i} out of range (0..{n - 1})")
+        if not indices:
+            return self.result()
+        key = frozenset(indices)
+        hit = self._bypassed.pop(key, None)
+        if hit is not None:
+            self._bypassed[key] = hit  # most recently used goes last
+            return hit
+        first = min(key)
+        if first:
+            current = self.intermediate(first - 1)
         else:
             if self._source is None:
                 raise ValueError("stack has no source radargram")
             current = self._source
-        for step, enabled in self._entries[index + 1 :]:
-            if enabled:
+        for i in range(first, n):
+            step, enabled = self._entries[i]
+            if enabled and i not in key:
                 current = step.apply(current)
+        self._bypassed[key] = current
+        while len(self._bypassed) > _BYPASS_MEMO_SIZE:
+            del self._bypassed[next(iter(self._bypassed))]
         return current
 
     def difference(self, index: int) -> Radargram:

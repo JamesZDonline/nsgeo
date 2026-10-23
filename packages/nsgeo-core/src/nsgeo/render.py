@@ -25,6 +25,7 @@ __all__ = [
     "colormap",
     "colormap_names",
     "decimate_columns",
+    "row_envelope",
     "to_index8",
     "to_index8_unipolar",
     "to_rgb8",
@@ -312,4 +313,37 @@ def decimate_columns(data: np.ndarray, max_width: int) -> np.ndarray:
         out[:, :full_blocks] = full.mean(axis=2)
     if full_blocks < n_blocks:
         out[:, full_blocks] = data[:, full_blocks * block :].mean(axis=1)
+    return out
+
+
+def row_envelope(data: np.ndarray, percentile: float, max_traces: int = 2048) -> np.ndarray:
+    """For each row, the `percentile` of |data| over the traces, shape (n_rows,).
+
+    The amplitude envelope down the record, which a front end compares with
+    the display limit to show headroom. Above `max_traces` columns a strided
+    subset `data[:, ::ceil(n / max_traces)]` is used, so the answer is
+    deterministic. The cap is 2048 because every real line in the corpus is
+    under it, so ordinary lines get an exact answer; a strided subset
+    measured up to 0.14 of the display limit off at stride 2 on a real line.
+
+    Non-finite samples are excluded, and a row with no finite sample gives
+    0.0 with no warning.
+    """
+    if not 0.0 < percentile <= 100.0:
+        raise ValueError(f"percentile must be in (0, 100], got {percentile}")
+    if max_traces < 1:
+        raise ValueError(f"max_traces must be >= 1, got {max_traces}")
+    arr = np.asarray(data, dtype=float)
+    n = arr.shape[1]
+    if n > max_traces:
+        arr = arr[:, :: math.ceil(n / max_traces)]
+    mags = np.abs(arr)
+    finite = np.isfinite(mags)
+    if finite.all():
+        return np.asarray(np.percentile(mags, percentile, axis=1), dtype=float)
+    mags = np.where(finite, mags, np.nan)
+    out = np.zeros(mags.shape[0])
+    has = finite.any(axis=1)
+    if has.any():
+        out[has] = np.nanpercentile(mags[has], percentile, axis=1)
     return out

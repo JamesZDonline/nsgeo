@@ -17,6 +17,7 @@ from nsgeo.render import (
     colormap,
     colormap_names,
     decimate_columns,
+    row_envelope,
     to_index8,
     to_rgb8,
 )
@@ -341,3 +342,29 @@ def test_amp_heat_runs_black_through_red_and_orange_to_white():
     assert r == 255
     assert b == 0
     assert 100 <= g <= 160
+
+
+def test_row_envelope_is_the_per_row_percentile_of_magnitudes():
+    x = np.random.default_rng(0).normal(size=(6, 50))
+    np.testing.assert_array_equal(row_envelope(x, 90.0), np.percentile(np.abs(x), 90.0, axis=1))
+
+
+def test_row_envelope_subsamples_wide_data_deterministically():
+    x = np.random.default_rng(1).normal(size=(4, 5000))
+    got = row_envelope(x, 99.0, max_traces=1000)
+    np.testing.assert_array_equal(got, np.percentile(np.abs(x[:, ::5]), 99.0, axis=1))
+
+
+def test_row_envelope_ignores_non_finite_samples_without_warning():
+    x = np.ones((3, 4))
+    x[0, 0], x[1, :] = np.inf, np.nan
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = row_envelope(x, 50.0)
+    np.testing.assert_array_equal(got, [1.0, 0.0, 1.0])
+
+
+@pytest.mark.parametrize("kwargs", [{"percentile": 0.0}, {"percentile": 100.5}, {"max_traces": 0}])
+def test_row_envelope_validates_its_arguments(kwargs):
+    with pytest.raises(ValueError):
+        row_envelope(np.ones((2, 3)), **{"percentile": 50.0, **kwargs})

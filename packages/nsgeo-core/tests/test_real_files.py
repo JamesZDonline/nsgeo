@@ -97,6 +97,23 @@ def test_a_cutoff_after_time_zero_keeps_the_first_rows_of_a_real_profile():
     assert stack.result_bypassing(1).n_samples == zeroed.n_samples
 
 
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_row_envelope_on_a_real_line_is_exact_below_the_cap(path):
+    from nsgeo.render import row_envelope
+
+    h = read_header(path)
+    rg = Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    stack = StepStack()
+    stack.source = rg
+    stack.append(build_step("time_zero", mode="first_break", threshold=0.25))
+    stack.append(build_step("dewow", window_ns=4.0))
+    out = stack.result()
+    assert out.n_traces <= 2048
+    np.testing.assert_array_equal(
+        row_envelope(out.data, 99.0), np.percentile(np.abs(out.data), 99.0, axis=1)
+    )
+
+
 def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     """End to end on real data: preset, transform, bin, slice, save, reload."""
     from nsgeo.slices.binning import PreparedLine, build_cube, plan_line, stream_slice

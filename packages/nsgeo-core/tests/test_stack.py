@@ -271,3 +271,83 @@ def test_a_cutoff_round_trips_through_dicts():
     st = stack_of(("time_cutoff", {"end_ns": 6.0}))
     again = StepStack.from_dicts(st.to_dicts())
     assert again.entries[0][0].params == {"end_ns": 6.0}
+
+
+CURVE = ("gain_curve", {"points": [[0.0, 0.0], [12.0, 12.0]]})
+
+
+def test_result_bypassing_several_steps_skips_each_of_them():
+    st = stack_of(CURVE, ("dewow", {"window_ns": 4.0}), CURVE, ("gain_agc", {"window_ns": 2.0}))
+    expected = stack_of(("dewow", {"window_ns": 4.0}), ("gain_agc", {"window_ns": 2.0})).result()
+    np.testing.assert_array_equal(st.result_bypassing(0, 2).data, expected.data)
+
+
+def test_result_bypassing_nothing_is_the_result():
+    st = stack_of(("dewow", {"window_ns": 4.0}))
+    assert st.result_bypassing() is st.result()
+
+
+def test_result_bypassing_rejects_any_out_of_range_index():
+    with pytest.raises(IndexError, match="out of range"):
+        stack_of(("dewow", {"window_ns": 4.0})).result_bypassing(0, 5)
+
+
+def test_a_bypass_survives_replacing_a_bypassed_step():
+    st = stack_of(("dewow", {"window_ns": 4.0}), CURVE, ("background_mean", {}))
+    first = st.result_bypassing(1)
+    st.replace_step(1, build_step("gain_curve", points=[[0.0, 0.0], [12.0, 30.0]]))
+    assert st.result_bypassing(1) is first
+
+
+def _replace_other(st):
+    st.replace_step(0, build_step("dewow", window_ns=2.0))
+
+
+def _set_enabled(st):
+    st.set_enabled(2, False)
+
+
+def _append(st):
+    st.append(build_step("gain_agc", window_ns=2.0))
+
+
+def _insert(st):
+    st.insert(0, build_step("dewow", window_ns=2.0))
+
+
+def _remove(st):
+    st.remove(2)
+
+
+def _move(st):
+    st.move(0, 2)
+
+
+def _new_source(st):
+    st.source = source(seed=1)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_replace_other, _set_enabled, _append, _insert, _remove, _move, _new_source],
+    ids=["replace-other", "set_enabled", "append", "insert", "remove", "move", "source"],
+)
+def test_a_bypass_is_recomputed_after_any_other_change(mutate):
+    st = stack_of(("dewow", {"window_ns": 4.0}), CURVE, ("background_mean", {}))
+    first = st.result_bypassing(1)
+    mutate(st)
+    got = st.result_bypassing(1)
+    assert got is not first
+    fresh = StepStack.from_dicts(st.to_dicts())
+    fresh.source = st.source
+    np.testing.assert_array_equal(got.data, fresh.result_bypassing(1).data)
+
+
+def test_the_bypass_memo_holds_the_two_most_recent_sets():
+    st = stack_of(("dewow", {"window_ns": 4.0}), CURVE, ("background_mean", {}))
+    a = st.result_bypassing(1)
+    c = st.result_bypassing(0)
+    assert st.result_bypassing(1) is a  # refreshes {1}
+    st.result_bypassing(2)
+    assert st.result_bypassing(1) is a
+    assert st.result_bypassing(0) is not c

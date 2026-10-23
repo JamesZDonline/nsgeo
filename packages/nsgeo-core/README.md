@@ -135,6 +135,7 @@ Amplitude to pixels, with no Qt.
 | `colormap` | A 256-entry RGB lookup table, by name. |
 | `colormap_names` | The table names, optionally filtered by polarity. |
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
+| `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
 | `to_index8_unipolar` | Map 0..limit to 0..255. |
 | `to_rgb8` | Amplitudes, a limit and a (256, 3) lookup table to an (H, W, 3) uint8 RGB array, mapped as `to_index8` does. |
