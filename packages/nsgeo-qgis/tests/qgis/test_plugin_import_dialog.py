@@ -721,3 +721,13 @@ def test_first_line_at_follows_the_spacing_until_the_user_sets_it(session):
     d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
 
     assert d.first_offset.value() == 0.1
+
+
+def test_retarget_to_an_unknown_grid_keeps_the_dialogs_own_grid(session):
+    # The refill that finds newly added grids must not drop the dialog onto
+    # the first grid when the id is not there at all (#61's own failure).
+    session.add_grid(GRID_B)
+    d = ImportDialog(session, grid_id="B")
+    d.retarget("no-such-grid")
+    assert d.grid_combo.currentData() == "B"
+    assert d.windowTitle() == "Import DZT files into B"

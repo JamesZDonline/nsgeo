@@ -288,7 +288,13 @@ class ImportDialog(QDialog):
         if self.rows:
             return
         if self.grid_combo.findData(grid_id) < 0:
-            self._fill_grid_combo()  # a grid added since the dialog opened
+            # A grid added since the dialog opened. The refill moves the
+            # combo to its first grid, so an id still missing after it
+            # goes back to the dialog's own grid, never the first one.
+            current = self.grid_combo.currentData()
+            self._fill_grid_combo()
+            if self.grid_combo.findData(grid_id) < 0:
+                grid_id = current
         index = self.grid_combo.findData(grid_id)
         if index >= 0:
             self.grid_combo.setCurrentIndex(index)
