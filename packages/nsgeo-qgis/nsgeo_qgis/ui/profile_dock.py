@@ -58,7 +58,7 @@ import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names
 from nsgeo.velocity import VelocityModel, resolve_velocity
-from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola
+from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -149,6 +149,9 @@ class ProfileDock(QgsDockWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
+        # (line key, points, fit id) of the last Save: lets Apply tell
+        # whether the fit it applies is the stored one.
+        self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -702,8 +705,23 @@ class ProfileDock(QgsDockWidget):
     def velocity_fit_result(self) -> HyperbolaFit | None:
         return self._velocity_fit
 
+    def _refuse_velocity_edit_on_preview(self) -> bool:
+        """True (after saying why) while a preview is displayed. A preview
+        never authors data (spec §3.3, §4.3): `self._key` is the displayed
+        line, and a click on it would otherwise be fitted against the
+        working line's distances."""
+        if self._preview_key is None:
+            return False
+        self.error.emit(
+            "velocity points are collected on the working line; this is a preview — "
+            "select the line on the map to work on it"
+        )
+        return True
+
     def _on_velocity_point_requested(self, trace: int, time_ns: float) -> None:
         try:
+            if self._refuse_velocity_edit_on_preview():
+                return
             self._velocity_points.append((int(trace), float(time_ns)))
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -711,6 +729,8 @@ class ProfileDock(QgsDockWidget):
 
     def _on_velocity_point_discarded(self, index: int) -> None:
         try:
+            if self._refuse_velocity_edit_on_preview():
+                return
             if 0 <= index < len(self._velocity_points):
                 del self._velocity_points[index]
                 self._update_velocity_fit()
@@ -722,7 +742,6 @@ class ProfileDock(QgsDockWidget):
     # the only place the two meet. `Line.distance_along()` carries the
     # traces-per-metre, start and direction, so nothing here re-derives them.
     _CURVE_SAMPLES = 200
-    _T0_TOLERANCE_NS = 0.5
 
     def _velocity_axis(self) -> tuple[Any, float, float]:
         """(metres at each trace, metres at trace 0, metres per trace) for
@@ -748,13 +767,15 @@ class ProfileDock(QgsDockWidget):
         """`fit` sampled across the line's traces as (trace, ns) pairs."""
         distance, d0, step = self._velocity_axis()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        dx = d0 + step * traces - fit.apex_x_m
-        t = np.sqrt(fit.t0_ns**2 + (4.0 / fit.v_m_ns**2) * dx**2)
+        t = hyperbola_time(fit, d0 + step * traces)
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
     def _velocity_time_zero_note(self) -> str:
         t = self.view.transform
-        if t is None or abs(t.t0_ns) <= self._T0_TOLERANCE_NS:
+        # time_zero crops whole samples, so half a sample is the closest
+        # any user can get; a fixed ns tolerance would be unreachable on a
+        # coarse-sampled file.
+        if t is None or abs(t.t0_ns) <= 0.5 * t.dt_ns:
             return ""
         return (
             f"Time zero is at {t.t0_ns:.1f} ns, so a hyperbola's time is not its "
@@ -793,7 +814,12 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
-            self.view.set_velocity_fit(self._velocity_points, curve)
+            if self._preview_key is None:
+                self.view.set_velocity_fit(self._velocity_points, curve)
+            else:
+                # The points and curve belong to the working line; painting
+                # them over a hovered one would put them on the wrong axes.
+                self.view.set_velocity_fit([], [])
             fit_ok = self._velocity_fit is not None
             self.apply_line_button.setEnabled(fit_ok)
             self.save_fit_button.setEnabled(fit_ok)
@@ -822,6 +848,17 @@ class ProfileDock(QgsDockWidget):
             if fit is not None and self._working_key is not None:
                 self.session.set_line_velocity(
                     self._working_key, VelocityModel.constant(fit.v_m_ns)
+                )
+                # `velocity_from_fit` is the fit that produced the override:
+                # the stored fit just applied, else none -- a bare "line" is
+                # better than a provenance the velocity does not have.
+                saved = self._saved_velocity_fit
+                same = saved is not None and saved[:2] == (
+                    self._working_key,
+                    tuple(self._velocity_points),
+                )
+                self.session.set_velocity_from_fit(
+                    self._working_key, saved[2] if saved is not None and same else None
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
@@ -853,7 +890,7 @@ class ProfileDock(QgsDockWidget):
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             )
             fit_id = self.session.add_velocity_fit(self._working_key, stored)
-            self.session.set_velocity_from_fit(self._working_key, fit_id)
+            self._saved_velocity_fit = (self._working_key, stored.points, fit_id)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 

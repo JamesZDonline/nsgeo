@@ -20,7 +20,7 @@ import numpy as np
 
 from nsgeo.velocity import C_M_PER_NS
 
-__all__ = ["HyperbolaFit", "StoredFit", "fit_hyperbola"]
+__all__ = ["HyperbolaFit", "StoredFit", "fit_hyperbola", "hyperbola_time"]
 
 _SEARCH_STEPS = 101
 
@@ -74,6 +74,16 @@ class StoredFit:
             points=tuple((int(trace), float(t_ns)) for trace, t_ns in doc["points"]),
             fitted_at=str(doc["fitted_at"]),
         )
+
+
+def hyperbola_time(fit: HyperbolaFit, x_m: Any) -> np.ndarray:
+    """Two-way time in ns of the fitted hyperbola at positions ``x_m``.
+
+    The one statement of the model outside the solver, so a drawn curve
+    cannot drift from the fit it draws.
+    """
+    dx = np.asarray(x_m, dtype=float) - fit.apex_x_m
+    return np.sqrt(fit.t0_ns**2 + (4.0 / fit.v_m_ns**2) * dx**2)
 
 
 def _solve(x_m: np.ndarray, t_ns: np.ndarray, apex_m: float, dof: int) -> HyperbolaFit | str:
