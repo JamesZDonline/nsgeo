@@ -2252,18 +2252,57 @@ def test_a_failure_while_drawing_leaves_the_overlay_as_it_was(
 ):
     d = _overlay_dialog(session, project_crs, real_canvas)
     _type_row(d, 0, *SITE_CORNERS[0])
-    before = list(d.overlay.corners)
-    _type_row(d, 1, *SITE_CORNERS[1])
+    assert d.overlay.corners[0] is not None
+    monkeypatch.setattr(d, "_grid_outline", lambda: 1 / 0)
+    _type_row(d, 2, *SITE_CORNERS[2])  # the refresh this triggers fails
+    # an apply-as-you-go refresh would have drawn this corner before failing
+    assert d.overlay.corners[2] is None
+    assert d.overlay.corners[0] is not None
+    # (the row change itself put the Fit line back over the message: R14)
+    assert d._overlay_message.startswith("could not draw the map overlay")
+    d._refresh_overlay()  # unchanged failure: label left alone
+    assert not d.fit_status.text().startswith("could not draw")
+
+
+def test_the_except_message_is_cleared_by_a_later_clean_refresh(
+    session, project_crs, real_canvas, monkeypatch
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_site(d)
+    d.fit_corners()
+    fit_line = d.fit_status.text()
     monkeypatch.setattr(d, "_grid_outline", lambda: 1 / 0)
     d._refresh_overlay()
-    assert d.overlay.corners[1] is not None  # (applied by the earlier, good refresh)
-    monkeypatch.undo()
-    _type_row(d, 2, *SITE_CORNERS[2])
-    monkeypatch.setattr(d, "_grid_outline", lambda: 1 / 0)
-    now = list(d.overlay.corners)
-    d._refresh_overlay()
-    assert d.overlay.corners == now and before != now
     assert d.fit_status.text().startswith("could not draw the map overlay")
+    monkeypatch.undo()
+    d._refresh_overlay()
+    assert d.fit_status.text() == fit_line
+
+
+def test_a_corners_crs_conversion_error_is_not_overwritten_by_the_overlay(
+    session, project_crs, real_canvas
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    d.corners_crs.setCrs(WGS84)
+    _type_site(d)  # UTM numbers read as degrees: none can reach the canvas
+    assert d.fit_status.text().startswith("the map cannot show")
+    d.corners_crs.setCrs(UTM16)  # converting those "degrees" fails
+    assert d.fit_status.text() == "could not convert the corners into EPSG:32616"
+    assert d.corners_crs.crs() == WGS84
+
+
+def test_a_persistent_overlay_failure_does_not_replace_the_fit_line(
+    session, project_crs, real_canvas
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    d.corners_crs.setCrs(WGS84)
+    _type_row(d, 0, *SITE_CORNERS[0])  # persistent: cannot reach the canvas
+    d._set_fit_line("rigid fit RMS 0.00 m")
+    assert d._overlay_message.startswith("the map cannot show")
+    _type_row(d, 0, *SITE_CORNERS[0])  # a good row change: the Fit line returns
+    assert d.fit_status.text() == "rigid fit RMS 0.00 m"
+    d.size_x.setValue(d.size_x.value() + 1.0)  # same failure: nothing replaced
+    assert d.fit_status.text() == "rigid fit RMS 0.00 m"
 
 
 def test_overlay_paints_its_marks(session, project_crs, real_canvas):

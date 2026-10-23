@@ -374,7 +374,15 @@ class GridDialog(QDialog):
             overlay.set_grid(outline)
             self._report_overlay_failures()
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
-            self.fit_status.setText(f"could not draw the map overlay: {exc}")
+            self._show_overlay_message(f"could not draw the map overlay: {exc}")
+
+    def _show_overlay_message(self, message: str) -> None:
+        """Put the overlay's message on fit_status, but only when it differs
+        from the one already reported: an unchanged failure must not overwrite
+        what the user is reading (a conversion error, the Fit line)."""
+        if message != self._overlay_message:
+            self.fit_status.setText(message)
+        self._overlay_message = message
 
     def _report_overlay_failures(self) -> None:
         """One transient message on fit_status for what the overlay could not
@@ -393,8 +401,7 @@ class GridDialog(QDialog):
             items.append(f"the {_join(corners)} {noun}")
         items += [w for w in ("the chosen polygon", "the grid") if w in failed]
         crs = self.canvas.mapSettings().destinationCrs().authid()
-        self._overlay_message = f"the map cannot show {_join(items)} in {crs}"
-        self.fit_status.setText(self._overlay_message)
+        self._show_overlay_message(f"the map cannot show {_join(items)} in {crs}")
 
     def _grid_outline(self) -> list[QgsPointXY] | None:
         """The form's grid as four corners in the canvas CRS, or None while it
