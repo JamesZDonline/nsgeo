@@ -79,7 +79,7 @@ from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
-from nsgeo_qgis.ui.profile_dock import ProfileDock
+from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 
@@ -509,10 +509,7 @@ class NsgeoPlugin:
     def _curve_param_name(step: Any) -> str | None:
         """The name of a step's curve-kind parameter, if it has one. Decided
         by the schema's kind, never by the step's name."""
-        for spec in type(step).schema():
-            if spec.kind == "curve":
-                return str(spec.name)
-        return None
+        return curve_param_name(step)
 
     def _sync_gain_strip(self, row: int) -> None:
         # Slots on session/dock signals can still fire after unload() nulls

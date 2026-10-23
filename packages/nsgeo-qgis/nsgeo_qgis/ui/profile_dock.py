@@ -17,6 +17,15 @@ top-level widget with no parent of its own, so it must tear it down itself
 teardown -- see `test_plugin_profile_view.py`'s `make_view` fixture for
 the same hazard and pattern this file's own tests copy.
 
+The display limit: the percentile of the radargram the image is *measured
+on*, which is not always the one shown. With a gain curve in the stack the
+limit is taken from the stack with every enabled curve step switched off
+(`_scale_reference`), so dragging a curve brightens or darkens a band
+against a scale that holds still, instead of the scale chasing the curve
+(spec 3, calls 1 and 4). A difference view is its own scale. The time
+cutoff is never bypassed in that measurement, so selecting the cutoff row
+shows more record without changing the brightness (call 11).
+
 The time cutoff: a step with a `time`-kind parameter (`time_param_name`)
 is drawn as a draggable line, and while its row is selected the image
 shows the stack with that step bypassed so there is something below the
@@ -82,6 +91,16 @@ def time_param_name(step: Any) -> str | None:
     `_curve_param_name` does for the gain curve."""
     for spec in type(step).schema():
         if spec.kind == "time":
+            return str(spec.name)
+    return None
+
+
+def curve_param_name(step: Any) -> str | None:
+    """The name of a step's curve-kind parameter, if it has one. Decided by
+    the schema's kind, never by the step's name; the same shape as
+    `time_param_name`."""
+    for spec in type(step).schema():
+        if spec.kind == "curve":
             return str(spec.name)
     return None
 
@@ -158,6 +177,11 @@ class ProfileDock(QgsDockWidget):
         bar.addWidget(QLabel("Display gain"))
         self.percentile_slider = QSlider(Qt.Orientation.Horizontal)
         self.percentile_slider.setRange(500, 1000)
+        self.percentile_slider.setToolTip(
+            "How much of the profile may saturate. With a gain curve in the processing "
+            "steps, this is measured as if the gain curve were switched off, so the curve "
+            "brightens or darkens parts of the profile against a fixed scale."
+        )
         # M5 follow-up (Finding 1): a lower percentile clips more of the
         # signal, which saturates more samples to black/white -- "more
         # gained" in the user's words. The intuitive drag direction is
@@ -770,10 +794,11 @@ class ProfileDock(QgsDockWidget):
         self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
         if keep_window and old is not None and old.n_samples == rg.n_samples:
             self.view.transform = old
+        reference = self._scale_reference(rg)
         self.image = (
-            self.image.with_radargram(rg)
+            self.image.with_radargram(rg, reference)
             if self.image is not None
-            else RadargramImage(rg, self.percentile, self.colormap_name)
+            else RadargramImage(rg, self.percentile, self.colormap_name, reference=reference)
         )
         self.view.set_image(self.image.image)
         step_text = ""
@@ -783,6 +808,27 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
         self._show_cutoff()
+
+    def _scale_reference(self, shown: Radargram) -> Radargram:
+        """The radargram the display limit is taken from: `shown` itself
+        for a difference view, else the displayed stack with every enabled
+        gain-curve step bypassed (just `result()` when there is none).
+        Never bypasses the time cutoff -- see the module docstring. Called
+        after `current_radargram`, so a declined difference has already
+        reset `_effective_difference_index`."""
+        if self._effective_difference_index >= 0 or self._key is None:
+            return shown
+        try:
+            stack = self.session.stack_for(self._key, insert=self._preview_key is None)
+            rows = [
+                i
+                for i, (step, enabled) in enumerate(stack.entries)
+                if enabled and curve_param_name(step) is not None
+            ]
+            return stack.result_bypassing(*rows)
+        except ValueError as exc:
+            _log(f"could not measure the display scale without the gain curves: {exc}")
+            return shown
 
     def _cutoff_row(self, row: int | None = None) -> int:
         """`row` (default: the selected one) when it is the cutoff row, else
