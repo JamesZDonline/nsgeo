@@ -43,6 +43,8 @@ KNOWN_UNCONSUMED = {
     # replaces the tool).
     "pick_all_requested",
     "corners_changed",
+    # Task 3 built the Pick on map button; Task 5 wires it to the polygon pick tool.
+    "pick_polygon_requested",
     "points_picked",
     "cancelled",
 }

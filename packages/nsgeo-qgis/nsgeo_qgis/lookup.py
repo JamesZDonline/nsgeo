@@ -252,62 +252,6 @@ def nearest_trace(
     return best
 
 
-@dataclass(frozen=True)
-class PolygonCorners:
-    local: np.ndarray  # (4, 2) grid-local metres
-    world: np.ndarray  # (4, 2) world coordinates
-    size_x: float
-    size_y: float
-
-
-def corners_from_polygon(
-    vertices: Sequence[tuple[float, float]], origin_index: int, plus_y_index: int
-) -> PolygonCorners:
-    """Turn a four-vertex ring into the control points a rigid fit wants.
-    `plus_y_index` must neighbour `origin_index`; the other neighbour is +X
-    and the remaining vertex is +X+Y.
-
-    Of the two corners adjacent to the origin, only one yields a
-    right-handed (non-mirrored) frame; the other is rejected. Silently
-    accepting it would be worse than accepting a non-square quadrilateral:
-    fit_grid_from_corners forbids reflection by construction, so a mirrored
-    pick still returns a plausible-looking origin, size, and azimuth --
-    identical to the correct pick's -- with nothing but a large
-    residual_rms to distinguish it, which callers may reasonably read as
-    "not square" rather than "wrong corner".
-    """
-    pts = [tuple(map(float, v)) for v in vertices]
-    if len(pts) >= 2 and pts[0] == pts[-1]:
-        pts = pts[:-1]
-    if len(pts) != 4:
-        raise ValueError(f"expected four corners, got {len(pts)}")
-    o = origin_index % 4
-    if plus_y_index % 4 not in ((o + 1) % 4, (o - 1) % 4):
-        raise ValueError("the +Y corner must be adjacent to the origin corner")
-    y = plus_y_index % 4
-    x = (o - 1) % 4 if y == (o + 1) % 4 else (o + 1) % 4
-    # cross(x - o, y - o) is positive iff (+X, +Y) is a right-handed pair --
-    # which a real grid's axes always are (Grid.axes() has
-    # cross(x_hat, y_hat) == +1 at every azimuth). A rotation (to_world's
-    # only transform) preserves that sign; a reflection would flip it. So a
-    # non-positive cross here means this (origin, +Y) pick mirrors the two
-    # neighbours onto each other's roles, regardless of the ring's own
-    # winding direction.
-    cross = (pts[x][0] - pts[o][0]) * (pts[y][1] - pts[o][1]) - (pts[x][1] - pts[o][1]) * (
-        pts[y][0] - pts[o][0]
-    )
-    if cross <= 0:
-        raise ValueError(
-            "these corners are mirrored: pick the other corner adjacent to the origin for +Y"
-        )
-    far = ({0, 1, 2, 3} - {o, x, y}).pop()
-    world = np.array([pts[o], pts[x], pts[far], pts[y]], dtype=float)
-    size_x = float(math.dist(pts[o], pts[x]))
-    size_y = float(math.dist(pts[o], pts[y]))
-    local = np.array([[0.0, 0.0], [size_x, 0.0], [size_x, size_y], [0.0, size_y]])
-    return PolygonCorners(local=local, world=world, size_x=size_x, size_y=size_y)
-
-
 def identity_curve(t0_ns: float, dt_ns: float, n_samples: int) -> list[list[float]]:
     """Two control points at 0 dB spanning the time axis: the identity, so
     seeding gain_curve with it is not a guess."""

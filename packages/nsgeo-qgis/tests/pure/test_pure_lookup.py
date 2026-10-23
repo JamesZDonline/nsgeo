@@ -9,7 +9,6 @@ from nsgeo_qgis.lookup import (
     ImportOptions,
     compass_label,
     corner_frame,
-    corners_from_polygon,
     identity_curve,
     nearest_trace,
     plan_import,
@@ -145,26 +144,6 @@ def test_nearest_trace_within_tolerance():
     assert nearest_trace({}, (0.0, 0.0), tolerance=1.0) is None
 
 
-def test_corners_from_polygon_yields_a_fittable_rectangle():
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    ring = [tuple(p) for p in world] + [tuple(world[0])]  # closed ring, as QGIS gives it
-    corners = corners_from_polygon(ring, origin_index=0, plus_y_index=3)
-    assert corners.size_x == pytest.approx(5.0) and corners.size_y == pytest.approx(11.0)
-    fit = fit_grid_from_corners(corners.local, corners.world)
-    assert fit.azimuth == pytest.approx(30.0, abs=1e-6)
-    assert fit.residual_rms < 1e-9
-    assert fit.origin == pytest.approx((500.0, 700.0))
-
-
-def test_corners_from_polygon_rejects_non_adjacent_plus_y():
-    ring = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
-    with pytest.raises(ValueError, match="adjacent"):
-        corners_from_polygon(ring, origin_index=0, plus_y_index=2)
-    with pytest.raises(ValueError, match="four"):
-        corners_from_polygon(ring[:3], origin_index=0, plus_y_index=1)
-
-
 def test_identity_curve_spans_the_time_axis_at_zero_db():
     assert identity_curve(-11.0, 0.5, 5) == [[-11.0, 0.0], [-9.0, 0.0]]
 
@@ -260,41 +239,6 @@ def test_reversed_lines_are_placed_within_the_grid_on_real_files():
         if along.min() < 0:
             overruns += 1
     assert overruns == 1  # exactly FILE__008
-
-
-def test_corners_from_polygon_rejects_a_mirrored_plus_y_pick():
-    """Finding 2: only a *diagonal* plus_y_index was rejected. Of the two
-    corners adjacent to the origin, exactly one yields a right-handed
-    frame; the other silently mirrors +X and +Y onto each other's corners.
-    fit_grid_from_corners forbids reflection by construction, so the
-    mirrored pick still returns a plausible-looking grid (same size,
-    azimuth, and origin as the correct pick) with only a large
-    residual_rms to show for it."""
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    ring = [tuple(p) for p in world] + [tuple(world[0])]
-    with pytest.raises(ValueError, match="mirrored"):
-        corners_from_polygon(ring, origin_index=1, plus_y_index=2)
-
-
-def test_corners_from_polygon_mirror_check_is_winding_independent():
-    """Finding 2, continued: the mirror check must key off world-coordinate
-    handedness, not the ring's own traversal direction. Reversing the
-    ring's vertex order must not change which pick is flagged: the same
-    physical +Y corner is still accepted, and the same physical +X corner
-    (now offered as a plausible plus_y_index) is still rejected."""
-    grid = Grid("G", (500.0, 700.0), 30.0, 5.0, 11.0, "EPSG:32616", 0.5)
-    world = grid.to_world(np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 11.0], [0.0, 11.0]]))
-    reversed_ring = [tuple(world[i]) for i in (0, 3, 2, 1)]
-    reversed_ring = reversed_ring + [reversed_ring[0]]
-    # index 1 of the reversed ring is world[3], the true +Y corner: valid.
-    corners = corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=1)
-    assert corners.size_x == pytest.approx(5.0) and corners.size_y == pytest.approx(11.0)
-    fit = fit_grid_from_corners(corners.local, corners.world)
-    assert fit.residual_rms < 1e-9
-    # index 3 of the reversed ring is world[1], the true +X corner: mirrored.
-    with pytest.raises(ValueError, match="mirrored"):
-        corners_from_polygon(reversed_ring, origin_index=0, plus_y_index=3)
 
 
 def test_reversed_direction_note_is_idempotent_and_clears_once_grid_length_is_known(tmp_path):

@@ -19,11 +19,14 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsCsException,
     QgsDistanceArea,
+    QgsGeometry,
+    QgsMapLayerProxyModel,
     QgsPointXY,
     QgsProject,
     QgsUnitTypes,
+    QgsVectorLayer,
 )
-from qgis.gui import QgsProjectionSelectionWidget
+from qgis.gui import QgsFeaturePickerWidget, QgsMapLayerComboBox, QgsProjectionSelectionWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -41,7 +44,13 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.lookup import CORNER_ROLES, corner_frame, rotate_roles
+from nsgeo_qgis.lookup import (
+    CORNER_ROLES,
+    compass_label,
+    corner_frame,
+    roles_from_ring,
+    rotate_roles,
+)
 from nsgeo_qgis.session import SiteSession
 
 COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
@@ -100,6 +109,7 @@ class GridDialog(QDialog):
     pick_requested = pyqtSignal(int)
     pick_all_requested = pyqtSignal()
     corners_changed = pyqtSignal()
+    pick_polygon_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -293,6 +303,27 @@ class GridDialog(QDialog):
         self.fit_status = QLabel("")
         self.fit_status.setWordWrap(True)
         v.addWidget(self.fit_status)
+
+        divider = QLabel("or fill all four from a polygon")
+        divider.setStyleSheet("color: gray; border-top: 1px solid gray; padding-top: 4px;")
+        v.addWidget(divider)
+        self.layer_combo = QgsMapLayerComboBox()
+        self.layer_combo.setFilters(QgsMapLayerProxyModel.Filter.PolygonLayer)
+        self.feature_picker = QgsFeaturePickerWidget()
+        self.layer_combo.layerChanged.connect(self.feature_picker.setLayer)
+        self.feature_picker.setLayer(self.layer_combo.currentLayer())
+        polygon_row = QHBoxLayout()
+        polygon_row.addWidget(self.layer_combo, 1)
+        polygon_row.addWidget(self.feature_picker, 1)
+        self.pick_polygon_button = QPushButton("Pick on map")
+        self.pick_polygon_button.clicked.connect(
+            lambda _checked=False: self.pick_polygon_requested.emit()
+        )
+        self.fill_button = QPushButton("Fill")
+        self.fill_button.clicked.connect(self.fill_from_polygon)
+        polygon_row.addWidget(self.pick_polygon_button)
+        polygon_row.addWidget(self.fill_button)
+        v.addLayout(polygon_row)
         return box
 
     def _geographic(self) -> bool:
@@ -464,6 +495,81 @@ class GridDialog(QDialog):
             self._rows_changed()
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
             self.fit_status.setText(f"could not rotate the corners: {exc}")
+
+    # ---- fill from a polygon ----------------------------------------------
+    def set_polygon_feature(self, layer: QgsVectorLayer, fid: int) -> None:
+        """Select a polygon in both combos (the map pick's way in)."""
+        self.layer_combo.setLayer(layer)
+        self.feature_picker.setLayer(layer)
+        self.feature_picker.setFeature(fid)
+
+    def chosen_polygon(self) -> tuple[QgsVectorLayer, QgsGeometry] | None:
+        """The layer and geometry the combos name, or None."""
+        layer = self.layer_combo.currentLayer()
+        if not isinstance(layer, QgsVectorLayer):
+            return None
+        picked = self.feature_picker.feature()
+        if not picked.isValid():
+            return None
+        feature = layer.getFeature(picked.id())
+        if not feature.isValid() or feature.geometry().isNull():
+            return None
+        return layer, feature.geometry()
+
+    def fill_from_polygon(self) -> None:
+        """Fill all four rows from the chosen polygon's first ring. Never fits."""
+        try:
+            self._fill_from_polygon()
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not fill from the polygon: {exc}")
+
+    def _fill_from_polygon(self) -> None:
+        layer = self.layer_combo.currentLayer()
+        picked = self.feature_picker.feature()
+        if not isinstance(layer, QgsVectorLayer) or not picked.isValid():
+            self.fit_status.setText("select a polygon feature first")
+            return
+        geometry = layer.getFeature(picked.id()).geometry()
+        ring: list[QgsPointXY] = []
+        if not geometry.isNull():
+            if geometry.isMultipart():
+                parts = geometry.asMultiPolygon()
+                ring = parts[0][0] if parts and parts[0] else []
+            else:
+                rings = geometry.asPolygon()
+                ring = rings[0] if rings else []
+        if not ring:
+            self.fit_status.setText("this feature has no rings to read corners from")
+            return
+        target = self.corners_crs.crs()
+        try:
+            xform = QgsCoordinateTransform(layer.crs(), target, QgsProject.instance())
+            points = [xform.transform(QgsPointXY(p)) for p in ring]
+        except QgsCsException:
+            self.fit_status.setText(f"could not convert the polygon into {target.authid()}")
+            return
+        # In degrees, a step in longitude is shorter than one in latitude by
+        # cos(mean latitude); roles and compass work in that corrected plane.
+        scale = 1.0
+        if target.isGeographic():
+            scale = math.cos(math.radians(sum(p.y() for p in points) / len(points)))
+        plane = [(p.x() * scale, p.y()) for p in points]
+        try:
+            ordered, idx = roles_from_ring(plane)
+        except ValueError as exc:
+            self.fit_status.setText(str(exc))
+            return
+        centre = (sum(p[0] for p in ordered) / 4, sum(p[1] for p in ordered) / 4)
+        by_plane = {pl: pt for pl, pt in zip(plane, points)}
+        rows = [
+            (
+                QgsPointXY(by_plane[xy]),
+                f"v{i} {compass_label(xy, centre)}",
+            )
+            for xy, i in zip(ordered, idx)
+        ]
+        for row, (point, source) in enumerate(rows):
+            self.set_corner(row, point, target, source)
 
     # ---- fit --------------------------------------------------------------
     def _corners_in_grid_crs(

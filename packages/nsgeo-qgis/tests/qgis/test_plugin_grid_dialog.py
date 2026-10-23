@@ -96,6 +96,16 @@ def _pump(app: object, condition: object, timeout: float = 2.0) -> bool:
     return condition()
 
 
+def _select_sole_feature(qgis_app: object, dialog: GridDialog, layer: QgsVectorLayer) -> None:
+    """Select `layer`'s only feature in `dialog`'s polygon row, waiting out
+    QgsFeaturePickerWidget's asynchronous population (see _pump)."""
+    dialog.layer_combo.setLayer(layer)
+    _pump(qgis_app, lambda: dialog.feature_picker.feature().isValid())
+    fid = next(layer.getFeatures()).id()
+    dialog.feature_picker.setFeature(fid)
+    _pump(qgis_app, lambda: dialog.feature_picker.feature().id() == fid)
+
+
 def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
     """Call open_grid_dialog() and return the GridDialog it just showed.
 
@@ -1088,3 +1098,190 @@ def test_a_fit_that_is_not_square_says_so(session):
     assert text.startswith("rigid fit RMS 0.0")
     assert not text.startswith("rigid fit RMS 0.000")
     assert text.endswith(" m from 4 corners · not quite square: see off by")
+
+
+# ---- fill from a polygon (#27) ----------------------------------------------
+
+
+def _wgs84_ring() -> list[QgsPointXY]:
+    xform = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance())
+    return [xform.transform(QgsPointXY(*p)) for p in SITE_CORNERS]
+
+
+def _polygon_layer(
+    ring: list[QgsPointXY], kind: str = "Polygon", crs: str = "EPSG:4326"
+) -> QgsVectorLayer:
+    layer = QgsVectorLayer(f"{kind}?crs={crs}", "plan", "memory")
+    f = QgsFeature()
+    if kind == "Polygon":
+        f.setGeometry(QgsGeometry.fromPolygonXY([ring]))
+    else:
+        f.setGeometry(QgsGeometry.fromMultiPolygonXY([[ring]]))
+    layer.dataProvider().addFeatures([f])
+    return layer
+
+
+@pytest.fixture
+def plan_layer(qgis_app):
+    made: list[QgsVectorLayer] = []
+
+    def _make(*args: Any, **kwargs: Any) -> QgsVectorLayer:
+        layer = _polygon_layer(*args, **kwargs)
+        QgsProject.instance().addMapLayer(layer)
+        made.append(layer)
+        return layer
+
+    yield _make
+    for layer in made:
+        QgsProject.instance().removeMapLayer(layer.id())
+
+
+def _geo_dialog(session) -> GridDialog:
+    d = GridDialog(session)
+    d.corners_crs.setCrs(WGS84)
+    d.crs_widget.setCrs(UTM16)
+    return d
+
+
+SITE_SOURCES = ["v0 SW", "v1 SE", "v2 NE", "v3 NW"]
+
+
+def test_fill_from_a_4326_polygon_gives_the_known_utm_grid(qgis_app, session, plan_layer):
+    layer = plan_layer(_wgs84_ring())
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    d.fit_corners()
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-3)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-3)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-6)
+    assert d.size_x.value() == pytest.approx(20.0, abs=1e-3)
+    assert d.size_y.value() == pytest.approx(20.0, abs=1e-3)
+    assert [d.corner_source(r) for r in range(4)] == SITE_SOURCES
+
+
+def test_fill_reads_a_multipolygon_layer(qgis_app, session, plan_layer):
+    layer = plan_layer(_wgs84_ring(), kind="MultiPolygon")
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    ring = _wgs84_ring()
+    for r in range(4):
+        assert d.corner_point(r).x() == pytest.approx(ring[r].x(), abs=1e-9)
+        assert d.corner_point(r).y() == pytest.approx(ring[r].y(), abs=1e-9)
+
+
+def test_fill_labels_by_compass_in_a_geographic_crs(qgis_app, session, plan_layer):
+    # A long thin site: the labels must come out the same from a UTM layer
+    # read into a geographic "Corners in" (the cos(phi) rule).
+    layer = plan_layer([QgsPointXY(*p) for p in SITE_CORNERS], crs="EPSG:32616")
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    assert d.corners_crs.crs() == WGS84
+    assert [d.corner_source(r) for r in range(4)] == SITE_SOURCES
+
+
+def test_the_cos_phi_rule_keeps_a_245_degree_vertex_south_west(qgis_app, session, plan_layer):
+    # A vertex at true bearing 245 deg sits just inside SW. Read raw in
+    # degrees at 36 N it would swing to ~249 deg and be called W.
+    import math
+
+    cx, cy = SITE.origin
+    ring = [
+        QgsPointXY(cx + 30 * math.sin(math.radians(b)), cy + 30 * math.cos(math.radians(b)))
+        for b in (245, 335, 65, 155)
+    ]
+    layer = plan_layer(ring, crs="EPSG:32616")
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    labels = {d.corner_source(r).split()[0]: d.corner_source(r).split()[1] for r in range(4)}
+    assert labels == {"v0": "SW", "v1": "NW", "v2": "NE", "v3": "SE"}
+
+
+def test_fill_without_a_feature_reports_a_message(session):
+    d = _geo_dialog(session)
+    d.fill_from_polygon()
+    assert d.fit_status.text() == "select a polygon feature first"
+
+
+def test_fill_reports_an_empty_geometry(qgis_app, session, plan_layer):
+    layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "plan", "memory")
+    layer.dataProvider().addFeatures([QgsFeature()])
+    QgsProject.instance().addMapLayer(layer)
+    try:
+        d = _geo_dialog(session)
+        _select_sole_feature(qgis_app, d, layer)
+        d.fill_from_polygon()
+        assert d.fit_status.text() == "this feature has no rings to read corners from"
+    finally:
+        QgsProject.instance().removeMapLayer(layer.id())
+
+
+def test_fill_refuses_a_five_corner_polygon(qgis_app, session, plan_layer):
+    ring = _wgs84_ring()
+    ring.insert(
+        2, QgsPointXY((ring[1].x() + ring[2].x()) / 2 + 1e-5, (ring[1].y() + ring[2].y()) / 2)
+    )
+    layer = plan_layer(ring)
+    d = _geo_dialog(session)
+    d.set_corner(0, QgsPointXY(-86.0, 36.0), WGS84, "typed")
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    assert "expected four corners, got 5" in d.fit_status.text()
+    assert [d.corner_point(r) for r in (1, 2, 3)] == [None, None, None]
+    assert d.corner_point(0) == QgsPointXY(-86.0, 36.0)
+    assert d.corner_source(0) == "typed"
+
+
+def test_fill_does_not_fit(qgis_app, session, plan_layer):
+    layer = plan_layer(_wgs84_ring())
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    assert (d.origin_x.value(), d.origin_y.value()) == (0.0, 0.0)
+
+
+def test_fill_that_cannot_transform_leaves_the_rows_alone(qgis_app, session, plan_layer):
+    ring = _wgs84_ring()
+    ring[2] = QgsPointXY(ring[2].x(), 95.0)  # outside every CRS: the transform raises
+    layer = plan_layer(ring)
+    d = _utm_dialog(session)
+    d.set_corner(0, QgsPointXY(*SITE_CORNERS[0]), UTM16, "typed")
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    assert d.fit_status.text() == "could not convert the polygon into EPSG:32616"
+    assert d.corner_source(0) == "typed"
+    assert d.corner_point(1) is None
+
+
+def test_rotate_carries_polygon_labels(qgis_app, session, plan_layer):
+    layer = plan_layer(_wgs84_ring())
+    d = _geo_dialog(session)
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    d.rotate_corners()
+    assert [d.corner_source(r) for r in range(4)] == ["v1 SE", "v2 NE", "v3 NW", "v0 SW"]
+
+
+def test_set_polygon_feature_sets_both_combos_and_chosen_polygon_reads_them(
+    qgis_app, session, plan_layer
+):
+    layer = plan_layer(_wgs84_ring())
+    d = _geo_dialog(session)
+    assert d.chosen_polygon() is None
+    fid = next(layer.getFeatures()).id()
+    d.set_polygon_feature(layer, fid)
+    _pump(qgis_app, lambda: d.feature_picker.feature().id() == fid)
+    assert d.layer_combo.currentLayer() == layer
+    chosen = d.chosen_polygon()
+    assert chosen is not None and chosen[0] == layer and not chosen[1].isNull()
+
+
+def test_pick_on_map_only_emits(session, qgis_app):
+    d = _geo_dialog(session)
+    seen: list[int] = []
+    d.pick_polygon_requested.connect(lambda: seen.append(1))
+    d.pick_polygon_button.click()
+    assert seen == [1]
