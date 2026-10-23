@@ -819,11 +819,13 @@ class ProfileView(QWidget):
             return
         # Pick wins the press over the grab, so in pick mode the line must
         # not advertise a drag.
-        if self._near_cutoff(x, y) and not self._pick_mode:
+        if self._near_cutoff(x, y) and not (self._pick_mode or self._velocity_mode):
             self.setCursor(Qt.CursorShape.SizeVerCursor)
         else:
             self.setCursor(
-                Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+                Qt.CursorShape.CrossCursor
+                if (self._pick_mode or self._velocity_mode)
+                else Qt.CursorShape.ArrowCursor
             )
         if 0 <= x < self.transform.width:
             self.trace_hovered.emit(self.transform.trace_index_at(x))

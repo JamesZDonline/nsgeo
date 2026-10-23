@@ -8,7 +8,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from plugin_testing import synthetic_dzt
+from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -118,19 +118,42 @@ def test_a_velocity_click_on_the_axis_margin_adds_no_point(plugin):
     assert plugin.profile_dock.velocity_points() == []
 
 
-def test_a_right_click_drops_the_nearest_point(plugin):
+def _right_click_at(v, pos, dx=0.0):
+    r = v.image_rect()
+    QTest.mouseClick(
+        v,
+        Qt.MouseButton.RightButton,
+        NO_MOD,
+        QPoint(round(r.left() + pos[0] + dx), round(r.top() + pos[1])),
+    )
+
+
+def test_a_right_click_drops_the_nearest_point_not_the_first_in_range(plugin):
     v = _view(plugin)
     _check(plugin.act_velocity)
     _click(v, 40, 30)
-    _click(v, 80, 50)
-    keep = plugin.profile_dock.velocity_points()[1]
+    _click(v, 50, 30)
+    first, second = plugin.profile_dock.velocity_points()
+    p1, p2 = v._velocity_positions(v.transform)
+    assert 0 < p2[0] - p1[0] < 12  # both within reach of one click
 
-    _click(v, 42, 32, Qt.MouseButton.RightButton)
-    assert plugin.profile_dock.velocity_points() == [keep]
+    _right_click_at(v, p2, dx=-1)  # nearer the second, yet the first is in range too
+    assert plugin.profile_dock.velocity_points() == [first]
 
-    # A right-click far from any point removes nothing.
-    _click(v, 150, 20, Qt.MouseButton.RightButton)
-    assert plugin.profile_dock.velocity_points() == [keep]
+
+def test_a_right_click_discards_only_within_the_tolerance(plugin):
+    from nsgeo_qgis.ui.profile_view import VELOCITY_DISCARD_PX
+
+    v = _view(plugin)
+    _check(plugin.act_velocity)
+    _click(v, 40, 30)
+    (p,) = v._velocity_positions(v.transform)
+    pt = plugin.profile_dock.velocity_points()
+
+    _right_click_at(v, p, dx=VELOCITY_DISCARD_PX + 2)  # just outside
+    assert plugin.profile_dock.velocity_points() == pt
+    _right_click_at(v, p, dx=VELOCITY_DISCARD_PX - 2)  # just inside
+    assert plugin.profile_dock.velocity_points() == []
 
 
 def test_opening_another_line_clears_the_working_points(plugin):
@@ -155,3 +178,24 @@ def test_velocity_mode_leaves_selection_drag_and_the_cutoff_handle_alone(plugin)
     assert v._cutoff_grab is not None  # the handle grabbed; nothing swallowed it
     QTest.mouseRelease(v, LEFT, NO_MOD, _local(v, 100, line_y))
     assert plugin.profile_dock.velocity_points() == []
+
+    # A plain press-drag-release off the line still selects a range.
+    got = []
+    v.range_selected.connect(lambda a, b: got.append((a, b)))
+    QTest.mousePress(v, LEFT, NO_MOD, _local(v, 20, 10))
+    send_move_while_pressed(v, _local(v, 120, 10))
+    QTest.mouseRelease(v, LEFT, NO_MOD, _local(v, 120, 10))
+    assert got and plugin.profile_dock.velocity_points() == []
+
+
+def test_a_velocity_press_near_the_cutoff_line_adds_a_point_and_takes_no_grab(plugin):
+    v = _view(plugin)
+    v.set_cutoff(40.0)
+    line_y = round(v._cutoff_y(v.transform))
+    _check(plugin.act_velocity)
+
+    _click(v, 100, line_y)
+
+    assert v._cutoff_grab is None
+    assert len(plugin.profile_dock.velocity_points()) == 1
+    assert v.cutoff_ns == 40.0

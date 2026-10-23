@@ -1789,6 +1789,17 @@ def test_hovering_the_line_shows_a_resize_cursor(view):
     assert v.cursor().shape() == Qt.CursorShape.CrossCursor
 
 
+def test_hovering_the_line_in_velocity_mode_keeps_the_crosshair(view):
+    v, _ = view
+    r, t, ly = _on_line(v)
+    v.set_velocity_fit_mode(True)
+    # The velocity click wins the press, so the line must not advertise a drag.
+    send_hover(v, QPoint(r.left() + 100, r.top() + ly))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+    send_hover(v, QPoint(r.left() + 100, r.top() + 50))
+    assert v.cursor().shape() == Qt.CursorShape.CrossCursor
+
+
 def test_clear_forgets_the_cutoff(view):
     v, _ = view
     v.set_cutoff(40.0)
