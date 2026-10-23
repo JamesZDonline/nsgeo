@@ -251,7 +251,22 @@ class ImportDialog(QDialog):
         grid = self._grid()
         if grid is not None:
             self.spacing.setValue(grid.default_spacing)
+        # #61: the target named where it is hard to miss, in the title and
+        # on the Import button (see _refresh_table).
+        gid = self.grid_combo.currentData()
+        self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
         self._replan()
+
+    def retarget(self, grid_id: str) -> None:
+        """Point the dialog at `grid_id`, but only while it has no files.
+
+        #61: raising an open dialog from the toolbar, or from a grid's own
+        Import DZT files..., switches its target to that grid. A half-built
+        import is never moved to another grid behind the user's back.
+        """
+        index = self.grid_combo.findData(grid_id)
+        if not self.rows and index >= 0:
+            self.grid_combo.setCurrentIndex(index)
 
     def options(self) -> ImportOptions:
         grid = self._grid()
@@ -393,7 +408,10 @@ class ImportDialog(QDialog):
                     self.table.setItem(r, col, item)
             self.table.resizeColumnsToContents()
             n = sum(1 for r in self.rows if r.include and r.placeable)
-            self.import_button.setText(f"Import {n} line(s)")
+            gid = self.grid_combo.currentData()
+            self.import_button.setText(
+                f"Import {n} line(s) into {gid}" if gid else f"Import {n} line(s)"
+            )
             self.import_button.setEnabled(n > 0)
         finally:
             self._updating = False

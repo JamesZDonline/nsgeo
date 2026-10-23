@@ -279,6 +279,36 @@ class SurveyDock(QgsDockWidget):
     def grid_id_of(self, item: QTreeWidgetItem | None) -> str | None:
         return item.data(0, ROLE_ID) if self.kind_of(item) == "grid" else None
 
+    def target_grid_id(self) -> str | None:
+        """The grid this panel points at, for the toolbar's Import DZT (#61).
+
+        The grid the selection names -- selected grid rows, or the grids of
+        selected lines, when they all come to one grid -- else the open
+        line's grid, else None. A selection spanning grids names none
+        rather than have one picked for it.
+        """
+        try:
+            grid_ids = set()
+            for item in self.tree.selectedItems():
+                key = self.key_of(item)
+                if key is not None:
+                    grid_ids.add(self._grid_of_line(key))
+                elif self.kind_of(item) == "grid":
+                    grid_ids.add(self.grid_id_of(item))
+            if len(grid_ids) == 1:
+                return grid_ids.pop()
+            key = self.session.current_key
+            return self._grid_of_line(key) if key else None
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring:
+            # reached from a toolbar action's slot. No target is the safe
+            # answer: the import dialog falls back to the first grid.
+            _log(f"could not read the selected grid: {exc}", Qgis.MessageLevel.Critical)
+            return None
+
+    def _grid_of_line(self, key: str) -> str | None:
+        line = self.session.line_for_key(key)
+        return getattr(line.placement, "grid_id", None)
+
     def item_for_key(self, key: str) -> QTreeWidgetItem | None:
         it = QTreeWidgetItemIterator(self.tree)
         while it.value():

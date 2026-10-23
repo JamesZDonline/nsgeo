@@ -4,6 +4,8 @@ from typing import Any
 
 import pytest
 from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.import_dialog import (
@@ -15,11 +17,14 @@ from nsgeo_qgis.ui.import_dialog import (
     COL_START,
     ImportDialog,
 )
+from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+GRID_B = Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+GRID_C = Grid("C", (700.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
 
 @pytest.fixture
@@ -570,3 +575,106 @@ def test_accept_refuses_when_the_target_grid_was_removed_under_the_dialog(
     dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
+
+
+# ---- #61: the target grid is the one the Survey panel points at ---------------
+
+
+def test_the_target_grid_is_named_in_the_title_and_on_the_import_button(session, tmp_path):
+    session.add_grid(GRID_B)
+    d = ImportDialog(session, grid_id="B")
+    d.add_files([synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)])
+    assert d.windowTitle() == "Import DZT files into B"
+    assert d.import_button.text() == "Import 2 line(s) into B"
+
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
+
+    assert d.windowTitle() == "Import DZT files into A"
+    assert d.import_button.text() == "Import 2 line(s) into A"
+
+
+@pytest.fixture
+def three_grids(fake_iface, tmp_path, answer_modal):
+    """A loaded plugin over grids A, B and C: two lines on B, one on C, none
+    on A, and no line open."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    for grid in (GRID, GRID_B, GRID_C):
+        plugin.session.add_grid(grid)
+    lines = []
+    for i, grid_id in enumerate("BBC"):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT")
+        lines.append(Line.open(p, GridPlacement(grid_id, "y", i * 0.5, 0.0, 1, p.stem)))
+    plugin.session.add_lines(lines)
+    yield plugin
+    if plugin._import_dialog is not None:
+        plugin._import_dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def _select(plugin, *rows):
+    """Select exactly `rows` in the Survey panel: ("grid", id) or ("line", key)."""
+    tree = plugin.survey_dock.tree
+    tree.clearSelection()
+    site = tree.topLevelItem(0)
+    for grid_item in (site.child(i) for i in range(site.childCount())):
+        items = [grid_item] + [grid_item.child(j) for j in range(grid_item.childCount())]
+        for item in items:
+            if (item.data(0, ROLE_KIND), item.data(0, ROLE_ID)) in rows:
+                item.setSelected(True)
+    assert len(tree.selectedItems()) == len(rows)
+
+
+def _import_from_toolbar(plugin) -> ImportDialog:
+    plugin.act_import.trigger()
+    dialog = plugin._import_dialog
+    assert dialog is not None
+    return dialog
+
+
+def test_toolbar_import_targets_the_grid_selected_in_the_survey_panel(three_grids):
+    _select(three_grids, ("grid", "B"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+
+
+def test_toolbar_import_targets_the_grid_the_selected_lines_share(three_grids):
+    _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__002.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+
+
+def test_toolbar_import_falls_back_to_the_open_lines_grid(three_grids):
+    three_grids.session.open_line("raw/FILE__003.DZT")
+    _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__003.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+
+
+def test_toolbar_import_falls_back_to_the_first_grid_rather_than_guess(three_grids):
+    # A selection across two grids names neither, and no line is open.
+    _select(three_grids, ("line", "raw/FILE__002.DZT"), ("line", "raw/FILE__003.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "A"
+
+
+def test_an_open_import_dialog_with_no_files_follows_a_new_target(three_grids):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    _select(three_grids, ("grid", "C"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "C"
+    three_grids.survey_dock.import_requested.emit("A")  # a grid's own "Import DZT files…"
+    assert first.grid_combo.currentData() == "A"
+
+
+def test_an_open_import_dialog_with_files_keeps_its_grid(three_grids, tmp_path):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    first.add_files([synthetic_dzt(tmp_path / "more", "FILE__010.DZT")])
+    _select(three_grids, ("grid", "C"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "B"
+    assert len(first.rows) == 1

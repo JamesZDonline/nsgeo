@@ -200,7 +200,7 @@ class NsgeoPlugin:
         self.act_save = self._toolbar_action("Save site", self.save_with_prompt)
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
-        self.act_import = self._toolbar_action("Import DZT…", lambda: self.open_import_dialog(None))
+        self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -1353,6 +1353,13 @@ class NsgeoPlugin:
         dialog.hide()
         canvas.setMapTool(tool)
 
+    def _import_from_toolbar(self) -> None:
+        # #61: into the grid the Survey panel points at, not always the
+        # first one. None when it points at none, and the dialog then
+        # falls back to the first grid.
+        dock = self.survey_dock
+        self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
+
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,
         # whose shape this copies: single-instance tracking on
@@ -1366,6 +1373,8 @@ class NsgeoPlugin:
             self.message("Add a grid before importing lines.", Qgis.MessageLevel.Warning)
             return
         if self._import_dialog is not None:
+            if grid_id is not None:
+                self._import_dialog.retarget(grid_id)
             self._import_dialog.show()
             self._import_dialog.raise_()
             self._import_dialog.activateWindow()
