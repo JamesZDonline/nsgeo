@@ -27,6 +27,7 @@ from nsgeo.model import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.velocity import VelocityModel, resolve_velocity
+from nsgeo.velocity_fit import StoredFit
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
@@ -618,6 +619,33 @@ class SiteSession(QObject):
         new_line = dataclasses.replace(line, velocity=model)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line  # same key: only the object changed
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
+    def add_velocity_fit(self, key: str, fit: StoredFit) -> str:
+        """Store a hyperbola fit on the line under a fresh id and return it.
+        Stores only: no velocity changes (`set_line_velocity` does that)."""
+        site = self._require_site()
+        line = self.line_for_key(key)
+        n = len(line.velocity_fits) + 1
+        while f"fit-{n}" in line.velocity_fits:
+            n += 1
+        fit_id = f"fit-{n}"
+        new_line = dataclasses.replace(line, velocity_fits={**line.velocity_fits, fit_id: fit})
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
+        self._set_dirty(True)
+        self.lines_changed.emit()
+        return fit_id
+
+    def set_velocity_from_fit(self, key: str, fit_id: str | None) -> None:
+        site = self._require_site()
+        line = self.line_for_key(key)
+        if fit_id is not None and fit_id not in line.velocity_fits:
+            raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
+        new_line = dataclasses.replace(line, velocity_from_fit=fit_id)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 

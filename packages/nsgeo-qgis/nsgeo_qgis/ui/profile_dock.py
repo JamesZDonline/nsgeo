@@ -51,11 +51,14 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any
 
+import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names
 from nsgeo.velocity import VelocityModel, resolve_velocity
+from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -144,6 +147,8 @@ class ProfileDock(QgsDockWidget):
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
+        self._velocity_fit: HyperbolaFit | None = None
+        self._velocity_mode = False
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -232,6 +237,32 @@ class ProfileDock(QgsDockWidget):
         self.gain_strip.hide()
         viewer_row.addWidget(self.gain_strip)
         layout.addLayout(viewer_row, 1)
+        # The velocity-fit strip: read-out, warning and four buttons, shown
+        # only while velocity mode is on. The read-out is monospaced and
+        # formatted to a fixed width because Qt has no tabular figures.
+        self.velocity_strip = QWidget(body)
+        strip = QHBoxLayout(self.velocity_strip)
+        strip.setContentsMargins(0, 0, 0, 0)
+        self.velocity_readout = QLabel("")
+        self.velocity_readout.setStyleSheet("font-family: monospace")
+        self.velocity_readout.setWordWrap(True)
+        self.velocity_note = QLabel("")
+        self.velocity_note.setWordWrap(True)
+        self.apply_line_button = QPushButton("Apply to line")
+        self.apply_grid_button = QPushButton("Apply to grid")
+        self.save_fit_button = QPushButton("Save fit")
+        self.clear_velocity_button = QPushButton("Clear")
+        strip.addWidget(self.velocity_readout, 2)
+        strip.addWidget(self.velocity_note, 1)
+        for button in (
+            self.apply_line_button,
+            self.apply_grid_button,
+            self.save_fit_button,
+            self.clear_velocity_button,
+        ):
+            strip.addWidget(button)
+        self.velocity_strip.hide()
+        layout.addWidget(self.velocity_strip)
         self.setWidget(body)
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
@@ -245,6 +276,10 @@ class ProfileDock(QgsDockWidget):
         self.view.pick_requested.connect(self._pick)
         self.view.velocity_point_requested.connect(self._on_velocity_point_requested)
         self.view.velocity_point_discarded.connect(self._on_velocity_point_discarded)
+        self.apply_line_button.clicked.connect(self._apply_velocity_to_line)
+        self.apply_grid_button.clicked.connect(self._apply_velocity_to_grid)
+        self.save_fit_button.clicked.connect(self._save_velocity_fit)
+        self.clear_velocity_button.clicked.connect(self._clear_velocity_points)
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
@@ -559,6 +594,8 @@ class ProfileDock(QgsDockWidget):
         self.setWindowTitle("nsgeo Profile")
         self.setToolTip("")
         self.velocity_label.setText("")
+        self._velocity_points = []
+        self._update_velocity_fit()
         self.channel_combo.hide()
 
     # ---- preview (M7, spec §3.3) ----------------------------------------
@@ -652,17 +689,23 @@ class ProfileDock(QgsDockWidget):
         self.view.set_pick_mode(bool(flag))
 
     def set_velocity_fit_mode(self, flag: bool) -> None:
-        """Turn the profile's velocity-fit mode on or off. A passthrough for
-        the same reason `set_pick_mode` is."""
-        self.view.set_velocity_fit_mode(bool(flag))
+        """Turn the profile's velocity-fit mode on or off, and show or hide
+        the strip with it."""
+        self._velocity_mode = bool(flag)
+        self.view.set_velocity_fit_mode(self._velocity_mode)
+        self.velocity_strip.setVisible(self._velocity_mode)
+        self._update_velocity_fit()
 
     def velocity_points(self) -> list[tuple[int, float]]:
         return list(self._velocity_points)
 
+    def velocity_fit_result(self) -> HyperbolaFit | None:
+        return self._velocity_fit
+
     def _on_velocity_point_requested(self, trace: int, time_ns: float) -> None:
         try:
             self._velocity_points.append((int(trace), float(time_ns)))
-            self.view.set_velocity_fit(self._velocity_points, [])
+            self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
 
@@ -670,9 +713,156 @@ class ProfileDock(QgsDockWidget):
         try:
             if 0 <= index < len(self._velocity_points):
                 del self._velocity_points[index]
-                self.view.set_velocity_fit(self._velocity_points, [])
+                self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not discard the velocity point: {exc}", Qgis.MessageLevel.Critical)
+
+    # ---- velocity fit: the unit boundary --------------------------------
+    # The view speaks (trace, ns) and the core speaks (metres, ns); this is
+    # the only place the two meet. `Line.distance_along()` carries the
+    # traces-per-metre, start and direction, so nothing here re-derives them.
+    _CURVE_SAMPLES = 200
+    _T0_TOLERANCE_NS = 0.5
+
+    def _velocity_axis(self) -> tuple[Any, float, float]:
+        """(metres at each trace, metres at trace 0, metres per trace) for
+        the working line. Raises `ValueError` for a line with no distance
+        calibration, and for one too short to have a trace spacing."""
+        if self._working_key is None:
+            raise ValueError("no line is open")
+        distance = self.session.line_for_key(self._working_key).distance_along()
+        if len(distance) < 2:
+            raise ValueError("this line has fewer than two traces, so it has no trace spacing")
+        return distance, float(distance[0]), float(distance[1] - distance[0])
+
+    def velocity_points_in_metres(self) -> tuple[Any, Any]:
+        """The working points as (metres along the line, two-way ns) arrays,
+        in click order, so the first is still the apex guess."""
+        distance, _, _ = self._velocity_axis()
+        last = len(distance) - 1
+        x_m = np.array([distance[min(max(t, 0), last)] for t, _ in self._velocity_points])
+        t_ns = np.array([ns for _, ns in self._velocity_points], dtype=float)
+        return x_m, t_ns
+
+    def velocity_curve_points(self, fit: HyperbolaFit) -> list[tuple[float, float]]:
+        """`fit` sampled across the line's traces as (trace, ns) pairs."""
+        distance, d0, step = self._velocity_axis()
+        traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
+        dx = d0 + step * traces - fit.apex_x_m
+        t = np.sqrt(fit.t0_ns**2 + (4.0 / fit.v_m_ns**2) * dx**2)
+        return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
+
+    def _velocity_time_zero_note(self) -> str:
+        t = self.view.transform
+        if t is None or abs(t.t0_ns) <= self._T0_TOLERANCE_NS:
+            return ""
+        return (
+            f"Time zero is at {t.t0_ns:.1f} ns, so a hyperbola's time is not its "
+            "two-way time to the reflector. Add the time_zero step first."
+        )
+
+    def _update_velocity_fit(self) -> None:
+        """Refit the working points and repaint the curve, read-out and
+        buttons. Never raises: it runs from slots and from session signals."""
+        try:
+            self._velocity_fit = None
+            curve: list[tuple[float, float]] = []
+            self.velocity_note.setText(self._velocity_time_zero_note())
+            if not self._velocity_points:
+                self.velocity_readout.setText(
+                    "Click the hyperbola's apex, then points down both limbs."
+                    if self._working_key is not None
+                    else ""
+                )
+            else:
+                try:
+                    x_m, t_ns = self.velocity_points_in_metres()
+                    fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
+                    curve = self.velocity_curve_points(fit)
+                    self._velocity_fit = fit
+                    self.velocity_readout.setText(
+                        f"v = {fit.v_m_ns:6.4f} ± {fit.v_stderr_m_ns:6.4f} m/ns"
+                        f" · rms {fit.rms_ns:5.2f} ns · {fit.n_points:2d} pts"
+                    )
+                except ValueError as exc:
+                    if self._line_has_no_distance_calibration():
+                        self.velocity_readout.setText(
+                            "This line has no distance calibration (no traces per metre, "
+                            "as with time-triggered collection), so a hyperbola cannot "
+                            "be fitted."
+                        )
+                    else:
+                        self.velocity_readout.setText(str(exc))
+            self.view.set_velocity_fit(self._velocity_points, curve)
+            fit_ok = self._velocity_fit is not None
+            self.apply_line_button.setEnabled(fit_ok)
+            self.save_fit_button.setEnabled(fit_ok)
+            self.apply_grid_button.setEnabled(fit_ok and self._working_grid_id() is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the velocity fit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _line_has_no_distance_calibration(self) -> bool:
+        if self._working_key is None or not self.session.is_open:
+            return False
+        try:
+            self.session.line_for_key(self._working_key).distance_along()
+        except ValueError:
+            return True
+        return False
+
+    def _working_grid_id(self) -> str | None:
+        if self._working_key is None or not self.session.is_open:
+            return None
+        grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
+        return None if grid is None else str(grid.id)
+
+    def _apply_velocity_to_line(self, *_: Any) -> None:
+        try:
+            fit = self._velocity_fit
+            if fit is not None and self._working_key is not None:
+                self.session.set_line_velocity(
+                    self._working_key, VelocityModel.constant(fit.v_m_ns)
+                )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
+
+    def _apply_velocity_to_grid(self, *_: Any) -> None:
+        try:
+            fit = self._velocity_fit
+            grid_id = self._working_grid_id()
+            if fit is not None and grid_id is not None:
+                self.session.set_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
+
+    def _save_velocity_fit(self, *_: Any) -> None:
+        """Store the fit on the line. Deliberately changes no velocity: a
+        saved fit is a measurement, and applying it is a separate choice."""
+        try:
+            fit = self._velocity_fit
+            if fit is None or self._working_key is None:
+                return
+            _, d0, step = self._velocity_axis()
+            stored = StoredFit(
+                t0_ns=fit.t0_ns,
+                v_m_ns=fit.v_m_ns,
+                v_stderr_m_ns=fit.v_stderr_m_ns,
+                rms_ns=fit.rms_ns,
+                apex_trace=round((fit.apex_x_m - d0) / step),
+                points=tuple(self._velocity_points),
+                fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            )
+            fit_id = self.session.add_velocity_fit(self._working_key, stored)
+            self.session.set_velocity_from_fit(self._working_key, fit_id)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _clear_velocity_points(self, *_: Any) -> None:
+        try:
+            self._velocity_points = []
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
@@ -816,6 +1006,7 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
         self._show_cutoff()
+        self._update_velocity_fit()
 
     def _cutoff_row(self, row: int | None = None) -> int:
         """`row` (default: the selected one) when it is the cutoff row, else
@@ -961,6 +1152,7 @@ class ProfileDock(QgsDockWidget):
             return
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
+        self._update_velocity_fit()
 
     def _configure_channels(self, n: int) -> None:
         self.channel_combo.blockSignals(True)
