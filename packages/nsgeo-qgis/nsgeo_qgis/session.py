@@ -18,11 +18,12 @@ import dataclasses
 import datetime as _dt
 import json
 import math
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry.grid import Grid
-from nsgeo.model.survey import Line, Profile, Site
+from nsgeo.geometry import Grid
+from nsgeo.model import Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.velocity import VelocityModel, resolve_velocity
@@ -448,6 +449,16 @@ class SiteSession(QObject):
         self._require_site()
         return list(self._lines_by_key)
 
+    def keys_on_grid(self, grid_id: str) -> list[str]:
+        """The keys of every line placed on `grid_id`, in survey order.
+        `KeyError` for a grid the site does not have."""
+        self.grid(grid_id)
+        return [
+            key
+            for key, line in self._lines_by_key.items()
+            if getattr(line.placement, "grid_id", None) == grid_id
+        ]
+
     def line_for_key(self, key: str) -> Line:
         self._require_site()
         try:
@@ -486,14 +497,23 @@ class SiteSession(QObject):
         self.grids_changed.emit()
         self.lines_changed.emit()  # line geometry follows the frame
 
-    def remove_grid(self, grid_id: str) -> None:
+    def remove_grid(self, grid_id: str, *, with_lines: bool = False) -> None:
+        """Remove a grid. One that still has lines is refused unless
+        `with_lines`, which removes those lines with it in the same change
+        (#31): one dirty mark, one `grids_changed`, and one `lines_changed`
+        if there were any lines to go."""
         site = self._require_site()
-        users = [ln for ln in site.lines if getattr(ln.placement, "grid_id", None) == grid_id]
-        if users:
-            raise ValueError(f"grid {grid_id!r} still has {len(users)} line(s); remove them first")
-        site.grids.remove(self.grid(grid_id))
+        grid = self.grid(grid_id)
+        keys = self.keys_on_grid(grid_id)
+        if keys and not with_lines:
+            raise ValueError(f"grid {grid_id!r} still has {len(keys)} line(s); remove them first")
+        site.grids.remove(grid)
+        dropped = self._drop_lines(keys)
         self._set_dirty(True)
+        self._announce_dropped(*dropped)
         self.grids_changed.emit()
+        if keys:
+            self.lines_changed.emit()
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         self.replace_grid(dataclasses.replace(self.grid(grid_id), velocity=model))
@@ -515,25 +535,54 @@ class SiteSession(QObject):
         self.lines_changed.emit()
 
     def remove_line(self, key: str) -> None:
-        site = self._require_site()
-        line = self.line_for_key(key)
-        site.lines.remove(line)
-        del self._lines_by_key[key]
-        site.stacks.pop(key, None)
-        self._profiles.pop(key, None)
-        self._channel.pop(key, None)
+        self.remove_lines([key])
+
+    def remove_lines(self, keys: Iterable[str]) -> None:
+        """Remove every line in `keys`, with their stacks, as one change:
+        one dirty mark and one `lines_changed`, however many lines (#31 --
+        each `lines_changed` rebuilds the survey tree and the map layers).
+
+        All or nothing: every key is checked before anything is removed,
+        so an unknown key raises `KeyError` with the site untouched.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        for key in unique:
+            self.line_for_key(key)
+        if not unique:
+            return
+        dropped = self._drop_lines(unique)
         self._set_dirty(True)
-        # The removed line can be current, previewed, or both at once --
-        # the session never forbids preview_key == current_key, that is a
-        # UI-level convention (ProfileDock's), not a rule enforced here.
-        # Both fields are reset here directly rather than through
-        # clear_preview(): that helper couples its reset to its own
-        # emission, and when a line is both current and previewed,
-        # clearing one field at a time would leave the OTHER still naming
-        # a line already gone from _lines_by_key while its signal fires.
-        # So both resets happen first, and only then does anything emit.
-        dropped_current = self._current_key == key
-        dropped_preview = self._preview_key == key
+        self._announce_dropped(*dropped)
+        self.lines_changed.emit()
+
+    def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
+        """Take `keys` (all known) out of the site and every per-line
+        cache, and reset the current and preview lines if they were among
+        them. Emits nothing; returns (dropped current, dropped preview)
+        for `_announce_dropped`.
+
+        The removed lines can include the current line, the previewed
+        line, or one line that is both -- the session never forbids
+        preview_key == current_key, that is a UI-level convention
+        (ProfileDock's), not a rule enforced here. Both fields are reset
+        here directly rather than through clear_preview(): that helper
+        couples its reset to its own emission, and when a line is both
+        current and previewed, clearing one field at a time would leave
+        the OTHER still naming a line already gone from _lines_by_key
+        while its signal fires. So every reset happens here, and only the
+        caller emits, afterwards.
+        """
+        site = self._require_site()
+        going = {id(self._lines_by_key[key]) for key in keys}
+        site.lines[:] = [ln for ln in site.lines if id(ln) not in going]
+        for key in keys:
+            del self._lines_by_key[key]
+            site.stacks.pop(key, None)
+            self._profiles.pop(key, None)
+            self._channel.pop(key, None)
+        dropped_current = self._current_key in keys
+        dropped_preview = self._preview_key in keys
         if dropped_current:
             self._current_key = None
             self._current_trace = -1
@@ -541,24 +590,27 @@ class SiteSession(QObject):
         if dropped_preview:
             self._preview_key = None
             self._preview_trace = -1
-        # Every field is reset BEFORE any emission. A slot reading
-        # display_key during either signal must never see the key that was
-        # just deleted.
-        #
-        # Order between the two is load-bearing, not arbitrary: line_opened
-        # first, THEN preview_changed. ProfileDock (Task 2) keeps its own
-        # _working_key and, on preview_changed telling it the preview
-        # ended, re-renders that key. If preview_changed fired first, that
-        # would run while the dock's _working_key still named the line
-        # being deleted here -> line_for_key(deleted) -> KeyError inside a
-        # slot -> qFatal() in the LTR container. Emitting line_opened("")
-        # first makes the dock drop _working_key before anything asks it
-        # to render.
+        return dropped_current, dropped_preview
+
+    def _announce_dropped(self, dropped_current: bool, dropped_preview: bool) -> None:
+        """Report what `_drop_lines` reset, after every field is already
+        reset: a slot reading display_key during either signal must never
+        see a key that was just deleted.
+
+        Order between the two is load-bearing, not arbitrary: line_opened
+        first, THEN preview_changed. ProfileDock (Task 2) keeps its own
+        _working_key and, on preview_changed telling it the preview
+        ended, re-renders that key. If preview_changed fired first, that
+        would run while the dock's _working_key still named a line
+        already deleted -> line_for_key(deleted) -> KeyError inside a
+        slot -> qFatal() in the LTR container. Emitting line_opened("")
+        first makes the dock drop _working_key before anything asks it
+        to render.
+        """
         if dropped_current:
             self.line_opened.emit("")
         if dropped_preview:
             self.preview_changed.emit("", -1)
-        self.lines_changed.emit()
 
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
         site = self._require_site()

@@ -1,5 +1,6 @@
 """The profile viewer: a QWidget that paints a cached radargram image
-through a ViewTransform, with axes, a cursor, a selection band and picks.
+through a ViewTransform, with axes, a cursor, a selection band, picks, a
+slice band and the draggable time-cutoff line.
 
 Measured: drawing a sub-rectangle of the cached image costs about 3 ms per
 frame at any zoom, so pan and zoom never touch numpy.
@@ -22,6 +23,9 @@ raw mouse/wheel event feeds such a value straight into the transform, so
 both guard their own bodies broadly (`except Exception`, not just
 `ValueError`) and fall back to leaving `self.transform` at its last good
 value rather than let the widget silently stop responding to input.
+`mousePressEvent` and `mouseReleaseEvent` feed nothing into the transform,
+but they carry the cutoff grab and the selection commit, so they guard
+their bodies the same way.
 """
 
 from __future__ import annotations
@@ -40,12 +44,13 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
 
-MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, 8, 28
-# Vertical extent of the axis caption band ("ns" / "m") at the top of a
-# vertical margin -- the same rect `_paint_axes` passes to `drawText` for
-# the caption. A tick label whose band reaches in is colliding with it;
-# see `_label_in_caption_band` (issue #7).
-CAPTION_BAND = MARGIN_TOP + 10
+# The axis captions ("ns" / "m") get a row of their own above the image,
+# CAPTION_ROW tall; a tick label is a 16-px rect centred on its tick, so the
+# topmost one overhangs the image by 8 px. MARGIN_TOP holds both, which is
+# what keeps a "0" tick at the very top (an active `time_zero` step) off the
+# caption without hiding the label (issue #7).
+CAPTION_ROW = 14
+MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, CAPTION_ROW + 8, 28
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
 CURSOR_COLOUR = QColor(255, 159, 26)
@@ -61,6 +66,24 @@ SLICE_BAND_COLOUR = QColor(80, 200, 255, 48)
 SLICE_BAND_EDGE = QColor(80, 200, 255, 170)
 MIN_BAND_PX = 2.0
 
+# The time-cutoff line (late-time clip). Magenta, so it reads as neither the
+# cyan slice band, the blue selection nor the orange cursor; the dim veil
+# over everything below it says "this part is hidden", not just "a line".
+CUTOFF_COLOUR = QColor(214, 39, 140)
+CUTOFF_DIM = QColor(250, 250, 250, 170)
+CUTOFF_GRAB_PX = 5
+CUTOFF_TAG_PAD_X = 5
+CUTOFF_TAG_PAD_Y = 2
+
+
+def cutoff_label(end_ns: float, velocity: VelocityModel | None) -> str:
+    """The line's caption: its time, and its depth when a velocity is known."""
+    label = f"{end_ns:.1f} ns"
+    if velocity is not None:
+        depth = float(velocity.depth_at(np.array([end_ns]))[0])
+        label += f" \u00b7 {depth:.2f} m"
+    return label
+
 
 class ProfileView(QWidget):
     trace_hovered = pyqtSignal(int)
@@ -68,6 +91,10 @@ class ProfileView(QWidget):
     selection_cleared = pyqtSignal()
     pick_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
     view_changed = pyqtSignal()
+    # Emitted once, on the release that ends a drag of the cutoff line, with
+    # the snapped end time (ns). Always emitted, even for an unmoved line:
+    # the no-op guard lives with the consumer.
+    cutoff_dragged = pyqtSignal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -82,6 +109,15 @@ class ProfileView(QWidget):
         self._selection = (-1, -1)
         self._picks: list[tuple[int, float]] = []
         self._slice_band: tuple[float, float] | None = None
+        self._cutoff_ns: float | None = None
+        # The value the line had when a drag of it began; not None means a
+        # drag is in progress. Kept so a drag whose release never arrives
+        # (see `_handle_mouse_move`) can put the line back.
+        self._cutoff_grab: float | None = None
+        # Where that drag's press landed, and the line's offset from it (both
+        # local y). Read only while `_cutoff_grab` is set.
+        self._cutoff_press_y = 0.0
+        self._cutoff_offset = 0.0
         self._pick_mode = False
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
@@ -187,6 +223,25 @@ class ProfileView(QWidget):
         self._slice_band = None
         self.update()
 
+    @property
+    def cutoff_ns(self) -> float | None:
+        """The end time drawn now, live during a drag; None when hidden."""
+        return self._cutoff_ns
+
+    def set_cutoff(self, end_ns: float | None) -> None:
+        """Show the cutoff line at `end_ns`, or hide it with None.
+
+        A drag in progress is abandoned (no emit): the caller has just
+        said where the line is, and the release that follows must not
+        overwrite that with a stale gesture.
+        """
+        self._cutoff_grab = None
+        if end_ns is not None and not math.isfinite(end_ns):
+            _log(f"set_cutoff: non-finite end time {end_ns}; line hidden instead")
+            end_ns = None
+        self._cutoff_ns = end_ns
+        self.update()
+
     def set_picks(self, picks: list[tuple[int, float]]) -> None:
         self._picks = list(picks)
         self.update()
@@ -202,7 +257,15 @@ class ProfileView(QWidget):
         self._selection = (-1, -1)
         self._picks = []
         self._slice_band = None
+        self._cutoff_ns = None
+        self._cutoff_grab = None
         self._message = "no line open"
+        # A hover over the line left the resize cursor up, and only the next
+        # hover over the image would reset it; with no line open there is
+        # no image to hover.
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+        )
         self.update()
 
     # ---- view changes -----------------------------------------------------
@@ -305,6 +368,7 @@ class ProfileView(QWidget):
                 painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
             painter.setClipRect(r)
             self._paint_slice_band(painter, r, t)
+            self._paint_cutoff(painter, r, t)
             self._paint_selection(painter, r, t)
             self._paint_picks(painter, r, t)
             self._paint_cursor(painter, r, t)
@@ -358,6 +422,65 @@ class ProfileView(QWidget):
         p.drawLine(QPointF(r.left(), y0), QPointF(r.right(), y0))
         p.drawLine(QPointF(r.left(), y1), QPointF(r.right(), y1))
 
+    def _cutoff_y(self, t: ViewTransform) -> float | None:
+        """Local (unoffset) y of the cutoff line, or None when hidden.
+        Clamped into the record, so a cutoff past it (or a line carried
+        over onto a shorter one) sits on the bottom edge rather than off
+        the widget."""
+        if self._cutoff_ns is None:
+            return None
+        return t.y_of_time(min(max(self._cutoff_ns, t.t0_ns), t.t_end))
+
+    def _cutoff_label_rect(self, r: QRect, t: ViewTransform) -> QRectF | None:
+        """The label's tag, or None when the line is hidden. Sized to the
+        text plus padding, right-aligned. Factored out the same way
+        `_selection_bounds` is, and for the same reason: a plain rect a
+        test can assert on without rendering a pixel."""
+        y = self._cutoff_y(t)
+        if self._cutoff_ns is None or y is None:
+            return None
+        text = cutoff_label(self._cutoff_ns, self._velocity)
+        fm = self.fontMetrics()
+        w = fm.horizontalAdvance(text) + 2 * CUTOFF_TAG_PAD_X
+        h = fm.height() + 2 * CUTOFF_TAG_PAD_Y
+        yy = r.top() + y
+        # Above the line, unless that would put it above the image, where
+        # the paint clip hides it: a line dragged up to keep one sample
+        # sits within a tag's height of the top.
+        top = yy - h - 2 if yy - h - 2 >= r.top() else yy + 2
+        return QRectF(max(r.left(), r.right() + 1 - 3 - w), top, w, h)
+
+    def _paint_cutoff(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        y = self._cutoff_y(t)
+        tag = self._cutoff_label_rect(r, t)
+        if y is None or tag is None or self._cutoff_ns is None:
+            return
+        yy = r.top() + y
+        p.fillRect(QRectF(r.left(), yy, r.width(), r.bottom() + 1 - yy), CUTOFF_DIM)
+        p.setPen(QPen(CUTOFF_COLOUR, 2))
+        p.drawLine(QPointF(r.left(), yy), QPointF(r.right(), yy))
+        # White on a magenta tag: magenta text straight onto the radargram
+        # was hard to read.
+        p.fillRect(tag, CUTOFF_COLOUR)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(
+            tag,
+            int(Qt.AlignmentFlag.AlignCenter),
+            cutoff_label(self._cutoff_ns, self._velocity),
+        )
+
+    def _near_cutoff(self, x: float, y: float) -> bool:
+        """True when a local point is inside the image and within the grab
+        distance of the line. The image bound matters for the same reason
+        as the pick gesture's: the handlers run for the axis margins too."""
+        if self.transform is None:
+            return False
+        line = self._cutoff_y(self.transform)
+        if line is None:
+            return False
+        inside = 0 <= x < self.transform.width and 0 <= y < self.transform.height
+        return inside and abs(y - line) <= CUTOFF_GRAB_PX
+
     def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
         """Local (unoffset by `r.left()`) x-bounds of the selection band, or
         `None` when there is no selection. `b + 1`, not `b`: the selection
@@ -402,30 +525,25 @@ class ProfileView(QWidget):
         for tick, y in self._time_ticks(t):
             yy = r.top() + y
             p.drawLine(QPointF(r.left() - 4, yy), QPointF(r.left(), yy))
-            if not self._label_in_caption_band(y):
-                # The mark always paints (it never reaches the caption
-                # band); only a label whose band does is skipped -- issue
-                # #7's "0" over "ns" under an active `time_zero` step.
-                p.drawText(
-                    QRectF(0, yy - 8, r.left() - 6, 16),
-                    int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
-                    tick,
-                )
-        p.drawText(QRectF(0, 0, r.left() - 6, CAPTION_BAND), int(Qt.AlignmentFlag.AlignRight), "ns")
+            p.drawText(
+                QRectF(0, yy - 8, r.left() - 6, 16),
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                tick,
+            )
+        p.drawText(QRectF(0, 0, r.left() - 6, CAPTION_ROW), int(Qt.AlignmentFlag.AlignRight), "ns")
         # right: depth
         p.drawLine(r.topRight(), r.bottomRight())
         if self._velocity is not None:
             for label, y in self._depth_ticks(t):
                 yy = r.top() + y
                 p.drawLine(QPointF(r.right(), yy), QPointF(r.right() + 4, yy))
-                if not self._label_in_caption_band(y):
-                    p.drawText(
-                        QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
-                        int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                        label,
-                    )
+                p.drawText(
+                    QRectF(r.right() + 6, yy - 8, MARGIN_RIGHT - 8, 16),
+                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    label,
+                )
             p.drawText(
-                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_BAND),
+                QRectF(r.right() + 6, 0, MARGIN_RIGHT - 8, CAPTION_ROW),
                 int(Qt.AlignmentFlag.AlignLeft),
                 "m",
             )
@@ -453,28 +571,6 @@ class ProfileView(QWidget):
         return [
             (f"{tick:g}", t.y_of_time(float(tick))) for tick in nice_ticks(t.time_lo, t.time_hi)
         ]
-
-    def _label_in_caption_band(self, y_local: float) -> bool:
-        """Whether a tick label at local `y_local` would be painted on top
-        of the axis caption band ("ns" / "m") at the top of the margin.
-        `_paint_axes` skips the label when this is true, but never the
-        tick mark.
-
-        A label is the 16-px rect `QRectF(..., yy - 8, ..., 16)` centred
-        on the tick at `yy = r.top() + y_local`, so it occupies the
-        absolute band [y_local + MARGIN_TOP - 8, y_local + MARGIN_TOP + 8];
-        the caption band is [0, CAPTION_BAND]. Ticks never sit above the
-        window (a label's band bottom is therefore always positive), so
-        the overlap reduces to the band's top edge crossing the caption's
-        bottom. Issue #7 is this method returning true for the "0" tick:
-        under an active `time_zero` step the window starts at 0, so the
-        tick is at local y = 0 -- or at any small positive y whenever the
-        line's zero offset is small enough, the collision the M6
-        checkpoint reported.
-        Deliberate about the `CAPTION_BAND` boundary rather than the
-        caption's glyph extent: deterministic across fonts and DPI.
-        """
-        return y_local + MARGIN_TOP - 8 < CAPTION_BAND
 
     def _distance_unit_label(self) -> str:
         return "m" if self._distance is not None else "trace"
@@ -528,11 +624,28 @@ class ProfileView(QWidget):
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802
         if self.transform is None:
             return
+        try:
+            self._handle_mouse_press(event)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring:
+            # a Qt-invoked virtual method, guarded for the reason
+            # mouseMoveEvent's own comment gives.
+            _log(f"could not handle the mouse press: {exc}", Qgis.MessageLevel.Warning)
+
+    def _handle_mouse_press(self, event: Any) -> None:
+        assert self.transform is not None  # only called from mousePressEvent's own guard
         x, y = self._local(event)
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = event_pos(event)
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            # A grab still set here lost its release (focus stolen mid-
+            # drag) and no button-less move has cleaned it up yet. Abandon
+            # it before deciding what this press is, or its stale state
+            # would follow the next gesture and emit from the wrong one.
+            if self._cutoff_grab is not None:
+                self._cutoff_ns = self._cutoff_grab
+                self._cutoff_grab = None
+                self.update()
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
                 # Only inside the radargram itself. This handler runs for
@@ -550,6 +663,14 @@ class ProfileView(QWidget):
                 self.pick_requested.emit(
                     self.transform.trace_index_at(x), self.transform.time_of_y(y)
                 )
+                return
+            line = self._cutoff_y(self.transform)
+            if line is not None and self._near_cutoff(x, y):
+                # Not `_press`: its release would commit or clear a
+                # selection, which a drag of this line must never do.
+                self._cutoff_grab = self._cutoff_ns
+                self._cutoff_press_y = y
+                self._cutoff_offset = line - y
                 return
             self._press = event_pos(event)
             self._dragging = False
@@ -596,6 +717,30 @@ class ProfileView(QWidget):
                 self.view_changed.emit()
                 self.update()
                 return
+        if self._cutoff_grab is not None:
+            # Same lesson as `_pan_last` above: trust the event's actual
+            # buttons, not the bookkeeping. A release lost mid-drag (focus
+            # change) would otherwise leave the line glued to the pointer.
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._cutoff_ns = self._cutoff_grab
+                self._cutoff_grab = None
+                self.update()
+            else:
+                # The grab zone is +-CUTOFF_GRAB_PX, so most presses land off
+                # the line's own pixel. Snapping the line to the pointer
+                # moved it on the first move, and a press, a wobble and a
+                # release where it began wrote an edit nobody made. So the
+                # line holds its exact start value until the pointer has
+                # travelled past the drag threshold, and from then on moves
+                # by the pointer's travel, keeping the press-to-line offset.
+                if abs(y - self._cutoff_press_y) <= DRAG_THRESHOLD_PX:
+                    self._cutoff_ns = self._cutoff_grab
+                else:
+                    self._cutoff_ns = self.transform.snap_cutoff(
+                        self.transform.time_of_y(y + self._cutoff_offset)
+                    )
+                self.update()
+                return
         if self._press is not None:
             if abs(pos.x() - self._press.x()) > DRAG_THRESHOLD_PX:
                 self._dragging = True
@@ -603,10 +748,26 @@ class ProfileView(QWidget):
                 b = self.transform.trace_index_at(x)
                 self.set_selection(a, b)
             return
+        # Pick wins the press over the grab, so in pick mode the line must
+        # not advertise a drag.
+        if self._near_cutoff(x, y) and not self._pick_mode:
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+            )
         if 0 <= x < self.transform.width:
             self.trace_hovered.emit(self.transform.trace_index_at(x))
 
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
+        try:
+            self._handle_mouse_release(event)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring:
+            # a Qt-invoked virtual method, guarded for the reason
+            # mouseMoveEvent's own comment gives.
+            _log(f"could not handle the mouse release: {exc}", Qgis.MessageLevel.Warning)
+
+    def _handle_mouse_release(self, event: Any) -> None:
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = None
             return
@@ -621,6 +782,11 @@ class ProfileView(QWidget):
         # mousePressEvent ever arms `_press`/`_dragging` for, so it is the
         # only one release should act on here.
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._cutoff_grab is not None:
+            self._cutoff_grab = None
+            if self._cutoff_ns is not None:
+                self.cutoff_dragged.emit(self._cutoff_ns)
             return
         if self._press is not None and self.transform is not None:
             if self._dragging:

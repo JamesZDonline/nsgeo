@@ -83,6 +83,20 @@ def test_a_full_stack_runs_on_a_real_profile():
     assert removed.data.shape == out.data.shape
 
 
+def test_a_cutoff_after_time_zero_keeps_the_first_rows_of_a_real_profile():
+    h = read_header(FILES[0])
+    rg = Radargram(data=read_samples(FILES[0])[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    stack = StepStack()
+    stack.source = rg
+    stack.append(build_step("time_zero", mode="first_break", threshold=0.25))
+    zeroed = stack.result()
+    stack.append(build_step("time_cutoff", end_ns=zeroed.t0_ns + 300 * zeroed.dt_ns))
+    out = stack.result()
+    assert out.n_samples == 300 and out.t0_ns == zeroed.t0_ns
+    np.testing.assert_array_equal(out.data, zeroed.data[:300])
+    assert stack.result_bypassing(1).n_samples == zeroed.n_samples
+
+
 def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     """End to end on real data: preset, transform, bin, slice, save, reload."""
     from nsgeo.slices.binning import PreparedLine, build_cube, plan_line, stream_slice

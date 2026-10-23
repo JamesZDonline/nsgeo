@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.render import colormap
 from nsgeo.slices import CubeFrame
+from nsgeo_qgis import slice_layer
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_layer import SliceLayer, build_shader
-from qgis.core import QgsProject
+from qgis.core import QgsProject, QgsSingleBandPseudoColorRenderer
 from qgis.PyQt.QtGui import qAlpha, qRed
 
 FRAME = CubeFrame(origin=(500.0, 700.0), azimuth=0.0, cell=0.5, nx=12, ny=12, crs="EPSG:32616")
@@ -55,10 +59,9 @@ def test_the_pixel_values_are_the_slice_values_not_a_rendered_picture(mapped):
     assert ok and value == pytest.approx(7.5)
 
 
-def test_a_second_update_refreshes_the_pixels_in_place(mapped):
-    """The layer is rewritten and reloaded on every tick rather than
-    rebuilt, so a drag does not churn the layer tree. Measured: the
-    rewrite plus reloadData is ~2.8 ms at 300x300."""
+def test_a_second_update_repoints_the_same_layer_at_the_new_pixels(mapped):
+    """The layer is repointed at a fresh file on every tick rather than
+    rebuilt, so a drag does not churn the layer tree."""
     sl, _, _, _ = mapped
     sl.update(_values(1.0), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")
     first_id = sl.layer.id()
@@ -68,9 +71,135 @@ def test_a_second_update_refreshes_the_pixels_in_place(mapped):
     assert ok and value == pytest.approx(9.0)
 
 
+def _update(sl, fill_value, limit=10.0):
+    sl.update(
+        _values(fill_value),
+        FRAME,
+        limit=limit,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="",
+    )
+
+
+def _centre(sl):
+    return sl.layer.dataProvider().sample(sl.layer.extent().center(), 1)
+
+
+def test_a_second_update_draws_even_when_the_open_file_cannot_be_replaced(mapped, monkeypatch):
+    """Windows will not delete a file QGIS holds open, and GDAL's `Create()`
+    deletes first, so rewriting the layer's own source fails there with
+    "Permission denied" (found in the 0.1.0 walkthrough). Linux allows it,
+    so model the rule: `Create()` raises for the layer's current source."""
+    sl, _, _, _ = mapped
+    real = slice_layer.gdal.GetDriverByName
+
+    class _WindowsDriver:
+        def __init__(self, driver):
+            self._driver = driver
+
+        def Create(self, path, *args, **kwargs):  # noqa: N802 -- GDAL's name
+            held = sl.layer is not None and Path(sl.layer.source()).resolve()
+            if Path(path).exists() and held == Path(path).resolve():
+                raise RuntimeError(f"deleting {path} failed: Permission denied")
+            return self._driver.Create(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        slice_layer.gdal, "GetDriverByName", lambda name: _WindowsDriver(real(name))
+    )
+    _update(sl, 1.0)
+    _update(sl, 9.0)
+    value, ok = _centre(sl)
+    assert ok and value == pytest.approx(9.0)
+
+
+def test_superseded_slice_files_are_removed(mapped):
+    sl, _, _, _ = mapped
+    for fill in (1.0, 2.0, 3.0, 4.0):
+        _update(sl, fill)
+    assert list(sl._dir.iterdir()) == [sl.path]
+    assert sl.path.exists()
+
+
+def test_a_stale_file_that_cannot_be_deleted_yet_does_not_stop_updates(mapped, monkeypatch):
+    """A file can stay open briefly after the layer moves on (a render
+    thread's provider clone). Deleting it is best effort, retried later."""
+    sl, _, _, _ = mapped
+    _update(sl, 1.0)
+    stale = sl.path
+    real_remove = os.remove
+    refused = []
+
+    def remove(path, *args, **kwargs):
+        if Path(path) == stale and not refused:
+            refused.append(path)
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(slice_layer, "_remove", remove)
+    _update(sl, 5.0)
+    assert refused, "the stale file's deletion was never attempted"
+    value, ok = _centre(sl)
+    assert ok and value == pytest.approx(5.0)
+    assert stale.exists()
+    _update(sl, 7.0)
+    assert not stale.exists()
+    value, ok = _centre(sl)
+    assert ok and value == pytest.approx(7.0)
+
+
+def test_a_persistently_failing_update_does_not_fill_the_scratch_folder(mapped, monkeypatch):
+    """Each failed tick writes a full-size file before the repoint fails.
+    The scratch folder must still hold only what the layer reads."""
+    sl, _, _, _ = mapped
+    _update(sl, 1.0)
+
+    def refuse(self, path):
+        raise RuntimeError("cannot open")
+
+    monkeypatch.setattr(SliceLayer, "_repoint", refuse)
+    for fill in range(10):
+        _update(sl, float(fill))
+    assert len(list(sl._dir.iterdir())) <= 2
+    assert Path(sl.layer.source()).exists()
+
+
+def test_a_failed_write_leaves_no_file_behind(mapped, monkeypatch):
+    sl, _, _, _ = mapped
+    _update(sl, 1.0)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(
+        SliceLayer, "_write", lambda self, path, *a: (path.write_bytes(b"x"), fail())[1]
+    )
+    _update(sl, 2.0)
+    assert list(sl._dir.iterdir()) == [sl.path]
+
+
+def test_the_renderer_survives_a_repoint(mapped):
+    """`setDataSource` may reset the renderer; the second update, with an
+    unchanged colormap and limit, must still show the pseudocolour one."""
+    sl, session, layers, _ = mapped
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _update(sl, 1.0)
+    layer_id = sl.layer.id()
+    assert layers.group.findLayer(layer_id) is not None
+    sl.layer.setName("my renamed preview")
+    _update(sl, 9.0)
+    assert sl.layer.name() == "my renamed preview"
+    renderer = sl.layer.renderer()
+    assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+    assert renderer.classificationMin() == pytest.approx(0.0)
+    assert renderer.classificationMax() == pytest.approx(10.0)
+    assert sl.layer.id() == layer_id
+    assert layers.group.findLayer(layer_id) is not None
+
+
 def test_a_cell_size_change_resizes_the_same_layer(mapped):
     """The cell slider changes nx and ny. Verified directly against this
-    GDAL and QGIS: width() and height() follow a reloadData() across a
+    GDAL and QGIS: width() and height() follow a setDataSource() across a
     shape change, so there is no need to tear the layer down."""
     sl, _, _, _ = mapped
     sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")

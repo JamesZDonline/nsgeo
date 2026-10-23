@@ -29,7 +29,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry.grid import Grid
+from nsgeo.geometry import Grid
 from nsgeo.project import ProjectError
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (

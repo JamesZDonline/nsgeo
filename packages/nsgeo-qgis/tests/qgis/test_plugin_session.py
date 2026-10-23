@@ -12,8 +12,8 @@ from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import session as session_module
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.core import Qgis, QgsApplication
+from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
+from qgis.core import Qgis
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -213,6 +213,155 @@ def test_remove_line_drops_its_stack_and_closes_it_if_current(session, tmp_path)
     assert key not in session.site.stacks
     assert session.current_key is None
     assert opened.calls == [("",)]
+
+
+# ---- bulk removal (#31) -----------------------------------------------------
+
+GRID_B = Grid("B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5)
+
+
+def _two_grids(session, folder):
+    """Grid A holding FILE__001..003 and grid B holding FILE__004..005."""
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines(_lines(folder, 3))
+    b_lines = []
+    for i in range(2):
+        p = synthetic_dzt(folder / "raw", f"FILE__00{i + 4}.DZT", n_traces=60)
+        b_lines.append(Line.open(p, GridPlacement("B", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(b_lines)
+
+
+def test_keys_on_grid_lists_that_grids_lines_in_survey_order(session, tmp_path):
+    _two_grids(session, tmp_path)
+    assert session.keys_on_grid("A") == [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
+    assert session.keys_on_grid("B") == ["raw/FILE__004.DZT", "raw/FILE__005.DZT"]
+    with pytest.raises(KeyError, match="Z"):
+        session.keys_on_grid("Z")
+
+
+def test_remove_lines_takes_every_line_and_its_stack_in_one_change(session, tmp_path):
+    _two_grids(session, tmp_path)
+    gone = ["raw/FILE__001.DZT", "raw/FILE__003.DZT", "raw/FILE__004.DZT"]
+    for key in gone:
+        session.append_step(key, build_step("dewow"))
+    session.save()
+    changed = Spy(session.lines_changed)
+
+    session.remove_lines(gone)
+
+    assert session.keys() == ["raw/FILE__002.DZT", "raw/FILE__005.DZT"]
+    assert [session.line_key(ln) for ln in session.site.lines] == session.keys()
+    assert not any(key in session.site.stacks for key in gone)
+    assert session.dirty
+    # One emission for the whole batch: every lines_changed rebuilds the
+    # survey tree and the map layers, so forty lines must not mean forty.
+    assert len(changed.calls) == 1
+
+
+def test_remove_lines_with_an_unknown_key_removes_nothing(session, tmp_path):
+    _two_grids(session, tmp_path)
+    session.save()
+    changed = Spy(session.lines_changed)
+
+    with pytest.raises(KeyError, match="NOPE"):
+        session.remove_lines(["raw/FILE__001.DZT", "raw/NOPE.DZT"])
+
+    assert len(session.keys()) == 5
+    assert not session.dirty
+    assert changed.calls == []
+
+
+def test_remove_lines_with_nothing_to_remove_changes_nothing(session, tmp_path):
+    _two_grids(session, tmp_path)
+    session.save()
+    changed = Spy(session.lines_changed)
+
+    session.remove_lines([])
+
+    assert len(session.keys()) == 5
+    assert not session.dirty
+    assert changed.calls == []
+
+
+def test_remove_lines_tolerates_a_key_named_twice(session, tmp_path):
+    _two_grids(session, tmp_path)
+    session.remove_lines(["raw/FILE__001.DZT", "raw/FILE__001.DZT"])
+    assert "raw/FILE__001.DZT" not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    assert len(session.keys()) == 4
+
+
+def test_remove_lines_closes_the_current_and_previewed_lines_before_saying_so(session, tmp_path):
+    _two_grids(session, tmp_path)
+    session.open_line("raw/FILE__002.DZT")
+    session.set_preview("raw/FILE__003.DZT", 5)
+    seen = []
+
+    def _probe(name):
+        def _slot(*_):
+            # Whatever a listener asks during any emission must be answerable.
+            seen.append((name, session.current_key, session.preview_key))
+            for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+                session.line_for_key(key)
+
+        return _slot
+
+    session.line_opened.connect(_probe("line_opened"))
+    session.preview_changed.connect(_probe("preview_changed"))
+    session.lines_changed.connect(_probe("lines_changed"))
+
+    session.remove_lines(["raw/FILE__002.DZT", "raw/FILE__003.DZT"])
+
+    assert seen == [
+        ("line_opened", None, None),
+        ("preview_changed", None, None),
+        ("lines_changed", None, None),
+    ]
+
+
+def test_remove_grid_with_lines_takes_the_grid_and_only_its_lines(session, tmp_path):
+    _two_grids(session, tmp_path)
+    session.append_step("raw/FILE__001.DZT", build_step("dewow"))
+    session.append_step("raw/FILE__004.DZT", build_step("dewow"))
+    session.open_line("raw/FILE__002.DZT")
+    session.save()
+    order = []
+    session.line_opened.connect(lambda k: order.append(("line_opened", k)))
+    session.grids_changed.connect(lambda: order.append(("grids_changed",)))
+    session.lines_changed.connect(lambda: order.append(("lines_changed",)))
+
+    session.remove_grid("A", with_lines=True)
+
+    assert [g.id for g in session.site.grids] == ["B"]
+    assert session.keys() == ["raw/FILE__004.DZT", "raw/FILE__005.DZT"]
+    assert list(session.site.stacks) == ["raw/FILE__004.DZT"]
+    assert session.current_key is None
+    assert session.dirty
+    assert order == [("line_opened", ""), ("grids_changed",), ("lines_changed",)]
+
+
+def test_removed_lines_can_be_imported_again_and_saved(session, tmp_path):
+    # The point of #31: clear out a bad import and do it again. The same
+    # files must import cleanly, without the dropped stacks coming back.
+    _two_grids(session, tmp_path)
+    session.append_step("raw/FILE__001.DZT", build_step("dewow"))
+    session.remove_grid("A", with_lines=True)
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 3))
+    session.save()
+
+    reopened = SiteSession()
+    reopened.open_site(tmp_path / SURVEY_FILE)
+    assert reopened.keys_on_grid("A") == [f"raw/FILE__00{i}.DZT" for i in (1, 2, 3)]
+    assert "raw/FILE__001.DZT" not in reopened.site.stacks
+
+
+def test_remove_grid_with_lines_on_an_empty_grid_says_nothing_about_lines(session, tmp_path):
+    session.add_grid(GRID)
+    changed = Spy(session.lines_changed)
+    session.remove_grid("A", with_lines=True)
+    assert session.site.grids == []
+    assert changed.calls == []
 
 
 def test_velocity_resolution_and_override(session, tmp_path):
@@ -645,16 +794,11 @@ def _capture_log(fn):
     unrecoverable ones use.
     """
     seen: list[tuple[str, int]] = []
-    log = QgsApplication.messageLog()
-
-    def _on_message(msg, tag, level):
-        seen.append((msg, int(level)))
-
-    log.messageReceived.connect(_on_message)
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append((msg, level)))
     try:
         fn()
     finally:
-        log.messageReceived.disconnect(_on_message)
+        disconnect()
     return seen
 
 

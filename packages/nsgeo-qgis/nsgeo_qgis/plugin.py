@@ -61,7 +61,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
 
-from nsgeo_qgis import plugin_version
+from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.map_link import MapLink
@@ -292,6 +292,7 @@ class NsgeoPlugin:
         self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
+        self.processing_dock.step_selected.connect(self.profile_dock.set_selected_step)
         self.processing_dock.difference_toggled.connect(self.profile_dock.set_difference_index)
         self.profile_dock.difference_cleared.connect(
             lambda: self.processing_dock.diff_button.setChecked(False)
@@ -672,7 +673,7 @@ class NsgeoPlugin:
 
         The cube id is `<grid_id>__<name>`, `name` being the stem of the
         file numpy ACTUALLY wrote (Important 1, same fix round) --
-        `Path(npz_path).stem`, not `Path(path).stem`. `store._npz_path`'s
+        `Path(npz_path).stem`, not `Path(path).stem`. `store.npz_path`'s
         own docstring names exactly this hazard: a user-typed name with a
         dot that is not an extension (a version tag, e.g. "cube.v1")
         keeps that dot in the file numpy writes ("cube.v1.npz") but the
@@ -885,7 +886,7 @@ class NsgeoPlugin:
             pass
 
     def show_about(self) -> None:
-        self.message(f"plugin {plugin_version()} · core {nsgeo.__version__}")
+        self.message(f"plugin {plugin_version()} · core {nsgeo.__version__} · {build_label()}")
 
     # ---- site files -------------------------------------------------------
     def new_site(self) -> None:

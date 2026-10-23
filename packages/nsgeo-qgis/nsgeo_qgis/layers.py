@@ -30,9 +30,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry.grid import Grid
-from nsgeo.io.dzx import DzxError, read_dzx
-from nsgeo.model.survey import Line
+from nsgeo.geometry import Grid
+from nsgeo.io import DzxError, read_dzx
+from nsgeo.model import Line
 from qgis.core import (
     NULL,
     Qgis,

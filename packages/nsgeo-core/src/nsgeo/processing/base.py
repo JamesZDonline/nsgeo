@@ -86,10 +86,12 @@ class ParamSpec:
 
     `kind` decides the widget: float and int are numeric entries with optional
     bounds and a unit, choice is a combo box over `choices`, curve is the gain
-    curve editor. `default` is a value or REQUIRED.
+    curve editor, time is a float two-way time in ns on the radargram's own
+    axis (validated like float, but a front end may let the user drag it on
+    the profile instead of typing it). `default` is a value or REQUIRED.
     """
 
-    KINDS: ClassVar[tuple[str, ...]] = ("float", "int", "choice", "curve")
+    KINDS: ClassVar[tuple[str, ...]] = ("float", "int", "choice", "curve", "time")
 
     name: str
     kind: str
@@ -231,7 +233,7 @@ def _validate_params(name: str, cls: type[Any], params: dict[str, Any]) -> None:
     for pname in sorted(params):
         spec = specs[pname]
         value = params[pname]
-        if spec.kind in ("float", "int"):
+        if spec.kind in ("float", "int", "time"):
             try:
                 number = float(value)
             except (TypeError, ValueError):

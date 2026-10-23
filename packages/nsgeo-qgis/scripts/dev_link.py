@@ -1,6 +1,7 @@
 """Symlink nsgeo_qgis/ into the active QGIS profile's plugin directory.
 
-Usage: python packages/nsgeo-qgis/scripts/dev_link.py [--profile NAME] [--remove]
+Usage: python packages/nsgeo-qgis/scripts/dev_link.py
+           [--profile NAME] [--qgis-major {3,4}] [--remove]
 """
 
 from __future__ import annotations
@@ -13,24 +14,25 @@ from pathlib import Path
 PLUGIN_SRC = Path(__file__).resolve().parent.parent / "nsgeo_qgis"
 
 
-def profile_plugins_dir(profile: str) -> Path:
+def profile_plugins_dir(profile: str, major: int = 3) -> Path:
     home = Path.home()
     if sys.platform.startswith("win"):
-        base = Path(os.environ["APPDATA"]) / "QGIS" / "QGIS3"
+        base = Path(os.environ["APPDATA"]) / "QGIS" / f"QGIS{major}"
     elif sys.platform == "darwin":
-        base = home / "Library" / "Application Support" / "QGIS" / "QGIS3"
+        base = home / "Library" / "Application Support" / "QGIS" / f"QGIS{major}"
     else:
-        base = home / ".local" / "share" / "QGIS" / "QGIS3"
+        base = home / ".local" / "share" / "QGIS" / f"QGIS{major}"
     return base / "profiles" / profile / "python" / "plugins"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", default="default")
+    ap.add_argument("--qgis-major", type=int, choices=[3, 4], default=3)
     ap.add_argument("--remove", action="store_true")
     args = ap.parse_args()
 
-    target = profile_plugins_dir(args.profile) / "nsgeo_qgis"
+    target = profile_plugins_dir(args.profile, args.qgis_major) / "nsgeo_qgis"
     if args.remove:
         if target.is_symlink():
             target.unlink()

@@ -92,13 +92,13 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     fill,
+    npz_path,
     plan_windows,
     save_cube,
     to_north_up,
     window_label,
     window_times_ns,
 )
-from nsgeo.slices.store import _npz_path
 from nsgeo.velocity import VelocityModel
 from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
@@ -476,7 +476,7 @@ def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:
 
     Returns the path numpy actually wrote, not `path` itself:
     `np.savez_compressed` APPENDS `.npz` unless the name already ends
-    with it, and `store._npz_path` is the one place that rule already
+    with it, and `store.npz_path` is the one place that rule already
     lives -- see its own docstring for why `Path.with_suffix` would be
     the wrong tool here.
 
@@ -496,7 +496,7 @@ def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:
     own docstring.
     """
     save_cube(engine.cube(), path)
-    written = _npz_path(path)
+    written = npz_path(path)
     if engine.mode == "streaming":
         engine.drop_cube()
     return written
