@@ -2397,3 +2397,18 @@ def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis
 
     assert _names(root) == [f"nsgeo · {session.site_name}"]
     assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(populated, tmp_path):
+    """A .qgz saved while the site is open keeps the group, token and all.
+    Read back in, that group is a snapshot from the file, not the live one:
+    the site's tables go into a group of their own, not alongside the
+    copies the file restored."""
+    session, layers, project = populated
+    saved = tmp_path / "map.qgs"
+    assert project.write(str(saved))
+    assert project.read(str(saved))
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]

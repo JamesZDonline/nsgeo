@@ -296,6 +296,11 @@ class SiteLayers(QObject):
         # registry so the next refresh reopens it, rather than holding a
         # Python wrapper around a since-deleted C++ object.
         self.project.layersWillBeRemoved.connect(self._on_layers_removed)
+        # Clearing the project (closing it, or reading another in) takes the
+        # site's group with it. A group read back from a saved project still
+        # carries the token, but it is the file's snapshot, not the live
+        # group: the next refresh makes a new one rather than adopting it.
+        self.project.cleared.connect(self._forget_group)
         # Registered here, in the constructor, for the same reason the
         # session signals above are: this must be in place before the
         # first site_opened could fire, not whenever someone remembers.
@@ -305,6 +310,9 @@ class SiteLayers(QObject):
     def _on_site_opened(self) -> None:
         self.detach()
         self.refresh()
+
+    def _forget_group(self) -> None:
+        self._group = None
 
     def _on_layers_removed(self, ids: list[str]) -> None:
         gone = {
