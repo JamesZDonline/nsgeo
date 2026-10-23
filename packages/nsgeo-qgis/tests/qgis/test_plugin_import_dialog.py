@@ -4,6 +4,8 @@ from typing import Any
 
 import pytest
 from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.import_dialog import (
@@ -15,11 +17,14 @@ from nsgeo_qgis.ui.import_dialog import (
     COL_START,
     ImportDialog,
 )
+from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QEvent, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+GRID_B = Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+GRID_C = Grid("C", (700.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
 
 @pytest.fixture
@@ -55,17 +60,17 @@ def test_table_shows_planned_rows_and_edits_flow_back(session, tmp_path):
         "FILE__002",
         "FILE__003",
     ]
-    assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.00", "0.50", "1.00"]
+    assert [d.table.item(r, COL_OFFSET).text() for r in range(3)] == ["0.25", "0.75", "1.25"]
     assert d.table.item(1, COL_DIR).text() == "−1"
     d.set_include(1, False)
     assert [d.table.item(r, COL_OFFSET).text() for r in range(3) if d.rows[r].include] == [
-        "0.00",
-        "0.50",
+        "0.25",
+        "0.75",
     ]
     d.set_offset(2, 3.25)
     d.set_include(1, True)
     assert d.rows[2].offset == 3.25 and d.rows[2].offset_edited
-    assert d.table.item(1, COL_OFFSET).text() == "0.50"
+    assert d.table.item(1, COL_OFFSET).text() == "0.75"
 
 
 def test_remove_and_reorder(session, tmp_path):
@@ -75,11 +80,11 @@ def test_remove_and_reorder(session, tmp_path):
     d.table.selectRow(2)
     d.move_selected(-1)
     assert [r.path.stem for r in d.rows] == ["FILE__001", "FILE__003", "FILE__002"]
-    assert [r.offset for r in d.rows] == [0.0, 0.5, 1.0]
+    assert [r.offset for r in d.rows] == [0.25, 0.75, 1.25]
     d.table.selectRow(0)
     d.remove_selected()
     assert [r.path.stem for r in d.rows] == ["FILE__003", "FILE__002"]
-    assert d.rows[0].offset == 0.0
+    assert d.rows[0].offset == 0.25
 
 
 def test_accept_adds_lines_and_fills_the_layer(session, tmp_path):
@@ -263,9 +268,9 @@ def test_bad_offset_entry_is_reported_and_reverted_not_crashed(session, tmp_path
     d = ImportDialog(session, grid_id="A")
     d.add_files([synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")])
     d.table.item(0, COL_OFFSET).setText("not-a-number")  # must not raise
-    assert d.rows[0].offset == 0.0 and not d.rows[0].offset_edited  # untouched
+    assert d.rows[0].offset == 0.25 and not d.rows[0].offset_edited  # untouched
     assert "not a number" in d.status.text()
-    assert d.table.item(0, COL_OFFSET).text() == "0.00"  # reverted, not left showing garbage
+    assert d.table.item(0, COL_OFFSET).text() == "0.25"  # reverted, not left showing garbage
 
 
 def test_hand_edited_label_survives_a_later_replan(session, tmp_path):
@@ -570,3 +575,159 @@ def test_accept_refuses_when_the_target_grid_was_removed_under_the_dialog(
     dialog.reject()
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
+
+
+# ---- #61: the target grid is the one the Survey panel points at ---------------
+
+
+def test_the_target_grid_is_named_in_the_title_and_on_the_import_button(session, tmp_path):
+    session.add_grid(GRID_B)
+    d = ImportDialog(session, grid_id="B")
+    d.add_files([synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT") for i in (1, 2)])
+    assert d.windowTitle() == "Import DZT files into B"
+    assert d.import_button.text() == "Import 2 line(s) into B"
+
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
+
+    assert d.windowTitle() == "Import DZT files into A"
+    assert d.import_button.text() == "Import 2 line(s) into A"
+
+
+@pytest.fixture
+def three_grids(fake_iface, tmp_path, answer_modal):
+    """A loaded plugin over grids A, B and C: two lines on B, one on C, none
+    on A, and no line open."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    for grid in (GRID, GRID_B, GRID_C):
+        plugin.session.add_grid(grid)
+    lines = []
+    for i, grid_id in enumerate("BBC"):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT")
+        lines.append(Line.open(p, GridPlacement(grid_id, "y", i * 0.5, 0.0, 1, p.stem)))
+    plugin.session.add_lines(lines)
+    yield plugin
+    if plugin._import_dialog is not None:
+        plugin._import_dialog.reject()
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def _select(plugin, *rows):
+    """Select exactly `rows` in the Survey panel: ("grid", id) or ("line", key)."""
+    tree = plugin.survey_dock.tree
+    tree.clearSelection()
+    site = tree.topLevelItem(0)
+    for grid_item in (site.child(i) for i in range(site.childCount())):
+        items = [grid_item] + [grid_item.child(j) for j in range(grid_item.childCount())]
+        for item in items:
+            if (item.data(0, ROLE_KIND), item.data(0, ROLE_ID)) in rows:
+                item.setSelected(True)
+    assert len(tree.selectedItems()) == len(rows)
+
+
+def _import_from_toolbar(plugin) -> ImportDialog:
+    plugin.act_import.trigger()
+    dialog = plugin._import_dialog
+    assert dialog is not None
+    return dialog
+
+
+def test_toolbar_import_targets_the_grid_selected_in_the_survey_panel(three_grids):
+    _select(three_grids, ("grid", "B"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+
+
+def test_toolbar_import_targets_the_grid_the_selected_lines_share(three_grids):
+    _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__002.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "B"
+
+
+def test_toolbar_import_prefers_a_selected_grid_row_over_selected_lines(three_grids):
+    # #61's order: a selected grid row first, the selected lines' grid second.
+    _select(three_grids, ("grid", "C"), ("line", "raw/FILE__001.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+
+
+def test_toolbar_import_falls_back_to_the_open_lines_grid(three_grids):
+    three_grids.session.open_line("raw/FILE__003.DZT")
+    _select(three_grids, ("line", "raw/FILE__001.DZT"), ("line", "raw/FILE__003.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "C"
+
+
+def test_toolbar_import_falls_back_to_the_first_grid_rather_than_guess(three_grids):
+    # A selection across two grids names neither, and no line is open.
+    _select(three_grids, ("line", "raw/FILE__002.DZT"), ("line", "raw/FILE__003.DZT"))
+    assert _import_from_toolbar(three_grids).grid_combo.currentData() == "A"
+
+
+def test_an_open_import_dialog_with_no_files_follows_a_new_target(three_grids):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    _select(three_grids, ("grid", "C"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "C"
+    three_grids.survey_dock.import_requested.emit("A")  # a grid's own "Import DZT files…"
+    assert first.grid_combo.currentData() == "A"
+
+
+def test_an_open_import_dialog_with_files_keeps_its_grid(three_grids, tmp_path):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    first.add_files([synthetic_dzt(tmp_path / "more", "FILE__010.DZT")])
+    _select(three_grids, ("grid", "C"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "B"
+    assert len(first.rows) == 1
+
+
+def test_an_open_import_dialog_with_no_files_follows_a_grid_added_after_it_opened(three_grids):
+    _select(three_grids, ("grid", "B"))
+    first = _import_from_toolbar(three_grids)
+    three_grids.session.add_grid(Grid("D", (800.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    _select(three_grids, ("grid", "D"))
+
+    assert _import_from_toolbar(three_grids) is first
+    assert first.grid_combo.currentData() == "D"
+    assert first.windowTitle() == "Import DZT files into D"
+
+
+# ---- #69: "First line at" starts at half the line spacing ------------------
+
+
+def test_first_line_at_starts_at_half_the_grids_line_spacing(session):
+    # Centred in its strip, like every line after it: 0.25 m at 0.5 m spacing.
+    d = ImportDialog(session, grid_id="A")
+    assert d.spacing.value() == 0.5
+    assert d.first_offset.value() == 0.25
+    assert d.options().first_offset == 0.25
+
+
+def test_first_line_at_follows_the_spacing_until_the_user_sets_it(session):
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 1.0))
+    d = ImportDialog(session, grid_id="A")
+    d.spacing.setValue(0.4)
+    assert d.first_offset.value() == 0.2
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("B"))  # spacing 1.0 from the grid
+    assert d.first_offset.value() == 0.5
+
+    d.first_offset.setValue(0.1)  # the user's own value
+    d.spacing.setValue(2.0)
+    d.grid_combo.setCurrentIndex(d.grid_combo.findData("A"))
+
+    assert d.first_offset.value() == 0.1
+
+
+def test_retarget_to_an_unknown_grid_keeps_the_dialogs_own_grid(session):
+    # The refill that finds newly added grids must not drop the dialog onto
+    # the first grid when the id is not there at all (#61's own failure).
+    session.add_grid(GRID_B)
+    d = ImportDialog(session, grid_id="B")
+    d.retarget("no-such-grid")
+    assert d.grid_combo.currentData() == "B"
+    assert d.windowTitle() == "Import DZT files into B"

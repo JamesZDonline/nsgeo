@@ -10,11 +10,24 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
-from nsgeo_qgis.layers import _PICKS_BACKUP, _PICKS_REBUILD, DERIVED, TABLES, SiteLayers
+from nsgeo_qgis.layers import (
+    _PICKS_BACKUP,
+    _PICKS_REBUILD,
+    DERIVED,
+    LEGEND_ORDER,
+    TABLES,
+    SiteLayers,
+)
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
-from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
+from plugin_testing import (
+    REAL_DZT,
+    connect_message_log,
+    drag_in_layers_panel,
+    needs_real_data,
+    synthetic_dzt,
+)
 from qgis.core import (
     NULL,
     Qgis,
@@ -131,7 +144,7 @@ def test_grid_in_another_crs_is_transformed_into_the_package_crs(populated):
     assert 100_000 < x < 900_000  # UTM easting, not a longitude
 
 
-def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
+def test_grids_layer_renders_as_a_solid_outline_with_no_fill(populated):
     """The grid polygon is a reference frame drawn over imagery: an opaque
     fill would hide the ground the user is judging placement against. This
     asserts on the renderer actually installed, not on a call being made --
@@ -155,7 +168,7 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     for symbol in by_grid.values():
         outline = symbol.symbolLayer(0)
         assert outline.brushStyle() == Qt.BrushStyle.NoBrush
-        assert outline.strokeStyle() == Qt.PenStyle.DashLine
+        assert outline.strokeStyle() == Qt.PenStyle.SolidLine  # #66: lines are the dashed ones
 
     # M5 follow-up (Finding 2): a grid's outline colour must now DIFFER
     # from the colour of its own lines (they used to share a palette
@@ -170,6 +183,20 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
     for grid_id, symbol in by_grid.items():
         assert symbol.symbolLayer(0).strokeColor().name() != lines_colours[grid_id]
+
+
+def test_survey_lines_are_thin_and_dashed(populated):
+    """#66: 0.5 mm solid lines at 0.5 m spacing covered too much of a slice
+    or imagery under them. The user chose thin dashed lines from renders
+    over a real slice."""
+    _, layers, _ = populated
+    categories = list(layers.layers["lines"].renderer().categories())
+    assert categories
+    for category in categories:
+        stroke = category.symbol().symbolLayer(0)
+        assert category.symbol().width() == pytest.approx(0.2)
+        assert stroke.useCustomDashPattern()
+        assert list(stroke.customDashVector()) == [3.0, 2.0]
 
 
 # --- M8 acceptance walkthrough, Finding B: style `picks` ONCE, at table
@@ -2285,3 +2312,128 @@ def test_write_pick_refuses_when_the_picks_layer_predates_a_grid_crs_change(popu
     with pytest.raises(RuntimeError, match="picks"):
         layers.write_pick(_a_pick())
     assert layers.feature_count("picks") == 0  # refused, not written
+
+
+# --- #68: a new site's group goes to the top of the Layers panel, above any
+# imagery already open; inside it points draw over lines over outlines; and a
+# group the user drags elsewhere stays there and stays the plugin's. ---------
+
+
+def _names(node):
+    return [child.name() for child in node.children()]
+
+
+def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    project.addMapLayer(QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory"))
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        session.add_grid(GRID)
+        assert _names(project.layerTreeRoot()) == [f"nsgeo · {session.site_name}", "imagery"]
+    finally:
+        layers.detach()
+        project.clear()
+
+
+def test_the_group_draws_points_over_lines_over_grid_outlines(populated):
+    _, layers, _ = populated
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
+    session, layers, project = populated
+    project.removeMapLayer(layers.layers["picks"].id())
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populated):
+    """The slice preview and exported GeoTIFFs sit below the tables. A table
+    reopened after the user removed it goes back above them, every table,
+    the bottom one included."""
+    session, layers, project = populated
+    preview = QgsVectorLayer("Polygon?crs=EPSG:32616", "Slice (live preview)", "memory")
+    project.addMapLayer(preview, False)
+    layers.group.addLayer(preview)
+    for name in LEGEND_ORDER:
+        project.removeMapLayer(layers.layers[name].id())
+        session.add_grid(Grid(f"G{name}", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+        assert _names(layers.group) == [*LEGEND_ORDER, "Slice (live preview)"], name
+
+
+def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
+    session, layers, project = populated
+    root = project.layerTreeRoot()
+    name = f"nsgeo · {session.site_name}"
+    project.addMapLayer(QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory"))
+    drag_in_layers_panel(project, layers.group, root, len(root.children()))
+    assert _names(root) == ["imagery", name]
+
+    project.removeMapLayer(layers.layers["lines"].id())
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(root) == ["imagery", name]  # not moved back, no second group
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert layers.feature_count("lines") == 3
+
+    layers.detach()
+    assert _names(root) == ["imagery"]  # the dragged group goes with the site
+
+
+def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis_app):
+    session, layers, project = populated
+    root = project.layerTreeRoot()
+    root.removeChildNode(layers.group)
+    qgis_app.processEvents()  # the project drops the group's layers on a queued call
+    assert layers.layers == {}
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(root) == [f"nsgeo · {session.site_name}"]
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(populated, tmp_path):
+    """A .qgz saved while the site is open keeps the group, token and all.
+    Read back in, that group is a snapshot from the file, not the live one:
+    the site's tables go into a group of their own, not alongside the
+    copies the file restored."""
+    session, layers, project = populated
+    saved = tmp_path / "map.qgs"
+    assert project.write(str(saved))
+    assert project.read(str(saved))
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_lines_and_marks_hide_beyond_1_800_per_metre_of_line_spacing(populated, tmp_path):
+    """#66 walkthrough, D2 and G1: zoomed out, thin dashed lines merge into a
+    moire pattern over the slice, starting at about 1:400 at 0.5 m spacing
+    (the user's reading). Lines and their marks hide beyond 1:800 per metre
+    of the finest line spacing among grids that have lines."""
+    session, layers, _ = populated
+    for name in ("lines", "marks"):
+        layer = layers.layers[name]
+        assert layer.hasScaleBasedVisibility(), name
+        assert layer.minimumScale() == pytest.approx(400.0), name
+        assert layer.maximumScale() == 0.0, name
+        assert layer.isInScaleRange(390.0) and layer.isInScaleRange(50.0), name  # drawn
+        assert not layer.isInScaleRange(410.0), name  # hidden
+    for name in ("grids", "picks"):
+        assert not layers.layers[name].hasScaleBasedVisibility(), name
+
+    # A finer grid counts once it has lines, not before.
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 3.0, 11.0, "EPSG:32616", 0.25))
+    assert layers.layers["lines"].minimumScale() == pytest.approx(400.0)
+    p = synthetic_dzt(tmp_path / "rawB", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("B", "y", 0.0, 0.0, 1, p.stem))])
+    for name in ("lines", "marks"):
+        assert layers.layers[name].minimumScale() == pytest.approx(200.0), name

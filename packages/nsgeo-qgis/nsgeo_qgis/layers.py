@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsGeometry,
+    QgsLayerTree,
     QgsMessageLog,
     QgsPointXY,
     QgsProject,
@@ -129,6 +131,26 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
 }
 DERIVED = ("grids", "lines", "marks")
 
+# #68: the tables top to bottom in the site's group -- points over lines over
+# grid outlines, so a pick or mark on a line is never drawn under it. The
+# slice preview and exported GeoTIFFs join below them.
+LEGEND_ORDER = ("picks", "marks", "lines", "grids")
+
+# Dragging a group in the Layers panel does not move the node:
+# QgsLayerTreeModel serialises it, builds a new node at the drop and deletes
+# the original (verified by probe on QGIS 3.44), so a held reference dangles
+# after any drag. Each group SiteLayers makes carries a fresh token under this
+# custom property, which the copy keeps, and `SiteLayers.group` finds the live
+# node by it.
+_GROUP_TOKEN = "nsgeo/site_group"
+
+# #66 walkthrough: zoomed out, thin dashed lines a few pixels apart merge into
+# a moire pattern over the slice, from about 1:400 at 0.5 m spacing by the
+# user's eye (lines about 4.7 px apart on a 96 dpi screen). Lines and their
+# marks hide beyond this scale denominator per metre of the finest line
+# spacing among the grids that have lines (see `_hide_when_lines_crowd`).
+HIDE_LINES_BEYOND_SCALE_PER_M = 800.0
+
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
 
 # M5 follow-up (Finding 2): a grid's outline used to share its lines'
@@ -140,8 +162,8 @@ GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"
 # examined rather than left implicit: with 6 colours and an offset of 3, a
 # fourth grid's outline reuses the first grid's *line* colour. Lines and
 # grids are different layers with different geometry types (LineString vs.
-# Polygon) rendered as visually distinct symbols (solid fill vs. dashed
-# unfilled stroke) regardless of hue, so a same-hue collision between a
+# Polygon) rendered as visually distinct symbols (thin dashed lines vs. a
+# solid unfilled outline) regardless of hue, so a same-hue collision between a
 # 4th grid's outline and the 1st grid's lines is not the same confusion
 # this fix removes (a layer's own outline vs. its own lines) and is
 # accepted.
@@ -255,7 +277,8 @@ class SiteLayers(QObject):
         # caller (tests included) behaves exactly as before.
         self.on_warning = on_warning
         self.layers: dict[str, QgsVectorLayer] = {}
-        self.group: Any = None
+        self._group: Any = None
+        self._group_token = ""
         # Final review, Important 2: each placed grid's own origin/
         # azimuth/size, as of the last successful refresh -- see
         # `_warn_if_a_placed_grid_moved`, the only reader. Starts empty so
@@ -280,6 +303,11 @@ class SiteLayers(QObject):
         # registry so the next refresh reopens it, rather than holding a
         # Python wrapper around a since-deleted C++ object.
         self.project.layersWillBeRemoved.connect(self._on_layers_removed)
+        # Clearing the project (closing it, or reading another in) takes the
+        # site's group with it. A group read back from a saved project still
+        # carries the token, but it is the file's snapshot, not the live
+        # group: the next refresh makes a new one rather than adopting it.
+        self.project.cleared.connect(self._forget_group)
         # Registered here, in the constructor, for the same reason the
         # session signals above are: this must be in place before the
         # first site_opened could fire, not whenever someone remembers.
@@ -289,6 +317,9 @@ class SiteLayers(QObject):
     def _on_site_opened(self) -> None:
         self.detach()
         self.refresh()
+
+    def _forget_group(self) -> None:
+        self._group = None
 
     def _on_layers_removed(self, ids: list[str]) -> None:
         gone = {
@@ -354,12 +385,12 @@ class SiteLayers(QObject):
             if ids:
                 self.project.removeMapLayers(ids)
             self.layers.clear()
-        if self.group is not None:
-            if not sip.isdeleted(self.group):
-                parent = self.group.parent()
-                if parent is not None:
-                    parent.removeChildNode(self.group)
-            self.group = None
+        group = self.group
+        if group is not None:
+            parent = group.parent()
+            if parent is not None:
+                parent.removeChildNode(group)
+        self._group = None
         # A closing site's grids must not be compared against the NEXT
         # site's: two unrelated sites can reuse a grid id (e.g. "A"), and
         # without this reset `_warn_if_a_placed_grid_moved` would read
@@ -467,6 +498,28 @@ class SiteLayers(QObject):
             + len(buf.changedGeometries())
             + len(buf.changedAttributeValues())
         )
+
+    @property
+    def group(self) -> Any:
+        """The site's group in the Layers panel, or None if there is none.
+
+        Wherever the user has dragged it (see `_GROUP_TOKEN`). None once
+        the user has deleted it, so the next `ensure_tables` makes another.
+        """
+        if self._group is not None and sip.isdeleted(self._group):
+            self._group = self._find_group(self.project.layerTreeRoot())
+        return self._group
+
+    def _find_group(self, node: Any) -> Any:
+        for child in node.children():
+            if not QgsLayerTree.isGroup(child):
+                continue
+            if child.customProperty(_GROUP_TOKEN) == self._group_token:
+                return child
+            found = self._find_group(child)
+            if found is not None:
+                return found
+        return None
 
     def crs(self) -> QgsCoordinateReferenceSystem | None:
         site = self.session.site
@@ -624,10 +677,17 @@ class SiteLayers(QObject):
                 # trying the other three, the same containment refresh()
                 # already gives each refill.
                 _log(f"could not prepare table {name!r}: {exc}", Qgis.MessageLevel.Critical)
-        if self.group is None:
-            self.group = self.project.layerTreeRoot().addGroup(f"nsgeo · {self.session.site_name}")
+        group = self.group
+        if group is None:
+            # #68: on top, above any imagery already open, rather than
+            # appended under it. Only here, where the group is made: one the
+            # user has since moved stays where they put it.
+            group = self.project.layerTreeRoot().insertGroup(0, f"nsgeo · {self.session.site_name}")
+            self._group_token = uuid.uuid4().hex
+            group.setCustomProperty(_GROUP_TOKEN, self._group_token)
+            self._group = group
         opened = []
-        for name in TABLES:
+        for name in LEGEND_ORDER:
             if name in self.layers:
                 continue
             try:
@@ -636,7 +696,7 @@ class SiteLayers(QObject):
                     raise RuntimeError(f"could not open table {name!r} in {path}")
                 layer.setReadOnly(name in DERIVED)
                 self.project.addMapLayer(layer, False)
-                self.group.addLayer(layer)
+                group.insertLayer(self._legend_row(group, name), layer)
                 self.layers[name] = layer
                 opened.append(layer)
             except Exception as exc:  # noqa: BLE001 -- see rule 4 above
@@ -656,6 +716,23 @@ class SiteLayers(QObject):
         # when the bound object hasn't changed (unbind-then-rebind onto
         # the same layer nets one connection, same as before).
         self._bind_picks_signals()
+
+    def _legend_row(self, group: Any, name: str) -> int:
+        """Where table `name` goes in `group`: just below the lowest of the
+        tables above it in LEGEND_ORDER that are already there, else on
+        top. A new group so fills in LEGEND_ORDER, and a table reopened after
+        the user removed it goes back to its place, not under the slice
+        preview, without undoing any rearranging the user has done."""
+        above = {
+            self.layers[n].id()
+            for n in LEGEND_ORDER[: LEGEND_ORDER.index(name)]
+            if n in self.layers and not sip.isdeleted(self.layers[n])
+        }
+        row = 0
+        for i, child in enumerate(group.children()):
+            if QgsLayerTree.isLayer(child) and child.layerId() in above:
+                row = i + 1
+        return row
 
     def _ensure_table(
         self,
@@ -1580,6 +1657,7 @@ class SiteLayers(QObject):
             feats.append(f)
         self._refill("lines", feats)
         self._style_lines()
+        self._hide_when_lines_crowd("lines")
 
     def refill_marks(self) -> None:
         site = self.session.site
@@ -1610,23 +1688,50 @@ class SiteLayers(QObject):
                 f["name"] = mark.name
                 feats.append(f)
         self._refill("marks", feats)
+        self._hide_when_lines_crowd("marks")
 
     def _style_lines(self) -> None:
         site = self.session.site
         assert site is not None
         categories = []
         for i, grid in enumerate(site.grids):
+            # #66: thin and dashed, so the slice or imagery under a grid
+            # shows between the lines and through the gaps. Chosen by eye
+            # from renders over a real slice; 0.5 mm solid covered too much.
             symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
             symbol.setColor(QColor(GRID_COLOURS[i % len(GRID_COLOURS)]))
-            symbol.setWidth(0.5)
+            symbol.setWidth(0.2)
+            stroke = symbol.symbolLayer(0)
+            stroke.setUseCustomDashPattern(True)
+            stroke.setCustomDashVector([3.0, 2.0])  # mm on, mm off
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
 
+    def _hide_when_lines_crowd(self, name: str) -> None:
+        """Hide table `name` beyond the map scale at which the site's most
+        closely spaced lines start to run together."""
+        spacings = set()
+        keys = self.session.keys()
+        for key in keys:
+            grid = self.session.grid_for_line(self.session.line_for_key(key))
+            if grid is not None:
+                spacings.add(grid.default_spacing)
+        layer = self.layers[name]
+        if not spacings:
+            layer.setScaleBasedVisibility(False)
+            return
+        # QGIS's "minimum" scale is the most zoomed-out one shown, as a
+        # scale denominator; 0 as the maximum leaves zooming in unlimited.
+        layer.setMinimumScale(HIDE_LINES_BEYOND_SCALE_PER_M * min(spacings))
+        layer.setMaximumScale(0.0)
+        layer.setScaleBasedVisibility(True)
+
     def _style_grids(self) -> None:
-        # A dashed, unfilled outline: the grid is a reference frame drawn
-        # over imagery and basemaps, and an opaque fill would hide the
-        # ground the user is judging its placement against. Categorised by
+        # An unfilled outline: the grid is a reference frame drawn over
+        # imagery and basemaps, and an opaque fill would hide the ground the
+        # user is judging its placement against. Solid, so it does not read
+        # like the dashed survey lines inside it (#66). Categorised by
         # `grid_id` and indexed by position in `site.grids`, same as
         # `_style_lines()` above, but offset by `_GRID_OUTLINE_OFFSET` so a
         # grid's outline colour is never the same as its own lines' colour
@@ -1640,10 +1745,10 @@ class SiteLayers(QObject):
             symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PolygonGeometry)
             outline = symbol.symbolLayer(0)
             outline.setBrushStyle(Qt.BrushStyle.NoBrush)
-            outline.setStrokeStyle(Qt.PenStyle.DashLine)
+            outline.setStrokeStyle(Qt.PenStyle.SolidLine)
             colour_index = (i + _GRID_OUTLINE_OFFSET) % len(GRID_COLOURS)
             outline.setStrokeColor(QColor(GRID_COLOURS[colour_index]))
-            outline.setStrokeWidth(0.5)
+            outline.setStrokeWidth(0.4)
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["grids"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["grids"].triggerRepaint()
