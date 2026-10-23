@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 import numpy as np
 from nsgeo.geometry import GridPlacement
@@ -19,6 +20,7 @@ from nsgeo.io import DztError, DzxError, DzxInfo, read_dzx, read_header, trace_c
 from nsgeo.model import Line
 
 _TRAILING = re.compile(r"(\d+)\s*$")
+_T = TypeVar("_T")
 
 
 def trailing_number(stem: str) -> int | None:
@@ -311,3 +313,133 @@ def identity_curve(t0_ns: float, dt_ns: float, n_samples: int) -> list[list[floa
     seeding gain_curve with it is not a guess."""
     t_end = t0_ns + dt_ns * (n_samples - 1)
     return [[float(t0_ns), 0.0], [float(t_end), 0.0]]
+
+
+# --- grid corners ---------------------------------------------------------
+
+CORNER_ROLES: tuple[str, str, str, str] = ("origin", "+X", "+X+Y", "+Y")
+
+_COINCIDENT = 1e-6  # metres: shorter than this, two corners are one point
+_DEGENERATE_AREA = 1e-9  # relative to the largest edge squared
+_COMPASS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+
+
+def utm_epsg(lon: float, lat: float) -> int | None:
+    """The WGS 84 UTM EPSG code for a lon/lat, so a grid picked on a
+    geographic map still gets metre coordinates. UTM is undefined beyond
+    84 degrees (UPS territory) and for non-finite input, so those give None.
+    """
+    if not (math.isfinite(lon) and math.isfinite(lat)) or abs(lat) > 84:
+        return None
+    zone = math.floor((lon + 180) / 6) % 60 + 1
+    return (32600 if lat >= 0 else 32700) + zone
+
+
+@dataclass(frozen=True)
+class CornerFrame:
+    rows: tuple[int, ...]  # filled row indices, ascending
+    local: np.ndarray  # (n, 2) metres in the grid's own frame
+    world: np.ndarray  # (n, 2) the points as given
+    size_x: float | None  # measured; None when no filled edge spans the axis
+    size_y: float | None
+
+
+def _signed_area(pts: np.ndarray) -> float:
+    x, y = pts[:, 0], pts[:, 1]
+    return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def corner_frame(points: Sequence[tuple[float, float] | None]) -> CornerFrame:
+    """Turn up to four picked corners (CORNER_ROLES order, None for an empty
+    row) into the local frame a fit needs: origin (0, 0), +X (sx, 0),
+    +X+Y (sx, sy), +Y (0, sy), each size the mean of its filled edges.
+
+    Mirrored corners are refused, not fitted. The fit forbids reflections, so
+    it would return a plausible-looking frame with only a large RMS to show
+    for the mistake; naming the cause is the useful answer.
+    """
+    if len(points) != 4:
+        raise ValueError(f"expected four corner slots, got {len(points)}")
+    rows = tuple(i for i, p in enumerate(points) if p is not None)
+    if len(rows) < 2:
+        raise ValueError("fit needs at least two corners")
+    world = np.array([points[i] for i in rows], dtype=float)
+    at = {r: world[k] for k, r in enumerate(rows)}
+
+    def edges(pairs: tuple[tuple[int, int], ...]) -> list[float]:
+        return [float(np.linalg.norm(at[a] - at[b])) for a, b in pairs if a in at and b in at]
+
+    x_edges = edges(((0, 1), (3, 2)))
+    y_edges = edges(((0, 3), (1, 2)))
+    if any(e < _COINCIDENT for e in x_edges + y_edges):
+        raise ValueError("two corners coincide")
+    size_x = float(np.mean(x_edges)) if x_edges else None
+    size_y = float(np.mean(y_edges)) if y_edges else None
+    for name, size, needing in (("X", size_x, (1, 2)), ("Y", size_y, (2, 3))):
+        if size is None and any(r in at for r in needing):
+            raise ValueError(
+                f"these corners don't fix the size along {name}: "
+                f"pick two corners joined by an {name} edge"
+            )
+    sx, sy = size_x or 0.0, size_y or 0.0
+    template = ((0.0, 0.0), (sx, 0.0), (sx, sy), (0.0, sy))
+    local = np.array([template[r] for r in rows], dtype=float)
+    if len(rows) >= 3:
+        spread = max(float(np.linalg.norm(a - b)) for a in world for b in world)
+        area = _signed_area(world)
+        if abs(area) < _DEGENERATE_AREA * spread**2:
+            raise ValueError("these corners lie in a line")
+        if area < 0:
+            raise ValueError("these corners are mirrored: check which corner is +X and which is +Y")
+    return CornerFrame(rows, local, world, size_x, size_y)
+
+
+def roles_from_ring(
+    ring: Sequence[tuple[float, float]],
+) -> tuple[list[tuple[float, float]], list[int]]:
+    """Assign CORNER_ROLES to a four-vertex ring, returning the points in
+    role order and each one's index in the cleaned ring.
+
+    Cleaning drops consecutive duplicates and the closing vertex. Roles run
+    anticlockwise (a clockwise ring is reversed), so +X is the next vertex
+    and +Y the previous one, which keeps the frame right-handed. The origin
+    is the vertex whose origin-to-+Y bearing is closest to north, so the
+    default grid reads the way a surveyor would lay it; ties go to the lower
+    index so the result is stable.
+    """
+    pts = [(float(p[0]), float(p[1])) for p in ring]
+    clean: list[tuple[float, float]] = []
+    for p in pts:
+        if not clean or p != clean[-1]:
+            clean.append(p)
+    if len(clean) > 1 and clean[0] == clean[-1]:
+        clean.pop()
+    if len(clean) != 4:
+        raise ValueError(f"expected four corners, got {len(clean)}")
+    order = [0, 1, 2, 3]
+    if _signed_area(np.array(clean)) < 0:
+        order.reverse()
+    best_k, best_bearing = 0, math.inf
+    for k in range(4):
+        o = clean[order[k]]
+        y = clean[order[k - 1]]
+        bearing = abs(math.degrees(math.atan2(y[0] - o[0], y[1] - o[1])))
+        if bearing < best_bearing - 1e-9:
+            best_k, best_bearing = k, bearing
+    # origin, +X (next), +X+Y (opposite), +Y (previous; k + 3 wraps to k - 1)
+    idx = [order[(best_k + d) % 4] for d in (0, 1, 2, 3)]
+    return [clean[i] for i in idx], idx
+
+
+def rotate_roles(rows: Sequence[_T]) -> list[_T]:
+    """Move every row's content one role on: +X becomes the origin, and so on.
+    A cyclic shift keeps the frame right-handed, unlike a swap, and empty rows
+    move with the rest."""
+    return [rows[1], rows[2], rows[3], rows[0]]
+
+
+def compass_label(point: tuple[float, float], centre: tuple[float, float]) -> str:
+    """The eight-point compass direction of a point from a centre, so a corner
+    can be named by where it sits on the map rather than by its role."""
+    bearing = math.degrees(math.atan2(point[0] - centre[0], point[1] - centre[1]))
+    return _COMPASS[math.floor((bearing + 22.5) / 45) % 8]
