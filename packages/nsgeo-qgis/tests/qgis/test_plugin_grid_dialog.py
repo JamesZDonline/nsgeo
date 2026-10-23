@@ -17,6 +17,7 @@ from qgis.core import (
     QgsGeometry,
     QgsPointXY,
     QgsProject,
+    QgsRectangle,
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QEvent, Qt
@@ -1285,3 +1286,166 @@ def test_pick_on_map_only_emits(session, qgis_app):
     d.pick_polygon_requested.connect(lambda: seen.append(1))
     d.pick_polygon_button.click()
     assert seen == [1]
+
+
+# ---- the grid's CRS chooses itself (#62) ---------------------------------------
+
+
+def _site_extent(crs: QgsCoordinateReferenceSystem) -> QgsRectangle:
+    """An 800 x 600 m box around SITE.origin, in `crs` (a lon/lat box for 4326)."""
+    ox, oy = SITE.origin
+    if crs == UTM16:
+        return QgsRectangle(ox - 400, oy - 300, ox + 400, oy + 300)
+    c = QgsCoordinateTransform(UTM16, crs, QgsProject.instance()).transform(QgsPointXY(ox, oy))
+    return QgsRectangle(c.x() - 0.004, c.y() - 0.003, c.x() + 0.004, c.y() + 0.003)
+
+
+def _ready(d: GridDialog) -> GridDialog:
+    d.id_edit.setText("A")
+    d.velocity.setValue(0.08)
+    return d
+
+
+def test_a_usable_project_crs_is_kept(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert d.crs_is_auto()
+    assert d.crs_hint.text() == ""
+
+
+def test_a_4326_project_gets_the_canvas_centres_utm_zone(session, project_crs, real_canvas):
+    project_crs(WGS84)
+    d = GridDialog(session, canvas=real_canvas(WGS84, _site_extent(WGS84)))
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert d.crs_is_auto()
+    hint = d.crs_hint.text()
+    assert "picked for you" in hint and "EPSG:4326" in hint and "degrees" in hint
+
+
+def test_the_sites_crs_comes_first(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    session.add_grid(Grid("B", (300_000.0, 4_000_000.0), 0.0, 10.0, 10.0, "EPSG:32617", 0.5))
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    assert d.crs_widget.crs().authid() == "EPSG:32617"
+    assert d.crs_hint.text() == "picked for you: the CRS the site's other grids use"
+
+
+def test_fit_moves_an_automatic_crs_to_the_corners_zone(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    d = GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    d.corners_crs.setCrs(WGS84)
+    for row, (dx, dy) in enumerate(((0, 0), (0.0002, 0), (0.0002, 0.0002), (0, 0.0002))):
+        d.set_corner(row, QgsPointXY(-70.0 + dx, 36.0 + dy), WGS84, "typed")
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    d.fit_corners()
+    assert d.crs_is_auto()
+    assert d.crs_widget.crs().authid() == "EPSG:32619"
+    ox, oy = d.origin_x.value(), d.origin_y.value()
+    ref = QgsCoordinateTransform(
+        WGS84, QgsCoordinateReferenceSystem("EPSG:32619"), QgsProject.instance()
+    )
+    p = ref.transform(QgsPointXY(-70.0, 36.0))
+    assert (ox, oy) == pytest.approx((p.x(), p.y()), abs=1e-3)
+
+
+def test_a_hand_picked_crs_is_never_replaced(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    d = _ready(GridDialog(session, canvas=real_canvas(UTM16, _site_extent(UTM16))))
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32619"))
+    assert not d.crs_is_auto()
+    for row, (e, n) in enumerate(SITE_CORNERS):
+        d.set_corner(row, QgsPointXY(e, n), UTM16, "typed")
+    d.fit_corners()
+    assert d.crs_widget.crs().authid() == "EPSG:32619"
+    assert not d.crs_is_auto()
+    assert not d.ok_button.isEnabled()
+
+
+def test_a_4326_polygon_in_a_4326_project_fits_in_the_right_utm_zone(
+    qgis_app, session, project_crs, real_canvas, plan_layer
+):
+    project_crs(WGS84)
+    d = GridDialog(session, canvas=real_canvas(WGS84, _site_extent(WGS84)))
+    assert d.corners_crs.crs() == WGS84
+    layer = plan_layer(_wgs84_ring())
+    _select_sole_feature(qgis_app, d, layer)
+    d.fill_from_polygon()
+    d.fit_corners()
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-3)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-3)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-6)
+
+
+def test_an_existing_grids_crs_is_never_changed(session, project_crs, real_canvas):
+    project_crs(UTM16)
+    session.add_grid(Grid("B", (300_000.0, 4_000_000.0), 0.0, 10.0, 10.0, "EPSG:32617", 0.5))
+    d = GridDialog(session, grid=session.grid("B"), canvas=real_canvas(UTM16, _site_extent(UTM16)))
+    assert not d.crs_is_auto()
+    assert d.crs_widget.crs().authid() == "EPSG:32617"
+    for row, (e, n) in enumerate(SITE_CORNERS):
+        d.set_corner(row, QgsPointXY(e, n), UTM16, "typed")
+    d.fit_corners()
+    assert d.crs_widget.crs().authid() == "EPSG:32617"
+
+
+def test_hand_picking_a_crs_converts_origin_and_azimuth(session, project_crs):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(SITE.azimuth)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32617"))
+    assert not d.crs_is_auto()
+    back = QgsCoordinateTransform(d.crs_widget.crs(), UTM16, QgsProject.instance())
+    origin = back.transform(QgsPointXY(d.origin_x.value(), d.origin_y.value()))
+    assert (origin.x(), origin.y()) == pytest.approx(SITE.origin, abs=1e-3)
+    # 100 along +Y in the new CRS is not 100 m on the ground (32617 is ~0.3% off
+    # here), so compare the direction: the point 100 m along it from the origin.
+    az = np.radians(d.azimuth.value())
+    ahead = back.transform(
+        QgsPointXY(d.origin_x.value() + 100 * np.sin(az), d.origin_y.value() + 100 * np.cos(az))
+    )
+    step = np.array([ahead.x() - origin.x(), ahead.y() - origin.y()])
+    rebuilt = np.array(SITE.origin) + 100 * step / np.hypot(*step)
+    want = np.radians(SITE.azimuth)
+    original = np.array(SITE.origin) + 100 * np.array([np.sin(want), np.cos(want)])
+    assert rebuilt == pytest.approx(original, abs=1e-2)
+
+
+def test_a_hand_pick_that_cannot_convert_puts_the_old_crs_back(session, project_crs):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    d.origin_x.setValue(1e8)  # outside UTM 16N's domain: the transform raises
+    d.origin_y.setValue(1e8)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32617"))
+    assert d.crs_widget.crs().authid() == "EPSG:32616"
+    assert "could not convert" in d.crs_hint.text()
+    assert (d.origin_x.value(), d.origin_y.value()) == (1e8, 1e8)
+
+
+def test_no_canvas_keeps_the_project_crs_and_says_what_will_happen(session, project_crs):
+    project_crs(WGS84)
+    d = _ready(GridDialog(session, canvas=None))
+    assert d.crs_widget.crs().authid() == "EPSG:4326"
+    assert not d.ok_button.isEnabled()
+    hint = d.crs_hint.text()
+    assert "metres" in hint and "a UTM zone will be picked when you fit corners" in hint
+
+
+def test_off_by_is_blank_unless_the_grid_crs_is_usable_at_the_origin(session, project_crs):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    for row, (e, n) in enumerate(SITE_CORNERS):
+        d.set_corner(row, QgsPointXY(e, n), UTM16, "typed")
+    d.fit_corners()
+    d.azimuth.setValue(11.0)
+    assert all(o is not None for o in d.corner_offsets()[1:])
+    for code in ("EPSG:4326", "EPSG:2264", "EPSG:3857"):  # degrees, US feet, 20% off
+        d.crs_widget.setCrs(UTM16)
+        d.origin_x.setValue(SITE.origin[0])
+        d.origin_y.setValue(SITE.origin[1])
+        d.crs_widget.setCrs(QgsCoordinateReferenceSystem(code))
+        assert (d.origin_x.value(), d.origin_y.value()) != (0.0, 0.0), code
+        assert d.corner_offsets() == [None] * 4, code

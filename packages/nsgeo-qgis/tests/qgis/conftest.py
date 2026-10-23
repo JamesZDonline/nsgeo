@@ -114,6 +114,58 @@ def fake_iface(qgis_app):
     return FakeIface()
 
 
+def _real_canvas(fake_iface, crs, extent):
+    """The FakeIface canvas, shown offscreen at 800 x 600 px, looking at
+    `extent` (a QgsRectangle in `crs`), with its events processed.
+
+    When the extent is 800 x 600 map units in a metric CRS the canvas must
+    come out at exactly 1 m per pixel; that is asserted here so a pixel
+    tolerance in a test cannot pass by accident. For any other extent
+    (a lon/lat box, say) the caller asserts what it needs.
+    """
+    from qgis.core import Qgis, QgsApplication
+
+    canvas = fake_iface.mapCanvas()
+    fake_iface.mainWindow().show()
+    # Fixed, not resize(): the main window's layout would otherwise win.
+    canvas.setFixedSize(800, 600)
+    QgsApplication.processEvents()
+    # ... and the canvas's own frame takes a pixel or two off each side, so
+    # grow the widget until the *map* is 800 x 600 px.
+    inner = canvas.mapSettings().outputSize()
+    canvas.setFixedSize(
+        800 + canvas.width() - inner.width(), 600 + canvas.height() - inner.height()
+    )
+    QgsApplication.processEvents()
+    assert (
+        canvas.mapSettings().outputSize().width(),
+        canvas.mapSettings().outputSize().height(),
+    ) == (800, 600)
+    canvas.setDestinationCrs(crs)
+    canvas.setExtent(extent)
+    QgsApplication.processEvents()
+    metric = crs.mapUnits() == Qgis.DistanceUnit.Meters
+    if metric and extent.width() == 800 and extent.height() == 600:
+        assert canvas.mapUnitsPerPixel() == pytest.approx(1.0)
+    return canvas
+
+
+@pytest.fixture
+def real_canvas(qgis_app):
+    """`_real_canvas` as a fixture: each window it shows is closed after."""
+    shown: list = []
+
+    def make(crs, extent):
+        iface = FakeIface()
+        shown.append(iface)
+        return _real_canvas(iface, crs, extent)
+
+    yield make
+    for iface in shown:
+        iface.mainWindow().close()
+        iface.mainWindow().deleteLater()
+
+
 @pytest.fixture(autouse=True)
 def _no_unhandled_modals(monkeypatch):
     """Every test in this tier defaults to *forbidding* a real modal.

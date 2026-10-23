@@ -1174,7 +1174,11 @@ class NsgeoPlugin:
                         Qgis.MessageLevel.Warning,
                     )
         dialog = GridDialog(
-            self.session, grid=grid, suggested_velocity=suggestion, parent=self.iface.mainWindow()
+            self.session,
+            grid=grid,
+            suggested_velocity=suggestion,
+            parent=self.iface.mainWindow(),
+            canvas=self.iface.mapCanvas(),
         )
         # Fix round 5, Finding 2: modeless means the toolbar stays
         # clickable while the dialog is open, so the site it was opened
