@@ -2412,3 +2412,28 @@ def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(popula
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_lines_and_marks_hide_once_zoomed_out_past_a_3px_line_gap(populated, tmp_path):
+    """#66 walkthrough, D2: zoomed out, thin dashed lines a few pixels apart
+    merge into a moire pattern. Lines and their marks hide once neighbouring
+    lines would be under 3 px apart on a 96 dpi screen, at the finest line
+    spacing among grids that have lines: 0.5 m -> beyond about 1:630."""
+    session, layers, _ = populated
+    for name in ("lines", "marks"):
+        layer = layers.layers[name]
+        assert layer.hasScaleBasedVisibility(), name
+        assert layer.minimumScale() == pytest.approx(630.0, rel=1e-3), name
+        assert layer.maximumScale() == 0.0, name
+        assert layer.isInScaleRange(600.0) and layer.isInScaleRange(50.0), name  # drawn
+        assert not layer.isInScaleRange(700.0), name  # hidden
+    for name in ("grids", "picks"):
+        assert not layers.layers[name].hasScaleBasedVisibility(), name
+
+    # A finer grid counts once it has lines, not before.
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 3.0, 11.0, "EPSG:32616", 0.25))
+    assert layers.layers["lines"].minimumScale() == pytest.approx(630.0, rel=1e-3)
+    p = synthetic_dzt(tmp_path / "rawB", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("B", "y", 0.0, 0.0, 1, p.stem))])
+    for name in ("lines", "marks"):
+        assert layers.layers[name].minimumScale() == pytest.approx(315.0, rel=1e-3), name

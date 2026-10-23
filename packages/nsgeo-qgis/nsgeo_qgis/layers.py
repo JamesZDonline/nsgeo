@@ -144,6 +144,13 @@ LEGEND_ORDER = ("picks", "marks", "lines", "grids")
 # node by it.
 _GROUP_TOKEN = "nsgeo/site_group"
 
+# #66 walkthrough: zoomed out, thin dashed lines a few pixels apart merge into
+# a moire pattern over the slice. Lines and their marks hide once neighbouring
+# lines would be closer than this on screen, at the finest line spacing among
+# the grids that have lines (see `_hide_when_lines_crowd`).
+MIN_LINE_GAP_PX = 3.0
+_METRES_PER_PX = 0.0254 / 96  # one pixel at 96 dpi, the screen QGIS scales assume
+
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
 
 # M5 follow-up (Finding 2): a grid's outline used to share its lines'
@@ -1650,6 +1657,7 @@ class SiteLayers(QObject):
             feats.append(f)
         self._refill("lines", feats)
         self._style_lines()
+        self._hide_when_lines_crowd("lines")
 
     def refill_marks(self) -> None:
         site = self.session.site
@@ -1680,6 +1688,7 @@ class SiteLayers(QObject):
                 f["name"] = mark.name
                 feats.append(f)
         self._refill("marks", feats)
+        self._hide_when_lines_crowd("marks")
 
     def _style_lines(self) -> None:
         site = self.session.site
@@ -1698,6 +1707,25 @@ class SiteLayers(QObject):
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
+
+    def _hide_when_lines_crowd(self, name: str) -> None:
+        """Hide table `name` beyond the map scale at which the site's most
+        closely spaced lines would be under MIN_LINE_GAP_PX apart."""
+        spacings = set()
+        keys = self.session.keys()
+        for key in keys:
+            grid = self.session.grid_for_line(self.session.line_for_key(key))
+            if grid is not None:
+                spacings.add(grid.default_spacing)
+        layer = self.layers[name]
+        if not spacings:
+            layer.setScaleBasedVisibility(False)
+            return
+        # QGIS's "minimum" scale is the most zoomed-out one shown, as a
+        # scale denominator; 0 as the maximum leaves zooming in unlimited.
+        layer.setMinimumScale(min(spacings) / (MIN_LINE_GAP_PX * _METRES_PER_PX))
+        layer.setMaximumScale(0.0)
+        layer.setScaleBasedVisibility(True)
 
     def _style_grids(self) -> None:
         # An unfilled outline: the grid is a reference frame drawn over
