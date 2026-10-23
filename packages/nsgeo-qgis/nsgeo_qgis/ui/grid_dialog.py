@@ -244,8 +244,8 @@ class GridDialog(QDialog):
         # was not wired at all before this round.
         self.origin_x.valueChanged.connect(self._validate)
         self.origin_y.valueChanged.connect(self._validate)
-        for w in (self.origin_x, self.origin_y, self.azimuth):
-            w.valueChanged.connect(self._on_numbers_edited)
+        for w, part in ((self.origin_x, "origin"), (self.origin_y, "origin"), (self.azimuth, "az")):
+            w.valueChanged.connect(lambda _v, part=part: self._on_numbers_edited(part))
         self.size_x.valueChanged.connect(lambda _v: self._size_edited(0))
         self.size_y.valueChanged.connect(lambda _v: self._size_edited(1))
         for w in (self.origin_x, self.origin_y, self.azimuth, self.size_x, self.size_y):
@@ -970,15 +970,7 @@ class GridDialog(QDialog):
                 self.azimuth.value(),
             )
         try:
-            xform = QgsCoordinateTransform(src, new, QgsProject.instance())
-            p0 = xform.transform(QgsPointXY(ox, oy))
-            new_az = az
-            if src.mapUnits() == Qgis.DistanceUnit.Meters:
-                a = math.radians(az)
-                p1 = xform.transform(QgsPointXY(ox + 100 * math.sin(a), oy + 100 * math.cos(a)))
-                new_az = math.degrees(math.atan2(p1.x() - p0.x(), p1.y() - p0.y())) % 360.0
-            if not all(math.isfinite(v) for v in (p0.x(), p0.y(), new_az)):
-                raise QgsCsException("not finite")
+            p0, new_az = self._chord(src, new, ox, oy, az)
         except QgsCsException:
             return f"could not convert the grid into {new.authid()}; kept {old.authid()}"
         self._write_numbers(new, p0.x(), p0.y(), new_az, keep_anchor=True)
@@ -1006,22 +998,56 @@ class GridDialog(QDialog):
         elif not keep_anchor:
             self._anchor = None
 
-    def _on_numbers_edited(self, *_: Any) -> None:
+    def _chord(
+        self,
+        src: QgsCoordinateReferenceSystem,
+        dst: QgsCoordinateReferenceSystem,
+        ox: float,
+        oy: float,
+        az: float,
+    ) -> tuple[QgsPointXY, float]:
+        """The origin and azimuth (cw from N) of the same grid in `dst`. The
+        azimuth is the bearing, in `dst`'s axes, from the transformed origin to
+        the transformed point one step along +Y in `src`'s axes: 100 units for
+        a projected CRS, 0.001 degrees for a geographic one. Raises
+        QgsCsException when it cannot."""
+        xform = QgsCoordinateTransform(src, dst, QgsProject.instance())
+        step = 1e-3 if src.isGeographic() else 100.0
+        a = math.radians(az)
+        p0 = xform.transform(QgsPointXY(ox, oy))
+        p1 = xform.transform(QgsPointXY(ox + step * math.sin(a), oy + step * math.cos(a)))
+        new_az = math.degrees(math.atan2(p1.x() - p0.x(), p1.y() - p0.y())) % 360.0
+        if not all(math.isfinite(v) for v in (p0.x(), p0.y(), new_az)):
+            raise QgsCsException("not finite")
+        return p0, new_az
+
+    def _on_numbers_edited(self, part: str) -> None:
         # valueChanged slot: a hand edit (the dialog's own writes are guarded).
         if self._setting_numbers:
             return
         try:
             crs = self.crs_widget.crs()
+            ox, oy, az = self.origin_x.value(), self.origin_y.value(), self.azimuth.value()
             if crs.isValid() and crs.mapUnits() == Qgis.DistanceUnit.Meters:
-                self._anchor = (
-                    crs,
-                    self.origin_x.value(),
-                    self.origin_y.value(),
-                    self.azimuth.value(),
-                )
+                self._anchor = (crs, ox, oy, az)
+            elif self._anchor is not None and crs.isValid():
+                # Not metric: re-derive only the part that was edited, so a
+                # nudge-and-undo or an azimuth-only change keeps the rest of
+                # the anchor at full precision.
+                acrs, ax, ay, aaz = self._anchor
+                try:
+                    p0, new_az = self._chord(crs, acrs, ox, oy, az)
+                except QgsCsException:
+                    self._anchor = None
+                    return
+                if part == "origin":
+                    self._anchor = (acrs, p0.x(), p0.y(), aaz)
+                else:
+                    self._anchor = (acrs, ax, ay, new_az)
             else:
                 self._anchor = None
         except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self._anchor = None
             self._crs_message = f"could not read the grid numbers: {exc}"
 
     def _on_grid_crs_changed(self, *_: Any) -> None:

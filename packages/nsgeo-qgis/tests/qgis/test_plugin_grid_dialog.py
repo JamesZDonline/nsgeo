@@ -1479,3 +1479,56 @@ def test_a_hand_edit_in_a_non_metric_crs_wins_over_the_anchor(session, project_c
     )
     assert (d.origin_x.value(), d.origin_y.value()) == pytest.approx((want.x(), want.y()), abs=1e-3)
     assert abs(d.origin_x.value() - SITE.origin[0]) > 500
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-3)
+
+
+def _site_dialog(session) -> GridDialog:
+    d = GridDialog(session)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(SITE.azimuth)
+    return d
+
+
+def test_moving_the_origin_in_feet_does_not_turn_the_grid(session, project_crs):
+    project_crs(UTM16)
+    d = _site_dialog(session)
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:2264"))
+    feet = d.crs_widget.crs()
+    here = QgsPointXY(d.origin_x.value(), d.origin_y.value())
+    d.origin_x.setValue(here.x() + 10.0)  # 10 ft east in the state plane's own axes
+    want = QgsCoordinateTransform(feet, UTM16, QgsProject.instance()).transform(
+        QgsPointXY(here.x() + 10.0, here.y())
+    )
+    d.crs_widget.setCrs(UTM16)
+    assert abs(want.x() - SITE.origin[0]) == pytest.approx(3.048, abs=0.05)  # the move is ~3 m
+    assert d.origin_x.value() == pytest.approx(want.x(), abs=2e-3)
+    assert d.origin_y.value() == pytest.approx(want.y(), abs=2e-3)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-3)
+
+
+def test_an_azimuth_nudge_and_undo_in_degrees_keeps_the_anchor(session, project_crs):
+    project_crs(UTM16)
+    d = _site_dialog(session)
+    d.crs_widget.setCrs(WGS84)
+    before = d.azimuth.value()
+    d.azimuth.setValue(before + 1.0)
+    d.azimuth.setValue(before)
+    d.crs_widget.setCrs(UTM16)
+    assert d.origin_x.value() == pytest.approx(SITE.origin[0], abs=1e-3)
+    assert d.origin_y.value() == pytest.approx(SITE.origin[1], abs=1e-3)
+    assert d.azimuth.value() == pytest.approx(10.0, abs=1e-3)
+
+
+def test_without_an_anchor_the_azimuth_still_survives_a_trip_from_feet(session, project_crs):
+    project_crs(UTM16)
+    d = GridDialog(session)
+    feet = QgsCoordinateReferenceSystem("EPSG:2264")
+    d.crs_widget.setCrs(feet)  # no origin yet: nothing converted, no anchor
+    d.origin_x.setValue(1_500_000.0)
+    d.origin_y.setValue(300_000.0)
+    d.azimuth.setValue(25.0)
+    d.crs_widget.setCrs(UTM16)
+    d.crs_widget.setCrs(feet)
+    assert d.azimuth.value() == pytest.approx(25.0, abs=1e-3)
+    assert d.origin_x.value() == pytest.approx(1_500_000.0, abs=2e-3)
