@@ -25,6 +25,7 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsGeometry,
+    QgsLayerTreeModel,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
@@ -2285,3 +2286,90 @@ def test_write_pick_refuses_when_the_picks_layer_predates_a_grid_crs_change(popu
     with pytest.raises(RuntimeError, match="picks"):
         layers.write_pick(_a_pick())
     assert layers.feature_count("picks") == 0  # refused, not written
+
+
+# --- #68: a new site's group goes to the top of the Layers panel, above any
+# imagery already open; inside it points draw over lines over outlines; and a
+# group the user drags elsewhere stays there and stays the plugin's. ---------
+
+
+def _names(node):
+    return [child.name() for child in node.children()]
+
+
+def _drag_in_layers_panel(project, node, parent, row):
+    """Move `node` to `row` of `parent` the way a drag in the Layers panel
+    does. That is not a move: QgsLayerTreeModel serialises the node, builds
+    a NEW one at the drop and deletes the original, so a Python reference
+    to the old node is left dangling."""
+    model = QgsLayerTreeModel(project.layerTreeRoot())
+    model.setFlag(QgsLayerTreeModel.Flag.AllowNodeReorder)
+    source = node.parent()
+    source_row = next(i for i, child in enumerate(source.children()) if child is node)
+    source_index = model.node2index(source)
+    mime = model.mimeData([model.node2index(node)])
+    assert model.dropMimeData(mime, Qt.DropAction.MoveAction, row, 0, model.node2index(parent))
+    if source is parent and row <= source_row:
+        source_row += 1  # the copy went in above the original
+    assert model.removeRows(source_row, 1, source_index)
+
+
+def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    project.addMapLayer(QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory"))
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        session.add_grid(GRID)
+        assert _names(project.layerTreeRoot()) == [f"nsgeo · {session.site_name}", "imagery"]
+    finally:
+        layers.detach()
+        project.clear()
+
+
+def test_the_group_draws_points_over_lines_over_grid_outlines(populated):
+    _, layers, _ = populated
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
+    session, layers, project = populated
+    project.removeMapLayer(layers.layers["picks"].id())
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+
+
+def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
+    session, layers, project = populated
+    root = project.layerTreeRoot()
+    name = f"nsgeo · {session.site_name}"
+    project.addMapLayer(QgsVectorLayer("Polygon?crs=EPSG:32616", "imagery", "memory"))
+    _drag_in_layers_panel(project, layers.group, root, len(root.children()))
+    assert _names(root) == ["imagery", name]
+
+    project.removeMapLayer(layers.layers["lines"].id())
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(root) == ["imagery", name]  # not moved back, no second group
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert layers.feature_count("lines") == 3
+
+    layers.detach()
+    assert _names(root) == ["imagery"]  # the dragged group goes with the site
+
+
+def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis_app):
+    session, layers, project = populated
+    root = project.layerTreeRoot()
+    root.removeChildNode(layers.group)
+    qgis_app.processEvents()  # the project drops the group's layers on a queued call
+    assert layers.layers == {}
+
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
+
+    assert _names(root) == [f"nsgeo · {session.site_name}"]
+    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
