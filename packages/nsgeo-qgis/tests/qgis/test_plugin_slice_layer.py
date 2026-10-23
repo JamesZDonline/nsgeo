@@ -13,7 +13,7 @@ from nsgeo.slices import CubeFrame
 from nsgeo_qgis import slice_layer
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.slice_layer import SliceLayer, build_shader
+from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME, SliceLayer, build_shader
 from qgis.core import QgsProject, QgsSingleBandPseudoColorRenderer
 from qgis.PyQt.QtGui import qAlpha, qRed
 
@@ -335,3 +335,136 @@ def test_the_layer_is_recreated_after_being_removed_from_the_project(mapped):
     assert project.mapLayer(sl.layer.id()) is not None
     value, ok = sl.layer.dataProvider().sample(sl.layer.extent().center(), 1)
     assert ok and value == pytest.approx(9.0)
+
+
+# ---- M12: the site lattice through the same layer ---------------------------
+
+#: A 9 x 6 north-up lattice with 0.5 m pixels, west edge 500, north edge 706.
+SITE_GT = (500.0, 0.5, 0.0, 706.0, 0.0, -0.5)
+
+
+def test_update_north_up_renames_the_layer_in_place(mapped):
+    """M12 spec 4.5: switching to the whole site renames the one preview
+    layer rather than rebuilding it, so the layer tree does not churn."""
+    sl, _, _, project = mapped
+    sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")
+    first_id = sl.layer.id()
+    assert sl.layer.name() == LAYER_NAME
+
+    site = np.full((6, 9), 4.0, dtype=np.float32)
+    sl.update_north_up(
+        site,
+        SITE_GT,
+        "EPSG:32616",
+        limit=10.0,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="site",
+        name=SITE_LAYER_NAME,
+    )
+    assert sl.layer.id() == first_id, "renamed in place, not rebuilt"
+    assert sl.layer.name() == SITE_LAYER_NAME
+    assert (sl.layer.width(), sl.layer.height()) == (9, 6)
+    assert sl.layer.extent().xMinimum() == pytest.approx(500.0)
+    assert sl.layer.extent().yMaximum() == pytest.approx(706.0)
+    value, ok = sl.layer.dataProvider().sample(sl.layer.extent().center(), 1)
+    assert ok and value == pytest.approx(4.0)
+    assert [lyr.name() for lyr in project.mapLayers().values()].count(SITE_LAYER_NAME) == 1
+
+    sl.update(_values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="")
+    assert sl.layer.id() == first_id
+    assert sl.layer.name() == LAYER_NAME, "This grid's update restores the name"
+
+
+def test_update_north_up_follows_a_crs_change(mapped):
+    """The site and a grid in another CRS share this one layer. Under
+    M11's `reloadData()` the layer kept the CRS it was created with;
+    0.1.0's `setDataSource` moves it (measured on QGIS 3.44.7), and
+    `update_north_up` checks it either way."""
+    sl, _, _, _ = mapped
+    values = np.full((6, 9), 1.0, dtype=np.float32)
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update_north_up(values, SITE_GT, "EPSG:32616", **kwargs)
+    assert sl.layer.crs().authid() == "EPSG:32616"
+    sl.update_north_up(values, SITE_GT, "EPSG:32615", **kwargs)
+    assert sl.layer.crs().authid() == "EPSG:32615"
+
+
+def test_the_layer_extent_follows_a_lattice_that_grows(mapped):
+    """The site lattice grows as grids become ready, and QGIS draws a
+    raster only inside its layer's extent. Under M11's `reloadData()` the
+    layer kept the extent it was created with; 0.1.0's `setDataSource`
+    moves it (measured on QGIS 3.44.7), and `update_north_up` checks it
+    either way."""
+    sl, _, _, _ = mapped
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update_north_up(np.full((12, 12), 1.0, np.float32), SITE_GT, "EPSG:32616", **kwargs)
+    assert sl.layer.extent().xMaximum() == pytest.approx(506.0)
+    sl.update_north_up(np.full((12, 36), 2.0, np.float32), SITE_GT, "EPSG:32616", **kwargs)
+    extent = sl.layer.extent()
+    assert (extent.xMinimum(), extent.xMaximum()) == (pytest.approx(500.0), pytest.approx(518.0))
+    assert (extent.yMinimum(), extent.yMaximum()) == (pytest.approx(700.0), pytest.approx(706.0))
+
+
+def _site_tick(sl, fill_value, name=SITE_LAYER_NAME):
+    sl.update_north_up(
+        np.full((6, 9), fill_value, dtype=np.float32),
+        SITE_GT,
+        "EPSG:32616",
+        limit=10.0,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="site",
+        name=name,
+    )
+
+
+def test_the_site_path_never_rewrites_the_file_the_layer_reads(mapped, monkeypatch):
+    """The merge of M12 onto 0.1.0: the site lattice reaches the map through
+    `update_north_up`, so it must keep 0.1.0's Windows rule too -- a fresh
+    file per tick, and nothing left behind but the file the layer reads.
+    `Create()` is made to refuse the layer's current source, as Windows
+    does, exactly as the This-grid test above models it."""
+    sl, _, _, _ = mapped
+    real = slice_layer.gdal.GetDriverByName
+    refused = []
+
+    class _WindowsDriver:
+        def __init__(self, driver):
+            self._driver = driver
+
+        def Create(self, path, *args, **kwargs):  # noqa: N802 -- GDAL's name
+            held = sl.layer is not None and Path(sl.layer.source()).resolve()
+            if Path(path).exists() and held == Path(path).resolve():
+                refused.append(path)
+                raise RuntimeError(f"deleting {path} failed: Permission denied")
+            return self._driver.Create(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        slice_layer.gdal, "GetDriverByName", lambda name: _WindowsDriver(real(name))
+    )
+    _update(sl, 1.0)
+    for fill_value in (3.0, 4.0, 6.0):
+        _site_tick(sl, fill_value)
+    assert not refused
+    assert list(sl._dir.iterdir()) == [sl.path]
+    assert sl.layer.name() == SITE_LAYER_NAME
+    value, ok = _centre(sl)
+    assert ok and value == pytest.approx(6.0)
+
+
+def test_a_user_rename_survives_site_ticks_but_a_scope_switch_renames(mapped):
+    """0.1.0 keeps a user's rename across ticks; M12 renames the layer when
+    the scope changes. Both hold: the name is reapplied only when the
+    requested one differs from the name this class last gave."""
+    sl, _, _, _ = mapped
+    _update(sl, 1.0)
+    _site_tick(sl, 2.0)
+    assert sl.layer.name() == SITE_LAYER_NAME
+    sl.layer.setName("my site view")
+    _site_tick(sl, 3.0)
+    assert sl.layer.name() == "my site view", "a site tick keeps the user's name"
+    _update(sl, 4.0)
+    assert sl.layer.name() == LAYER_NAME, "leaving the site renames"
+    _site_tick(sl, 5.0)
+    assert sl.layer.name() == SITE_LAYER_NAME, "entering the site renames"

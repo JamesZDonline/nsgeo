@@ -180,18 +180,25 @@ nsgeo imports lines into a grid, so place the grid first. Click **Add grid…**
    usable.
 
 The grid appears on the map in a layer group named **nsgeo ·** followed by the
-site folder's name.
+site folder's name. The group goes in at the top of the Layers panel, above any
+imagery already open, with picks over marks over lines over grid outlines. If
+you move the group, it stays where you put it.
 
 ### Step 3: Import DZT files
 
 Click **Import DZT…** (or right-click the grid, then **Import DZT files…**).
+The toolbar button opens on the grid selected in **nsgeo Survey**, or the grid
+of the selected lines, or the grid of the line that is open. The dialog's title
+and its **Import** button name the grid the lines will go into.
 
 1. Choose the **Target grid**, and say which way **Lines run along** (the grid's
    Y or X axis).
 2. Set **Spacing across** (the line spacing), **First line at** (the offset of
    the first line), **Start along** (where a line run in the + direction
    begins), and the **Direction**: **alternate (zigzag)**, **all +1** or
-   **all -1**.
+   **all -1**. **First line at** starts at half the spacing, so the first line
+   sits in the middle of its strip like the others, and follows **Spacing
+   across** until you type a value of your own.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at
@@ -200,7 +207,9 @@ Click **Import DZT…** (or right-click the grid, then **Import DZT files…**).
    a redone line moves the later files up into its place, unless you have edited
    them by hand.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
-   Survey**.
+   Survey**. They are drawn as thin dashed lines in the grid's colour, and are
+   hidden when you zoom out far enough that they would run together (beyond
+   1:400 at 0.5 m spacing). Grid outlines and picks stay at every scale.
 
 ### Step 4: Open a line and use the map
 
@@ -233,7 +242,14 @@ for them first. For example, `bandpass` needs its cut-off frequencies.
   drag, to change the order. **Remove** deletes the selected step.
 - **Difference** shows what the selected step removed, rather than the result.
 - Select a `gain_curve` step, and a strip beside the profile lets you drag its
-  control points.
+  control points. It works on its own, without `gain_agc` before it. The
+  profile's brightness is measured as if the gain curve were switched off, so
+  raising part of the curve brightens only that part, and pushing too far turns
+  it solid black and white. Under the curve, the grey band shows how loud the
+  loudest parts of the line are at each depth, and the black line is the trace
+  under the cursor. The dotted lines are the limits of what the profile can
+  show. Anything past them is drawn red, and is solid black or white on the
+  profile.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

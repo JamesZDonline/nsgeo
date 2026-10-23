@@ -39,6 +39,7 @@ from qgis.gui import QgsDockWidget
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -56,6 +57,7 @@ from qgis.PyQt.QtWidgets import (
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
 from nsgeo_qgis.slice_export import ViewSettings, recipe_from_record
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
@@ -63,6 +65,7 @@ from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
     Resolution,
+    SiteSource,
     SourceChoice,
     depth_scroll_delta,
     estimate_memory,
@@ -71,7 +74,9 @@ from nsgeo_qgis.slices_plan import (
     smallest_safe_cell,
     transform_names,
 )
+from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.profile_dock import velocity_source
+from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -125,6 +130,39 @@ class SlicesDock(QgsDockWidget):
             on_error=self._on_engine_error,
             on_progress=self._on_progress,
         )
+        # ---- M12: the Whole site scope (spec 4.1-4.5) ---------------------
+        #: "grid" (M11's This grid) or "site". Never persisted (plan Ruling
+        #: 5): the dock always opens in This grid.
+        self._scope = "grid"
+        #: Built here, after `engine` and before this dock connects to the
+        #: session: its `grids_changed` slot must run before `rebuild_source`
+        #: (see `site_engine.py`'s slot-order note). This grid's engine is its
+        #: `exclusive_with` peer (Ruling 1); R-P5 closes the other direction.
+        self.site_engine = SiteEngine(
+            session,
+            on_changed=self._on_site_changed,
+            on_error=self._on_site_error,
+            exclusive_with=[self.engine],
+            parent=self,
+        )
+        #: This grid's values while the site shows: its Resolution spins,
+        #: palette and remembered source, and the top time carried back.
+        self._grid_spins: site_scope.Spins | None = None
+        self._grid_palette = ""
+        self._grid_record_at_entry: tuple[Any, Any] | None = None
+        self._pending_top_ns: float | None = None
+        #: R-P5: a This-grid preparation owed once the site has stopped, and
+        #: This grid's `_on_prepared` arriving while the site showed.
+        self._grid_prepare_pending = False
+        self._grid_prepared_away = False
+        #: The survey the site scope's memory belongs to.
+        self._site_seen: Any = None
+        #: R-P5: retries the owed This-grid preparation every 50 ms until no
+        #: site task is live. Never blocks.
+        self._grid_retry = QTimer(self)
+        self._grid_retry.setSingleShot(True)
+        self._grid_retry.setInterval(50)
+        self._grid_retry.timeout.connect(self._run_pending_grid_prepare)
         # A depth counter, not a bool -- see `rebuild_source` and the
         # module docstring of `processing_dock.py`, whose reasoning this
         # copies exactly: a slot re-entering `rebuild_source` while the
@@ -212,6 +250,20 @@ class SlicesDock(QgsDockWidget):
         outer = QVBoxLayout(body)
         outer.setContentsMargins(4, 4, 4, 4)
 
+        # M12 spec 4.1: the scope is stated where the eye lands first.
+        scope_row = QHBoxLayout()
+        self.grid_scope_button = QPushButton("This grid")
+        self.site_scope_button = QPushButton("Whole site")
+        self._scope_buttons = QButtonGroup(self)
+        self._scope_buttons.setExclusive(True)
+        for button in (self.grid_scope_button, self.site_scope_button):
+            button.setCheckable(True)
+            self._scope_buttons.addButton(button)
+            scope_row.addWidget(button)
+        self.grid_scope_button.setChecked(True)
+        self.site_scope_button.setEnabled(False)
+        outer.addLayout(scope_row)
+
         self.source_group = QGroupBox("Source")
         source_layout = QVBoxLayout(self.source_group)
 
@@ -242,6 +294,9 @@ class SlicesDock(QgsDockWidget):
         source_layout.addWidget(self.source_status)
 
         outer.addWidget(self.source_group)
+        self.site_panel = SiteSourcePanel()
+        self.site_panel.setVisible(False)
+        outer.addWidget(self.site_panel)
 
         # ---- Position: the slider IS the top of the window (spec 9.2) --
         # there is no separate "Top" field. The readout sits directly
@@ -266,6 +321,15 @@ class SlicesDock(QgsDockWidget):
         self.velocity_label.setFont(velocity_font)
         self.velocity_label.setStyleSheet("color: palette(mid);")
         position_layout.addWidget(self.velocity_label)
+
+        # M12 spec 4.3: each grid's depth through its own velocity, in the
+        # same quieter face as `velocity_label`, which it replaces in site scope.
+        self.site_depths_label = QLabel("")
+        self.site_depths_label.setFont(velocity_font)
+        self.site_depths_label.setStyleSheet("color: palette(mid);")
+        self.site_depths_label.setWordWrap(True)
+        self.site_depths_label.setVisible(False)
+        position_layout.addWidget(self.site_depths_label)
 
         thickness_form = QFormLayout()
         self.thickness_spin = QDoubleSpinBox()
@@ -398,7 +462,22 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("Fill radius", self.radius_spin)
 
+        # M12 spec 4.4: in site scope the radius is a multiple of each grid's
+        # own line spacing; the tooltip gives the metres per grid.
+        self.radius_spacing_spin = QDoubleSpinBox()
+        self.radius_spacing_spin.setRange(0.0, 10.0)
+        self.radius_spacing_spin.setDecimals(2)
+        self.radius_spacing_spin.setSingleStep(0.25)
+        self.radius_spacing_spin.setSuffix(" × line spacing")
+        self.radius_spacing_spin.setValue(1.5)
+        resolution_form.addRow("Fill radius", self.radius_spacing_spin)
+        self._resolution_form = resolution_form
+        site_scope.set_row_visible(self, self.radius_spacing_spin, False)
+
         outer.addWidget(self.resolution_group)
+        self.normalisation_panel = NormalisationPanel()
+        self.normalisation_panel.setVisible(False)
+        outer.addWidget(self.normalisation_panel)
 
         # One debounce for all five Resolution widgets: `flush_debounce()`
         # stops the timer and applies immediately, for tests and for
@@ -569,6 +648,14 @@ class SlicesDock(QgsDockWidget):
         # so `_on_resident_toggled` reaches the engine directly.
         self.resident_check.toggled.connect(self._on_resident_toggled)
 
+        # M12: the scope switch; `SiteScope` wires the two site groups.
+        self.grid_scope_button.clicked.connect(lambda: self._on_scope_clicked("grid"))
+        self.site_scope_button.clicked.connect(lambda: self._on_scope_clicked("site"))
+        self.site_panel.choose_lines_requested.connect(
+            lambda _grid: self.choose_lines_requested.emit()
+        )
+        self._site = site_scope.SiteScope(self)
+
         self.rebuild_source()
 
     # ---- source group -------------------------------------------------
@@ -618,12 +705,23 @@ class SlicesDock(QgsDockWidget):
             # (`processing_dock.py`'s own `has_line` loop) -- there is
             # nothing to choose lines FROM without a site open.
             self.choose_button.setEnabled(self.session.is_open)
+            self.site_scope_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared
                 and not self.engine.is_running
             ):
                 self.prepare()
+            # M12: the site scope follows the same five signals, and a
+            # different survey forgets what the last one's site view held.
+            if self._scope == "site":
+                if self.session.is_open:
+                    self._site.on_session_changed()
+                else:
+                    self.set_scope("grid")  # the survey closed under the site
+            if self.session.site is not self._site_seen:
+                self._site_seen = self.session.site
+                self._site.forget()
         except Exception as exc:  # noqa: BLE001 -- a slot on five session signals
             _log(f"could not rebuild the slice source controls: {exc}")
 
@@ -728,6 +826,7 @@ class SlicesDock(QgsDockWidget):
             self._included_is_default = True
             self._dz_z_seeded_for = None
             self._seed_resolution_defaults(grid_id)
+            self._restore_remembered_source(grid_id)
             return
         if self._included_is_default:
             self._included = self._default_included(grid_id)
@@ -735,6 +834,53 @@ class SlicesDock(QgsDockWidget):
             return
         valid = set(self.session.keys()) if self.session.is_open else set()
         self._included = tuple(k for k in self._included if k in valid)
+
+    def _restore_remembered_source(self, grid_id: str | None) -> None:
+        """M12 spec 4.2: bring back the preset and lines the user chose for
+        `grid_id` the last time (`SiteSession.slice_source`). A restore, not
+        a choice: the preset is selected inside the `_updating` guard so it
+        does not read as a user change, and nothing is remembered here. A
+        remembered preset that no longer exists is skipped; remembered line
+        keys are filtered to the ones still on the grid, in survey order. A
+        remembered `lines` of None means "every line", so it stays a
+        default and a line imported later is still picked up. So does one
+        that filters to nothing -- an empty choice, or lines that have all
+        left the grid (final review D4): an empty inclusion set would leave
+        This grid with nothing to prepare and no way back to the default."""
+        entry = self.session.slice_source(grid_id) if grid_id and self.session.is_open else None
+        if entry is None:
+            return
+        preset = entry.get("preset")
+        if (
+            preset
+            and preset != self.preset_combo.currentText()
+            and self.preset_combo.findText(preset) >= 0
+        ):
+            self._updating += 1
+            try:
+                self.preset_combo.setCurrentText(preset)
+            finally:
+                self._updating -= 1
+        lines = entry.get("lines")
+        if lines is not None:
+            wanted = set(lines)
+            every = self._default_included(grid_id)
+            kept = tuple(k for k in every if k in wanted)
+            self._included = kept if kept else every
+            self._included_is_default = not kept
+
+    def _remember_source(self, *, every_line: bool = False) -> None:
+        """Record the user's own choice for the selected grid. Called only
+        from a real user change (`_on_source_changed`, `set_included`),
+        never from `rebuild_source`'s first computation: opening a site
+        must not mark it dirty. `every_line` remembers `lines=None` whatever
+        the inclusion set is: a cube record that names no line list (D4)."""
+        grid_id = self.grid_combo.currentText()
+        preset = self.preset_combo.currentText()
+        if not grid_id or not preset or not self.session.is_open:
+            return
+        lines = None if every_line or self._included_is_default else self._included
+        self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
 
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
@@ -877,6 +1023,7 @@ class SlicesDock(QgsDockWidget):
         self._update_included_label()
         self._refresh_source_status()
         if changed:
+            self._remember_source()
             self.prepare()
 
     def _live_preset_steps(self, preset_name: str) -> list[dict]:
@@ -967,6 +1114,15 @@ class SlicesDock(QgsDockWidget):
         overwrite that message with the generic "not prepared" this
         method would otherwise compute.
         """
+        # M12, ruling R-P5: This grid's engine never prepares while the site
+        # is showing, nor while a site task may still run (a cancel whose
+        # bounded wait gave up): two preparations at once segfault (trap 1).
+        # The preparation is owed, and run by `_run_pending_grid_prepare`.
+        if self._scope == "site" or self.site_engine.has_live_task:
+            self._grid_prepare_pending = True
+            if self._scope == "grid":
+                self._grid_retry.start()
+            return
         choice = self.source_choice()
         if (
             choice is not None
@@ -1014,6 +1170,7 @@ class SlicesDock(QgsDockWidget):
             self._pending_palette = None
             self._mark_cube_unsaved()
             self._sync_included()
+            self._remember_source()
             self._update_included_label()
             self.prepare()
         except Exception as exc:  # noqa: BLE001 -- a slot on currentTextChanged
@@ -1064,8 +1221,11 @@ class SlicesDock(QgsDockWidget):
         # place spec 9.2's "the status could have just changed" already
         # gets recomputed everywhere it matters (rebuild_source,
         # set_included, and both engine callbacks).
-        self.save_button.setEnabled(self.engine.is_prepared)
-        self.export_button.setEnabled(self.engine.is_prepared)
+        if self._scope == "site":
+            self._site.update_export_button()
+        else:
+            self.save_button.setEnabled(self.engine.is_prepared)
+            self.export_button.setEnabled(self.engine.is_prepared)
         if self.engine.is_running:
             return
         choice = self.engine.choice
@@ -1149,6 +1309,12 @@ class SlicesDock(QgsDockWidget):
 
     def _on_prepared(self) -> None:
         try:
+            if self._scope == "site":
+                # M12: the Resolution and Display widgets are the site's
+                # now; This grid's clamp and redraw run on the way back.
+                self._shared_limit_cache = None
+                self._grid_prepared_away = True
+                return
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
@@ -1232,7 +1398,7 @@ class SlicesDock(QgsDockWidget):
         un-restore its own combo selection.
         """
         try:
-            if self._updating:
+            if self._updating or self._scope == "site":
                 return
             if self.cube_combo.currentText() != "(unsaved)":
                 self.cube_combo.setCurrentText("(unsaved)")
@@ -1390,7 +1556,8 @@ class SlicesDock(QgsDockWidget):
         own contract for an old-format record.
         """
         try:
-            recipe = recipe_from_record(self.session.site.cubes[cube_id])
+            record = self.session.site.cubes[cube_id]
+            recipe = recipe_from_record(record)
             transform_text = (
                 "none" if recipe.choice.transform == NO_TRANSFORM else recipe.choice.transform
             )
@@ -1443,6 +1610,14 @@ class SlicesDock(QgsDockWidget):
                     self.z1_spin.setValue(recipe.resolution.t1_ns)
             finally:
                 self._updating -= 1
+            # M12 spec 4.2 (controller ruling T2-b): picking a saved cube is
+            # a user choice, so its preset and lines become this grid's
+            # remembered source. `restore_cube` is reached only from
+            # `_on_cube_changed`, which returns early under `_updating`, so
+            # no automatic path (opening a site) remembers through here. A
+            # record with no `lines` key names no line list: it is remembered
+            # as every line, not as an empty choice (final review D4).
+            self._remember_source(every_line="lines" not in record)
             self._update_included_label()
             self.flush_debounce()
             self.prepare()
@@ -1603,6 +1778,11 @@ class SlicesDock(QgsDockWidget):
         (`plugin.py`) derives them once, the same way, rather than
         re-deriving the formula and risking a mismatch between what the
         dock is currently showing and what a GeoTIFF actually gets."""
+        if self._scope == "site":
+            site_z = self.site_engine.site_z
+            if site_z is None:
+                raise RuntimeError("no site geometry: prepare the grids and set a resolution")
+            return site_scope.levels(site_z, self.thickness_spin.value(), self.step_spin.value())
         z = self.engine.z
         if z is None:
             raise RuntimeError("no slice geometry: choose a source and a resolution first")
@@ -1612,7 +1792,7 @@ class SlicesDock(QgsDockWidget):
     def step_slice(self, delta: int) -> None:
         """Move the slider by `delta` STEPS, not levels -- the unit a
         person navigating overlapping slices actually thinks in."""
-        z = self.engine.z
+        z = self.site_engine.site_z if self._scope == "site" else self.engine.z
         step_levels = self._step_levels(z) if z is not None else 1
         target = self.slice_slider.value() + delta * step_levels
         target = max(self.slice_slider.minimum(), min(self.slice_slider.maximum(), target))
@@ -1627,6 +1807,9 @@ class SlicesDock(QgsDockWidget):
 
     def _apply_resolution(self) -> None:
         try:
+            if self._scope == "site":
+                self._apply_site_resolution()
+                return
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
@@ -1696,6 +1879,9 @@ class SlicesDock(QgsDockWidget):
             self.error.emit(str(exc))
 
     def refresh_slice(self) -> None:
+        if self._scope == "site":
+            self._site.schedule_refresh()  # ruling T3-g; This grid is not coalesced
+            return
         try:
             window = self.current_window()
             if window is None or not self.engine.is_prepared:
@@ -1721,7 +1907,7 @@ class SlicesDock(QgsDockWidget):
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
-            self.status_label.setText(self.engine.status_text())
+            self.status_label.setText(self._grid_status_text())
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
@@ -1767,11 +1953,14 @@ class SlicesDock(QgsDockWidget):
         mode, possibly a cube build) to announce a number this dock is
         already holding.
         """
-        z = self.engine.z
-        if self._window is None or z is None:
+        if self._scope == "site":
+            z, window = self.site_engine.site_z, self._site.window
+        else:
+            z, window = self.engine.z, self._window
+        if window is None or z is None:
             self.window_cleared.emit()
             return
-        lo_ns, hi_ns = window_times_ns(z, self._window)
+        lo_ns, hi_ns = window_times_ns(z, window)
         self.window_changed.emit(lo_ns, hi_ns)
 
     def _update_readout(self, window: SliceWindow) -> None:
@@ -1912,6 +2101,8 @@ class SlicesDock(QgsDockWidget):
         docstring) -- the two branches now differ only in WHICH slices
         they measure, never in HOW.
         """
+        if self._scope == "site":
+            return self._site.display_limit()
         if self.coverage_check.isChecked():
             if self._values is None:
                 return 1.0
@@ -1944,7 +2135,258 @@ class SlicesDock(QgsDockWidget):
         number rather than the colour)."""
         if self.coverage_check.isChecked():
             return True
+        if self._scope == "site":
+            return self._site.unipolar()
         return self.engine.output_unipolar
+
+    # ---- M12: the scope switch (spec 4.1) ----------------------------------
+    #
+    # Whole site drives the same Position, Resolution and Display widgets
+    # for every included grid. Its logic lives in `site_scope.SiteScope`
+    # (`self._site`); the M11 methods above branch to it in site scope and
+    # are otherwise unchanged. What stays here is the switch itself, the
+    # widgets both scopes share, and ruling R-P5's guard on This grid.
+    def scope(self) -> str:
+        """`"grid"` (This grid, M11's dock) or `"site"` (Whole site)."""
+        return self._scope
+
+    def set_scope(self, scope: str) -> None:
+        """Switch scope, keeping the window's time (spec 4.1).
+
+        Leaving the site cancels its preparation (Ruling 1), then runs any
+        This-grid preparation owed meanwhile once no site task is live
+        (R-P5). Entering it builds a `SiteSource` from the survey's site view.
+        """
+        if scope not in ("grid", "site"):
+            raise ValueError(f"scope must be 'grid' or 'site', got {scope!r}")
+        if scope == self._scope:
+            site_scope.show_scope_widgets(self)
+            return
+        if scope == "site" and not self.session.is_open:
+            site_scope.show_scope_widgets(self)
+            raise RuntimeError("open a survey before showing the whole site")
+        if self._debounce.isActive():
+            # The scope being left applies its own pending change first.
+            self._debounce.stop()
+            self._apply_resolution()
+        if self._scope == "site":
+            top = self._site.shown_top()
+        else:
+            z = self.engine.z
+            top = (
+                self._pending_top_ns if z is None else z.t0_ns + self.slice_slider.value() * z.dz_ns
+            )
+        if scope == "site":
+            self._grid_spins = site_scope.capture_spins(self)
+            self._grid_palette = self.palette_combo.currentText()
+            self._grid_record_at_entry = self._grid_record()
+            self._scope = "site"
+            # R-P5: a moved grid's This-grid engine clears itself and owes a
+            # preparation, rather than re-preparing beside the site's.
+            self.engine.on_grid_moved = self._mark_grid_stale
+            site_scope.show_scope_widgets(self)
+            self._site.enter(top)
+        else:
+            self._scope = "grid"  # first: the site's cancel spins the event loop
+            self._site.leave()
+            # Final review D2: `on_grid_moved` stays `_mark_grid_stale` until
+            # `_run_pending_grid_prepare` sees no site task live. A cancel
+            # whose bounded wait gave up leaves the site's task reading, and
+            # M11's self re-preparation on a move would start beside it.
+            site_scope.show_scope_widgets(self)
+            self._resume_grid(top)
+
+    def _on_scope_clicked(self, scope: str) -> None:
+        try:
+            self.set_scope(scope)
+        except Exception as exc:  # noqa: BLE001 -- a slot on QPushButton.clicked
+            site_scope.show_scope_widgets(self)
+            self.error.emit(f"could not switch the slice scope: {exc}")
+
+    def _resume_grid(self, top: float | None) -> None:
+        """Back to This grid exactly as it was left, at the site's window time."""
+        if self._grid_spins is not None:
+            site_scope.restore_spins(self, self._grid_spins)
+        self._refill_palette_combo()
+        if self.palette_combo.findText(self._grid_palette) >= 0:
+            self.palette_combo.blockSignals(True)
+            try:
+                self.palette_combo.setCurrentText(self._grid_palette)
+            finally:
+                self.palette_combo.blockSignals(False)
+        self._follow_record_changed_in_site()
+        self._pending_top_ns = top
+        self._sync_grid_slider()
+        self._refresh_source_status()
+        if self._grid_prepared_away:
+            self._grid_prepared_away = False
+            self._on_prepared()
+        else:
+            self.refresh_slice()
+        # Always: it also hands This grid's moves back to its engine (D2).
+        self._run_pending_grid_prepare()
+
+    def _grid_record(self) -> tuple[Any, Any] | None:
+        grid_id = self.grid_combo.currentText()
+        if not grid_id or not self.session.is_open:
+            return None
+        entry = self.session.slice_source(grid_id) or {}
+        # The preset and lines only: a gain edit is not a source change.
+        return entry.get("preset"), entry.get("lines")
+
+    def _follow_record_changed_in_site(self) -> None:
+        """Spec 4.2: This grid reads the record the site writes. Lines chosen
+        for This grid's own grid while the site showed are picked up here,
+        and owe a preparation."""
+        record = self._grid_record()
+        if record is None or record == self._grid_record_at_entry:
+            return
+        grid_id = self.grid_combo.currentText()
+        self._restore_remembered_source(grid_id)
+        if record[1] is None:
+            self._included = self._default_included(grid_id)
+            self._included_is_default = True
+        self._update_included_label()
+        self._grid_prepare_pending = True
+
+    def _grid_status_text(self) -> str:
+        """This grid's status line, and what the site view still holds.
+
+        Final review M2: leaving Whole site keeps every prepared site grid
+        (Ruling 1), memory This grid's own line would otherwise hide. The
+        figure is `SiteEngine.held_bytes`, the site's own accounting.
+        """
+        text = self.engine.status_text()
+        held = self.site_engine.held_bytes
+        if held > 0:
+            text += f" · +{format_bytes(held)} held by the site view"
+        return text
+
+    # ---- R-P5: This grid never prepares while the site shows ---------------
+    def _mark_grid_stale(self) -> None:
+        """This grid's engine's `on_grid_moved` while the site shows, or while a
+        site task outlives leaving it (D2). The engine has cleared its lines
+        (R-P2); preparing them again waits for This grid and a stopped site.
+        In This grid scope `_resume_grid` has already started the retry that
+        runs it: the hook is only still installed while that retry runs."""
+        try:
+            self._grid_prepare_pending = True
+        except Exception as exc:  # noqa: BLE001 -- called from a grids_changed slot
+            _log(f"could not mark the slice source stale: {exc}")
+
+    def _run_pending_grid_prepare(self) -> None:
+        """Run the owed This-grid preparation once no site task is live, else
+        retry in 50 ms. Never blocks. Also the retry timer's slot.
+
+        Final review D2: only here, once no site task is live, does This
+        grid's engine get M11's self re-preparation on a move back
+        (`on_grid_moved = None`). Until then a move is `_mark_grid_stale`'s.
+        """
+        try:
+            if self._scope != "grid":
+                return
+            if self.site_engine.has_live_task:
+                self._grid_retry.start()
+                return
+            self.engine.on_grid_moved = None  # R-P5: M11's self re-preparation again
+            if not self._grid_prepare_pending:
+                return
+            self._grid_prepare_pending = False
+            self.prepare()
+            if self.engine.z is None and self.engine.choice is not None:
+                # A moved grid's engine was cleared, resolution and all.
+                self._apply_resolution()
+            self._sync_grid_slider()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer slot
+            _log(f"could not prepare the slice source: {exc}")
+
+    def _sync_grid_slider(self) -> None:
+        """Put the carried-over top time on This grid's axis, once it has one."""
+        z, top = self.engine.z, self._pending_top_ns
+        if z is None or top is None:
+            return
+        nearest = int(round((top - z.t0_ns) / z.dz_ns))
+        self.slice_slider.blockSignals(True)
+        try:
+            self.slice_slider.setRange(0, max(0, z.nz - 1))
+            self.slice_slider.setValue(max(0, min(z.nz - 1, nearest)))
+        finally:
+            self.slice_slider.blockSignals(False)
+        self._pending_top_ns = None
+
+    # ---- the site, delegated to `SiteScope` ---------------------------------
+    def _site_source(self) -> SiteSource | None:
+        return self._site.source()
+
+    def _site_transform(self) -> str:
+        return self._site.transform()
+
+    def _on_site_changed(self) -> None:
+        self._site.on_changed()  # guards itself
+
+    def _on_site_error(self, message: str) -> None:
+        try:
+            self.error.emit(message)
+        except Exception:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not report a site error: {message}")
+
+    def _apply_site_resolution(self) -> None:
+        self._site.apply_resolution()
+
+    def _refresh_site_slice(self) -> None:
+        self._site.refresh_slice()
+
+    def current_site_slice(self) -> SiteSlice | None:
+        """The site slice last drawn, or None (not in site scope, or none ready)."""
+        return self._site.slice if self._scope == "site" else None
+
+    def site_gains(self) -> dict[str, float]:
+        """Each included grid's manual gain (spec 4.6)."""
+        return self._site.gains() if self.session.is_open else {}
+
+    def site_velocities(self) -> dict[str, VelocityModel | None]:
+        """Each ready grid's velocity, resolved as the This-grid readout does."""
+        return self._site.velocities()
+
+    def site_left_out(self) -> list[str]:
+        """Included grids no site file will hold: failed, or no lines (T4-a)."""
+        return self._site.left_out() if self.session.is_open else []
+
+    def site_left_out_states(self) -> dict[str, str]:
+        """`site_left_out`, grid id to state, as the site file records it (F-2)."""
+        return self._site.left_out_states() if self.session.is_open else {}
+
+    def line_choice_grid(self) -> str | None:
+        """The grid the line chooser acts on: This grid's, or the selected row's."""
+        if self._scope == "site":
+            return self.site_panel.selected_grid()
+        return self.grid_combo.currentText() or None
+
+    def line_choice_keys(self, grid_id: str) -> tuple[str, ...]:
+        """The lines the chooser starts from for `grid_id`."""
+        if self._scope == "site":
+            return site_scope.source_keys(self.session, grid_id)
+        return self.included_keys()
+
+    def set_included_for(self, grid_id: str, keys: tuple[str, ...]) -> None:
+        """Commit a line choice for `grid_id`. In site scope it becomes that
+        grid's remembered source (spec 4.2) and only that grid re-prepares;
+        This grid's own inclusion set is not touched."""
+        if self._scope == "site":
+            self._site.set_lines(grid_id, tuple(keys))
+            return
+        if grid_id != (self.grid_combo.currentText() or None):
+            raise ValueError(f"lines for {grid_id!r} offered while This grid shows another")
+        self.set_included(tuple(keys))
+
+    def dispose_site(self) -> None:
+        """Stop the site scope for good (`plugin.unload`): its timers, This
+        grid's hook, and the site engine, which cancels and waits, bounded."""
+        self._site.dispose()
+        self._grid_retry.stop()
+        self._grid_prepare_pending = False
+        self.engine.on_grid_moved = None
+        self.site_engine.dispose()
 
 
 class CanvasDepthScroll(QObject):

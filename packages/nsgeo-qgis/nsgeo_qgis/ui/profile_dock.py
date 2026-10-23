@@ -17,6 +17,15 @@ top-level widget with no parent of its own, so it must tear it down itself
 teardown -- see `test_plugin_profile_view.py`'s `make_view` fixture for
 the same hazard and pattern this file's own tests copy.
 
+The display limit: the percentile of the radargram the image is *measured
+on*, which is not always the one shown. With a gain curve in the stack the
+limit is taken from the stack with every enabled curve step switched off
+(`_scale_reference`), so dragging a curve brightens or darkens a band
+against a scale that holds still, instead of the scale chasing the curve
+(spec §3, call 1). A difference view is its own scale (call 4). The time
+cutoff is never bypassed in that measurement, so selecting the cutoff row
+shows more record without changing the brightness (call 11).
+
 The time cutoff: a step with a `time`-kind parameter (`time_param_name`)
 is drawn as a draggable line, and while its row is selected the image
 shows the stack with that step bypassed so there is something below the
@@ -56,7 +65,7 @@ from typing import Any
 
 import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step
-from nsgeo.render import DEFAULT_COLORMAP, colormap_names
+from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
 from qgis.core import Qgis
@@ -75,7 +84,7 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import GainStrip
+from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 
 
@@ -85,6 +94,16 @@ def time_param_name(step: Any) -> str | None:
     `_curve_param_name` does for the gain curve."""
     for spec in type(step).schema():
         if spec.kind == "time":
+            return str(spec.name)
+    return None
+
+
+def curve_param_name(step: Any) -> str | None:
+    """The name of a step's curve-kind parameter, if it has one. Decided by
+    the schema's kind, never by the step's name; the same shape as
+    `time_param_name`."""
+    for spec in type(step).schema():
+        if spec.kind == "curve":
             return str(spec.name)
     return None
 
@@ -174,6 +193,11 @@ class ProfileDock(QgsDockWidget):
         bar.addWidget(QLabel("Display gain"))
         self.percentile_slider = QSlider(Qt.Orientation.Horizontal)
         self.percentile_slider.setRange(500, 1000)
+        self.percentile_slider.setToolTip(
+            "How much of the profile may saturate. With a gain curve in the processing "
+            "steps, this is measured as if the gain curve were switched off, so the curve "
+            "brightens or darkens parts of the profile against a fixed scale."
+        )
         # M5 follow-up (Finding 1): a lower percentile clips more of the
         # signal, which saturates more samples to black/white -- "more
         # gained" in the user's words. The intuitive drag direction is
@@ -342,6 +366,7 @@ class ProfileDock(QgsDockWidget):
         try:
             self.image = self.image.with_display(self.percentile, self.colormap_name)
             self.view.set_image(self.image.image)
+            self._push_headroom()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the display change: {exc}", Qgis.MessageLevel.Critical)
 
@@ -485,6 +510,7 @@ class ProfileDock(QgsDockWidget):
         )
         self.view.set_direction(int(getattr(line.placement, "direction", 1)))
         self.image = None
+        self.gain_strip.set_headroom(None)  # no image: no band, whichever slot runs first
         profiles = self.session.profiles_for(key)
         if profiles:
             self._configure_channels(len(profiles))
@@ -556,6 +582,7 @@ class ProfileDock(QgsDockWidget):
             return
         try:
             self.view.set_cursor(index)
+            self._push_trace()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not move the profile cursor: {exc}", Qgis.MessageLevel.Critical)
 
@@ -599,6 +626,7 @@ class ProfileDock(QgsDockWidget):
 
     def _clear_view_only(self) -> None:
         self.image = None
+        self.gain_strip.set_headroom(None)
         self.view.clear()
         self.setWindowTitle("nsgeo Profile")
         self.setToolTip("")
@@ -683,6 +711,7 @@ class ProfileDock(QgsDockWidget):
             self.show_gain_strip(*deferred)  # not previewing now: takes the normal path
         elif self._strip_was_visible:
             self.gain_strip.show()
+            self._push_headroom()
         self._strip_was_visible = False
 
     def set_pick_mode(self, flag: bool) -> None:
@@ -1074,10 +1103,11 @@ class ProfileDock(QgsDockWidget):
         self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
         if keep_window and old is not None and old.n_samples == rg.n_samples:
             self.view.transform = old
+        reference = self._scale_reference(rg)
         self.image = (
-            self.image.with_radargram(rg)
+            self.image.with_radargram(rg, reference)
             if self.image is not None
-            else RadargramImage(rg, self.percentile, self.colormap_name)
+            else RadargramImage(rg, self.percentile, self.colormap_name, reference=reference)
         )
         self.view.set_image(self.image.image)
         step_text = ""
@@ -1088,6 +1118,28 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self._show_cutoff()
         self._update_velocity_fit()
+        self._push_headroom()
+
+    def _scale_reference(self, shown: Radargram) -> Radargram:
+        """The radargram the display limit is taken from: `shown` itself
+        for a difference view, else the displayed stack with every enabled
+        gain-curve step bypassed (just `result()` when there is none).
+        Never bypasses the time cutoff -- see the module docstring. Called
+        after `current_radargram`, so a declined difference has already
+        reset `_effective_difference_index`."""
+        if self._effective_difference_index >= 0 or self._key is None:
+            return shown
+        try:
+            stack = self.session.stack_for(self._key, insert=self._preview_key is None)
+            rows = [
+                i
+                for i, (step, enabled) in enumerate(stack.entries)
+                if enabled and curve_param_name(step) is not None
+            ]
+            return stack.result_bypassing(*rows)
+        except ValueError as exc:
+            _log(f"could not measure the display scale without the gain curves: {exc}")
+            return shown
 
     def _cutoff_row(self, row: int | None = None) -> int:
         """`row` (default: the selected one) when it is the cutoff row, else
@@ -1209,6 +1261,53 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
+        self._push_headroom()
+
+    def _push_headroom(self) -> None:
+        """Give the strip the displayed line's envelope and the display
+        limit, or take them away (a difference view has no limit that means
+        anything beside a gain curve). Nothing to do while the strip is
+        hidden: `show_gain_strip` pushes when it is shown. With no image
+        the band is cleared, not left as the previous line's. The envelope is
+        recomputed here and on a display change only, never on a cursor
+        move (spec §5)."""
+        if self.gain_strip.isHidden():
+            return
+        if self.image is None:
+            self.gain_strip.set_headroom(None)  # never the previous line's band
+            return
+        try:
+            if self._effective_difference_index >= 0:
+                self.gain_strip.set_headroom(None)
+                return
+            rg = self.image.rg
+            unipolar = (
+                self._key is not None
+                and self.session.stack_for(
+                    self._key, insert=self._preview_key is None
+                ).output_unipolar
+            )
+            self.gain_strip.set_headroom(
+                Headroom(
+                    limit=self.image.limit,
+                    t0_ns=rg.t0_ns,
+                    dt_ns=rg.dt_ns,
+                    envelope=row_envelope(rg.data, self.percentile),
+                    one_sided=bool(unipolar),
+                )
+            )
+            self._push_trace()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the gain strip's headroom: {exc}", Qgis.MessageLevel.Warning)
+
+    def _push_trace(self) -> None:
+        """The trace under the session cursor, for the strip's dark line."""
+        if self.image is None or self.gain_strip.headroom is None:
+            self.gain_strip.set_trace(None)
+            return
+        rg = self.image.rg
+        c = self.session.current_trace
+        self.gain_strip.set_trace(rg.data[:, c] if 0 <= c < rg.n_traces else None)
 
     def _refresh_velocity(self, *_: Any) -> None:
         # I4: both halves of this guard matter, even though only the first

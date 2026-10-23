@@ -48,7 +48,11 @@ them live here:
   decide whether a result may be kept: keys are relative paths, so the
   same string can name a line in two different sites. These two checks
   are the one place a terminal path stays silent on purpose -- a newer
-  request, or a different site, owns the notification now.
+  request, or a different site, owns the notification now. The
+  closed-site check still ends `_running` and wakes a confirm wait
+  without calling `on_prepared` (ruling T3-e, M12): it is this request's
+  own edge, and leaving the wait to time out reported a stopped task as
+  "did not stop in time".
 * **A `LinePlan` must never outlive the frame or z axis it was built
   against.** Every `Resolution` field invalidates every plan.
   `_rebuild_geometry` drops them by setting `_plans = None`, and
@@ -70,11 +74,15 @@ them live here:
   undetected, measured as a silent, uniform 4-cell shift (1 m at a
   0.25 m cell) with no exception and no change in total coverage. A
   velocity-only edit is deliberately excluded from the fingerprint,
-  since that relabels depths without rebinning -- but it still drops any
-  resident `_cube` (never the lines or the plans), because `cube()`
-  freezes a `Provenance` snapshot at build time and `provenance()` reads
-  velocity live; without this, an export's recorded velocity would depend
-  on whether a cube happened to be resident.
+  since that relabels depths without rebinning -- but an edit to the
+  chosen grid's velocity still drops any resident `_cube` (never the
+  lines or the plans), because `cube()` freezes a `Provenance` snapshot
+  at build time and `provenance()` reads velocity live; without this, an
+  export's recorded velocity would depend on whether a cube happened to
+  be resident. Only the chosen grid's own edit does (M12 final review
+  I2): `grids_changed` fires for every grid, and a site holds one engine
+  per grid, so dropping on any edit threw away every resident cube in
+  the site for one grid's velocity.
 * **Two real preparations must never run at once.** `_generation` decides
   whose RESULT is kept, never whether a superseded task is still actually
   executing -- and two of them reading the same lines on two worker
@@ -177,12 +185,22 @@ class SliceEngine(QObject):
         on_error: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int], None] | None = None,
         parent: QObject | None = None,
+        *,
+        on_grid_moved: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.on_prepared = on_prepared
         self.on_error = on_error
         self.on_progress = on_progress
+        #: R-P2 (M12): who re-prepares when the chosen grid moves. None (the
+        #: default) keeps M11's behaviour: this engine re-prepares itself.
+        #: Set, a move clears this engine and calls the hook instead, so
+        #: an owner that serialises preparations across several engines
+        #: (`SiteEngine`, trap 1) queues the re-preparation rather than
+        #: having it start beside another engine's. See
+        #: `_hand_over_the_move`.
+        self.on_grid_moved = on_grid_moved
         self._choice: SourceChoice | None = None
         self._resolution: Resolution | None = None
         self._lines: list[PreparedLine] = []
@@ -201,6 +219,10 @@ class SliceEngine(QObject):
         #: `grids_changed` (see `_on_grids_changed`/`_grid_fingerprint`,
         #: Ruling M).
         self._grid_fp: tuple[Any, ...] | None = None
+        #: The chosen grid itself, as of the last `set_source` or
+        #: `grids_changed` (M12 final review I2): whether an edit that
+        #: moved nothing was to THIS grid -- its velocity -- or to another.
+        self._grid_seen: Any = None
         self._cube: SliceCube | None = None
         self._mode = "streaming"
         self._always_resident = False
@@ -241,6 +263,9 @@ class SliceEngine(QObject):
         #: than refusing) is what keeps that true even when a change
         #: arrives while another is still being cancelled.
         self._queued_choice: Any = _NOT_QUEUED
+        #: Ruling T3-e (M12): ends a `wait_for_preparation` in progress
+        #: WITHOUT calling `on_prepared`. Set only while one is waiting.
+        self._wake_waiter: Callable[[], None] | None = None
         session.site_closed.connect(self.clear)
         session.grids_changed.connect(self._on_grids_changed)
 
@@ -252,6 +277,21 @@ class SliceEngine(QObject):
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def has_live_task(self) -> bool:
+        """Whether a preparation task of this engine may still be executing.
+
+        Ruling T3-b (M12). `is_running` is this engine's CURRENT request,
+        and `clear()` (so `dispose()` too) sets it False even when its
+        bounded confirm wait gave up -- the abandoned task is then still
+        reading a line on a worker thread until its next `isCanceled()`
+        check. `_pending` holds every task until its `finished` has run,
+        whatever its generation, so this is the truth a dispatcher needs
+        before it starts another preparation (trap 1). M11's dock keeps
+        reading `is_running`, whose meaning is unchanged.
+        """
+        return self._running or bool(self._pending)
 
     @property
     def line_count(self) -> int:
@@ -357,7 +397,9 @@ class SliceEngine(QObject):
         # all. `choose_residency`'s own `budget_bytes` default is this same
         # constant, so leaving it out here is not a behaviour change.
         self._mode = choose_residency(
-            self.estimate, len(self._lines), always_resident=self._always_resident
+            self.estimate,
+            sum(int(line.data.shape[1]) for line in self._lines),
+            always_resident=self._always_resident,
         )
 
     # ---- source -----------------------------------------------------------
@@ -427,6 +469,31 @@ class SliceEngine(QObject):
                 "proceeding with the new choice anyway"
             )
 
+    def cancel_preparation(self) -> None:
+        """Stop the preparation in flight, confirm it stopped, and start nothing.
+
+        Ruling 1 (M12): `SiteEngine` owns one engine per grid and lets
+        them prepare strictly one at a time, because two preparations at
+        once segfault (trap 1). Leaving site scope must stop the grid
+        being prepared without touching the grids already prepared, and
+        none of the existing entry points does only that: `set_source`
+        dispatches a new task, and `clear()` also drops the choice and the
+        resolution. This is `_cancel_in_flight` made public -- cancel, and
+        wait (bounded by `_CANCEL_TIMEOUT_MS`, about one line's processing)
+        until the task has really ended.
+
+        Afterwards `is_running` is False, unless that bounded wait ran out
+        (reported through `on_error`). Then it stays True until the task
+        actually finishes, which is exactly what a caller checking
+        `is_running` before its next dispatch needs to see.
+
+        The engine's lines are not to be trusted afterwards: the
+        cancelled `set_source` had already dropped the previous ones, and
+        the cancelled task's result may or may not have landed. The
+        caller re-dispatches with `set_source` when it wants the grid.
+        """
+        self._cancel_in_flight()
+
     def set_source(self, choice: SourceChoice | None) -> None:
         """Choose what goes into the cube and start preparing it.
 
@@ -470,6 +537,7 @@ class SliceEngine(QObject):
             self._plans = None
             self._cube = None
             self._grid_fp = None
+            self._grid_seen = None
             self._redraw_ms = None
             self._choice = choice
             if choice is None or not self.session.is_open:
@@ -509,6 +577,7 @@ class SliceEngine(QObject):
             # change in total coverage.
             grid = frames.get(choice.grid_id)
             self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
+            self._grid_seen = grid
             for key in choice.line_keys:
                 try:
                     line = self.session.line_for_key(key)
@@ -622,7 +691,22 @@ class SliceEngine(QObject):
                 if generation != self._generation:
                     return  # a newer source was chosen; this result is stale
                 if self.session.site is not requested_against:
-                    return  # the site was closed or replaced under us
+                    # The site was closed or replaced under us. Ruling T3-e
+                    # (M12): with the generation still matching, this is
+                    # THIS request's own terminal edge -- any newer request
+                    # bumps the generation first -- so it ends `_running`
+                    # and wakes `_cancel_in_flight`'s confirm wait (which
+                    # `clear()` on `site_closed` is spinning right now).
+                    # Without that the wait sat out `_CANCEL_TIMEOUT_MS` and
+                    # reported "did not stop in time" about a task that
+                    # had stopped. It applies nothing and reports nothing,
+                    # and wakes the wait without `on_prepared`: the dock's
+                    # `_on_prepared` redraws and refills widgets, which has
+                    # no business running for a site that is gone.
+                    self._running = False
+                    if self._wake_waiter is not None:
+                        self._wake_waiter()
+                    return
                 notify = True
                 self._running = False
                 for message in failures:
@@ -766,7 +850,9 @@ class SliceEngine(QObject):
         engine holds become the SAME (now stale) object, so `!=` never
         fires. A full re-preparation, not merely a geometry rebuild, is
         the only way to pick up coordinates that were computed from the
-        OLD grid.
+        OLD grid. With `on_grid_moved` set (R-P2, M12) that
+        re-preparation is handed to the owner instead of started here --
+        see `_hand_over_the_move`.
 
         When the fingerprint has NOT changed, `replace_grid` may still
         have run -- `set_grid_velocity` goes through it too, and
@@ -778,7 +864,11 @@ class SliceEngine(QObject):
         streaming source (no cube held) always reads the fresh one. Only
         `self._cube` is dropped -- the prepared lines and the plans do not
         depend on velocity at all, so dropping them would pay 0.9 s for
-        nothing.
+        nothing -- and only when the chosen grid itself changed
+        (`_grid_seen`, M12 final review I2). An edit to another grid
+        leaves this cube's provenance true; a site's `SiteEngine` holds
+        one engine per grid, and dropping every cube for one grid's
+        velocity rebuilt them all on the UI thread on the next tick.
         """
         if self._choice is None:
             return
@@ -792,12 +882,44 @@ class SliceEngine(QObject):
         if self._grid_fp is None:
             return
         if self._grid_fingerprint(grid) != self._grid_fp:
+            if self.on_grid_moved is not None:
+                self._hand_over_the_move(grid_id)
+                return
             try:
                 self.set_source(self._choice)
             except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
                 self._report(f"could not re-prepare after the grid changed: {exc}")
             return
-        self._cube = None
+        if grid != self._grid_seen:
+            self._cube = None  # Ruling Q: this grid's velocity changed
+        self._grid_seen = grid
+
+    def _hand_over_the_move(self, grid_id: str) -> None:
+        """R-P2 (M12): the chosen grid moved and an owner re-prepares.
+
+        The `set_source(self._choice)` above starts a task from inside
+        this slot, outside any queue an owner keeps across engines. Moving
+        one grid while another grid prepares -- or moving a grid that two
+        engines hold -- would then run two preparations at once, which
+        segfaulted M11 (trap 1). So: `clear()`, which cancels and waits
+        out any task in flight and drops the lines binned at the old
+        registration, then tell the owner, who queues the grid. Nothing is
+        dispatched here.
+
+        Still a slot: neither half may raise past it, so both report
+        through `on_error`.
+        """
+        try:
+            self.clear()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not drop the slice source after grid {grid_id!r} moved: {exc}")
+        hook = self.on_grid_moved
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not re-prepare after grid {grid_id!r} moved: {exc}")
 
     def _require_geometry(self) -> tuple[CubeFrame, ZAxis]:
         if self._frame is None or self._z is None:
@@ -1039,6 +1161,7 @@ class SliceEngine(QObject):
         self._frame = None
         self._z = None
         self._grid_fp = None
+        self._grid_seen = None
         self._cube = None
         self._redraw_ms = None
         self._running = False
@@ -1102,6 +1225,7 @@ class SliceEngine(QObject):
         self.on_prepared = None
         self.on_error = None
         self.on_progress = None
+        self.on_grid_moved = None
 
     def wait_for_preparation(
         self,
@@ -1156,8 +1280,21 @@ class SliceEngine(QObject):
             finally:
                 loop.quit()
 
+        previous_wake = self._wake_waiter
+
+        def wake() -> None:
+            # Ruling T3-e: the same wake as `done`, minus `on_prepared` --
+            # for a terminal edge that applies nothing (a closed site).
+            nonlocal finished
+            finished = True
+            loop.quit()
+            if previous_wake is not None:
+                previous_wake()
+
         self.on_prepared = done
+        self._wake_waiter = wake
         timer.start(timeout_ms)
         loop.exec(flags)
         self.on_prepared = previous
+        self._wake_waiter = previous_wake
         return finished and not self._running

@@ -120,15 +120,17 @@ class ImportDialog(QDialog):
         self.rows: list[ImportRow] = []
         self.imported_keys: list[str] = []
         self._updating = False
+        # #69: whether "First line at" holds a value the user gave it, and
+        # so no longer follows the spacing (see _follow_spacing).
+        self._first_offset_own = False
+        self._following = False
         self.setWindowTitle("Import DZT files")
         self.resize(900, 520)
         layout = QVBoxLayout(self)
 
         form = QFormLayout()
         self.grid_combo = QComboBox()
-        site = session.site
-        for g in site.grids if site else []:
-            self.grid_combo.addItem(g.id, g.id)
+        self._fill_grid_combo()
         if grid_id:
             self.grid_combo.setCurrentIndex(max(0, self.grid_combo.findData(grid_id)))
         self.axis_combo = QComboBox()
@@ -213,6 +215,8 @@ class ImportDialog(QDialog):
         layout.addWidget(self.buttons)
 
         self.grid_combo.currentIndexChanged.connect(self._grid_changed)
+        self.spacing.valueChanged.connect(self._follow_spacing)
+        self.first_offset.valueChanged.connect(self._first_offset_changed)
         self.axis_combo.currentIndexChanged.connect(self._replan)
         for s in (self.spacing, self.first_offset, self.start_along):
             s.valueChanged.connect(self._replan)
@@ -224,6 +228,7 @@ class ImportDialog(QDialog):
             self.label_number,
         ):
             b.toggled.connect(self._replan)
+        self._follow_spacing()
         self._grid_changed()
 
     # ---- options ------------------------------------------------------------
@@ -251,7 +256,54 @@ class ImportDialog(QDialog):
         grid = self._grid()
         if grid is not None:
             self.spacing.setValue(grid.default_spacing)
+        # #61: the target named where it is hard to miss, in the title and
+        # on the Import button (see _refresh_table).
+        gid = self.grid_combo.currentData()
+        self.setWindowTitle(f"Import DZT files into {gid}" if gid else "Import DZT files")
         self._replan()
+
+    def _follow_spacing(self, *_: Any) -> None:
+        """#69: "First line at" is half the spacing, so the first line sits
+        in the middle of its strip like every line after it -- until the
+        user gives it a value of their own, which then stays put."""
+        if self._first_offset_own:
+            return
+        self._following = True
+        try:
+            self.first_offset.setValue(self.spacing.value() / 2)
+        finally:
+            self._following = False
+
+    def _first_offset_changed(self, *_: Any) -> None:
+        if not self._following:
+            self._first_offset_own = True
+
+    def retarget(self, grid_id: str) -> None:
+        """Point the dialog at `grid_id`, but only while it has no files.
+
+        #61: raising an open dialog from the toolbar, or from a grid's own
+        Import DZT files..., switches its target to that grid. A half-built
+        import is never moved to another grid behind the user's back.
+        """
+        if self.rows:
+            return
+        if self.grid_combo.findData(grid_id) < 0:
+            # A grid added since the dialog opened. The refill moves the
+            # combo to its first grid, so an id still missing after it
+            # goes back to the dialog's own grid, never the first one.
+            current = self.grid_combo.currentData()
+            self._fill_grid_combo()
+            if self.grid_combo.findData(grid_id) < 0:
+                grid_id = current
+        index = self.grid_combo.findData(grid_id)
+        if index >= 0:
+            self.grid_combo.setCurrentIndex(index)
+
+    def _fill_grid_combo(self) -> None:
+        self.grid_combo.clear()
+        site = self.session.site
+        for g in site.grids if site else []:
+            self.grid_combo.addItem(g.id, g.id)
 
     def options(self) -> ImportOptions:
         grid = self._grid()
@@ -393,7 +445,10 @@ class ImportDialog(QDialog):
                     self.table.setItem(r, col, item)
             self.table.resizeColumnsToContents()
             n = sum(1 for r in self.rows if r.include and r.placeable)
-            self.import_button.setText(f"Import {n} line(s)")
+            gid = self.grid_combo.currentData()
+            self.import_button.setText(
+                f"Import {n} line(s) into {gid}" if gid else f"Import {n} line(s)"
+            )
             self.import_button.setEnabled(n > 0)
         finally:
             self._updating = False

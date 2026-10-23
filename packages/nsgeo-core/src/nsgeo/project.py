@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -206,7 +207,43 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         doc["presets"] = site.presets
     if site.cubes:
         doc["cubes"] = site.cubes
+    if site.slice_sources:
+        doc["slice_sources"] = site.slice_sources
+    if site.site_view:
+        doc["site_view"] = site.site_view
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if isinstance(entry.get("preset"), str):
+        out["preset"] = entry["preset"]
+    if "lines" in entry:
+        lines = entry["lines"]
+        if lines is None:
+            out["lines"] = None
+        elif isinstance(lines, list) and all(isinstance(k, str) for k in lines):
+            out["lines"] = list(lines)
+    gain = entry.get("gain")
+    if (
+        isinstance(gain, (int, float))
+        and not isinstance(gain, bool)
+        and math.isfinite(gain)
+        and gain > 0
+    ):
+        out["gain"] = float(gain)
+    return out
+
+
+def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    grids = view.get("grids")
+    if isinstance(grids, list):
+        out["grids"] = [g for g in grids if isinstance(g, str) and g in known]
+    for key in ("transform", "normalisation"):
+        if isinstance(view.get(key), str):
+            out[key] = view[key]
+    return out
 
 
 def load_site(path: str | Path) -> Site:
@@ -292,6 +329,27 @@ def load_site(path: str | Path) -> Site:
             f"{path}: 'cubes' must be an object keyed by id, got {type(cubes).__name__}"
         )
     site.cubes = dict(cubes)
+
+    slice_sources = doc.get("slice_sources", {})
+    if not isinstance(slice_sources, dict):
+        raise ProjectError(
+            f"{path}: 'slice_sources' must be an object keyed by grid id, "
+            f"got {type(slice_sources).__name__}"
+        )
+    known = {g.id for g in grids}
+    # Tolerant: an entry for an unknown grid, or one that is not an object,
+    # is dropped; inside an entry a key of the wrong type is dropped too
+    # (it reads as "unset"), so a hand-edited file never blocks opening.
+    site.slice_sources = {
+        gid: _clean_slice_source(entry)
+        for gid, entry in slice_sources.items()
+        if gid in known and isinstance(entry, dict)
+    }
+
+    site_view = doc.get("site_view", {})
+    if not isinstance(site_view, dict):
+        raise ProjectError(f"{path}: 'site_view' must be an object, got {type(site_view).__name__}")
+    site.site_view = _clean_site_view(site_view, known)
 
     site.validate()
     return site

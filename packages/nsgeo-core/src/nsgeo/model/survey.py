@@ -143,6 +143,18 @@ class Site:
     #: already portable by the time `save_site` sees it.
     cubes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    #: Each grid's remembered slice source, keyed by grid id:
+    #: `{"preset": str, "lines": [line keys] | None, "gain": float}`. Every
+    #: key is optional. `lines: None` means "every line on the grid", so
+    #: lines imported later are picked up. Written only by the user's own
+    #: choice (never by an automatic first preparation).
+    slice_sources: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    #: The site view's remembered choices:
+    #: `{"grids": [grid ids], "transform": str, "normalisation": str}`.
+    #: Every key is optional; a missing key is the default.
+    site_view: dict[str, Any] = field(default_factory=dict)
+
     @property
     def frames(self) -> dict[str, Grid]:
         return {g.id: g for g in self.grids}
