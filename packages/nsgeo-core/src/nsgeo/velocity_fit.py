@@ -34,22 +34,37 @@ class HyperbolaFit:
     n_points: int
 
 
-def _solve(x_m: np.ndarray, t_ns: np.ndarray, apex_m: float) -> HyperbolaFit | None:
-    """Solve at a fixed apex; None when this apex gives no physical hyperbola."""
+def _solve(x_m: np.ndarray, t_ns: np.ndarray, apex_m: float, dof: int) -> HyperbolaFit | str:
+    """Solve at a fixed apex; a reason string when no physical hyperbola results.
+
+    Squaring a time with constant error gives var(t^2) ~ (2 t sigma_t)^2, so
+    rows are weighted by 1/(2t) to make the errors in y = t^2 even. Without
+    that, the covariance below would understate sigma on late (high-leverage)
+    points.
+    """
     n = x_m.size
     dx2 = (x_m - apex_m) ** 2
     design = np.column_stack([np.ones_like(dx2), dx2])
     y = t_ns**2
-    coef, _, rank, _ = np.linalg.lstsq(design, y, rcond=None)
+    sqrt_w = 1.0 / (2.0 * t_ns)
+    design_w = design * sqrt_w[:, None]
+    y_w = y * sqrt_w
+    coef, _, rank, _ = np.linalg.lstsq(design_w, y_w, rcond=None)
+    if rank < 2:
+        return "singular"
     intercept, slope = float(coef[0]), float(coef[1])
-    if rank < 2 or intercept <= 0.0 or slope <= 0.0:
-        return None
+    if not (np.isfinite(intercept) and np.isfinite(slope)):
+        return "nonphysical"
+    if intercept <= 0.0 or slope <= 0.0:
+        return "nonphysical"
     t0 = np.sqrt(intercept)
     v = 2.0 / np.sqrt(slope)
-    s2 = float(np.sum((y - design @ coef) ** 2)) / (n - 2)
-    cov = s2 * np.linalg.inv(design.T @ design)
+    s2 = float(np.sum((y_w - design_w @ coef) ** 2)) / dof
+    cov = s2 * np.linalg.inv(design_w.T @ design_w)
     sigma_v = float(np.sqrt(cov[1, 1])) / slope**1.5
     rms = float(np.sqrt(np.mean((t_ns - np.sqrt(t0**2 + slope * dx2)) ** 2)))
+    if not all(np.isfinite([t0, v, sigma_v, rms])):
+        return "nonphysical"
     return HyperbolaFit(apex_m, float(t0), float(v), sigma_v, rms, n)
 
 
@@ -59,7 +74,9 @@ def fit_hyperbola(
     """Fit t(x) to points; scan the apex within ``search_m`` of the guess."""
     x_m = np.asarray(x_m, dtype=float)
     t_ns = np.asarray(t_ns, dtype=float)
-    if x_m.shape != t_ns.shape or x_m.ndim != 1:
+    if x_m.ndim != 1 or t_ns.ndim != 1:
+        raise ValueError("Positions and times must each be a one-dimensional list.")
+    if x_m.shape != t_ns.shape:
         raise ValueError("Positions and times must be two lists of the same length.")
     if x_m.size < 3:
         raise ValueError(
@@ -73,18 +90,39 @@ def fit_hyperbola(
             "Every point's time must be positive; a hyperbola is fitted to "
             "two-way times measured from the surface."
         )
+    if not np.isfinite(apex_guess_m):
+        raise ValueError("The apex guess must be a finite position along the profile.")
+    if not np.isfinite(search_m) or search_m < 0.0:
+        raise ValueError(
+            f"The apex search distance must be zero or a positive length; got {search_m}."
+        )
     if np.ptp(x_m) == 0.0:
         raise ValueError(
             "All points are at the same position along the profile, so there is "
             "no hyperbola shape to fit. Click points either side of the apex."
         )
 
-    if search_m > 0.0:
+    searched = search_m > 0.0
+    if searched:
+        if x_m.size < 4:
+            raise ValueError(
+                "Searching for the apex fits three unknowns, so it needs at least "
+                f"4 points; got {x_m.size}. Click another point, or turn the "
+                "apex search off."
+            )
         apexes = np.linspace(apex_guess_m - search_m, apex_guess_m + search_m, _SEARCH_STEPS)
     else:
         apexes = np.array([apex_guess_m])
-    fits = [f for a in apexes if (f := _solve(x_m, t_ns, float(a))) is not None]
+    dof = x_m.size - (3 if searched else 2)
+    results = [_solve(x_m, t_ns, float(a), dof) for a in apexes]
+    fits = [r for r in results if isinstance(r, HyperbolaFit)]
     if not fits:
+        if "singular" in results:
+            raise ValueError(
+                "These points are all the same distance from the apex, so they "
+                "give no lever arm to measure the hyperbola's curvature. Click "
+                "points at a range of distances from the apex."
+            )
         raise ValueError(
             "These points open upward (time falls away from the apex) or give a "
             "non-physical hyperbola, so no velocity can be fitted. Check that "

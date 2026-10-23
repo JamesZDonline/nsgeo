@@ -90,3 +90,50 @@ def test_all_points_at_one_offset_are_refused():
     t = np.array([20.0, 20.1, 19.9, 20.0])
     with pytest.raises(ValueError, match="same position"):
         fit_hyperbola(x, t, apex_guess_m=5.0)
+
+
+def test_points_symmetric_about_the_apex_are_refused_as_having_no_lever_arm():
+    # Different x, identical offset from the apex: the design matrix is singular.
+    x = np.array([3.0, 7.0, 3.0, 7.0])
+    t = np.array([30.0, 30.1, 29.9, 30.0])
+    with pytest.raises(ValueError, match="same distance"):
+        fit_hyperbola(x, t, apex_guess_m=5.0, search_m=0.0)
+
+
+@pytest.mark.parametrize("search", [-0.5, float("nan"), float("inf")])
+def test_a_negative_or_non_finite_search_is_refused(search):
+    x, t = _good()
+    with pytest.raises(ValueError, match="search"):
+        fit_hyperbola(x, t, apex_guess_m=5.0, search_m=search)
+
+
+def test_a_non_finite_apex_guess_is_refused_by_name():
+    x, t = _good()
+    with pytest.raises(ValueError, match="apex guess"):
+        fit_hyperbola(x, t, apex_guess_m=float("nan"))
+
+
+def test_two_dimensional_input_is_not_called_a_length_mismatch():
+    x = np.zeros((2, 3))
+    with pytest.raises(ValueError, match="one-dimensional"):
+        fit_hyperbola(x, x + 20.0, apex_guess_m=0.0)
+
+
+def test_a_searched_apex_needs_a_fourth_point():
+    x, t = _good()
+    with pytest.raises(ValueError, match="at least 4 points"):
+        fit_hyperbola(x[:3], t[:3], apex_guess_m=5.0, search_m=0.25)
+
+
+def test_the_reported_sigma_is_calibrated_over_many_noise_draws():
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.linspace(2.0, 8.0, 9)
+    clean = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+    rng = np.random.default_rng(42)
+    vs, sigmas = [], []
+    for _ in range(2000):
+        fit = fit_hyperbola(x, clean + rng.normal(0.0, 0.2, x.size), x0, search_m=0.0)
+        vs.append(fit.v_m_ns)
+        sigmas.append(fit.v_stderr_m_ns)
+    ratio = np.mean(sigmas) / np.std(vs)
+    assert 0.9 < ratio < 1.1
