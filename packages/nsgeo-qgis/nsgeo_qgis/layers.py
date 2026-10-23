@@ -145,11 +145,11 @@ LEGEND_ORDER = ("picks", "marks", "lines", "grids")
 _GROUP_TOKEN = "nsgeo/site_group"
 
 # #66 walkthrough: zoomed out, thin dashed lines a few pixels apart merge into
-# a moire pattern over the slice. Lines and their marks hide once neighbouring
-# lines would be closer than this on screen, at the finest line spacing among
-# the grids that have lines (see `_hide_when_lines_crowd`).
-MIN_LINE_GAP_PX = 3.0
-_METRES_PER_PX = 0.0254 / 96  # one pixel at 96 dpi, the screen QGIS scales assume
+# a moire pattern over the slice, from about 1:400 at 0.5 m spacing by the
+# user's eye (lines about 4.7 px apart on a 96 dpi screen). Lines and their
+# marks hide beyond this scale denominator per metre of the finest line
+# spacing among the grids that have lines (see `_hide_when_lines_crowd`).
+HIDE_LINES_BEYOND_SCALE_PER_M = 800.0
 
 GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"]
 
@@ -1710,7 +1710,7 @@ class SiteLayers(QObject):
 
     def _hide_when_lines_crowd(self, name: str) -> None:
         """Hide table `name` beyond the map scale at which the site's most
-        closely spaced lines would be under MIN_LINE_GAP_PX apart."""
+        closely spaced lines start to run together."""
         spacings = set()
         keys = self.session.keys()
         for key in keys:
@@ -1723,7 +1723,7 @@ class SiteLayers(QObject):
             return
         # QGIS's "minimum" scale is the most zoomed-out one shown, as a
         # scale denominator; 0 as the maximum leaves zooming in unlimited.
-        layer.setMinimumScale(min(spacings) / (MIN_LINE_GAP_PX * _METRES_PER_PX))
+        layer.setMinimumScale(HIDE_LINES_BEYOND_SCALE_PER_M * min(spacings))
         layer.setMaximumScale(0.0)
         layer.setScaleBasedVisibility(True)
 
