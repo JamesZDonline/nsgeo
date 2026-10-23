@@ -1,0 +1,92 @@
+import numpy as np
+import pytest
+from nsgeo.velocity_fit import fit_hyperbola
+
+
+def test_points_on_an_analytic_hyperbola_recover_its_parameters():
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+    fit = fit_hyperbola(x, t, apex_guess_m=x0, search_m=0.0)
+    assert fit.v_m_ns == pytest.approx(v, rel=1e-9)
+    assert fit.t0_ns == pytest.approx(t0, rel=1e-9)
+    assert fit.rms_ns == pytest.approx(0.0, abs=1e-9)
+    assert fit.n_points == 5
+
+
+def test_a_wrong_apex_guess_is_recovered_by_the_search():
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+    fit = fit_hyperbola(x, t, apex_guess_m=5.4, search_m=0.5)
+    assert fit.apex_x_m == pytest.approx(5.0, abs=0.011)  # grid step is 0.01 m
+    assert fit.v_m_ns == pytest.approx(v, rel=1e-3)
+
+
+def test_the_reported_sigma_brackets_the_error_under_noise():
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.linspace(2.0, 8.0, 9)
+    t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+    t = t + np.random.default_rng(0).normal(0.0, 0.2, size=t.size)
+    fit = fit_hyperbola(x, t, apex_guess_m=x0, search_m=0.0)
+    assert abs(fit.v_m_ns - v) <= 3.0 * fit.v_stderr_m_ns
+
+
+def test_points_clustered_near_the_apex_report_a_large_sigma_while_the_residual_stays_quiet():
+    v, t0, x0 = 0.1, 20.0, 5.0
+
+    def noisy(x):
+        t = np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2)
+        return t + np.random.default_rng(1).normal(0.0, 0.2, size=t.size)
+
+    spread_x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    tight_x = np.array([4.7, 4.85, 5.0, 5.15, 5.3])
+    spread = fit_hyperbola(spread_x, noisy(spread_x), apex_guess_m=x0, search_m=0.0)
+    tight = fit_hyperbola(tight_x, noisy(tight_x), apex_guess_m=x0, search_m=0.0)
+    assert tight.v_stderr_m_ns > 5.0 * spread.v_stderr_m_ns  # sigma warns
+    assert tight.rms_ns < 2.0 * spread.rms_ns  # the residual does not
+
+
+def _good():
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    return x, np.sqrt(20.0**2 + 400.0 * (x - 5.0) ** 2)
+
+
+def test_two_points_are_refused():
+    with pytest.raises(ValueError, match="at least 3 points"):
+        fit_hyperbola(np.array([4.0, 5.0]), np.array([21.0, 20.0]), apex_guess_m=5.0)
+
+
+def test_a_non_positive_time_is_refused():
+    x, t = _good()
+    t[1] = 0.0
+    with pytest.raises(ValueError, match="positive"):
+        fit_hyperbola(x, t, apex_guess_m=5.0)
+
+
+def test_a_non_finite_time_is_refused():
+    x, t = _good()
+    t[1] = np.nan
+    with pytest.raises(ValueError, match="finite"):
+        fit_hyperbola(x, t, apex_guess_m=5.0)
+
+
+def test_an_upward_opening_set_is_refused():
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    t = np.sqrt(400.0 - 10.0 * (x - 5.0) ** 2)
+    with pytest.raises(ValueError, match="open upward"):
+        fit_hyperbola(x, t, apex_guess_m=5.0, search_m=0.0)
+
+
+def test_a_superluminal_fit_is_refused():
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    t = np.sqrt(20.0**2 + (4.0 / 0.5**2) * (x - 5.0) ** 2)
+    with pytest.raises(ValueError, match="C_M_PER_NS"):
+        fit_hyperbola(x, t, apex_guess_m=5.0, search_m=0.0)
+
+
+def test_all_points_at_one_offset_are_refused():
+    x = np.full(4, 5.0)
+    t = np.array([20.0, 20.1, 19.9, 20.0])
+    with pytest.raises(ValueError, match="same position"):
+        fit_hyperbola(x, t, apex_guess_m=5.0)
