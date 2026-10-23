@@ -57,6 +57,8 @@ CURSOR_COLOUR = QColor(255, 159, 26)
 SELECTION_COLOUR = QColor(48, 140, 198, 60)
 SELECTION_EDGE = QColor(48, 140, 198)
 PICK_COLOUR = QColor(224, 66, 27)
+# How close (pixels) a right-click must land to a fit point to discard it.
+VELOCITY_DISCARD_PX = 12.0
 DRAG_THRESHOLD_PX = 3
 
 # Spec 9.3's one overlay. Distinct from SELECTION_COLOUR, which is a
@@ -90,6 +92,8 @@ class ProfileView(QWidget):
     range_selected = pyqtSignal(int, int)
     selection_cleared = pyqtSignal()
     pick_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
+    velocity_point_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
+    velocity_point_discarded = pyqtSignal(int)  # index into the last points list
     view_changed = pyqtSignal()
     # Emitted once, on the release that ends a drag of the cutoff line, with
     # the snapped end time (ns). Always emitted, even for an unmoved line:
@@ -119,6 +123,12 @@ class ProfileView(QWidget):
         self._cutoff_press_y = 0.0
         self._cutoff_offset = 0.0
         self._pick_mode = False
+        self._velocity_mode = False
+        # The working hyperbola fit, in VIEW units (trace index, ns). The
+        # view only paints it: converting to metres and fitting are the
+        # dock's business, never this widget's.
+        self._velocity_points: list[tuple[int, float]] = []
+        self._velocity_curve: list[tuple[float, float]] = []
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
         self._dragging = False
@@ -250,12 +260,25 @@ class ProfileView(QWidget):
         self._pick_mode = flag
         self.setCursor(Qt.CursorShape.CrossCursor if flag else Qt.CursorShape.ArrowCursor)
 
+    def set_velocity_fit_mode(self, flag: bool) -> None:
+        self._velocity_mode = bool(flag)
+        self.setCursor(Qt.CursorShape.CrossCursor if flag else Qt.CursorShape.ArrowCursor)
+
+    def set_velocity_fit(
+        self, points: list[tuple[int, float]], curve: list[tuple[float, float]]
+    ) -> None:
+        self._velocity_points = list(points)
+        self._velocity_curve = list(curve)
+        self.update()
+
     def clear(self) -> None:
         self.transform = None
         self._image = None
         self._cursor = -1
         self._selection = (-1, -1)
         self._picks = []
+        self._velocity_points = []
+        self._velocity_curve = []
         self._slice_band = None
         self._cutoff_ns = None
         self._cutoff_grab = None
@@ -264,7 +287,9 @@ class ProfileView(QWidget):
         # hover over the image would reset it; with no line open there is
         # no image to hover.
         self.setCursor(
-            Qt.CursorShape.CrossCursor if self._pick_mode else Qt.CursorShape.ArrowCursor
+            Qt.CursorShape.CrossCursor
+            if self._pick_mode or self._velocity_mode
+            else Qt.CursorShape.ArrowCursor
         )
         self.update()
 
@@ -371,6 +396,7 @@ class ProfileView(QWidget):
             self._paint_cutoff(painter, r, t)
             self._paint_selection(painter, r, t)
             self._paint_picks(painter, r, t)
+            self._paint_velocity_fit(painter, r, t)
             self._paint_cursor(painter, r, t)
             painter.setClipping(False)
             self._paint_axes(painter, r, t)
@@ -515,6 +541,28 @@ class ProfileView(QWidget):
             xx, yy = r.left() + x, r.top() + y
             p.drawPolygon(QPointF(xx, yy), QPointF(xx - 5, yy - 9), QPointF(xx + 5, yy - 9))
 
+    def _velocity_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
+        """Local (x, y) of each working fit point, in list order, so an
+        index into this list is the index `velocity_point_discarded` emits."""
+        return [
+            (t.x_of_trace(trace + 0.5), t.y_of_time(time_ns))
+            for trace, time_ns in self._velocity_points
+        ]
+
+    def _paint_velocity_fit(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
+        if len(self._velocity_curve) >= 2:
+            p.setPen(QPen(CURSOR_COLOUR, 2))
+            pts = [
+                QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
+                for trace, time_ns in self._velocity_curve
+            ]
+            for a, b in zip(pts, pts[1:], strict=False):
+                p.drawLine(a, b)
+        p.setPen(QPen(QColor(255, 255, 255), 1))
+        p.setBrush(SELECTION_EDGE)
+        for x, y in self._velocity_positions(t):
+            p.drawEllipse(QPointF(r.left() + x, r.top() + y), 4.0, 4.0)
+
     def _paint_axes(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         p.setPen(AXIS_COLOUR)
         font = p.font()
@@ -637,6 +685,17 @@ class ProfileView(QWidget):
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan_last = event_pos(event)
             return
+        if event.button() == Qt.MouseButton.RightButton and self._velocity_mode:
+            # Nearest in SCREEN space: the points live in trace/ns, whose
+            # scales differ, so only pixels say which one the user meant.
+            nearest = None
+            for i, (px, py) in enumerate(self._velocity_positions(self.transform)):
+                d = math.hypot(px - x, py - y)
+                if d <= VELOCITY_DISCARD_PX and (nearest is None or d < nearest[0]):
+                    nearest = (d, i)
+            if nearest is not None:
+                self.velocity_point_discarded.emit(nearest[1])
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             # A grab still set here lost its release (focus stolen mid-
             # drag) and no button-less move has cleaned it up yet. Abandon
@@ -661,6 +720,16 @@ class ProfileView(QWidget):
                 if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
                     return
                 self.pick_requested.emit(
+                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
+                )
+                return
+            if self._velocity_mode:
+                # Same bounds guard as the pick branch above, for the same
+                # reason: `time_of_y` does not clamp, so a click on the
+                # axis margin would author a point before the record starts.
+                if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
+                    return
+                self.velocity_point_requested.emit(
                     self.transform.trace_index_at(x), self.transform.time_of_y(y)
                 )
                 return

@@ -141,6 +141,9 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
+        # The hyperbola points clicked so far, in view units (trace, ns).
+        # The dock owns this list; the view only paints it.
+        self._velocity_points: list[tuple[int, float]] = []
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -240,6 +243,8 @@ class ProfileDock(QgsDockWidget):
         self.view.range_selected.connect(self._range_selected)
         self.view.selection_cleared.connect(self._selection_cleared)
         self.view.pick_requested.connect(self._pick)
+        self.view.velocity_point_requested.connect(self._on_velocity_point_requested)
+        self.view.velocity_point_discarded.connect(self._on_velocity_point_discarded)
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
@@ -337,6 +342,11 @@ class ProfileDock(QgsDockWidget):
         # the very next stack_changed re-armed it against a step index
         # that could belong to an entirely different stack.
         was_diff = self._difference_index >= 0
+        # Points clicked on the previous line mean nothing on this one: a
+        # hyperbola cannot span two lines, and a stale point would be fitted
+        # as if it belonged here.
+        self._velocity_points = []
+        self.view.set_velocity_fit([], [])
         self._difference_index = -1
         self.difference_label.setText("")
         if was_diff:
@@ -640,6 +650,29 @@ class ProfileDock(QgsDockWidget):
         feature was unbuilt (spec §1, §6). This is its first consumer.
         """
         self.view.set_pick_mode(bool(flag))
+
+    def set_velocity_fit_mode(self, flag: bool) -> None:
+        """Turn the profile's velocity-fit mode on or off. A passthrough for
+        the same reason `set_pick_mode` is."""
+        self.view.set_velocity_fit_mode(bool(flag))
+
+    def velocity_points(self) -> list[tuple[int, float]]:
+        return list(self._velocity_points)
+
+    def _on_velocity_point_requested(self, trace: int, time_ns: float) -> None:
+        try:
+            self._velocity_points.append((int(trace), float(time_ns)))
+            self.view.set_velocity_fit(self._velocity_points, [])
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_velocity_point_discarded(self, index: int) -> None:
+        try:
+            if 0 <= index < len(self._velocity_points):
+                del self._velocity_points[index]
+                self.view.set_velocity_fit(self._velocity_points, [])
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not discard the velocity point: {exc}", Qgis.MessageLevel.Critical)
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:

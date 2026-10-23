@@ -150,6 +150,7 @@ class NsgeoPlugin:
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
+        self.act_velocity: QAction | None = None
         self._grid_dialog: GridDialog | None = None
         self._import_dialog: ImportDialog | None = None
         self._line_choice_dialog: LineChoiceDialog | None = None
@@ -205,6 +206,12 @@ class NsgeoPlugin:
         self.act_pick.setCheckable(True)
         self.act_pick.setToolTip(
             "Pick mode: click the profile to author a pick. Shift+click works with this off."
+        )
+        self.act_velocity = self._toolbar_action("Velocity", self._toggle_velocity_fit_mode)
+        self.act_velocity.setCheckable(True)
+        self.act_velocity.setToolTip(
+            "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
+            "Right-click a point to remove it."
         )
 
         about = QAction("About nsgeo", main)
@@ -444,6 +451,7 @@ class NsgeoPlugin:
         self.act_add_grid = None
         self.act_import = None
         self.act_pick = None
+        self.act_velocity = None
         if self.toolbar is not None:
             self.toolbar.setParent(None)
             self.toolbar.deleteLater()
@@ -502,6 +510,11 @@ class NsgeoPlugin:
                 if not has_line and self.act_pick.isChecked():
                     self.act_pick.setChecked(False)
                     self._toggle_pick_mode(False)
+            if self.act_velocity is not None:
+                self.act_velocity.setEnabled(has_line)
+                if not has_line and self.act_velocity.isChecked():
+                    self.act_velocity.setChecked(False)
+                    self._toggle_velocity_fit_mode(False)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not update the toolbar: {exc}", Qgis.MessageLevel.Warning)
 
@@ -849,9 +862,25 @@ class NsgeoPlugin:
         try:
             if self.profile_dock is None:
                 return
+            if checked and self.act_velocity is not None and self.act_velocity.isChecked():
+                # Both modes claim the left click; the one just switched on wins.
+                self.act_velocity.setChecked(False)
+                self._toggle_velocity_fit_mode(False)
             self.profile_dock.set_pick_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _toggle_velocity_fit_mode(self, checked: bool) -> None:
+        """The Velocity toolbar toggle. Drives the dock, never the view."""
+        try:
+            if self.profile_dock is None:
+                return
+            if checked and self.act_pick is not None and self.act_pick.isChecked():
+                self.act_pick.setChecked(False)
+                self._toggle_pick_mode(False)
+            self.profile_dock.set_velocity_fit_mode(bool(checked))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
     def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
         """Relay a pick from the profile to the session.
