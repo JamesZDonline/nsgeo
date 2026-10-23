@@ -37,12 +37,6 @@ KNOWN_UNCONSUMED = {
     "new_site_requested",
     "open_site_requested",
     "save_requested",
-    # Grid-dialog rework (#63): GridDialog emits this on every row change
-    # for the map overlay, which Task 6 builds and connects; until then
-    # nothing listens. (Task 5 wired pick_all_requested and
-    # pick_polygon_requested to the map-pick flow and replaced the tool
-    # whose points_picked and cancelled sat here.)
-    "corners_changed",
 }
 
 # A signal name declared by more than one class cannot be judged by a

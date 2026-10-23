@@ -59,6 +59,7 @@ from nsgeo_qgis.lookup import (
     utm_epsg,
 )
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.ui.grid_overlay import GridOverlay, tag_text
 
 COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
 
@@ -130,6 +131,10 @@ class GridDialog(QDialog):
         self.session = session
         self.existing = grid
         self.canvas = canvas
+        # The marks on the map while the dialog is open (spec 4.8); `finished`
+        # takes them back, and plugin.py's clear_if_current is the net for a
+        # dialog destroyed without it.
+        self.overlay: GridOverlay | None = None if canvas is None else GridOverlay(canvas)
         # The grid CRS is automatic until the user picks one by hand, and
         # never for an existing grid (C4). Every write the dialog itself
         # makes to crs_widget happens under _setting_crs, because crsChanged
@@ -252,6 +257,8 @@ class GridDialog(QDialog):
         for w in (self.origin_x, self.origin_y, self.azimuth, self.size_x, self.size_y):
             w.valueChanged.connect(self._refresh_derived)
         self.crs_widget.crsChanged.connect(self._refresh_derived)
+        if canvas is not None:
+            self._wire_overlay(canvas)
 
         project_crs = QgsProject.instance().crs()
         # Round 1 and 2 fell back to a placeholder CRS (first EPSG:4326,
@@ -276,6 +283,106 @@ class GridDialog(QDialog):
             self._settle_crs_at_open()
         self._validate()
         self._refresh_derived()
+        self._refresh_overlay()
+
+    # ---- the map overlay (spec 4.8) ----------------------------------------
+    def _wire_overlay(self, canvas: QgsMapCanvas) -> None:
+        # Connected last among the form's slots, so a redraw sees the numbers
+        # and the CRS after the dialog's own conversions have settled.
+        self.corners_changed.connect(self._refresh_overlay)
+        for w in (self.origin_x, self.origin_y, self.azimuth, self.size_x, self.size_y):
+            w.valueChanged.connect(self._refresh_overlay)
+        self.crs_widget.crsChanged.connect(self._refresh_overlay)
+        self.corners_crs.crsChanged.connect(self._refresh_overlay)
+        self.feature_picker.featureChanged.connect(self._refresh_overlay)
+        self.layer_combo.layerChanged.connect(self._refresh_overlay)
+        canvas.destinationCrsChanged.connect(self._refresh_overlay)
+        self.finished.connect(self._dispose_overlay)
+
+    def _dispose_overlay(self, *_: Any) -> None:
+        if self.overlay is not None:
+            self.overlay.dispose()
+
+    def _to_canvas(
+        self, crs: QgsCoordinateReferenceSystem, points: list[QgsPointXY]
+    ) -> list[QgsPointXY] | None:
+        """`points` from `crs` into the canvas CRS, or None when that fails."""
+        assert self.canvas is not None
+        target = self.canvas.mapSettings().destinationCrs()
+        if not crs.isValid() or not target.isValid():
+            return None
+        try:
+            xform = QgsCoordinateTransform(crs, target, QgsProject.instance())
+            out = [xform.transform(p) for p in points]
+        except QgsCsException:
+            return None
+        if not all(math.isfinite(p.x()) and math.isfinite(p.y()) for p in out):
+            return None
+        return out
+
+    def _chosen_ring(self) -> list[QgsPointXY] | None:
+        chosen = self.chosen_polygon()
+        if chosen is None:
+            return None
+        layer, geometry = chosen
+        if geometry.isMultipart():
+            parts = geometry.asMultiPolygon()
+            ring = parts[0][0] if parts and parts[0] else []
+        else:
+            rings = geometry.asPolygon()
+            ring = rings[0] if rings else []
+        return self._to_canvas(layer.crs(), [QgsPointXY(p) for p in ring]) if ring else None
+
+    def _refresh_overlay(self, *_: Any) -> None:
+        # A slot on many signals: report, never raise.
+        overlay = self.overlay
+        if overlay is None or overlay.disposed:
+            return
+        try:
+            tags: list[tuple[QgsPointXY, str] | None] = []
+            for row in range(len(CORNER_ROLES)):
+                point = self.corner_point(row)
+                moved = None if point is None else self._to_canvas(self.corners_crs.crs(), [point])
+                if moved is None:
+                    tags.append(None)
+                else:
+                    tags.append((moved[0], tag_text(CORNER_ROLES[row], self.corner_source(row))))
+            overlay.set_corners(tags)
+            overlay.set_polygon(self._chosen_ring())
+            overlay.set_grid(self._grid_outline())
+        except Exception as exc:  # noqa: BLE001 -- slot: show, don't raise
+            self.fit_status.setText(f"could not draw the map overlay: {exc}")
+
+    def _grid_outline(self) -> list[QgsPointXY] | None:
+        """The form's grid as four corners in the canvas CRS, or None while it
+        cannot be drawn (see `_grid_drawable`)."""
+        grid_crs = self.crs_widget.crs()
+        if not self._grid_drawable(grid_crs):
+            return None
+        sx, sy = self.size_x.value(), self.size_y.value()
+        grid = Grid(
+            "_",
+            (self.origin_x.value(), self.origin_y.value()),
+            self.azimuth.value(),
+            sx,
+            sy,
+            grid_crs.authid(),
+            0.5,
+        )
+        world = grid.to_world(np.array([[0, 0], [sx, 0], [sx, sy], [0, sy]], dtype=float))
+        return self._to_canvas(grid_crs, [QgsPointXY(float(x), float(y)) for x, y in world])
+
+    def _grid_drawable(self, grid_crs: QgsCoordinateReferenceSystem) -> bool:
+        """Whether the form describes a grid: an origin that is not (0, 0),
+        both sizes above 0 and a grid CRS usable at that origin. "Off by" and
+        the map overlay both ask this, so they can never disagree."""
+        ox, oy = self.origin_x.value(), self.origin_y.value()
+        return (
+            not (ox == 0.0 and oy == 0.0)
+            and self.size_x.value() > 0
+            and self.size_y.value() > 0
+            and self._crs_check(grid_crs, QgsPointXY(ox, oy))[0] is None
+        )
 
     # ---- corner table -----------------------------------------------------
     def _build_corner_group(self) -> QGroupBox:
@@ -733,12 +840,7 @@ class GridDialog(QDialog):
         grid_crs = self.crs_widget.crs()
         ox, oy = self.origin_x.value(), self.origin_y.value()
         sx, sy = self.size_x.value(), self.size_y.value()
-        if (
-            not (ox == 0.0 and oy == 0.0)
-            and sx > 0
-            and sy > 0
-            and self._crs_check(grid_crs, QgsPointXY(ox, oy))[0] is None
-        ):
+        if self._grid_drawable(grid_crs):
             try:
                 points = self._corners_in_grid_crs(grid_crs)
                 grid = Grid("_", (ox, oy), self.azimuth.value(), sx, sy, grid_crs.authid(), 0.5)

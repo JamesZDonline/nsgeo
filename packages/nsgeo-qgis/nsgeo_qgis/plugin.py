@@ -1296,7 +1296,14 @@ class NsgeoPlugin:
             # clearing unconditionally would wedge *that* one instead.
             if self._grid_dialog is dialog:
                 self._grid_dialog = None
+            # The overlay's canvas item belongs to the canvas, not the
+            # dialog, so a dialog destroyed without finished() must still
+            # give it back (dispose() is idempotent). Held by a local
+            # reference: `dialog` is already gone here.
+            if overlay is not None:
+                overlay.dispose()
 
+        overlay = dialog.overlay
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
         dialog.pick_requested.connect(lambda row: self._start_pick(dialog, [row]))

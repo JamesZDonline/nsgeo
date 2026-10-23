@@ -1236,7 +1236,8 @@ def test_a_dialog_closed_mid_pick_leaves_no_canvas_items(real_iface, tmp_path, q
     t.dialog.reject()  # gives up on the pick outright, tool still active
 
     assert t.canvas.mapTool() is None
-    assert _scene_count(qgis_app, t.canvas) == baseline
+    # the baseline held the dialog's overlay item too, which went with it
+    assert _scene_count(qgis_app, t.canvas) == baseline - 1
     assert sip.isdeleted(tool)
     assert _bar(t.bar) == []
     t.plugin.unload()
@@ -2009,3 +2010,287 @@ def test_without_an_anchor_the_azimuth_still_survives_a_trip_from_feet(session, 
     d.crs_widget.setCrs(feet)
     assert d.azimuth.value() == pytest.approx(25.0, abs=1e-3)
     assert d.origin_x.value() == pytest.approx(1_500_000.0, abs=2e-3)
+
+
+# ---- the map overlay (#27, #28, spec 4.8) -------------------------------------
+
+
+def _overlay_dialog(session, project_crs, real_canvas, crs=UTM16) -> GridDialog:
+    project_crs(crs)
+    d = GridDialog(session, canvas=real_canvas(crs, _site_extent(crs)))
+    d.corners_crs.setCrs(UTM16)
+    return d
+
+
+def _close(_unused: Any, points: Any, expect: Any, tol: float = 1e-6) -> bool:
+    return all(
+        (p.x() == pytest.approx(e[0], abs=tol)) and (p.y() == pytest.approx(e[1], abs=tol))
+        for p, e in zip(points, expect)
+    )
+
+
+def test_a_dialog_without_a_canvas_has_no_overlay(session):
+    assert GridDialog(session).overlay is None
+
+
+def test_overlay_tags_each_filled_corner(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    _type_row(d, 2, *SITE_CORNERS[2])
+    c = d.overlay.corners
+    assert [None if x is None else x[1] for x in c] == ["origin", None, "+X+Y", None]
+    assert (c[0][0].x(), c[0][0].y()) == pytest.approx(tuple(SITE_CORNERS[0]), abs=1e-6)
+    assert (c[2][0].x(), c[2][0].y()) == pytest.approx(tuple(SITE_CORNERS[2]), abs=1e-6)
+
+
+def test_overlay_corners_are_in_the_canvas_crs(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas, crs=WGS84)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    want = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance()).transform(
+        QgsPointXY(*SITE_CORNERS[0])
+    )
+    got = d.overlay.corners[0][0]
+    assert (got.x(), got.y()) == pytest.approx((want.x(), want.y()), abs=1e-9)
+
+
+def test_overlay_tags_polygon_vertices_with_their_labels(
+    qgis_app, session, project_crs, real_canvas, plan_layer
+):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    ring = [QgsPointXY(*p) for p in SITE_CORNERS]
+    _select_sole_feature(qgis_app, d, plan_layer(ring, crs="EPSG:32616"))
+    d.fill_from_polygon()
+    tags = [c[1] for c in d.overlay.corners]
+    assert all(t.startswith(f"{role} · v") for t, role in zip(tags, ("origin", "+X", "+X+Y", "+Y")))
+    assert tags[0] == f"origin · {d.corner_source(0)}"
+
+
+def test_the_chosen_polygon_is_outlined(qgis_app, session, project_crs, real_canvas, plan_layer):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    assert d.overlay.polygon is None
+    ring = [QgsPointXY(*p) for p in SITE_CORNERS]
+    layer = plan_layer(ring, crs="EPSG:32616")
+    _select_sole_feature(qgis_app, d, layer)
+    assert d.overlay.polygon is not None
+    pts = d.overlay.polygon
+    assert _close(None, pts[:4], SITE_CORNERS)
+    # choosing no feature clears it
+    d.layer_combo.setLayer(None)
+    _pump(qgis_app, lambda: d.overlay.polygon is None)
+    assert d.overlay.polygon is None
+
+
+def test_the_chosen_polygon_is_outlined_in_the_canvas_crs(
+    qgis_app, session, project_crs, real_canvas, plan_layer
+):
+    d = _overlay_dialog(session, project_crs, real_canvas, crs=WGS84)
+    _select_sole_feature(qgis_app, d, plan_layer(_wgs84_ring()))
+    assert _close(None, d.overlay.polygon[:4], [(p.x(), p.y()) for p in _wgs84_ring()], 1e-9)
+
+
+def test_overlay_outline_follows_the_form(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    d.crs_widget.setCrs(UTM16)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.azimuth.setValue(SITE.azimuth)
+    d.size_x.setValue(SITE.size_x)
+    d.size_y.setValue(SITE.size_y)
+    assert _close(None, d.overlay.grid, SITE_CORNERS)
+    d.size_x.setValue(30.0)  # no Fit needed
+    assert d.overlay.grid[1].x() != pytest.approx(SITE_CORNERS[1][0], abs=1e-3)
+    want = Grid("_", SITE.origin, SITE.azimuth, 30.0, 20.0, "EPSG:32616", 0.5).to_world(
+        np.array([[0, 0], [30, 0], [30, 20], [0, 20]], dtype=float)
+    )
+    assert _close(None, d.overlay.grid, want)
+
+
+def test_overlay_grid_is_in_the_canvas_crs(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas, crs=WGS84)
+    d.crs_widget.setCrs(UTM16)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.size_x.setValue(20.0)
+    d.size_y.setValue(20.0)
+    want = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance()).transform(
+        QgsPointXY(d.origin_x.value(), d.origin_y.value())
+    )
+    assert (d.overlay.grid[0].x(), d.overlay.grid[0].y()) == pytest.approx(
+        (want.x(), want.y()), abs=1e-9
+    )
+
+
+def test_overlay_hides_the_grid_until_it_can_be_drawn(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    d.crs_widget.setCrs(UTM16)
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    d.size_x.setValue(20.0)
+    d.size_y.setValue(0.0)
+    assert d.overlay.grid is None
+    d.size_y.setValue(20.0)
+    assert d.overlay.grid is not None
+    d.size_x.setValue(0.0)
+    assert d.overlay.grid is None
+    d.size_x.setValue(20.0)
+    d.origin_x.setValue(0.0)
+    d.origin_y.setValue(0.0)
+    assert d.overlay.grid is None
+    d.origin_x.setValue(SITE.origin[0])
+    d.origin_y.setValue(SITE.origin[1])
+    assert d.overlay.grid is not None
+    d.crs_widget.setCrs(WGS84)  # degrees: not usable for a metric grid
+    assert d.overlay.grid is None
+
+
+def test_overlay_and_off_by_agree_on_when_to_draw(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_site(d)
+    d.fit_corners()
+    assert d.overlay.grid is not None and d._offsets[0] is not None
+    d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
+    assert (d.overlay.grid is None) == all(o is None for o in d._offsets)
+
+
+def test_overlay_redraws_on_a_canvas_crs_change(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    before = d.overlay.corners[0][0]
+    d.canvas.setDestinationCrs(WGS84)
+    after = d.overlay.corners[0][0]
+    want = QgsCoordinateTransform(UTM16, WGS84, QgsProject.instance()).transform(
+        QgsPointXY(*SITE_CORNERS[0])
+    )
+    assert (after.x(), after.y()) == pytest.approx((want.x(), want.y()), abs=1e-9)
+    assert (after.x(), after.y()) != pytest.approx((before.x(), before.y()))
+
+
+def test_a_failed_transform_hides_that_element(session, project_crs, real_canvas, monkeypatch):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    _type_row(d, 1, *SITE_CORNERS[1])
+    from nsgeo_qgis.ui import grid_dialog
+    from qgis.core import QgsCsException
+
+    real = grid_dialog.QgsCoordinateTransform
+
+    class Failing:
+        def __init__(self, *a: Any) -> None:
+            self._t = real(*a)
+
+        def transform(self, p: Any, *rest: Any) -> Any:
+            if abs(p.x() - SITE_CORNERS[1][0]) < 1e-6:
+                raise QgsCsException()
+            return self._t.transform(p, *rest)
+
+    monkeypatch.setattr(grid_dialog, "QgsCoordinateTransform", Failing)
+    d._refresh_overlay()
+    assert d.overlay.corners[0] is not None
+    assert d.overlay.corners[1] is None
+
+
+def test_overlay_paints_its_marks(session, project_crs, real_canvas):
+    from qgis.PyQt.QtGui import QColor, QImage, QPainter
+    from qgis.PyQt.QtWidgets import QStyleOptionGraphicsItem
+
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_site(d)
+    d.fit_corners()
+    item = d.overlay.item
+    image = QImage(800, 600, QImage.Format.Format_ARGB32)
+    image.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(image)
+    item.paint(painter, QStyleOptionGraphicsItem(), None)
+    painter.end()
+    colours = {image.pixelColor(x, y).name() for x in range(800) for y in range(0, 600, 2)}
+    assert "#ff00ff" in colours  # the role tags and the arrow
+    assert "#0050ff" in colours  # the grid outline
+
+
+def test_overlay_paint_failure_is_caught(session, project_crs, real_canvas):
+    from qgis.PyQt.QtGui import QImage, QPainter
+    from qgis.PyQt.QtWidgets import QStyleOptionGraphicsItem
+
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    _type_row(d, 0, *SITE_CORNERS[0])
+    d.overlay.item.corners = [object()]  # a bad payload
+    image = QImage(100, 100, QImage.Format.Format_ARGB32)
+    painter = QPainter(image)
+    d.overlay.item.paint(painter, QStyleOptionGraphicsItem(), None)  # must not raise
+    painter.end()
+
+
+def test_overlay_stays_while_the_dialog_is_hidden_mid_pick(real_iface, tmp_path, qgis_app):
+    t = _pick_site(real_iface, tmp_path)
+    _type_row(t.dialog, 0, 400.0, 300.0)
+    item_count = _scene_count(qgis_app, t.canvas)
+    t.dialog.pick_buttons[1].click()
+    assert t.dialog.isHidden()
+    assert _scene_count(qgis_app, t.canvas) == item_count
+    assert not t.dialog.overlay.disposed
+    assert t.dialog.overlay.item.isVisible()
+    send_map_mouse(t.canvas.mapTool(), "move", (408, 300))
+    send_map_mouse(t.canvas.mapTool(), "release", (408, 300))
+    assert [None if c is None else c[1] for c in t.dialog.overlay.corners] == [
+        "origin",
+        "+X",
+        None,
+        None,
+    ]
+    t.dialog.reject()
+    t.plugin.unload()
+
+
+@pytest.mark.parametrize("how", ["ok", "cancel", "close mid-pick", "unload", "destroyed"])
+def test_overlay_leaves_nothing_behind(real_iface, tmp_path, qgis_app, how):
+    import nsgeo_qgis
+
+    iface = real_iface(UTM16, QgsRectangle(0, 0, 800, 600))
+    plugin = nsgeo_qgis.classFactory(iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    canvas = iface.mapCanvas()
+    baseline = _scene_count(qgis_app, canvas)
+    plugin.open_grid_dialog(None)
+    dialog = plugin._grid_dialog
+    dialog.corners_crs.setCrs(UTM16)
+    overlay = dialog.overlay
+    item = overlay.item
+    _type_row(dialog, 0, 400.0, 300.0)
+    assert _scene_count(qgis_app, canvas) == baseline + 1  # drawn
+    if how == "ok":
+        dialog.id_edit.setText("A")
+        dialog.velocity.setValue(0.08)
+        dialog.origin_x.setValue(400.0)
+        dialog.origin_y.setValue(300.0)
+        dialog.size_x.setValue(10.0)
+        dialog.size_y.setValue(10.0)
+        dialog.accept()
+    elif how == "cancel":
+        dialog.reject()
+    elif how == "close mid-pick":
+        dialog.pick_buttons[1].click()
+        dialog.reject()
+    elif how == "unload":
+        dialog.pick_buttons[1].click()
+        plugin.unload()
+    else:
+        dialog.setParent(None)
+        dialog.deleteLater()
+    qgis_app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    if how == "unload":  # the plugin's own map-link items go too
+        assert _scene_count(qgis_app, canvas) <= baseline - 1
+    else:
+        assert _scene_count(qgis_app, canvas) == baseline
+    assert sip.isdeleted(item)
+    overlay.dispose()  # idempotent
+    if how not in ("unload", "ok"):  # (an accepted grid leaves unsaved changes to ask about)
+        plugin.unload()
+
+
+def test_dispose_is_idempotent_and_setters_then_do_nothing(session, project_crs, real_canvas):
+    d = _overlay_dialog(session, project_crs, real_canvas)
+    d.overlay.dispose()
+    d.overlay.dispose()
+    _type_row(d, 0, *SITE_CORNERS[0])  # a late slot must not raise
+    assert d.overlay.corners == [None] * 4
