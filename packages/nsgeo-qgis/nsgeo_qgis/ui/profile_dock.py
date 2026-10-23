@@ -22,7 +22,7 @@ on*, which is not always the one shown. With a gain curve in the stack the
 limit is taken from the stack with every enabled curve step switched off
 (`_scale_reference`), so dragging a curve brightens or darkens a band
 against a scale that holds still, instead of the scale chasing the curve
-(spec 3, calls 1 and 4). A difference view is its own scale. The time
+(spec §3, call 1). A difference view is its own scale (call 4). The time
 cutoff is never bypassed in that measurement, so selecting the cutoff row
 shows more record without changing the brightness (call 11).
 
@@ -456,6 +456,7 @@ class ProfileDock(QgsDockWidget):
         )
         self.view.set_direction(int(getattr(line.placement, "direction", 1)))
         self.image = None
+        self.gain_strip.set_headroom(None)  # no image: no band, whichever slot runs first
         profiles = self.session.profiles_for(key)
         if profiles:
             self._configure_channels(len(profiles))
@@ -571,6 +572,7 @@ class ProfileDock(QgsDockWidget):
 
     def _clear_view_only(self) -> None:
         self.image = None
+        self.gain_strip.set_headroom(None)
         self.view.clear()
         self.setWindowTitle("nsgeo Profile")
         self.setToolTip("")
@@ -960,10 +962,14 @@ class ProfileDock(QgsDockWidget):
         """Give the strip the displayed line's envelope and the display
         limit, or take them away (a difference view has no limit that means
         anything beside a gain curve). Nothing to do while the strip is
-        hidden: `show_gain_strip` pushes when it is shown. The envelope is
+        hidden: `show_gain_strip` pushes when it is shown. With no image
+        the band is cleared, not left as the previous line's. The envelope is
         recomputed here and on a display change only, never on a cursor
         move (spec §5)."""
-        if self.gain_strip.isHidden() or self.image is None:
+        if self.gain_strip.isHidden():
+            return
+        if self.image is None:
+            self.gain_strip.set_headroom(None)  # never the previous line's band
             return
         try:
             if self._effective_difference_index >= 0:

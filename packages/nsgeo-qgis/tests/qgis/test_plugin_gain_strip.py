@@ -1026,9 +1026,13 @@ def test_a_curve_edit_keeps_the_limits_still_and_moves_the_band(curve_dock):
 
 def test_the_cursor_trace_follows_the_session_cursor(curve_dock):
     session, dock, key = curve_dock
-    dock.show_gain_strip(FLAT, "c")
+    session.replace_step(key, 1, build_step("gain_curve", points=DEEP))
+    dock.show_gain_strip(DEEP, "c")
     assert dock.gain_strip.trace is None
     rg = dock.image.rg
+    # The displayed data is not the bypassed reference: a trace read from
+    # `image.reference` would differ at depth.
+    assert not np.array_equal(rg.data, dock.image.reference.data)
     session.set_trace(key, 0)
     np.testing.assert_array_equal(dock.gain_strip.trace, rg.data[:, 0])
     session.set_trace(key, 10**6)
@@ -1068,3 +1072,50 @@ def test_unipolar_output_gives_a_one_sided_band(curve_dock):
     assert dock.gain_strip.headroom.one_sided is False
     session.append_step(key, build_step("amp_envelope"))
     assert dock.gain_strip.headroom.one_sided is True
+
+
+def _add_second_line(session, tmp_path, *, load):
+    p = synthetic_dzt(tmp_path / "raw", "FILE__002.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 1.0))
+    first = session.keys()[0]
+    session.add_lines([line])
+    key_b = next(k for k in session.keys() if k != first)
+    if load:
+        session.set_profiles(key_b, line.load())
+    return key_b
+
+
+def test_a_line_without_profiles_does_not_inherit_the_previous_lines_band(curve_dock, tmp_path):
+    session, dock, key = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.headroom is not None
+    key_b = _add_second_line(session, tmp_path, load=False)
+    session.append_step(key_b, build_step("gain_curve", points=FLAT))
+    session.open_line(key_b)
+    assert dock.image is None
+    dock.show_gain_strip(FLAT, "c")  # what the plugin's _sync_gain_strip does
+    assert dock.gain_strip.headroom is None
+    assert dock.gain_strip.trace is None
+
+
+def test_closing_the_site_takes_the_strips_band_away(curve_dock):
+    session, dock, _ = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.headroom is not None
+    session.close_site()
+    assert dock.gain_strip.headroom is None
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.headroom is None
+
+
+def test_leaving_a_preview_re_pushes_the_band_at_the_current_percentile(curve_dock, tmp_path):
+    session, dock, key = curve_dock
+    key_b = _add_second_line(session, tmp_path, load=True)
+    dock.show_gain_strip(FLAT, "c")
+    session.set_preview(key_b, 0)
+    dock.percentile_slider.setValue(950)
+    session.set_preview(None)
+    assert dock.gain_strip.isVisible()
+    np.testing.assert_array_equal(
+        dock.gain_strip.headroom.envelope, row_envelope(dock.image.rg.data, 95.0)
+    )

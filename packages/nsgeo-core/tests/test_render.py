@@ -368,3 +368,7 @@ def test_row_envelope_ignores_non_finite_samples_without_warning():
 def test_row_envelope_validates_its_arguments(kwargs):
     with pytest.raises(ValueError):
         row_envelope(np.ones((2, 3)), **{"percentile": 50.0, **kwargs})
+
+
+def test_row_envelope_of_a_zero_trace_array_is_zeros():
+    np.testing.assert_array_equal(row_envelope(np.empty((3, 0)), 90.0), np.zeros(3))

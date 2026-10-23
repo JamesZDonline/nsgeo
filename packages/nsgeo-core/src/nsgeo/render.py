@@ -335,6 +335,8 @@ def row_envelope(data: np.ndarray, percentile: float, max_traces: int = 2048) ->
         raise ValueError(f"max_traces must be >= 1, got {max_traces}")
     arr = np.asarray(data, dtype=float)
     n = arr.shape[1]
+    if n == 0:
+        return np.zeros(arr.shape[0])
     if n > max_traces:
         arr = arr[:, :: math.ceil(n / max_traces)]
     mags = np.abs(arr)

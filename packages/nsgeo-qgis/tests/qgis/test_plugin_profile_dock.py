@@ -1755,3 +1755,31 @@ def test_a_real_line_balanced_by_a_gain_curve_keeps_its_limit(bare):
     raised = [[t, db + 6.0] for t, db in points]
     session.replace_step(key, 3, build_step("gain_curve", points=raised))
     assert dock.image.limit == limit0
+
+
+@needs_real_data
+def test_raising_only_the_deep_point_leaves_the_shallow_pixels_alone(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    line = Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, -1, "REAL"))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    session.append_step(key, build_step("time_zero", mode="first_break", threshold=0.25))
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    session.append_step(key, build_step("background_sliding", window_traces=200))
+    stack = session.stack_for(key)
+    t0 = stack.intermediate(2).t0_ns
+    dt = stack.intermediate(2).dt_ns
+    t_end = t0 + 1e4
+    points = [[t0, 0.0], [50.0, 0.0], [t_end, 40.0]]
+    session.append_step(key, build_step("gain_curve", points=points))
+    k = int((50.0 - t0) / dt)  # rows before the curve leaves 0 dB
+    assert k > 0
+    limit0 = dock.image.limit
+    shallow0 = to_index8(stack.result().data[:k], limit0)
+    session.replace_step(key, 3, build_step("gain_curve", points=[*points[:2], [t_end, 52.0]]))
+    assert dock.image.limit == limit0
+    np.testing.assert_array_equal(to_index8(stack.result().data[:k], dock.image.limit), shallow0)
