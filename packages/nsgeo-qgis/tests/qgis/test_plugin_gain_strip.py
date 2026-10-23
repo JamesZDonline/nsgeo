@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
+from nsgeo.render import row_envelope
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import GainStrip
+from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_dock import ProfileDock
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP
 from nsgeo_qgis.ui.view_transform import ViewTransform
@@ -903,3 +906,165 @@ def test_gain_strip_slots_do_not_raise_after_unload(fake_iface, tmp_path):
 
     plugin._sync_gain_strip(0)  # must not raise
     plugin._on_gain_points([[0.0, 0.0], [1.0, 1.0]])  # must not raise
+
+
+# ---- headroom under the curve (#10) --------------------------------------
+
+FLAT = [[-11.0, 0.0], [99.0, 0.0]]
+DEEP = [[-11.0, 0.0], [40.0, 0.0], [99.0, 30.0]]
+
+
+def h(env, one_sided=False):
+    return Headroom(2.0, 0.0, 0.5, np.asarray(env, dtype=float), one_sided)
+
+
+def _px(strip, x, row):
+    return strip.grab().toImage().pixelColor(int(x), int(strip.y_of_time(0.5 * row)))
+
+
+def _two_level():
+    return np.concatenate([np.full(100, 1.0), np.full(100, 2.4)])
+
+
+def test_amplitudes_map_to_the_centre_the_limits_and_the_edge(strip):
+    strip.set_headroom(h(np.zeros(200)))
+    for a, x in [(0, 48.0), (2.0, 78.4), (-2.0, 17.6), (10.0, 86.0), (-10.0, 10.0)]:
+        assert strip.x_of_amplitude(a) == pytest.approx(x)
+
+
+def test_a_depth_past_the_limit_is_painted_red(strip):
+    strip.set_headroom(h(_two_level()))
+    c = _px(strip, 82, 150)
+    assert c.red() > 150 and c.green() < 100
+    c = _px(strip, 82, 50)
+    assert min(c.red(), c.green(), c.blue()) > 240
+
+
+def test_inside_the_limits_the_band_is_grey(strip):
+    strip.set_headroom(h(_two_level()))
+    c = _px(strip, strip.x_of_amplitude(0.25), 50)
+    chans = [c.red(), c.green(), c.blue()]
+    assert max(chans) - min(chans) <= 3 and max(chans) < 245
+
+
+def test_a_one_sided_band_leaves_the_negative_side_empty(strip):
+    strip.set_headroom(h(np.full(200, 1.0), one_sided=True))
+    c = _px(strip, strip.x_of_amplitude(-0.5), 50)
+    assert min(c.red(), c.green(), c.blue()) > 240
+    c = _px(strip, strip.x_of_amplitude(0.5), 50)
+    assert max(c.red(), c.green(), c.blue()) < 245
+
+
+def test_the_cursor_trace_is_drawn_and_can_be_cleared(strip):
+    strip.set_headroom(h(np.zeros(200)))
+    strip.set_trace(np.full(200, 1.0))
+    x = strip.x_of_amplitude(1.0)
+
+    def darkest():
+        return min(_px(strip, x + d, 50).red() for d in (-1, 0, 1))
+
+    assert darkest() < 80
+    strip.set_trace(None)
+    assert darkest() >= 80
+
+
+def test_no_headroom_draws_the_curve_alone(strip):
+    strip.set_headroom(h(_two_level()))
+    strip.set_headroom(None)
+    c = _px(strip, 78, 150)
+    assert min(c.red(), c.green(), c.blue()) > 240
+    assert strip.trace is None
+
+
+def test_the_zero_db_line_is_blue(strip):
+    x = round(strip.x_of_db(0.0))
+    ys = range(int(strip.y_of_time(0.0)) + 20, int(strip.y_of_time(0.0)) + 41)
+    img = strip.grab().toImage()
+    assert any(img.pixelColor(x, y).blue() > img.pixelColor(x, y).red() + 40 for y in ys)
+
+
+@pytest.fixture
+def curve_dock(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = ProfileDock(session)
+    dock.resize(900, 360)
+    dock.show()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    session.append_step(key, build_step("dewow"))
+    session.append_step(key, build_step("gain_curve", points=FLAT))
+    yield session, dock, key
+    dock.hide()
+    dock.deleteLater()
+
+
+def test_the_strip_receives_the_displayed_envelope_and_the_display_limit(curve_dock):
+    _, dock, _ = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    hr = dock.gain_strip.headroom
+    assert hr is not None
+    assert hr.limit == dock.image.limit
+    np.testing.assert_array_equal(hr.envelope, row_envelope(dock.image.rg.data, dock.percentile))
+    assert hr.t0_ns == dock.image.rg.t0_ns
+
+
+def test_a_curve_edit_keeps_the_limits_still_and_moves_the_band(curve_dock):
+    session, dock, key = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    before = dock.gain_strip.headroom
+    session.replace_step(key, 1, build_step("gain_curve", points=DEEP))
+    after = dock.gain_strip.headroom
+    assert after.limit == before.limit
+    assert after.envelope[-1] / before.envelope[-1] == pytest.approx(10 ** (30 / 20), rel=1e-6)
+
+
+def test_the_cursor_trace_follows_the_session_cursor(curve_dock):
+    session, dock, key = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.trace is None
+    rg = dock.image.rg
+    session.set_trace(key, 0)
+    np.testing.assert_array_equal(dock.gain_strip.trace, rg.data[:, 0])
+    session.set_trace(key, 10**6)
+    np.testing.assert_array_equal(dock.gain_strip.trace, rg.data[:, -1])
+
+
+def test_the_difference_view_draws_the_curve_alone(curve_dock):
+    _, dock, _ = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.headroom is not None
+    dock.set_difference_index(1)
+    assert dock.gain_strip.headroom is None
+
+
+def test_the_percentile_slider_rescales_the_band(curve_dock):
+    _, dock, _ = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    dock.percentile_slider.setValue(950)
+    hr = dock.gain_strip.headroom
+    np.testing.assert_array_equal(hr.envelope, row_envelope(dock.image.rg.data, 95.0))
+    assert hr.limit == dock.image.limit
+
+
+def test_a_strip_shown_after_a_percentile_change_uses_the_new_percentile(curve_dock):
+    _, dock, _ = curve_dock
+    dock.show_gain_strip(None)
+    dock.percentile_slider.setValue(950)
+    dock.show_gain_strip(FLAT, "c")
+    np.testing.assert_array_equal(
+        dock.gain_strip.headroom.envelope, row_envelope(dock.image.rg.data, 95.0)
+    )
+
+
+def test_unipolar_output_gives_a_one_sided_band(curve_dock):
+    session, dock, key = curve_dock
+    dock.show_gain_strip(FLAT, "c")
+    assert dock.gain_strip.headroom.one_sided is False
+    session.append_step(key, build_step("amp_envelope"))
+    assert dock.gain_strip.headroom.one_sided is True

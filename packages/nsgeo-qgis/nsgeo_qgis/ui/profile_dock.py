@@ -63,7 +63,7 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.processing import Radargram, StepStack, build_step
-from nsgeo.render import DEFAULT_COLORMAP, colormap_names
+from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
@@ -81,7 +81,7 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gain_strip import GainStrip
+from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 
 
@@ -318,6 +318,7 @@ class ProfileDock(QgsDockWidget):
         try:
             self.image = self.image.with_display(self.percentile, self.colormap_name)
             self.view.set_image(self.image.image)
+            self._push_headroom()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the display change: {exc}", Qgis.MessageLevel.Critical)
 
@@ -526,6 +527,7 @@ class ProfileDock(QgsDockWidget):
             return
         try:
             self.view.set_cursor(index)
+            self._push_trace()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not move the profile cursor: {exc}", Qgis.MessageLevel.Critical)
 
@@ -651,6 +653,7 @@ class ProfileDock(QgsDockWidget):
             self.show_gain_strip(*deferred)  # not previewing now: takes the normal path
         elif self._strip_was_visible:
             self.gain_strip.show()
+            self._push_headroom()
         self._strip_was_visible = False
 
     def set_pick_mode(self, flag: bool) -> None:
@@ -808,6 +811,7 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
         self._show_cutoff()
+        self._push_headroom()
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
@@ -950,6 +954,49 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
+        self._push_headroom()
+
+    def _push_headroom(self) -> None:
+        """Give the strip the displayed line's envelope and the display
+        limit, or take them away (a difference view has no limit that means
+        anything beside a gain curve). Nothing to do while the strip is
+        hidden: `show_gain_strip` pushes when it is shown. The envelope is
+        recomputed here and on a display change only, never on a cursor
+        move (spec §5)."""
+        if self.gain_strip.isHidden() or self.image is None:
+            return
+        try:
+            if self._effective_difference_index >= 0:
+                self.gain_strip.set_headroom(None)
+                return
+            rg = self.image.rg
+            unipolar = (
+                self._key is not None
+                and self.session.stack_for(
+                    self._key, insert=self._preview_key is None
+                ).output_unipolar
+            )
+            self.gain_strip.set_headroom(
+                Headroom(
+                    limit=self.image.limit,
+                    t0_ns=rg.t0_ns,
+                    dt_ns=rg.dt_ns,
+                    envelope=row_envelope(rg.data, self.percentile),
+                    one_sided=bool(unipolar),
+                )
+            )
+            self._push_trace()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the gain strip's headroom: {exc}", Qgis.MessageLevel.Warning)
+
+    def _push_trace(self) -> None:
+        """The trace under the session cursor, for the strip's dark line."""
+        if self.image is None or self.gain_strip.headroom is None:
+            self.gain_strip.set_trace(None)
+            return
+        rg = self.image.rg
+        c = self.session.current_trace
+        self.gain_strip.set_trace(rg.data[:, c] if 0 <= c < rg.n_traces else None)
 
     def _refresh_velocity(self, *_: Any) -> None:
         # I4: both halves of this guard matter, even though only the first
