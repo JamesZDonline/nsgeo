@@ -77,16 +77,29 @@ for equality; `plugin.py` decides what makes two curves the same one,
 and re-checks step identity before every write as the matching second
 barrier, the same shape `ProcessingDock._show_form`/`_on_form_committed`
 already use for the parameter form.
+
+Under the curve the strip can also show how close each depth is to burning
+out: a grey band for the line's amplitude envelope, a dark line for the
+trace under the cursor, and dotted lines at the display limits, with
+whatever lies past a limit in red (`set_headroom`, `set_trace`). Their
+amplitude axis is the strip's own and is unrelated to the curve's dB axis:
+zero amplitude is the strip's centre and the limits sit at 80 % of the way
+to either edge. The 0 dB line is blue so it reads as part of the curve
+rather than as part of that amplitude scale.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from qgis.PyQt.QtCore import QPointF, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QPainter, QPen
+import numpy as np
+from qgis.core import Qgis
+from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QPainter, QPen, QPolygonF
 from qgis.PyQt.QtWidgets import QWidget
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
 from nsgeo_qgis.ui.view_transform import ViewTransform
 
@@ -94,7 +107,26 @@ HANDLE_RADIUS = 5
 HIT_RADIUS = 8
 PAD_X = 10
 CURVE_COLOUR = QColor(48, 140, 198)
-ZERO_COLOUR = QColor(160, 160, 160)
+ZERO_COLOUR = QColor(130, 185, 222)
+ENVELOPE_COLOUR = QColor(0, 0, 0, 31)
+PAST_LIMIT_COLOUR = QColor(179, 38, 62)
+TRACE_COLOUR = QColor(20, 20, 20)
+LIMIT_COLOUR = QColor(60, 60, 60)
+# Where the display limit sits, as a fraction of the half-width inside the
+# padding, and how far past it an amplitude may be drawn before it clips.
+LIMIT_FRACTION = 0.8
+OVERSHOOT = 1.25
+
+
+@dataclass(frozen=True)
+class Headroom:
+    """What the strip draws under the curve."""
+
+    limit: float  # the display limit, > 0
+    t0_ns: float  # time of the first displayed row
+    dt_ns: float
+    envelope: np.ndarray  # one value >= 0 per displayed row
+    one_sided: bool  # unipolar output: draw the band on the positive side only
 
 
 class GainStrip(QWidget):
@@ -114,6 +146,58 @@ class GainStrip(QWidget):
         # Whose curve is on screen: an opaque token from whoever last
         # called set_points. See the module docstring's fourth invariant.
         self._owner: Any = None
+        self._headroom: Headroom | None = None
+        self._trace: np.ndarray | None = None
+
+    # ---- headroom -----------------------------------------------------------
+    @property
+    def headroom(self) -> Headroom | None:
+        return self._headroom
+
+    @property
+    def trace(self) -> np.ndarray | None:
+        return self._trace
+
+    def set_headroom(self, headroom: Headroom | None) -> None:
+        """Show the envelope band and display limits, or `None` to draw the
+        curve alone (which also clears the trace). A limit that is not a
+        positive finite number cannot be drawn, so it counts as `None`."""
+        if headroom is not None and not (np.isfinite(headroom.limit) and headroom.limit > 0):
+            headroom = None
+        self._headroom = headroom
+        if headroom is None or (
+            self._trace is not None and len(self._trace) != len(headroom.envelope)
+        ):
+            self._trace = None
+        self.update()
+
+    def set_trace(self, trace: np.ndarray | None) -> None:
+        """The trace under the cursor, one value per displayed row. Ignored
+        while there is no headroom, or when its length is not the band's."""
+        if (
+            trace is not None
+            and self._headroom is not None
+            and len(trace) == len(self._headroom.envelope)
+        ):
+            self._trace = trace
+        else:
+            self._trace = None
+        self.update()
+
+    def x_of_amplitude(self, a: float) -> float:
+        """Strip x of amplitude `a`: the centre for 0, the dotted limit at
+        `LIMIT_FRACTION` of the way to the edge, and no further than the
+        edge (`w - PAD_X`) however large `a` is. Only with a headroom set."""
+        assert self._headroom is not None
+        half = self.width() / 2
+        frac = min(max(a / self._headroom.limit, -OVERSHOOT), OVERSHOOT)
+        return half + frac * LIMIT_FRACTION * (half - PAD_X)
+
+    def _xs_of_amplitude(self, a: np.ndarray) -> np.ndarray:
+        assert self._headroom is not None
+        half = self.width() / 2
+        frac = np.clip(np.nan_to_num(a / self._headroom.limit), -OVERSHOOT, OVERSHOOT)
+        return np.asarray(half + frac * LIMIT_FRACTION * (half - PAD_X))
 
     # ---- mappings ---------------------------------------------------------
     def set_time_mapping(self, transform: ViewTransform, top_px: float) -> None:
@@ -211,11 +295,16 @@ class GainStrip(QWidget):
 
     # ---- painting ---------------------------------------------------------
     def paintEvent(self, _event: Any) -> None:  # noqa: N802
+        # Guarded like ProfileView.paintEvent: try/finally so the painter
+        # always ends (a painter left bound to the widget crashes the next
+        # repaint), and except so a bad payload leaves a blank strip, not
+        # an exception out of a Qt-invoked override.
         p = QPainter(self)
         try:
             p.fillRect(self.rect(), QColor(250, 250, 250))
             if self._transform is None or not self._points:
                 return
+            self._paint_headroom(p)
             p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             x0 = self.x_of_db(0.0)
             p.setPen(QPen(ZERO_COLOUR, 1, Qt.PenStyle.DashLine))
@@ -232,8 +321,63 @@ class GainStrip(QWidget):
             lo, hi = self._db_range()
             p.drawText(2, 12, f"{lo:g}")
             p.drawText(self.width() - 26, 12, f"{hi:g} dB")
+        except Exception as exc:  # noqa: BLE001 -- see the comment above
+            _log(f"could not paint the gain strip: {exc}", Qgis.MessageLevel.Warning)
         finally:
             p.end()
+
+    def _paint_headroom(self, p: QPainter) -> None:
+        """Band, trace and limits, each in its own colour inside the limits
+        and red outside them. Unantialiased so a one-pixel line stays one
+        solid pixel."""
+        hr = self._headroom
+        if hr is None:
+            return
+        n = len(hr.envelope)
+        ys = [self.y_of_time(hr.t0_ns + i * hr.dt_ns) for i in range(n)]
+        xl, xr = self.x_of_amplitude(-hr.limit), self.x_of_amplitude(hr.limit)
+        h = float(self.height())
+        inside = QRectF(xl, 0.0, xr - xl, h)
+        outside = (QRectF(0.0, 0.0, xl, h), QRectF(xr, 0.0, self.width() - xr, h))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        past = QColor(PAST_LIMIT_COLOUR)
+        past.setAlpha(184)
+
+        def painted(draw: Any, colour: QColor, past_colour: QColor) -> None:
+            for clip, c in [(inside, colour), *((r, past_colour) for r in outside)]:
+                p.save()
+                p.setClipRect(clip)
+                draw(c)
+                p.restore()
+
+        if n >= 2:
+            env = np.maximum(np.nan_to_num(hr.envelope), 0.0)
+            right = self._xs_of_amplitude(env)
+            left = self._xs_of_amplitude(-env) if not hr.one_sided else np.full(n, self.width() / 2)
+            poly = QPolygonF(
+                [QPointF(float(x), float(y)) for x, y in zip(right, ys, strict=True)]
+                + [QPointF(float(x), float(y)) for x, y in zip(left[::-1], ys[::-1], strict=True)]
+            )
+
+            def draw_band(c: QColor) -> None:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(c)
+                p.drawPolygon(poly)
+
+            painted(draw_band, ENVELOPE_COLOUR, past)
+            if self._trace is not None:
+                tx = self._xs_of_amplitude(np.asarray(self._trace, dtype=float))
+                line = QPolygonF([QPointF(float(x), float(y)) for x, y in zip(tx, ys, strict=True)])
+
+                def draw_trace(c: QColor) -> None:
+                    p.setPen(QPen(c, 1))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawPolyline(line)
+
+                painted(draw_trace, TRACE_COLOUR, PAST_LIMIT_COLOUR)
+        p.setPen(QPen(LIMIT_COLOUR, 1, Qt.PenStyle.DotLine))
+        for x in (xl, xr):
+            p.drawLine(QPointF(x, 0.0), QPointF(x, h))
 
     # ---- lifecycle ----------------------------------------------------------
     def hideEvent(self, event: Any) -> None:  # noqa: N802

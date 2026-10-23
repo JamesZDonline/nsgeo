@@ -233,7 +233,14 @@ for them first. For example, `bandpass` needs its cut-off frequencies.
   drag, to change the order. **Remove** deletes the selected step.
 - **Difference** shows what the selected step removed, rather than the result.
 - Select a `gain_curve` step, and a strip beside the profile lets you drag its
-  control points.
+  control points. It works on its own, without `gain_agc` before it. The
+  profile's brightness is measured as if the gain curve were switched off, so
+  raising part of the curve brightens only that part, and pushing too far turns
+  it solid black and white. Under the curve, the grey band shows how loud the
+  loudest parts of the line are at each depth, and the black line is the trace
+  under the cursor. The dotted lines are the limits of what the profile can
+  show. Anything past them is drawn red, and is solid black or white on the
+  profile.
 
 Nothing runs unless you add it. Your DZT files are only ever read and never
 changed, so any step can be undone.

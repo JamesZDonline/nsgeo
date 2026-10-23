@@ -36,7 +36,12 @@ def rgb_to_qimage(rgb: np.ndarray) -> QImage:
 class RadargramImage:
     """One radargram rendered once per display setting. Pan and zoom draw
     sub-rectangles of `image`; only a new radargram or a display change
-    re-runs numpy."""
+    re-runs numpy.
+
+    `reference` is the radargram the display limit is measured on; it is
+    `rg` itself unless the caller passes another (the dock passes the stack
+    with its gain curves switched off, so the scale holds still while a
+    curve is dragged)."""
 
     def __init__(
         self,
@@ -44,12 +49,14 @@ class RadargramImage:
         percentile: float = 99.0,
         colormap_name: str = DEFAULT_COLORMAP,
         max_width: int = 8192,
+        reference: Radargram | None = None,
     ) -> None:
         self.rg = rg
+        self.reference = rg if reference is None else reference
         self.percentile = percentile
         self.colormap_name = colormap_name
         self.max_width = max_width
-        self.limit = PercentileClip(percentile).limit(rg.data)
+        self.limit = PercentileClip(percentile).limit(self.reference.data)
         self._image: QImage | None = None
 
     @property
@@ -67,7 +74,8 @@ class RadargramImage:
             self.percentile if percentile is None else percentile,
             self.colormap_name if colormap_name is None else colormap_name,
             self.max_width,
+            self.reference,
         )
 
-    def with_radargram(self, rg: Radargram) -> RadargramImage:
-        return RadargramImage(rg, self.percentile, self.colormap_name, self.max_width)
+    def with_radargram(self, rg: Radargram, reference: Radargram | None = None) -> RadargramImage:
+        return RadargramImage(rg, self.percentile, self.colormap_name, self.max_width, reference)
