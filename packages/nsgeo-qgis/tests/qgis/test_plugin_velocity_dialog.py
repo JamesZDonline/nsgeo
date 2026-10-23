@@ -184,7 +184,7 @@ def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_
     line = s.line_for_key(key)
     assert line.velocity is None
     assert line.velocity_from_fit is None
-    assert velocity_source(s, key) != "line override"  # falls back to the grid, then the header
+    assert velocity_source(s, key) == "header ε 14"  # falls back to the grid, then the header
     assert fit_id in line.velocity_fits  # the measurement itself is kept
 
 
@@ -206,8 +206,38 @@ def test_cancel_changes_nothing(plugin, drive_dialog):
     assert s.line_for_key(key) == before
 
 
-def test_a_stale_key_is_reported_not_raised(plugin):
+def test_a_stale_key_is_reported_not_raised(plugin, fake_iface):
     plugin.open_velocity_dialog("no-such-line")  # the autouse fixture fails on a swallowed error
+    assert "no-such-line" in fake_iface.messageBar().currentItem().text()
+
+
+def test_a_line_whose_velocity_cannot_be_resolved_is_reported_not_raised(
+    plugin, fake_iface, monkeypatch
+):
+    # A header with epsr 0 loads fine and makes resolved_velocity raise ValueError.
+    def boom(key):
+        raise ValueError("relative dielectric permittivity must be positive, got 0.0")
+
+    monkeypatch.setattr(plugin.session, "resolved_velocity", boom)
+    plugin.open_velocity_dialog(plugin.session.keys()[0])
+    assert "permittivity" in fake_iface.messageBar().currentItem().text()
+
+
+def test_a_zero_velocity_cannot_be_applied(plugin):
+    dialog = _dialog(plugin)
+    dialog.spin.setValue(0.0)
+    assert not dialog.apply_button.isEnabled()
+    assert dialog.spin.specialValueText() == "required"
+    dialog.spin.setValue(0.05)
+    assert dialog.apply_button.isEnabled()
+
+
+def test_applying_a_fit_stores_its_exact_velocity_not_the_spin_boxs_rounding(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09004))
+    dialog = _dialog(plugin)
+    dialog.select_fit(fit_id)
+    assert dialog.velocity() == VelocityModel.constant(0.09004)  # spin shows 0.0900
 
 
 # ---- the disagreement flag, pinned with literal numbers ---------------------
@@ -294,6 +324,23 @@ def test_saved_curves_follow_the_open_line(plugin):
 
     s.open_line(s.keys()[0])
     assert len(view._saved_velocity_curves) == 1
+
+
+def test_a_saved_curve_is_drawn_differently_from_the_working_fit_over_the_same_geometry(plugin):
+    view = plugin.profile_dock.view
+    curve = [(float(t), 10.0 + 0.5 * t) for t in range(60)]
+    view.grab()  # warm-up: the first paint after a change is not the settled one
+    view.set_saved_velocity_fits([curve])
+    view.grab()
+    saved_only = view.grab().toImage()
+    view.set_saved_velocity_fits([])
+    view.set_velocity_fit([], curve)
+    view.grab()
+    working_only = view.grab().toImage()
+    view.set_velocity_fit([], [])
+    none = view.grab().toImage()
+    assert saved_only != none and working_only != none  # both really drew
+    assert saved_only != working_only
 
 
 def test_drawing_the_saved_curves_changes_the_picture(plugin):
