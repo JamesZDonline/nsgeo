@@ -14,6 +14,18 @@ def test_points_on_an_analytic_hyperbola_recover_its_parameters():
     assert fit.n_points == 5
 
 
+def test_hyperbola_time_evaluates_the_fitted_curve():
+    from nsgeo.velocity_fit import hyperbola_time
+
+    v, t0, x0 = 0.1, 20.0, 5.0
+    x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])
+    fit = fit_hyperbola(x, np.sqrt(t0**2 + (4.0 / v**2) * (x - x0) ** 2), x0, search_m=0.0)
+    probe = np.array([0.0, 4.0, 5.0, 9.5])
+    expected = np.sqrt(t0**2 + (4.0 / v**2) * (probe - x0) ** 2)
+    assert hyperbola_time(fit, probe) == pytest.approx(expected, rel=1e-9)
+    assert hyperbola_time(fit, probe)[2] == pytest.approx(t0)  # the apex time is t0
+
+
 def test_a_wrong_apex_guess_is_recovered_by_the_search():
     v, t0, x0 = 0.1, 20.0, 5.0
     x = np.array([2.0, 3.5, 5.0, 6.5, 8.0])

@@ -307,18 +307,45 @@ def test_a_line_with_no_traces_per_metre_explains_instead_of_raising(plugin, tmp
     assert _view(plugin)._velocity_curve == []
 
 
+def _time_zero_to(plugin, sample):
+    s = plugin.session
+    s.append_step(s.keys()[0], build_step("time_zero", mode="sample", sample=sample))
+    return _velocity_on(plugin)
+
+
 def test_a_radargram_not_at_time_zero_warns_and_names_the_step(plugin):
     dock = _velocity_on(plugin)
-    assert dock.view.transform.t0_ns != pytest.approx(0.0, abs=0.5)
     assert "time_zero" in dock.velocity_note.text()
 
 
-def test_after_a_time_zero_step_there_is_no_warning(plugin):
+# The fixture header puts sample 0 at -11.086 ns with dt = 0.2165 ns, so
+# time_zero at sample k leaves t0 = -11.086 + k * 0.2165: k=51 -> -0.043 ns,
+# k=50 -> -0.260, k=52 -> +0.173. Half a sample (0.108 ns) is the best a
+# whole-sample crop can promise, so only k=51 is "at time zero".
+def test_time_zero_at_the_nearest_sample_is_quiet(plugin):
+    dock = _time_zero_to(plugin, 51)
+    assert dock.velocity_note.text() == ""
+
+
+@pytest.mark.parametrize("sample", [50, 52, 49])
+def test_a_time_zero_more_than_half_a_sample_out_still_warns(plugin, sample):
+    dock = _time_zero_to(plugin, sample)
+    assert "time_zero" in dock.velocity_note.text()
+
+
+def test_the_tolerance_scales_with_the_sample_interval(plugin, tmp_path):
+    # 1000 ns over 512 samples: dt = 1.953 ns, so the closest crop (sample 6)
+    # leaves t0 = +0.63 ns. That is the best this file can do, so no warning.
     s = plugin.session
-    # The fixture header puts sample 0 at -11.086 ns; sample 51 is its zero.
-    s.append_step(s.keys()[0], build_step("time_zero", mode="sample", sample=51))
+    path = synthetic_dzt(tmp_path / "raw", "DEEP.DZT", n_traces=60, range_ns=1000.0)
+    line = Line.open(path, GridPlacement("A", "y", 5.0, 0.0))
+    s.add_lines([line])
+    key = s.line_key(line)
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=6))
     dock = _velocity_on(plugin)
-    assert dock.view.transform.t0_ns == pytest.approx(0.0, abs=0.5)
+    assert 0.5 < abs(dock.view.transform.t0_ns) < 0.5 * dock.view.transform.dt_ns
     assert dock.velocity_note.text() == ""
 
 
@@ -362,12 +389,70 @@ def test_save_fit_stores_it_without_changing_any_velocity(plugin):
     assert s.resolved_velocity(key) == before
     assert dock.velocity_label.text() == label_before
     assert len(line.velocity_fits) == 1
-    fit_id, stored = next(iter(line.velocity_fits.items()))
-    assert line.velocity_from_fit == fit_id
+    _, stored = next(iter(line.velocity_fits.items()))
+    # No override was made, so there is no fit that "produced" it.
+    assert line.velocity_from_fit is None
     assert stored.v_m_ns == pytest.approx(fit.v_m_ns)
     assert stored.apex_trace == APEX_TRACE
     assert [p[0] for p in stored.points] == [30, 15, 45, 5, 55]  # trace indices, not metres
     assert s.dirty
+
+
+def test_apply_after_save_names_the_saved_fit_as_the_overrides_source(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    dock.apply_line_button.click()
+    line = s.line_for_key(key)
+    (fit_id,) = line.velocity_fits
+    assert line.velocity is not None and line.velocity_from_fit == fit_id
+
+
+def test_apply_of_an_unsaved_fit_leaves_no_provenance(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    dock.apply_line_button.click()
+    assert s.line_for_key(key).velocity_from_fit is not None
+
+    _view(plugin).velocity_point_discarded.emit(4)  # a different, unsaved fit
+    dock.apply_line_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(dock.velocity_fit_result().v_m_ns)
+    assert line.velocity_from_fit is None  # a bare "line" beats a false provenance
+
+
+def test_save_alone_leaves_the_pointer_on_the_fit_that_drives_the_line(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    dock.apply_line_button.click()
+    (first,) = s.line_for_key(key).velocity_fits
+
+    _view(plugin).velocity_point_discarded.emit(4)
+    dock.save_fit_button.click()  # a second fit, stored but not applied
+
+    line = s.line_for_key(key)
+    assert len(line.velocity_fits) == 2
+    assert line.velocity_from_fit == first
+
+
+def test_apply_after_saving_a_different_fit_names_the_applied_one(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    _view(plugin).velocity_point_discarded.emit(4)
+    dock.save_fit_button.click()
+    dock.apply_line_button.click()
+
+    line = s.line_for_key(key)
+    second = [i for i, f in line.velocity_fits.items() if len(f.points) == 4]
+    assert line.velocity_from_fit == second[0]
 
 
 def test_save_fit_twice_keeps_both_under_distinct_ids(plugin):
@@ -459,3 +544,41 @@ def test_add_velocity_fit_and_set_velocity_from_fit_dirty_and_announce(plugin):
     s.set_velocity_from_fit(key, None)
     assert s.line_for_key(key).velocity_from_fit is None
     assert s.add_velocity_fit(key, stored) != fit_id
+
+
+def test_a_velocity_click_on_a_previewed_line_is_refused_with_a_message(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    errors = []
+    dock.error.connect(errors.append)
+    s.set_preview(s.keys()[1], 5)
+
+    _view(plugin).velocity_point_requested.emit(10, 25.0)
+
+    assert dock.velocity_points() == []
+    assert errors and "preview" in errors[0]
+
+
+def test_a_velocity_discard_on_a_previewed_line_changes_nothing(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    s.set_preview(s.keys()[1], 5)
+
+    _view(plugin).velocity_point_discarded.emit(0)
+
+    assert len(dock.velocity_points()) == 5
+
+
+def test_the_curve_and_points_are_not_painted_over_a_previewed_line(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    assert len(_view(plugin)._velocity_curve) == 200
+
+    s.set_preview(s.keys()[1], 5)
+
+    assert _view(plugin)._velocity_curve == []
+    assert _view(plugin)._velocity_points == []
+    assert len(dock.velocity_points()) == 5  # the working line's points are kept
+
+    s.clear_preview()  # and they come back when the preview ends
+    assert len(_view(plugin)._velocity_curve) == 200
+    assert len(_view(plugin)._velocity_points) == 5
