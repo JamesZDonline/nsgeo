@@ -142,17 +142,17 @@ def test_a_right_click_drops_the_nearest_point_not_the_first_in_range(plugin):
 
 
 def test_a_right_click_discards_only_within_the_tolerance(plugin):
-    from nsgeo_qgis.ui.profile_view import VELOCITY_DISCARD_PX
-
     v = _view(plugin)
     _check(plugin.act_velocity)
+    # The distances are literals on purpose: deriving them from
+    # VELOCITY_DISCARD_PX let a 100 px tolerance pass this test.
     _click(v, 40, 30)
     (p,) = v._velocity_positions(v.transform)
     pt = plugin.profile_dock.velocity_points()
 
-    _right_click_at(v, p, dx=VELOCITY_DISCARD_PX + 2)  # just outside
+    _right_click_at(v, p, dx=14)  # just outside the 12 px tolerance
     assert plugin.profile_dock.velocity_points() == pt
-    _right_click_at(v, p, dx=VELOCITY_DISCARD_PX - 2)  # just inside
+    _right_click_at(v, p, dx=10)  # just inside it
     assert plugin.profile_dock.velocity_points() == []
 
 
