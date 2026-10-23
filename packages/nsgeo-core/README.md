@@ -158,3 +158,4 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 |---|---|
 | `HyperbolaFit` | A fitted hyperbola: apex position, apex time, velocity, velocity standard error, RMS residual and point count. |
 | `fit_hyperbola` | Least-squares hyperbola through points in metres and nanoseconds; scans the apex near a guess. Raises `ValueError` when no physical fit exists. |
+| `StoredFit` | A fit as persisted on a `Line`: trace indices not metres, with the clicked points and a UTC timestamp, so several fits can later feed a Dix conversion. `to_dict` and `from_dict` give the survey-JSON form. |

@@ -14,12 +14,13 @@ the error says the velocity is unconstrained.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
 from nsgeo.velocity import C_M_PER_NS
 
-__all__ = ["HyperbolaFit", "fit_hyperbola"]
+__all__ = ["HyperbolaFit", "StoredFit", "fit_hyperbola"]
 
 _SEARCH_STEPS = 101
 
@@ -32,6 +33,47 @@ class HyperbolaFit:
     v_stderr_m_ns: float
     rms_ns: float
     n_points: int
+
+
+@dataclass(frozen=True)
+class StoredFit:
+    """A fit as persisted: trace indices, not metres, and the clicked points.
+
+    A fitted hyperbola measures the RMS velocity down to its own reflector, so
+    several fits at several depths are the raw input to a later Dix conversion.
+    The (t0, v) pair and the points are kept for that, not just a velocity.
+    """
+
+    t0_ns: float
+    v_m_ns: float
+    v_stderr_m_ns: float
+    rms_ns: float
+    apex_trace: int
+    points: tuple[tuple[int, float], ...]  # (trace index, two-way time ns)
+    fitted_at: str  # ISO-8601 UTC
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "t0_ns": self.t0_ns,
+            "v_m_ns": self.v_m_ns,
+            "v_stderr_m_ns": self.v_stderr_m_ns,
+            "rms_ns": self.rms_ns,
+            "apex_trace": self.apex_trace,
+            "points": [[trace, t_ns] for trace, t_ns in self.points],
+            "fitted_at": self.fitted_at,
+        }
+
+    @classmethod
+    def from_dict(cls, doc: dict[str, Any]) -> StoredFit:
+        return cls(
+            t0_ns=float(doc["t0_ns"]),
+            v_m_ns=float(doc["v_m_ns"]),
+            v_stderr_m_ns=float(doc["v_stderr_m_ns"]),
+            rms_ns=float(doc["rms_ns"]),
+            apex_trace=int(doc["apex_trace"]),
+            points=tuple((int(trace), float(t_ns)) for trace, t_ns in doc["points"]),
+            fitted_at=str(doc["fitted_at"]),
+        )
 
 
 def _solve(x_m: np.ndarray, t_ns: np.ndarray, apex_m: float, dof: int) -> HyperbolaFit | str:

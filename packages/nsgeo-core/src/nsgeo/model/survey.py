@@ -19,6 +19,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_fit import StoredFit
 
 #: How many lines' sample arrays stay resident. A 30x30 m grid at 0.5 m
 #: spacing is about 100 MB in total, so a bound of 16 lines is generous
@@ -72,6 +73,8 @@ class Line:
     placement: Placement
     n_traces: int
     velocity: VelocityModel | None = None
+    velocity_fits: Mapping[str, StoredFit] = field(default_factory=dict)
+    velocity_from_fit: str | None = None
 
     @classmethod
     def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:

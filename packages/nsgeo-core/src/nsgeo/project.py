@@ -12,6 +12,7 @@ absolute paths (see `save_site`).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_fit import StoredFit
 
 __all__ = [
     "ProjectError",
@@ -182,6 +184,10 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             entry["stack"] = stack.to_dicts()
         if line.velocity is not None:
             entry["velocity"] = line.velocity.to_dict()
+        if line.velocity_fits:
+            entry["velocity_fits"] = {fid: fit.to_dict() for fid, fit in line.velocity_fits.items()}
+        if line.velocity_from_fit is not None:
+            entry["velocity_from_fit"] = line.velocity_from_fit
         lines_data.append(entry)
 
     orphans = sorted(set(site.stacks) - set(keys_written))
@@ -244,7 +250,19 @@ def load_site(path: str | Path) -> Site:
                 velocity = VelocityModel.from_dict(entry["velocity"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(f"invalid velocity for line {entry['path']!r}: {exc}") from exc
-        lines.append(Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity))
+        fits: dict[str, StoredFit] = {}
+        try:
+            for fid, fit_doc in entry.get("velocity_fits", {}).items():
+                fits[fid] = StoredFit.from_dict(fit_doc)
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(f"invalid velocity fit for line {entry['path']!r}: {exc}") from exc
+        # Fits are evidence; a selection naming a fit that is gone is dropped
+        # rather than costing the user the file.
+        from_fit = entry.get("velocity_from_fit")
+        if from_fit not in fits:
+            from_fit = None
+        line = Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity)
+        lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))
         if "stack" in entry:
             try:
                 stacks[key] = StepStack.from_dicts(entry["stack"])
