@@ -155,8 +155,8 @@ GRID_COLOURS = ["#2f6fb2", "#c0392b", "#27ae60", "#8e44ad", "#d35400", "#16a085"
 # examined rather than left implicit: with 6 colours and an offset of 3, a
 # fourth grid's outline reuses the first grid's *line* colour. Lines and
 # grids are different layers with different geometry types (LineString vs.
-# Polygon) rendered as visually distinct symbols (solid fill vs. dashed
-# unfilled stroke) regardless of hue, so a same-hue collision between a
+# Polygon) rendered as visually distinct symbols (thin dashed lines vs. a
+# solid unfilled outline) regardless of hue, so a same-hue collision between a
 # 4th grid's outline and the 1st grid's lines is not the same confusion
 # this fix removes (a layer's own outline vs. its own lines) and is
 # accepted.
@@ -708,6 +708,8 @@ class SiteLayers(QObject):
         top. A new group so fills in LEGEND_ORDER, and a table reopened after
         the user removed it goes back to its place, not under the slice
         preview, without undoing any rearranging the user has done."""
+        if name == "grids":
+            return len(group.children())
         above = {
             self.layers[n].id()
             for n in LEGEND_ORDER[: LEGEND_ORDER.index(name)]
@@ -1678,17 +1680,24 @@ class SiteLayers(QObject):
         assert site is not None
         categories = []
         for i, grid in enumerate(site.grids):
+            # #66: thin and dashed, so the slice or imagery under a grid
+            # shows between the lines and through the gaps. Chosen by eye
+            # from renders over a real slice; 0.5 mm solid covered too much.
             symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
             symbol.setColor(QColor(GRID_COLOURS[i % len(GRID_COLOURS)]))
-            symbol.setWidth(0.5)
+            symbol.setWidth(0.2)
+            stroke = symbol.symbolLayer(0)
+            stroke.setUseCustomDashPattern(True)
+            stroke.setCustomDashVector([3.0, 2.0])  # mm on, mm off
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
 
     def _style_grids(self) -> None:
-        # A dashed, unfilled outline: the grid is a reference frame drawn
-        # over imagery and basemaps, and an opaque fill would hide the
-        # ground the user is judging its placement against. Categorised by
+        # An unfilled outline: the grid is a reference frame drawn over
+        # imagery and basemaps, and an opaque fill would hide the ground the
+        # user is judging its placement against. Solid, so it does not read
+        # like the dashed survey lines inside it (#66). Categorised by
         # `grid_id` and indexed by position in `site.grids`, same as
         # `_style_lines()` above, but offset by `_GRID_OUTLINE_OFFSET` so a
         # grid's outline colour is never the same as its own lines' colour
@@ -1702,10 +1711,10 @@ class SiteLayers(QObject):
             symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.PolygonGeometry)
             outline = symbol.symbolLayer(0)
             outline.setBrushStyle(Qt.BrushStyle.NoBrush)
-            outline.setStrokeStyle(Qt.PenStyle.DashLine)
+            outline.setStrokeStyle(Qt.PenStyle.SolidLine)
             colour_index = (i + _GRID_OUTLINE_OFFSET) % len(GRID_COLOURS)
             outline.setStrokeColor(QColor(GRID_COLOURS[colour_index]))
-            outline.setStrokeWidth(0.5)
+            outline.setStrokeWidth(0.4)
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
         self.layers["grids"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["grids"].triggerRepaint()

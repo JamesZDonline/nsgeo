@@ -132,7 +132,7 @@ def test_grid_in_another_crs_is_transformed_into_the_package_crs(populated):
     assert 100_000 < x < 900_000  # UTM easting, not a longitude
 
 
-def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
+def test_grids_layer_renders_as_a_solid_outline_with_no_fill(populated):
     """The grid polygon is a reference frame drawn over imagery: an opaque
     fill would hide the ground the user is judging placement against. This
     asserts on the renderer actually installed, not on a call being made --
@@ -156,7 +156,7 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     for symbol in by_grid.values():
         outline = symbol.symbolLayer(0)
         assert outline.brushStyle() == Qt.BrushStyle.NoBrush
-        assert outline.strokeStyle() == Qt.PenStyle.DashLine
+        assert outline.strokeStyle() == Qt.PenStyle.SolidLine  # #66: lines are the dashed ones
 
     # M5 follow-up (Finding 2): a grid's outline colour must now DIFFER
     # from the colour of its own lines (they used to share a palette
@@ -171,6 +171,20 @@ def test_grids_layer_renders_as_dashed_outline_with_no_fill(populated):
     lines_colours = {str(cat.value()): cat.symbol().color().name() for cat in line_cats}
     for grid_id, symbol in by_grid.items():
         assert symbol.symbolLayer(0).strokeColor().name() != lines_colours[grid_id]
+
+
+def test_survey_lines_are_thin_and_dashed(populated):
+    """#66: 0.5 mm solid lines at 0.5 m spacing covered too much of a slice
+    or imagery under them. The user chose thin dashed lines from renders
+    over a real slice."""
+    _, layers, _ = populated
+    categories = list(layers.layers["lines"].renderer().categories())
+    assert categories
+    for category in categories:
+        stroke = category.symbol().symbolLayer(0)
+        assert category.symbol().width() == pytest.approx(0.2)
+        assert stroke.useCustomDashPattern()
+        assert list(stroke.customDashVector()) == [3.0, 2.0]
 
 
 # --- M8 acceptance walkthrough, Finding B: style `picks` ONCE, at table
