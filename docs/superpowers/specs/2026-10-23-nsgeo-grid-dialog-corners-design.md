@@ -85,21 +85,18 @@ Claude's calls, not the user's.
 - **C1. Fit only runs when Fit is pressed.** Filling from a polygon, picking, rotating and editing
   cells never re-fit. Until Fit is pressed again, the role tags show the new corners and the
   dashed outline shows the old fit.
-- **C2. Picks always snap, generously.** The user asked for exactly this after reading the
-  design: *"can we enable some sort of "snapping" for the picker, so It is easy to grab
-  corner/points without having to zoom way in to them?"* So:
-  - The radius is **20 px** on screen, whatever the zoom, against QGIS's default of 12. A
-    corner can be grabbed from a zoomed-out view.
+- **C2. Picks always snap.** The user asked for snapping "so It is easy to grab corner/points
+  without having to zoom way in to them", then confirmed QGIS's usual **12 px** radius is
+  fine. So:
+  - **The radius is 12 px on screen,** whatever the zoom. It is a constant, so it is easy to
+    tune after the walkthrough.
   - **Point features win over vertices.** Within the radius, the nearest point feature (a GPS
     fix) is taken before any polygon or line vertex (a drawn polygon, an overlay map). Only
     with no point in range does the nearest vertex win.
   - **The target is named before the click.** A snap marker sits on it, with a label naming
-    the feature and its layer (for example `G4 · gps_corners`). With the larger radius pulling
-    in more candidates, the user can see which one they'll get.
+    the feature and its layer (for example `G4 · gps_corners`), as in the mock-up.
   - It works whatever the project's snapping settings. A click with nothing in range gives a
     free point.
-
-  The radius is a constant, so it is easy to tune after the walkthrough.
 - **C3. The dialog hides while picking**, as Digitise does today, and the QGIS message bar says
   which corner to click next.
 - **C4. The automatic CRS never replaces a CRS the user chose by hand**, and never changes an
@@ -267,7 +264,7 @@ travel with their points, and the two Size boxes swap, typed state included (C12
 A new one-click map tool replaces `DigitiseGridTool`:
 
 - **Snapping (C2):** its own `QgsMapCanvasSnappingUtils` with its own `QgsSnappingConfig`
-  (enabled, all layers, vertex type, 20 px). The project's snapping settings are neither read
+  (enabled, all layers, vertex type, 12 px). The project's snapping settings are neither read
   nor changed.
   - Points win over vertices in two passes. The first `snapToMap` takes a
     `QgsPointLocator.MatchFilter` that accepts only point-geometry layers. The second, used only
@@ -390,8 +387,8 @@ Remove every mention of **Digitise on map** from user-facing text. That includes
   This replaces `test_use_polygon_refuses_a_geographic_crs_layer`.
 - **Picks:**
   - Picks on a 4326 canvas land in the table converted correctly.
-  - A click 15 px from a point feature snaps to it. A click 25 px away is free.
-  - A point feature 18 px away wins over a polygon vertex 5 px away.
+  - A click 8 px from a point feature snaps to it. A click 16 px away is free.
+  - A point feature 10 px away wins over a polygon vertex 4 px away.
   - The label names the snapped feature, and the click uses the match that was shown.
 - **Pick all and cancelling:** right-click skips a corner, Esc stops, and switching tools
   cancels. Each of these brings the dialog back and clears the message bar.
