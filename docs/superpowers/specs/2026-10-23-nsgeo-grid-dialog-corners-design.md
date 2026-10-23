@@ -149,7 +149,7 @@ Top to bottom (see the mock-up, option B):
     coordinates, **from**, a **Pick** button, and **off by**.
     - **from** says where the point came from: `typed`; for a pick, the snapped layer and
       feature (by the layer's display expression), or `free click`; for a polygon,
-      `v2 · NE` (vertex index and compass position, §4.6). Editing a cell by hand turns that
+      `v2 NE` (vertex index and compass position, §4.6). Editing a cell by hand turns that
       row's **from** into `typed`.
     - **off by** shows the distance in metres from that corner to the matching corner of the
       grid as the form defines it now (C13). It is blank while that grid can't be drawn
@@ -252,8 +252,13 @@ combos. **Fill**:
 2. Converts the vertices to **Corners in**.
 3. Assigns the four roles so the frame is right-handed (the rule in `corners_from_polygon`), with
    the origin at the vertex whose +Y edge points closest to north (C9).
-4. Labels each row `v<i> · <compass>`, where compass is the vertex's 8-way direction from the
-   ring's centroid.
+4. Labels each row `v<i> <compass>` (for example `v2 NE`), where compass is the vertex's
+   8-way direction from the ring's centroid.
+
+When **Corners in** is geographic, steps 3 and 4 work on (lon · cos φ̄, lat), where φ̄ is the
+ring's mean latitude, so that a degree of longitude is not mistaken for a degree of latitude.
+At 36° N that difference alone would shift a bearing of 245° to 249°, across the SW/W
+boundary.
 
 **⟳ Rotate** moves every role one corner round the frame, keeping it right-handed. Four presses
 return to the start. It works the same whichever way the rows were filled. The **from** labels
@@ -356,8 +361,8 @@ Nothing is added to the project or the layer tree.
 Rewrite "Step 2: Place a grid" in `docs/guide/getting-started.md` for the one corner table:
 typing, Pick and Pick all, Fill from a polygon, Rotate, Fit, the automatic CRS, and the size rule.
 Remove every mention of **Digitise on map** from user-facing text. That includes
-`nsgeo_qgis/metadata.txt` (`about` and the changelog line) and the root `README.md`. The
-0.1.0 release notes stay as they are, because they are history.
+`nsgeo_qgis/metadata.txt`'s `about` and the root `README.md`. The 0.1.0 changelog entry in
+`metadata.txt` and the 0.1.0 release notes stay as they are, because they are history.
 
 ---
 
