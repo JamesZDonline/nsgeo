@@ -147,7 +147,8 @@ Each is a real failure mode, not a formality.
 | `v > C_M_PER_NS` | Faster than light in vacuum. `velocity.py` already defines the constant; a fit returning this was given something that is not a diffraction. |
 | Singular design matrix | Every point at the same dx. The fully degenerate form of clustered points. |
 
-**Three points is necessary and not sufficient**, and the standard error is what catches the rest.
+**Clearing that minimum is necessary and not sufficient**, and the standard error is what catches
+the rest.
 Points clustered near the apex have a tiny lever arm in dx², so 1/v² is barely constrained — and
 the RMS residual looks *excellent*, because a near-degenerate fit passes beautifully through its
 own clustered points. Reporting σ is what makes "the tool can tell you it fitted badly" true in
