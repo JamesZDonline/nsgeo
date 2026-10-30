@@ -17,7 +17,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
-from nsgeo_qgis.slices_plan import format_bytes
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, format_bytes
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -147,8 +147,8 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.normalisation_panel.method() == "none"
     spin = dock.radius_spacing_spin
     assert spin.suffix() == " × line spacing"
-    assert (spin.minimum(), spin.maximum(), spin.singleStep(), spin.value()) == (0, 10, 0.25, 1.5)
-    assert "A 2.25 m" in spin.toolTip()  # 1.5 x A's 1.5 m spacing
+    assert (spin.minimum(), spin.maximum(), spin.singleStep(), spin.value()) == (0, 10, 0.25, 0.5)
+    assert "A 0.75 m" in spin.toolTip()  # 0.5 x A's 1.5 m spacing (#81)
 
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
@@ -285,7 +285,7 @@ def test_refreshing_the_grid_list_reads_each_line_once(plugin, monkeypatch):
     table = dock.site_panel.table
     assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
-    assert "A 2.25 m" in dock.radius_spacing_spin.toolTip()
+    assert "A 0.75 m" in dock.radius_spacing_spin.toolTip()
 
 
 def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
@@ -363,6 +363,24 @@ def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
     whole_site(plugin)
     assert dock.site_panel.transform() == "amp_envelope"
     assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
+
+
+def test_the_site_starts_from_square_and_a_0_2_m_cell(plugin):
+    """#81, in Whole site: with nothing stored the transform falls back to
+    This grid's, which starts on Square, and the cell follows This grid's
+    rule (site3's 1.5 m spacing does not clamp 0.2 m)."""
+    dock = whole_site(plugin)
+    assert dock.site_panel.transform() == "amp_square"
+    assert dock.site_engine.engine_for("A").choice.transform == "amp_square"
+    assert dock.cell_spin.value() == pytest.approx(0.2)
+
+
+def test_a_remembered_none_transform_is_kept_over_the_default(plugin):
+    """#81: a default only fills a gap. A site that remembers "none" keeps it."""
+    plugin.session.set_site_view(transform="none")
+    dock = whole_site(plugin)
+    assert dock.site_panel.transform() == "none"
+    assert dock.site_engine.engine_for("A").choice.transform == NO_TRANSFORM
 
 
 def test_both_scopes_legends_name_the_transform_by_title(plugin):
@@ -625,8 +643,8 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
     try:
         md = ds.GetMetadata()
         assert md["NSGEO_SITE_NORMALISATION"] == "background"
-        assert md["NSGEO_SITE_TRANSFORM"] == "none"
-        assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 1.5
+        assert md["NSGEO_SITE_TRANSFORM"] == "amp_square"  # #81's default
+        assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 0.5
         assert [g["grid_id"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == ["A", "B", "C"]
         thickness, step = dock.thickness_step_levels()  # the dock's own, on the site axis
         assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1

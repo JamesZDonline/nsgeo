@@ -62,11 +62,15 @@ from nsgeo_qgis.slice_export import ViewSettings, recipe_from_record
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
+    DEFAULT_CELL_M,
+    DEFAULT_RADIUS_SPACINGS,
+    DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
     Resolution,
     SiteSource,
     SourceChoice,
+    default_cell,
     depth_scroll_delta,
     estimate_memory,
     format_bytes,
@@ -366,7 +370,7 @@ class SlicesDock(QgsDockWidget):
         self.cell_spin.setRange(0.01, 5.0)
         self.cell_spin.setDecimals(3)
         self.cell_spin.setSuffix(" m")
-        self.cell_spin.setValue(0.5)
+        self.cell_spin.setValue(DEFAULT_CELL_M)
         # Qt defaults `singleStep` to 1.0 whatever the range or the
         # decimals. On a control spanning 0.01-5.0 m that made ONE press
         # of the down-arrow clamp 0.5 m straight to the 0.01 m minimum --
@@ -456,7 +460,7 @@ class SlicesDock(QgsDockWidget):
         self.radius_spin.setToolTip(
             "Fills cells that no line crossed from their neighbours within "
             "this distance (spec 6.4).\n"
-            "Default is 1.5 x the line spacing. The binned truth is kept "
+            "Default is 0.5 x the line spacing. The binned truth is kept "
             "underneath either way -- tick Show coverage to see it, and set "
             "this to 0 to display it unfilled."
         )
@@ -469,7 +473,7 @@ class SlicesDock(QgsDockWidget):
         self.radius_spacing_spin.setDecimals(2)
         self.radius_spacing_spin.setSingleStep(0.25)
         self.radius_spacing_spin.setSuffix(" × line spacing")
-        self.radius_spacing_spin.setValue(1.5)
+        self.radius_spacing_spin.setValue(DEFAULT_RADIUS_SPACINGS)
         resolution_form.addRow("Fill radius", self.radius_spacing_spin)
         self._resolution_form = resolution_form
         site_scope.set_row_visible(self, self.radius_spacing_spin, False)
@@ -583,6 +587,9 @@ class SlicesDock(QgsDockWidget):
         # (grid_combo was still empty, so `source_choice()` was `None`).
         # `grid_combo`/`preset_combo` are rebuilt from the session instead,
         # in `rebuild_source` below.
+        # #81: start on Square. Set here, above the connect block, for the
+        # same reason: nothing is listening yet. Not offered, it stays on None.
+        self.transform_combo.set_value(DEFAULT_TRANSFORM)
 
         # `clicked` carries a `bool checked` that a direct
         # `.connect(self.choose_lines_requested.emit)` would pass straight
@@ -1663,8 +1670,8 @@ class SlicesDock(QgsDockWidget):
         branch, so an unrelated session signal never overwrites a value
         the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and spec 6.4's 1.5x-spacing fill radius -- both need
-        only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
+        spacing", and #81's 0.2 m cell and half-spacing fill radius -- both
+        need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.
         """
@@ -1682,8 +1689,8 @@ class SlicesDock(QgsDockWidget):
         # does run away (walkthrough round 2, W7).
         floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
         self.cell_spin.setMinimum(floor)
-        self.cell_spin.setValue(max(floor, min(0.5, grid.default_spacing / 2.0)))
-        self.radius_spin.setValue(1.5 * grid.default_spacing)
+        self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
+        self.radius_spin.setValue(DEFAULT_RADIUS_SPACINGS * grid.default_spacing)
         self._seed_dz_z_defaults(grid_id)
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:

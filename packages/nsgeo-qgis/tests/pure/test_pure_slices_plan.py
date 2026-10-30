@@ -311,6 +311,20 @@ def test_the_fill_radius_follows_each_grids_own_line_spacing():
         radius_cells_for(0.5, 1.5, 0.0)
 
 
+def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
+    """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
+    line the detail is set by the trace spacing, so a widely spaced grid
+    keeps fine cells. Spec 4's "no larger than half the line spacing"
+    still caps it, and the frame's affordable floor (`smallest_safe_cell`,
+    walkthrough W7) still wins over both."""
+    from nsgeo_qgis.slices_plan import default_cell
+
+    assert default_cell(0.5, 0.01) == pytest.approx(0.2)
+    assert default_cell(1.0, 0.01) == pytest.approx(0.2)  # not 0.4: fixed, not relative
+    assert default_cell(0.25, 0.01) == pytest.approx(0.125)  # half the spacing
+    assert default_cell(0.5, 0.3) == pytest.approx(0.3)  # the floor wins
+
+
 def test_limit_windows_are_the_abutting_windows_and_the_thinner_tail():
     """Below the cap, `limit_windows` is exactly what
     `SliceEngine.shared_limit` measures over: `plan_windows(z, t, t)` plus

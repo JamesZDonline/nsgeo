@@ -185,10 +185,10 @@ def test_shared_limit_measures_the_filled_array_actually_displayed(qgis_app, tmp
     stretch over the UNFILLED slice (`self._slice(w)[0]`), while what
     `refresh_slice()` actually displays is `fill(values, coverage,
     radius_cells())` -- so the default (shared) stretch measured something
-    never drawn. Reproduced at the dock's own seeded defaults on this
-    repo's real DZT files: thickness 23 levels (thickness_spin's default
-    5.0 ns at this dz), radius 0.75 m / cell 0.25 m -> 3 cells (1.5x
-    `default_spacing` / half of it -- the dock's own seed formulas).
+    never drawn. Reproduced at the dock's seeded defaults of the time on
+    this repo's real DZT files: thickness 23 levels (thickness_spin's
+    default 5.0 ns at this dz), radius 0.75 m / cell 0.25 m -> 3 cells
+    (1.5x `default_spacing` / half of it -- the seed formulas before #81).
 
     `reported` (what the engine now returns) must equal `correct` (the
     same shared-stretch measurement, computed independently here by
@@ -231,7 +231,7 @@ def test_shared_limit_measures_the_filled_array_actually_displayed(qgis_app, tmp
     try:
         for transform, clip_cls in (
             ("amp_envelope", UnipolarClip),
-            (NO_TRANSFORM, PercentileClip),  # transform_combo's out-of-the-box default
+            (NO_TRANSFORM, PercentileClip),  # transform_combo's "none"
         ):
             engine.set_source(
                 SourceChoice(
