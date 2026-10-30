@@ -941,6 +941,99 @@ def test_leaving_the_site_waits_out_a_task_that_outlived_its_cancel(plugin, monk
     assert counter.max_concurrent == 1
 
 
+def test_this_grid_opens_the_grid_selected_in_the_site_list(plugin):
+    """#70: Whole site's selected row names the grid This grid opens."""
+    dock = plugin.slices_dock
+    whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    site_z = dock.site_engine.site_z
+    site_top = site_z.t0_ns + dock.slice_slider.value() * site_z.dz_ns
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    assert dock.engine.choice.grid_id == "B"
+    z = dock.engine.z
+    back_top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    assert abs(back_top - site_top) <= z.dz_ns / 2 + 1e-9
+    assert not plugin.session.dirty
+
+
+def test_this_grid_opens_the_selected_grid_with_its_remembered_source(plugin, site3):
+    plugin.session.remember_slice_source("B", preset="raw", lines=site3.keys("B")[:2])
+    dock = whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == "raw"
+    assert dock.included_keys() == site3.keys("B")[:2]
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_with_this_grids_own_grid_selected_it_comes_back_as_it_was_left(plugin):
+    dock = plugin.slices_dock
+    cell, palette = dock.cell_spin.value(), dock.palette_combo.currentText()
+    whole_site(plugin)
+    assert dock.site_panel.selected_grid() in (None, "A")
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.cell_spin.value() == pytest.approx(cell)
+    assert dock.palette_combo.currentText() == palette
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.grid_id == "A"
+
+
+def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cancel(
+    plugin, monkeypatch
+):
+    """#70 with R-P5: the switch owes B's preparation; it runs only once the
+    site's task, which outlived its bounded cancel, has stopped."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    assert spin_until(lambda: counter.concurrent == 1)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    assert not dock.engine.is_running, "This grid waits for it"
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    assert counter.max_concurrent == 1
+
+
+def test_a_selected_grid_removed_meanwhile_falls_back_to_this_grids_own(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.site_panel.select_grid("C")
+    plugin.session.remove_grid("C", with_lines=True)
+    _events()
+    # The panel's rebuild moves its selection to a surviving row (B), so pin
+    # the guard itself: a selection naming a grid This grid no longer offers.
+    monkeypatch.setattr(dock.site_panel, "selected_grid", lambda: "C")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    assert errors == []
+
+
+def test_a_failure_inside_resume_still_hands_this_grids_moves_back(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    real = dock._refresh_source_status
+    calls = []
+
+    def boom():
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("boom")
+        real()
+
+    monkeypatch.setattr(dock, "_refresh_source_status", boom)
+    with pytest.raises(RuntimeError):
+        dock.set_scope("grid")
+    assert dock.engine.on_grid_moved is None
+
+
 def test_moving_this_grids_grid_while_a_site_task_outlives_its_cancel_never_overlaps(
     plugin, monkeypatch
 ):

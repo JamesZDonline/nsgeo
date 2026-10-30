@@ -2233,27 +2233,76 @@ class SlicesDock(QgsDockWidget):
             self.error.emit(f"could not switch the slice scope: {exc}")
 
     def _resume_grid(self, top: float | None) -> None:
-        """Back to This grid exactly as it was left, at the site's window time."""
-        if self._grid_spins is not None:
-            site_scope.restore_spins(self, self._grid_spins)
-        self._refill_palette_combo()
-        if self.palette_combo.findText(self._grid_palette) >= 0:
-            self.palette_combo.blockSignals(True)
-            try:
-                self.palette_combo.setCurrentText(self._grid_palette)
-            finally:
-                self.palette_combo.blockSignals(False)
-        self._follow_record_changed_in_site()
-        self._pending_top_ns = top
-        self._sync_grid_slider()
+        """Back to This grid at the site's window time (#70).
+
+        A row selected in the site list that names another offered grid opens
+        that grid, with its remembered preset and lines (`_switch_resumed_grid`);
+        with no such row This grid comes back exactly as it was left. Either
+        way the hand-back of This grid's moves runs from a `finally` (#75
+        F-9): an exception in the restore must not leave `on_grid_moved` on
+        `_mark_grid_stale`, or a moved grid would never re-prepare.
+        """
+        try:
+            target = self._grid_to_resume()
+            if target is not None:
+                # The left grid's spins and palette are not the target's: its
+                # own seeds and remembered source come from `_sync_included`,
+                # and the palette from its preparation landing.
+                self._switch_resumed_grid(target)
+                self._pending_top_ns = top
+                self._sync_grid_slider()
+                return
+            if self._grid_spins is not None:
+                site_scope.restore_spins(self, self._grid_spins)
+            self._refill_palette_combo()
+            if self.palette_combo.findText(self._grid_palette) >= 0:
+                self.palette_combo.blockSignals(True)
+                try:
+                    self.palette_combo.setCurrentText(self._grid_palette)
+                finally:
+                    self.palette_combo.blockSignals(False)
+            self._follow_record_changed_in_site()
+            self._pending_top_ns = top
+            self._sync_grid_slider()
+            self._refresh_source_status()
+            if self._grid_prepared_away:
+                self._grid_prepared_away = False
+                self._on_prepared()
+            else:
+                self.refresh_slice()
+        finally:
+            # Always: it also hands This grid's moves back to its engine (D2).
+            self._run_pending_grid_prepare()
+
+    def _grid_to_resume(self) -> str | None:
+        """The site list's selected grid, when This grid offers it and it is
+        not the grid This grid already shows (#70); else None."""
+        grid_id = self.site_panel.selected_grid()
+        if grid_id is None or grid_id == self.grid_combo.currentText():
+            return None
+        if self.grid_combo.findText(grid_id) < 0:
+            return None
+        return grid_id
+
+    def _switch_resumed_grid(self, grid_id: str) -> None:
+        """Open `grid_id` in This grid, as `_on_source_changed` would for a
+        combo pick minus what the switch is not (#70). It is not a source
+        choice, so nothing is remembered (`_remember_source`); and its
+        preparation is owed through `_grid_prepare_pending` rather than
+        started here, so `_run_pending_grid_prepare` runs it only once no
+        site task is live (R-P5)."""
+        self._pending_palette = None  # a source change, not a restore
+        self._updating += 1
+        try:
+            self.grid_combo.setCurrentText(grid_id)
+        finally:
+            self._updating -= 1
+        self._mark_cube_unsaved()
+        self._sync_included()
+        self._update_included_label()
         self._refresh_source_status()
-        if self._grid_prepared_away:
-            self._grid_prepared_away = False
-            self._on_prepared()
-        else:
-            self.refresh_slice()
-        # Always: it also hands This grid's moves back to its engine (D2).
-        self._run_pending_grid_prepare()
+        self._grid_prepared_away = False
+        self._grid_prepare_pending = True
 
     def _grid_record(self) -> tuple[Any, Any] | None:
         grid_id = self.grid_combo.currentText()
