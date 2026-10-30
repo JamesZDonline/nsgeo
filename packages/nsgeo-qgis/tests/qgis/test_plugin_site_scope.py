@@ -460,6 +460,25 @@ def test_removing_every_remembered_line_reads_as_every_line_in_both_scopes(plugi
     assert dock.line_choice_keys("A") == rest
 
 
+def test_a_live_choice_emptied_by_removal_reads_as_every_line_in_both_scopes(plugin, site3):
+    """#74: the same removal with This grid ON A, holding an explicit choice.
+    Its live set used to prune to `()` (no lines) while the site read every line."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    chosen = site3.keys("A")[:2]
+    rest = site3.keys("A")[2:]
+    assert dock.grid_combo.currentText() == "A"
+    dock.set_included(chosen)
+    record = session.slice_source("A")
+    session.remove_lines(chosen)
+    assert session.slice_source("A") == record  # the fall-back writes nothing
+    assert site_scope.source_keys(session, "A") == rest
+    assert dock.included_keys() == rest
+    assert dock.line_choice_keys("A") == rest
+
+
 def test_a_source_edit_after_emptying_does_not_change_what_the_site_prepares(plugin):
     dock = plugin.slices_dock
     dock.grid_combo.setCurrentText("B")

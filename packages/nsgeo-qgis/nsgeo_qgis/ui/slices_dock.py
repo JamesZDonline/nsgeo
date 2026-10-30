@@ -793,7 +793,10 @@ class SlicesDock(QgsDockWidget):
         1, Important 1), re-seed it -- more lines may have arrived under
         this same grid since it was last seeded -- and only once the user
         has made an explicit choice does this fall back to pruning stale
-        keys, keeping survey order.
+        keys, keeping survey order. A prune that empties a non-empty choice
+        (every chosen line removed) returns to the seeded default instead,
+        the reading `_restore_remembered_source` and the site give an
+        emptied choice (#74).
 
         An inclusion list carried over from a different grid means
         nothing here -- the whole point of `_default_included` is to
@@ -837,7 +840,16 @@ class SlicesDock(QgsDockWidget):
             self._seed_dz_z_defaults(grid_id)
             return
         valid = set(self.session.keys()) if self.session.is_open else set()
-        self._included = tuple(k for k in self._included if k in valid)
+        pruned = tuple(k for k in self._included if k in valid)
+        if self._included and not pruned:
+            # #74: removal took every line the user had chosen. An empty set
+            # is no choice (the site reads the same record as every line), so
+            # fall back to the default. Nothing is remembered: the record
+            # stands, and `source_keys` reads it the same way.
+            self._included = self._default_included(grid_id)
+            self._included_is_default = True
+            return
+        self._included = pruned
 
     def _restore_remembered_source(self, grid_id: str | None) -> None:
         """M12 spec 4.2: bring back the preset and lines the user chose for
