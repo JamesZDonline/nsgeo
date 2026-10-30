@@ -268,50 +268,55 @@ def test_applying_a_fit_stores_its_exact_velocity_not_the_spin_boxs_rounding(plu
 # ---- the disagreement flag, pinned with literal numbers ---------------------
 
 
-def test_two_fits_disagreeing_beyond_their_combined_sigma_are_flagged(plugin):
-    # combined sigma = sqrt(0.002**2 + 0.002**2) = 0.00283; the gap is 0.030
+def test_two_fits_far_apart_are_flagged(plugin):
+    # sigma 0.002 each: 2*hypot = 0.00566; the gap is 0.030
     ids, flagged, dialog = _flagged(plugin, (0.090, 0.002), (0.120, 0.002))
     assert flagged == frozenset(ids)
     assert dialog.flag_text(0) and dialog.flag_text(1)  # the rows say so too
 
 
-def test_a_gap_just_over_the_combined_sigma_is_flagged_which_a_summed_sigma_would_miss(plugin):
-    # gap 0.003 > 0.00283, but < 0.004 (sigma1 + sigma2)
-    ids, flagged, _ = _flagged(plugin, (0.090, 0.002), (0.093, 0.002))
-    assert flagged == frozenset(ids)
-
-
-def test_a_gap_just_under_the_combined_sigma_is_not_flagged_which_a_single_sigma_would_flag(plugin):
-    # gap 0.0025 < 0.00283, but > 0.002 (one sigma)
-    _, flagged, dialog = _flagged(plugin, (0.090, 0.002), (0.0925, 0.002))
+def test_the_walkthrough_pair_one_sigma_apart_is_not_flagged(plugin):
+    # Real fits from the M13 walkthrough: 0.0701 +- 0.0018 and 0.0733 +- 0.0024.
+    # Gap 0.0032, hypot 0.0030 (1.07 sigma): indistinguishable. The old 1-sigma
+    # rule flagged this pair; 2*hypot is 0.0060.
+    _, flagged, dialog = _flagged(plugin, (0.0701, 0.0018), (0.0733, 0.0024))
     assert flagged == frozenset()
     assert not dialog.flag_text(0) and not dialog.flag_text(1)
 
 
-def test_two_fits_agreeing_within_their_combined_sigma_are_not_flagged(plugin):
-    _, flagged, _ = _flagged(plugin, (0.090, 0.002), (0.092, 0.002))
+def test_a_gap_of_about_two_and_a_half_sigma_is_not_flagged_which_a_summed_sigma_would_flag(plugin):
+    # sigma 0.002 each: gap 0.0050 is under 2*hypot (0.00566) but over the sum
+    # of the sigmas (0.004)
+    _, flagged, _ = _flagged(plugin, (0.0900, 0.002), (0.0950, 0.002))
     assert flagged == frozenset()
 
 
-def test_unequal_sigmas_combine_in_quadrature_not_by_the_larger(plugin):
-    # sigmas 0.001 and 0.004: combined 0.00412. A gap of 0.0041 is inside it,
-    # though beyond the larger sigma alone (0.004).
-    _, flagged, _ = _flagged(plugin, (0.0900, 0.001), (0.0941, 0.004))
+def test_a_gap_just_over_two_combined_sigma_is_flagged(plugin):
+    # sigma 0.002 each: gap 0.0060 is over 2*hypot (0.00566), under 3*hypot (0.0085)
+    ids, flagged, _ = _flagged(plugin, (0.0900, 0.002), (0.0960, 0.002))
+    assert flagged == frozenset(ids)
+
+
+def test_unequal_sigmas_a_gap_inside_twice_the_quadrature_sum_is_not_flagged(plugin):
+    # sigmas 0.001 and 0.004: 2*hypot = 0.00825. A gap of 0.0080 is inside it,
+    # though well beyond hypot alone (0.00412).
+    _, flagged, _ = _flagged(plugin, (0.0900, 0.001), (0.0980, 0.004))
     assert flagged == frozenset()
 
 
-def test_unequal_sigmas_a_gap_beyond_the_quadrature_sum_is_flagged(plugin):
-    ids, flagged, _ = _flagged(plugin, (0.0900, 0.001), (0.0943, 0.004))
+def test_unequal_sigmas_a_gap_beyond_twice_the_quadrature_sum_is_flagged(plugin):
+    # the same sigmas, gap 0.0084 over 0.00825
+    ids, flagged, _ = _flagged(plugin, (0.0900, 0.001), (0.0984, 0.004))
     assert flagged == frozenset(ids)
 
 
 def test_flagging_is_per_pair_so_the_fit_that_agrees_with_both_neighbours_is_not_flagged(plugin):
-    # sigma 0.003 each: combined 0.00424. a-b gap 0.0025 and b-c gap 0.0025
-    # are inside it; a-c gap 0.005 is outside it.
+    # sigma 0.003 each: 2*hypot = 0.00849. a-b gap 0.0050 and b-c gap 0.0050
+    # are inside it; a-c gap 0.0100 is outside it.
     s, key = plugin.session, plugin.session.keys()[0]
     a = s.add_velocity_fit(key, _stored(10.0, 0.0900, 0.003))
-    s.add_velocity_fit(key, _stored(30.0, 0.0925, 0.003))
-    c = s.add_velocity_fit(key, _stored(50.0, 0.0950, 0.003))
+    s.add_velocity_fit(key, _stored(30.0, 0.0950, 0.003))
+    c = s.add_velocity_fit(key, _stored(50.0, 0.1000, 0.003))
     assert _dialog(plugin).flagged_fit_ids() == frozenset({a, c})
 
 
