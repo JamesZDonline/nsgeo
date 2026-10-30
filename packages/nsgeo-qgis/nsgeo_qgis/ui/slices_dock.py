@@ -1338,6 +1338,10 @@ class SlicesDock(QgsDockWidget):
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
             clamped = self._clamp_z_to_prepared()
+            # A carried-over time no apply has placed yet (a reopened survey
+            # prepares with nothing owed) lands on this axis now, else it
+            # would override the user's next resolution change (#70).
+            self._sync_grid_slider()
             # Final review, Important 1 (part 3): the cache's key
             # (`n_levels`, `engine.choice`, `engine.mode`, `radius_cells`)
             # cannot always tell a re-preparation happened -- `_on_grids_
@@ -1842,6 +1846,12 @@ class SlicesDock(QgsDockWidget):
             if self._scope == "site":
                 self._apply_site_resolution()
                 return
+            if self._resolution_owed:
+                # #70: the engine still holds the grid that was left, and the
+                # owed apply after `prepare()` reads these same spins, so
+                # applying them to it now would only draw B's settings onto
+                # A's lines (a spurious "does not cover" error).
+                return
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
@@ -1902,6 +1912,9 @@ class SlicesDock(QgsDockWidget):
             # a cell-only change) generally moves the slider's own clamped
             # value, so this was invisible to a debounce test that only
             # ever varies `cell_spin`.
+            if new_z is not None:
+                # Placed below: consumed, so it cannot override a later change.
+                self._pending_top_ns = None
             self.slice_slider.blockSignals(True)
             try:
                 self.slice_slider.setRange(0, max(0, nz - 1))
@@ -2209,14 +2222,18 @@ class SlicesDock(QgsDockWidget):
             top = self._site.shown_top()
         else:
             z = self.engine.z
-            top = (
-                self._pending_top_ns if z is None else z.t0_ns + self.slice_slider.value() * z.dz_ns
-            )
+            # A carried-over time still pending is the truth: the slider may
+            # still hold an index read on the axis of a grid just left (#70).
+            if self._pending_top_ns is not None or z is None:
+                top = self._pending_top_ns
+            else:
+                top = z.t0_ns + self.slice_slider.value() * z.dz_ns
         if scope == "site":
             self._grid_spins = site_scope.capture_spins(self)
             self._grid_palette = self.palette_combo.currentText()
             self._grid_record_at_entry = self._grid_record()
             self._scope = "site"
+            self._resolution_owed = False  # the owed grid was never prepared
             # R-P5: a moved grid's This-grid engine clears itself and owes a
             # preparation, rather than re-preparing beside the site's.
             self.engine.on_grid_moved = self._mark_grid_stale

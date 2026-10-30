@@ -991,13 +991,19 @@ def test_with_this_grids_own_grid_selected_it_comes_back_as_it_was_left(plugin):
     assert dock.engine.choice.grid_id == "A"
 
 
-def _narrow_a_then_site_mid_window(dock):
+def _spurious(errors):
+    """Errors but the engine's own note that a 1 ms cancel gave up waiting."""
+    return [e for e in errors if "did not stop in time" not in e]
+
+
+def _narrow_a_then_site_mid_window(plugin):
     """A narrowed This-grid z range and a site time well inside the window: a
     time clamped to the left grid's axis would not survive (#70, Ruling 6)."""
+    dock = plugin.slices_dock
     dock.z1_spin.setValue(dock.z0_spin.value() + (dock.z1_spin.value() - dock.z0_spin.value()) / 3)
     dock.flush_debounce()
     _events()
-    whole_site(dock.plugin_for_test)
+    whole_site(plugin)
     dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
     _events()
     return dock._site.shown_top()
@@ -1013,8 +1019,7 @@ def _assert_on_b_axis(dock, site_top):
 
 def test_the_opened_grid_lands_on_the_site_time_not_the_left_grids_clamp(plugin):
     dock = plugin.slices_dock
-    dock.plugin_for_test = plugin
-    site_top = _narrow_a_then_site_mid_window(dock)
+    site_top = _narrow_a_then_site_mid_window(plugin)
     dock.site_panel.select_grid("B")
     dock.grid_scope_button.click()
     _assert_on_b_axis(dock, site_top)
@@ -1028,8 +1033,9 @@ def test_the_opened_grid_lands_on_the_site_time_when_a_site_task_outlived_its_ca
 ):
     monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
     dock = plugin.slices_dock
-    dock.plugin_for_test = plugin
-    site_top = _narrow_a_then_site_mid_window(dock)
+    site_top = _narrow_a_then_site_mid_window(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
     counter = LoadCounter(monkeypatch, delay=0.3)
     dock.site_panel.select_grid("B")
     # Re-queue a site read so a task is live when the cancel gives up.
@@ -1038,8 +1044,11 @@ def test_the_opened_grid_lands_on_the_site_time_when_a_site_task_outlived_its_ca
     spin_until(lambda: counter.concurrent == 1, 5_000)
     dock.grid_scope_button.click()
     assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    spin_until(lambda: False, 300)  # the seeded spins' debounce fires in the window
+    assert _spurious(errors) == []
     _assert_on_b_axis(dock, site_top)
     assert counter.max_concurrent == 1
+    assert _spurious(errors) == []
 
 
 def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cancel(
@@ -1050,14 +1059,21 @@ def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cance
     monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
     counter = LoadCounter(monkeypatch, delay=0.15)
     dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
     dock.site_scope_button.click()
     assert spin_until(lambda: counter.concurrent == 1)
     dock.site_panel.select_grid("B")
     dock.grid_scope_button.click()
     assert dock.site_engine.has_live_task, "the cancelled task is still reading"
     assert not dock.engine.is_running, "This grid waits for it"
+    spin_until(lambda: False, 300)  # the seeded spins' debounce fires in the window
+    dock.slice_slider.setValue(dock.slice_slider.value() + 1)  # and a drag
+    _events()
+    assert _spurious(errors) == []
     assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
     assert counter.max_concurrent == 1
+    assert _spurious(errors) == []
 
 
 def _remove_selected_and_switch(plugin, grid_id):
@@ -1101,6 +1117,55 @@ def test_a_selection_naming_a_grid_this_grid_does_not_offer_is_ignored(plugin, m
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "A"
     assert errors == []
+
+
+def test_a_carried_time_never_overrides_a_later_resolution_change(plugin):
+    """A reopened survey prepares with nothing owed; the site's time must not
+    stay pending and replace the user's slider time at their next change."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    session.save()
+    path = session.json_path
+    session.open_site(path)
+    _events()
+    assert dock.engine.wait_for_preparation(20_000)
+    spin_until(lambda: False, 400)
+    dock.slice_slider.setValue(5)
+    _events()
+    z = dock.engine.z
+    user_top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    dock.dz_spin.setValue(round(dock.dz_spin.value() * 2, 4))
+    dock.flush_debounce()
+    _events()
+    z = dock.engine.z
+    assert abs(z.t0_ns + dock.slice_slider.value() * z.dz_ns - user_top) <= z.dz_ns / 2 + 1e-9
+    assert dock._pending_top_ns is None
+
+
+def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugin, monkeypatch):
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    dock.dz_spin.setValue(dock.dz_spin.value() * 3)  # A's axis differs from the site's
+    dock.flush_debounce()
+    _events()
+    whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    site_top = dock._site.shown_top()
+    counter = LoadCounter(monkeypatch, delay=0.6)
+    dock.site_panel.select_grid("B")
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task
+    dock._debounce.stop()  # no seed differed from the site's spins
+    dock.site_scope_button.click()
+    _events()
+    assert dock._site.shown_top() == pytest.approx(site_top, abs=0.5)
 
 
 def test_a_failure_inside_resume_still_hands_this_grids_moves_back(plugin, monkeypatch):
