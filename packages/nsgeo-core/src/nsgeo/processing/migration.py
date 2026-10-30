@@ -48,6 +48,7 @@ def migrate_fk(
     dx_m: float | None,
     velocity_m_ns: float,
     t0_ns: float = 0.0,
+    _pad_traces: int | None = None,
 ) -> np.ndarray:
     """Migrate `data` (samples x traces) at a constant `velocity_m_ns`.
 
@@ -57,6 +58,11 @@ def migrate_fk(
     with no spatial axis, or on an uncorrected time zero, produces a
     confident image that is wrong by half a metre and that nothing
     downstream will ever flag.
+
+    `_pad_traces` forces the pad width, in traces each side, instead of
+    deriving it. Underscore-prefixed because it is not a user parameter and
+    must never reach `schema()`: it exists so a test can measure the wrap
+    the derived pad prevents, by asking for no pad at all.
     """
     if dx_m is None or not dx_m > 0:
         raise ValueError(
@@ -87,7 +93,16 @@ def migrate_fk(
     # vm * t_max. That is what the pad has to cover, so the FFT's circular
     # wrap cannot fold energy leaving one end of the line back into the
     # other. It is physically determined; there is no fraction to tune.
-    if n_traces == 1:
+    if _pad_traces is not None:
+        # Exactly what was asked for, with no rounding up: rounding 640
+        # traces to 1024 would itself be a 384-trace pad, which is not the
+        # unpadded case a measurement needs.
+        pad = int(_pad_traces)
+        n_pad = n_traces + 2 * pad
+    elif n_traces == 1:
+        # The Add-step dialog probes a candidate step against one trace on
+        # every keystroke. Padding that to the aperture would cost a
+        # 512 x 512 transform per keypress for an answer that cannot differ.
         pad, n_pad = 0, 1
     else:
         pad = int(np.ceil(vm * (n_samples * dt_ns) / dx_m))

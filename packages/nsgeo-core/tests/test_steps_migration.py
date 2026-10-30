@@ -9,8 +9,11 @@ bandwidth the local lines actually have.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+from nsgeo.io.dzt import read_header, read_samples
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.migration import migrate_fk
 
@@ -18,6 +21,10 @@ from nsgeo.processing.migration import migrate_fk
 # M13's measured velocity.
 V, DT_NS, DX_M = 0.0733, 0.2165, 1 / 60.0
 FC_GHZ = 0.35
+
+#: The real lines, gitignored and so absent on CI (see test_real_files.py).
+DATA = Path(__file__).parent / "data" / "local"
+FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
 
 
 def _diffraction(
@@ -205,3 +212,71 @@ def test_the_time_zero_tolerance_is_in_time_not_depth(velocity_m_ns):
     step.apply(_plain(t0_ns=1.9))
     with pytest.raises(ValueError, match="time_zero"):
         step.apply(_plain(t0_ns=2.1))
+
+
+# ---- the pad -------------------------------------------------------------
+
+
+def test_padding_removes_the_wrap_at_the_far_end():
+    """A measurement, not an assertion that padding happened.
+
+    The artefact the pad exists to prevent is the FFT's circular wrap:
+    energy migrating off one end of the line reappearing at the other. So
+    put a diffractor 1 m from the left end, migrate with the derived pad and
+    with none, and compare what lands in the rightmost tenth of the line --
+    where nothing was recorded and nothing should arrive.
+    """
+    n_samples, n_traces = 512, 640
+    data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 60, 40.0)
+    far = slice(int(n_traces * 0.9), n_traces)
+
+    padded = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+    unpadded = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, _pad_traces=0)
+
+    assert (unpadded[:, far] ** 2).sum() > 10 * (padded[:, far] ** 2).sum()
+
+
+def test_a_line_shorter_than_the_pad_still_migrates():
+    """A 1 m stub is about 60 traces against a 244-trace aperture. It must
+    migrate -- no wrap, no crash, no division by a zero-width window."""
+    data = _diffraction(512, 60, DT_NS, DX_M, V, 30, 40.0)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert out.shape == data.shape
+    assert np.all(np.isfinite(out))
+    assert np.abs(out).max() > 0.0
+
+
+# ---- edges ---------------------------------------------------------------
+
+
+def test_a_velocity_near_c_empties_the_image_rather_than_inventing_one():
+    """At 0.29 m/ns nearly every mapped frequency lands outside the band the
+    record actually contains, so there is nothing left to image. The result
+    must be visibly empty -- an image a user can tell is wrong -- rather
+    than the band edge smeared across it by an extrapolated interpolation.
+    """
+    data = _diffraction(512, 640, DT_NS, DX_M, V, 320, 40.0)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=0.29)
+
+    assert (out**2).sum() < 0.01 * (data**2).sum()
+
+
+def test_output_preserves_shape_dt_and_t0():
+    """Picks, map-to-profile cursor sync and cube binning all index by
+    trace, and `StepStack.difference()` refuses a step that changes the
+    sample count. Asserted on a real line, not a square array."""
+    if not FILES:
+        pytest.skip("no real DZT files in tests/data/local")
+    header = read_header(FILES[0])
+    data = read_samples(FILES[0], header)[0]
+    rg = Radargram(data=np.asarray(data, dtype=float), dt_ns=header.dt_ns, t0_ns=0.0, dx_m=1 / 60.0)
+
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(rg)
+
+    assert out.data.shape == rg.data.shape
+    assert out.dt_ns == rg.dt_ns
+    assert out.t0_ns == rg.t0_ns
+    assert out.dx_m == rg.dx_m
