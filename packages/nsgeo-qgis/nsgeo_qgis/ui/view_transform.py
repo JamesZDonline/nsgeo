@@ -156,9 +156,7 @@ class ViewTransform:
     def traces_between(self, x0: float, x1: float) -> tuple[int, int] | None:
         """The data traces whose columns the pixel span touches, ascending and
         clamped into the data; None when the span misses the data."""
-        ta, tb = sorted((self.trace_of_x(x0), self.trace_of_x(x1)))
-        first = math.floor(ta)
-        last = max(math.ceil(tb) - 1, first)  # a zero-width span still touches a column
+        first, last = sorted((self._column_at(x0), self._column_at(x1)))
         a, b = max(first, 0), min(last, self.n_traces - 1)
         return (a, b) if a <= b else None
 

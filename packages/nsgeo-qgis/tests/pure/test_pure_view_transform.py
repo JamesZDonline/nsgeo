@@ -337,3 +337,12 @@ def test_bounds_must_be_finite_and_ordered():
     for bad in ((5.0, 5.0), (10.0, 0.0), (float("nan"), 10.0), (0.0, float("inf"))):
         with pytest.raises(ValueError, match="bounds"):
             ViewTransform.fit(608, 512, -11.09, 0.2165, 800, 300, bounds=bad)
+
+
+def test_traces_between_agrees_with_trace_at_on_column_boundaries():
+    w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
+    for t in (w.one_to_one(), dataclasses.replace(w, mirrored=True).one_to_one()):
+        for px in (0, 10, 11, 799):
+            c = t.trace_at(float(px))
+            assert t.traces_between(float(px), float(px)) == (c, c)
+    assert FIT.traces_between(0.0, FIT.x_of_trace(19)) == (0, 19)
