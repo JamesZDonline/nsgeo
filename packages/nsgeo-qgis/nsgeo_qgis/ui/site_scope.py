@@ -107,13 +107,16 @@ def default_preset(session: Any, grid_id: str) -> str | None:
 def source_keys(
     session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
-    """The grid's remembered lines, still on it and in survey order; every line if none."""
+    """The grid's remembered lines, still on it and in survey order; every line
+    if none is remembered or they have all left the grid (#74: the reading
+    `SlicesDock._restore_remembered_source` gives This grid, so both scopes agree)."""
     every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:
         return every
     wanted = set(lines)
-    return tuple(k for k in every if k in wanted)
+    kept = tuple(k for k in every if k in wanted)
+    return kept if kept else every
 
 
 def included_grids(

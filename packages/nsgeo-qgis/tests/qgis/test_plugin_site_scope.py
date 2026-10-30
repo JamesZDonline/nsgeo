@@ -411,6 +411,69 @@ def test_lines_chosen_in_the_site_for_this_grids_grid_are_what_this_grid_shows(p
     assert dock.engine.line_count == 2
 
 
+def _a_row(dock, plugin):
+    from nsgeo_qgis.ui import site_scope
+
+    rows = site_scope.site_rows(
+        plugin.session, dock.site_engine, site_scope.included_grids(plugin.session)
+    )
+    return next(r for r in rows if r.grid_id == "A")
+
+
+def test_both_scopes_read_a_line_choice_that_left_the_grid_as_every_line(plugin, site3):
+    """#74: remembered lines that have all left the grid mean every line, as
+    This grid already read them; the site no longer shows `no lines`. The
+    record is written while This grid shows B -- coming back to A would
+    rewrite it as `lines: None`, which is the very reading under test."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=("raw/gone/X.DZT",))
+    dock = whole_site(plugin)
+    assert site_scope.source_keys(plugin.session, "A") == site3.keys("A")
+    assert dock.site_engine.engine_for("A").line_count == 4
+    row = _a_row(dock, plugin)
+    assert row.lines == "4 / 4"
+    assert row.state != "no lines"
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.rebuild_source()
+    assert dock.line_choice_keys("A") == site3.keys("A")
+
+
+def test_removing_every_remembered_line_reads_as_every_line_in_both_scopes(plugin, site3):
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    gone = site3.keys("A")[:2]
+    rest = site3.keys("A")[2:]
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=gone)
+    plugin.session.remove_lines(gone)
+    dock = whole_site(plugin)
+    assert site_scope.source_keys(plugin.session, "A") == rest
+    assert dock.site_engine.engine_for("A").line_count == 2
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.rebuild_source()
+    assert dock.line_choice_keys("A") == rest
+
+
+def test_a_source_edit_after_emptying_does_not_change_what_the_site_prepares(plugin):
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=("raw/gone/X.DZT",))
+    dock = whole_site(plugin)
+    before = dock.site_engine.engine_for("A").line_count
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.preset_combo.setCurrentText("raw")  # rewrites the record as lines: None
+    dock = whole_site(plugin)
+    assert before == 4
+    assert dock.site_engine.engine_for("A").line_count == before
+
+
 # ---- normalisation and gain -------------------------------------------------------
 
 
@@ -709,11 +772,16 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     assert dock.export_button.isEnabled()
 
 
-def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path, fake_iface):
+def test_the_export_message_names_a_grid_left_out(
+    plugin, site3, answer_modal, tmp_path, fake_iface
+):
     """Ruling T4-a: an included grid with no lines is named in the success message."""
     session = plugin.session
     dock = whole_site(plugin)
-    session.remember_slice_source("C", preset="p", lines=())
+    # A grid with no lines at all: an emptied line choice is every line (#74).
+    # Ticked outright, since a grid with no lines is otherwise not offered.
+    session.set_site_view(grids=("A", "B", "C"))
+    session.remove_lines(site3.keys("C"))
     session.lines_changed.emit()  # the survey changed: the site follows
     settle(dock)
     assert dock.site_engine.grid_state("C") == "no lines"
@@ -725,7 +793,7 @@ def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path
     assert "exported" in text and "C (no lines)" in text, text
 
 
-def test_the_site_file_records_an_included_grid_it_left_out(plugin, answer_modal, tmp_path):
+def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, answer_modal, tmp_path):
     """Final review M4 (Ruling F-2): the file itself names an included grid
     it does not hold, with its state, and says nothing when none is left out."""
     session = plugin.session
@@ -734,7 +802,8 @@ def test_the_site_file_records_an_included_grid_it_left_out(plugin, answer_modal
     answer_modal(QFileDialog, "getSaveFileName", (str(whole), "GeoTIFF (*.tif *.tiff)"))
     dock.export_button.click()
     assert "NSGEO_SITE_LEFT_OUT" not in _metadata(whole)
-    session.remember_slice_source("C", preset="p", lines=())
+    session.set_site_view(grids=("A", "B", "C"))
+    session.remove_lines(site3.keys("C"))  # no lines at all (#74)
     session.lines_changed.emit()
     settle(dock)
     part = tmp_path / "part.tif"

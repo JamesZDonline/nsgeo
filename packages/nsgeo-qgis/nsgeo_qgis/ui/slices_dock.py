@@ -1549,11 +1549,12 @@ class SlicesDock(QgsDockWidget):
         line on the grid, or re-seed Resolution from the grid's generic
         defaults (`_sync_included`'s job, for a transition this is not).
 
-        `recipe.choice.line_keys` is set unconditionally, even for a
-        record with no `lines` key at all -- `recipe_from_record` cannot
-        tell "the key was missing" from "the key was an empty list" (both
-        read back as `()`), so restoring an old-format record leaves the
-        inclusion set empty rather than guessing the whole grid was meant.
+        An old record names no line list, and `recipe_from_record` reads
+        both a missing key and an empty list as `()`. An empty set is no
+        choice (#74: the remembered record already says every line, D4, and
+        the line chooser no longer lets OK through with nothing ticked), so
+        it restores every line on the grid as a default, the way
+        `_restore_remembered_source` reads one.
 
         `recipe.resolution`/`recipe.view` being `None` leaves the
         corresponding widgets exactly where they were -- `CubeRecipe`'s
@@ -1611,6 +1612,9 @@ class SlicesDock(QgsDockWidget):
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
                 self._included = recipe.choice.line_keys
                 self._included_is_default = False
+                if not recipe.choice.line_keys:
+                    self._included = self._default_included(recipe.choice.grid_id)
+                    self._included_is_default = True
                 self._last_grid_id = recipe.choice.grid_id
                 self._dz_z_seeded_for = recipe.choice.grid_id
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)

@@ -1673,6 +1673,23 @@ def _grid_keys(session, grid_id):
     )
 
 
+def test_an_old_cube_record_without_lines_restores_every_line(docked_two_grids):
+    """#74: an old record names no line list; it restores every line, as the
+    remembered record (final review D4) already says."""
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(
+        dock, session, "A__old", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    del session.site.cubes["A__old"]["lines"]
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.included_keys() == a_keys
+    assert session.slice_source("A")["lines"] is None
+    assert dock.engine.wait_for_preparation(20_000)
+
+
 def test_opening_a_site_does_not_mark_it_dirty(docked_two_grids):
     dock, session = docked_two_grids
     dock.engine.wait_for_preparation(20_000)
@@ -1806,7 +1823,7 @@ def test_an_empty_remembered_line_set_is_the_default(docked_two_grids, tmp_path,
 def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_grids):
     """Final review D4: an old-format cube record names no line list, so
     picking it remembers `lines=None` ("every line"), not an empty choice.
-    The dock itself still restores its empty inclusion set (M11)."""
+    The dock restores every line too (#74; it used to restore an empty set)."""
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
@@ -1814,5 +1831,5 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     del record["lines"]  # written before cube records carried their lines
     dock.cube_combo.setCurrentText("A__old")
     assert dock.engine.wait_for_preparation(20_000)
-    assert dock.included_keys() == ()
+    assert dock.included_keys() == _grid_keys(session, "A")
     assert session.slice_source("A")["lines"] is None
