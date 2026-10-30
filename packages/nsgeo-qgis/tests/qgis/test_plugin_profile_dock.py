@@ -13,6 +13,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
+from nsgeo_qgis.ui.ruler import trace_units_at
 from plugin_testing import REAL_DZT, needs_real_data, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
@@ -246,7 +247,8 @@ def test_rerender_with_the_same_shape_keeps_the_current_zoom(opened):
     r = dock.view.image_rect()
     dock.view.zoom_at(2.0, r.width() / 2, r.height() / 2)
     zoomed = dock.view.transform
-    assert zoomed.trace_hi - zoomed.trace_lo < 240  # sanity: this really is zoomed in
+    blo, bhi = zoomed.trace_bounds
+    assert zoomed.trace_hi - zoomed.trace_lo < bhi - blo  # sanity: this really is zoomed in
     session.append_step(key, build_step("dewow", window_ns=4.0))
     assert dock.view.transform is zoomed  # the exact same window, not a fresh fit
 
@@ -536,10 +538,14 @@ def test_fit_button_restores_the_full_extent_after_a_zoom(opened):
     session.set_profiles(key, line.load())
     r = dock.view.image_rect()
     dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
-    assert dock.view.transform.trace_hi - dock.view.transform.trace_lo < 240  # really zoomed in
+    t = dock.view.transform
+    blo, bhi = t.trace_bounds
+    assert t.trace_hi - t.trace_lo < bhi - blo  # really zoomed in
     dock.fit_button.click()
-    assert dock.view.transform.trace_lo == pytest.approx(0.0)
-    assert dock.view.transform.trace_hi == pytest.approx(240.0)
+    # Fit shows the whole ruler (the grid's length, widened to this line), not
+    # trace 0 to the line's own end.
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
 
 
 def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
@@ -557,10 +563,11 @@ def test_one_to_one_button_sets_a_trace_per_pixel_window(opened):
     session.add_lines([wide])
     key2 = next(k for k in session.keys() if k != key)  # noqa: SIM118 -- SiteSession.keys(), not a dict
     session.open_line(key2)
+    left = dock.view.transform.trace_lo
     dock.one_to_one_button.click()
     t = dock.view.transform
     assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
-    assert t.trace_lo == pytest.approx(0.0)
+    assert t.trace_lo == pytest.approx(left)  # 1:1 holds the screen-left trace
 
 
 def test_a_preview_starting_does_not_shift_the_toolbar_buttons(qgis_app, tmp_path):
@@ -1783,3 +1790,182 @@ def test_raising_only_the_deep_point_leaves_the_shallow_pixels_alone(bare):
     session.replace_step(key, 3, build_step("gain_curve", points=[*points[:2], [t_end, 52.0]]))
     assert dock.image.limit == limit0
     np.testing.assert_array_equal(to_index8(stack.result().data[:k], dock.image.limit), shallow0)
+
+
+# ---- one ruler per grid, and the window held in metres (#67) -------------------
+
+
+def _add_line(session, name, placement, **kw):
+    p = synthetic_dzt(session.root / "raw", f"{name}.DZT", **{"n_traces": 300, **kw})
+    line = Line.open(p, placement)
+    session.add_lines([line])
+    key = next(k for k in session.keys() if session.line_for_key(k) is line)  # noqa: SIM118 -- SiteSession.keys(), not a dict
+    return key, line
+
+
+def _forward(session, name="FILE__FWD", **kw):
+    return _add_line(session, name, GridPlacement("A", "y", 0.5, 0.0, 1, name), **kw)
+
+
+def _x_of_metre(dock, line, metres):
+    return dock.view.transform.x_of_trace(trace_units_at(line.distance_along(), metres))
+
+
+def _zoom(dock):
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    t = dock.view.transform
+    return dock.view.window_m(), (t.time_lo, t.time_hi)
+
+
+def test_a_reversed_line_is_mirrored_against_its_grid_ruler(opened):
+    session, dock, key, line = opened
+    v = dock.view
+    assert (v.ruler.grid_id, v.ruler.axis, v.ruler.hi_m) == ("A", "y", 11.0)
+    assert v.ruler.lo_m == pytest.approx(
+        -239 / 60 - 1 / 120
+    )  # the line runs past the grid's 0 edge
+    assert v.transform.mirrored
+
+
+def test_the_same_metre_is_at_the_same_pixel_on_neighbouring_lines(opened):
+    session, dock, key, line = opened
+    fkey, fwd = _forward(session)
+    before = _x_of_metre(dock, line, 2.0)
+    session.open_line(fkey)
+    # the ruler widened when the reversed line was added, so both see the same one
+    assert abs(_x_of_metre(dock, fwd, 2.0) - before) < 0.5
+
+
+def test_zoom_is_held_in_metres_when_the_next_line_opens(opened):
+    session, dock, key, line = opened
+    fkey, _ = _forward(session)
+    m, t = _zoom(dock)
+    session.open_line(fkey)
+    assert dock.view.window_m() == pytest.approx(m)
+    tr = dock.view.transform
+    assert (tr.time_lo, tr.time_hi) == pytest.approx(t)
+    assert not tr.mirrored
+
+
+def test_the_hold_survives_a_preview_and_its_end(opened):
+    session, dock, key, line = opened
+    fkey, _ = _forward(session)
+    m, _t = _zoom(dock)
+    session.set_preview(fkey, 5)
+    assert dock.view.window_m() == pytest.approx(m)
+    session.clear_preview()
+    assert dock.view.window_m() == pytest.approx(m)
+    assert dock.view.transform.mirrored
+
+
+def test_a_header_only_preview_is_ruled_and_held_through_its_load(opened):
+    session, dock, key, line = opened
+    fkey, fwd = _forward(session)
+    m, _t = _zoom(dock)
+    session.set_preview(fkey, 5)
+    assert dock.view.ruler is not None
+    assert dock.view.window_m() == pytest.approx(m)
+    session.set_profiles(fkey, fwd.load())
+    assert dock.view.window_m() == pytest.approx(m)
+
+
+def test_a_cross_line_or_another_grid_starts_at_fit(opened):
+    session, dock, key, line = opened
+    _zoom(dock)
+    xkey, _ = _add_line(session, "FILE__X", GridPlacement("A", "x", 0.5, 0.0, 1, "FILE__X"))
+    session.open_line(xkey)
+    assert dock.view.ruler.key == ("A", "x")
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == t.trace_bounds
+    session.open_line(key)
+    _zoom(dock)
+    session.add_grid(dataclasses.replace(GRID, id="B"))
+    bkey, _ = _add_line(session, "FILE__B", GridPlacement("B", "y", 0.5, 0.0, 1, "FILE__B"))
+    session.open_line(bkey)
+    assert dock.view.ruler.key == ("B", "y")
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == t.trace_bounds
+
+
+def test_the_hold_is_in_metres_across_different_trace_spacings(opened):
+    session, dock, key, line = opened
+    fkey, _ = _forward(session, traces_per_metre=50.0)
+    m, _t = _zoom(dock)
+    t0 = dock.view.transform
+    session.open_line(fkey)
+    t1 = dock.view.transform
+    assert dock.view.window_m() == pytest.approx(m, abs=0.05)
+    assert t1.trace_hi - t1.trace_lo != pytest.approx(t0.trace_hi - t0.trace_lo)
+
+
+def test_a_line_without_distance_neither_mirrors_nor_holds(opened, caplog):
+    session, dock, key, line = opened
+    _zoom(dock)
+    tkey, tline = _add_line(
+        session,
+        "FILE__TIME",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__TIME"),
+        traces_per_metre=0.0,
+    )
+    session.open_line(tkey)
+    t = dock.view.transform
+    assert dock.view.ruler is None and not t.mirrored
+    assert (t.trace_lo, t.trace_hi) == (0.0, float(tline.n_traces))
+    session.open_line(key)
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == t.trace_bounds
+    assert dock.view.ruler is not None
+
+
+def test_the_difference_view_keeps_the_mirror_and_the_window(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("dewow", window_ns=4.0))
+    m, _t = _zoom(dock)
+    dock.set_difference_index(0)
+    assert dock.view.transform.mirrored
+    assert dock.view.window_m() == pytest.approx(m)
+    dock.set_difference_index(-1)
+    assert dock.view.transform.mirrored
+    assert dock.view.window_m() == pytest.approx(m)
+
+
+def test_a_grid_resize_moves_fit_without_reopening_the_line(opened):
+    session, dock, key, line = opened
+    session.replace_grid(dataclasses.replace(GRID, size_y=20.0))
+    assert dock.view.ruler.hi_m == pytest.approx(20.0)
+    dock.fit_button.click()
+    assert dock.view.window_m()[1] == pytest.approx(20.0)
+
+
+@needs_real_data
+def test_real_zigzag_lines_keep_a_metre_in_place_across_the_sweep(bare):
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.add_grid(Grid("R", (0.0, 0.0), 0.0, 20.0, 11.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(10):
+        placement = (
+            GridPlacement("R", "y", 0.5 * i, 0.0, 1, f"R{i}")
+            if i % 2 == 0
+            else GridPlacement("R", "y", 0.5 * i, 11.0, -1, f"R{i}")
+        )
+        lines.append(Line.open(REAL_DZT[i % len(REAL_DZT)], placement))
+    session.add_lines(lines)
+    keys = session.keys()
+    session.set_profiles(keys[0], lines[0].load())
+    session.open_line(keys[0])
+    x0 = _x_of_metre(dock, lines[0], 5.0)
+    for k, ln in zip(keys[1:], lines[1:], strict=True):
+        session.set_profiles(k, ln.load())
+        session.set_preview(k, 3)
+        assert _x_of_metre(dock, ln, 5.0) == pytest.approx(x0, abs=0.5)
+    session.clear_preview()
+    dock.view.set_window_m(4.5, 5.5, dock.view.transform.time_lo, dock.view.transform.time_hi)
+    m = dock.view.window_m()
+    x0 = _x_of_metre(dock, lines[0], 5.0)
+    for k, ln in zip(keys[1:], lines[1:], strict=True):
+        session.set_preview(k, 3)
+        assert _x_of_metre(dock, ln, 5.0) == pytest.approx(x0, abs=0.5)
+        assert dock.view.window_m() == pytest.approx(m)

@@ -18,7 +18,10 @@ from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
 
-GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
+# Sized to its lines along their axis (60 traces = 1 m), as an import sizes a
+# grid: the Profile is drawn against the grid's length, so a longer grid would
+# leave the clicked pixels in blank space.
+GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 1.0, "EPSG:32616", 0.5)
 NO_MOD = Qt.KeyboardModifier.NoModifier
 LEFT = Qt.MouseButton.LeftButton
 

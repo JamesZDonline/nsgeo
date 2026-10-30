@@ -36,6 +36,15 @@ every drag, never cached: a line switch or a stack edit can change what sits
 at the selected row, and a remembered "this is the cutoff" would then
 bypass, or write onto, the wrong step.
 
+The window across lines: every line on a grid, running the same way, is drawn
+against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
+over in metres along the grid -- read off the line being left, not stored,
+because every line on a ruler has the same bounds in metres, so it never
+clamps. The hold covers opening a line and the hover preview alike, and
+runs on the header-only axes too, so the load that follows does not move
+it. A re-render of the same line keeps the exact transform object (not an
+equal one), so a stack or display change leaves the zoom alone.
+
 Signal/slot hazard: an exception raised inside a slot connected via
 `connect()` never reaches whatever emitted the signal -- PyQt prints the
 traceback to stderr and `emit()` returns as if the slot had succeeded (see
@@ -86,7 +95,7 @@ from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
-from nsgeo_qgis.ui.ruler import metres_to_trace, trace_to_metres
+from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 
 
 def time_param_name(step: Any) -> str | None:
@@ -178,6 +187,7 @@ class ProfileDock(QgsDockWidget):
         # whether the fit it applies is the stored one.
         self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
         self._working_key: str | None = None
+        self._axes_key: str | None = None  # the line the view's axes were last set for
         self._preview_key: str | None = None
         self._strip_was_visible = False
         self._deferred_strip: tuple[list[list[float]], Any] | None = None
@@ -325,6 +335,8 @@ class ProfileDock(QgsDockWidget):
         session.selection_changed.connect(self._on_selection_changed)
         session.lines_changed.connect(self._refresh_velocity)
         session.grids_changed.connect(self._refresh_velocity)
+        session.lines_changed.connect(self._on_geometry_changed)
+        session.grids_changed.connect(self._on_geometry_changed)
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
 
@@ -384,6 +396,96 @@ class ProfileDock(QgsDockWidget):
             return line.distance_along()
         except ValueError:
             return None
+
+    def _ruler_for(self, line: Any, distance: Any) -> Ruler | None:
+        """The ruler `line` is drawn against: its grid's, over every line on
+        that grid running the same way. None when there is nothing to rule
+        against (no distance axis, no grid, no axis in the placement)."""
+        if distance is None or len(distance) < 2:
+            return None
+        grid = self.session.grid_for_line(line)
+        axis = getattr(line.placement, "axis", None)
+        if grid is None or axis is None:
+            return None
+        distances = []
+        for other_key in self.session.keys_on_grid(grid.id):
+            other = self.session.line_for_key(other_key)
+            if getattr(other.placement, "axis", None) != axis:
+                continue
+            d = self._safe_distance(other)
+            if d is not None:
+                distances.append(d)
+        return ruler_for(grid, axis, distances)
+
+    def _set_axes_holding(
+        self,
+        key: str,
+        n_traces: int,
+        n_samples: int,
+        t0_ns: float,
+        dt_ns: float,
+        distance: Any,
+    ) -> None:
+        """Set the view's axes for `key`, carrying the window over from
+        whatever was showing. The only place the dock sets axes.
+
+        The window is read off the line being left, never remembered
+        separately: every line on a ruler has the same bounds in metres, so
+        the metres just read always fit the next line. Rule 1 puts back the
+        very same transform object, so a re-render of an unchanged line
+        leaves anything holding it (and the zoom itself) untouched.
+        """
+        view = self.view
+        old = view.transform
+        old_ruler = view.ruler
+        old_m = view.window_m()
+        old_key = self._axes_key
+        ruler = self._ruler_for(self.session.line_for_key(key), distance) if key else None
+        view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
+        new = view.transform
+        if (
+            old is not None
+            and new is not None
+            and key == old_key
+            and (new.n_traces, new.n_samples, new.bounds, new.mirrored)
+            == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
+        ):
+            view.transform = old
+        elif (
+            old is not None
+            and ruler is not None
+            and old_ruler is not None
+            and ruler.key == old_ruler.key
+            and old_m is not None
+        ):
+            view.set_window_m(*old_m, old.time_lo, old.time_hi)
+        elif (
+            old is not None
+            and ruler is None
+            and (old.n_traces, old.n_samples) == (n_traces, n_samples)
+        ):
+            view.transform = old
+        self._axes_key = key
+
+    def _on_geometry_changed(self, *_: Any) -> None:
+        """A grid or line edit can change the ruler of the line on show (a
+        resize, an import past the edge): show it again, window held, so Fit
+        follows without reopening."""
+        try:
+            key = self._key
+            if key is None or not self.session.is_open:
+                return
+            try:
+                line = self.session.line_for_key(key)
+            except KeyError:
+                return  # removed in the same change; line_opened follows
+            if self._ruler_for(line, self._safe_distance(line)) != self.view.ruler:
+                self._show_line(key, is_preview=self._preview_key is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(
+                f"could not follow the grid change in the profile: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
 
     # ---- session events -------------------------------------------------
     def _on_line_opened(self, key: str) -> None:
@@ -526,7 +628,8 @@ class ProfileDock(QgsDockWidget):
             # render puts it back.
             self._cutoff_step = None
             self.view.set_cutoff(None)
-            self.view.set_axes(
+            self._set_axes_holding(
+                key,
                 line.n_traces,
                 line.header.n_samples,
                 line.header.position_ns,
@@ -629,6 +732,7 @@ class ProfileDock(QgsDockWidget):
             self.difference_cleared.emit()
 
     def _clear_view_only(self) -> None:
+        self._axes_key = None
         self.image = None
         self.gain_strip.set_headroom(None)
         self.view.clear()
@@ -1113,13 +1217,9 @@ class ProfileDock(QgsDockWidget):
             line = self.session.line_for_key(self._key)
             if rg.n_traces == line.n_traces:
                 distance = self._safe_distance(line)
-        keep_window = (
-            self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
+        self._set_axes_holding(
+            self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
         )
-        old = self.view.transform
-        self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
-        if keep_window and old is not None and old.n_samples == rg.n_samples:
-            self.view.transform = old
         reference = self._scale_reference(rg)
         self.image = (
             self.image.with_radargram(rg, reference)
