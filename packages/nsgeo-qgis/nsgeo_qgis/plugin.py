@@ -86,6 +86,7 @@ from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
+from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
 
@@ -156,6 +157,7 @@ class NsgeoPlugin:
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
+        self.act_velocity: QAction | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
         #: and the menu it drops down. See `_build_panels_menu`.
         self.act_panels: QAction | None = None
@@ -218,6 +220,12 @@ class NsgeoPlugin:
         self.act_pick.setCheckable(True)
         self.act_pick.setToolTip(
             "Pick mode: click the profile to author a pick. Shift+click works with this off."
+        )
+        self.act_velocity = self._toolbar_action("Velocity", self._toggle_velocity_fit_mode)
+        self.act_velocity.setCheckable(True)
+        self.act_velocity.setToolTip(
+            "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
+            "Right-click a point to remove it."
         )
 
         about = QAction("About nsgeo", main)
@@ -569,6 +577,7 @@ class NsgeoPlugin:
         self.act_add_grid = None
         self.act_import = None
         self.act_pick = None
+        self.act_velocity = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -633,6 +642,11 @@ class NsgeoPlugin:
                 if not has_line and self.act_pick.isChecked():
                     self.act_pick.setChecked(False)
                     self._toggle_pick_mode(False)
+            if self.act_velocity is not None:
+                self.act_velocity.setEnabled(has_line)
+                if not has_line and self.act_velocity.isChecked():
+                    self.act_velocity.setChecked(False)
+                    self._toggle_velocity_fit_mode(False)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not update the toolbar: {exc}", Qgis.MessageLevel.Warning)
 
@@ -1089,9 +1103,25 @@ class NsgeoPlugin:
         try:
             if self.profile_dock is None:
                 return
+            if checked and self.act_velocity is not None and self.act_velocity.isChecked():
+                # Both modes claim the left click; the one just switched on wins.
+                self.act_velocity.setChecked(False)
+                self._toggle_velocity_fit_mode(False)
             self.profile_dock.set_pick_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the pick mode: {exc}", Qgis.MessageLevel.Warning)
+
+    def _toggle_velocity_fit_mode(self, checked: bool) -> None:
+        """The Velocity toolbar toggle. Drives the dock, never the view."""
+        try:
+            if self.profile_dock is None:
+                return
+            if checked and self.act_pick is not None and self.act_pick.isChecked():
+                self.act_pick.setChecked(False)
+                self._toggle_pick_mode(False)
+            self.profile_dock.set_velocity_fit_mode(bool(checked))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
     def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
         """Relay a pick from the profile to the session.
@@ -1692,7 +1722,37 @@ class NsgeoPlugin:
         dialog.activateWindow()
 
     def open_velocity_dialog(self, key: str) -> None:
-        self.message("Velocity dialog arrives in a later task.", Qgis.MessageLevel.Warning)
+        """Set or clear the line's velocity override, from a typed number or a
+        saved fit. Modal: it is a short question about one line, and the answer
+        is applied the moment it closes.
+
+        `velocity_from_fit` names the fit that produced the override, so every
+        route here keeps it true: applying a fit points at it, a typed number
+        clears it, and clearing the override clears both."""
+        try:
+            dialog = VelocityDialog(self.session, key, parent=self.iface.mainWindow())
+        except (KeyError, ProjectError) as exc:
+            # The key was captured when a context menu was built; the line
+            # may be gone by now.
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            # e.g. ValueError from a header with a non-positive epsr, which
+            # loads fine and fails when its velocity is resolved.
+            self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
+            return
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            model = dialog.velocity()
+            self.session.set_line_velocity(key, model)
+            self.session.set_velocity_from_fit(
+                key, dialog.selected_fit_id() if model is not None else None
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
+        finally:
+            dialog.deleteLater()
 
     def open_line_choice_dialog(self) -> None:
         """Spec 9.1's one dialog. Modeless, like every dialog here.

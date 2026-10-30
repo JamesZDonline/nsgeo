@@ -280,19 +280,19 @@ def test_unload_releases_every_toolbar_and_menu_action(fake_iface, qgis_app):
     assert sip.isdeleted(menu_action)
 
 
-def test_line_velocity_requested_reports_that_no_dialog_exists_yet(fake_iface):
+def test_line_velocity_requested_is_wired_and_reports_a_line_that_cannot_be_found(fake_iface):
     # Finding 2 (review round 1): this signal was emitted by the context
     # menu's "Set velocity override..." action but never connected to
     # anything -- a permanent, silent no-op with no message, no log line,
-    # nothing. Now routed to the same message-bar-stub pattern as
-    # open_grid_dialog/open_import_dialog.
+    # nothing. Now routed to open_velocity_dialog, which says so when the
+    # key it was handed names no line (here: no site is open at all).
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     plugin.survey_dock.line_velocity_requested.emit("raw/FILE__001.DZT")
     item = fake_iface.messageBar().currentItem()
-    assert item is not None and "elocity" in item.text()
+    assert item is not None and item.text() == "no site is open"
     plugin.unload()
 
 

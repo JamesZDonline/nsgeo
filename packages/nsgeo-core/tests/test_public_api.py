@@ -19,6 +19,7 @@ EXPECTED_PUBLIC = {
     "project",
     "render",
     "velocity",
+    "velocity_fit",
 }
 
 

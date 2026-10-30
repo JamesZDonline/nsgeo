@@ -60,11 +60,14 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any
 
+import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
 from nsgeo.velocity import VelocityModel, resolve_velocity
+from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -107,7 +110,8 @@ def curve_param_name(step: Any) -> str | None:
 
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
-    "line override", "Grid <id>", a header-dielectric fallback, or
+    "line override" (or "line override (fit at 18.4 ns)" when the override
+    was measured from a stored fit), "Grid <id>", a header-dielectric fallback, or
     "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
@@ -137,12 +141,44 @@ def velocity_source(session: SiteSession, key: str) -> str:
     grid = session.grid_for_line(line)
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
+        # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
+        if fit is not None:
+            return f"line override (fit at {fit.t0_ns:.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
         return f"Grid {grid.id}"
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
+
+
+def _trace_to_metres(distance: Any, traces: Any) -> Any:
+    """Metres along the line at (possibly fractional) `traces`, read off the
+    line's own distance array, so there is one trace-to-metre map. Beyond
+    either end it extends by the end spacing."""
+    d = np.asarray(distance, dtype=float)
+    tr = np.asarray(traces, dtype=float)
+    last = len(d) - 1
+    inside = np.interp(tr, np.arange(len(d)), d)
+    below = d[0] + tr * (d[1] - d[0])
+    above = d[-1] + (tr - last) * (d[-1] - d[-2])
+    return np.where(tr < 0, below, np.where(tr > last, above, inside))
+
+
+def _metres_to_trace(distance: Any, x_m: Any) -> Any:
+    """The inverse of `_trace_to_metres`, for a line whose distance runs
+    either way along the axis."""
+    d = np.asarray(distance, dtype=float)
+    x = np.asarray(x_m, dtype=float)
+    idx = np.arange(len(d), dtype=float)
+    if d[-1] < d[0]:
+        d, idx = d[::-1], idx[::-1]
+    last = len(d) - 1
+    inside = np.interp(x, d, idx)
+    below = idx[0] + (x - d[0]) / (d[1] - d[0]) * (idx[1] - idx[0])
+    above = idx[-1] + (x - d[-1]) / (d[-1] - d[-2]) * (idx[-1] - idx[-2])
+    return np.where(x < d[0], below, np.where(x > d[last], above, inside))
 
 
 class ProfileDock(QgsDockWidget):
@@ -160,6 +196,14 @@ class ProfileDock(QgsDockWidget):
         self.session = session
         self.image: RadargramImage | None = None
         self._difference_index = -1
+        # The hyperbola points clicked so far, in view units (trace, ns).
+        # The dock owns this list; the view only paints it.
+        self._velocity_points: list[tuple[int, float]] = []
+        self._velocity_fit: HyperbolaFit | None = None
+        self._velocity_mode = False
+        # (line key, points, fit id) of the last Save: lets Apply tell
+        # whether the fit it applies is the stored one.
+        self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -253,6 +297,32 @@ class ProfileDock(QgsDockWidget):
         self.gain_strip.hide()
         viewer_row.addWidget(self.gain_strip)
         layout.addLayout(viewer_row, 1)
+        # The velocity-fit strip: read-out, warning and four buttons, shown
+        # only while velocity mode is on. The read-out is monospaced and
+        # formatted to a fixed width because Qt has no tabular figures.
+        self.velocity_strip = QWidget(body)
+        strip = QHBoxLayout(self.velocity_strip)
+        strip.setContentsMargins(0, 0, 0, 0)
+        self.velocity_readout = QLabel("")
+        self.velocity_readout.setStyleSheet("font-family: monospace")
+        self.velocity_readout.setWordWrap(True)
+        self.velocity_note = QLabel("")
+        self.velocity_note.setWordWrap(True)
+        self.apply_line_button = QPushButton("Apply to line")
+        self.apply_grid_button = QPushButton("Apply to grid")
+        self.save_fit_button = QPushButton("Save fit")
+        self.clear_velocity_button = QPushButton("Clear")
+        strip.addWidget(self.velocity_readout, 2)
+        strip.addWidget(self.velocity_note, 1)
+        for button in (
+            self.apply_line_button,
+            self.apply_grid_button,
+            self.save_fit_button,
+            self.clear_velocity_button,
+        ):
+            strip.addWidget(button)
+        self.velocity_strip.hide()
+        layout.addWidget(self.velocity_strip)
         self.setWidget(body)
 
         self.percentile_slider.valueChanged.connect(self._display_changed)
@@ -264,6 +334,12 @@ class ProfileDock(QgsDockWidget):
         self.view.range_selected.connect(self._range_selected)
         self.view.selection_cleared.connect(self._selection_cleared)
         self.view.pick_requested.connect(self._pick)
+        self.view.velocity_point_requested.connect(self._on_velocity_point_requested)
+        self.view.velocity_point_discarded.connect(self._on_velocity_point_discarded)
+        self.apply_line_button.clicked.connect(self._apply_velocity_to_line)
+        self.apply_grid_button.clicked.connect(self._apply_velocity_to_grid)
+        self.save_fit_button.clicked.connect(self._save_velocity_fit)
+        self.clear_velocity_button.clicked.connect(self._clear_velocity_points)
         self.view.view_changed.connect(self._sync_strip_mapping)
         self.view.cutoff_dragged.connect(self._on_cutoff_dragged)
         self.gain_strip.points_changed.connect(self.gain_points_changed.emit)
@@ -362,6 +438,12 @@ class ProfileDock(QgsDockWidget):
         # the very next stack_changed re-armed it against a step index
         # that could belong to an entirely different stack.
         was_diff = self._difference_index >= 0
+        # Points clicked on the previous line mean nothing on this one: a
+        # hyperbola cannot span two lines, and a stale point would be fitted
+        # as if it belonged here.
+        self._velocity_points = []
+        self.view.set_velocity_fit([], [])
+        self.view.set_saved_velocity_fits([])
         self._difference_index = -1
         self.difference_label.setText("")
         if was_diff:
@@ -552,6 +634,9 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        # Dock state, not site state: left alone it could match a line of the
+        # next site that happens to share a key and its points.
+        self._saved_velocity_fit = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -577,6 +662,8 @@ class ProfileDock(QgsDockWidget):
         self.setWindowTitle("nsgeo Profile")
         self.setToolTip("")
         self.velocity_label.setText("")
+        self._velocity_points = []
+        self._update_velocity_fit()
         self.channel_combo.hide()
 
     # ---- preview (M7, spec §3.3) ----------------------------------------
@@ -669,6 +756,267 @@ class ProfileDock(QgsDockWidget):
         feature was unbuilt (spec §1, §6). This is its first consumer.
         """
         self.view.set_pick_mode(bool(flag))
+
+    def set_velocity_fit_mode(self, flag: bool) -> None:
+        """Turn the profile's velocity-fit mode on or off, and show or hide
+        the strip with it."""
+        self._velocity_mode = bool(flag)
+        self.view.set_velocity_fit_mode(self._velocity_mode)
+        self.velocity_strip.setVisible(self._velocity_mode)
+        self._update_velocity_fit()
+
+    def velocity_points(self) -> list[tuple[int, float]]:
+        return list(self._velocity_points)
+
+    def velocity_fit_result(self) -> HyperbolaFit | None:
+        return self._velocity_fit
+
+    def _refuse_velocity_edit_on_preview(self) -> bool:
+        """True (after saying why) while a preview is displayed. A preview
+        never authors data (spec §3.3, §4.3): `self._key` is the displayed
+        line, and a click on it would otherwise be fitted against the
+        working line's distances."""
+        if self._preview_key is None:
+            return False
+        self.error.emit(
+            "velocity points are collected on the working line; this is a preview — "
+            "select the line on the map to work on it"
+        )
+        return True
+
+    def _on_velocity_point_requested(self, trace: int, time_ns: float) -> None:
+        try:
+            if self._refuse_velocity_edit_on_preview():
+                return
+            self._velocity_points.append((int(trace), float(time_ns)))
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
+
+    def _on_velocity_point_discarded(self, index: int) -> None:
+        try:
+            if self._refuse_velocity_edit_on_preview():
+                return
+            if 0 <= index < len(self._velocity_points):
+                del self._velocity_points[index]
+                self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not discard the velocity point: {exc}", Qgis.MessageLevel.Critical)
+
+    # ---- velocity fit: the unit boundary --------------------------------
+    # The view speaks (trace, ns) and the core speaks (metres, ns); this is
+    # the only place the two meet. `Line.distance_along()` carries the
+    # traces-per-metre, start and direction, so nothing here re-derives them.
+    _CURVE_SAMPLES = 200
+
+    def _velocity_axis(self) -> tuple[Any, float, float]:
+        """(metres at each trace, metres at trace 0, metres per trace) for
+        the working line. Raises `ValueError` for a line with no distance
+        calibration, and for one too short to have a trace spacing."""
+        if self._working_key is None:
+            raise ValueError("no line is open")
+        distance = self.session.line_for_key(self._working_key).distance_along()
+        if len(distance) < 2:
+            raise ValueError("this line has fewer than two traces, so it has no trace spacing")
+        return distance, float(distance[0]), float(distance[1] - distance[0])
+
+    def velocity_points_in_metres(self) -> tuple[Any, Any]:
+        """The working points as (metres along the line, two-way ns) arrays,
+        in click order, so the first is still the apex guess."""
+        distance, _, _ = self._velocity_axis()
+        last = len(distance) - 1
+        x_m = np.array([distance[min(max(t, 0), last)] for t, _ in self._velocity_points])
+        t_ns = np.array([ns for _, ns in self._velocity_points], dtype=float)
+        return x_m, t_ns
+
+    def velocity_curve_points(
+        self, fit: HyperbolaFit, distance: Any = None
+    ) -> list[tuple[float, float]]:
+        """`fit` sampled across the line's traces as (trace, ns) pairs.
+        `distance` is the line's axis when the caller already has it, so a
+        loop over several fits does not rebuild it for each."""
+        if distance is None:
+            distance, _, _ = self._velocity_axis()
+        traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
+        t = hyperbola_time(fit, _trace_to_metres(distance, traces))
+        return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
+
+    def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
+        """The working line's stored fits as (trace, ns) curves. Empty for a
+        line with no distance calibration, which could not have been fitted."""
+        if self._working_key is None or not self.session.is_open:
+            return []
+        fits = self.session.line_for_key(self._working_key).velocity_fits
+        try:
+            distance, _, _ = self._velocity_axis()
+        except ValueError:
+            return []
+        return [
+            self.velocity_curve_points(
+                HyperbolaFit(
+                    apex_x_m=float(_trace_to_metres(distance, float(f.apex_trace))),
+                    t0_ns=f.t0_ns,
+                    v_m_ns=f.v_m_ns,
+                    v_stderr_m_ns=f.v_stderr_m_ns,
+                    rms_ns=f.rms_ns,
+                    n_points=len(f.points),
+                ),
+                distance,
+            )
+            for f in fits.values()
+        ]
+
+    def _velocity_time_zero_note(self) -> str:
+        t = self.view.transform
+        # time_zero crops whole samples, so half a sample is the closest
+        # any user can get; a fixed ns tolerance would be unreachable on a
+        # coarse-sampled file.
+        if t is None or abs(t.t0_ns) <= 0.5 * t.dt_ns:
+            return ""
+        return (
+            f"Time zero is at {t.t0_ns:.1f} ns, so a hyperbola's time is not its "
+            "two-way time to the reflector. Add the time_zero step first."
+        )
+
+    def _update_velocity_fit(self) -> None:
+        """Refit the working points and repaint the curve, read-out and
+        buttons. Never raises: it runs from slots and from session signals."""
+        try:
+            self._velocity_fit = None
+            curve: list[tuple[float, float]] = []
+            self.velocity_note.setText(self._velocity_time_zero_note())
+            if not self._velocity_points:
+                self.velocity_readout.setText(
+                    "Click the hyperbola's apex, then points down both limbs."
+                    if self._working_key is not None
+                    else ""
+                )
+            else:
+                try:
+                    x_m, t_ns = self.velocity_points_in_metres()
+                    fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
+                    curve = self.velocity_curve_points(fit)
+                    self._velocity_fit = fit
+                    readout = (
+                        f"v = {fit.v_m_ns:6.4f} ± {fit.v_stderr_m_ns:6.4f} m/ns"
+                        f" · rms {fit.rms_ns:5.2f} ns · {fit.n_points:2d} pts"
+                    )
+                    if fit.v_stderr_m_ns / fit.v_m_ns > 0.2:
+                        # Advice, not a gate (spec §5.4): sigma is what makes
+                        # "the tool can tell you it fitted badly" true.
+                        readout += (
+                            ". The velocity is poorly constrained; try points "
+                            "spread further along the limbs."
+                        )
+                    self.velocity_readout.setText(readout)
+                except ValueError as exc:
+                    if self._line_has_no_distance_calibration():
+                        self.velocity_readout.setText(
+                            "This line has no distance calibration (no traces per metre, "
+                            "as with time-triggered collection), so a hyperbola cannot "
+                            "be fitted."
+                        )
+                    else:
+                        self.velocity_readout.setText(str(exc))
+            if self._preview_key is None and self._velocity_mode:
+                self.view.set_velocity_fit(self._velocity_points, curve)
+            else:
+                # The points and curve belong to the working line; painting
+                # them over a hovered one would put them on the wrong axes.
+                # With the mode off they are scratch marks with no control to
+                # remove them. Saved fits, below, show regardless of mode.
+                self.view.set_velocity_fit([], [])
+            # Saved fits belong to the working line too, never a hovered one.
+            self.view.set_saved_velocity_fits(
+                self._saved_velocity_curves() if self._preview_key is None else []
+            )
+            fit_ok = self._velocity_fit is not None
+            self.apply_line_button.setEnabled(fit_ok)
+            self.save_fit_button.setEnabled(fit_ok)
+            self.apply_grid_button.setEnabled(fit_ok and self._working_grid_id() is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the velocity fit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _line_has_no_distance_calibration(self) -> bool:
+        if self._working_key is None or not self.session.is_open:
+            return False
+        try:
+            self.session.line_for_key(self._working_key).distance_along()
+        except ValueError:
+            return True
+        return False
+
+    def _working_grid_id(self) -> str | None:
+        if self._working_key is None or not self.session.is_open:
+            return None
+        grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
+        return None if grid is None else str(grid.id)
+
+    def _apply_velocity_to_line(self, *_: Any) -> None:
+        try:
+            fit = self._velocity_fit
+            if fit is not None and self._working_key is not None:
+                self.session.set_line_velocity(
+                    self._working_key, VelocityModel.constant(fit.v_m_ns)
+                )
+                # `velocity_from_fit` is the fit that produced the override:
+                # the stored fit just applied, else none -- a bare "line" is
+                # better than a provenance the velocity does not have.
+                saved = self._saved_velocity_fit
+                same = saved is not None and saved[:2] == (
+                    self._working_key,
+                    tuple(self._velocity_points),
+                )
+                self.session.set_velocity_from_fit(
+                    self._working_key, saved[2] if saved is not None and same else None
+                )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
+
+    def _apply_velocity_to_grid(self, *_: Any) -> None:
+        try:
+            fit = self._velocity_fit
+            grid_id = self._working_grid_id()
+            if fit is not None and grid_id is not None:
+                self.session.set_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
+
+    def _save_velocity_fit(self, *_: Any) -> None:
+        """Store the fit on the line. Deliberately changes no velocity: a
+        saved fit is a measurement, and applying it is a separate choice."""
+        try:
+            fit = self._velocity_fit
+            if fit is None or self._working_key is None:
+                return
+            distance, _, _ = self._velocity_axis()
+            stored = StoredFit(
+                t0_ns=fit.t0_ns,
+                v_m_ns=fit.v_m_ns,
+                v_stderr_m_ns=fit.v_stderr_m_ns,
+                rms_ns=fit.rms_ns,
+                apex_trace=round(float(_metres_to_trace(distance, fit.apex_x_m))),
+                points=tuple(self._velocity_points),
+                fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            )
+            fit_id = self.session.add_velocity_fit(self._working_key, stored)
+            self._saved_velocity_fit = (self._working_key, stored.points, fit_id)
+            # A saved fit goes quietly into the line's record; say where to
+            # find it. The next fit action rewrites the read-out.
+            self.velocity_readout.setText(
+                self.velocity_readout.text().split(" Fit saved:")[0]
+                + " Fit saved: find it in the line's Set velocity override\u2026 dialog"
+                " (right-click the line in the Survey panel)."
+            )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _clear_velocity_points(self, *_: Any) -> None:
+        try:
+            self._velocity_points = []
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)
 
     # ---- rendering -------------------------------------------------------
     def set_difference_index(self, index: int) -> None:
@@ -813,6 +1161,7 @@ class ProfileDock(QgsDockWidget):
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
         self._show_cutoff()
+        self._update_velocity_fit()
         self._push_headroom()
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
@@ -1016,17 +1365,19 @@ class ProfileDock(QgsDockWidget):
         # nothing in today's call graph reaches it (`close_site` always
         # emits `line_opened("")` -- which clears `self._key` via `_open`
         # -- before `site_closed`). Keep both halves.
-        if self._key is None or not self.session.is_open:
-            return
-        try:
-            model: VelocityModel = self.session.resolved_velocity(self._key)
-            label = velocity_source(self.session, self._key)
-            self.view.set_velocity(model)
-            self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
-        except KeyError:
-            return
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
+        if self._key is not None and self.session.is_open:
+            try:
+                model: VelocityModel = self.session.resolved_velocity(self._key)
+                label = velocity_source(self.session, self._key)
+                self.view.set_velocity(model)
+                self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
+            except KeyError:
+                pass
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
+        # Every path, the early ones included, resets the strip: a line that
+        # just went away must not leave the old read-out and buttons behind.
+        self._update_velocity_fit()
 
     def _configure_channels(self, n: int) -> None:
         self.channel_combo.blockSignals(True)

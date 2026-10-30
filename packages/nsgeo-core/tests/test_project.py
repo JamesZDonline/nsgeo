@@ -11,6 +11,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing import StepStack, build_step
 from nsgeo.project import ProjectError, line_key, load_site, save_site
+from nsgeo.velocity_fit import StoredFit
 
 from tests.synthetic import write_dzt
 
@@ -405,6 +406,88 @@ def test_a_full_cubes_record_round_trips_unchanged_even_with_an_absolute_array(t
     reloaded = load_site(path).cubes
     assert reloaded == site.cubes
     assert reloaded["out-of-tree"]["array"] == "/home/someone/scratch/cube.npz"
+
+
+def _a_fit() -> StoredFit:
+    return StoredFit(
+        t0_ns=18.4,
+        v_m_ns=0.0984,
+        v_stderr_m_ns=0.0041,
+        rms_ns=0.31,
+        apex_trace=412,
+        points=((389, 21.2), (412, 18.6), (437, 21.9)),
+        fitted_at="2026-10-22T14:02:11Z",
+    )
+
+
+def test_velocity_fits_survive_a_save_and_load(tmp_path, site):
+    fit = _a_fit()
+    site.lines[0] = dataclasses.replace(
+        site.lines[0], velocity_fits={"f1": fit}, velocity_from_fit="f1"
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_fits == {"f1": fit}
+    assert loaded.velocity_from_fit == "f1"
+    assert loaded.velocity_fits["f1"].points == ((389, 21.2), (412, 18.6), (437, 21.9))
+
+
+def test_a_line_entry_without_fits_loads(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    entry = json.loads(out.read_text())["lines"][0]
+    assert "velocity_fits" not in entry
+    assert "velocity_from_fit" not in entry
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_fits == {}
+    assert loaded.velocity_from_fit is None
+
+
+def test_a_file_with_fits_still_declares_schema_version_1(tmp_path, site):
+    site.lines[0] = dataclasses.replace(
+        site.lines[0], velocity_fits={"f1": _a_fit()}, velocity_from_fit="f1"
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert json.loads(out.read_text())["schema_version"] == 1
+
+
+def test_a_velocity_from_fit_naming_a_missing_fit_loads_as_no_selection(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["velocity_fits"] = {"f1": _a_fit().to_dict()}
+    doc["lines"][0]["velocity_from_fit"] = "gone"
+    out.write_text(json.dumps(doc))
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_from_fit is None
+    assert set(loaded.velocity_fits) == {"f1"}
+
+
+@pytest.mark.parametrize("pointer", ['["f1"]', "{}", "7", "null"])
+def test_a_non_string_velocity_from_fit_loads_as_no_selection(tmp_path, site, pointer):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    text = out.read_text()
+    doc = json.loads(text)
+    doc["lines"][0]["velocity_fits"] = {"f1": _a_fit().to_dict()}
+    doc["lines"][0]["velocity_from_fit"] = "@@"
+    # Hand-written JSON, as a person editing the file would leave it.
+    out.write_text(json.dumps(doc).replace('"@@"', pointer))
+    loaded = load_site(out).lines[0]
+    assert loaded.velocity_from_fit is None
+    assert set(loaded.velocity_fits) == {"f1"}
+
+
+def test_a_malformed_fit_raises_project_error_naming_the_line(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["velocity_fits"] = {"f1": {"t0_ns": 1.0}}
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="data/L0.DZT"):
+        load_site(out)
 
 
 def _two_grid_site():
