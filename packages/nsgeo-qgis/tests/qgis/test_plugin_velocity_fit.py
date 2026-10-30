@@ -12,6 +12,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
+from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import fit_hyperbola
 from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
@@ -501,6 +502,65 @@ def test_apply_after_saving_a_different_fit_names_the_applied_one(plugin):
     assert line.velocity_from_fit == second[0]
 
 
+def test_apply_after_the_saved_fit_was_deleted_applies_with_no_provenance(plugin, message_log):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (fit_id,) = s.line_for_key(key).velocity_fits
+    s.remove_velocity_fit(key, fit_id)
+
+    dock.apply_line_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(dock.velocity_fit_result().v_m_ns)
+    assert line.velocity_from_fit is None
+    assert message_log == []
+
+
+def test_apply_names_a_stored_fit_with_the_same_points_saved_before_another(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (first,) = s.line_for_key(key).velocity_fits
+    _view(plugin).velocity_point_discarded.emit(4)
+    dock.save_fit_button.click()  # the dock's last save is now a different fit
+    _view(plugin).velocity_point_requested.emit(55, _hyperbola_ns(55))  # back to the first's points
+
+    dock.apply_line_button.click()
+
+    assert s.line_for_key(key).velocity_from_fit == first
+
+
+def test_time_zero_added_after_a_save_leaves_the_fit_on_its_feature_and_apply_still_names_it(
+    plugin,
+):
+    """Issue #90 rested on time_zero moving the time axis. It does not: it
+    crops rows and each surviving sample keeps its time, so a saved fit's
+    (trace, ns) points still land on the hyperbola they were clicked on. A
+    step that rebased the axis would strand every saved fit, and fail here."""
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (fit_id,) = s.line_for_key(key).velocity_fits
+    v_before = dock.velocity_fit_result().v_m_ns
+    before = dock.current_radargram()
+
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    after = dock.current_radargram()
+    assert after.n_samples == before.n_samples - 51  # rows really were cropped
+    assert after.times_ns()[0] == pytest.approx(-0.04, abs=0.01)  # -11.086 + 51 * 0.2165
+    np.testing.assert_array_equal(after.data[0], before.data[51])  # that row kept its time
+    assert dock.velocity_fit_result().v_m_ns == v_before
+
+    dock.apply_line_button.click()
+
+    assert s.line_for_key(key).velocity_from_fit == fit_id
+
+
 def test_save_fit_twice_keeps_both_under_distinct_ids(plugin):
     s, dock = plugin.session, _velocity_on(plugin)
     _click_hyperbola(plugin)
@@ -651,6 +711,66 @@ def test_set_velocity_from_fit_rejects_an_unknown_fit_id(plugin):
     assert s.line_for_key(key).velocity_from_fit is None
 
 
+def _two_saved_fits(s, key):
+    from nsgeo.velocity_fit import StoredFit
+
+    a = StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
+    b = StoredFit(41.0, 0.12, 0.004, 0.2, 20, ((20, 41.0), (10, 42.0)), "t")
+    return s.add_velocity_fit(key, a), a, s.add_velocity_fit(key, b), b
+
+
+def test_remove_velocity_fit_drops_only_that_fit_dirties_and_announces(plugin):
+    s = plugin.session
+    key = s.keys()[0]
+    id_a, a, id_b, _ = _two_saved_fits(s, key)
+    s._set_dirty(False)
+    heard = []
+    s.lines_changed.connect(lambda: heard.append(1))
+
+    s.remove_velocity_fit(key, id_b)
+
+    assert s.line_for_key(key).velocity_fits == {id_a: a}
+    assert s.dirty and heard == [1]
+
+
+def test_removing_the_fit_that_set_the_velocity_keeps_the_velocity_but_not_the_claim(plugin):
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s = plugin.session
+    key = s.keys()[0]
+    id_a, _, _, _ = _two_saved_fits(s, key)
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    s.set_velocity_from_fit(key, id_a)
+
+    s.remove_velocity_fit(key, id_a)
+
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09)
+    assert line.velocity_from_fit is None
+    assert velocity_source(s, key) == "line override"
+
+
+def test_removing_another_fit_leaves_the_pointer_alone(plugin):
+    s = plugin.session
+    key = s.keys()[0]
+    id_a, _, id_b, _ = _two_saved_fits(s, key)
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    s.set_velocity_from_fit(key, id_a)
+
+    s.remove_velocity_fit(key, id_b)
+
+    assert s.line_for_key(key).velocity_from_fit == id_a
+
+
+def test_remove_velocity_fit_rejects_an_unknown_fit_id(plugin):
+    s = plugin.session
+    key = s.keys()[0]
+    id_a, a, id_b, b = _two_saved_fits(s, key)
+    with pytest.raises(KeyError):
+        s.remove_velocity_fit(key, "no-such-fit")
+    assert s.line_for_key(key).velocity_fits == {id_a: a, id_b: b}
+
+
 def _stub_fit(monkeypatch, v, sigma):
     from nsgeo.velocity_fit import HyperbolaFit
     from nsgeo_qgis.ui import profile_dock
@@ -735,17 +855,6 @@ def test_a_refresh_with_no_open_line_still_resets_the_strip(plugin):
     assert not dock.apply_line_button.isEnabled()
     assert not dock.save_fit_button.isEnabled()
     assert "±" not in dock.velocity_readout.text()
-
-
-def test_closing_the_site_forgets_which_fit_was_just_saved(plugin):
-    dock = _velocity_on(plugin)
-    _click_hyperbola(plugin)
-    dock.save_fit_button.click()
-    assert dock._saved_velocity_fit is not None
-
-    plugin.session.close_site()
-
-    assert dock._saved_velocity_fit is None
 
 
 def test_one_update_builds_the_distance_axis_the_same_number_of_times_however_many_fits_are_saved(

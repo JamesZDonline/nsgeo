@@ -201,9 +201,6 @@ class ProfileDock(QgsDockWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
-        # (line key, points, fit id) of the last Save: lets Apply tell
-        # whether the fit it applies is the stored one.
-        self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -634,9 +631,6 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
-        # Dock state, not site state: left alone it could match a line of the
-        # next site that happens to share a key and its points.
-        self._saved_velocity_fit = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -960,15 +954,18 @@ class ProfileDock(QgsDockWidget):
                     self._working_key, VelocityModel.constant(fit.v_m_ns)
                 )
                 # `velocity_from_fit` is the fit that produced the override:
-                # the stored fit just applied, else none -- a bare "line" is
-                # better than a provenance the velocity does not have.
-                saved = self._saved_velocity_fit
-                same = saved is not None and saved[:2] == (
-                    self._working_key,
-                    tuple(self._velocity_points),
-                )
+                # a stored fit with these very points, else none -- a bare
+                # "line" is better than a provenance the velocity does not
+                # have. Same points, same fit: a fit reads nothing else of
+                # the line that could have changed, and no processing step
+                # moves a sample's time (time_zero crops rows, it does not
+                # rebase them). The store is asked rather than remembered,
+                # so a deleted fit is never named.
+                points = tuple(self._velocity_points)
+                fits = self.session.line_for_key(self._working_key).velocity_fits
+                stored = [i for i, f in fits.items() if f.points == points]
                 self.session.set_velocity_from_fit(
-                    self._working_key, saved[2] if saved is not None and same else None
+                    self._working_key, stored[-1] if stored else None
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
@@ -999,8 +996,7 @@ class ProfileDock(QgsDockWidget):
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             )
-            fit_id = self.session.add_velocity_fit(self._working_key, stored)
-            self._saved_velocity_fit = (self._working_key, stored.points, fit_id)
+            self.session.add_velocity_fit(self._working_key, stored)
             # A saved fit goes quietly into the line's record; say where to
             # find it. The next fit action rewrites the read-out.
             self.velocity_readout.setText(
