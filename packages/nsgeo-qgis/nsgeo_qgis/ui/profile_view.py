@@ -698,6 +698,12 @@ class ProfileView(QWidget):
             # mouseMoveEvent's own comment gives.
             _log(f"could not handle the mouse press: {exc}", Qgis.MessageLevel.Warning)
 
+    def _abandon_stale_cutoff_grab(self) -> None:
+        if self._cutoff_grab is not None:
+            self._cutoff_ns = self._cutoff_grab
+            self._cutoff_grab = None
+            self.update()
+
     def _handle_mouse_press(self, event: Any) -> None:
         assert self.transform is not None  # only called from mousePressEvent's own guard
         x, y = self._local(event)
@@ -705,6 +711,7 @@ class ProfileView(QWidget):
             self._pan_last = event_pos(event)
             return
         if event.button() == Qt.MouseButton.RightButton and self._velocity_mode:
+            self._abandon_stale_cutoff_grab()
             # Nearest in SCREEN space: the points live in trace/ns, whose
             # scales differ, so only pixels say which one the user meant.
             nearest = None
@@ -720,10 +727,7 @@ class ProfileView(QWidget):
             # drag) and no button-less move has cleaned it up yet. Abandon
             # it before deciding what this press is, or its stale state
             # would follow the next gesture and emit from the wrong one.
-            if self._cutoff_grab is not None:
-                self._cutoff_ns = self._cutoff_grab
-                self._cutoff_grab = None
-                self.update()
+            self._abandon_stale_cutoff_grab()
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
                 # Only inside the radargram itself. This handler runs for

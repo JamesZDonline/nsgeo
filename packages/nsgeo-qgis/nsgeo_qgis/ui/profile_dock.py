@@ -153,6 +153,34 @@ def velocity_source(session: SiteSession, key: str) -> str:
     return "unknown source"
 
 
+def _trace_to_metres(distance: Any, traces: Any) -> Any:
+    """Metres along the line at (possibly fractional) `traces`, read off the
+    line's own distance array, so there is one trace-to-metre map. Beyond
+    either end it extends by the end spacing."""
+    d = np.asarray(distance, dtype=float)
+    tr = np.asarray(traces, dtype=float)
+    last = len(d) - 1
+    inside = np.interp(tr, np.arange(len(d)), d)
+    below = d[0] + tr * (d[1] - d[0])
+    above = d[-1] + (tr - last) * (d[-1] - d[-2])
+    return np.where(tr < 0, below, np.where(tr > last, above, inside))
+
+
+def _metres_to_trace(distance: Any, x_m: Any) -> Any:
+    """The inverse of `_trace_to_metres`, for a line whose distance runs
+    either way along the axis."""
+    d = np.asarray(distance, dtype=float)
+    x = np.asarray(x_m, dtype=float)
+    idx = np.arange(len(d), dtype=float)
+    if d[-1] < d[0]:
+        d, idx = d[::-1], idx[::-1]
+    last = len(d) - 1
+    inside = np.interp(x, d, idx)
+    below = idx[0] + (x - d[0]) / (d[1] - d[0]) * (idx[1] - idx[0])
+    above = idx[-1] + (x - d[-1]) / (d[-1] - d[-2]) * (idx[-1] - idx[-2])
+    return np.where(x < d[0], below, np.where(x > d[last], above, inside))
+
+
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
@@ -606,6 +634,9 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        # Dock state, not site state: left alone it could match a line of the
+        # next site that happens to share a key and its points.
+        self._saved_velocity_fit = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -798,11 +829,16 @@ class ProfileDock(QgsDockWidget):
         t_ns = np.array([ns for _, ns in self._velocity_points], dtype=float)
         return x_m, t_ns
 
-    def velocity_curve_points(self, fit: HyperbolaFit) -> list[tuple[float, float]]:
-        """`fit` sampled across the line's traces as (trace, ns) pairs."""
-        distance, d0, step = self._velocity_axis()
+    def velocity_curve_points(
+        self, fit: HyperbolaFit, distance: Any = None
+    ) -> list[tuple[float, float]]:
+        """`fit` sampled across the line's traces as (trace, ns) pairs.
+        `distance` is the line's axis when the caller already has it, so a
+        loop over several fits does not rebuild it for each."""
+        if distance is None:
+            distance, _, _ = self._velocity_axis()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        t = hyperbola_time(fit, d0 + step * traces)
+        t = hyperbola_time(fit, _trace_to_metres(distance, traces))
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
     def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
@@ -812,19 +848,20 @@ class ProfileDock(QgsDockWidget):
             return []
         fits = self.session.line_for_key(self._working_key).velocity_fits
         try:
-            _, d0, step = self._velocity_axis()
+            distance, _, _ = self._velocity_axis()
         except ValueError:
             return []
         return [
             self.velocity_curve_points(
                 HyperbolaFit(
-                    apex_x_m=d0 + step * f.apex_trace,
+                    apex_x_m=float(_trace_to_metres(distance, float(f.apex_trace))),
                     t0_ns=f.t0_ns,
                     v_m_ns=f.v_m_ns,
                     v_stderr_m_ns=f.v_stderr_m_ns,
                     rms_ns=f.rms_ns,
                     n_points=len(f.points),
-                )
+                ),
+                distance,
             )
             for f in fits.values()
         ]
@@ -952,13 +989,13 @@ class ProfileDock(QgsDockWidget):
             fit = self._velocity_fit
             if fit is None or self._working_key is None:
                 return
-            _, d0, step = self._velocity_axis()
+            distance, _, _ = self._velocity_axis()
             stored = StoredFit(
                 t0_ns=fit.t0_ns,
                 v_m_ns=fit.v_m_ns,
                 v_stderr_m_ns=fit.v_stderr_m_ns,
                 rms_ns=fit.rms_ns,
-                apex_trace=round((fit.apex_x_m - d0) / step),
+                apex_trace=round(float(_metres_to_trace(distance, fit.apex_x_m))),
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             )
@@ -1328,17 +1365,18 @@ class ProfileDock(QgsDockWidget):
         # nothing in today's call graph reaches it (`close_site` always
         # emits `line_opened("")` -- which clears `self._key` via `_open`
         # -- before `site_closed`). Keep both halves.
-        if self._key is None or not self.session.is_open:
-            return
-        try:
-            model: VelocityModel = self.session.resolved_velocity(self._key)
-            label = velocity_source(self.session, self._key)
-            self.view.set_velocity(model)
-            self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
-        except KeyError:
-            return
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
+        if self._key is not None and self.session.is_open:
+            try:
+                model: VelocityModel = self.session.resolved_velocity(self._key)
+                label = velocity_source(self.session, self._key)
+                self.view.set_velocity(model)
+                self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
+            except KeyError:
+                pass
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
+        # Every path, the early ones included, resets the strip: a line that
+        # just went away must not leave the old read-out and buttons behind.
         self._update_velocity_fit()
 
     def _configure_channels(self, n: int) -> None:
