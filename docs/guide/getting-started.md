@@ -380,7 +380,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    radius is set in line spacings, as it is for the whole site, and starts at
    0.5. Its metres are shown beside the box. That radius just closes the gaps
    between lines. If a line strayed from its spacing and leaves an unfilled
-   stripe, raise the fill radius.
+   stripe, raise the fill radius. Each grid remembers the resolution you set
+   for it, and saving the site saves it.
 4. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 5. **Save cube…** keeps the prepared volume in the site folder (click **Save

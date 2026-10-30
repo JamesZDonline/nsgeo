@@ -1406,3 +1406,67 @@ def test_removing_a_grid_with_its_lines_prunes_its_source_and_site_view_entry(se
     session.remove_grid("A", with_lines=True)
     assert session.slice_source("A") is None
     assert session.site_view()["grids"] == ["B"]
+
+
+def test_remember_slice_resolution_merges_fields_and_keeps_the_source(session):
+    # #71: each field is remembered on its own, so a later edit adds to the
+    # record rather than replacing it, and the preset and lines stay put.
+    session.add_grid(GRID)
+    session.remember_slice_source("A", preset="p", lines=None)
+    session.remember_slice_resolution("A", cell=0.1)
+    session.remember_slice_resolution("A", dz_ns=0.2)
+    assert session.slice_source("A") == {
+        "preset": "p",
+        "lines": None,
+        "resolution": {"cell": 0.1, "dz_ns": 0.2},
+    }
+    got = session.slice_resolution("A")
+    assert got == {"cell": 0.1, "dz_ns": 0.2}
+    got["cell"] = 9.0
+    assert session.slice_resolution("A") == {"cell": 0.1, "dz_ns": 0.2}
+    assert session.slice_resolution("B") == {}
+
+
+def test_remembering_an_unchanged_resolution_does_not_dirty(session):
+    session.add_grid(GRID)
+    session.remember_slice_resolution("A", cell=0.1, t0_ns=2.0)
+    session.remember_site_resolution(radius_spacings=1.5)
+    assert session.dirty
+    session.save()
+    session.remember_slice_resolution("A", cell=0.1)
+    session.remember_slice_resolution("A", t0_ns=2.0, dz_ns=None)
+    session.remember_slice_resolution("A")
+    session.remember_site_resolution(radius_spacings=1.5)
+    session.remember_site_resolution()
+    assert not session.dirty
+    assert session.slice_resolution("A") == {"cell": 0.1, "t0_ns": 2.0}
+    session.remember_slice_resolution("A", t1_ns=30.0)
+    assert session.dirty
+
+
+def test_site_resolution_is_remembered_apart_from_each_grid(session):
+    session.add_grid(GRID)
+    session.set_site_view(grids=("A",), transform="none")
+    assert session.site_resolution() == {}
+    session.remember_site_resolution(cell=0.2, radius_spacings=0.75)
+    session.remember_slice_resolution("A", cell=0.1)
+    session.remember_site_resolution(dz_ns=0.3)
+    assert session.site_resolution() == {"cell": 0.2, "dz_ns": 0.3, "radius_spacings": 0.75}
+    assert session.slice_resolution("A") == {"cell": 0.1}
+    # The site view's other choices stay where they were.
+    view = session.site_view()
+    assert view["grids"] == ["A"] and view["transform"] == "none"
+    got = session.site_resolution()
+    got["cell"] = 9.0
+    assert session.site_resolution()["cell"] == 0.2
+
+
+def test_removing_a_grid_drops_its_remembered_resolution(session):
+    session.add_grid(GRID)
+    session.remember_slice_resolution("A", cell=0.1, radius_spacings=1.0)
+    session.remember_site_resolution(cell=0.2)
+    session.remove_grid("A")
+    assert session.slice_resolution("A") == {}
+    assert session.slice_source("A") is None
+    # The site's own resolution is not the removed grid's to take with it.
+    assert session.site_resolution() == {"cell": 0.2}

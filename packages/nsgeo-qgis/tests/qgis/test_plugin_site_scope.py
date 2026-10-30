@@ -1028,6 +1028,32 @@ def test_the_opened_grid_lands_on_the_site_time_not_the_left_grids_clamp(plugin)
     ), "the engine holds the resolution the spins show"
 
 
+def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
+    """#71 on #70's switch: the grid opened from the site list restores its
+    remembered resolution, and the owed apply carries it to the engine. The
+    switch is no choice, so nothing is written and the survey stays clean."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, radius_spacings=1.5)
+    session.save()
+    stored = session.slice_source("B")
+    whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.engine.wait_for_preparation(20_000)
+    spin_until(lambda: False, 400)  # any debounce runs on its own
+    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.dz_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(0.5)
+    assert dock.current_values() is not None
+    assert session.slice_source("B") == stored
+    assert not session.dirty
+
+
 def test_the_opened_grid_lands_on_the_site_time_when_a_site_task_outlived_its_cancel(
     plugin, monkeypatch
 ):
@@ -1237,6 +1263,32 @@ def test_landing_on_the_grid_the_engine_already_holds_clamps_the_seeded_range(pl
     assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
     dock.site_panel.select_grid("A")
     dock.grid_scope_button.click()
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_data(
+    plugin, monkeypatch
+):
+    """#71, Review Focus 1, on #70's owed path: `prepare()` is a no-op (the
+    engine still holds A), so `_run_pending_grid_prepare`'s own clamp is the
+    one that meets A's remembered range lying wholly past A's data."""
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    assert dock.engine.choice.grid_id == "A"
+    _low, high = dock.engine.prepared_z_bounds()
+    beyond = {"t0_ns": high + 10.0, "t1_ns": high + 50.0}
+    plugin.session.remember_slice_resolution("A", **beyond)
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.engine.is_prepared and not dock.engine.is_running, "the no-op path"
+    low, high = dock.engine.prepared_z_bounds()
+    assert dock.z0_spin.value() == _snap_inside(low, dock.z0_spin.decimals(), upper=False)
+    assert dock.z1_spin.value() == _snap_inside(high, dock.z1_spin.decimals(), upper=True)
+    assert plugin.session.slice_resolution("A") == beyond
     _assert_a_slice_is_drawn_on_a(dock, errors)
 
 

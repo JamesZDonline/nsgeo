@@ -509,6 +509,76 @@ def test_slice_sources_and_site_view_round_trip(tmp_path):
     assert loaded.site_view == site.site_view
 
 
+_FULL_RESOLUTION = {"cell": 0.1, "dz_ns": 0.25, "t0_ns": 2.0, "t1_ns": 40.0, "radius_spacings": 1.5}
+
+
+def test_a_remembered_resolution_round_trips(tmp_path):
+    site = _two_grid_site()
+    site.slice_sources = {"A": {"preset": "p", "resolution": dict(_FULL_RESOLUTION)}}
+    site.site_view = {"grids": ["A"], "resolution": {"cell": 0.2, "radius_spacings": 0.75}}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    loaded = load_site(path)
+    assert loaded.slice_sources == site.slice_sources
+    assert loaded.site_view == site.site_view
+
+
+def _load_with_resolution(tmp_path, resolution):
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {"A": {"preset": "p", "resolution": resolution}}
+    doc["site_view"] = {"transform": "none", "resolution": resolution}
+    # allow_nan so a NaN reaches the loader as the bare token a hand-edit or
+    # another writer could leave, not as a refused dump.
+    path.write_text(json.dumps(doc, allow_nan=True))
+    return load_site(path)
+
+
+# Review Focus 2 (#71): a hand-edited or damaged value reads as unset and the
+# survey still opens.
+@pytest.mark.parametrize(
+    "resolution",
+    [
+        [],
+        {"cell": "0.2"},
+        {"cell": 0},
+        {"cell": -1.0},
+        {"dz_ns": 0},
+        {"cell": True},
+        {"radius_spacings": -0.5},
+        {"t0_ns": 5.0, "t1_ns": 5.0},
+        {"t0_ns": 9.0, "t1_ns": 2.0},
+        {"colour": 1},
+        {"dz_ns": float("nan")},
+    ],
+    ids=[
+        "list",
+        "string-cell",
+        "zero-cell",
+        "negative-cell",
+        "zero-dz",
+        "bool-cell",
+        "negative-radius",
+        "empty-z-range",
+        "reversed-z-range",
+        "unknown-key",
+        "nan-dz",
+    ],
+)
+def test_a_bad_remembered_resolution_value_reads_as_unset(tmp_path, resolution):
+    loaded = _load_with_resolution(tmp_path, resolution)
+    assert loaded.slice_sources == {"A": {"preset": "p"}}
+    assert loaded.site_view == {"transform": "none"}
+
+
+def test_a_partly_bad_resolution_keeps_its_good_values(tmp_path):
+    loaded = _load_with_resolution(tmp_path, {"cell": 0.1, "dz_ns": -1})
+    assert loaded.slice_sources == {"A": {"preset": "p", "resolution": {"cell": 0.1}}}
+    assert loaded.site_view == {"transform": "none", "resolution": {"cell": 0.1}}
+
+
 def test_a_survey_without_them_loads_with_empty_defaults(tmp_path):
     path = tmp_path / "survey.nsgeo.json"
     path.write_text(json.dumps({"schema_version": 1, "grids": [], "lines": []}))

@@ -21,6 +21,7 @@ slot below guards its own body and reports through `error` or
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -180,6 +181,12 @@ class SlicesDock(QgsDockWidget):
         # outer call is still on the stack would otherwise have its
         # `finally` clear the guard early, for the inner call's own frame.
         self._updating = 0
+        #: #71: raised, as a depth counter for the same reason, around every
+        #: seed and every restore of a remembered resolution. Those still
+        #: emit `valueChanged`, which is how they reach the engine through
+        #: the debounce; this is what tells `_on_resolution_edited` that the
+        #: change is not the user's to remember.
+        self._seeding = 0
         #: The included subset, in survey order. Always a subset of the
         #: selected grid's own lines (fix round 3, Ruling Y corrects what
         #: this used to say): `_default_included` seeds it from the grid,
@@ -656,6 +663,17 @@ class SlicesDock(QgsDockWidget):
         # combo's claim about the array still true.
         for _spin in (self.cell_spin, self.dz_spin, self.z0_spin, self.z1_spin):
             _spin.valueChanged.connect(lambda _value: self._mark_cube_unsaved())
+
+        # #71: each of the five, edited by hand, is remembered for the grid
+        # it was edited on, field by field (`_on_resolution_edited`).
+        for _spin, _field in (
+            (self.cell_spin, "cell"),
+            (self.dz_spin, "dz_ns"),
+            (self.z0_spin, "t0_ns"),
+            (self.z1_spin, "t1_ns"),
+            (self.grid_radius_spin, "radius_spacings"),
+        ):
+            _spin.valueChanged.connect(partial(self._on_resolution_edited, _field))
 
         # Display changes no value `refresh_slice()` fetches from the
         # engine, but each still changes what the map ought to show --
@@ -1332,23 +1350,35 @@ class SlicesDock(QgsDockWidget):
         reaches them for lines that genuinely disagree with each other
         (spec 9.1 wants that acted on, not hidden). Only a range reaching
         OUTSIDE what the data can supply is corrected.
+
+        One exception (#71, Review Focus 1): a range the clamp would leave
+        empty (z1 <= z0), which every slice refuses, takes the prepared range
+        at both ends instead. The usual cause is a remembered range lying
+        wholly past one end of the data -- a z0 of 80 ns on lines a time
+        cutoff has since cropped at 50 -- which clamps end by end to z1 < z0.
+        The clamp is no edit: the remembered values stand, so a later crop
+        that frees the range brings them back on the next grid change or
+        reopen.
         """
         bounds = self.engine.prepared_z_bounds()
         if bounds is None:
             return False
         low, high = bounds
+        top = _snap_inside(low, self.z0_spin.decimals(), upper=False)
+        bottom = _snap_inside(high, self.z1_spin.decimals(), upper=True)
+        z0, z1 = self.z0_spin.value(), self.z1_spin.value()
+        new_z0 = top if z0 < low else z0
+        new_z1 = bottom if z1 > high else z1
+        if new_z1 <= new_z0:
+            new_z0, new_z1 = top, bottom
         changed = False
         self._updating += 1
         try:
-            for spin, bound, upper in (
-                (self.z0_spin, low, False),
-                (self.z1_spin, high, True),
-            ):
-                value = spin.value()
-                if (value > bound) if upper else (value < bound):
+            for spin, value in ((self.z0_spin, new_z0), (self.z1_spin, new_z1)):
+                if value != spin.value():
                     spin.blockSignals(True)
                     try:
-                        spin.setValue(_snap_inside(bound, spin.decimals(), upper=upper))
+                        spin.setValue(value)
                     finally:
                         spin.blockSignals(False)
                     changed = True
@@ -1693,6 +1723,20 @@ class SlicesDock(QgsDockWidget):
             # record with no `lines` key names no line list: it is remembered
             # as every line, not as an empty choice (final review D4).
             self._remember_source(every_line="lines" not in record)
+            # #71: so are its resolution settings, as that grid's own. The
+            # radius is read off the box, which `apply_view` set in spacings.
+            remembered: dict[str, float] = {}
+            if recipe.resolution is not None:
+                remembered.update(
+                    cell=recipe.resolution.cell,
+                    dz_ns=recipe.resolution.dz_ns,
+                    t0_ns=recipe.resolution.t0_ns,
+                    t1_ns=recipe.resolution.t1_ns,
+                )
+            if recipe.view is not None:
+                remembered["radius_spacings"] = self.grid_radius_spin.value()
+            if remembered:
+                self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
             self.flush_debounce()
             self.prepare()
@@ -1743,24 +1787,32 @@ class SlicesDock(QgsDockWidget):
             grid = self.session.grid(grid_id)
         except KeyError:
             return
-        # The floor is raised BEFORE the value is set, so the seeded
-        # value is clamped into the affordable range rather than sitting
-        # below a minimum that arrives afterwards. On any ordinary grid
-        # `smallest_safe_cell` is well under the spin's own 0.01 m and
-        # this changes nothing; it only bites where the arithmetic really
-        # does run away (walkthrough round 2, W7).
-        floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
-        self.cell_spin.setMinimum(floor)
-        self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
-        # Quiet: a seed is not an edit, and a grid change re-prepares and
-        # `refresh_slice` reads `radius_cells()` live, so no debounce either.
-        self.grid_radius_spin.blockSignals(True)
+        # #71: a seed, not an edit, so nothing here is remembered.
+        self._seeding += 1
         try:
-            self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
+            # The floor is raised BEFORE the value is set, so the seeded
+            # value is clamped into the affordable range rather than sitting
+            # below a minimum that arrives afterwards. On any ordinary grid
+            # `smallest_safe_cell` is well under the spin's own 0.01 m and
+            # this changes nothing; it only bites where the arithmetic really
+            # does run away (walkthrough round 2, W7).
+            floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
+            self.cell_spin.setMinimum(floor)
+            self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
+            # Quiet: a seed is not an edit, and a grid change re-prepares and
+            # `refresh_slice` reads `radius_cells()` live, so no debounce either.
+            self.grid_radius_spin.blockSignals(True)
+            try:
+                self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
+            finally:
+                self.grid_radius_spin.blockSignals(False)
+            self._update_radius_metres()
+            self._seed_dz_z_defaults(grid_id)
+            # Last, so what the user chose for this grid wins over its seed
+            # (#71), and the cell lands above the floor just raised.
+            self._restore_remembered_resolution(grid_id)
         finally:
-            self.grid_radius_spin.blockSignals(False)
-        self._update_radius_metres()
-        self._seed_dz_z_defaults(grid_id)
+            self._seeding -= 1
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
         """Re-seed `dz_spin`/`z0_spin`/`z1_spin` from `grid_id`'s first
@@ -1792,16 +1844,81 @@ class SlicesDock(QgsDockWidget):
         if not included:
             return
         header = self.session.line_for_key(included[0]).header
-        # One sample per arrow click, on all three of the time spins: on
-        # a time axis nothing else is a meaningful increment, and Qt's
-        # 1.0 ns default was five samples at this repo's own sampling
-        # (walkthrough round 2, W7).
-        for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
-            _spin.setSingleStep(header.dt_ns)
-        self.dz_spin.setValue(header.dt_ns)
-        self.z0_spin.setValue(header.position_ns)
-        self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
-        self._dz_z_seeded_for = grid_id
+        # #71: a seed, not an edit (see `_seed_resolution_defaults`).
+        self._seeding += 1
+        try:
+            # One sample per arrow click, on all three of the time spins: on
+            # a time axis nothing else is a meaningful increment, and Qt's
+            # 1.0 ns default was five samples at this repo's own sampling
+            # (walkthrough round 2, W7).
+            for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
+                _spin.setSingleStep(header.dt_ns)
+            self.dz_spin.setValue(header.dt_ns)
+            self.z0_spin.setValue(header.position_ns)
+            self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
+            self._dz_z_seeded_for = grid_id
+            # This seed can run long after the grid change (the lines
+            # arrived later), so it must not overwrite a remembered value.
+            self._restore_remembered_resolution(grid_id)
+        finally:
+            self._seeding -= 1
+
+    def _restore_remembered_resolution(self, grid_id: str | None) -> None:
+        """Set what the user chose for `grid_id`'s resolution the last time
+        (#71) onto the spins. A restore, not a choice: run inside `_seeding`,
+        so nothing is remembered, and only after the seeds, so a seed never
+        overwrites it. The four geometry spins emit as a seed does, which is
+        how the values reach the engine (the debounce, or the owed apply on
+        a switch from the site, #70). The radius is set quietly, as its seed
+        is: `refresh_slice` reads it live.
+
+        A remembered cell below the grid's floor is clamped up by the spin
+        itself; a remembered z range is clamped to the prepared lines later,
+        by `_clamp_z_to_prepared`. Neither clamp touches the record, so a
+        freed range comes back on the next grid change or reopen."""
+        if not grid_id or not self.session.is_open:
+            return
+        remembered = self.session.slice_resolution(grid_id)
+        if not remembered:
+            return
+        self._seeding += 1
+        try:
+            for field, spin in (
+                ("cell", self.cell_spin),
+                ("dz_ns", self.dz_spin),
+                ("t0_ns", self.z0_spin),
+                ("t1_ns", self.z1_spin),
+            ):
+                if field in remembered:
+                    spin.setValue(remembered[field])
+            if "radius_spacings" in remembered:
+                self.grid_radius_spin.blockSignals(True)
+                try:
+                    self.grid_radius_spin.setValue(remembered["radius_spacings"])
+                finally:
+                    self.grid_radius_spin.blockSignals(False)
+                self._update_radius_metres()
+        finally:
+            self._seeding -= 1
+
+    def _on_resolution_edited(self, field: str, value: float) -> None:
+        """One of the five Resolution spins moved: remember the user's value
+        for the grid it was set on (#71). Each field on its own, so changing
+        the cell does not freeze a z range that was only ever seeded.
+
+        Seeds and restores emit `valueChanged` too; `_seeding` and
+        `_updating` (a cube restore, a clamp) are what tell them apart."""
+        try:
+            if self._updating or self._seeding:
+                return
+            if self._scope == "site":
+                return  # Task 5: the site's own resolution
+            grid_id = self.grid_combo.currentText()
+            if not grid_id or not self.session.is_open:
+                return
+            self.session.remember_slice_resolution(grid_id, **{field: value})
+        except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
+            _log(f"could not remember the slice resolution: {exc}")
 
     def _refill_palette_combo(self) -> None:
         """Spec 8's rule made concrete: only tables that suit the
