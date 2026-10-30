@@ -114,8 +114,9 @@ any other QGIS panel.
   drawn against the grid's length, with the low end on the left, so a line that
   was walked the other way is shown mirrored. A line shorter than the grid
   leaves hatched blank space. Zoom and pan stay on the same stretch of ground
-  when another line on the same grid, running the same way, opens or is hovered
-  on the map. **Fit** shows the whole grid length, and **1:1** shows one trace
+  when another line on the same grid, parallel to it and walked in either
+  direction, opens or is hovered on the map, and they come back after a glance
+  at a cross-line. **Fit** shows the whole grid length, and **1:1** shows one trace
   per screen pixel. The arrow under the distance axis shows which way the line
   was walked. The mouse wheel zooms, and dragging with the middle button pans.
 - **nsgeo Processing** (right) holds the processing steps for the open line:

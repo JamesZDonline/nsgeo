@@ -342,21 +342,10 @@ def test_time_triggered_line_shows_a_trace_axis_instead_of_raising(bare):
 
 
 def test_switching_lines_does_not_inherit_the_previous_lines_window(opened):
-    """`_render`'s "keep the current pan/zoom across a re-render" mechanism
-    (see `test_rerender_with_the_same_shape_keeps_the_current_zoom` above)
-    is gated on *two* conditions ANDed together: the old transform's
-    `n_traces` matches the new radargram's, AND its `n_samples` does too.
-    Every other test in this file changes shape (if at all) only via
-    `time_zero`, which crops samples but never traces -- so mutating the
-    `n_traces` half of that gate to an unconditional `True` survives the
-    whole suite, because the `n_samples` half already blocks the restore
-    by itself whenever a *sample* mismatch is what's actually varying.
-
-    Isolates the `n_traces` half by opening a second line with the *same*
-    sample count (`synthetic_dzt` always writes 512) but a different trace
-    count. Without that guard, the second line's view would incorrectly
-    inherit the first line's stale, differently-scaled trace window
-    instead of a fresh fit.
+    """Both lines are ruled (on grid A), so this no longer pins the old
+    n_traces gate; it pins that the second line's transform is built for its
+    own trace count (not the first line's 240), with the window carried over
+    in metres rather than as a stale trace window.
     """
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
@@ -1899,9 +1888,9 @@ def test_the_hold_is_in_metres_across_different_trace_spacings(opened):
     assert t1.trace_hi - t1.trace_lo != pytest.approx(t0.trace_hi - t0.trace_lo)
 
 
-def test_a_line_without_distance_neither_mirrors_nor_holds(opened, caplog):
+def test_a_line_without_distance_neither_mirrors_nor_holds(opened, message_log):
     session, dock, key, line = opened
-    _zoom(dock)
+    m, _t = _zoom(dock)
     tkey, tline = _add_line(
         session,
         "FILE__TIME",
@@ -1913,9 +1902,10 @@ def test_a_line_without_distance_neither_mirrors_nor_holds(opened, caplog):
     assert dock.view.ruler is None and not t.mirrored
     assert (t.trace_lo, t.trace_hi) == (0.0, float(tline.n_traces))
     session.open_line(key)
-    t = dock.view.transform
-    assert (t.trace_lo, t.trace_hi) == t.trace_bounds
-    assert dock.view.ruler is not None
+    # the window held on the ruler comes back; nothing was carried onto the
+    # unruled line and nothing is logged
+    assert dock.view.window_m() == pytest.approx(m)
+    assert message_log == []
 
 
 def test_the_difference_view_keeps_the_mirror_and_the_window(opened):
@@ -1969,3 +1959,76 @@ def test_real_zigzag_lines_keep_a_metre_in_place_across_the_sweep(bare):
         session.set_preview(k, 3)
         assert _x_of_metre(dock, ln, 5.0) == pytest.approx(x0, abs=0.5)
         assert dock.view.window_m() == pytest.approx(m)
+
+
+@pytest.mark.parametrize("zoomed", [False, True])
+def test_a_same_shape_unruled_line_after_a_ruled_one_starts_clean(opened, zoomed):
+    session, dock, key, line = opened
+    if zoomed:
+        _zoom(dock)
+    tkey, tline = _add_line(
+        session,
+        "FILE__T240",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__T240"),
+        n_traces=240,
+        traces_per_metre=0.0,
+    )
+    session.open_line(tkey)
+    t = dock.view.transform
+    assert dock.view.ruler is None and not t.mirrored and t.bounds is None
+    assert (t.trace_lo, t.trace_hi) == (0.0, 240.0)
+
+
+def test_two_same_shape_unruled_lines_keep_the_window_between_them(opened):
+    session, dock, key, line = opened
+    ka, _ = _add_line(
+        session,
+        "T1",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "T1"),
+        n_traces=240,
+        traces_per_metre=0.0,
+    )
+    kb, _ = _add_line(
+        session,
+        "T2",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "T2"),
+        n_traces=240,
+        traces_per_metre=0.0,
+    )
+    session.open_line(ka)
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    zoomed = dock.view.transform
+    session.open_line(kb)
+    assert (dock.view.transform.trace_lo, dock.view.transform.trace_hi) == (
+        zoomed.trace_lo,
+        zoomed.trace_hi,
+    )
+    assert dock.view.transform.trace_hi - dock.view.transform.trace_lo < 240
+
+
+def test_the_hold_comes_back_after_a_glance_at_a_cross_line(opened):
+    session, dock, key, line = opened
+    fkey, _ = _forward(session)
+    xkey, _ = _add_line(session, "FILE__X", GridPlacement("A", "x", 0.5, 0.0, 1, "FILE__X"))
+    m, t = _zoom(dock)
+    session.set_preview(xkey, 5)
+    tr = dock.view.transform
+    assert (tr.trace_lo, tr.trace_hi) == tr.trace_bounds  # a cross-line starts at Fit
+    session.clear_preview()
+    assert dock.view.window_m() == pytest.approx(m)
+    session.set_preview(xkey, 5)
+    session.set_preview(fkey, 5)
+    assert dock.view.window_m() == pytest.approx(m)
+    tr = dock.view.transform
+    assert (tr.time_lo, tr.time_hi) == pytest.approx(t)
+
+
+def test_an_import_past_the_ruler_edge_widens_it_without_reopening(opened):
+    session, dock, key, line = opened
+    assert dock.view.ruler.hi_m == pytest.approx(11.0)
+    # lines_changed alone (no grid edit): 900 traces from 10 m run to 25 m
+    _add_line(
+        session, "FILE__LONG", GridPlacement("A", "y", 0.5, 10.0, 1, "FILE__LONG"), n_traces=900
+    )
+    assert dock.view.ruler.hi_m == pytest.approx(10.0 + 899 / 60 + 1 / 120)

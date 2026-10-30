@@ -36,14 +36,18 @@ every drag, never cached: a line switch or a stack edit can change what sits
 at the selected row, and a remembered "this is the cutoff" would then
 bypass, or write onto, the wrong step.
 
-The window across lines: every line on a grid, running the same way, is drawn
+The window across lines: every line on a grid, running the same axis, is drawn
 against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
-over in metres along the grid -- read off the line being left, not stored,
-because every line on a ruler has the same bounds in metres, so it never
-clamps. The hold covers opening a line and the hover preview alike, and
-runs on the header-only axes too, so the load that follows does not move
+over in metres along the grid. On leaving a ruled view it files the window
+under that ruler's key (`_held`), and the next line on that ruler starts from
+it, so a glance at a cross-line (another ruler) does not lose the hold. Lines
+on one ruler share their bounds in metres, so the horizontal window carries
+over as it is, down to the minimum span; the time window is clamped into each
+line's own record. The hold covers opening a line and the hover preview alike,
+and runs on the header-only axes too, so the load that follows does not move
 it. A re-render of the same line keeps the exact transform object (not an
-equal one), so a stack or display change leaves the zoom alone.
+equal one), so a stack or display change leaves the zoom alone. The held
+windows are forgotten when the site closes.
 
 Signal/slot hazard: an exception raised inside a slot connected via
 `connect()` never reaches whatever emitted the signal -- PyQt prints the
@@ -188,6 +192,8 @@ class ProfileDock(QgsDockWidget):
         self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
         self._working_key: str | None = None
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on it
+        self._held: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         self._preview_key: str | None = None
         self._strip_was_visible = False
         self._deferred_strip: tuple[list[list[float]], Any] | None = None
@@ -429,17 +435,21 @@ class ProfileDock(QgsDockWidget):
         """Set the view's axes for `key`, carrying the window over from
         whatever was showing. The only place the dock sets axes.
 
-        The window is read off the line being left, never remembered
-        separately: every line on a ruler has the same bounds in metres, so
-        the metres just read always fit the next line. Rule 1 puts back the
-        very same transform object, so a re-render of an unchanged line
-        leaves anything holding it (and the zoom itself) untouched.
+        The window is filed per ruler on leaving a view (`_held`), so it
+        survives a line on another ruler in between. Lines on one ruler share
+        their bounds in metres, so the horizontal window carries over (down
+        to `with_window`'s minimum span) while the time window is clamped into
+        the new line's record. Rule 1 puts back the very same transform
+        object, so a re-render of an unchanged line leaves anything holding
+        it (and the zoom itself) untouched.
         """
         view = self.view
         old = view.transform
         old_ruler = view.ruler
         old_m = view.window_m()
         old_key = self._axes_key
+        if old is not None and old_ruler is not None and old_m is not None:
+            self._held[old_ruler.key] = (*old_m, old.time_lo, old.time_hi)
         ruler = self._ruler_for(self.session.line_for_key(key), distance) if key else None
         view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
         new = view.transform
@@ -451,17 +461,12 @@ class ProfileDock(QgsDockWidget):
             == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
         ):
             view.transform = old
-        elif (
-            old is not None
-            and ruler is not None
-            and old_ruler is not None
-            and ruler.key == old_ruler.key
-            and old_m is not None
-        ):
-            view.set_window_m(*old_m, old.time_lo, old.time_hi)
+        elif ruler is not None and ruler.key in self._held:
+            view.set_window_m(*self._held[ruler.key])
         elif (
             old is not None
             and ruler is None
+            and old_ruler is None
             and (old.n_traces, old.n_samples) == (n_traces, n_samples)
         ):
             view.transform = old
@@ -710,6 +715,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        self._held = {}  # a window in metres means nothing on another site
         # Dock state, not site state: left alone it could match a line of the
         # next site that happens to share a key and its points.
         self._saved_velocity_fit = None
