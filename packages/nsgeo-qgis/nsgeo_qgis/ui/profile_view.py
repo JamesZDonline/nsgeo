@@ -26,6 +26,15 @@ value rather than let the widget silently stop responding to input.
 `mousePressEvent` and `mouseReleaseEvent` feed nothing into the transform,
 but they carry the cutoff grab and the selection commit, so they guard
 their bodies the same way.
+
+A line on a grid ruler (`set_axes(..., ruler=...)`) is fitted to the ruler's
+extent in that line's own trace units, and drawn mirrored when it was walked
+toward the grid's low end, so every line on a grid reads low-to-high left to
+right. The ruler can be wider than the data, so the window may show blank
+space, hatched and inert (`trace_at` is None there). The trace index never
+changes meaning: only the picture flips, and every signal, pick and selection
+still counts traces in recorded order. Mirroring is a painter transform around
+the one `drawImage`, never a mirrored copy of the image.
 """
 
 from __future__ import annotations
@@ -37,11 +46,18 @@ import numpy as np
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen
+from qgis.PyQt.QtGui import QBrush, QColor, QImage, QPainter, QPen
 from qgis.PyQt.QtWidgets import QWidget
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
+from nsgeo_qgis.ui.ruler import (
+    Ruler,
+    bounds_on,
+    is_reversed,
+    metres_at,
+    trace_units_at,
+)
 from nsgeo_qgis.ui.view_transform import ViewTransform, nice_ticks
 
 # The axis captions ("ns" / "m") get a row of their own above the image,
@@ -53,6 +69,9 @@ CAPTION_ROW = 14
 MARGIN_LEFT, MARGIN_RIGHT, MARGIN_TOP, MARGIN_BOTTOM = 56, 48, CAPTION_ROW + 8, 28
 BACKGROUND = QColor(250, 250, 250)
 AXIS_COLOUR = QColor(60, 60, 60)
+# Ruler space with no trace under it: a light hatch over the background, so it
+# cannot be read as data in any colour table.
+NO_DATA_HATCH = QColor(200, 200, 200)
 CURSOR_COLOUR = QColor(255, 159, 26)
 SELECTION_COLOUR = QColor(48, 140, 198, 60)
 SELECTION_EDGE = QColor(48, 140, 198)
@@ -107,6 +126,7 @@ class ProfileView(QWidget):
         self.transform: ViewTransform | None = None
         self._image: QImage | None = None
         self._distance: np.ndarray | None = None
+        self._ruler: Ruler | None = None
         self._velocity: VelocityModel | None = None
         self._direction = 1
         self._cursor = -1
@@ -151,6 +171,7 @@ class ProfileView(QWidget):
         t0_ns: float,
         dt_ns: float,
         distance_along: np.ndarray | None = None,
+        ruler: Ruler | None = None,
     ) -> None:
         # C1c: `ViewTransform.__post_init__` checks `dt_ns` for finiteness only,
         # not positivity -- `dt_ns == 0.0` is finite and constructs a transform
@@ -180,9 +201,53 @@ class ProfileView(QWidget):
                 )
                 distance_along = None
         r = self.image_rect()
-        self.transform = ViewTransform.fit(n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height())
+        # A ruler needs a distance axis of at least two traces to place
+        # anything on it; without one the view is today's.
+        if ruler is not None and (distance_along is None or n_traces < 2):
+            ruler = None
+        if ruler is not None and distance_along is not None:
+            self.transform = ViewTransform.fit(
+                n_traces,
+                n_samples,
+                t0_ns,
+                dt_ns,
+                r.width(),
+                r.height(),
+                bounds=bounds_on(ruler, distance_along),
+                mirrored=is_reversed(distance_along),
+            )
+        else:
+            self.transform = ViewTransform.fit(
+                n_traces, n_samples, t0_ns, dt_ns, r.width(), r.height()
+            )
+        self._ruler = ruler
         self._distance = distance_along
         self._message = "loading…"
+        self.view_changed.emit()
+        self.update()
+
+    @property
+    def ruler(self) -> Ruler | None:
+        return self._ruler
+
+    def window_m(self) -> tuple[float, float] | None:
+        """The window's two ends in metres along the grid, ascending; None
+        without a ruler."""
+        if self._ruler is None or self._distance is None or self.transform is None:
+            return None
+        t = self.transform
+        a = float(metres_at(self._distance, t.trace_lo))
+        b = float(metres_at(self._distance, t.trace_hi))
+        return (min(a, b), max(a, b))
+
+    def set_window_m(self, lo_m: float, hi_m: float, time_lo: float, time_hi: float) -> None:
+        """Set the window from metres along the grid (and a time window);
+        `with_window` clamps it. Does nothing without a ruler."""
+        if self._ruler is None or self._distance is None or self.transform is None:
+            return
+        a = float(trace_units_at(self._distance, lo_m))
+        b = float(trace_units_at(self._distance, hi_m))
+        self.transform = self.transform.with_window(min(a, b), max(a, b), time_lo, time_hi)
         self.view_changed.emit()
         self.update()
 
@@ -280,6 +345,7 @@ class ProfileView(QWidget):
 
     def clear(self) -> None:
         self.transform = None
+        self._ruler = None
         self._image = None
         self._cursor = -1
         self._selection = (-1, -1)
@@ -308,7 +374,14 @@ class ProfileView(QWidget):
         t = self.transform
         r = self.image_rect()
         self.transform = ViewTransform.fit(
-            t.n_traces, t.n_samples, t.t0_ns, t.dt_ns, r.width(), r.height()
+            t.n_traces,
+            t.n_samples,
+            t.t0_ns,
+            t.dt_ns,
+            r.width(),
+            r.height(),
+            bounds=t.bounds,
+            mirrored=t.mirrored,
         )
         self.view_changed.emit()
         self.update()
@@ -318,7 +391,7 @@ class ProfileView(QWidget):
         if self.transform is None:
             return
         t = self.transform
-        self.transform = t.with_window(t.trace_lo, t.trace_lo + t.width, t.time_lo, t.time_hi)
+        self.transform = t.one_to_one()
         self.view_changed.emit()
         self.update()
 
@@ -394,8 +467,24 @@ class ProfileView(QWidget):
                 # does not otherwise need to know.
                 sx = self._image.width() / t.n_traces
                 sy = self._image.height() / t.n_samples
+                # The ruler can be wider than the data: hatch the whole image
+                # rect, then draw only the part of the window that has traces.
+                painter.fillRect(r, QBrush(NO_DATA_HATCH, Qt.BrushStyle.BDiagPattern))
                 x, y, w, h = t.source_rect()
-                painter.drawImage(QRectF(r), self._image, QRectF(x * sx, y * sy, w * sx, h * sy))
+                if w > 0:
+                    x0, x1 = t.target_span()
+                    target = QRectF(r.left() + x0, r.top(), x1 - x0, r.height())
+                    src = QRectF(x * sx, y * sy, w * sx, h * sy)
+                    if t.mirrored:
+                        # Flip about the target's centre: the image keeps its
+                        # recorded order, only the picture reverses.
+                        painter.save()
+                        painter.translate(target.left() + target.right(), 0)
+                        painter.scale(-1, 1)
+                        painter.drawImage(target, self._image, src)
+                        painter.restore()
+                    else:
+                        painter.drawImage(target, self._image, src)
             else:
                 painter.setPen(AXIS_COLOUR)
                 painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), self._message)
@@ -524,7 +613,8 @@ class ProfileView(QWidget):
         a, b = self._selection
         if a < 0:
             return None
-        return t.x_of_trace(a), t.x_of_trace(b + 1)
+        x0, x1 = t.x_of_trace(a), t.x_of_trace(b + 1)
+        return (min(x0, x1), max(x0, x1))
 
     def _paint_selection(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         bounds = self._selection_bounds(t)
@@ -625,7 +715,7 @@ class ProfileView(QWidget):
         p.drawText(
             QRectF(r.left(), r.bottom() + 14, r.width(), 14),
             int(Qt.AlignmentFlag.AlignHCenter),
-            f"{self._distance_unit_label()} along line {self._direction_arrow()}",
+            self._distance_caption(),
         )
 
     def _time_ticks(self, t: ViewTransform) -> list[tuple[str, float]]:
@@ -641,6 +731,11 @@ class ProfileView(QWidget):
 
     def _distance_unit_label(self) -> str:
         return "m" if self._distance is not None else "trace"
+
+    def _distance_caption(self) -> str:
+        if self._ruler is not None:
+            return f"m along grid \u00b7 walked {self._direction_arrow()}"
+        return f"{self._distance_unit_label()} along line {self._direction_arrow()}"
 
     def _direction_arrow(self) -> str:
         return "→" if self._direction == 1 else "←"
@@ -672,15 +767,14 @@ class ProfileView(QWidget):
         # there is nothing to tick in metres along zero traces.
         if self._distance is None or t.n_traces == 0:
             return [(f"{tick:g}", t.x_of_trace(float(tick))) for tick in nice_ticks(lo, hi)]
-        idx = np.arange(t.n_traces, dtype=float)
         d = self._distance
-        d_lo, d_hi = np.interp([lo, min(hi, t.n_traces - 1)], idx, d)
-        order = np.argsort(d)
-        out = []
-        for tick in nice_ticks(min(d_lo, d_hi), max(d_lo, d_hi)):
-            trace = float(np.interp(tick, d[order], idx[order]))
-            out.append((f"{tick:g}", t.x_of_trace(trace)))
-        return out
+        # The window's ends in metres, read off the extrapolating map so the
+        # ticks run on across blank space; each tick sits on its column centre.
+        m_lo, m_hi = (float(metres_at(d, v)) for v in (lo, hi))
+        return [
+            (f"{tick:g}", t.x_of_trace(float(trace_units_at(d, float(tick)))))
+            for tick in nice_ticks(min(m_lo, m_hi), max(m_lo, m_hi))
+        ]
 
     # ---- mouse ------------------------------------------------------------
     def _local(self, event: Any) -> tuple[float, float]:
@@ -742,9 +836,9 @@ class ProfileView(QWidget):
                 # is that rule for the other axis and the other gesture.
                 if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
                     return
-                self.pick_requested.emit(
-                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
-                )
+                trace = self.transform.trace_at(x)
+                if trace is not None:  # blank space on the ruler is inert
+                    self.pick_requested.emit(trace, self.transform.time_of_y(y))
                 return
             if self._velocity_mode:
                 # Same bounds guard as the pick branch above, for the same
@@ -752,9 +846,9 @@ class ProfileView(QWidget):
                 # axis margin would author a point before the record starts.
                 if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
                     return
-                self.velocity_point_requested.emit(
-                    self.transform.trace_index_at(x), self.transform.time_of_y(y)
-                )
+                trace = self.transform.trace_at(x)
+                if trace is not None:
+                    self.velocity_point_requested.emit(trace, self.transform.time_of_y(y))
                 return
             line = self._cutoff_y(self.transform)
             if line is not None and self._near_cutoff(x, y):
@@ -836,9 +930,11 @@ class ProfileView(QWidget):
         if self._press is not None:
             if abs(pos.x() - self._press.x()) > DRAG_THRESHOLD_PX:
                 self._dragging = True
-                a = self.transform.trace_index_at(self._press.x() - self.image_rect().left())
-                b = self.transform.trace_index_at(x)
-                self.set_selection(a, b)
+                span = self.transform.traces_between(self._press.x() - self.image_rect().left(), x)
+                if span is None:  # the drag has only crossed blank space
+                    self.clear_selection()
+                else:
+                    self.set_selection(*span)
             return
         # Pick wins the press over the grab, so in pick mode the line must
         # not advertise a drag.
@@ -851,7 +947,9 @@ class ProfileView(QWidget):
                 else Qt.CursorShape.ArrowCursor
             )
         if 0 <= x < self.transform.width:
-            self.trace_hovered.emit(self.transform.trace_index_at(x))
+            trace = self.transform.trace_at(x)
+            if trace is not None:
+                self.trace_hovered.emit(trace)
 
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
         try:
@@ -883,9 +981,13 @@ class ProfileView(QWidget):
                 self.cutoff_dragged.emit(self._cutoff_ns)
             return
         if self._press is not None and self.transform is not None:
-            if self._dragging:
+            if self._dragging and self._selection != (-1, -1):
                 a, b = self._selection
                 self.range_selected.emit(a, b)
+            elif self._dragging:
+                # A drag that only crossed blank space counts as a click.
+                self.clear_selection()
+                self.selection_cleared.emit()
             elif not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
                 # A plain click -- press and release with no drag in
                 # between -- clears the selection. The conventional
