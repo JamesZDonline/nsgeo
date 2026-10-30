@@ -86,6 +86,7 @@ from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
+from nsgeo_qgis.ui.ruler import metres_to_trace, trace_to_metres
 
 
 def time_param_name(step: Any) -> str | None:
@@ -151,34 +152,6 @@ def velocity_source(session: SiteSession, key: str) -> str:
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
-
-
-def _trace_to_metres(distance: Any, traces: Any) -> Any:
-    """Metres along the line at (possibly fractional) `traces`, read off the
-    line's own distance array, so there is one trace-to-metre map. Beyond
-    either end it extends by the end spacing."""
-    d = np.asarray(distance, dtype=float)
-    tr = np.asarray(traces, dtype=float)
-    last = len(d) - 1
-    inside = np.interp(tr, np.arange(len(d)), d)
-    below = d[0] + tr * (d[1] - d[0])
-    above = d[-1] + (tr - last) * (d[-1] - d[-2])
-    return np.where(tr < 0, below, np.where(tr > last, above, inside))
-
-
-def _metres_to_trace(distance: Any, x_m: Any) -> Any:
-    """The inverse of `_trace_to_metres`, for a line whose distance runs
-    either way along the axis."""
-    d = np.asarray(distance, dtype=float)
-    x = np.asarray(x_m, dtype=float)
-    idx = np.arange(len(d), dtype=float)
-    if d[-1] < d[0]:
-        d, idx = d[::-1], idx[::-1]
-    last = len(d) - 1
-    inside = np.interp(x, d, idx)
-    below = idx[0] + (x - d[0]) / (d[1] - d[0]) * (idx[1] - idx[0])
-    above = idx[-1] + (x - d[-1]) / (d[-1] - d[-2]) * (idx[-1] - idx[-2])
-    return np.where(x < d[0], below, np.where(x > d[last], above, inside))
 
 
 class ProfileDock(QgsDockWidget):
@@ -838,7 +811,7 @@ class ProfileDock(QgsDockWidget):
         if distance is None:
             distance, _, _ = self._velocity_axis()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        t = hyperbola_time(fit, _trace_to_metres(distance, traces))
+        t = hyperbola_time(fit, trace_to_metres(distance, traces))
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
     def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
@@ -854,7 +827,7 @@ class ProfileDock(QgsDockWidget):
         return [
             self.velocity_curve_points(
                 HyperbolaFit(
-                    apex_x_m=float(_trace_to_metres(distance, float(f.apex_trace))),
+                    apex_x_m=float(trace_to_metres(distance, float(f.apex_trace))),
                     t0_ns=f.t0_ns,
                     v_m_ns=f.v_m_ns,
                     v_stderr_m_ns=f.v_stderr_m_ns,
@@ -995,7 +968,7 @@ class ProfileDock(QgsDockWidget):
                 v_m_ns=fit.v_m_ns,
                 v_stderr_m_ns=fit.v_stderr_m_ns,
                 rms_ns=fit.rms_ns,
-                apex_trace=round(float(_metres_to_trace(distance, fit.apex_x_m))),
+                apex_trace=round(float(metres_to_trace(distance, fit.apex_x_m))),
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             )
