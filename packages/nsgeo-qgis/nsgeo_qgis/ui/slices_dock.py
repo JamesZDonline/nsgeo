@@ -2233,7 +2233,6 @@ class SlicesDock(QgsDockWidget):
             self._grid_palette = self.palette_combo.currentText()
             self._grid_record_at_entry = self._grid_record()
             self._scope = "site"
-            self._resolution_owed = False  # the owed grid was never prepared
             # R-P5: a moved grid's This-grid engine clears itself and owes a
             # preparation, rather than re-preparing beside the site's.
             self.engine.on_grid_moved = self._mark_grid_stale
@@ -2289,6 +2288,12 @@ class SlicesDock(QgsDockWidget):
                     self.palette_combo.blockSignals(False)
             self._follow_record_changed_in_site()
             self._pending_top_ns = top
+            if self._resolution_owed:
+                # Back inside a wait window (#70): the engine still holds the
+                # grid left before the site, so the time and the redraw are
+                # the owed apply's, as on the target path.
+                self._refresh_source_status()
+                return
             self._sync_grid_slider()
             self._refresh_source_status()
             if self._grid_prepared_away:
@@ -2397,8 +2402,15 @@ class SlicesDock(QgsDockWidget):
             if not self._grid_prepare_pending:
                 return
             self._grid_prepare_pending = False
-            self.prepare()
+            # Before `prepare()`: a raise must not leave the flag stuck, which
+            # would make This grid ignore every later resolution edit.
             owed, self._resolution_owed = self._resolution_owed, False
+            self.prepare()
+            if owed and self.engine.is_prepared:
+                # `prepare()` was a no-op: the engine already holds this
+                # grid's lines, so `_on_prepared`'s clamp will not run, and
+                # the re-seeded z range would reach lines it does not cover.
+                self._clamp_z_to_prepared()
             if (owed or self.engine.z is None) and self.engine.choice is not None:
                 # A moved grid's engine was cleared, resolution and all; and a
                 # grid opened from the site list (#70) still holds the left

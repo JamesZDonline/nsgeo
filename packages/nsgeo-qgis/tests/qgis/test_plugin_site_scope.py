@@ -1162,10 +1162,98 @@ def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugi
     spin_until(lambda: counter.concurrent == 1, 5_000)
     dock.grid_scope_button.click()
     assert dock.site_engine.has_live_task
-    dock._debounce.stop()  # no seed differed from the site's spins
     dock.site_scope_button.click()
     _events()
     assert dock._site.shown_top() == pytest.approx(site_top, abs=0.5)
+
+
+def _in_wait_window(plugin, monkeypatch):
+    """B selected in the site, a site task outliving its cancel, This grid
+    clicked: the dock is in the wait window (#70). Returns dock, errors, the
+    site's time."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    site_top = _narrow_a_then_site_mid_window(plugin)
+    counter = LoadCounter(monkeypatch, delay=0.6)
+    dock.site_panel.select_grid("B")
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task
+    return dock, errors, site_top
+
+
+def _round_trip_through_the_site(dock):
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    spin_until(lambda: False, 300)
+    dock.grid_scope_button.click()
+
+
+def test_a_round_trip_through_the_site_in_the_wait_window_keeps_the_owed_resolution(
+    plugin, monkeypatch
+):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(60.0)
+    _events()
+    _round_trip_through_the_site(dock)
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    spin_until(lambda: False, 400)
+    z = dock.engine.z
+    assert z.t0_ns == pytest.approx(dock.z0_spin.value(), abs=z.dz_ns)
+    assert z.t0_ns + (z.nz - 1) * z.dz_ns == pytest.approx(dock.z1_spin.value(), abs=z.dz_ns)
+    assert dock.z1_spin.value() == pytest.approx(60.0)
+    assert _spurious(errors) == []
+
+
+def test_a_round_trip_through_the_site_in_the_wait_window_keeps_the_window_time(
+    plugin, monkeypatch
+):
+    dock, errors, site_top = _in_wait_window(plugin, monkeypatch)
+    _round_trip_through_the_site(dock)
+    _assert_on_b_axis(dock, site_top)
+    assert _spurious(errors) == []
+
+
+def _assert_a_slice_is_drawn_on_a(dock, errors):
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "A", 30_000)
+    spin_until(lambda: False, 400)
+    dock.z1_spin.setValue(dock.z1_spin.value() - 1)  # a later edit must not error either
+    dock.flush_debounce()
+    _events()
+    assert _spurious(errors) == []
+    assert dock.current_values() is not None
+
+
+def test_landing_on_the_grid_the_engine_already_holds_clamps_the_seeded_range(plugin, monkeypatch):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_a_grid_removed_inside_the_wait_window_clamps_the_fallback_grid(plugin, monkeypatch):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    plugin.session.remove_grid("B", with_lines=True)
+    _events()
+    assert dock.grid_combo.currentText() == "A"
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_a_raising_prepare_does_not_leave_the_owed_resolution_stuck(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    monkeypatch.setattr(dock, "prepare", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    dock.grid_scope_button.click()
+    assert dock._resolution_owed is False
 
 
 def test_a_failure_inside_resume_still_hands_this_grids_moves_back(plugin, monkeypatch):
