@@ -19,6 +19,7 @@ from nsgeo.processing import (
 )
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QPalette
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -86,11 +87,22 @@ def _menu_heading(text: str, menu: QMenu) -> QWidgetAction:
     the Windows styles draw a bare separator in its place, so the group
     names would vanish on exactly the machines the plugin is shown on. A
     label draws on every style; disabled, it cannot be chosen.
+
+    Disabling the action disables the label, whose disabled grey read as
+    ghostly in the walkthrough, so the label's disabled text takes the
+    ordinary text colour: a bold heading, still not a choice.
     """
     label = QLabel(text)
     font = label.font()
     font.setBold(True)
     label.setFont(font)
+    palette = label.palette()
+    palette.setColor(
+        QPalette.ColorGroup.Disabled,
+        QPalette.ColorRole.WindowText,
+        palette.color(QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText),
+    )
+    label.setPalette(palette)
     label.setContentsMargins(8, 4, 8, 2)
     action = QWidgetAction(menu)
     action.setDefaultWidget(label)

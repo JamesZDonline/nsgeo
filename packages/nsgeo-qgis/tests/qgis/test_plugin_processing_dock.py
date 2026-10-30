@@ -9,6 +9,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index, needs_dialog
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
+from qgis.PyQt.QtGui import QPalette
 from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox, QWidgetAction
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -91,6 +92,20 @@ def test_add_menu_headings_draw_on_every_style_and_cannot_be_chosen(opened):
     assert [h.defaultWidget().text() for h in headings] == ["Time", "Filters", "Background", "Gain"]
     assert not any(h.isEnabled() for h in headings)
     assert not any(a.isSeparator() and a.text() for a in actions)  # no addSection
+
+
+def test_add_menu_headings_draw_in_the_text_colour_not_the_disabled_grey(opened):
+    """A disabled action disables its label too, and the disabled grey read
+    as ghostly in the walkthrough. The heading stays unchoosable but draws
+    bold in the menu's ordinary text colour."""
+    _, dock, _ = opened
+    for heading in (a for a in dock.add_menu.actions() if isinstance(a, QWidgetAction)):
+        label = heading.defaultWidget()
+        assert not label.isEnabled()
+        palette = label.palette()
+        drawn = palette.color(QPalette.ColorGroup.Disabled, label.foregroundRole())
+        assert drawn == palette.color(QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText)
+        assert label.font().bold()
 
 
 def test_add_menu_action_triggers_add_step(opened, drive_dialog):
