@@ -498,7 +498,7 @@ def test_a_grid_that_cannot_be_prepared_is_failed_and_the_rest_continue(site3, m
     )
     assert site.wait_until_idle(60_000)
     assert site.grid_state("B").startswith("failed: ")
-    assert "amp_abs" in site.grid_state("B")
+    assert "Absolute value" in site.grid_state("B")  # by title, as the Processing list shows it
     assert site.ready_grids == ("A", "C")
     assert any(msg.startswith("B: ") for msg in errors), errors
 

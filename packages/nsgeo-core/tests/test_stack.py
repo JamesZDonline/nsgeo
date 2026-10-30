@@ -168,6 +168,15 @@ def test_difference_is_undefined_for_a_step_that_crops_samples():
         st.difference(0)
 
 
+def test_difference_refusal_counts_rows_from_one_and_names_the_title():
+    """The message reaches the user unchanged, and the Processing list has
+    no row numbers: "step 1" must be the first row, and the step must read
+    as it does in that list (#60, #82)."""
+    st = stack_of(("dewow", {"window_ns": 4.0}), ("time_zero", {"mode": "sample", "sample": 8}))
+    with pytest.raises(ValueError, match=r"^step 2 \(Time zero\) changes the sample count"):
+        st.difference(1)
+
+
 def test_move_rejects_negative_or_out_of_range_indices():
     """A negative dst would under-invalidate and serve stale results."""
     st = stack_of(("dewow", {"window_ns": 4.0}), ("background_mean", {}))

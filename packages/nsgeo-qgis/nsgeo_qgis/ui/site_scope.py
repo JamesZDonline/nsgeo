@@ -510,9 +510,10 @@ class SiteScope:
         self.ready_handled = None
         self.limit_cache = None
         panel = dock.site_panel
-        offered = [panel.transform_combo.itemText(i) for i in range(panel.transform_combo.count())]
         panel.set_transform(
-            stored_transform(self.session, offered, dock.transform_combo.currentText() or "none")
+            stored_transform(
+                self.session, panel.transform_combo.values(), dock.transform_combo.value()
+            )
         )
         dock.normalisation_panel.set_method(stored_method(self.session))
         self.refresh_rows()
@@ -898,7 +899,8 @@ class SiteScope:
             dock.legend_label.setText(f"1 – {limit:.3g} traces per cell · blank = no line crossed")
             return
         base = f"0 – {limit:.3g}" if self.unipolar() else f"−{limit:.3g} – {limit:.3g}"
-        dock.legend_label.setText(f"{base} ({dock.site_panel.transform()})")
+        # The title the combo shows, as This grid's legend does (#82).
+        dock.legend_label.setText(f"{base} ({dock.site_panel.transform_combo.currentText()})")
 
     def unipolar(self) -> bool:
         return self.transform() != NO_TRANSFORM

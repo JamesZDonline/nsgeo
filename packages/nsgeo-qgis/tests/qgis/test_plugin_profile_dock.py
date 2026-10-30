@@ -452,7 +452,7 @@ def test_set_difference_index_shows_what_a_step_actually_removed(opened):
     expected_diff = before_data - after_data
 
     dock.set_difference_index(0)
-    assert dock.difference_label.text() == "Difference: dewow"
+    assert dock.difference_label.text() == "Difference: Dewow"
     np.testing.assert_array_equal(dock.image.rg.data, expected_diff)
 
     dock.set_difference_index(-1)
@@ -882,7 +882,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
     session.append_step(keys[0], build_step("dewow", window_ns=4.0))
     dock.set_difference_index(0)
     assert dock._difference_index == 0
-    assert "dewow" in dock.difference_label.text()
+    assert "Dewow" in dock.difference_label.text()
 
     # keys[1] has an EMPTY stack, so index 0 does not exist on it. If the
     # render used the stored index instead of the effective one this would
@@ -895,7 +895,7 @@ def test_the_difference_index_survives_a_preview_round_trip(previewing):
 
     session.clear_preview()
     assert dock._effective_difference_index == 0
-    assert "dewow" in dock.difference_label.text()
+    assert "Dewow" in dock.difference_label.text()
 
 
 def test_snap_back_restores_the_working_lines_cursor_and_selection(previewing):
