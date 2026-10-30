@@ -16,6 +16,9 @@ from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 @register
 class TimeCutoff:
     name = "time_cutoff"
+    title = "Time cutoff"
+    group = "Time"
+    order = 2
 
     def __init__(self, end_ns: float) -> None:
         end = float(end_ns)

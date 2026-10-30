@@ -11,6 +11,9 @@ from nsgeo.processing.base import ParamSpec, Radargram, register
 @register
 class Dewow:
     name = "dewow"
+    title = "Dewow"
+    group = "Filters"
+    order = 1
 
     def __init__(self, window_ns: float = 4.0) -> None:
         self.window_ns = window_ns

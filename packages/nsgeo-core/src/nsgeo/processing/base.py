@@ -122,10 +122,25 @@ class ParamSpec:
         return self.default is REQUIRED
 
 
+#: The groups a step menu is laid out in, in the usual processing order.
+#: Every step's `group` names one of these.
+STEP_GROUPS: Final = ("Time", "Filters", "Background", "Gain", "Amplitude")
+
+
 class Step(Protocol):
-    """A pure function of (parameters, radargram). No I/O, no hidden state."""
+    """A pure function of (parameters, radargram). No I/O, no hidden state.
+
+    `name` is the id a saved stack stores; `title` is what a front end shows
+    wherever it names the step. `group` and `order` place it in a step menu:
+    one of `STEP_GROUPS`, and its position inside that group, lowest first.
+    None of the three display attributes is ever saved, so rewording a title
+    or regrouping a step leaves every project file as it was.
+    """
 
     name: str
+    title: str
+    group: str
+    order: int
 
     @property
     def params(self) -> dict[str, Any]: ...
@@ -181,6 +196,22 @@ def register(cls: type[Any]) -> type[Any]:
 
 def available_steps() -> list[str]:
     return sorted(_REGISTRY)
+
+
+def grouped_steps() -> list[tuple[str, list[str]]]:
+    """Every registered step by group: groups in `STEP_GROUPS` order, steps
+    inside a group by their `order`. A group with no steps is left out."""
+    groups = []
+    for group in STEP_GROUPS:
+        members = [cls for cls in _REGISTRY.values() if cls.group == group]
+        if members:
+            groups.append((group, [cls.name for cls in sorted(members, key=lambda c: c.order)]))
+    return groups
+
+
+def step_title(name: str) -> str:
+    """The title a front end shows for step `name`."""
+    return str(get_step(name).title)
 
 
 def get_step(name: str) -> type[Any]:
