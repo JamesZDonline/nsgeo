@@ -75,6 +75,7 @@ from nsgeo_qgis.slices_plan import (
     estimate_memory,
     format_bytes,
     frame_cells,
+    radius_cells_for,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
@@ -451,23 +452,34 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("z1", self.z1_spin)
 
-        self.radius_spin = QDoubleSpinBox()
-        self.radius_spin.setRange(0.0, 50.0)
-        self.radius_spin.setDecimals(3)
-        self.radius_spin.setSuffix(" m")
-        self.radius_spin.setValue(0.0)
-        # 1.0 m -- Qt's default -- moved the seeded 0.75 m radius to 1.75
-        # in one click, past anything spec 6.4's 1.5x-line-spacing rule
-        # would ever suggest (walkthrough round 2, W5).
-        self.radius_spin.setSingleStep(0.05)
-        self.radius_spin.setToolTip(
+        # #72: This grid's radius is set in line spacings, like Whole
+        # site's, so one habit works in both scopes and a spacing edit moves
+        # the distance without moving the box. The metres it comes to sit
+        # beside the box (one grid, so a label rather than a tooltip).
+        # Constructed at 0, the unfilled truth, and seeded on a grid change.
+        self.grid_radius_spin = QDoubleSpinBox()
+        self.grid_radius_spin.setRange(0.0, 10.0)
+        self.grid_radius_spin.setDecimals(2)
+        self.grid_radius_spin.setSuffix(" × line spacing")
+        self.grid_radius_spin.setValue(0.0)
+        # Qt's default 1.0 would move the seeded 0.5 to 1.5 in one click
+        # (walkthrough round 2, W5); a quarter spacing is a nudge.
+        self.grid_radius_spin.setSingleStep(0.25)
+        self.grid_radius_spin.setToolTip(
             "Fills cells that no line crossed from their neighbours within "
-            "this distance (spec 6.4).\n"
-            "Default is 0.5 x the line spacing. The binned truth is kept "
-            "underneath either way -- tick Show coverage to see it, and set "
-            "this to 0 to display it unfilled."
+            "this many line spacings (spec 6.4).\n"
+            "Default is half a spacing, which just closes the gap between "
+            "lines. The binned truth is kept underneath either way -- tick "
+            "Show coverage to see it, and set this to 0 to display it unfilled."
         )
-        resolution_form.addRow("Fill radius", self.radius_spin)
+        self.grid_radius_metres = QLabel("")
+        self.grid_radius_row = QWidget()
+        _radius_layout = QHBoxLayout(self.grid_radius_row)
+        _radius_layout.setContentsMargins(0, 0, 0, 0)
+        _radius_layout.addWidget(self.grid_radius_spin)
+        _radius_layout.addWidget(self.grid_radius_metres)
+        _radius_layout.addStretch(1)
+        resolution_form.addRow("Fill radius", self.grid_radius_row)
 
         # M12 spec 4.4: in site scope the radius is a multiple of each grid's
         # own line spacing; the tooltip gives the metres per grid.
@@ -480,6 +492,7 @@ class SlicesDock(QgsDockWidget):
         resolution_form.addRow("Fill radius", self.radius_spacing_spin)
         self._resolution_form = resolution_form
         site_scope.set_row_visible(self, self.radius_spacing_spin, False)
+        self.grid_radius_spin.valueChanged.connect(lambda _value: self._update_radius_metres())
 
         outer.addWidget(self.resolution_group)
         self.normalisation_panel = NormalisationPanel()
@@ -626,7 +639,7 @@ class SlicesDock(QgsDockWidget):
             self.dz_spin,
             self.z0_spin,
             self.z1_spin,
-            self.radius_spin,
+            self.grid_radius_spin,
         ):
             _spin.valueChanged.connect(lambda _value: self._debounce.start())
 
@@ -634,7 +647,7 @@ class SlicesDock(QgsDockWidget):
         # the four fields that decide what the cube IS (spec 5.4's split,
         # `cube_record`'s own docstring) moves -- `cell`/`dz_ns`/`t0_ns`/
         # `t1_ns`, i.e. the `Resolution` dataclass's own fields. Deliberately
-        # NOT `radius_spin`: the fill radius is a `ViewSettings` field (it
+        # NOT `grid_radius_spin`: the fill radius is a `ViewSettings` field (it
         # changes no pixel in the array, only how it is displayed -- see
         # `Resolution`'s own docstring), so moving it alone leaves the
         # combo's claim about the array still true.
@@ -707,6 +720,7 @@ class SlicesDock(QgsDockWidget):
             self.refresh_cube_combo()
             self._sync_included()
             self._update_included_label()
+            self._update_radius_metres()
             self._refresh_source_status()
             # Cheap cluster (final review): the established pattern
             # (`processing_dock.py`'s own `has_line` loop) -- there is
@@ -812,7 +826,7 @@ class SlicesDock(QgsDockWidget):
         outlive the other two.
 
         An actual grid change is also the one moment `_seed_resolution_
-        defaults` re-seeds `cell_spin`/`radius_spin` from `grid_id`'s own
+        defaults` re-seeds `cell_spin`/`grid_radius_spin` from `grid_id`'s own
         `default_spacing` (spec 4, spec 6.4) -- tied to this branch and
         not to every call here, for the same reason `_included_is_default`
         exists at all: reseeding on every `presets_changed` would silently
@@ -1451,15 +1465,18 @@ class SlicesDock(QgsDockWidget):
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
-            radius_m=self.radius_spin.value(),
+            radius_m=self.grid_radius_spin.value() * (self._grid_spacing() or 0.0),
             palette=self.palette_combo.currentText(),
             stretch=self.stretch_combo.currentText(),
             coverage=self.coverage_check.isChecked(),
         )
 
-    def apply_view(self, view: ViewSettings) -> None:
+    def apply_view(self, view: ViewSettings, *, spacing_m: float) -> None:
         """The inverse of `view_settings()`: write `view`'s six fields
-        back onto their widgets, signals blocked throughout.
+        back onto their widgets, signals blocked throughout. `view.radius_m`
+        is metres and the box is line spacings (#72), so `spacing_m` -- the
+        grid's spacing NOW, which `restore_cube` reads before the grid combo
+        has moved -- converts it; 0 or less reads as an unfilled 0.
 
         `thickness_spin`/`step_spin`/`stretch_combo`/`palette_combo`/
         `coverage_check` are wired straight to `refresh_slice()`,
@@ -1467,7 +1484,7 @@ class SlicesDock(QgsDockWidget):
         `self._updating` themselves -- so setting all of them without
         blocking would fire that many redundant redraws before
         `restore_cube`'s own single `prepare()` produces the real
-        picture. `radius_spin` only ever restarts the Resolution
+        picture. `grid_radius_spin` only ever restarts the Resolution
         debounce (harmless to retrigger, and `flush_debounce()` applies
         it deliberately, once, right after `restore_cube` finishes
         setting every widget), but is blocked here too so this method is
@@ -1494,7 +1511,7 @@ class SlicesDock(QgsDockWidget):
         widgets = (
             self.thickness_spin,
             self.step_spin,
-            self.radius_spin,
+            self.grid_radius_spin,
             self.palette_combo,
             self.stretch_combo,
             self.coverage_check,
@@ -1504,7 +1521,7 @@ class SlicesDock(QgsDockWidget):
         try:
             self.thickness_spin.setValue(view.thickness_ns)
             self.step_spin.setValue(view.step_ns)
-            self.radius_spin.setValue(view.radius_m)
+            self.grid_radius_spin.setValue(view.radius_m / spacing_m if spacing_m > 0 else 0.0)
             palette_names = [
                 self.palette_combo.itemText(i) for i in range(self.palette_combo.count())
             ]
@@ -1627,7 +1644,10 @@ class SlicesDock(QgsDockWidget):
             self._updating += 1
             try:
                 if recipe.view is not None:
-                    self.apply_view(recipe.view)
+                    self.apply_view(
+                        recipe.view,
+                        spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
+                    )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
                 self._included = recipe.choice.line_keys
                 self._included_is_default = False
@@ -1644,6 +1664,9 @@ class SlicesDock(QgsDockWidget):
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
                     self.z0_spin.setValue(recipe.resolution.t0_ns)
                     self.z1_spin.setValue(recipe.resolution.t1_ns)
+                # `apply_view` blocked the box's signals, so the metres
+                # beside it are refreshed here, once the grid is selected.
+                self._update_radius_metres()
             finally:
                 self._updating -= 1
             # M12 spec 4.2 (controller ruling T2-b): picking a saved cube is
@@ -1713,7 +1736,8 @@ class SlicesDock(QgsDockWidget):
         floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
         self.cell_spin.setMinimum(floor)
         self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
-        self.radius_spin.setValue(DEFAULT_RADIUS_SPACINGS * grid.default_spacing)
+        self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
+        self._update_radius_metres()
         self._seed_dz_z_defaults(grid_id)
 
     def _seed_dz_z_defaults(self, grid_id: str | None) -> None:
@@ -1798,8 +1822,37 @@ class SlicesDock(QgsDockWidget):
     def current_values(self) -> np.ndarray | None:
         return self._values
 
+    def _grid_spacing(self) -> float | None:
+        """The selected grid's line spacing, or None with no grid."""
+        grid_id = self.grid_combo.currentText()
+        if not grid_id or not self.session.is_open:
+            return None
+        try:
+            return self.session.grid(grid_id).default_spacing
+        except KeyError:
+            return None
+
+    def _update_radius_metres(self) -> None:
+        """Refresh the metres beside the radius box. Run on the box's own
+        edits, after a seed, after a cube restore and from `rebuild_source`
+        (which a spacing edit reaches through `grids_changed`), so the label
+        cannot go stale however the spacing or the box moved (#72)."""
+        try:
+            spacing = self._grid_spacing()
+            if spacing is None:
+                self.grid_radius_metres.setText("")
+            else:
+                self.grid_radius_metres.setText(
+                    f"= {self.grid_radius_spin.value() * spacing:.3g} m"
+                )
+        except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
+            _log(f"could not refresh the fill radius in metres: {exc}")
+
     def radius_cells(self) -> int:
-        return max(0, int(round(self.radius_spin.value() / self.cell_spin.value())))
+        spacing = self._grid_spacing()
+        if spacing is None:
+            return 0
+        return radius_cells_for(spacing, self.grid_radius_spin.value(), self.cell_spin.value())
 
     def _step_levels(self, z: Any) -> int:
         """`step_spin`'s nanoseconds, in levels of `z` -- at least 1, so a

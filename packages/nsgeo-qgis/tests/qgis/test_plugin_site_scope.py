@@ -123,7 +123,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
     assert not dock.source_group.isHidden()
     assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
-    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
     assert not dock.save_button.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
@@ -132,7 +132,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
     assert dock.source_group.isHidden()
     assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
-    assert dock.radius_spin.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.grid_radius_row.isHidden() and not dock.radius_spacing_spin.isHidden()
     assert dock.save_button.isHidden()
     assert dock.export_button.text() == "Export site GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the site"
@@ -153,7 +153,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
     assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
-    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
 

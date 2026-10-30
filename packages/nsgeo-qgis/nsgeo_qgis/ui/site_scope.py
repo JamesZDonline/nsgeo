@@ -375,7 +375,7 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
-    set_row_visible(dock, dock.radius_spin, not site)
+    set_row_visible(dock, dock.grid_radius_row, not site)
     set_row_visible(dock, dock.radius_spacing_spin, site)
     # Residency stays per grid and automatic in the site (spec 4.8).
     dock.resident_check.setVisible(not site)

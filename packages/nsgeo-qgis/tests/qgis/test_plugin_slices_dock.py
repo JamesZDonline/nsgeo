@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import numpy as np
@@ -628,15 +629,15 @@ def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
     assert not np.allclose(first[both], second[both]), "a different depth must look different"
 
 
-def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
+def test_the_fill_radius_is_a_distance_and_survives_a_cell_size_change(docked):
     """The default radius is a multiple of the line spacing -- a distance
-    (spec 6.4; #81 made it 0.5 x). The spin box is therefore in metres and
-    the cell conversion happens underneath, so halving the cell size does
+    (spec 6.4; #81 made it 0.5 x; #72 made the box say so, in spacings).
+    The cell conversion happens underneath, so halving the cell size does
     not silently halve the smoothing.
 
     Strengthened from the brief's own draft: with this fixture's
     `GRID.default_spacing` of 0.5, the default radius is 0.25 m -- under
-    1 m before ANY conversion -- so `int(self.radius_spin.value())`
+    1 m before ANY conversion -- so `int(metres)`
     (metres misread as an already-integer cell count, the exact mutant
     Step 10 names) truncates to 0 both before and after the cell change,
     and `before * 2 == 0` too, so the relative-doubling check alone passes
@@ -646,13 +647,81 @@ def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
     get right by accident."""
     dock, session = docked
     _ready(dock)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     before = dock.radius_cells()
     assert before == round(0.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_this_grid_sets_the_fill_radius_in_line_spacings(docked):
+    """#72: This grid's Fill radius reads like Whole site's, in line
+    spacings, with the metres it comes to shown beside the box."""
+    dock, _ = docked
+    _ready(dock)
+    spin = dock.grid_radius_spin
+    assert spin.suffix() == " × line spacing"
+    assert spin.value() == pytest.approx(0.5)
+    assert spin.singleStep() == 0.25
+    assert dock.grid_radius_metres.text() == "= 0.25 m"
+    assert dock.radius_cells() == round(0.25 / dock.cell_spin.value())
+
+
+def test_the_metres_beside_the_radius_follow_the_box(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    assert dock.grid_radius_metres.text() == "= 0.75 m"
+    assert dock.radius_cells() == round(0.75 / dock.cell_spin.value())
+
+
+def test_the_radius_follows_a_line_spacing_edit(docked):
+    """Review Focus 3: the radius is in spacings, so a spacing edit moves
+    the metres and the cells with no grid switch and no change to the box."""
+    dock, session = docked
+    _ready(dock)
+    before = dock.radius_cells()
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_metres.text() == "= 0.5 m"
+    assert dock.radius_cells() == round(0.5 / dock.cell_spin.value())
+    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_a_saved_cube_records_its_radius_in_metres(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    assert dock.view_settings().radius_m == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("radius_m", [0.0, 0.25, 0.5, 0.75])
+def test_an_old_cubes_radius_reopens_with_the_same_radius_in_cells(docked, radius_m):
+    dock, session = docked
+    _ready(dock)
+    view = dock.view_settings()
+    _save_cube(dock, session, "A__r", dataclasses.replace(view, radius_m=radius_m))
+    dock.grid_radius_spin.setValue(3.0)
+    dock.restore_cube("A__r")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.grid_radius_spin.value() == pytest.approx(radius_m / 0.5)
+    assert dock.radius_cells() == max(0, round(radius_m / dock.cell_spin.value()))
+
+
+def test_a_cube_saved_before_a_spacing_edit_keeps_its_radius_in_metres(docked):
+    """Review Focus 5: `radius_m` is metres, the box is spacings, so the
+    conversion uses the grid's spacing now, keeping the metres."""
+    dock, session = docked
+    _ready(dock)
+    view = dock.view_settings()
+    _save_cube(dock, session, "A__s", dataclasses.replace(view, radius_m=0.5))
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    dock.restore_cube("A__s")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_metres.text() == "= 0.5 m"
 
 
 def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
@@ -664,7 +733,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
@@ -680,7 +749,7 @@ def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
     dock = SlicesDock(session)
     try:
         assert dock.cell_spin.value() == pytest.approx(cell)
-        assert dock.radius_spin.value() == pytest.approx(0.5 * spacing)
+        assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -692,10 +761,10 @@ def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
     fill is most of the picture rather than a nicety."""
     dock, _ = docked
     _ready(dock)
-    dock.radius_spin.setValue(0.0)
+    dock.grid_radius_spin.setValue(0.0)
     dock.flush_debounce()
     unfilled = np.isfinite(dock.current_values()).sum()
-    dock.radius_spin.setValue(1.0)
+    dock.grid_radius_spin.setValue(2.0)  # 1 m on a 0.5 m spacing
     dock.flush_debounce()
     filled = np.isfinite(dock.current_values()).sum()
     assert filled > unfilled
@@ -1084,7 +1153,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
             palette=dock.palette_combo.currentText(),
             stretch="shared across the cube",
             coverage=False,
-        )
+        ),
+        spacing_m=GRID.default_spacing,
     )
     assert dock.cube_combo.currentText() == "(unsaved)", "perturbing must drop the claim"
 
@@ -1492,7 +1562,7 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
 
     Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
     or the decimals, so every one of these shipped with an arrow click
-    that moved a 0.75 m radius to 1.75 m and a 0.2165 ns dz to 1.2165.
+    that moved a 0.75 m radius to 1.75 m (now in spacings) and a 0.2165 ns dz to 1.2165.
     `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
     per click is the only increment that means anything on a time axis.
     """
@@ -1500,7 +1570,7 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
     assert dock.engine.wait_for_preparation(20_000)
     header = dock.session.line_for_key(dock.session.keys()[0]).header
 
-    assert dock.radius_spin.singleStep() <= 0.1
+    assert dock.grid_radius_spin.singleStep() == 0.25  # a quarter spacing, not Qt's 1.0
     assert dock.cell_spin.singleStep() <= 0.1
     assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
     assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
@@ -1521,7 +1591,7 @@ def test_the_resolution_controls_say_what_they_do(docked):
     """
     dock, _ = docked
     for spin, must_say in (
-        (dock.radius_spin, "no line"),
+        (dock.grid_radius_spin, "no line"),
         (dock.dz_spin, "sample"),
         (dock.cell_spin, "spacing"),
         (dock.coverage_check, "traces"),

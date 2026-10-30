@@ -43,7 +43,7 @@ reviewer of this task does:
   recoverable from a surviving neighbour before this module ever sees the
   array. Radius only changes how much the loss matters, never whether it
   happens, and radius 0 (spec 6.4's own honest unfilled truth,
-  `radius_spin`'s construction default, and a value `export_geotiff`
+  `grid_radius_spin`'s construction default, and a value `export_geotiff`
   passes straight through with no refusal) is not a debugging-only case
   this module gets to assume away. This writer does not compensate with a
   finer output pitch anyway, for reasons that hold regardless: (1) a
