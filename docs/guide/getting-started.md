@@ -89,6 +89,7 @@ stay exactly where they are.
 | **Add grid…** | Places a new grid on the map. |
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
+| **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
 **Save site**, **Add grid…** and **Import DZT…** stay greyed out until a site is
 open, and **Pick** until a line is open.
@@ -117,8 +118,19 @@ any other QGIS panel.
 - **nsgeo Slices** (right) builds time and depth slices across a grid. The first
   time nsgeo starts, it sits as a tab behind **nsgeo Processing**.
 
-If you close a panel, reopen it from **View → Panels**. The toolbar is under
-**View → Toolbars → nsgeo**.
+**Panels ▾** on the nsgeo toolbar ticks each panel that is open, including one
+sitting behind another tab. Tick a panel to bring it back in front, or untick it
+to close it. Below the ticks are three layouts:
+
+- **Profile work** keeps **nsgeo Survey** and **nsgeo Profile**, and closes
+  Processing and Slices.
+- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile
+  and Processing.
+- **Show all** opens all four again.
+
+A layout only opens and closes panels: each one comes back at the size and in
+the place you left it, and QGIS's own panels are left alone. **View → Panels**
+works too. The toolbar is under **View → Toolbars → nsgeo**.
 
 In 0.1.0, **Set velocity override…** on a line's right-click menu is not
 available yet. It only shows a message. Set the velocity on the grid instead
