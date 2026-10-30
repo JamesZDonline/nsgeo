@@ -121,6 +121,21 @@ def test_the_dialog_opens_seeded_with_the_resolved_velocity(plugin):
     assert _dialog(plugin).spin.value() == pytest.approx(0.0777)
 
 
+def test_the_dialog_seeds_from_the_grid_when_the_line_has_no_override(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_grid_velocity("A", VelocityModel.constant(0.0888))
+    assert s.line_for_key(key).velocity is None
+    assert _dialog(plugin).spin.value() == pytest.approx(0.0888)
+
+
+def test_the_dialog_seeds_from_the_header_dielectric_with_no_line_or_grid_velocity(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    line = s.line_for_key(key)
+    assert line.velocity is None and s.grid_for_line(line).velocity is None
+    expected = VelocityModel.from_dielectric(line.header.epsr).surface_velocity
+    assert _dialog(plugin).spin.value() == pytest.approx(expected, abs=1e-4)
+
+
 def test_the_spin_box_is_a_four_decimal_velocity_bounded_at_the_speed_of_light_in_air(plugin):
     dialog = _dialog(plugin)
     spin = dialog.spin
@@ -371,6 +386,22 @@ def test_a_saved_curve_is_drawn_differently_from_the_working_fit_over_the_same_g
     none = view.grab().toImage()
     assert saved_only != none and working_only != none  # both really drew
     assert saved_only != working_only
+
+    # Fainter, not merely different: the strongest pixel a saved curve leaves
+    # is well short of the working curve's. A saved curve at full alpha would
+    # reach the working curve's peak, whatever its line width.
+    def _peak(img):
+        peak = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                a, b = img.pixelColor(x, y), none.pixelColor(x, y)
+                peak = max(
+                    peak,
+                    abs(a.red() - b.red()) + abs(a.green() - b.green()) + abs(a.blue() - b.blue()),
+                )
+        return peak
+
+    assert _peak(saved_only) < 0.6 * _peak(working_only)
 
 
 def test_drawing_the_saved_curves_changes_the_picture(plugin):

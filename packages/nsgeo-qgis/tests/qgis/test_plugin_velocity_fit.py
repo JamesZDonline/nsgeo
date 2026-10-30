@@ -103,6 +103,20 @@ def test_the_velocity_action_is_disabled_and_unchecked_with_no_line(plugin):
     assert _view(plugin)._velocity_mode is False
 
 
+def test_a_disabled_velocity_action_cannot_be_fired(plugin):
+    plugin.session.close_site()
+    assert not plugin.act_velocity.isEnabled()
+
+    # Not `act.trigger()`: on this Qt a bare QAction.trigger() ignores
+    # isEnabled() (it checks and emits regardless), so it proves nothing.
+    # The toolbar button is the path a user has, and it does honour it.
+    button = plugin.toolbar.widgetForAction(plugin.act_velocity)
+    button.click()
+
+    assert not plugin.act_velocity.isChecked()
+    assert _view(plugin)._velocity_mode is False
+
+
 def test_a_click_in_velocity_mode_adds_a_point(plugin):
     v = _view(plugin)
     _check(plugin.act_velocity)
@@ -292,6 +306,9 @@ def test_three_points_show_the_solvers_own_refusal_and_no_curve(plugin):
 
 def test_a_line_with_no_traces_per_metre_explains_instead_of_raising(plugin, tmp_path):
     s = plugin.session
+    _velocity_on(plugin)
+    _click_hyperbola(plugin)  # a curve on the calibrated line, to be cleared
+    assert len(_view(plugin)._velocity_curve) == 200
     path = synthetic_dzt(tmp_path / "raw", "TIMEMODE.DZT", n_traces=60, traces_per_metre=0.0)
     line = Line.open(path, GridPlacement("A", "y", 3.0, 0.0))
     s.add_lines([line])
@@ -613,6 +630,27 @@ def test_the_curve_and_points_are_not_painted_over_a_previewed_line(plugin):
     assert len(_view(plugin)._velocity_points) == 5
 
 
+def test_point_collection_resumes_once_the_preview_ends(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    v = _view(plugin)
+    s.set_preview(s.keys()[1], 5)
+    _click(v, 40, 30)
+    assert dock.velocity_points() == []  # refused while previewing
+
+    s.clear_preview()
+    _click(v, 40, 30)
+
+    assert len(dock.velocity_points()) == 1
+
+
+def test_set_velocity_from_fit_rejects_an_unknown_fit_id(plugin):
+    s = plugin.session
+    key = s.keys()[0]
+    with pytest.raises(KeyError):
+        s.set_velocity_from_fit(key, "no-such-fit")
+    assert s.line_for_key(key).velocity_from_fit is None
+
+
 def _stub_fit(monkeypatch, v, sigma):
     from nsgeo.velocity_fit import HyperbolaFit
     from nsgeo_qgis.ui import profile_dock
@@ -654,3 +692,80 @@ def test_turning_velocity_mode_off_clears_the_working_marks_but_keeps_saved_fits
     assert v._velocity_points == []
     assert v._velocity_curve == []
     assert len(v._saved_velocity_curves) == 1  # what is already measured stays visible
+
+
+def test_a_right_click_in_velocity_mode_abandons_a_stale_cutoff_grab(plugin):
+    v = _view(plugin)
+    _check(plugin.act_velocity)
+    v._cutoff_ns = 33.0  # where a lost-release drag had dragged it to
+    v._cutoff_grab = 12.0  # ...from here
+
+    _click(v, 10, 10, Qt.MouseButton.RightButton)  # nowhere near a point
+
+    assert v._cutoff_grab is None
+    assert v._cutoff_ns == 12.0  # the abandoned drag is undone, as a left press does
+
+
+def test_a_line_that_vanishes_from_a_refresh_still_resets_the_strip_by_key_error(
+    plugin, monkeypatch
+):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    assert dock.apply_line_button.isEnabled()
+    dock._velocity_points = []  # the read-out and buttons are now stale
+    monkeypatch.setattr(
+        plugin.session, "resolved_velocity", lambda key: (_ for _ in ()).throw(KeyError(key))
+    )
+
+    plugin.session.lines_changed.emit()
+
+    assert "Click the hyperbola" in dock.velocity_readout.text()
+    assert not dock.apply_line_button.isEnabled()
+
+
+def test_a_refresh_with_no_open_line_still_resets_the_strip(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    assert dock.apply_line_button.isEnabled()
+    dock._velocity_points = []  # stale, as above
+    dock._working_key = None
+
+    plugin.session.lines_changed.emit()
+
+    assert not dock.apply_line_button.isEnabled()
+    assert not dock.save_fit_button.isEnabled()
+    assert "±" not in dock.velocity_readout.text()
+
+
+def test_closing_the_site_forgets_which_fit_was_just_saved(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    assert dock._saved_velocity_fit is not None
+
+    plugin.session.close_site()
+
+    assert dock._saved_velocity_fit is None
+
+
+def test_one_update_builds_the_distance_axis_the_same_number_of_times_however_many_fits_are_saved(
+    plugin, monkeypatch
+):
+    from nsgeo.velocity_fit import StoredFit
+
+    s, dock = plugin.session, plugin.profile_dock
+    key = s.keys()[0]
+    calls = []
+    real = Line.distance_along
+    monkeypatch.setattr(Line, "distance_along", lambda self: calls.append(1) or real(self))
+
+    def _count():
+        calls.clear()
+        dock._update_velocity_fit()
+        return len(calls)
+
+    s.add_velocity_fit(key, StoredFit(20.0, 0.1, 0.004, 0.2, 30, ((30, 20.0),), "t"))
+    one = _count()
+    for i in range(4):
+        s.add_velocity_fit(key, StoredFit(20.0 + i, 0.1, 0.004, 0.2, 20 + i, ((20, 20.0),), "t"))
+    assert _count() == one
