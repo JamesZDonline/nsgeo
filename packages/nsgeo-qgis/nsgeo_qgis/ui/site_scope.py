@@ -44,6 +44,7 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SiteSource,
     SourceChoice,
+    default_cell,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui.site_panel import SiteRow
@@ -231,7 +232,7 @@ def busy(site_engine: Any, included: Iterable[str]) -> bool:
 
 
 def seed_cell(session: Any, included: Iterable[str]) -> tuple[float, float] | None:
-    """`(floor, cell)`: M11's rule applied to the finest-spaced included grid (spec 4.4).
+    """`(floor, cell)`: `default_cell` for the finest-spaced included grid (spec 4.4).
 
     The floor is the largest of the grids' `smallest_safe_cell`, so no grid's
     own frame can be made undrawable from the arrows (walkthrough W7). The
@@ -242,7 +243,7 @@ def seed_cell(session: Any, included: Iterable[str]) -> tuple[float, float] | No
         return None
     floor = max(0.01, *(smallest_safe_cell(g.size_x, g.size_y) for g in grids))
     finest = min(g.default_spacing for g in grids)
-    return floor, max(floor, min(0.5, finest / 2.0))
+    return floor, default_cell(finest, floor)
 
 
 def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float, float] | None:

@@ -38,6 +38,12 @@ from nsgeo.slices import SliceWindow, ZAxis, plan_windows
 #: being absent is exactly what `output_unipolar` reports.
 NO_TRANSFORM = ""
 
+#: Issue #81: the transform a grid's slices start on. Square is what the
+#: slices spec's convention names (Conyers, GPR-SLICE: "spatially averaged
+#: squared amplitude or Hilbert envelope"). A default only fills a gap: a
+#: transform the site remembers, "none" included, is kept.
+DEFAULT_TRANSFORM = "amp_square"
+
 #: Measured, spec 7.4: streaming costs ~0.14 ms per line per tick.
 STREAM_MS_PER_LINE = 0.14
 
@@ -227,6 +233,25 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
     while cell > 0.0 and frame_cells(size_x, size_y, cell) > max_cells:
         cell = round(cell + 0.001, 3)
     return cell
+
+
+#: Issue #81: the cell a grid starts from, in metres -- fixed, not a
+#: fraction of the line spacing, because along a line the detail is set by
+#: the trace spacing. `default_cell` caps it at half the line spacing.
+DEFAULT_CELL_M = 0.2
+
+#: Issue #81: the fill radius a grid starts from, in line spacings. Half a
+#: spacing is the smallest radius that still closes the gap between lines
+#: at their nominal offsets, so it smears far less than spec 6.4's 1.5x but
+#: has no margin: a line that wanders off its offset can leave a stripe.
+DEFAULT_RADIUS_SPACINGS = 0.5
+
+
+def default_cell(spacing_m: float, floor: float) -> float:
+    """The cell a grid is seeded with: `DEFAULT_CELL_M`, no larger than half
+    the line spacing (spec 4), and never under `floor`, the finest cell the
+    frame can afford (`smallest_safe_cell`)."""
+    return max(floor, min(DEFAULT_CELL_M, spacing_m / 2.0))
 
 
 def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstimate:

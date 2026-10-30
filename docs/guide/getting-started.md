@@ -341,9 +341,10 @@ line, the depth and the velocity.
 Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 
 1. Under **Source**, choose the **Grid** and a **Preset**. The preset's steps are
-   applied to every line before slicing. Optionally, choose a **Transform**
-   (`amp_abs`, `amp_envelope` or `amp_square`) for amplitude slices. Preparing
-   starts by itself, and the status line reads *prepared* when it is done.
+   applied to every line before slicing. **Transform** starts on `amp_square`
+   (squared amplitude). Choose `amp_abs` or `amp_envelope` for other amplitude
+   slices, or `none` for the signed mean. Preparing starts by itself, and the
+   status line reads *prepared* when it is done.
    **Choose…** sets which of the grid's lines are included.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
@@ -352,7 +353,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Shift and use the mouse wheel over the map to step through the slices.
 3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), the top
    and bottom of the volume (**z0**, **z1**), and the **Fill radius** for cells
-   no line crossed. Hover over each control for an explanation.
+   no line crossed. Hover over each control for an explanation. A grid starts
+   at a 0.2 m cell, or half the line spacing if that is smaller, and a fill
+   radius of half the line spacing. That radius just closes the gaps between
+   lines. If a line strayed from its spacing and leaves an unfilled stripe,
+   raise the fill radius.
 4. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 5. **Save cube…** keeps the prepared volume in the site folder (click **Save
