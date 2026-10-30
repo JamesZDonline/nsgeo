@@ -357,7 +357,7 @@ def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
     stored one that is no longer offered must not break the switch. The
     fallback is what This grid shows (here not the panel's own "none")."""
     dock = plugin.slices_dock
-    dock.transform_combo.setCurrentText("amp_envelope")
+    dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.wait_for_preparation(20_000)
     plugin.session.set_site_view(transform="amp_gone_since")
     whole_site(plugin)
@@ -570,7 +570,7 @@ def test_the_site_view_survives_save_and_reopen(plugin):
     session = plugin.session
     assert not session.dirty, "showing the site is not a change to the survey"
     dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
-    dock.site_panel.transform_combo.setCurrentText("amp_envelope")
+    dock.site_panel.transform_combo.set_value("amp_envelope")
     dock.normalisation_panel.method_combo.setCurrentIndex(2)  # Edge match
     dock.site_panel.select_grid("B")
     dock.normalisation_panel.gain_spin.setValue(1.5)
@@ -777,7 +777,7 @@ def test_flipping_scope_mid_preparation_never_overlaps_and_settles(plugin, monke
     dock = plugin.slices_dock
     # This grid starts a preparation of its own, and the site is asked for
     # straight after it: the site waits for it (Ruling 1).
-    dock.transform_combo.setCurrentText("amp_envelope")
+    dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.is_running
     dock.site_scope_button.click()
     assert spin_until(lambda: dock.site_engine.grid_state("A") == "preparing")

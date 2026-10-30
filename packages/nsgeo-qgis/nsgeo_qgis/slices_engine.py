@@ -121,7 +121,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
-from nsgeo.processing import Radargram, StepStack, build_step
+from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
     LinePlan,
@@ -549,10 +549,13 @@ class SliceEngine(QObject):
             conflict = preset_transform_conflict(steps)
             if conflict is not None:
                 self._choice = None
+                # By title: the user removes it from the Processing list,
+                # which shows titles, not ids (#82).
+                title = step_title(conflict)
                 raise ValueError(
                     f"the preset {choice.preset!r} already contains the amplitude transform "
-                    f"{conflict!r}. A cube's transform is chosen here and applied last, so "
-                    f"remove {conflict!r} from the preset or choose it in Transform, not both"
+                    f"{title}. A cube's transform is chosen here and applied last, so "
+                    f"remove {title} from the preset or choose it in Transform, not both"
                 )
             # Captured now, not re-read from `site.presets` in `provenance()`:
             # `save_preset` overwrites a name in place and `delete_preset`

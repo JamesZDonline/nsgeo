@@ -286,6 +286,7 @@ def test_add_step_dialog_shows_header_facts_and_validates_against_nyquist(qgis_a
 
     rg = Radargram.from_profile(line.load()[0])
     d = AddStepDialog("bandpass", header=line.header, radargram=rg)
+    assert d.windowTitle() == "Add step: Bandpass"
     assert "HS350US" in d.facts.text() and "Nyquist" in d.facts.text()
     assert not d.ok_button.isEnabled()
     d.form.set_value("low_mhz", "100")

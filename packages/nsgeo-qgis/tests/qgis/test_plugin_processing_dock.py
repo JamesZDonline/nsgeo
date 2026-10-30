@@ -4,12 +4,12 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing import available_steps, build_step
+from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index
+from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index, needs_dialog
 from plugin_testing import synthetic_dzt
 from qgis.PyQt.QtCore import QModelIndex, Qt
-from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox
+from qgis.PyQt.QtWidgets import QDialog, QDoubleSpinBox, QMessageBox, QWidgetAction
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
 
@@ -31,16 +31,66 @@ def opened(qgis_app, tmp_path):
     return session, dock, key
 
 
-def test_add_menu_lists_the_registry_and_marks_required_steps(opened):
+def _menu_layout(menu):
+    """The Add step menu as [(heading, [step id, ...]), ...]."""
+    layout = []
+    for action in menu.actions():
+        if isinstance(action, QWidgetAction):
+            layout.append((action.defaultWidget().text(), []))
+        elif not action.isSeparator():
+            layout[-1][1].append(action.data())
+    return layout
+
+
+def _step_actions(menu):
+    return [a for a in menu.actions() if not a.isSeparator() and a.data()]
+
+
+def test_add_menu_is_grouped_in_processing_order(opened):
+    """#82: headed groups in the usual processing flow, not the registry's
+    ids in alphabetical order. The amplitude transforms are not offered:
+    the user makes slices with them, never profiles, and the Slices
+    panel's Transform combo offers them there."""
     _, dock, _ = opened
-    texts = [a.text() for a in dock.add_menu.actions()]
-    assert [t.split(" ")[0] for t in texts] == available_steps()
-    assert any(t.startswith("bandpass") and "needs values" in t for t in texts)
-    assert not any(t.startswith("dewow") and "needs values" in t for t in texts)
+    assert _menu_layout(dock.add_menu) == [
+        ("Time", ["time_zero", "time_cutoff"]),
+        ("Filters", ["dewow", "bandpass"]),
+        ("Background", ["background_mean", "background_sliding", "background_svd"]),
+        ("Gain", ["gain_curve", "gain_agc", "gain_parametric"]),
+    ]
+
+
+def test_add_menu_offers_every_registered_step_but_the_slice_transforms(opened):
+    """Still the registry, not a list: a step added to the core appears here."""
+    _, dock, _ = opened
+    offered = [name for _, names in _menu_layout(dock.add_menu) for name in names]
+    assert sorted(offered) == [n for n in available_steps() if not is_unipolar(get_step(n))]
+
+
+def test_add_menu_shows_titles_and_an_ellipsis_only_where_a_dialog_opens(opened):
+    _, dock, _ = opened
+    texts = {a.data(): a.text() for a in _step_actions(dock.add_menu)}
+    assert texts["bandpass"] == "Bandpass…"
+    assert texts["gain_agc"] == "Automatic gain control"
     # These two add straight away, seeded from the record: no dialog, so no
     # promise of one.
-    assert "time_cutoff" in texts
-    assert "gain_curve" in texts
+    assert texts["time_cutoff"] == "Time cutoff"
+    assert texts["gain_curve"] == "Gain curve"
+    assert all(text.endswith("…") == needs_dialog(name) for name, text in texts.items())
+
+
+def test_add_menu_headings_draw_on_every_style_and_cannot_be_chosen(opened):
+    """`QMenu.addSection` leaves its text to the style, and the Windows
+    styles draw a bare separator instead (rendered under Qt's "Windows"
+    style for #82's mock-up), so the group names would vanish on the
+    machines the plugin is demonstrated on. A label drawn by the plugin
+    shows on every style."""
+    _, dock, _ = opened
+    actions = dock.add_menu.actions()
+    headings = [a for a in actions if isinstance(a, QWidgetAction)]
+    assert [h.defaultWidget().text() for h in headings] == ["Time", "Filters", "Background", "Gain"]
+    assert not any(h.isEnabled() for h in headings)
+    assert not any(a.isSeparator() and a.text() for a in actions)  # no addSection
 
 
 def test_add_menu_action_triggers_add_step(opened, drive_dialog):
@@ -76,7 +126,7 @@ def test_add_menu_action_triggers_add_step(opened, drive_dialog):
     shown = drive_dialog(QDialog, "exec", lambda d: d.reject())
 
     def action_named(name: str):
-        return next(a for a in dock.add_menu.actions() if a.text().split(" ")[0] == name)
+        return next(a for a in _step_actions(dock.add_menu) if a.data() == name)
 
     action_named("dewow").trigger()
     assert [s.name for s, _ in session.stack_for(key).entries] == ["dewow"]
@@ -95,7 +145,17 @@ def test_add_remove_toggle_and_reorder(opened):
     dock.add_step("dewow")
     dock.add_step("background_mean")
     dock.add_step("gain_agc")
-    assert [dock.list.item(i).text() for i in range(3)] == ["dewow", "background_mean", "gain_agc"]
+    assert [dock.list.item(i).text() for i in range(3)] == [
+        "Dewow",
+        "Background removal (mean)",
+        "Automatic gain control",
+    ]
+    # The id stays one hover away, to match a project file or a help page.
+    assert [dock.list.item(i).toolTip() for i in range(3)] == [
+        "dewow",
+        "background_mean",
+        "gain_agc",
+    ]
     dock.list.item(1).setCheckState(Qt.CheckState.Unchecked)
     assert session.stack_for(key).entries[1][1] is False
     dock.list.setCurrentRow(2)

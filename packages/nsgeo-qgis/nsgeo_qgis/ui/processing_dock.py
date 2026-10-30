@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from nsgeo.processing import available_steps, build_step, default_params, get_step, required_params
+from nsgeo.processing import (
+    build_step,
+    default_params,
+    get_step,
+    grouped_steps,
+    is_unipolar,
+    required_params,
+)
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -26,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from nsgeo_qgis.log import log as _log
@@ -69,6 +77,25 @@ def needs_dialog(name: str) -> bool:
     """
     required = [s for s in get_step(name).schema() if s.required]
     return bool(required) and not all(s.kind in ("curve", "time") for s in required)
+
+
+def _menu_heading(text: str, menu: QMenu) -> QWidgetAction:
+    """A group heading for the Add step menu, drawn by us.
+
+    Not `QMenu.addSection`: Qt leaves a section's text to the style, and
+    the Windows styles draw a bare separator in its place, so the group
+    names would vanish on exactly the machines the plugin is shown on. A
+    label draws on every style; disabled, it cannot be chosen.
+    """
+    label = QLabel(text)
+    font = label.font()
+    font.setBold(True)
+    label.setFont(font)
+    label.setContentsMargins(8, 4, 8, 2)
+    action = QWidgetAction(menu)
+    action.setDefaultWidget(label)
+    action.setEnabled(False)
+    return action
 
 
 class ProcessingDock(QgsDockWidget):
@@ -127,16 +154,30 @@ class ProcessingDock(QgsDockWidget):
         self.add_button.setText("Add step")
         self.add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.add_menu = QMenu(self.add_button)
-        for name in available_steps():
-            text = f"{name}  (needs values)" if needs_dialog(name) else name
-            # `checked=False` absorbs whatever `addAction`'s convenience
-            # overload passes the slot -- binding the zero-argument
-            # `triggered()` overload is an implementation detail of that
-            # overload, not documented API, and this repo has no PyQt6 to
-            # confirm it holds there too. `n=name` keeps the step name
-            # correct under either binding (see `test_add_menu_...` below,
-            # which triggers these for real rather than only reading text).
-            self.add_menu.addAction(text, lambda checked=False, n=name: self.add_step(n))
+        # The registry's groups in processing order (#82). Unipolar steps
+        # are the amplitude transforms: slices take them from the Slices
+        # panel's Transform combo, and nobody adds one to a profile.
+        for group, names in grouped_steps():
+            names = [n for n in names if not is_unipolar(get_step(n))]
+            if not names:
+                continue
+            if self.add_menu.actions():
+                self.add_menu.addSeparator()
+            self.add_menu.addAction(_menu_heading(group, self.add_menu))
+            for name in names:
+                # "…" is Qt's usual mark for "opens a dialog".
+                text = get_step(name).title + ("…" if needs_dialog(name) else "")
+                # `checked=False` absorbs whatever `addAction`'s convenience
+                # overload passes the slot -- binding the zero-argument
+                # `triggered()` overload is an implementation detail of that
+                # overload, not documented API, and this repo has no PyQt6 to
+                # confirm it holds there too. `n=name` keeps the step name
+                # correct under either binding (see `test_add_menu_...` below,
+                # which triggers these for real rather than only reading text).
+                action = self.add_menu.addAction(
+                    text, lambda checked=False, n=name: self.add_step(n)
+                )
+                action.setData(name)
         self.add_button.setMenu(self.add_menu)
         self.remove_button = QPushButton("Remove")
         self.up_button = QPushButton("↑")
@@ -236,7 +277,8 @@ class ProcessingDock(QgsDockWidget):
             self.list.clear()
             if key is not None:
                 for step, enabled in self.session.stack_for(key).entries:
-                    item = QListWidgetItem(step.name)
+                    item = QListWidgetItem(step.title)
+                    item.setToolTip(step.name)
                     item.setFlags(
                         Qt.ItemFlag.ItemIsSelectable
                         | Qt.ItemFlag.ItemIsEnabled

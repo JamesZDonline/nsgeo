@@ -58,7 +58,7 @@ def _prepare(plugin) -> None:
     dock = plugin.slices_dock
     dock.grid_combo.setCurrentText("A")
     dock.preset_combo.setCurrentText("p")
-    dock.transform_combo.setCurrentText("amp_envelope")
+    dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.wait_for_preparation(20_000), "preparation did not finish"
     dock.cell_spin.setValue(0.25)
     dock.dz_spin.setValue(0.5)
