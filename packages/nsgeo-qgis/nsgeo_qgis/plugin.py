@@ -61,7 +61,7 @@ from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettin
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMenu, QMessageBox, QToolButton
 
 from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.layers import SiteLayers
@@ -156,6 +156,10 @@ class NsgeoPlugin:
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
+        #: The toolbar's Panels button (the toolbar's own action for it)
+        #: and the menu it drops down. See `_build_panels_menu`.
+        self.act_panels: QAction | None = None
+        self.panels_menu: QMenu | None = None
         self._grid_dialog: GridDialog | None = None
         #: The running map pick's instruction in the message bar, if any.
         #: Only one pick runs at a time (see `_arm_pick`).
@@ -289,6 +293,7 @@ class NsgeoPlugin:
             # sticks.
             QTimer.singleShot(0, self._tabify_slices_dock)
         self.docks.append(self.slices_dock)
+        self._build_panels_menu()
 
         # The active slice on the map: owned here (not by the dock) for
         # the same reason `map_link` and `layers` are -- it is a map
@@ -359,6 +364,111 @@ class NsgeoPlugin:
             QgsSettings().setValue(_TABIFIED_KEY, True)
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
             self.message(f"could not tab the Slices panel: {exc}", Qgis.MessageLevel.Warning)
+
+    def _build_panels_menu(self) -> None:
+        """#84: the toolbar's Panels button -- each panel by name, then
+        three layouts.
+
+        The entries are this plugin's own actions, not the docks'
+        `toggleViewAction()`s: those take their text from the panel's
+        title, and the Profile panel's title names the open line. Each
+        entry is ticked from its dock's `toggleViewAction`, which Qt keeps
+        in step however the panel is closed -- its own close button,
+        View ▸ Panels, or this menu.
+
+        A layout only opens and closes panels; Qt keeps a closed panel's
+        place (its tab group, its size) for when it is opened again.
+        """
+        main = self.iface.mainWindow()
+        menu = QMenu(main)
+        named = (
+            ("Survey", self.survey_dock),
+            ("Profile", self.profile_dock),
+            ("Processing", self.processing_dock),
+            ("Slices", self.slices_dock),
+        )
+        for text, dock in named:
+            entry = menu.addAction(text)
+            entry.setCheckable(True)
+            view = dock.toggleViewAction()
+            entry.setChecked(view.isChecked())
+            view.toggled.connect(entry.setChecked)
+            entry.triggered.connect(
+                lambda checked, d=dock, e=entry: self._set_panel_open(d, e, checked)
+            )
+        menu.addSeparator()
+        profile_work = menu.addAction("Profile work")
+        profile_work.triggered.connect(
+            lambda: self._apply_layout((self.survey_dock, self.profile_dock))
+        )
+        slices_work = menu.addAction("Slices work")
+        slices_work.triggered.connect(
+            lambda: self._apply_layout((self.survey_dock, self.slices_dock))
+        )
+        menu.addAction("Show all").triggered.connect(self._show_all_panels)
+
+        # A button of our own, not an action given a menu: the popup mode
+        # belongs to the button, and QToolBar would make that button
+        # itself, with a split arrow whose main half does nothing here.
+        button = QToolButton(self.toolbar)
+        button.setText("Panels")
+        button.setToolTip("Show or hide the nsgeo panels, or switch to a layout")
+        button.setMenu(menu)
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.toolbar.addSeparator()
+        self.act_panels = self.toolbar.addWidget(button)
+        self.toolbar_actions.append(self.act_panels)
+        self.panels_menu = menu
+
+    def _set_panel_open(self, dock: Any, entry: QAction, checked: bool) -> None:
+        """A panel's entry in the Panels menu was ticked or unticked.
+
+        Ticked: open AND in front. Qt alone reopens a tabbed panel behind
+        the current tab, where the tick would look as if it did nothing.
+        Unticked: `close()`, as the panel's own close button does -- not
+        `setUserVisible(False)`, which does nothing to a panel that is
+        open behind another tab.
+        """
+        try:
+            if checked:
+                dock.setUserVisible(True)
+            else:
+                dock.close()
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            # The click has already flipped the tick; put it back to what
+            # the panel actually is.
+            entry.setChecked(dock.toggleViewAction().isChecked())
+            verb = "open" if checked else "close"
+            self.message(
+                f"could not {verb} the {entry.text()} panel: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def _apply_layout(self, keep: tuple[Any, ...]) -> None:
+        """Profile work / Slices work: the panels in `keep` open and in
+        front, every other nsgeo panel closed. QGIS's own panels are left
+        as they are."""
+        try:
+            for dock in self.docks:
+                if dock not in keep:
+                    dock.close()
+            for dock in keep:
+                dock.setUserVisible(True)
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(f"could not change the panels: {exc}", Qgis.MessageLevel.Warning)
+
+    def _show_all_panels(self) -> None:
+        """Show all: every nsgeo panel open, and none pulled in front.
+
+        Which of Processing and Slices ends up in front falls out of Qt
+        and the order of `self.docks`: with both closed, the first one
+        shown takes the front -- Processing, as at start-up; with one of
+        them already open (after Slices work, say), that one stays.
+        """
+        try:
+            for dock in self.docks:
+                dock.show()
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(f"could not show the panels: {exc}", Qgis.MessageLevel.Warning)
 
     def unload(self) -> None:
         # Connected in initGui() and owned by `iface`, which outlives this
@@ -458,6 +568,12 @@ class NsgeoPlugin:
         self.act_add_grid = None
         self.act_import = None
         self.act_pick = None
+        self.act_panels = None
+        if self.panels_menu is not None:
+            # Parented to the main window, which outlives this plugin; its
+            # entries are its children and go with it.
+            self.panels_menu.deleteLater()
+            self.panels_menu = None
         if self.toolbar is not None:
             self.toolbar.setParent(None)
             self.toolbar.deleteLater()
