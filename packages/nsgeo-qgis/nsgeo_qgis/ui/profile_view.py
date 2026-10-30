@@ -767,6 +767,10 @@ class ProfileView(QWidget):
         # there is nothing to tick in metres along zero traces.
         if self._distance is None or t.n_traces == 0:
             return [(f"{tick:g}", t.x_of_trace(float(tick))) for tick in nice_ticks(lo, hi)]
+        # One trace has no spacing to extrapolate metres from (`trace_to_metres`
+        # reads two samples); the old interpolation gave no ticks either.
+        if t.n_traces < 2:
+            return []
         d = self._distance
         # The window's ends in metres, read off the extrapolating map so the
         # ticks run on across blank space; each tick sits on its column centre.

@@ -1912,8 +1912,9 @@ def test_the_mirrored_image_puts_the_last_trace_on_the_left(ruled):
     assert (
         QColor(shot.pixel(int(r.left() + t.x_of_trace(5.5)), mid_y)).red() > 200
     )  # trace 5: white
-    blank = QColor(shot.pixel(r.left() + 40, mid_y))
-    assert blank in (BACKGROUND, NO_DATA_HATCH)
+    run = [QColor(shot.pixel(r.left() + 20 + i, mid_y)) for i in range(30)]
+    assert all(c in (BACKGROUND, NO_DATA_HATCH) for c in run)
+    assert NO_DATA_HATCH in run  # the hatch is painted, not just the background
 
 
 def test_cursor_picks_and_selection_sit_on_their_traces_when_mirrored(ruled):
@@ -1984,9 +1985,21 @@ def test_a_drag_across_only_blank_space_clears_like_a_click(ruled):
 def test_wheel_and_middle_drag_follow_the_pointer_when_mirrored(ruled):
     v = ruled
     x = v.transform.x_of_trace(100.0)
-    before = v.transform.trace_of_x(x)
-    v.zoom_at(1.25, x, 100)
-    assert v.transform.trace_of_x(x) == pytest.approx(before)
+    before, span = v.transform.trace_of_x(x), v.transform.trace_hi - v.transform.trace_lo
+    pos = QPointF(_local(v, x, 100))
+    ev = QWheelEvent(
+        pos,
+        pos,
+        QPoint(0, 0),
+        QPoint(0, 120),  # one notch in
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    QApplication.sendEvent(v, ev)
+    assert v.transform.trace_of_x(x) == pytest.approx(before, abs=0.5)
+    assert v.transform.trace_hi - v.transform.trace_lo < span
     start = v.transform.x_of_trace(100.0)
     QTest.mousePress(v, Qt.MouseButton.MiddleButton, NO_MOD, _local(v, start, 100))
     _send_move_while_pressed(v, _local(v, start - 50, 100), held_button=Qt.MouseButton.MiddleButton)
@@ -2002,9 +2015,19 @@ def test_fit_and_one_to_one_keep_the_ruler_and_the_mirror(ruled):
     assert v.transform.mirrored and (v.transform.trace_lo, v.transform.trace_hi) == pytest.approx(
         (-59.5, 300.5)
     )
-    left = v.transform.trace_hi
+    # A ruler wider than the panel (1680 trace units > 696 px), zoomed in past 1:1,
+    # so the 1:1 window neither clamps back to the bounds nor is a no-op.
+    # Mirrored, the screen-left edge is trace_hi and stays.
+    rg = _rg()
+    v.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, D, Ruler("A", "y", -12.0, 16.0))
+    v.zoom_at(8.0, r.width() / 2, r.height() / 2)
+    t = v.transform
+    assert t.trace_hi - t.trace_lo < t.width
+    left = t.trace_hi
     v.one_to_one()
-    assert v.transform.trace_hi == pytest.approx(left) and v.transform.mirrored
+    t = v.transform
+    assert t.trace_hi == pytest.approx(left) and t.mirrored
+    assert t.trace_hi - t.trace_lo == pytest.approx(t.width)
 
 
 def test_distance_ticks_rise_left_to_right_across_blank_space(ruled):
@@ -2061,3 +2084,15 @@ def test_set_axes_drops_a_ruler_without_a_distance(make_view):
     v.resize(800, 300)
     v.set_axes(200, 128, -4.0, 0.5, None, R)
     assert v.ruler is None and not v.transform.mirrored and v.transform.bounds is None
+
+
+def test_a_one_trace_line_with_a_distance_paints_its_axes_without_error(make_view, monkeypatch):
+    v = make_view()
+    v.resize(800, 300)
+    v.show()
+    logged = []
+    monkeypatch.setattr(profile_view_module, "_log", lambda *a, **k: logged.append(a))
+    v.set_axes(1, 128, -4.0, 0.5, np.array([2.0]))
+    assert v._distance_ticks(v.transform) == []
+    v.grab_image()
+    assert logged == []
