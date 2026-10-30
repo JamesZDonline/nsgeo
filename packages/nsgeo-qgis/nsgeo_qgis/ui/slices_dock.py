@@ -159,6 +159,9 @@ class SlicesDock(QgsDockWidget):
         #: This grid's `_on_prepared` arriving while the site showed.
         self._grid_prepare_pending = False
         self._grid_prepared_away = False
+        #: #70: a grid switch left the engine on the grid that was left; its
+        #: resolution is the spins' to apply once the new grid is prepared.
+        self._resolution_owed = False
         #: The survey the site scope's memory belongs to.
         self._site_seen: Any = None
         #: R-P5: retries the owed This-grid preparation every 50 ms until no
@@ -1842,7 +1845,11 @@ class SlicesDock(QgsDockWidget):
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
-            if old_z is not None:
+            if self._pending_top_ns is not None:
+                # #70: a carried-over time wins over the slider, which reads
+                # on the axis of a grid This grid has just left.
+                previous_time = self._pending_top_ns
+            elif old_z is not None:
                 previous_time = old_z.t0_ns + self.slice_slider.value() * old_z.dz_ns
             try:
                 resolution = Resolution(
@@ -2248,9 +2255,11 @@ class SlicesDock(QgsDockWidget):
                 # The left grid's spins and palette are not the target's: its
                 # own seeds and remembered source come from `_sync_included`,
                 # and the palette from its preparation landing.
+                # The time stays pending (Ruling 6): the engine still holds the
+                # left grid's axis, and `_run_pending_grid_prepare` lands it on
+                # the selected grid's own once that grid's resolution applies.
                 self._switch_resumed_grid(target)
                 self._pending_top_ns = top
-                self._sync_grid_slider()
                 return
             if self._grid_spins is not None:
                 site_scope.restore_spins(self, self._grid_spins)
@@ -2303,6 +2312,7 @@ class SlicesDock(QgsDockWidget):
         self._refresh_source_status()
         self._grid_prepared_away = False
         self._grid_prepare_pending = True
+        self._resolution_owed = True
 
     def _grid_record(self) -> tuple[Any, Any] | None:
         grid_id = self.grid_combo.currentText()
@@ -2371,8 +2381,11 @@ class SlicesDock(QgsDockWidget):
                 return
             self._grid_prepare_pending = False
             self.prepare()
-            if self.engine.z is None and self.engine.choice is not None:
-                # A moved grid's engine was cleared, resolution and all.
+            owed, self._resolution_owed = self._resolution_owed, False
+            if (owed or self.engine.z is None) and self.engine.choice is not None:
+                # A moved grid's engine was cleared, resolution and all; and a
+                # grid opened from the site list (#70) still holds the left
+                # grid's, whatever the spins' own change signals did.
                 self._apply_resolution()
             self._sync_grid_slider()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot

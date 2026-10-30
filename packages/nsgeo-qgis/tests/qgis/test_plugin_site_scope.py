@@ -972,9 +972,16 @@ def test_this_grid_opens_the_selected_grid_with_its_remembered_source(plugin, si
 
 def test_with_this_grids_own_grid_selected_it_comes_back_as_it_was_left(plugin):
     dock = plugin.slices_dock
+    # Non-default values, so skipping the restore would show.
+    dock.cell_spin.setValue(round(dock.cell_spin.value() * 2, 3))
+    dock.flush_debounce()
+    names = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    other = next(n for n in names if n != dock.palette_combo.currentText())
+    dock.palette_combo.setCurrentText(other)
     cell, palette = dock.cell_spin.value(), dock.palette_combo.currentText()
+    assert palette == other
     whole_site(plugin)
-    assert dock.site_panel.selected_grid() in (None, "A")
+    assert dock.cell_spin.value() != pytest.approx(cell), "the site's own cell shows"
     dock.site_panel.select_grid("A")
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "A"
@@ -982,6 +989,57 @@ def test_with_this_grids_own_grid_selected_it_comes_back_as_it_was_left(plugin):
     assert dock.palette_combo.currentText() == palette
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.grid_id == "A"
+
+
+def _narrow_a_then_site_mid_window(dock):
+    """A narrowed This-grid z range and a site time well inside the window: a
+    time clamped to the left grid's axis would not survive (#70, Ruling 6)."""
+    dock.z1_spin.setValue(dock.z0_spin.value() + (dock.z1_spin.value() - dock.z0_spin.value()) / 3)
+    dock.flush_debounce()
+    _events()
+    whole_site(dock.plugin_for_test)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    return dock._site.shown_top()
+
+
+def _assert_on_b_axis(dock, site_top):
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    spin_until(lambda: False, 400)  # any debounce runs on its own
+    z = dock.engine.z
+    top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    assert abs(top - site_top) <= z.dz_ns / 2 + 1e-9, (top, site_top)
+
+
+def test_the_opened_grid_lands_on_the_site_time_not_the_left_grids_clamp(plugin):
+    dock = plugin.slices_dock
+    dock.plugin_for_test = plugin
+    site_top = _narrow_a_then_site_mid_window(dock)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    _assert_on_b_axis(dock, site_top)
+    assert dock.engine.z == dock.engine.z.__class__.from_range(
+        dock.z0_spin.value(), dock.z1_spin.value(), dock.dz_spin.value()
+    ), "the engine holds the resolution the spins show"
+
+
+def test_the_opened_grid_lands_on_the_site_time_when_a_site_task_outlived_its_cancel(
+    plugin, monkeypatch
+):
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    dock.plugin_for_test = plugin
+    site_top = _narrow_a_then_site_mid_window(dock)
+    counter = LoadCounter(monkeypatch, delay=0.3)
+    dock.site_panel.select_grid("B")
+    # Re-queue a site read so a task is live when the cancel gives up.
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    _assert_on_b_axis(dock, site_top)
+    assert counter.max_concurrent == 1
 
 
 def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cancel(
@@ -1002,16 +1060,44 @@ def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cance
     assert counter.max_concurrent == 1
 
 
-def test_a_selected_grid_removed_meanwhile_falls_back_to_this_grids_own(plugin, monkeypatch):
+def _remove_selected_and_switch(plugin, grid_id):
     dock = whole_site(plugin)
     errors: list[str] = []
     dock.error.connect(errors.append)
-    dock.site_panel.select_grid("C")
-    plugin.session.remove_grid("C", with_lines=True)
+    dock.site_panel.select_grid(grid_id)
+    plugin.session.remove_grid(grid_id, with_lines=True)
     _events()
-    # The panel's rebuild moves its selection to a surviving row (B), so pin
-    # the guard itself: a selection naming a grid This grid no longer offers.
-    monkeypatch.setattr(dock.site_panel, "selected_grid", lambda: "C")
+    plugin.session.save()  # the removal itself dirties; the switch must not
+    assert not plugin.session.dirty
+    shown = dock.site_panel.selected_grid()
+    dock.grid_scope_button.click()
+    assert errors == []
+    return dock, shown
+
+
+def test_removing_the_selected_last_grid_opens_the_neighbour_the_panel_selects(plugin):
+    """Ruling 7: the rule is the row the list shows selected at the switch."""
+    dock, shown = _remove_selected_and_switch(plugin, "C")
+    assert shown == "B"
+    assert dock.grid_combo.currentText() == shown
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not plugin.session.dirty
+
+
+def test_removing_a_selected_middle_grid_leaves_no_selection_and_this_grid_stays(plugin):
+    dock, shown = _remove_selected_and_switch(plugin, "B")
+    assert shown is None
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not plugin.session.dirty
+
+
+def test_a_selection_naming_a_grid_this_grid_does_not_offer_is_ignored(plugin, monkeypatch):
+    """The `_grid_to_resume` guard itself, with a stale id the panel cannot make."""
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    monkeypatch.setattr(dock.site_panel, "selected_grid", lambda: "Z")
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "A"
     assert errors == []
