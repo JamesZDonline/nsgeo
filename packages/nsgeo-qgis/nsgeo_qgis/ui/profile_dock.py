@@ -964,6 +964,13 @@ class ProfileDock(QgsDockWidget):
             )
             fit_id = self.session.add_velocity_fit(self._working_key, stored)
             self._saved_velocity_fit = (self._working_key, stored.points, fit_id)
+            # A saved fit goes quietly into the line's record; say where to
+            # find it. The next fit action rewrites the read-out.
+            self.velocity_readout.setText(
+                self.velocity_readout.text().split(" Fit saved:")[0]
+                + " Fit saved: find it in the line's Set velocity override\u2026 dialog"
+                " (right-click the line in the Survey panel)."
+            )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 

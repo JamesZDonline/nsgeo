@@ -413,6 +413,9 @@ def test_save_fit_says_where_the_fit_went_and_keeps_the_readout(plugin):
     assert "Set velocity override" in text
     assert "Survey panel" in text
 
+    dock.save_fit_button.click()  # saving again does not stack the sentence
+    assert dock.velocity_readout.text().count("Fit saved") == 1
+
 
 def test_the_next_fit_action_replaces_the_saved_pointer(plugin):
     dock = _velocity_on(plugin)
