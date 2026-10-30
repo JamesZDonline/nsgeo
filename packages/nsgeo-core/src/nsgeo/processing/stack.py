@@ -198,7 +198,7 @@ class StepStack:
         if before.data.shape != after.data.shape:
             step = self._entries[index][0]
             raise ValueError(
-                f"step {index} ({step.name}) changes the sample count "
+                f"step {index + 1} ({step.title}) changes the sample count "
                 f"({before.n_samples} -> {after.n_samples}); a difference view is "
                 f"undefined for it"
             )

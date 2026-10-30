@@ -58,7 +58,7 @@ def _prepare(plugin) -> None:
     dock = plugin.slices_dock
     dock.grid_combo.setCurrentText("A")
     dock.preset_combo.setCurrentText("p")
-    dock.transform_combo.setCurrentText("amp_envelope")
+    dock.transform_combo.set_value("amp_envelope")
     assert dock.engine.wait_for_preparation(20_000), "preparation did not finish"
     dock.cell_spin.setValue(0.25)
     dock.dz_spin.setValue(0.5)
@@ -120,6 +120,8 @@ def test_save_cube_with_dotted_names_produces_distinct_records(plugin, tmp_path,
     assert written1.exists()
     assert "A__cube.v1" in s.site.cubes
     assert s.site.cubes["A__cube.v1"]["array"] == "slices/cube.v1.npz"
+    # The recipe stores the transform's id, never the title the combo shows.
+    assert s.site.cubes["A__cube.v1"]["transform"] == "amp_envelope"
 
     target2 = tmp_path / "slices" / "cube.v2"
     answer_modal(QFileDialog, "getSaveFileName", (str(target2), "nsgeo cube (*.npz)"))

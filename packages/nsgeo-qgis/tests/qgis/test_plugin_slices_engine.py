@@ -93,7 +93,7 @@ def test_a_preset_that_already_carries_a_transform_is_refused_by_name(sourced):
         {"step": "amp_abs", "params": {}, "enabled": True},
         {"step": "gain_agc", "params": {}, "enabled": True},
     ]
-    with pytest.raises(ValueError, match="amp_abs"):
+    with pytest.raises(ValueError, match="already contains the Absolute value step"):
         engine.set_source(
             SourceChoice(grid_id="A", preset="bad", transform="amp_square", line_keys=("x",))
         )

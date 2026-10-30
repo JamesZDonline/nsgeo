@@ -60,6 +60,7 @@ class _NoParams:
     """Shared shape for the three transforms: no parameters, no choices."""
 
     unipolar = True
+    group = "Amplitude"
 
     def __init__(self) -> None:
         pass
@@ -76,6 +77,8 @@ class _NoParams:
 @register
 class AmpAbs(_NoParams):
     name = "amp_abs"
+    title = "Absolute value"
+    order = 1
 
     def apply(self, rg: Radargram) -> Radargram:
         return rg.replace(data=np.abs(rg.data))
@@ -84,6 +87,8 @@ class AmpAbs(_NoParams):
 @register
 class AmpSquare(_NoParams):
     name = "amp_square"
+    title = "Square of the amplitude"
+    order = 3
 
     def apply(self, rg: Radargram) -> Radargram:
         return rg.replace(data=rg.data * rg.data)
@@ -92,6 +97,8 @@ class AmpSquare(_NoParams):
 @register
 class AmpEnvelope(_NoParams):
     name = "amp_envelope"
+    title = "Envelope"
+    order = 2
 
     def apply(self, rg: Radargram) -> Radargram:
         return rg.replace(data=analytic_envelope(rg.data))

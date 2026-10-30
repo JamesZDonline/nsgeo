@@ -66,6 +66,9 @@ def test_registry_round_trip(clean_registry):
     @register
     class _Doubler:
         name = "test_doubler"
+        title = "Doubler"
+        group = "Gain"
+        order = 9
 
         def __init__(self, factor: float = 2.0):
             self.factor = factor
@@ -109,6 +112,9 @@ def test_register_refuses_a_name_another_step_already_owns(clean_registry):
         @register
         class _Impostor:
             name = "dewow"
+            title = "Dewow"
+            group = "Filters"
+            order = 1
 
             def __init__(self, window_ns: float = 4.0):
                 self.window_ns = window_ns
@@ -135,6 +141,9 @@ def test_registering_the_same_class_twice_is_not_a_conflict(clean_registry):
     @register
     class _Once:
         name = "test_once"
+        title = "Once"
+        group = "Gain"
+        order = 9
 
         @property
         def params(self):

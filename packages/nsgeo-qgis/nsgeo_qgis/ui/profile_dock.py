@@ -1157,7 +1157,7 @@ class ProfileDock(QgsDockWidget):
         step_text = ""
         if self._effective_difference_index >= 0 and self._key is not None:
             entries = self.session.stack_for(self._key).entries
-            step_text = f"Difference: {entries[self._effective_difference_index][0].name}"
+            step_text = f"Difference: {entries[self._effective_difference_index][0].title}"
         self.difference_label.setText(step_text)
         self._sync_strip_mapping()
         self._show_cutoff()

@@ -25,6 +25,9 @@ class GainAgc:
     """Automatic gain control: normalise by a running RMS in time."""
 
     name = "gain_agc"
+    title = "Automatic gain control"
+    group = "Gain"
+    order = 2
 
     def __init__(self, window_ns: float = 20.0, target: float = 1.0, eps: float = 1e-12) -> None:
         self.window_ns = window_ns
@@ -66,6 +69,9 @@ class GainParametric:
     """Exponential or power-law gain as a function of two-way time."""
 
     name = "gain_parametric"
+    title = "Parametric gain"
+    group = "Gain"
+    order = 3
 
     def __init__(
         self, mode: str = "exponential", alpha: float = 0.05, exponent: float = 1.0
@@ -129,6 +135,9 @@ class GainCurve:
     """
 
     name = "gain_curve"
+    title = "Gain curve"
+    group = "Gain"
+    order = 1
 
     def __init__(self, points: Sequence[Sequence[float]]) -> None:
         pts = [[float(t), float(db)] for t, db in points]
