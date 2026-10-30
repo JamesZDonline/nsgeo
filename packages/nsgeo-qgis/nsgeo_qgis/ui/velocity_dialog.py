@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 from qgis.core import Qgis, QgsMessageLog
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -66,6 +67,9 @@ def disagreeing_fit_ids(fits: Mapping[str, StoredFit]) -> frozenset[str]:
 
 
 class VelocityDialog(QDialog):
+    # The fit selected in the table, or None: lets the profile light its curve.
+    fit_highlighted = pyqtSignal(object)
+
     def __init__(self, session: SiteSession, key: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.session = session
@@ -157,6 +161,10 @@ class VelocityDialog(QDialog):
         item = self.table.item(row, _FLAG_COLUMN)
         return item.text() if item is not None else ""
 
+    def highlighted_fit_id(self) -> str | None:
+        """The fit selected in the table, whatever the spin box now says."""
+        return self._selected
+
     def selected_fit_id(self) -> str | None:
         """The selected fit, unless the spin box has since been moved off its
         velocity -- then the number is the user's own."""
@@ -184,11 +192,10 @@ class VelocityDialog(QDialog):
         try:
             rows = self.table.selectionModel().selectedRows()
             self.delete_button.setEnabled(bool(rows))
-            if not rows:
-                self._selected = None
-                return
-            self._selected = self._ids[rows[0].row()]
-            self.spin.setValue(self._fits[self._selected].v_m_ns)
+            self._selected = self._ids[rows[0].row()] if rows else None
+            self.fit_highlighted.emit(self._selected)
+            if self._selected is not None:
+                self.spin.setValue(self._fits[self._selected].v_m_ns)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
 

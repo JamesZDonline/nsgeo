@@ -130,6 +130,7 @@ class ProfileView(QWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_curve: list[tuple[float, float]] = []
         self._saved_velocity_curves: list[list[tuple[float, float]]] = []
+        self._saved_velocity_highlight: int | None = None
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
         self._dragging = False
@@ -272,10 +273,15 @@ class ProfileView(QWidget):
         self._velocity_curve = list(curve)
         self.update()
 
-    def set_saved_velocity_fits(self, curves: list[list[tuple[float, float]]]) -> None:
+    def set_saved_velocity_fits(
+        self, curves: list[list[tuple[float, float]]], highlighted: int | None = None
+    ) -> None:
         """The line's already-measured fits as (trace, ns) curves, drawn faint
-        beneath the working fit, which `set_velocity_fit` carries."""
+        beneath the working fit, which `set_velocity_fit` carries. The curve
+        at index `highlighted` is drawn bold and dashed: the fit selected in
+        the velocity dialog, so its row can be matched to its curve."""
         self._saved_velocity_curves = [list(c) for c in curves]
+        self._saved_velocity_highlight = highlighted
         self.update()
 
     def clear(self) -> None:
@@ -287,6 +293,7 @@ class ProfileView(QWidget):
         self._velocity_points = []
         self._velocity_curve = []
         self._saved_velocity_curves = []
+        self._saved_velocity_highlight = None
         self._slice_band = None
         self._cutoff_ns = None
         self._cutoff_grab = None
@@ -560,9 +567,18 @@ class ProfileView(QWidget):
     def _paint_velocity_fit(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         faint = QColor(CURSOR_COLOUR)
         faint.setAlpha(90)
-        for saved in self._saved_velocity_curves:
+        lit = self._saved_velocity_highlight
+        # The lit curve last, so the faint ones never cross over it.
+        order = [i for i in range(len(self._saved_velocity_curves)) if i != lit]
+        if lit is not None and 0 <= lit < len(self._saved_velocity_curves):
+            order.append(lit)
+        for i in order:
+            saved = self._saved_velocity_curves[i]
             if len(saved) >= 2:
-                p.setPen(QPen(faint, 1))
+                if i == lit:
+                    p.setPen(QPen(CURSOR_COLOUR, 2, Qt.PenStyle.DashLine))
+                else:
+                    p.setPen(QPen(faint, 1))
                 spts = [
                     QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
                     for trace, time_ns in saved

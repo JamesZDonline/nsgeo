@@ -193,6 +193,14 @@ back to indices on the way into the JSON.
 report **"line (fit at 18.4 ns)"** rather than a bare "line" — so a velocity that was measured
 stays distinguishable from one that was typed.
 
+Apply on the result strip sets it to a stored fit on the line whose clicked points are the working
+points, else clears it. Same points, same fit: a fit reads nothing of the line that can change, and
+no processing step moves a sample's time — `time_zero` crops rows and the survivors keep their
+times, so a stored fit stays on the hyperbola it was clicked on whatever the stack becomes. (#90
+supposed otherwise and was closed on that basis; a test pins it, so a step that rebases the axis
+fails rather than stranding every saved fit.) The store is asked, not a memory of the last Save,
+so a deleted fit is never named.
+
 ### 6.2 A fit is evidence, not a setting
 
 Saving a fit changes no velocity anywhere. Applying one is a separate, explicit act, through the
@@ -217,6 +225,12 @@ and decline to pretend it is one number.
   on-ramp to Dix conversion. (An earlier draft used 1× the combined σ; that flags 31.7% of pairs
   that are truly identical, and the M13 walkthrough hit it: 0.0701 ± 0.0018 against
   0.0733 ± 0.0024 is 1.07σ apart. 2σ flags 4.6%, the conventional "really differ" line.)
+- **A fit can be deleted** (#85), from the dialog. The reason is a fit saved by mistake: one
+  stray fit marks every good fit on its line as disagreeing, so it is noise that must be
+  removable. Deleting the fit behind the line's velocity **keeps the velocity** and clears only
+  `velocity_from_fit`: the number was applied deliberately, and the dialog the user is standing
+  in is where they choose another. The status bar falls back to a bare "line override", exactly
+  as `load_site` heals a pointer to a fit that is gone.
 
 ---
 
@@ -270,6 +284,14 @@ and names `time_zero` when it does.
   selection and Apply.
 - **Clear override**, since `set_line_velocity` accepts `None` and an override that cannot be
   removed is a trap.
+- **Delete fit** (#85) under the list, enabled while a row is selected. It asks first, naming
+  the fit by t₀ and v ± σ, and says so when the fit is the one behind the line's velocity. It
+  acts at once rather than waiting for Apply, because Apply also writes the spin box as the
+  override and deleting a fit must not set a velocity on the way; afterwards the spin box shows
+  the line's own velocity again, not the deleted fit's number.
+- While the dialog is open, **the selected fit's curve is drawn bold and dashed** on the profile
+  (when the profile shows that line), so a row whose numbers look wrong can be matched to the
+  curve that sits badly before it is deleted.
 
 ---
 

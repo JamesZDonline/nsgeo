@@ -201,6 +201,8 @@ class ProfileDock(QgsDockWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
+        # (line key, fit id) the velocity dialog has selected, drawn bold.
+        self._highlighted_fit: tuple[str, str] | None = None
         self._working_key: str | None = None
         self._preview_key: str | None = None
         self._strip_was_visible = False
@@ -860,6 +862,27 @@ class ProfileDock(QgsDockWidget):
             for f in fits.values()
         ]
 
+    def _highlighted_index(self) -> int | None:
+        """Where the dialog's selected fit sits in `_saved_velocity_curves`,
+        which follows the line's own fit order; None when it is not on the
+        working line."""
+        if self._highlighted_fit is None or self._working_key is None:
+            return None
+        key, fit_id = self._highlighted_fit
+        if key != self._working_key:
+            return None
+        ids = list(self.session.line_for_key(key).velocity_fits)
+        return ids.index(fit_id) if fit_id in ids else None
+
+    def highlight_saved_fit(self, key: str, fit_id: str | None) -> None:
+        """Draw `fit_id`'s curve bold while the velocity dialog has it
+        selected, so its row can be matched to its curve; None to stop."""
+        try:
+            self._highlighted_fit = None if fit_id is None else (key, fit_id)
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not highlight the fit: {exc}", Qgis.MessageLevel.Critical)
+
     def _velocity_time_zero_note(self) -> str:
         t = self.view.transform
         # time_zero crops whole samples, so half a sample is the closest
@@ -921,9 +944,12 @@ class ProfileDock(QgsDockWidget):
                 # remove them. Saved fits, below, show regardless of mode.
                 self.view.set_velocity_fit([], [])
             # Saved fits belong to the working line too, never a hovered one.
-            self.view.set_saved_velocity_fits(
-                self._saved_velocity_curves() if self._preview_key is None else []
-            )
+            if self._preview_key is None:
+                self.view.set_saved_velocity_fits(
+                    self._saved_velocity_curves(), self._highlighted_index()
+                )
+            else:
+                self.view.set_saved_velocity_fits([])
             fit_ok = self._velocity_fit is not None
             self.apply_line_button.setEnabled(fit_ok)
             self.save_fit_button.setEnabled(fit_ok)

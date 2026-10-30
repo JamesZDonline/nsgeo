@@ -539,3 +539,118 @@ def test_a_delete_stands_even_when_the_dialog_is_then_cancelled(plugin, answer_m
     line = s.line_for_key(key)
     assert line.velocity_fits == {}
     assert line.velocity is None  # deleting set no velocity on the way
+
+
+# ---- the selected fit, lit on the profile -------------------------------------
+
+
+def _highlighted_apex(view):
+    i = view._saved_velocity_highlight
+    if i is None:
+        return None
+    return min(view._saved_velocity_curves[i], key=lambda p: p[1])[0]
+
+
+def test_the_fit_selected_in_the_dialog_is_lit_on_the_profile_until_it_closes(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    shallow_left = s.add_velocity_fit(key, _stored(12.0, 0.12, apex=20))
+    deep = s.add_velocity_fit(key, _stored(41.0, 0.10, apex=40))
+    seen = []
+
+    def _drive(d):
+        d.select_fit(shallow_left)
+        seen.append(_highlighted_apex(view))
+        d.select_fit(deep)
+        seen.append(_highlighted_apex(view))
+        d.reject()
+
+    drive_dialog(QDialog, "exec", _drive)
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen[0] == pytest.approx(20, abs=0.5)
+    assert seen[1] == pytest.approx(40, abs=0.5)
+    assert view._saved_velocity_highlight is None
+
+
+def test_the_fit_behind_the_velocity_is_lit_as_the_dialog_opens(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    applied = s.add_velocity_fit(key, _stored(41.0, 0.12, apex=20))
+    s.set_line_velocity(key, VelocityModel.constant(0.12))
+    s.set_velocity_from_fit(key, applied)
+    seen = []
+    drive_dialog(QDialog, "exec", lambda d: (seen.append(_highlighted_apex(view)), d.reject()))
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen == [pytest.approx(20, abs=0.5)]
+
+
+def test_a_deleted_fit_is_no_longer_lit(plugin, answer_modal, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.15, apex=20))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    seen = []
+
+    def _drive(d):
+        d.select_fit(bad)
+        d.delete_button.click()
+        seen.append((view._saved_velocity_highlight, len(view._saved_velocity_curves)))
+        d.reject()
+
+    drive_dialog(QDialog, "exec", _drive)
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen == [(None, 1)]
+
+
+def test_a_dialog_for_a_line_the_profile_is_not_showing_lights_nothing(plugin, drive_dialog):
+    s = plugin.session
+    other = s.keys()[1]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(s.keys()[0], _stored(18.0, 0.09))
+    fit_id = s.add_velocity_fit(other, _stored(41.0, 0.12))
+    seen = []
+    drive_dialog(
+        QDialog,
+        "exec",
+        lambda d: (d.select_fit(fit_id), seen.append(view._saved_velocity_highlight), d.reject()),
+    )
+
+    plugin.open_velocity_dialog(other)
+
+    assert seen == [None]
+
+
+def test_a_lit_saved_curve_is_drawn_stronger_than_an_unlit_one(plugin):
+    view = plugin.profile_dock.view
+    curve = [(float(t), 10.0 + 0.5 * t) for t in range(60)]
+    view.set_saved_velocity_fits([])
+    view.grab()  # warm-up: the first paint after a change is not the settled one
+    none = view.grab().toImage()
+    view.set_saved_velocity_fits([curve])
+    view.grab()
+    unlit = view.grab().toImage()
+    view.set_saved_velocity_fits([curve], highlighted=0)
+    view.grab()
+    lit = view.grab().toImage()
+
+    def _ink(img):
+        """Summed colour change against the empty picture: more, stronger
+        pixels means a bolder line."""
+        total = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                a, b = img.pixelColor(x, y), none.pixelColor(x, y)
+                total += abs(a.red() - b.red()) + abs(a.green() - b.green())
+                total += abs(a.blue() - b.blue())
+        return total
+
+    assert _ink(lit) > 2 * _ink(unlit) > 0
