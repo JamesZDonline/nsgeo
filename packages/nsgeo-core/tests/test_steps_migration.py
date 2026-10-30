@@ -10,6 +10,8 @@ bandwidth the local lines actually have.
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.migration import migrate_fk
 
 # The real local lines: dt 0.2165 ns, 60 traces/m, HS350US at 350 MHz, and
@@ -127,3 +129,79 @@ def test_too_fast_a_velocity_produces_an_upward_smile():
     _, focus, flank, apex_row = _wrong_velocity_case(1.6)
     assert focus < 0.5
     assert flank < apex_row - 10
+
+
+# ---- refusals ------------------------------------------------------------
+#
+# Migration that runs on uncorrected time zero, or on trace index because the
+# file has no spatial axis, produces a confident image that is wrong by half a
+# metre, and nothing downstream will ever flag it. Each refusal names its fix.
+
+
+def _plain(n_samples=128, n_traces=32, t0_ns=0.0, dx_m=DX_M):
+    return Radargram(data=np.zeros((n_samples, n_traces)), dt_ns=DT_NS, t0_ns=t0_ns, dx_m=dx_m)
+
+
+@pytest.mark.parametrize("dx_m", [None, 0.0, -1.0])
+def test_refuses_when_there_is_no_trace_spacing(dx_m):
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="survey wheel"):
+        step.apply(_plain(dx_m=dx_m))
+
+
+def test_refuses_a_velocity_of_zero():
+    """The schema's `min=0.0` looks like it catches this and does not:
+    `_out_of_bounds` tests `value < spec.min`, so exactly 0.0 is accepted,
+    and a hand-edited project or preset can carry it. `vm = 0` makes the
+    omega->kz map identically zero and the obliquity factor 0/0 -- a NaN
+    image with no complaint -- and it would make 0 the de-facto sentinel
+    that an empty value has to stay free to mean later."""
+    step = build_step("migrate_fk", velocity_m_ns=0.0)
+    with pytest.raises(ValueError, match="greater than zero"):
+        step.apply(_plain())
+
+
+def test_refuses_a_velocity_faster_than_light():
+    with pytest.raises(ValueError, match="velocity_m_ns"):
+        build_step("migrate_fk", velocity_m_ns=0.4)
+
+
+def test_refuses_an_uncorrected_time_zero():
+    """-11.086 ns is what every local FILE__0NN.DZT carries raw."""
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="time_zero"):
+        step.apply(_plain(t0_ns=-11.086))
+
+
+def test_refuses_non_finite_samples():
+    """One dropped trace must not silently blank the line: a single NaN
+    spreads across the whole image through the FFT."""
+    rg = _plain()
+    data = rg.data.copy()
+    data[10, 3] = np.nan
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="not finite"):
+        step.apply(rg.replace(data=data))
+
+
+@pytest.mark.parametrize("t0_ns", [-0.6929, -0.4764, +0.8228])
+def test_accepts_what_time_zero_actually_leaves(t0_ns):
+    """What the shipped `time_zero` leaves on the real lines, at its three
+    threshold settings: 0.15 -> -0.6929, 0.20 (the default) -> -0.4764,
+    0.40 -> +0.8228. All three must migrate. An earlier draft of the design
+    set the tolerance at 0.02 m of implied depth error and refused two of
+    them outright, and refused the default above about 0.084 m/ns."""
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(_plain(t0_ns=t0_ns))
+    assert out.t0_ns == t0_ns
+
+
+@pytest.mark.parametrize("velocity_m_ns", [0.0250, 0.2500])
+def test_the_time_zero_tolerance_is_in_time_not_depth(velocity_m_ns):
+    """MAX_T0_NS is 2.0 ns, and the refusal must not move with the number in
+    the velocity box: 1.9 ns passes and 2.1 ns is refused at a velocity ten
+    times the other one. A tolerance derived from velocity passes one and
+    fails the other."""
+    step = build_step("migrate_fk", velocity_m_ns=velocity_m_ns)
+    step.apply(_plain(t0_ns=1.9))
+    with pytest.raises(ValueError, match="time_zero"):
+        step.apply(_plain(t0_ns=2.1))

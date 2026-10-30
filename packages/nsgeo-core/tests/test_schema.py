@@ -26,12 +26,25 @@ from nsgeo.project import ProjectError, load_site
 from tests.synthetic import write_dzt
 
 
+def _in_bounds(spec: ParamSpec, value):
+    """`value`, pulled inside whatever bounds the spec declares.
+
+    1 is outside some of them: `migrate_fk.velocity_m_ns` is capped at the
+    speed of light, 0.2998 m/ns.
+    """
+    if spec.max is not None and value > spec.max:
+        value = spec.max
+    if spec.min is not None and value < spec.min:
+        value = spec.min
+    return value
+
+
 def _placeholder(spec: ParamSpec):
     """Any value acceptable to the constructor, so `params` can be compared."""
     if spec.kind in ("float", "time"):
-        return 1.0
+        return _in_bounds(spec, 1.0)
     if spec.kind == "int":
-        return 1
+        return int(_in_bounds(spec, 1))
     if spec.kind == "choice":
         return spec.choices[0]
     return [[0.0, 0.0], [10.0, 0.0]]  # curve
@@ -63,6 +76,7 @@ def test_only_the_known_steps_have_required_params():
     req = {n: required_params(n) for n in available_steps() if required_params(n)}
     assert req == {
         "bandpass": ("low_mhz", "high_mhz"),
+        "migrate_fk": ("velocity_m_ns",),
         "gain_curve": ("points",),
         "time_cutoff": ("end_ns",),
     }
@@ -193,6 +207,7 @@ def test_the_registry_declares_the_bounds_these_tests_cover():
         "gain_agc.window_ns",
         "gain_agc.target",
         "gain_agc.eps",
+        "migrate_fk.velocity_m_ns",
         "time_zero.sample",
         "time_zero.threshold",
     }

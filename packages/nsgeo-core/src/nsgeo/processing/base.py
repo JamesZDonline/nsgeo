@@ -23,6 +23,11 @@ class Radargram:
     data: np.ndarray
     dt_ns: float
     t0_ns: float
+    #: Metres between traces, from the header's `traces_per_metre`. None when
+    #: the file was collected on a timer rather than a survey wheel and so has
+    #: no spatial axis. Optional and last so every existing construction and
+    #: every `replace()` keeps working untouched.
+    dx_m: float | None = None
 
     def __post_init__(self) -> None:
         if np.asarray(self.data).ndim != 2:
@@ -124,7 +129,7 @@ class ParamSpec:
 
 #: The groups a step menu is laid out in, in the usual processing order.
 #: Every step's `group` names one of these.
-STEP_GROUPS: Final = ("Time", "Filters", "Background", "Gain", "Amplitude")
+STEP_GROUPS: Final = ("Time", "Filters", "Background", "Migration", "Gain", "Amplitude")
 
 
 class Step(Protocol):
