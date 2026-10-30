@@ -435,13 +435,14 @@ class NsgeoPlugin:
             else:
                 dock.close()
         except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
-            # The click has already flipped the tick; put it back to what
-            # the panel actually is.
-            entry.setChecked(dock.toggleViewAction().isChecked())
             verb = "open" if checked else "close"
             self.message(
                 f"could not {verb} the {entry.text()} panel: {exc}", Qgis.MessageLevel.Warning
             )
+            # The click has already flipped the tick; put it back to what
+            # the panel actually is -- if the panel is still there to ask.
+            with contextlib.suppress(Exception):
+                entry.setChecked(dock.toggleViewAction().isChecked())
 
     def _apply_layout(self, keep: tuple[Any, ...]) -> None:
         """Profile work / Slices work: the panels in `keep` open and in

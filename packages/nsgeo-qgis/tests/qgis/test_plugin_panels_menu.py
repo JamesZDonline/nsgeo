@@ -1,20 +1,24 @@
 """#84: the toolbar's Panels button -- one entry per panel, three layouts.
 
 "Open" below means not closed (`isHidden()` is False), which a panel
-still is while it sits behind another tab. "In front" is
-`QgsDockWidget.isUserVisible()`: open AND the raised tab. The two differ
-only for Processing and Slices, which share a tab group, and that
-difference is most of what these tests are about.
+still is while it sits behind another tab. "In front" (`_in_front`) is
+open AND the current tab of its group. The two differ only for panels
+that share a tab group -- Processing and Slices, or a panel tabbed with
+one of QGIS's own -- and that difference is most of what these tests are
+about.
 """
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from nsgeo_qgis.plugin import _TABIFIED_KEY, NsgeoPlugin
 from qgis.core import QgsSettings
+from qgis.gui import QgsDockWidget
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QCoreApplication, QEvent
-from qgis.PyQt.QtWidgets import QToolButton
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtWidgets import QTabBar, QToolButton
 
 PANELS = ("Survey", "Profile", "Processing", "Slices")
 LAYOUTS = ("Profile work", "Slices work", "Show all")
@@ -42,6 +46,46 @@ def _choose(plugin, text):
     QCoreApplication.processEvents()
 
 
+def _bar_of(dock):
+    """The tab bar on screen that has a tab for `dock`, or None."""
+    title = dock.windowTitle()
+    for bar in dock.parentWidget().findChildren(QTabBar):
+        if bar.isVisible() and title in [bar.tabText(i) for i in range(bar.count())]:
+            return bar
+    return None
+
+
+def _in_front(dock):
+    """Open, and the current tab of its tab group if it is in one.
+
+    Read off the main window's own tab bars -- what is on the screen --
+    and NOT `QgsDockWidget.isUserVisible()`: that is QGIS's record of the
+    dock's `visibilityChanged` signals, the very thing the plugin calls
+    `setUserVisible` on, so a test reading it would be checking the
+    plugin's bookkeeping against itself.
+    """
+    if dock.isHidden():
+        return False
+    bar = _bar_of(dock)
+    return bar is None or bar.tabText(bar.currentIndex()) == dock.windowTitle()
+
+
+def _wait_for(condition, what):
+    """Run events until `condition()` holds.
+
+    Qt 6.10 lays out a newly shown window's docks, or a dock newly tabbed
+    into one, a pass of the event loop later than Qt 6.9 did: after the
+    first pass the tab bar is still hidden and the docks sit off-screen
+    (measured in qgis/qgis:4.2 rebuilt on Qt 6.10.2). Waiting on the
+    layout itself, not on a count of passes, holds for both.
+    """
+    deadline = time.monotonic() + 5
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {what}")
+        QCoreApplication.processEvents()
+
+
 @pytest.fixture
 def shown_plugin(fake_iface, qgis_app):
     """The plugin in a SHOWN main window, Slices tabbed onto Processing as
@@ -56,11 +100,12 @@ def shown_plugin(fake_iface, qgis_app):
     main = fake_iface.mainWindow()
     main.resize(1400, 900)
     main.show()
-    QCoreApplication.processEvents()  # runs the tabify timer
     try:
+        # Also runs the tabify timer, which the tab bar is waiting on.
+        _wait_for(lambda: _bar_of(plugin.processing_dock) is not None, "Slices tabbed on")
         assert plugin.slices_dock in main.tabifiedDockWidgets(plugin.processing_dock)
-        assert plugin.processing_dock.isUserVisible()
-        assert not plugin.slices_dock.isUserVisible()
+        assert _in_front(plugin.processing_dock)
+        assert not _in_front(plugin.slices_dock)
         yield plugin
     finally:
         plugin.unload()
@@ -128,7 +173,7 @@ def test_ticking_a_closed_panel_brings_it_back_in_front_of_its_tab_group(fake_if
     assert shown_plugin.slices_dock in main.tabifiedDockWidgets(shown_plugin.processing_dock)
     # Qt alone would put it back BEHIND Processing, out of sight, so the
     # tick would look as if it had done nothing.
-    assert shown_plugin.slices_dock.isUserVisible()
+    assert _in_front(shown_plugin.slices_dock)
 
 
 def test_profile_work_leaves_survey_and_profile(shown_plugin):
@@ -145,31 +190,78 @@ def test_profile_work_leaves_survey_and_profile(shown_plugin):
 def test_slices_work_leaves_survey_and_slices_with_slices_in_front(shown_plugin):
     _choose(shown_plugin, "Slices work")
     assert _open(shown_plugin) == {"Survey", "Slices"}
-    assert shown_plugin.slices_dock.isUserVisible()
+    assert _in_front(shown_plugin.slices_dock)
+
+
+def test_a_layout_brings_its_panels_in_front_of_a_qgis_panel_tabbed_with_them(fake_iface, qgis_app):
+    """Survey tabbed behind one of QGIS's own panels, as anyone may have
+    arranged it: Profile work is for working in Survey, so it brings Survey
+    to the front -- and leaves QGIS's panel open behind it.
+
+    Arranged before the window is shown, as QGIS's restored layout is, and
+    on a profile where Slices was tabbed on an earlier start. Not with
+    `shown_plugin`: the first-start tabbing, done after the window is shown
+    while another tab group is on it, segfaults Qt 6.10 about half the
+    time -- on main as well, so not this feature's doing.
+    """
+    QgsSettings().setValue(_TABIFIED_KEY, True)
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    main = fake_iface.mainWindow()
+    layers = QgsDockWidget("Layers", main)
+    layers.setObjectName("Layers")
+    main.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, layers)
+    main.tabifyDockWidget(plugin.survey_dock, layers)
+    main.resize(1400, 900)
+    main.show()
+    try:
+        _wait_for(lambda: _bar_of(layers) is not None, "Layers tabbed on")
+        layers.raise_()
+        QCoreApplication.processEvents()
+        assert not _in_front(plugin.survey_dock)
+
+        _choose(plugin, "Profile work")
+
+        assert _in_front(plugin.survey_dock)
+        assert not layers.isHidden()
+    finally:
+        plugin.unload()
+        main.close()
+        QgsSettings().setValue(_TABIFIED_KEY, False)
 
 
 def test_show_all_after_profile_work_puts_every_panel_back_where_it_was(fake_iface, shown_plugin):
     main = fake_iface.mainWindow()
-    profile_height = shown_plugin.profile_dock.height()
+    # Off their defaults, so that "as before" means as the user left it.
+    main.resizeDocks([shown_plugin.processing_dock], [430], Qt.Orientation.Horizontal)
+    QCoreApplication.processEvents()
     right_width = shown_plugin.processing_dock.width()
+    profile_height = shown_plugin.profile_dock.height()
 
     _choose(shown_plugin, "Profile work")
     _choose(shown_plugin, "Show all")
 
     assert _open(shown_plugin) == set(PANELS)
     assert shown_plugin.slices_dock in main.tabifiedDockWidgets(shown_plugin.processing_dock)
-    assert shown_plugin.processing_dock.isUserVisible()  # the start-up front tab
-    assert shown_plugin.profile_dock.height() == profile_height
+    assert _in_front(shown_plugin.processing_dock)  # the start-up front tab
     assert shown_plugin.processing_dock.width() == right_width
+    assert shown_plugin.profile_dock.height() == profile_height
 
 
 def test_show_all_after_slices_work_keeps_slices_in_front(fake_iface, shown_plugin):
     main = fake_iface.mainWindow()
+    main.resizeDocks([shown_plugin.profile_dock], [260], Qt.Orientation.Vertical)
+    QCoreApplication.processEvents()
+    profile_height = shown_plugin.profile_dock.height()
+
     _choose(shown_plugin, "Slices work")
     _choose(shown_plugin, "Show all")
+
     assert _open(shown_plugin) == set(PANELS)
     assert shown_plugin.slices_dock in main.tabifiedDockWidgets(shown_plugin.processing_dock)
-    assert shown_plugin.slices_dock.isUserVisible()
+    assert _in_front(shown_plugin.slices_dock)
+    # Slices work closed Profile: it comes back at the height it was left at.
+    assert shown_plugin.profile_dock.height() == profile_height
 
 
 def test_a_panel_that_fails_to_open_is_reported_and_its_entry_stays_unticked(
