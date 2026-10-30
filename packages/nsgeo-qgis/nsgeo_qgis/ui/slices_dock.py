@@ -76,11 +76,11 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     frame_cells,
     smallest_safe_cell,
-    transform_names,
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.profile_dock import velocity_source
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
+from nsgeo_qgis.ui.transform_combo import TransformCombo
 
 
 def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
@@ -279,7 +279,7 @@ class SlicesDock(QgsDockWidget):
         self.cube_combo = QComboBox()
         self.grid_combo = QComboBox()
         self.preset_combo = QComboBox()
-        self.transform_combo = QComboBox()
+        self.transform_combo = TransformCombo()
         form.addRow("Cube", self.cube_combo)
         form.addRow("Grid", self.grid_combo)
         form.addRow("Preset", self.preset_combo)
@@ -578,22 +578,18 @@ class SlicesDock(QgsDockWidget):
         self._refill_palette_combo()
         self._update_resident_check_label()
 
-        # Filled once, and BEFORE the connects just below: `transform_names()`
-        # is the registry, not the site, and does not change while this dock
-        # is alive. Filling an empty combo auto-selects its first item and
-        # fires `currentTextChanged` unconditionally (fix round 1, M2) -- with
-        # this above the connect block, that happens with nothing listening
-        # yet; the earlier order fired `_on_source_changed('none')` with
+        # `transform_combo` filled itself when it was built, before the
+        # connects just below: its options are the registry, not the site,
+        # and do not change while this dock is alive. Filling an empty combo
+        # auto-selects its first item and announces it (fix round 1, M2);
+        # the earlier order fired `_on_source_changed('none')` with
         # `_updating == 0` right here in `__init__`, harmless only by luck
         # (grid_combo was still empty, so `source_choice()` was `None`).
         # `grid_combo`/`preset_combo` are rebuilt from the session instead,
         # in `rebuild_source` below.
-        self.transform_combo.addItem("none")
-        self.transform_combo.addItems(transform_names())
         # #81: start on Square. Set here, above the connect block, for the
-        # same reason as the items: nothing is listening yet.
-        if self.transform_combo.findText(DEFAULT_TRANSFORM) >= 0:
-            self.transform_combo.setCurrentText(DEFAULT_TRANSFORM)
+        # same reason: nothing is listening yet. Not offered, it stays on None.
+        self.transform_combo.set_value(DEFAULT_TRANSFORM)
 
         # `clicked` carries a `bool checked` that a direct
         # `.connect(self.choose_lines_requested.emit)` would pass straight
@@ -607,7 +603,7 @@ class SlicesDock(QgsDockWidget):
         self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
-        self.transform_combo.currentTextChanged.connect(self._on_source_changed)
+        self.transform_combo.value_changed.connect(self._on_source_changed)
         session.site_opened.connect(self.rebuild_source)
         session.site_closed.connect(self.rebuild_source)
         session.grids_changed.connect(self.rebuild_source)
@@ -975,7 +971,7 @@ class SlicesDock(QgsDockWidget):
         preset = self.preset_combo.currentText()
         if not grid_id or not preset:
             return None
-        transform_text = self.transform_combo.currentText()
+        transform_text = self.transform_combo.value()
         transform = NO_TRANSFORM if transform_text in ("", "none") else transform_text
         return SourceChoice(
             grid_id=grid_id, preset=preset, transform=transform, line_keys=self._included
@@ -1585,14 +1581,23 @@ class SlicesDock(QgsDockWidget):
             # names exactly this as the one failure a reproducibility
             # feature must not have. Checked here, together, so a refusal
             # names every field that is missing, not just the first.
+            # The transform combo is looked up by id, not by the title it shows.
             missing = [
                 f"{label} {text!r}"
-                for label, combo, text in (
-                    ("grid", self.grid_combo, recipe.choice.grid_id),
-                    ("preset", self.preset_combo, recipe.choice.preset),
-                    ("transform", self.transform_combo, transform_text),
+                for label, offered, text in (
+                    (
+                        "grid",
+                        self.grid_combo.findText(recipe.choice.grid_id) >= 0,
+                        recipe.choice.grid_id,
+                    ),
+                    (
+                        "preset",
+                        self.preset_combo.findText(recipe.choice.preset) >= 0,
+                        recipe.choice.preset,
+                    ),
+                    ("transform", transform_text in self.transform_combo.values(), transform_text),
                 )
-                if combo.findText(text) < 0
+                if not offered
             ]
             if missing:
                 raise ValueError(
@@ -1610,7 +1615,7 @@ class SlicesDock(QgsDockWidget):
                 self._dz_z_seeded_for = recipe.choice.grid_id
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)
                 self.preset_combo.setCurrentText(recipe.choice.preset)
-                self.transform_combo.setCurrentText(transform_text)
+                self.transform_combo.set_value(transform_text)
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)

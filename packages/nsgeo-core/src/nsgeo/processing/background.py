@@ -21,6 +21,9 @@ class BackgroundMean:
     """Subtract the mean trace over the whole line."""
 
     name = "background_mean"
+    title = "Background removal (mean)"
+    group = "Background"
+    order = 1
 
     @property
     def params(self) -> dict[str, Any]:
@@ -39,6 +42,9 @@ class BackgroundSliding:
     """Subtract a running mean along the trace axis."""
 
     name = "background_sliding"
+    title = "Background removal (sliding)"
+    group = "Background"
+    order = 2
 
     def __init__(self, window_traces: int = 200) -> None:
         self.window_traces = window_traces
@@ -71,6 +77,9 @@ class BackgroundSvd:
     """
 
     name = "background_svd"
+    title = "Remove leading components (SVD)"
+    group = "Background"
+    order = 3
 
     def __init__(self, n_components: int = 1) -> None:
         self.n_components = n_components

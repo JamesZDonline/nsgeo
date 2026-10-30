@@ -284,18 +284,25 @@ working as usual.
 
 ### Step 5: Process the profile
 
-In **nsgeo Processing**, click **Add step** and choose a step. The steps are
-`time_zero`, `dewow`, `background_mean`, `background_sliding`,
-`background_svd`, `bandpass`, `gain_parametric`, `gain_agc`, `gain_curve`,
-`amp_abs`, `amp_envelope` and `amp_square`. A step marked *(needs values)* asks
-for them first. For example, `bandpass` needs its cut-off frequencies.
+In **nsgeo Processing**, click **Add step** and choose a step. The menu lists
+them in the usual processing order, in four groups:
+
+- **Time:** Time zero, Time cutoff
+- **Filters:** Dewow, Bandpass
+- **Background:** Background removal (mean), Background removal (sliding),
+  Remove leading components (SVD)
+- **Gain:** Gain curve, Automatic gain control, Parametric gain
+
+A step whose name ends in **…** asks for values first. For example, **Bandpass…**
+needs its cut-off frequencies. Hover over a step in the list to see its short
+name (such as `gain_agc`), which is what the survey file stores.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
   drag, to change the order. **Remove** deletes the selected step.
 - **Difference** shows what the selected step removed, rather than the result.
-- Select a `gain_curve` step, and a strip beside the profile lets you drag its
-  control points. It works on its own, without `gain_agc` before it. The
+- Select a **Gain curve** step, and a strip beside the profile lets you drag its
+  control points. It works on its own, without **Automatic gain control** before it. The
   profile's brightness is measured as if the gain curve were switched off, so
   raising part of the curve brightens only that part, and pushing too far turns
   it solid black and white. Under the curve, the grey band shows how loud the
@@ -341,10 +348,11 @@ line, the depth and the velocity.
 Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 
 1. Under **Source**, choose the **Grid** and a **Preset**. The preset's steps are
-   applied to every line before slicing. **Transform** starts on `amp_square`
-   (squared amplitude). Choose `amp_abs` or `amp_envelope` for other amplitude
-   slices, or `none` for the signed mean. Preparing starts by itself, and the
-   status line reads *prepared* when it is done.
+   applied to every line before slicing. **Transform** starts on **Square of the
+   amplitude**. Choose **Absolute value** or **Envelope** for other amplitude
+   slices, or **None** for the signed mean. These transforms are only offered
+   here, not in **Add step**. Preparing starts by itself, and the status line
+   reads *prepared* when it is done.
    **Choose…** sets which of the grid's lines are included.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
@@ -443,24 +451,24 @@ let it sync only while QGIS is closed.
 
 ### A one-sample window blanks the profile (#40)
 
-[Issue #40](https://github.com/JamesZDonline/nsgeo/issues/40). `dewow` and
-`background_sliding` subtract a running mean. If the window is one sample (or
+[Issue #40](https://github.com/JamesZDonline/nsgeo/issues/40). **Dewow** and
+**Background removal (sliding)** subtract a running mean. If the window is one sample (or
 one trace) wide, they subtract each value from itself, and the profile goes
-blank. With **Difference** on, the whole profile then shows as removed. `gain_agc`
+blank. With **Difference** on, the whole profile then shows as removed. **Automatic gain control**
 has the same edge case with a different symptom. At a one-sample window, every
 value becomes plus or minus the **Target RMS**, so all the amplitude information
 is lost. Nothing warns you in either case.
 
 **Workaround:** keep each window at least two samples wide.
 
-- `dewow`: **Window (ns)** at least twice the sample interval.
-- `background_sliding`: **Window (traces)** at least 2.
-- `gain_agc`: **Window (ns)** at least twice the sample interval.
+- **Dewow**: **Window (ns)** at least twice the sample interval.
+- **Background removal (sliding)**: **Window (traces)** at least 2.
+- **Automatic gain control**: **Window (ns)** at least twice the sample interval.
 
 The sample interval is the time range divided by the samples per trace. For
 example, 512 samples over 50 ns is about 0.1 ns, so the shortest safe window is
-about 0.2 ns. The default windows (4 ns for `dewow`, 200 traces for
-`background_sliding` and 20 ns for `gain_agc`) are safe unless your sample
+about 0.2 ns. The default windows (4 ns for Dewow, 200 traces for
+Background removal (sliding) and 20 ns for Automatic gain control) are safe unless your sample
 interval is longer than 2 ns. If a profile goes blank, select the step and widen
 its window. Your DZT files are untouched.
 

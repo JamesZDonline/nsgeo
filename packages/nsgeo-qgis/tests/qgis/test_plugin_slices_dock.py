@@ -62,7 +62,7 @@ def test_the_source_combos_are_filled_from_the_site_not_from_literals(docked):
     dock, session = docked
     assert [dock.grid_combo.itemText(i) for i in range(dock.grid_combo.count())] == ["A"]
     assert "p" in [dock.preset_combo.itemText(i) for i in range(dock.preset_combo.count())]
-    offered = [dock.transform_combo.itemText(i) for i in range(dock.transform_combo.count())]
+    offered = dock.transform_combo.values()
     assert offered[0] == "none"  # spec 6.2 and GPRSLICE's xfrm_method=NONE
     assert offered[1:] == transform_names()
 
@@ -156,8 +156,9 @@ def test_choosing_a_preset_that_carries_a_transform_is_refused_visibly(docked):
     seen: list[str] = []
     dock.error.connect(seen.append)
     dock.preset_combo.setCurrentText("bad")  # re-preparing is what refuses it
-    assert any("amp_abs" in msg for msg in seen), seen
-    assert "amp_abs" in dock.source_status.text()
+    # Named as the Processing list shows it, where the user goes to remove it.
+    assert any("Absolute value" in msg for msg in seen), seen
+    assert "Absolute value" in dock.source_status.text()
     assert not dock.engine.is_prepared
 
 
@@ -446,7 +447,7 @@ def test_the_stale_wording_names_the_transform_when_only_the_transform_diverges(
     assert dock.engine.wait_for_preparation(20_000)
 
     dock.transform_combo.blockSignals(True)
-    dock.transform_combo.setCurrentText("amp_abs")
+    dock.transform_combo.set_value("amp_abs")
     dock.transform_combo.blockSignals(False)
 
     dock._refresh_source_status()
@@ -476,7 +477,7 @@ def test_a_failed_schedule_does_not_claim_lines_prepared(docked, monkeypatch):
     import nsgeo_qgis.slices_engine as engine_module
 
     monkeypatch.setattr(engine_module, "QgsApplication", _FakeApp)
-    dock.transform_combo.setCurrentText("amp_abs")  # a genuine change -- prepare() must run
+    dock.transform_combo.set_value("amp_abs")  # a genuine change -- prepare() must run
 
     assert not dock.engine.is_prepared
     assert dock.source_status.text() == "not prepared · every line failed"
@@ -659,7 +660,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
     for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
     spacing, so nothing is clamped here."""
     dock, _ = docked
-    assert dock.transform_combo.currentText() == "amp_square"
+    assert dock.transform_combo.value() == "amp_square"
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
@@ -775,13 +776,13 @@ def test_the_palette_offers_unipolar_tables_for_a_transformed_source(docked):
     source"; the test chooses one itself rather than lean on a default."""
     dock, _ = docked
     _ready(dock)
-    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    dock.transform_combo.set_value("amp_abs")  # re-prepares on its own (spec 9.1)
     assert dock.engine.wait_for_preparation(20_000)
     offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
     assert set(offered) == set(colormap_names(unipolar=True))
     assert "seismic" not in offered
 
-    dock.transform_combo.setCurrentText("none")  # re-prepares on its own (spec 9.1)
+    dock.transform_combo.set_value("none")  # re-prepares on its own (spec 9.1)
     assert dock.engine.wait_for_preparation(20_000)
     offered = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
     assert set(offered) == set(colormap_names(unipolar=False))
@@ -825,7 +826,7 @@ def test_a_preparation_triggers_exactly_one_rebuild_not_several(docked):
     errors: list[str] = []
     dock.slice_changed.connect(lambda: seen.append(1))
     dock.error.connect(errors.append)
-    dock.transform_combo.setCurrentText("amp_abs")  # re-prepares on its own (spec 9.1)
+    dock.transform_combo.set_value("amp_abs")  # re-prepares on its own (spec 9.1)
     assert dock.engine.wait_for_preparation(20_000)
     assert len(seen) == 1, "one preparation must mean exactly one rebuild, not several"
     assert not any("colormap" in e for e in errors), errors
@@ -1068,7 +1069,7 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     session.presets_changed.emit()
     dock.preset_combo.setCurrentText("q")
     assert dock.engine.wait_for_preparation(20_000)
-    dock.transform_combo.setCurrentText("none")
+    assert dock.transform_combo.set_value("none")
     assert dock.engine.wait_for_preparation(20_000)
     dock.set_included(full[:1])
     assert dock.engine.wait_for_preparation(20_000)
@@ -1092,7 +1093,7 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
 
     assert dock.grid_combo.currentText() == "A"
     assert dock.preset_combo.currentText() == "p"
-    assert dock.transform_combo.currentText() == "amp_square"
+    assert dock.transform_combo.value() == "amp_square"
     assert dock.included_keys() == full
     assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
     assert dock.z0_spin.value() == record["z"]["t0_ns"]

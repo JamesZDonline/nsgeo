@@ -12,6 +12,9 @@ from nsgeo.processing.base import ParamSpec, Radargram, register
 @register
 class TimeZero:
     name = "time_zero"
+    title = "Time zero"
+    group = "Time"
+    order = 1
 
     def __init__(self, mode: str = "first_break", sample: int = 0, threshold: float = 0.2) -> None:
         self.mode = mode

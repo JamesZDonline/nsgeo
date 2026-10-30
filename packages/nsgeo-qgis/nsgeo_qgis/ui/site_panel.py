@@ -34,7 +34,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.slices_plan import transform_names
+from nsgeo_qgis.ui.transform_combo import TransformCombo
 
 #: The grid list's columns, in order (spec 4.2).
 HEADERS = ("✓", "Grid", "Preset", "Lines", "State")
@@ -83,9 +83,7 @@ class SiteSourcePanel(QWidget):
         layout = QVBoxLayout(group)
 
         form = QFormLayout()
-        self.transform_combo = QComboBox()
-        self.transform_combo.addItem("none")
-        self.transform_combo.addItems(transform_names())
+        self.transform_combo = TransformCombo()
         self.transform_combo.setToolTip(
             "One transform for the whole site: every grid is drawn on one layer, "
             "so they must agree on polarity."
@@ -114,7 +112,7 @@ class SiteSourcePanel(QWidget):
 
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        self.transform_combo.currentTextChanged.connect(self._on_transform_changed)
+        self.transform_combo.value_changed.connect(self._on_transform_changed)
         self.choose_button.clicked.connect(lambda: self._on_choose_clicked())
 
     # ---- what the dock reads ------------------------------------------
@@ -134,8 +132,8 @@ class SiteSourcePanel(QWidget):
         return self._ids[row] if 0 <= row < len(self._ids) else None
 
     def transform(self) -> str:
-        """The combo's text: "none" or a transform name."""
-        return self.transform_combo.currentText() or "none"
+        """The combo's value: "none" or a transform name."""
+        return self.transform_combo.value()
 
     # ---- what the dock writes -----------------------------------------
     def set_rows(self, rows: Sequence[SiteRow]) -> None:
@@ -195,11 +193,11 @@ class SiteSourcePanel(QWidget):
 
     def set_transform(self, name: str) -> None:
         """Show `name` without it reading as a choice; an unknown name is ignored."""
-        if self.transform_combo.findText(name) < 0:
+        if name not in self.transform_combo.values():
             return
         self._updating += 1
         try:
-            self.transform_combo.setCurrentText(name)
+            self.transform_combo.set_value(name)
         finally:
             self._updating -= 1
 

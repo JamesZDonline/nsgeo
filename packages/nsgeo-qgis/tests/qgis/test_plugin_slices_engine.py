@@ -17,8 +17,9 @@ from nsgeo_qgis import slices_engine
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QTimer
+from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
+from qgis.core import QgsApplication, QgsTask
+from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [
@@ -93,7 +94,7 @@ def test_a_preset_that_already_carries_a_transform_is_refused_by_name(sourced):
         {"step": "amp_abs", "params": {}, "enabled": True},
         {"step": "gain_agc", "params": {}, "enabled": True},
     ]
-    with pytest.raises(ValueError, match="amp_abs"):
+    with pytest.raises(ValueError, match="already contains the Absolute value step"):
         engine.set_source(
             SourceChoice(grid_id="A", preset="bad", transform="amp_square", line_keys=("x",))
         )
@@ -569,15 +570,23 @@ def test_two_different_choices_back_to_back_never_run_concurrently(sourced, monk
     `_cancel_in_flight()` to a no-op (commenting out its body) and re-ran
     just this test -- it failed with `max_concurrent == 2`, both threads
     inside the patched `load` at once, exactly the shape the fix removes.
+
+    #41: `choice_b` is set only once `choice_a`'s task has really started.
+    A task cancelled while still QUEUED is terminated synchronously, so
+    no overlap could happen on that run and this test passed vacuously;
+    that path has its own test, `test_cancelling_a_choice_still_queued_
+    ends_it_at_once_and_the_new_choice_wins`.
     """
     engine, session, errors, _ = sourced
     concurrent = 0
     max_concurrent = 0
     lock = threading.Lock()
+    started = threading.Event()
     real_load = Line.load
 
     def slow_load(self: Line) -> list:
         nonlocal concurrent, max_concurrent
+        started.set()
         with lock:
             concurrent += 1
             max_concurrent = max(max_concurrent, concurrent)
@@ -595,6 +604,7 @@ def test_two_different_choices_back_to_back_never_run_concurrently(sourced, monk
     choice_b = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
 
     engine.set_source(choice_a)
+    assert started.wait(5), "choice_a's task never started"
     engine.set_source(choice_b)  # no intervening wait -- the discriminating call
     assert engine.wait_for_preparation(20_000)
 
@@ -657,6 +667,20 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     land inside the wait before contention could push it past that
     window. No assertion here was loosened -- `max_concurrent <= 1` and
     "the latest choice wins" are exactly as strict as before.
+
+    #41, the actual cause of the intermittent failure: `choice_b` used to
+    follow `choice_a` within microseconds, before a worker had picked
+    `choice_a`'s task up. Cancelling a task that is still QUEUED
+    terminates it synchronously, inside `cancel()` (probed on QGIS 3.44),
+    so `_running` was already False, `_cancel_in_flight` never spun its
+    nested loop, and the timer fired in the final `wait_for_preparation`
+    instead. There its `set_source` finished `choice_b` (waking the wait)
+    and dispatched `choice_c`, so the wait returned False at once: `True
+    and not _running`. Not a hang (it failed in ~0.2 s) and not an engine
+    bug -- `choice_c` still won, with no errors. Reproduced every time by
+    occupying the task manager's workers so `choice_a` stays queued. The
+    test now waits until `choice_a`'s task is really running, and checks
+    the timer did fire inside the cancel wait.
     """
     engine, session, errors, _ = sourced
     keys = tuple(session.keys())
@@ -672,10 +696,12 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     concurrent = 0
     max_concurrent = 0
     lock = threading.Lock()
+    started = threading.Event()
     real_load = Line.load
 
     def slow_load(self: Line) -> list:
         nonlocal concurrent, max_concurrent
+        started.set()
         with lock:
             concurrent += 1
             max_concurrent = max(max_concurrent, concurrent)
@@ -695,9 +721,17 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     choice_b = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
     choice_c = SourceChoice(grid_id="A", preset="p", transform="amp_abs", line_keys=keys)
 
+    fired_while_dispatching: list[bool] = []
+
+    def deliver_c() -> None:
+        fired_while_dispatching.append(engine._dispatching)
+        engine.set_source(choice_c)
+
     engine.set_source(choice_a)
-    QTimer.singleShot(0, lambda: engine.set_source(choice_c))
+    assert started.wait(5), "choice_a's task never started"
+    QTimer.singleShot(0, deliver_c)
     engine.set_source(choice_b)  # cancels choice_a; the timer fires during THIS wait
+    assert fired_while_dispatching == [True], "choice_c must arrive inside the cancel wait"
     assert engine.wait_for_preparation(20_000)
 
     assert max_concurrent <= 1, (
@@ -710,6 +744,62 @@ def test_a_choice_delivered_during_the_cancel_wait_does_not_reopen_the_overlap(
     # `_generation` last regardless of dispatch order.
     assert engine.choice == choice_c
     assert engine.line_count == len(keys)
+    assert errors == [], errors
+
+
+def test_cancelling_a_choice_still_queued_ends_it_at_once_and_the_new_choice_wins(
+    sourced, monkeypatch
+):
+    """#41: a task cancelled before any worker picked it up is terminated
+    synchronously, inside `cancel()`, so its `finished` runs from inside
+    `_cancel_in_flight`, which then has nothing left to wait for. Every
+    worker is held busy here so `choice_a` is certainly still queued. It
+    must never run, its cancel must not be reported, and `choice_b` wins."""
+    engine, session, errors, _ = sourced
+    keys = tuple(session.keys())
+    loads = 0
+    lock = threading.Lock()
+    real_load = Line.load
+
+    def counted_load(self: Line) -> list:
+        nonlocal loads
+        with lock:
+            loads += 1
+        return real_load(self)
+
+    monkeypatch.setattr(Line, "load", counted_load)
+    release = threading.Event()
+    held: list[int] = []
+    # Kept in this list until each one's `finished` has run: the task
+    # manager holds no Python reference of its own.
+    blockers = [
+        QgsTask.fromFunction(
+            f"nsgeo test: hold worker {i}",
+            lambda task: release.wait(20),
+            on_finished=lambda exception, result=None: held.append(1),
+        )
+        for i in range(QThread.idealThreadCount())
+    ]
+    choice_a = SourceChoice(grid_id="A", preset="p", transform=NO_TRANSFORM, line_keys=keys)
+    choice_b = SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+    try:
+        for blocker in blockers:
+            assert QgsApplication.taskManager().addTask(blocker)
+        assert spin_until(
+            lambda: all(b.status() == QgsTask.TaskStatus.Running for b in blockers), 5_000
+        ), "could not occupy every worker"
+        engine.set_source(choice_a)
+        assert [t.status() for t in engine._pending] == [QgsTask.TaskStatus.Queued]
+        engine.set_source(choice_b)
+        assert engine.choice == choice_b
+        assert len(engine._pending) == 1, "choice_a's task should be gone already"
+    finally:
+        release.set()
+        assert spin_until(lambda: len(held) == len(blockers), 20_000)
+    assert engine.wait_for_preparation(20_000)
+    assert engine.choice == choice_b
+    assert engine.output_unipolar is True
+    assert loads == len(keys), "only choice_b's lines are read: choice_a never ran"
     assert errors == [], errors
 
 

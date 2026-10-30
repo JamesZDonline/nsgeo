@@ -29,7 +29,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from nsgeo.processing import available_steps, get_step
+from nsgeo.processing import get_step, grouped_steps
 from nsgeo.slices import SliceWindow, ZAxis, plan_windows
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
@@ -157,13 +157,19 @@ class MemoryEstimate:
 
 
 def transform_names() -> list[str]:
-    """Registered steps whose output is unipolar, in registry order.
+    """Registered steps whose output is unipolar, in the core's menu order
+    (`grouped_steps()`, #82).
 
     From the registry, never a literal: the plugin's rule everywhere is
-    that steps come from `available_steps()`, and a hardcoded list would
+    that steps come from the registry, and a hardcoded list would
     silently omit any transform added to the core later.
     """
-    return [name for name in available_steps() if getattr(get_step(name), "unipolar", False)]
+    return [
+        name
+        for _, names in grouped_steps()
+        for name in names
+        if getattr(get_step(name), "unipolar", False)
+    ]
 
 
 def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:

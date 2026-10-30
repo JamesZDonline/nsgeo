@@ -66,15 +66,18 @@ User-ordered processing steps. Nothing runs automatically.
 | `ParamSpec` | One declared parameter of a step. |
 | `REQUIRED` | Marks a parameter with no default. |
 | `Radargram` | A radargram as the steps see it. |
+| `STEP_GROUPS` | The groups a step menu is laid out in, in processing order. |
 | `Step` | A pure function of (parameters, radargram). |
 | `StepStack` | An ordered list of steps applied to a radargram. |
 | `available_steps` | The names of the registered steps. |
 | `build_step` | The one way to construct a step; validates its parameters. |
 | `default_params` | Constructor parameters that have a real default. |
 | `get_step` | Look a step class up by name. |
+| `grouped_steps` | The registered steps by group, in menu order. |
 | `is_unipolar` | Whether a step's output has no negative side. |
 | `nyquist_mhz` | Nyquist frequency in MHz for a sample interval in ns. |
 | `required_params` | Parameters that must be collected before a step can be built. |
+| `step_title` | The human title a front end shows for a step. |
 
 ### `nsgeo.slices`
 

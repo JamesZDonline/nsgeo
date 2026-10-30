@@ -29,9 +29,26 @@ def test_transform_names_come_from_the_registry_not_a_hardcoded_list():
 
     names = transform_names()
     expected = [n for n in available_steps() if getattr(get_step(n), "unipolar", False)]
-    assert names == expected
+    assert sorted(names) == expected
     assert set(names) == {"amp_abs", "amp_square", "amp_envelope"}
     assert "gain_agc" not in names and "dewow" not in names
+
+
+def test_transform_names_follow_the_registrys_menu_order_not_the_ids(monkeypatch):
+    """The Transform combo lists them as the core orders its Amplitude group
+    (#82), so a transform added later lands where its `order` puts it. A
+    double whose id sorts first but whose order is last tells the two apart."""
+    from nsgeo.processing import base
+
+    class _Late:
+        name = "aaa_test_transform"
+        title = "Late"
+        group = "Amplitude"
+        order = 99
+        unipolar = True
+
+    monkeypatch.setitem(base._REGISTRY, _Late.name, _Late)
+    assert transform_names() == ["amp_abs", "amp_envelope", "amp_square", "aaa_test_transform"]
 
 
 def test_a_preset_carrying_an_amplitude_transform_is_a_conflict():
