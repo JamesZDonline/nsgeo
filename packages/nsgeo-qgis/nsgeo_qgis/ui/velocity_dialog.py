@@ -39,16 +39,22 @@ from nsgeo_qgis.session import SiteSession
 _HEADERS = ("t0 (ns)", "v ± σ (m/ns)", "rms (ns)", "points", "")
 _FLAG_COLUMN = 4
 
+# Two fits disagree when their velocities differ by more than this many
+# combined standard errors. 1 would cry wolf on about a third (31.7%) of pairs
+# that are genuinely identical; 2 flags about 4.6%, the conventional line.
+_DISAGREEMENT_SIGMAS = 2.0
+
 
 def disagreeing_fit_ids(fits: Mapping[str, StoredFit]) -> frozenset[str]:
     """Ids of every fit that disagrees with at least one other: velocities
-    further apart than the two standard errors combined in quadrature."""
+    further apart than `_DISAGREEMENT_SIGMAS` times the two standard errors
+    combined in quadrature."""
     items = list(fits.items())
     flagged: set[str] = set()
     for i, (id_a, a) in enumerate(items):
         for id_b, b in items[i + 1 :]:
             combined = math.hypot(a.v_stderr_m_ns, b.v_stderr_m_ns)
-            if abs(a.v_m_ns - b.v_m_ns) > combined:
+            if abs(a.v_m_ns - b.v_m_ns) > _DISAGREEMENT_SIGMAS * combined:
                 flagged.update((id_a, id_b))
     return frozenset(flagged)
 

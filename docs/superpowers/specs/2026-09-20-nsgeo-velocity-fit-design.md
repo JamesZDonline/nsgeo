@@ -212,8 +212,11 @@ and decline to pretend it is one number.
 - **Exactly one fit is active**, selected by the user, recorded in `velocity_from_fit`.
 - **No averaging.** Fits at different depths are different measurements, not repeat readings.
 - **A passive disagreement flag.** The dialog lists fits sorted by t₀ and marks any pair whose
-  velocities differ by more than their combined σ, taken as `sqrt(σ₁² + σ₂²)`. Nearly free, and it is precisely the diagnostic
-  that says "this is a layered situation" — the natural on-ramp to Dix conversion.
+  velocities differ by more than **twice** their combined σ, i.e. `2·sqrt(σ₁² + σ₂²)`. Nearly
+  free, and it is precisely the diagnostic that says "this is a layered situation" — the natural
+  on-ramp to Dix conversion. (An earlier draft used 1× the combined σ; that flags 31.7% of pairs
+  that are truly identical, and the M13 walkthrough hit it: 0.0701 ± 0.0018 against
+  0.0733 ± 0.0024 is 1.07σ apart. 2σ flags 4.6%, the conventional "really differ" line.)
 
 ---
 
