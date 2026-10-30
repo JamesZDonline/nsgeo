@@ -2096,3 +2096,13 @@ def test_a_one_trace_line_with_a_distance_paints_its_axes_without_error(make_vie
     assert v._distance_ticks(v.transform) == []
     v.grab_image()
     assert logged == []
+
+
+def test_a_constant_distance_axis_drops_the_ruler_instead_of_raising(make_view):
+    from nsgeo_qgis.ui.ruler import Ruler
+
+    v = make_view()
+    v.set_axes(30, 64, 0.0, 1.0, np.full(30, 2.0), Ruler("A", "y", 0.0, 11.0))
+    assert v.ruler is None
+    t = v.transform
+    assert (t.trace_lo, t.trace_hi) == (0.0, 30.0)

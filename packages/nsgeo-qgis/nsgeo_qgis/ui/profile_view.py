@@ -205,6 +205,13 @@ class ProfileView(QWidget):
         # anything on it; without one the view is today's.
         if ruler is not None and (distance_along is None or n_traces < 2):
             ruler = None
+        # A constant (or non-finite) distance axis has no spacing to place
+        # traces by: its bounds are infinite and would not build a transform.
+        if ruler is not None and distance_along is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lo, hi = bounds_on(ruler, distance_along)
+            if not (math.isfinite(lo) and math.isfinite(hi) and lo < hi):
+                ruler = None
         if ruler is not None and distance_along is not None:
             self.transform = ViewTransform.fit(
                 n_traces,
@@ -607,9 +614,9 @@ class ProfileView(QWidget):
     def _selection_bounds(self, t: ViewTransform) -> tuple[float, float] | None:
         """Local (unoffset by `r.left()`) x-bounds of the selection band, or
         `None` when there is no selection. `b + 1`, not `b`: the selection
-        is inclusive of trace `b`, so its right edge is the *start* of the
-        next trace -- factored out so this is a plain value comparable in a
-        test without rendering a pixel."""
+        is inclusive of trace `b`, so its far edge (the right one, or the
+        screen-left one when mirrored) is the *start* of the next trace -- factored out so
+        this is a plain value comparable in a test without rendering a pixel."""
         a, b = self._selection
         if a < 0:
             return None

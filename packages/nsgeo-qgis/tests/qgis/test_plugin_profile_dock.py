@@ -343,9 +343,8 @@ def test_time_triggered_line_shows_a_trace_axis_instead_of_raising(bare):
 
 def test_switching_lines_does_not_inherit_the_previous_lines_window(opened):
     """Both lines are ruled (on grid A), so this no longer pins the old
-    n_traces gate; it pins that the second line's transform is built for its
-    own trace count (not the first line's 240), with the window carried over
-    in metres rather than as a stale trace window.
+    n_traces gate. It pins that the second line's transform is built for its
+    own trace count (300), not the first line's stale 240.
     """
     session, dock, key, line = opened
     session.set_profiles(key, line.load())
@@ -2032,3 +2031,134 @@ def test_an_import_past_the_ruler_edge_widens_it_without_reopening(opened):
         session, "FILE__LONG", GridPlacement("A", "y", 0.5, 10.0, 1, "FILE__LONG"), n_traces=900
     )
     assert dock.view.ruler.hi_m == pytest.approx(10.0 + 899 / 60 + 1 / 120)
+
+
+# ---- a whole-record or whole-ruler view is held as whole (#67) -------------------
+
+
+def _whole_time(dock, rg_end=None):
+    t = dock.view.transform
+    return t.time_lo <= t.t0_ns + t.dt_ns / 2 and t.time_hi >= t.t_end - t.dt_ns / 2
+
+
+def _cutoff_at_200(session, dock, key, line):
+    session.set_profiles(key, line.load())
+    rg = session.stack_for(key).source
+    end = rg.t0_ns + 200 * rg.dt_ns
+    session.append_step(key, build_step("time_cutoff", end_ns=end))
+    return end
+
+
+def test_reselecting_the_cutoff_row_shows_the_whole_bypassed_record(opened):
+    session, dock, key, line = opened
+    end = _cutoff_at_200(session, dock, key, line)
+    assert dock.view.transform.t_end == pytest.approx(end, abs=1.0)
+    dock.set_selected_step(0)
+    t = dock.view.transform
+    assert t.n_samples == 512 and _whole_time(dock)
+
+
+def test_removing_the_cutoff_step_shows_the_whole_record(opened):
+    session, dock, key, line = opened
+    _cutoff_at_200(session, dock, key, line)
+    session.remove_step(key, 0)
+    assert dock.view.transform.n_samples == 512 and _whole_time(dock)
+
+
+def test_a_horizontal_zoom_is_held_while_the_time_axis_stays_whole(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=40))
+    assert dock.view.transform.n_samples == 472
+    t = dock.view.transform
+    dock.view.transform = t.with_window(t.trace_lo + 100, t.trace_lo + 300, t.time_lo, t.time_hi)
+    m = dock.view.window_m()
+    session.set_step_enabled(key, 0, False)
+    assert dock.view.transform.n_samples == 512
+    assert _whole_time(dock)
+    assert dock.view.window_m() == pytest.approx(m)
+
+
+def test_a_longer_record_after_a_shorter_one_shows_its_full_record(opened):
+    session, dock, key, line = opened
+    short = _add_line(session, "SHORT", GridPlacement("A", "y", 0.5, 0.0, 1, "SHORT"), n_traces=300)
+    session.set_profiles(short[0], short[1].load())
+    session.append_step(short[0], build_step("time_zero", mode="sample", sample=40))
+    session.open_line(short[0])
+    assert dock.view.transform.n_samples == 472
+    session.set_profiles(key, line.load())
+    session.open_line(key)
+    assert dock.view.transform.n_samples == 512 and _whole_time(dock)
+
+
+def test_a_view_at_fit_stays_at_fit_when_the_ruler_grows(opened):
+    session, dock, key, line = opened
+    session.replace_grid(dataclasses.replace(GRID, size_y=20.0))
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+    assert dock.view.window_m() == pytest.approx((dock.view.ruler.lo_m, 20.0))
+
+
+def test_a_time_zoom_is_still_held_across_lines(opened):
+    session, dock, key, line = opened
+    fkey, _ = _forward(session)
+    t = dock.view.transform
+    mid = (t.time_lo + t.time_hi) / 2
+    dock.view.transform = t.with_window(t.trace_lo, t.trace_hi, t.time_lo, mid)
+    held = (dock.view.transform.time_lo, dock.view.transform.time_hi)
+    session.open_line(fkey)
+    n = dock.view.transform
+    assert (n.time_lo, n.time_hi) == pytest.approx(held)
+
+
+def test_a_same_shape_unruled_pair_needs_the_same_trace_count(opened):
+    session, dock, key, line = opened
+    ka, _ = _add_line(
+        session,
+        "U1",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "U1"),
+        n_traces=240,
+        traces_per_metre=0.0,
+    )
+    kb, _ = _add_line(
+        session,
+        "U2",
+        GridPlacement("A", "y", 0.0, 0.0, 1, "U2"),
+        n_traces=300,
+        traces_per_metre=0.0,
+    )
+    session.open_line(ka)
+    r = dock.view.image_rect()
+    dock.view.zoom_at(4.0, r.width() / 2, r.height() / 2)
+    session.open_line(kb)
+    t = dock.view.transform
+    assert t.n_traces == 300
+    assert (t.trace_lo, t.trace_hi) == (0.0, 300.0)
+
+
+def test_a_removed_line_files_its_window_for_the_next_one(opened):
+    session, dock, key, line = opened
+    bkey, _ = _forward(session, "FILE__B")
+    ckey, _ = _forward(session, "FILE__C")
+    _zoom(dock)  # W1 on A
+    session.open_line(bkey)
+    r = dock.view.image_rect()
+    dock.view.zoom_at(2.0, r.width() / 4, r.height() / 2)  # W2 on B
+    w2 = dock.view.window_m()
+    session.remove_line(bkey)
+    session.open_line(ckey)
+    assert dock.view.window_m() == pytest.approx(w2)
+
+
+def test_the_held_windows_are_forgotten_when_the_site_closes(opened, tmp_path):
+    session, dock, key, line = opened
+    _zoom(dock)
+    session.close_site()
+    other = tmp_path / "second"
+    other.mkdir()
+    session.new_site(other)
+    session.add_grid(GRID)
+    nkey, _ = _add_line(session, "FILE__N", GridPlacement("A", "y", 0.0, 0.0, 1, "FILE__N"))
+    session.open_line(nkey)
+    t = dock.view.transform
+    assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
