@@ -398,6 +398,32 @@ def test_save_fit_stores_it_without_changing_any_velocity(plugin):
     assert s.dirty
 
 
+def test_save_fit_says_where_the_fit_went_and_keeps_the_readout(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    readout = dock.velocity_readout.text()
+    assert readout.startswith("v = ")
+    assert "Set velocity override" not in readout
+
+    dock.save_fit_button.click()
+
+    text = dock.velocity_readout.text()
+    assert text.startswith(readout)  # the v = ... read-out is undisturbed
+    assert "Fit saved" in text
+    assert "Set velocity override" in text
+    assert "Survey panel" in text
+
+
+def test_the_next_fit_action_replaces_the_saved_pointer(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    assert "Fit saved" in dock.velocity_readout.text()
+
+    dock.clear_velocity_button.click()
+    assert "Fit saved" not in dock.velocity_readout.text()
+
+
 def test_apply_after_save_names_the_saved_fit_as_the_overrides_source(plugin):
     s, dock = plugin.session, _velocity_on(plugin)
     key = s.keys()[0]
