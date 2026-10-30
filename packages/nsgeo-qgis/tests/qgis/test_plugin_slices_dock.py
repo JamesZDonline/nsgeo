@@ -683,11 +683,45 @@ def test_the_radius_follows_a_line_spacing_edit(docked):
     dock, session = docked
     _ready(dock)
     before = dock.radius_cells()
+    dock.refresh_slice()
+    finite_before = np.isfinite(dock.current_values()).sum()
     session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
     assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     assert dock.grid_radius_metres.text() == "= 0.5 m"
     assert dock.radius_cells() == round(0.5 / dock.cell_spin.value())
     assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+    # The drawn fill follows too, with no other refresh: export reads
+    # `radius_cells()` live, so the map must not show the old radius.
+    assert np.isfinite(dock.current_values()).sum() > finite_before
+
+
+def test_a_seeded_radius_emits_no_value_changed(docked_two_grids):
+    """The seed is not an edit: Task 4's memory hangs on `valueChanged`."""
+    dock, _ = docked_two_grids
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    seen: list[float] = []
+    dock.grid_radius_spin.valueChanged.connect(seen.append)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert seen == []
+
+
+def test_with_no_grid_the_radius_reads_zero_and_blank(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = SlicesDock(session)  # no survey open
+    try:
+        assert dock.grid_radius_metres.text() == ""
+        assert dock.radius_cells() == 0
+        assert dock.view_settings().radius_m == 0.0
+        session.new_site(tmp_path)  # open, but no grid yet
+        assert dock.grid_radius_metres.text() == ""
+        assert dock.radius_cells() == 0
+        assert dock.view_settings().radius_m == 0.0
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
 
 
 def test_a_saved_cube_records_its_radius_in_metres(docked):
@@ -1562,7 +1596,7 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
 
     Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
     or the decimals, so every one of these shipped with an arrow click
-    that moved a 0.75 m radius to 1.75 m (now in spacings) and a 0.2165 ns dz to 1.2165.
+    that moved a 0.75 m radius to 1.75 m (the box is in spacings now) and a 0.2165 ns dz to 1.2165.
     `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
     per click is the only increment that means anything on a time axis.
     """

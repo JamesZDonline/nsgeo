@@ -163,6 +163,9 @@ class SlicesDock(QgsDockWidget):
         #: #70: a grid switch left the engine on the grid that was left; its
         #: resolution is the spins' to apply once the new grid is prepared.
         self._resolution_owed = False
+        #: The fill radius (cells) the drawn This-grid slice used, so a line
+        #: spacing edit that changes it (#72) can redraw.
+        self._filled_radius_cells: int | None = None
         #: The survey the site scope's memory belongs to.
         self._site_seen: Any = None
         #: R-P5: retries the owed This-grid preparation every 50 ms until no
@@ -733,6 +736,19 @@ class SlicesDock(QgsDockWidget):
                 and not self.engine.is_running
             ):
                 self.prepare()
+            elif (
+                self._scope == "grid"
+                and not self._resolution_owed
+                and self.engine.is_prepared
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and self._filled_radius_cells is not None
+                and self.radius_cells() != self._filled_radius_cells
+            ):
+                # #72: a spacing edit moved the radius in cells without
+                # touching the box; redraw so the map and an export agree.
+                # Direct, like the sliders: no resolution change to debounce.
+                self.refresh_slice()
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -1711,7 +1727,7 @@ class SlicesDock(QgsDockWidget):
 
     # ---- Position/Resolution/Display -------------------------------------
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:
-        """Re-seed `cell_spin`/`radius_spin` from the grid that was just
+        """Re-seed `cell_spin`/`grid_radius_spin` from the grid that was just
         selected -- called only from `_sync_included`'s grid-changed
         branch, so an unrelated session signal never overwrites a value
         the user picked for the grid that is still selected. Spec 4's "no
@@ -1736,7 +1752,13 @@ class SlicesDock(QgsDockWidget):
         floor = max(0.01, smallest_safe_cell(grid.size_x, grid.size_y))
         self.cell_spin.setMinimum(floor)
         self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
-        self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
+        # Quiet: a seed is not an edit, and a grid change re-prepares and
+        # `refresh_slice` reads `radius_cells()` live, so no debounce either.
+        self.grid_radius_spin.blockSignals(True)
+        try:
+            self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
+        finally:
+            self.grid_radius_spin.blockSignals(False)
         self._update_radius_metres()
         self._seed_dz_z_defaults(grid_id)
 
@@ -2003,7 +2025,8 @@ class SlicesDock(QgsDockWidget):
                 shown = coverage.astype(float)
                 shown[coverage == 0] = np.nan
             else:
-                shown = fill(values, coverage, self.radius_cells())
+                self._filled_radius_cells = self.radius_cells()
+                shown = fill(values, coverage, self._filled_radius_cells)
             self._values = shown
             self._window = window
             self._update_readout(window)
