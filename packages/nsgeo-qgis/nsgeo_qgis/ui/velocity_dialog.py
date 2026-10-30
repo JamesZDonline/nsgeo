@@ -5,8 +5,12 @@ override". `selected_fit_id()` says which saved fit that number came from, and
 is `None` once the user types something else, because a typed number has no
 fit behind it.
 
+Deleting a fit is the one thing here that does not wait for Apply: Apply also
+writes the spin box as the line's override, and opening the dialog only to
+delete a bad fit must not set a velocity on the way.
+
 Fits are listed by t0 (shallowest first). A pair whose velocities differ by
-more than sqrt(s1^2 + s2^2) is flagged. That is a passive diagnostic, not a
+more than 2 * sqrt(s1^2 + s2^2) is flagged. That is a passive diagnostic, not a
 refusal: it says the ground looks layered, which a later Dix conversion acts
 on.
 """
@@ -26,7 +30,9 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -66,9 +72,9 @@ class VelocityDialog(QDialog):
         self.key = key
         self.setWindowTitle(f"Velocity · {key}")
         line = session.line_for_key(key)
-        self._fits = dict(line.velocity_fits)
-        self._ids = sorted(self._fits, key=lambda i: self._fits[i].t0_ns)
-        self._flagged = disagreeing_fit_ids(self._fits)
+        self._fits: dict[str, StoredFit] = {}
+        self._ids: list[str] = []
+        self._flagged: frozenset[str] = frozenset()
         self._cleared = False
         self._selected: str | None = None
 
@@ -84,23 +90,20 @@ class VelocityDialog(QDialog):
         layout.addLayout(form)
 
         layout.addWidget(QLabel("Saved hyperbola fits (pick one to use its velocity):"))
-        self.table = QTableWidget(len(self._ids), len(_HEADERS))
+        self.table = QTableWidget(0, len(_HEADERS))
         self.table.setHorizontalHeaderLabels(list(_HEADERS))
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        for row, fit_id in enumerate(self._ids):
-            fit = self._fits[fit_id]
-            cells = (
-                f"{fit.t0_ns:.1f}",
-                f"{fit.v_m_ns:.4f} ± {fit.v_stderr_m_ns:.4f}",
-                f"{fit.rms_ns:.2f}",
-                str(len(fit.points)),
-                "disagrees with another fit" if fit_id in self._flagged else "",
-            )
-            for col, text in enumerate(cells):
-                self.table.setItem(row, col, QTableWidgetItem(text))
+        self._fill_table()
         layout.addWidget(self.table)
+        delete_row = QHBoxLayout()
+        self.delete_button = QPushButton("Delete fit")
+        self.delete_button.setToolTip("Remove the selected fit from this line's record.")
+        self.delete_button.setEnabled(False)
+        delete_row.addWidget(self.delete_button)
+        delete_row.addStretch()
+        layout.addLayout(delete_row)
 
         buttons = QDialogButtonBox()
         self.apply_button = buttons.addButton("Apply", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -113,12 +116,35 @@ class VelocityDialog(QDialog):
         self._validate()
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.clear_button.clicked.connect(self._on_clear)
+        self.delete_button.clicked.connect(self._on_delete)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
         pointer = line.velocity_from_fit
         if pointer is not None and pointer in self._fits and line.velocity is not None:
             self.select_fit(pointer)
+
+    def _fill_table(self) -> None:
+        """(Re)build the rows from the line's stored fits, shallowest first."""
+        self._fits = dict(self.session.line_for_key(self.key).velocity_fits)
+        self._ids = sorted(self._fits, key=lambda i: self._fits[i].t0_ns)
+        self._flagged = disagreeing_fit_ids(self._fits)
+        # The current index too, not just the selection: removing the current
+        # row otherwise selects its neighbour, arming Delete on a fit nobody
+        # chose.
+        self.table.selectionModel().clear()
+        self.table.setRowCount(len(self._ids))
+        for row, fit_id in enumerate(self._ids):
+            fit = self._fits[fit_id]
+            cells = (
+                f"{fit.t0_ns:.1f}",
+                f"{fit.v_m_ns:.4f} ± {fit.v_stderr_m_ns:.4f}",
+                f"{fit.rms_ns:.2f}",
+                str(len(fit.points)),
+                "disagrees with another fit" if fit_id in self._flagged else "",
+            )
+            for col, text in enumerate(cells):
+                self.table.setItem(row, col, QTableWidgetItem(text))
 
     # ---- reading the dialog ------------------------------------------------
     def fit_id_at_row(self, row: int) -> str:
@@ -157,6 +183,7 @@ class VelocityDialog(QDialog):
     def _on_selection_changed(self) -> None:
         try:
             rows = self.table.selectionModel().selectedRows()
+            self.delete_button.setEnabled(bool(rows))
             if not rows:
                 self._selected = None
                 return
@@ -176,5 +203,31 @@ class VelocityDialog(QDialog):
         try:
             self._cleared = True
             self.accept()
+        except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
+            QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
+
+    def _on_delete(self) -> None:
+        try:
+            fit_id = self._selected
+            if fit_id is None:
+                return
+            fit = self._fits[fit_id]
+            text = (
+                f"Delete the fit at {fit.t0_ns:.1f} ns "
+                f"({fit.v_m_ns:.4f} ± {fit.v_stderr_m_ns:.4f} m/ns)?"
+            )
+            if self.session.line_for_key(self.key).velocity_from_fit == fit_id:
+                text += (
+                    "\n\nThis fit set the line's velocity. The velocity stays as it is "
+                    "until you apply another."
+                )
+            answer = QMessageBox.question(self, "Delete fit", text)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.session.remove_velocity_fit(self.key, fit_id)
+            self._fill_table()
+            # Selecting the fit copied its velocity into the spin box; that
+            # number is gone with it.
+            self.spin.setValue(self.session.resolved_velocity(self.key).surface_velocity)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)

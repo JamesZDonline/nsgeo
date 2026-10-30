@@ -411,3 +411,131 @@ def test_drawing_the_saved_curves_changes_the_picture(plugin):
     with_curve = view.grab().toImage()
     view.set_saved_velocity_fits([])
     assert view.grab().toImage() != with_curve
+
+
+# ---- deleting a saved fit ----------------------------------------------------
+
+
+def _answer_delete(answer_modal, button):
+    """Answer the delete prompt. Later questions (unload's save prompt) get
+    the same answer, which is harmless in a throwaway site folder."""
+    return answer_modal(QMessageBox, "question", button)
+
+
+def test_delete_is_enabled_only_while_a_fit_is_selected(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
+    dialog = _dialog(plugin)
+    assert not dialog.delete_button.isEnabled()
+
+    dialog.select_fit(fit_id)
+    assert dialog.delete_button.isEnabled()
+
+    dialog.table.clearSelection()
+    assert not dialog.delete_button.isEnabled()
+
+
+def test_delete_asks_which_fit_then_removes_it_from_the_line_and_the_list(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    keep = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.1500, 0.0040))
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(bad)
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "41.0 ns" in args[2] and "0.1500" in args[2]  # names the fit being deleted
+    assert set(s.line_for_key(key).velocity_fits) == {keep}
+    assert dialog.table.rowCount() == 1
+    assert dialog.fit_id_at_row(0) == keep
+    assert not dialog.delete_button.isEnabled()  # nothing is selected any more
+
+
+def test_answering_no_keeps_the_fit(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.No)
+    dialog = _dialog(plugin)
+    dialog.select_fit(fit_id)
+
+    dialog.delete_button.click()
+
+    assert fit_id in s.line_for_key(key).velocity_fits
+    assert dialog.table.rowCount() == 1
+
+
+def test_deleting_the_odd_fit_out_clears_the_disagreement_flag_on_the_rest(plugin, answer_modal):
+    ids, flagged, dialog = _flagged(plugin, (0.090, 0.002), (0.150, 0.002))
+    assert flagged == frozenset(ids)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog.select_fit(ids[1])
+
+    dialog.delete_button.click()
+
+    assert dialog.flagged_fit_ids() == frozenset()
+    assert dialog.flag_text(0) == ""
+
+
+def test_deleting_the_fit_behind_the_velocity_says_the_velocity_stays(plugin, answer_modal):
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    s.set_velocity_from_fit(key, fit_id)
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)  # opens with the applied fit selected
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "line's velocity" in args[2]  # the prompt warns before, not after
+    assert s.line_for_key(key).velocity == VelocityModel.constant(0.09)
+    assert velocity_source(s, key) == "line override"
+
+
+def test_the_prompt_for_a_fit_not_behind_the_velocity_does_not_mention_the_velocity(
+    plugin, answer_modal
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(fit_id)
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "line's velocity" not in args[2]
+
+
+def test_after_a_delete_the_spin_box_shows_the_lines_own_velocity_again(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.0777))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.1500))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(bad)
+    assert dialog.spin.value() == pytest.approx(0.15)  # selecting copied the fit's velocity
+
+    dialog.delete_button.click()
+
+    assert dialog.spin.value() == pytest.approx(0.0777)  # not the deleted fit's number
+    assert dialog.selected_fit_id() is None
+
+
+def test_a_delete_stands_even_when_the_dialog_is_then_cancelled(plugin, answer_modal, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.15))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(
+        QDialog, "exec", lambda d: (d.select_fit(bad), d.delete_button.click(), d.reject())
+    )
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity_fits == {}
+    assert line.velocity is None  # deleting set no velocity on the way
