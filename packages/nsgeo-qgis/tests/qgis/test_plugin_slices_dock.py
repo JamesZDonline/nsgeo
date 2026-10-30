@@ -629,14 +629,14 @@ def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
 
 
 def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
-    """Spec 6.4's default is 1.5 x the line spacing -- a distance. The
-    spin box is therefore in metres and the cell conversion happens
-    underneath, so halving the cell size does not silently halve the
-    smoothing.
+    """The default radius is a multiple of the line spacing -- a distance
+    (spec 6.4; #81 made it 0.5 x). The spin box is therefore in metres and
+    the cell conversion happens underneath, so halving the cell size does
+    not silently halve the smoothing.
 
     Strengthened from the brief's own draft: with this fixture's
-    `GRID.default_spacing` of 0.5, the default radius is 0.75 m -- under
-    1 cell wide before ANY conversion -- so `int(self.radius_spin.value())`
+    `GRID.default_spacing` of 0.5, the default radius is 0.25 m -- under
+    1 m before ANY conversion -- so `int(self.radius_spin.value())`
     (metres misread as an already-integer cell count, the exact mutant
     Step 10 names) truncates to 0 both before and after the cell change,
     and `before * 2 == 0` too, so the relative-doubling check alone passes
@@ -646,13 +646,45 @@ def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
     get right by accident."""
     dock, session = docked
     _ready(dock)
-    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
     before = dock.radius_cells()
-    assert before == round(1.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
+    assert before == round(0.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
-    assert dock.radius_spin.value() == pytest.approx(1.5 * GRID.default_spacing)
+    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
     assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
+    """#81: what a grid's slices start from before anything is remembered
+    for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
+    spacing, so nothing is clamped here."""
+    dock, _ = docked
+    assert dock.transform_combo.value() == "amp_square"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
+    assert dock.cell_spin.value() == pytest.approx(0.2)
+    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+
+
+@pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
+def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
+    qgis_app, tmp_path, spacing, cell
+):
+    """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
+    0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
+    fill radius is always half the grid's own spacing."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", spacing))
+    dock = SlicesDock(session)
+    try:
+        assert dock.cell_spin.value() == pytest.approx(cell)
+        assert dock.radius_spin.value() == pytest.approx(0.5 * spacing)
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
 
 
 def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
@@ -736,12 +768,12 @@ def test_the_palette_offers_unipolar_tables_for_a_transformed_source(docked):
     error, not a style choice. The combo is where that rule is enforced.
 
     Fixed from the brief's own draft: `docked`'s preset ("p", a plain
-    `dewow`) carries no transform, and `transform_combo` starts on its
-    first item, "none" -- so without explicitly choosing a transform here,
-    `engine.output_unipolar` is already False right after `_ready()`, and
-    the very first assertion below (expecting the UNIPOLAR list) fails
-    against correct code. The name says "for a transformed source"; the
-    fixture needs to actually be one before that assertion runs."""
+    `dewow`) carries no transform, and `transform_combo` then started on
+    "none" (#81 moved it to amp_square) -- so without explicitly choosing
+    a transform here, `engine.output_unipolar` was False right after
+    `_ready()`, and the very first assertion below (expecting the UNIPOLAR
+    list) failed against correct code. The name says "for a transformed
+    source"; the test chooses one itself rather than lean on a default."""
     dock, _ = docked
     _ready(dock)
     dock.transform_combo.set_value("amp_abs")  # re-prepares on its own (spec 9.1)
@@ -1029,11 +1061,15 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     )
 
     # Perturb every restorable control so the restore is not a no-op:
-    # a second preset, a narrower inclusion set, different Resolution/view
-    # values.
+    # a second preset, another transform (the cube was saved on #81's
+    # default, amp_square), a narrower inclusion set, different
+    # Resolution/view values.
+    assert record["transform"] == "amp_square"
     session.site.presets["q"] = list(PRESET)
     session.presets_changed.emit()
     dock.preset_combo.setCurrentText("q")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.transform_combo.set_value("none")
     assert dock.engine.wait_for_preparation(20_000)
     dock.set_included(full[:1])
     assert dock.engine.wait_for_preparation(20_000)
@@ -1057,7 +1093,7 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
 
     assert dock.grid_combo.currentText() == "A"
     assert dock.preset_combo.currentText() == "p"
-    assert dock.transform_combo.value() == "none"
+    assert dock.transform_combo.value() == "amp_square"
     assert dock.included_keys() == full
     assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
     assert dock.z0_spin.value() == record["z"]["t0_ns"]

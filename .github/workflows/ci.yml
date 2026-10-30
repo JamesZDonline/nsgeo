@@ -36,6 +36,13 @@ jobs:
       QGIS_PREFIX_PATH: /usr
     steps:
       - uses: actions/checkout@v4
+      # The container runs as root over a checkout the runner's user owns, so git
+      # refuses it ("dubious ownership") and build_zip's tests fail. checkout's own
+      # safe.directory goes into a temporary HOME it discards. The images had no git
+      # until late October 2026 (checkout fell back to the REST API and those tests
+      # skipped), so only add it when git is there.
+      - name: let git read the checkout
+        run: if command -v git >/dev/null; then git config --global --add safe.directory "$GITHUB_WORKSPACE"; fi
       - run: |
           python3 -m pip --version || (apt-get update && apt-get install -y python3-pip)
           python3 -m pip install --break-system-packages pytest
