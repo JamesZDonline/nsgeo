@@ -553,8 +553,8 @@ class SliceEngine(QObject):
                 # which shows titles, not ids (#82).
                 title = step_title(conflict)
                 raise ValueError(
-                    f"the preset {choice.preset!r} already contains the amplitude transform "
-                    f"{title}. A cube's transform is chosen here and applied last, so "
+                    f"the preset {choice.preset!r} already contains the {title} step. "
+                    f"A cube's amplitude transform is chosen here and applied last, so "
                     f"remove {title} from the preset or choose it in Transform, not both"
                 )
             # Captured now, not re-read from `site.presets` in `provenance()`:

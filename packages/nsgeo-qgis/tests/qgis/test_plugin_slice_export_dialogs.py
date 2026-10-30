@@ -120,6 +120,8 @@ def test_save_cube_with_dotted_names_produces_distinct_records(plugin, tmp_path,
     assert written1.exists()
     assert "A__cube.v1" in s.site.cubes
     assert s.site.cubes["A__cube.v1"]["array"] == "slices/cube.v1.npz"
+    # The recipe stores the transform's id, never the title the combo shows.
+    assert s.site.cubes["A__cube.v1"]["transform"] == "amp_envelope"
 
     target2 = tmp_path / "slices" / "cube.v2"
     answer_modal(QFileDialog, "getSaveFileName", (str(target2), "nsgeo cube (*.npz)"))

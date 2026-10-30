@@ -116,6 +116,45 @@ def test_grouped_steps_orders_a_group_by_order_not_by_registration(clean_registr
     assert groups["Time"][1:] == ["time_zero", "time_cutoff"]
 
 
+def _bare_step(**attrs):
+    """A minimal step class carrying exactly `attrs` as class attributes."""
+
+    def apply(self, rg: Radargram) -> Radargram:
+        return rg
+
+    body = {
+        "params": property(lambda self: {}),
+        "schema": classmethod(lambda cls: ()),
+        "apply": apply,
+        **attrs,
+    }
+    return type("_Bare", (), body)
+
+
+@pytest.mark.parametrize("missing", ["title", "group", "order"])
+def test_register_refuses_a_step_missing_a_display_attribute(clean_registry, missing):
+    """Refused where the step is defined, not later where the Add step menu
+    or the Difference caption first reads the attribute and fails far from
+    the cause (a step without `group` stopped the Processing panel loading)."""
+    attrs = {"name": "test_bare", "title": "Bare", "group": "Time", "order": 9}
+    del attrs[missing]
+    with pytest.raises(ValueError, match=rf"test_bare.*{missing}"):
+        register(_bare_step(**attrs))
+    assert "test_bare" not in available_steps()
+
+
+@pytest.mark.parametrize(
+    ("attr", "value"),
+    [("title", ""), ("title", 3), ("group", "Display"), ("order", "1"), ("order", True)],
+)
+def test_register_refuses_a_display_attribute_of_the_wrong_kind(clean_registry, attr, value):
+    """An unknown group would silently drop the step from every menu."""
+    attrs = {"name": "test_bare", "title": "Bare", "group": "Time", "order": 9, attr: value}
+    with pytest.raises(ValueError, match=rf"test_bare.*{attr}"):
+        register(_bare_step(**attrs))
+    assert "test_bare" not in available_steps()
+
+
 def test_step_title_of_an_unknown_step_names_it():
     with pytest.raises(KeyError, match="no_such_step"):
         step_title("no_such_step")

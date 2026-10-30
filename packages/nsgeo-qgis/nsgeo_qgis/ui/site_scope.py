@@ -899,7 +899,8 @@ class SiteScope:
             dock.legend_label.setText(f"1 – {limit:.3g} traces per cell · blank = no line crossed")
             return
         base = f"0 – {limit:.3g}" if self.unipolar() else f"−{limit:.3g} – {limit:.3g}"
-        dock.legend_label.setText(f"{base} ({dock.site_panel.transform()})")
+        # The title the combo shows, as This grid's legend does (#82).
+        dock.legend_label.setText(f"{base} ({dock.site_panel.transform_combo.currentText()})")
 
     def unipolar(self) -> bool:
         return self.transform() != NO_TRANSFORM

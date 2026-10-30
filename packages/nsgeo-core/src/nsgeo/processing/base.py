@@ -190,8 +190,30 @@ def register(cls: type[Any]) -> type[Any]:
             f"because a saved stack naming it would resolve to whichever was "
             f"imported last"
         )
+    problem = _display_problem(cls)
+    if problem is not None:
+        raise ValueError(f"step {cls.name!r}: {problem}")
     _REGISTRY[cls.name] = cls
     return cls
+
+
+def _display_problem(cls: type[Any]) -> str | None:
+    """What is wrong with a step's `title`, `group` or `order`, or None.
+
+    Checked at registration because a front end reads them far from where
+    the step is defined: a step without a `group` stopped the Processing
+    panel loading, and one with an unknown group silently left every menu.
+    """
+    title = getattr(cls, "title", None)
+    if not isinstance(title, str) or not title.strip():
+        return f"title must be a non-empty string, got {title!r}"
+    group = getattr(cls, "group", None)
+    if group not in STEP_GROUPS:
+        return f"group must be one of {STEP_GROUPS}, got {group!r}"
+    order = getattr(cls, "order", None)
+    if not isinstance(order, int) or isinstance(order, bool):
+        return f"order must be an int, got {order!r}"
+    return None
 
 
 def available_steps() -> list[str]:

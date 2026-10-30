@@ -365,6 +365,20 @@ def test_a_stale_transform_on_disk_falls_back_to_the_dock_s(plugin):
     assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
 
 
+def test_both_scopes_legends_name_the_transform_by_title(plugin):
+    """#82: the legend under the slice reads as the Transform combo does, in
+    This grid and in Whole site alike (the site's once showed the id)."""
+    dock = plugin.slices_dock
+    dock.transform_combo.set_value("amp_envelope")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.legend_label.text().endswith("(Envelope)"), dock.legend_label.text()
+    whole_site(plugin)
+    dock.site_panel.transform_combo.set_value("amp_abs")
+    settle(dock)
+    assert dock.legend_label.text().endswith("(Absolute value)"), dock.legend_label.text()
+
+
 def test_lines_chosen_in_the_site_for_this_grids_grid_are_what_this_grid_shows(plugin):
     """Spec 4.2: This grid reads and writes the same record the site does."""
     dock = whole_site(plugin)
