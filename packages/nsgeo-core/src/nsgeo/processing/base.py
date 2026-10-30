@@ -122,10 +122,25 @@ class ParamSpec:
         return self.default is REQUIRED
 
 
+#: The groups a step menu is laid out in, in the usual processing order.
+#: Every step's `group` names one of these.
+STEP_GROUPS: Final = ("Time", "Filters", "Background", "Gain", "Amplitude")
+
+
 class Step(Protocol):
-    """A pure function of (parameters, radargram). No I/O, no hidden state."""
+    """A pure function of (parameters, radargram). No I/O, no hidden state.
+
+    `name` is the id a saved stack stores; `title` is what a front end shows
+    wherever it names the step. `group` and `order` place it in a step menu:
+    one of `STEP_GROUPS`, and its position inside that group, lowest first.
+    None of the three display attributes is ever saved, so rewording a title
+    or regrouping a step leaves every project file as it was.
+    """
 
     name: str
+    title: str
+    group: str
+    order: int
 
     @property
     def params(self) -> dict[str, Any]: ...
@@ -175,12 +190,50 @@ def register(cls: type[Any]) -> type[Any]:
             f"because a saved stack naming it would resolve to whichever was "
             f"imported last"
         )
+    problem = _display_problem(cls)
+    if problem is not None:
+        raise ValueError(f"step {cls.name!r}: {problem}")
     _REGISTRY[cls.name] = cls
     return cls
 
 
+def _display_problem(cls: type[Any]) -> str | None:
+    """What is wrong with a step's `title`, `group` or `order`, or None.
+
+    Checked at registration because a front end reads them far from where
+    the step is defined: a step without a `group` stopped the Processing
+    panel loading, and one with an unknown group silently left every menu.
+    """
+    title = getattr(cls, "title", None)
+    if not isinstance(title, str) or not title.strip():
+        return f"title must be a non-empty string, got {title!r}"
+    group = getattr(cls, "group", None)
+    if group not in STEP_GROUPS:
+        return f"group must be one of {STEP_GROUPS}, got {group!r}"
+    order = getattr(cls, "order", None)
+    if not isinstance(order, int) or isinstance(order, bool):
+        return f"order must be an int, got {order!r}"
+    return None
+
+
 def available_steps() -> list[str]:
     return sorted(_REGISTRY)
+
+
+def grouped_steps() -> list[tuple[str, list[str]]]:
+    """Every registered step by group: groups in `STEP_GROUPS` order, steps
+    inside a group by their `order`. A group with no steps is left out."""
+    groups = []
+    for group in STEP_GROUPS:
+        members = [cls for cls in _REGISTRY.values() if cls.group == group]
+        if members:
+            groups.append((group, [cls.name for cls in sorted(members, key=lambda c: c.order)]))
+    return groups
+
+
+def step_title(name: str) -> str:
+    """The title a front end shows for step `name`."""
+    return str(get_step(name).title)
 
 
 def get_step(name: str) -> type[Any]:

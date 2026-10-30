@@ -49,7 +49,7 @@ def test_difference_view_shows_what_a_step_removed(plugin):
     pd.add_step("background_mean")
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert "background_mean" in prd.difference_label.text()
+    assert "Background removal (mean)" in prd.difference_label.text()
     diff = prd.current_radargram()
     result = s.stack_for(key).result()
     assert diff is not result
@@ -94,8 +94,8 @@ def test_presets_save_apply_and_persist(plugin, tmp_path):
 
     _menu_action(pd.presets_menu, "campus").trigger()
     assert [i.text() for i in (pd.list.item(r) for r in range(pd.list.count()))] == [
-        "dewow",
-        "gain_agc",
+        "Dewow",
+        "Automatic gain control",
     ]
     s.save()
     assert '"presets"' in (tmp_path / "survey.nsgeo.json").read_text()
@@ -182,8 +182,8 @@ def test_applying_a_preset_updates_the_form_and_gain_strip_for_the_selected_row(
 
     pd.apply_preset_named("first")  # row 0 becomes gain_agc: no curve
     assert [pd.list.item(r).text() for r in range(pd.list.count())] == [
-        "gain_agc",
-        "gain_curve",
+        "Automatic gain control",
+        "Gain curve",
     ]
     assert pd.list.currentRow() == 0
     assert pd.form.step_name == "gain_agc"  # not the stale gain_curve form

@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.io import DztHeader
-from nsgeo.processing import Radargram, Step, nyquist_mhz
+from nsgeo.processing import Radargram, Step, nyquist_mhz, step_title
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox, QLabel, QVBoxLayout, QWidget
 
 from nsgeo_qgis.ui.param_form import ParamForm
@@ -33,7 +33,7 @@ class AddStepDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Add step: {step_name}")
+        self.setWindowTitle(f"Add step: {step_title(step_name)}")
         self.radargram = radargram
         layout = QVBoxLayout(self)
         self.form = ParamForm(self)

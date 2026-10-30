@@ -18,6 +18,9 @@ from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, nyquist_mhz, r
 @register
 class Bandpass:
     name = "bandpass"
+    title = "Bandpass"
+    group = "Filters"
+    order = 2
 
     def __init__(self, low_mhz: float, high_mhz: float, taper_frac: float = 0.25) -> None:
         self.low_mhz = low_mhz

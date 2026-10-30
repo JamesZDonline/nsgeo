@@ -125,7 +125,7 @@ def test_selecting_the_cutoff_with_the_difference_view_on_shows_the_line(
     end = _clip(plugin, s, key, 200)
     pd.list.setCurrentRow(1)
     pd.diff_button.setChecked(True)
-    assert prof.difference_label.text() == "Difference: background_mean"
+    assert prof.difference_label.text() == "Difference: Background removal (mean)"
     errors = []
     prof.error.connect(errors.append)
     pd.list.setCurrentRow(2)
