@@ -287,11 +287,14 @@ and names `time_zero` when it does.
 - **Delete fit** (#85) under the list, enabled while a row is selected. It asks first, naming
   the fit by t₀ and v ± σ, and says so when the fit is the one behind the line's velocity. It
   acts at once rather than waiting for Apply, because Apply also writes the spin box as the
-  override and deleting a fit must not set a velocity on the way; afterwards the spin box shows
-  the line's own velocity again, not the deleted fit's number.
-- While the dialog is open, **the selected fit's curve is drawn bold and dashed** on the profile
-  (when the profile shows that line), so a row whose numbers look wrong can be matched to the
-  curve that sits badly before it is deleted.
+  override and deleting a fit must not set a velocity on the way. Afterwards the dialog is as it
+  opened: the fit behind the velocity selected if it survives, else the line's own velocity in
+  the spin box, never the deleted fit's number. Apply with that number untouched keeps the
+  override to the last digit rather than the box's 4 dp, so "the velocity stays" holds.
+- While the dialog is open, **the selected fit's curve is drawn bold, dashed and in the selection
+  blue, over the working fit** (when the profile shows that line), so a row whose numbers look
+  wrong can be matched to the curve that sits badly before it is deleted. Over the working fit
+  and not in its orange, because the fit just saved from the working points coincides with it.
 
 ---
 

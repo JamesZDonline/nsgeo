@@ -654,3 +654,83 @@ def test_a_lit_saved_curve_is_drawn_stronger_than_an_unlit_one(plugin):
         return total
 
     assert _ink(lit) > 2 * _ink(unlit) > 0
+
+
+def test_deleting_another_fit_leaves_the_applied_fit_selected_so_apply_keeps_it(
+    plugin, answer_modal, drive_dialog
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
+    other = s.add_velocity_fit(key, _stored(41.0, 0.15))
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    s.set_velocity_from_fit(key, applied)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(
+        QDialog,
+        "exec",
+        lambda d: (d.select_fit(other), d.delete_button.click(), d.accept()),
+    )
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity_from_fit == applied
+    assert line.velocity == VelocityModel.constant(0.09123456)  # not the box's 0.0912
+
+
+def test_apply_after_deleting_the_fit_behind_the_velocity_keeps_the_velocity_exactly(
+    plugin, answer_modal, drive_dialog
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    s.set_velocity_from_fit(key, applied)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(QDialog, "exec", lambda d: (d.delete_button.click(), d.accept()))
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09123456)  # "stays as it is"
+    assert line.velocity_from_fit is None
+
+
+def test_a_number_typed_over_the_untouched_override_still_applies(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    drive_dialog(QDialog, "exec", lambda d: (d.spin.setValue(0.0950), d.accept()))
+
+    plugin.open_velocity_dialog(key)
+
+    assert s.line_for_key(key).velocity == VelocityModel.constant(0.095)
+
+
+def test_a_lit_saved_curve_shows_over_a_working_curve_on_the_same_line(plugin):
+    """Select the fit just saved from the working points, and the two curves
+    coincide: the lit one must still be visible."""
+    view = plugin.profile_dock.view
+    curve = [(float(t), 10.0 + 0.5 * t) for t in range(60)]
+
+    def _picture(working, saved, highlighted):
+        view.set_velocity_fit([], working)
+        view.set_saved_velocity_fits(saved, highlighted=highlighted)
+        view.grab()  # warm-up: the first paint after a change is not the settled one
+        return view.grab().toImage()
+
+    def _ink(a, b):
+        total = 0
+        for y in range(a.height()):
+            for x in range(a.width()):
+                p, q = a.pixelColor(x, y), b.pixelColor(x, y)
+                total += abs(p.red() - q.red()) + abs(p.green() - q.green())
+                total += abs(p.blue() - q.blue())
+        return total
+
+    none = _picture([], [], None)
+    lit_alone = _picture([], [curve], 0)
+    unlit = _picture(curve, [curve], None)
+    lit = _picture(curve, [curve], 0)
+    # Lighting the curve changes at least a third as much ink as the lit curve
+    # makes on its own: antialiased edges peeking out from under the working
+    # curve are not "visible".
+    assert _ink(lit, unlit) > _ink(lit_alone, none) / 3

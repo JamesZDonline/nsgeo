@@ -75,7 +75,7 @@ class VelocityDialog(QDialog):
         self.session = session
         self.key = key
         self.setWindowTitle(f"Velocity · {key}")
-        line = session.line_for_key(key)
+        session.line_for_key(key)  # a stale key raises KeyError here, for the caller
         self._fits: dict[str, StoredFit] = {}
         self._ids: list[str] = []
         self._flagged: frozenset[str] = frozenset()
@@ -124,9 +124,7 @@ class VelocityDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
 
-        pointer = line.velocity_from_fit
-        if pointer is not None and pointer in self._fits and line.velocity is not None:
-            self.select_fit(pointer)
+        self._select_applied_fit()
 
     def _fill_table(self) -> None:
         """(Re)build the rows from the line's stored fits, shallowest first."""
@@ -182,11 +180,27 @@ class VelocityDialog(QDialog):
         if fit_id is not None:
             # The fit's own velocity, not the spin box's 4-dp rounding of it.
             return VelocityModel.constant(self._fits[fit_id].v_m_ns)
+        current = self.session.line_for_key(self.key).velocity
+        if current is not None and round(self.spin.value(), 4) == round(
+            current.surface_velocity, 4
+        ):
+            # The line's own override, untouched: kept to the last digit, as
+            # deleting the fit behind it promises, not rounded to the box's.
+            return current
         return VelocityModel.constant(self.spin.value())
 
     # ---- driving the dialog --------------------------------------------------
     def select_fit(self, fit_id: str) -> None:
         self.table.selectRow(self._ids.index(fit_id))
+
+    def _select_applied_fit(self) -> bool:
+        """Select the fit behind the line's velocity, if there is one."""
+        line = self.session.line_for_key(self.key)
+        pointer = line.velocity_from_fit
+        if pointer is None or pointer not in self._fits or line.velocity is None:
+            return False
+        self.select_fit(pointer)
+        return True
 
     def _on_selection_changed(self) -> None:
         try:
@@ -233,8 +247,10 @@ class VelocityDialog(QDialog):
                 return
             self.session.remove_velocity_fit(self.key, fit_id)
             self._fill_table()
-            # Selecting the fit copied its velocity into the spin box; that
-            # number is gone with it.
-            self.spin.setValue(self.session.resolved_velocity(self.key).surface_velocity)
+            # Back to how the dialog opened: the fit behind the velocity
+            # selected, else the line's own velocity in the box. Selecting
+            # the deleted fit copied its number there, and it is gone.
+            if not self._select_applied_fit():
+                self.spin.setValue(self.session.resolved_velocity(self.key).surface_velocity)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)

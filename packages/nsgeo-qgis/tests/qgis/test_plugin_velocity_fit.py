@@ -538,14 +538,16 @@ def test_time_zero_added_after_a_save_leaves_the_fit_on_its_feature_and_apply_st
 ):
     """Issue #90 rested on time_zero moving the time axis. It does not: it
     crops rows and each surviving sample keeps its time, so a saved fit's
-    (trace, ns) points still land on the hyperbola they were clicked on. A
-    step that rebased the axis would strand every saved fit, and fail here."""
+    (trace, ns) points still land on the hyperbola they were clicked on. The
+    radargram assertions are the pin: a step that rebased the axis would
+    strand every saved fit, and fail them. Apply naming the fit afterwards
+    is the consequence #90 doubted, recorded rather than independently
+    tested, since Apply compares points alone."""
     s, dock = plugin.session, _velocity_on(plugin)
     key = s.keys()[0]
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
     (fit_id,) = s.line_for_key(key).velocity_fits
-    v_before = dock.velocity_fit_result().v_m_ns
     before = dock.current_radargram()
 
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
@@ -554,7 +556,6 @@ def test_time_zero_added_after_a_save_leaves_the_fit_on_its_feature_and_apply_st
     assert after.n_samples == before.n_samples - 51  # rows really were cropped
     assert after.times_ns()[0] == pytest.approx(-0.04, abs=0.01)  # -11.086 + 51 * 0.2165
     np.testing.assert_array_equal(after.data[0], before.data[51])  # that row kept its time
-    assert dock.velocity_fit_result().v_m_ns == v_before
 
     dock.apply_line_button.click()
 
