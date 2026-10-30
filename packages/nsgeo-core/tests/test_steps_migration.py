@@ -87,3 +87,43 @@ def test_a_constant_field_migrates_to_nothing():
     """
     out = migrate_fk(np.full((256, 256), 5.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
     assert np.abs(out).max() < 1e-9
+
+
+def _flank_row(out, apex_trace, near=40, far=120):
+    """Energy-weighted mean sample row of whatever is left on the two
+    flanks, in a lateral band clear of the apex itself.
+
+    Which way the residual opens. Energy still *below* the apex is an
+    under-collapsed hyperbola; energy *above* it is an over-migrated smile.
+    A test that only checks the correct velocity cannot tell migration from
+    blurring, and one that only checks that a wrong velocity blurs cannot
+    tell the two kinds of wrong apart.
+    """
+    cols = np.r_[apex_trace - far : apex_trace - near, apex_trace + near : apex_trace + far]
+    weights = (out[:, cols] ** 2).sum(axis=1)
+    rows = np.arange(out.shape[0], dtype=float)
+    return float((weights * rows).sum() / weights.sum())
+
+
+def _wrong_velocity_case(mult):
+    apex_trace, apex_t_ns = 320, 40.0
+    data = _diffraction(512, 640, DT_NS, DX_M, V, apex_trace, apex_t_ns)
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V * mult)
+    peak = np.unravel_index(np.argmax(np.abs(out)), out.shape)
+    return out, _focus(out, peak[0], peak[1]), _flank_row(out, apex_trace), apex_t_ns / DT_NS
+
+
+def test_too_slow_a_velocity_leaves_a_downward_residual():
+    """0.6x the truth: measured focus 0.215, flank energy 50 rows below the
+    apex. The 10-row margin is a sign test with room, not a tuned number."""
+    _, focus, flank, apex_row = _wrong_velocity_case(0.6)
+    assert focus < 0.5
+    assert flank > apex_row + 10
+
+
+def test_too_fast_a_velocity_produces_an_upward_smile():
+    """1.6x the truth: measured focus 0.144, flank energy 31 rows above the
+    apex -- the opposite side from the under-migrated case."""
+    _, focus, flank, apex_row = _wrong_velocity_case(1.6)
+    assert focus < 0.5
+    assert flank < apex_row - 10
