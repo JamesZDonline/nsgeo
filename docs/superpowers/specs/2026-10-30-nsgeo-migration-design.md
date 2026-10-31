@@ -162,23 +162,55 @@ a precedent for every step after this one.
 
 Stolt f-k, constant velocity, exploding-reflector. With `vm = v / 2`:
 
-1. Pad in x (§5.3) and 2-D FFT to `F(ω, kx)`.
-2. For the uniform `kz` grid conjugate to depth `z = vm·t`, map `ω = vm·√(kx² + kz²)`.
-3. Interpolate `F` linearly in ω at that mapped frequency, per `kx`, on the real and imaginary
-   parts separately.
-4. Scale by the obliquity factor `vm·kz / √(kx² + kz²)`.
-5. Zero the evanescent region, `|ω| < vm·|kx|`. **Mandatory, not optional** — it is energy that
-   corresponds to no propagating wave, and leaving it in is a direct source of the artefacts §3.1
-   forbids.
-6. Inverse transform, take the real part, crop back to the original trace count.
+1. Pad in x (§5.3), extend the record to **twice its length in time**, and 2-D FFT to `F(ω, kx)`.
+2. For the uniform `kz` grid conjugate to depth `z = vm·t`, map `ω = sign(kz)·vm·√(kx² + kz²)`.
+   The sign is not optional: without it the negative frequencies map onto the positive ones,
+   Hermitian symmetry breaks, and the image comes back with an imaginary part as large as its
+   real one.
+3. Move the time origin to the middle of the record (multiply `F` by `e^{iω·T/2}`), interpolate
+   linearly in ω at the mapped frequency per `kx`, and move it back (multiply by
+   `e^{-iω_map·T/2}`).
+4. Scale by the obliquity factor `|kz| / √(kx² + kz²)` — the Jacobian `dω/dkz = vm·|kz|/root`
+   divided by the `vm` that taking the output on the input's own time grid has already absorbed.
+   It is dimensionless and equals **1 at zero dip**, so a flat reflector comes through at its own
+   amplitude.
+5. Zero where the mapped frequency falls outside the band the record contains. The evanescent
+   region needs no separate mask: `√(kx²+kz²) ≥ |kx|` holds by construction, so `|ω_map| ≥ vm·|kx|`
+   always and energy below that line — which corresponds to no propagating wave — is never read.
+   What does need zeroing is the steep-dip energy whose mapped frequency the record does not have,
+   which the interpolation would otherwise extrapolate from the band edge without bound.
+6. Inverse transform, take the real part, crop back to the original sample count and trace count.
 
 The output stays in **time**. `VelocityModel` relabels the axis to depth exactly as it does today,
 which is the same decision `ZAxis` took for the cube. Migration does not change what a sample
 means; it changes which sample the energy is in.
 
-**Where these go wrong.** Sign and `fftshift` conventions in the ω→kz map, and the obliquity
-factor, are where published implementations fail. The synthetic point-diffractor test (§9) is
-unforgiving enough to catch all three, and it is worth writing before the solver.
+**Steps 1 and 3 are what the first draft of this spec got wrong, and they are the whole
+milestone.** The draft said only "interpolate `F` linearly in ω", and that was built and shipped
+into a branch where the collapse failed below about 1.5 m and a broad smear appeared instead —
+precisely the artefact §1 calls worse than not migrating. The reason is not the interpolator's
+width. An event at two-way time `t` turns the spectrum through `t·Δω` radians per bin; over a
+record of length `T` sampled at `Δω = 2π/T` that reaches a **full turn per bin** at the bottom of
+the record, which is past Nyquist along the frequency axis, and an aliased phasor cannot be
+recovered by any interpolator — an eight-point windowed sinc was measured at 0.780 / 0.250 / 0.056
+at 1.5 / 2.0 / 2.5 m, no better than the two-point form. Centring the time origin halves the
+winding; doubling the transform halves it again. Measured focus at 0.5 m through 3.5 m:
+
+| | 0.5 m | 1.0 m | 1.5 m | 2.0 m | 2.5 m | 3.0 m | 3.5 m |
+|---|---|---|---|---|---|---|---|
+| over the record alone | 0.98 | 0.92 | 0.68 | **0.33** | **0.13** | **0.08** | **0.08** |
+| centred, doubled | 0.98 | 0.98 | 0.97 | 0.97 | 0.96 | 0.95 | 0.92 |
+
+Doubling the record in time earns its cost twice: it also removes a **temporal** circular wrap.
+Migration moves energy up the record, and over the record's own length the time axis is circular,
+so energy passing `t = 0` returns at the bottom as a band of invented reflectivity under
+everything shallow and strong. On a real line the migrated bottom tenth held 6.8× the middle's
+energy against 0.56× in the input; doubled, it holds 0.82×.
+
+**Where these go wrong.** The sign in the ω→kz map, the obliquity factor, and the conditioning of
+the ω interpolation. A synthetic point-diffractor test (§9) catches the first two — but only if it
+is run at **several depths**: a single apex at 40 ns is the last depth that still clears a
+sensible threshold, and a suite with one operating point there sees none of the table above.
 
 ### 5.2 Trace spacing is context; velocity is a parameter
 
@@ -380,10 +412,12 @@ Three consequences to record rather than discover:
 - **Provenance is free.** `Provenance.steps` already records every step's parameters, so the
   velocity a cube was migrated at is written into the cube and travels with the export. No new
   field.
-- **The cost is real:** about **4.7 s** added across 24 lines, on top of the existing preparation
-  — the derived pad always lands on a 2048-wide transform for these lines (§5.3). Worth stating in
-  the plan so nobody reports it as a regression, and worth a second look if a site ever holds
-  hundreds of lines rather than twenty-four.
+- **The cost is real:** about **10.2 s** added across 24 lines, on top of the existing
+  preparation — the derived pad always lands on a 2048-wide transform for these lines (§5.3), and
+  §5.1's time extension doubles the rows again. Measured at 426 ms a line. (An earlier draft of
+  this section said 4.7 s, from before the time extension existed.) Worth stating in the plan so
+  nobody reports it as a regression, and worth a second look if a site ever holds hundreds of
+  lines rather than twenty-four.
 
 ---
 
