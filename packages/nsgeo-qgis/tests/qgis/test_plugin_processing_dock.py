@@ -492,3 +492,39 @@ def test_a_step_without_a_velocity_keeps_its_plain_title(opened):
     session.append_step(key, build_step("dewow"))
 
     assert dock.list.item(0).text() == "Dewow"
+
+
+def _unresolvable(session, monkeypatch):
+    """A header with epsr 0 loads fine and makes `resolved_velocity` raise
+    when anything asks for the line's velocity."""
+
+    def boom(key):
+        raise ValueError("relative dielectric permittivity must be positive, got 0.0")
+
+    monkeypatch.setattr(session, "resolved_velocity", boom)
+
+
+def test_a_line_whose_velocity_cannot_be_resolved_still_lists_its_steps(opened, monkeypatch):
+    """`rebuild` runs inside a Qt slot, after `list.clear()` and before the
+    row buttons are updated. An exception there is swallowed to stderr and
+    leaves the panel showing no steps for a line that has them."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+    _unresolvable(session, monkeypatch)
+
+    dock.rebuild()
+
+    assert dock.list.count() == 1
+    assert dock.list.item(0).text() == "Migration (Stolt f-k)"
+
+
+def test_a_line_whose_velocity_cannot_be_resolved_still_opens_the_add_dialog(opened, monkeypatch):
+    """The prefill is a convenience. A line that cannot supply one must
+    still be able to have a step added to it, with the field left blank."""
+    session, dock, key = opened
+    _unresolvable(session, monkeypatch)
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert not dialog.ok_button.isEnabled()
+    assert dialog.form.editors["velocity_m_ns"].text() == ""

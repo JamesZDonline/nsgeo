@@ -341,7 +341,15 @@ class ProcessingDock(QgsDockWidget):
         if velocity is None:
             return str(step.title)
         label = f"{step.title} \u2014 {velocity:.4f} m/ns"
-        resolved = self.session.resolved_velocity(key).surface_velocity
+        try:
+            resolved = self.session.resolved_velocity(key).surface_velocity
+        except ValueError as exc:
+            # Raised far from here by a header with a non-positive epsr.
+            # This runs inside `rebuild`, which is a slot: letting it out
+            # would abandon the rebuild after `list.clear()` and leave the
+            # panel showing no steps at all for a line that has them.
+            _log(f"row_label: cannot resolve a velocity for {key} ({exc}); no comparison shown")
+            return str(step.title)
         if resolved > 0 and abs(velocity - resolved) / resolved > _VELOCITY_MISMATCH_FRACTION:
             label += f" \u00b7 this line says {resolved:.4f}"
         return label
@@ -612,9 +620,19 @@ class ProcessingDock(QgsDockWidget):
         already use. A seed only: once the step exists the value is its
         own, and a later velocity change does not reach back into it.
         """
-        if name == "migrate_fk":
+        if name != "migrate_fk":
+            return None
+        try:
             return {"velocity_m_ns": self.session.resolved_velocity(key).surface_velocity}
-        return None
+        except ValueError as exc:
+            # e.g. a header with a non-positive epsr, which loads fine and
+            # fails when its velocity is resolved. A prefill is a
+            # convenience; failing to make one must not stop the dialog
+            # opening at all, which is the shape `plugin.py` already uses.
+            _log(
+                f"seed_params: cannot resolve a velocity for {key} ({exc}); leaving the field blank"
+            )
+            return None
 
     def build_add_dialog(self, name: str) -> AddStepDialog:
         key = self.key()

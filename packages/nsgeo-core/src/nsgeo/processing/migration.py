@@ -40,6 +40,21 @@ from nsgeo.velocity import C_M_PER_NS
 #: refusal depend on something unrelated to the fault it reports.
 MAX_T0_NS = 2.0
 
+#: How many times the record's own length to transform over, in time.
+#:
+#: The Stolt map reads the spectrum between its sampled frequencies, and
+#: how well that reads depends on how fast the spectrum turns: an event at
+#: two-way time `t` turns `t * d_omega` radians per bin. Over the record's
+#: own length alone, `d_omega = 2*pi/T` makes that a half turn per bin at
+#: the bottom even with the origin centred -- right at the limit, and the
+#: collapse measurably decays towards it. Doubling the transform halves
+#: `d_omega` and leaves a quarter turn, which holds the focus flat across
+#: the whole record. Measured on the real lines' sampling, focus at 0.5 m
+#: through 3.5 m: 0.98 0.92 0.68 0.33 0.13 0.08 0.08 over the record alone,
+#: 0.98 0.98 0.97 0.97 0.96 0.95 0.92 doubled. It costs about 3x the
+#: transform (110 ms to 354 ms on a 512 x 640 line).
+_T_OVERSAMPLE = 2
+
 
 def migrate_fk(
     data: np.ndarray,
@@ -107,17 +122,35 @@ def migrate_fk(
     else:
         pad = int(np.ceil(vm * (n_samples * dt_ns) / dx_m))
         n_pad = 1 << int(n_traces + 2 * pad - 1).bit_length()
-    padded = np.zeros((n_samples, n_pad), dtype=float)
-    padded[:, pad : pad + n_traces] = arr
+
+    # Twice the record in time, so the frequency axis is sampled at twice
+    # the rate the interpolation below needs. See `_T_OVERSAMPLE`. The
+    # aperture above is deliberately computed from the REAL record length:
+    # the extra rows are empty, and energy cannot migrate out of them.
+    n_rows = _T_OVERSAMPLE * n_samples
+    padded = np.zeros((n_rows, n_pad), dtype=float)
+    padded[:n_samples, pad : pad + n_traces] = arr
 
     spectrum = np.fft.fft2(padded)
-    omega = 2.0 * np.pi * np.fft.fftfreq(n_samples, d=dt_ns)  # rad/ns
+    omega = 2.0 * np.pi * np.fft.fftfreq(n_rows, d=dt_ns)  # rad/ns
     kx = 2.0 * np.pi * np.fft.fftfreq(n_pad, d=dx_m)  # rad/m
 
     # searchsorted needs the frequency axis ascending; fftfreq is not.
     order = np.argsort(omega)
     omega_asc = omega[order]
     spectrum_asc = spectrum[order, :]
+
+    # Move the time origin to the middle of the record before interpolating,
+    # and put it back afterwards. This is what makes the interpolation
+    # well-posed rather than merely more accurate. The spectrum of an event
+    # at time `t` turns through `t * d_omega` radians per bin; measured from
+    # the start of the record that is up to a full turn per bin at the
+    # bottom, which is past Nyquist along the frequency axis, and an aliased
+    # phasor cannot be recovered by any interpolator -- an eight-point sinc
+    # does no better than the two-point form here. Measured from the middle
+    # it is at most half a turn, and with `_T_OVERSAMPLE` a quarter.
+    t_centre = 0.5 * n_samples * dt_ns
+    spectrum_asc = spectrum_asc * np.exp(1j * omega_asc * t_centre)[:, None]
 
     # The image is wanted on the input's own time axis, so take the vertical
     # wavenumber grid as kz = omega / vm: then vm * kz is the input's own
@@ -131,7 +164,7 @@ def migrate_fk(
     omega_map = np.sign(kz)[:, None] * vm * root
 
     idx = np.searchsorted(omega_asc, omega_map)
-    idx = np.clip(idx, 1, n_samples - 1)
+    idx = np.clip(idx, 1, n_rows - 1)
     lo, hi = idx - 1, idx
     span = omega_asc[hi] - omega_asc[lo]
     frac = (omega_map - omega_asc[lo]) / span
@@ -139,11 +172,16 @@ def migrate_fk(
         np.take_along_axis(spectrum_asc, lo, axis=0) * (1.0 - frac)
         + np.take_along_axis(spectrum_asc, hi, axis=0) * frac
     )
+    mapped *= np.exp(-1j * omega_map * t_centre)
 
-    # Obliquity: the Jacobian d(omega)/d(kz) of the change of variable.
-    # Positive everywhere, because omega and kz share a sign.
+    # Obliquity: the Jacobian d(omega)/d(kz), `vm*|kz|/root`, divided by the
+    # `vm` that taking the output on the input's own time grid has already
+    # absorbed. What is left is dimensionless and equals 1 at zero dip, so a
+    # flat reflector comes through at its own amplitude. Keeping the `vm`
+    # scales the whole image by the velocity the user typed -- a factor of
+    # 27 at 0.0733 m/ns.
     with np.errstate(invalid="ignore", divide="ignore"):
-        obliquity = vm * np.abs(kz)[:, None] / root
+        obliquity = np.abs(kz)[:, None] / root
     mapped *= np.where(root > 0.0, obliquity, 0.0)
 
     # Steep dips map to frequencies the record does not contain. Without
@@ -155,7 +193,7 @@ def migrate_fk(
 
     unsorted = np.empty_like(mapped)
     unsorted[order, :] = mapped
-    return np.real(np.fft.ifft2(unsorted))[:, pad : pad + n_traces]
+    return np.real(np.fft.ifft2(unsorted))[:n_samples, pad : pad + n_traces]
 
 
 @register

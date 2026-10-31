@@ -67,9 +67,19 @@ def _focus(out, row, trace, half=8):
     return float((box**2).sum() / (out**2).sum())
 
 
-def test_a_point_diffractor_collapses_to_its_apex():
+@pytest.mark.parametrize("depth_m", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+def test_a_point_diffractor_collapses_to_its_apex(depth_m):
+    """Every depth the record reaches, not one.
+
+    The spectrum of an event at two-way time `t` turns through `360*t/T`
+    degrees per frequency bin, for a record `T = 110.9 ns` long. Sampled at
+    `d_omega = 2*pi/T`, an event past `T/2` turns more than half a turn per
+    bin: it is aliased along the frequency axis, and no interpolator can
+    recover it. A single apex at 40 ns hides that completely -- it is the
+    last depth whose collapse still clears this threshold.
+    """
     n_samples, n_traces = 512, 640
-    apex_trace, apex_t_ns = 320, 40.0
+    apex_trace, apex_t_ns = 320, 2 * depth_m / V
     data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, apex_trace, apex_t_ns)
 
     out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
@@ -80,22 +90,59 @@ def test_a_point_diffractor_collapses_to_its_apex():
     # The collapse, not merely a narrowing: most of the energy inside a small
     # box around the apex. 0.5 is a literal chosen to sit above what blurring
     # achieves and below a true collapse, not derived from anything the solver
-    # computes. Measured: 0.10 unmigrated, 0.70 migrated at this velocity,
-    # 0.21 and 0.14 at 0.6x and 1.6x of it.
+    # computes. Measured at 1.5 m: 0.10 unmigrated, 0.97 migrated at this
+    # velocity, 0.17 and 0.12 at 0.6x and 1.6x of it.
     assert _focus(out, peak[0], peak[1]) > 0.5
 
 
-def test_a_constant_field_migrates_to_nothing():
-    """What pins the obliquity factor.
+def test_a_flat_reflector_comes_through_at_its_own_amplitude():
+    """Zero dip is the one case with nothing to migrate, so migration is
+    the identity there and the amplitude must survive it.
 
-    A constant carries no propagating wave, so there is nothing for
-    migration to move and the image is empty. The factor `vm*|kz|/root` is
-    what makes that true: it is zero at `kz == 0`, which is the whole of a
-    constant field's spectrum. Drop the factor and the constant comes
-    through untouched; invert it and `kz == 0` divides by zero.
+    What this pins is that the obliquity factor is the dimensionless
+    `|kz|/root` and not `vm*|kz|/root`: the `vm` is the Jacobian of a
+    change of variable the choice `kz = omega/vm` has already made, and
+    carrying it twice scales the whole image by the velocity the user
+    typed. At 0.0733 m/ns that is a factor of 27, which turns the
+    Difference view of a migration step into a copy of the record and
+    makes the image dim or brighten when the velocity is retyped.
     """
-    out = migrate_fk(np.full((256, 256), 5.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
-    assert np.abs(out).max() < 1e-9
+    data = np.zeros((512, 640))
+    data[200, :] = 1.0
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert np.abs(out).max() == pytest.approx(1.0, abs=0.1)
+
+
+def _plane_event(slope_ns_per_m, n_samples=512, n_traces=640, t_ns=40.0):
+    """A band-limited plane reflector dipping at `slope_ns_per_m`."""
+    times = np.arange(n_samples, dtype=float) * DT_NS
+    data = np.zeros((n_samples, n_traces))
+    for trace in range(n_traces):
+        t = t_ns + slope_ns_per_m * (trace - n_traces // 2) * DX_M
+        if not 2.0 < t < times[-1] - 2.0:
+            continue
+        arg = (np.pi * FC_GHZ * (times - t)) ** 2
+        data[:, trace] = (1 - 2 * arg) * np.exp(-arg)
+    return data
+
+
+def test_a_steep_reflector_does_not_come_out_louder_than_a_flat_one():
+    """What pins the obliquity factor, which is what weights dip.
+
+    `|kz|/root` is the cosine of the migration dip angle: 1 for a flat
+    event, falling as the dip steepens towards the evanescent limit. Drop
+    it and steep energy is not merely mis-weighted, it is **amplified** --
+    migration handing back more amplitude than the record contained, which
+    is the artefact class this milestone exists to remove. Measured at
+    24 ns/m (sin(dip) 0.88, near the limit): the steep event comes out at
+    0.94 of the flat one with the factor and at 2.01 without it.
+    """
+    flat = migrate_fk(_plane_event(0.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+    steep = migrate_fk(_plane_event(24.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert np.abs(steep).max() < np.abs(flat).max()
 
 
 def _flank_row(out, apex_trace, near=40, far=120):
@@ -123,16 +170,17 @@ def _wrong_velocity_case(mult):
 
 
 def test_too_slow_a_velocity_leaves_a_downward_residual():
-    """0.6x the truth: measured focus 0.215, flank energy 50 rows below the
-    apex. The 10-row margin is a sign test with room, not a tuned number."""
+    """0.6x the truth: measured focus 0.168 against 0.97 at the truth, and
+    flank energy 71 rows below the apex. The 10-row margin is a sign test
+    with room, not a tuned number."""
     _, focus, flank, apex_row = _wrong_velocity_case(0.6)
     assert focus < 0.5
     assert flank > apex_row + 10
 
 
 def test_too_fast_a_velocity_produces_an_upward_smile():
-    """1.6x the truth: measured focus 0.144, flank energy 31 rows above the
-    apex -- the opposite side from the under-migrated case."""
+    """1.6x the truth: measured focus 0.123, and flank energy 42 rows above
+    the apex -- the opposite side from the under-migrated case."""
     _, focus, flank, apex_row = _wrong_velocity_case(1.6)
     assert focus < 0.5
     assert flank < apex_row - 10
@@ -233,8 +281,9 @@ def test_padding_removes_the_wrap_at_the_far_end(n_traces):
     is, so a pad of zero still leaves 384 traces of zero fill and measures
     as if it worked. 974 + 2*244 rounds to 2048 with 830 traces of slack,
     while 974 + 2*24 rounds to 1024 with 24 -- less than the aperture, so
-    the wrap lands in the data. Measured: 4256x with the derived pad, 2.6x
-    with a tenth of it or none at all.
+    the wrap lands in the data. Measured far-end energy, unpadded over
+    padded: 47000x at 640 traces and 654x at 974 with the derived pad,
+    against 2.6x at 974 with a tenth of it or none at all.
     """
     n_samples = 512
     data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 60, 40.0)
@@ -262,16 +311,26 @@ def test_a_line_shorter_than_the_pad_still_migrates():
 
 
 def test_a_velocity_near_c_empties_the_image_rather_than_inventing_one():
-    """At 0.29 m/ns nearly every mapped frequency lands outside the band the
-    record actually contains, so there is nothing left to image. The result
-    must be visibly empty -- an image a user can tell is wrong -- rather
-    than the band edge smeared across it by an extrapolated interpolation.
+    """At 0.29 m/ns most of the mapped frequencies land outside the band the
+    record contains, so most of the record is discarded and what is left
+    does not focus. The user has to be able to see that it is wrong.
+
+    Measured against the same solver at a sane velocity, which is the only
+    standard that is free of the operator's own scaling: energy 0.80 of the
+    record at 0.0733 against 0.20 at 0.29, peak 6.76 against 0.21, focus
+    0.97 against 0.03. An earlier version of this test compared against the
+    input's energy and passed only because the image was then multiplied by
+    `vm`, so it was measuring the velocity rather than the cut.
     """
     data = _diffraction(512, 640, DT_NS, DX_M, V, 320, 40.0)
 
-    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=0.29)
+    sane = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+    near_c = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=0.29)
 
-    assert (out**2).sum() < 0.01 * (data**2).sum()
+    assert (near_c**2).sum() < 0.5 * (sane**2).sum()
+    assert np.abs(near_c).max() < 0.1 * np.abs(sane).max()
+    peak = np.unravel_index(np.argmax(np.abs(near_c)), near_c.shape)
+    assert _focus(near_c, peak[0], peak[1]) < 0.1
 
 
 def test_output_preserves_shape_dt_and_t0():
@@ -314,7 +373,7 @@ def test_migration_does_not_manufacture_trace_to_trace_oscillation():
     unreachable, and this is the input that reaches it. The standard is the
     record itself, not a chosen number: migration must not leave more of
     the image at the top of the band than the record put there. Measured
-    0.25 in, 0.15 out; without the cut, 0.70.
+    0.25 in, 0.14 out; without the cut, 0.70.
     """
     noise = np.random.default_rng(0).normal(size=(512, 256))
 

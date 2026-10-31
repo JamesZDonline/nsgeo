@@ -10,6 +10,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import Radargram
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import CoverageError, SliceWindow, fill, limit_over_slices, plan_windows
 from nsgeo.velocity import VelocityModel
@@ -1074,12 +1075,19 @@ def test_migration_reaches_the_cube_through_the_preset_alone(qgis_app, tmp_path)
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
-    counts = {"FILE__001.DZT": 60, "FILE__002.DZT": 97}
+    # Different trace counts AND different trace spacings: the aperture pad
+    # migration derives is `vm * t_max / dx_m`, so a shared `dx_m` would let
+    # one spacing stand in for both and the test would not notice.
+    shapes = {"FILE__001.DZT": (60, 60.0), "FILE__002.DZT": (97, 40.0)}
     lines = []
-    for i, (name, n_traces) in enumerate(counts.items()):
-        path = synthetic_dzt(tmp_path / "raw", name, n_traces=n_traces)
+    for i, (name, (n_traces, tpm)) in enumerate(shapes.items()):
+        path = synthetic_dzt(tmp_path / "raw", name, n_traces=n_traces, traces_per_metre=tpm)
         lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
     session.add_lines(lines)
+    assert sorted(round(Radargram.from_profile(line.load()[0]).dx_m, 6) for line in lines) == [
+        round(1 / 60.0, 6),
+        round(1 / 40.0, 6),
+    ]
     session.site.presets["plain"] = [MIGRATING_PRESET[0]]
     session.site.presets["migrating"] = list(MIGRATING_PRESET)
 
