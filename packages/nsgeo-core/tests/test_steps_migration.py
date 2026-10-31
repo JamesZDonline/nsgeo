@@ -380,3 +380,26 @@ def test_migration_does_not_manufacture_trace_to_trace_oscillation():
     out = migrate_fk(noise, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
 
     assert _top_kx_fraction(out) <= _top_kx_fraction(noise)
+
+
+def test_a_shallow_diffractor_does_not_reappear_at_the_bottom_of_the_record():
+    """Migration moves energy up the record, and a transform over the
+    record's own length alone makes the time axis circular: energy moving
+    up past t = 0 comes back in at the bottom, as a band of invented
+    reflectivity under everything shallow and strong. On a real line that
+    left the bottom tenth holding 6.8x the middle's energy, against 0.56x
+    in the record itself. `_T_OVERSAMPLE` is what gives that energy
+    somewhere to go instead.
+
+    The standard is the record, not a chosen number. Measured for a 6 ns
+    apex: the bottom tenth holds 3.4e-4 of the record and 2.0e-6 of the
+    image; over the record's own length alone it holds 5.9e-2, thirty
+    thousand times more.
+    """
+    n_samples, n_traces = 512, 640
+    data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 320, 6.0)
+    deep = slice(9 * n_samples // 10, n_samples)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert (out[deep] ** 2).sum() / (out**2).sum() < (data[deep] ** 2).sum() / (data**2).sum()
