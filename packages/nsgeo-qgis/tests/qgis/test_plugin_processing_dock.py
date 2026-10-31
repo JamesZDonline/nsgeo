@@ -458,3 +458,37 @@ def test_the_prefill_is_a_seed_not_a_link(opened):
 
     step, _ = session.stack_for(key).entries[0]
     assert step.params["velocity_m_ns"] == pytest.approx(0.0733)
+
+
+def test_the_step_row_says_when_its_velocity_is_not_this_lines(opened):
+    """The hazard in a prefilled value is not being wrong, it is being
+    silent: a velocity frozen three lines ago looks identical to one that
+    belongs to the open line. 0.0733 against this line's 0.0801 is 8.5%
+    apart -- both literals, neither computed from the threshold."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+
+    text = dock.list.item(0).text()
+
+    assert "0.0733 m/ns" in text
+    assert "this line says 0.0801" in text
+
+
+def test_the_step_row_says_nothing_when_they_agree(opened):
+    """0.0810 against this line's 0.0801 is 1.1% apart -- a different
+    number, inside the band, so no read-out. A threshold that fired on any
+    difference at all would fire on every step ever added."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0810))
+
+    text = dock.list.item(0).text()
+
+    assert "0.0810 m/ns" in text
+    assert "this line says" not in text
+
+
+def test_a_step_without_a_velocity_keeps_its_plain_title(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("dewow"))
+
+    assert dock.list.item(0).text() == "Dewow"

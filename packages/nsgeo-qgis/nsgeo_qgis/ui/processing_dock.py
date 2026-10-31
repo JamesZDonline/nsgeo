@@ -44,6 +44,18 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
 
+#: How far a step's own velocity may sit from the open line's resolved
+#: velocity before the step's row says so, as a fraction of the line's.
+#:
+#: 2% of a typical 0.08 m/ns is 0.0016 m/ns, which is smaller than the
+#: standard error on a single hyperbola fit (M13 measured 0.0701 +/- 0.0018
+#: and 0.0733 +/- 0.0024 on real ground). So anything the row flags is at
+#: least a one-sigma difference, not two readings of the same number.
+#: Deliberately a constant and not derived from either velocity it
+#: compares: a threshold computed from one of its own operands pins
+#: nothing.
+_VELOCITY_MISMATCH_FRACTION = 0.02
+
 
 def dest_index(start: int, row: int) -> int:
     """Translate QAbstractItemModel.rowsMoved's destination row (the row the
@@ -290,7 +302,7 @@ class ProcessingDock(QgsDockWidget):
             self.list.clear()
             if key is not None:
                 for step, enabled in self.session.stack_for(key).entries:
-                    item = QListWidgetItem(step.title)
+                    item = QListWidgetItem(self.row_label(step, key))
                     item.setToolTip(step.name)
                     item.setFlags(
                         Qt.ItemFlag.ItemIsSelectable
@@ -311,6 +323,28 @@ class ProcessingDock(QgsDockWidget):
             w.setEnabled(has_line)
         self._update_row_buttons()
         self.step_selected.emit(self.list.currentRow())
+
+    def row_label(self, step: Any, key: str) -> str:
+        """A step's row text: its title, plus its velocity when it carries
+        one, plus the open line's velocity when the two disagree.
+
+        A prefilled velocity's hazard is not being wrong, it is being
+        silent -- one frozen three lines ago looks exactly like one that
+        belongs to the line on screen. So the row says both numbers and
+        the user decides. No refusal, no auto-correction, no dialog.
+
+        Keyed off the parameter rather than off `migrate_fk`, so a second
+        migration step (phase-shift, for v(z)) gets the same read-out
+        without this method learning its name.
+        """
+        velocity = step.params.get("velocity_m_ns")
+        if velocity is None:
+            return str(step.title)
+        label = f"{step.title} \u2014 {velocity:.4f} m/ns"
+        resolved = self.session.resolved_velocity(key).surface_velocity
+        if resolved > 0 and abs(velocity - resolved) / resolved > _VELOCITY_MISMATCH_FRACTION:
+            label += f" \u00b7 this line says {resolved:.4f}"
+        return label
 
     def _update_row_buttons(self) -> None:
         row = self.list.currentRow()
