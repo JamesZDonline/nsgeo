@@ -217,7 +217,8 @@ def test_the_time_zero_tolerance_is_in_time_not_depth(velocity_m_ns):
 # ---- the pad -------------------------------------------------------------
 
 
-def test_padding_removes_the_wrap_at_the_far_end():
+@pytest.mark.parametrize("n_traces", [640, 974])
+def test_padding_removes_the_wrap_at_the_far_end(n_traces):
     """A measurement, not an assertion that padding happened.
 
     The artefact the pad exists to prevent is the FFT's circular wrap:
@@ -225,8 +226,17 @@ def test_padding_removes_the_wrap_at_the_far_end():
     put a diffractor 1 m from the left end, migrate with the derived pad and
     with none, and compare what lands in the rightmost tenth of the line --
     where nothing was recorded and nothing should arrive.
+
+    Two lengths, because rounding the transform up to a power of two is
+    itself padding and can hide the absence of the real one. 640 is a real
+    line (the local files are 606-666) and rounds to 1024 whatever the pad
+    is, so a pad of zero still leaves 384 traces of zero fill and measures
+    as if it worked. 974 + 2*244 rounds to 2048 with 830 traces of slack,
+    while 974 + 2*24 rounds to 1024 with 24 -- less than the aperture, so
+    the wrap lands in the data. Measured: 4256x with the derived pad, 2.6x
+    with a tenth of it or none at all.
     """
-    n_samples, n_traces = 512, 640
+    n_samples = 512
     data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 60, 40.0)
     far = slice(int(n_traces * 0.9), n_traces)
 
@@ -280,3 +290,34 @@ def test_output_preserves_shape_dt_and_t0():
     assert out.dt_ns == rg.dt_ns
     assert out.t0_ns == rg.t0_ns
     assert out.dx_m == rg.dx_m
+
+
+def _top_kx_fraction(image):
+    """Fraction of the image's energy in the top quarter of the spatial
+    frequency band -- the trace-to-trace oscillation end of it."""
+    power = np.abs(np.fft.fft(image, axis=1)) ** 2
+    top = np.abs(np.fft.fftfreq(image.shape[1])) > 0.375
+    return float(power[:, top].sum() / power.sum())
+
+
+def test_migration_does_not_manufacture_trace_to_trace_oscillation():
+    """What zeroing the out-of-band region is for.
+
+    Steep dips map to frequencies the record does not contain. Left to
+    itself the interpolation extrapolates from the band edge instead, by a
+    factor that grows without bound as the dip steepens -- so the artefact
+    arrives at the top of the spatial band, as oscillation from one trace
+    to the next.
+
+    White noise, because real GPR data is band-limited and has nothing near
+    its own Nyquist to extrapolate from: with a 350 MHz wavelet the cut is
+    unreachable, and this is the input that reaches it. The standard is the
+    record itself, not a chosen number: migration must not leave more of
+    the image at the top of the band than the record put there. Measured
+    0.25 in, 0.15 out; without the cut, 0.70.
+    """
+    noise = np.random.default_rng(0).normal(size=(512, 256))
+
+    out = migrate_fk(noise, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert _top_kx_fraction(out) <= _top_kx_fraction(noise)
