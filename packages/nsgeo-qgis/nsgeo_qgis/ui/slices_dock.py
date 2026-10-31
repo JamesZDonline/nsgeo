@@ -166,8 +166,9 @@ class SlicesDock(QgsDockWidget):
         #: #70: a grid switch left the engine on the grid that was left; its
         #: resolution is the spins' to apply once the new grid is prepared.
         self._resolution_owed = False
-        #: The fill radius (cells) the drawn This-grid slice used, so a line
-        #: spacing edit that changes it (#72) can redraw.
+        #: The fill radius (cells) at the last successful This-grid draw, a
+        #: coverage draw included, so a line spacing edit that changes it
+        #: (#72) can redraw. Set by `refresh_slice`.
         self._filled_radius_cells: int | None = None
         #: The survey the site scope's memory belongs to.
         self._site_seen: Any = None
@@ -219,8 +220,11 @@ class SlicesDock(QgsDockWidget):
         #: must still pick up the lines that arrive after the seed -- this
         #: flag is what tells `_sync_included` it is still allowed to
         #: re-seed rather than merely prune. Cleared the moment the user
-        #: makes an explicit choice (`set_included`), and set again only by
-        #: an actual grid change.
+        #: makes an explicit, non-empty choice (`set_included`). Set again by
+        #: an actual grid change and by a prune that empties the user's
+        #: choice (#74); a restored line choice (`_restore_remembered_source`,
+        #: `restore_cube`, `_follow_record_changed_in_site`) sets it to
+        #: whether what it restored means every line.
         self._included_is_default = True
         #: The current slice's own values (post coverage/fill) and the
         #: `SliceWindow` they came from, as `refresh_slice()` last left
@@ -1365,7 +1369,8 @@ class SlicesDock(QgsDockWidget):
         cutoff has since cropped at 50 -- which clamps end by end to z1 < z0.
         The clamp is no edit: the remembered values stand, so a later crop
         that frees the range brings them back on the next grid change or
-        reopen.
+        reopen -- unless the user edits the other end meanwhile, against the
+        range shown (Ruling 15, `_edited_fields`).
         """
         bounds = self.engine.prepared_z_bounds()
         if bounds is None:
@@ -2191,18 +2196,24 @@ class SlicesDock(QgsDockWidget):
                 self.window_cleared.emit()
                 return
             values, coverage = self.engine.slice_at(window)
+            radius = self.radius_cells()
             if self.coverage_check.isChecked():
                 shown = coverage.astype(float)
                 shown[coverage == 0] = np.nan
             else:
-                self._filled_radius_cells = self.radius_cells()
-                shown = fill(values, coverage, self._filled_radius_cells)
+                shown = fill(values, coverage, radius)
             self._values = shown
             self._window = window
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
             self.status_label.setText(self._grid_status_text())
+            # Recorded only once the draw succeeded, and by a coverage draw
+            # too (#72): `rebuild_source` redraws when the radius in cells
+            # differs from this, so a value left over from an earlier fill
+            # redrew the coverage view on every session signal. Unticking
+            # coverage redraws through its own toggle, at the radius then.
+            self._filled_radius_cells = radius
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.

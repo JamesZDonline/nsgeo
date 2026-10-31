@@ -552,6 +552,7 @@ def _load_with_resolution(tmp_path, resolution):
         {"t0_ns": 9.0, "t1_ns": 2.0},
         {"colour": 1},
         {"dz_ns": float("nan")},
+        {"cell": 10**400},
     ],
     ids=[
         "list",
@@ -565,11 +566,34 @@ def _load_with_resolution(tmp_path, resolution):
         "reversed-z-range",
         "unknown-key",
         "nan-dz",
+        "huge-int-cell",
     ],
 )
 def test_a_bad_remembered_resolution_value_reads_as_unset(tmp_path, resolution):
     loaded = _load_with_resolution(tmp_path, resolution)
     assert loaded.slice_sources == {"A": {"preset": "p"}}
+    assert loaded.site_view == {"transform": "none"}
+
+
+def test_an_integer_too_large_for_a_float_reads_as_unset_and_the_survey_opens(tmp_path):
+    """Review Focus 2: JSON has no size limit on an integer, and one too large
+    for a float made the loader raise OverflowError instead of reading the
+    value as unset, for a resolution field and for a gain alike."""
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {
+        "A": {"preset": "p", "gain": 10**400},
+        "B": {"preset": "p", "resolution": {"cell": 10**400, "dz_ns": 0.25}},
+    }
+    doc["site_view"] = {"transform": "none", "resolution": {"t1_ns": -(10**400)}}
+    path.write_text(json.dumps(doc))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {
+        "A": {"preset": "p"},
+        "B": {"preset": "p", "resolution": {"dz_ns": 0.25}},
+    }
     assert loaded.site_view == {"transform": "none"}
 
 

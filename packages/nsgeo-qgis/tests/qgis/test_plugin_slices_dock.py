@@ -695,6 +695,24 @@ def test_the_radius_follows_a_line_spacing_edit(docked):
     assert np.isfinite(dock.current_values()).sum() > finite_before
 
 
+def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
+    """#72's redraw on a spacing edit compares the radius in cells with the
+    one the last draw used. A coverage draw left that unrecorded, so after a
+    cell edit every session signal redrew the coverage view."""
+    dock, session = docked
+    _ready(dock)
+    dock.coverage_check.setChecked(True)
+    before = dock.radius_cells()
+    dock.cell_spin.setValue(0.05)
+    dock.flush_debounce()
+    assert dock.radius_cells() != before
+    drawn: list[None] = []
+    dock.slice_changed.connect(lambda: drawn.append(None))
+    for _ in range(3):
+        session.presets_changed.emit()
+    assert drawn == []
+
+
 def test_a_seeded_radius_emits_no_value_changed(docked_two_grids):
     """The seed is not an edit: Task 4's memory hangs on `valueChanged`."""
     dock, _ = docked_two_grids
@@ -2242,6 +2260,37 @@ def test_an_edit_after_a_clamp_that_left_the_range_usable_keeps_the_remembered_e
     z1 = round(low + 0.5 * (high - low), 3)
     dock.z1_spin.setValue(z1)
     assert session.slice_resolution("A") == {"t0_ns": low - 5.0, "t1_ns": z1}
+
+
+def test_a_hand_resolution_on_an_empty_grid_survives_its_lines_arriving(qgis_app, tmp_path):
+    """#71, the ordinary new-survey flow: a grid picked before it has lines,
+    dz and z1 set by hand, then the lines imported. dz/z0/z1 are seeded only
+    once a line exists, after the grid change, so that late seed must lay
+    what the user chose back over itself (`_seed_dz_z_defaults`' restore)."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        assert dock.grid_combo.currentText() == "A"
+        dock.dz_spin.setValue(0.5)
+        dock.z1_spin.setValue(30.0)
+        remembered = {"dz_ns": 0.5, "t1_ns": 30.0}
+        assert session.slice_resolution("A") == remembered
+        session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+        header = session.line_for_key(session.keys()[0]).header
+        assert dock.z0_spin.value() == pytest.approx(header.position_ns, abs=1e-3), "seeded"
+        assert (dock.dz_spin.value(), dock.z1_spin.value()) == (0.5, 30.0)
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        assert dock.engine.z.dz_ns == pytest.approx(0.5)
+        assert dock.engine.z.t_end_ns == pytest.approx(30.0, abs=0.5)
+        assert dock.current_values() is not None
+        assert session.slice_resolution("A") == remembered
+    finally:
+        _dispose(dock)
 
 
 def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_grids):

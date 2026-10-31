@@ -765,7 +765,8 @@ class SiteScope:
         As in M11 (Review Focus 1), a range the clamp would leave empty
         (z1 <= z0), such as a remembered one wholly past the data, takes the
         bounds at both ends. The record is never written here: it stands, for
-        a later crop that frees the range."""
+        a later crop that frees the range, until the user edits the other end
+        against the range shown (Ruling 15, `SlicesDock._edited_fields`)."""
         from nsgeo_qgis.ui.slices_dock import _snap_inside  # the dock imports this module
 
         dock = self.dock

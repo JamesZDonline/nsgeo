@@ -169,7 +169,8 @@ def test_a_persistently_failing_update_from_a_corrupt_file_keeps_the_scratch_fol
 ):
     """The faked test above replaces `_repoint`. Here the real one runs and
     meets a file GDAL cannot open, on every tick (#54): the folder must hold
-    only what the layer reads, and the layer must still point at a file that
+    only the file the layer reads and the last good one `self.path` names,
+    each with its sidecars, and the layer must still point at a file that
     exists."""
     sl, _, _, _ = mapped
     _update(sl, 1.0)

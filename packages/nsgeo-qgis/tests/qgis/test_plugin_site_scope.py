@@ -1754,6 +1754,13 @@ def test_a_grid_removed_inside_the_wait_window_clamps_the_fallback_grid(plugin, 
     plugin.session.remove_grid("B", with_lines=True)
     _events()
     assert dock.grid_combo.currentText() == "A"
+    # The engine already holds A, so `_assert_a_slice_is_drawn_on_a`'s own
+    # wait passes at once. The owed clamp runs only once the site task dies;
+    # waiting for that, not for a fixed time, catches a dropped clamp on any
+    # machine.
+    assert spin_until(
+        lambda: not dock.site_engine.has_live_task and not dock._resolution_owed, 30_000
+    )
     _assert_a_slice_is_drawn_on_a(dock, errors)
 
 

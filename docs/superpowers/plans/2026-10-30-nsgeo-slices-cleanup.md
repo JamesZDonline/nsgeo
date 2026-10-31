@@ -215,6 +215,7 @@ These are the inputs most likely to hurt a user that the issues don't name. Each
 - Test: `packages/nsgeo-qgis/tests/qgis/test_plugin_site_scope.py`
 
 **Interfaces:**
+- Superseded during execution by Ruling 14: the site's z bounds are custom per field from the remembered record (`SiteScope.seed_z`); `z_custom` and `seed_z_from_ready` were removed.
 - Consumes: Task 4's `site_resolution()`, `remember_site_resolution(...)` and `_on_resolution_edited`.
 - `_on_resolution_edited`, site branch: when `self._scope == "site"`, for `cell`, `dz_ns`, `t0_ns` and `t1_ns`, call `session.remember_site_resolution(**{field: value})`. For `dz_ns`, `t0_ns` and `t1_ns`, also set `self._site.z_custom = True`. This replaces `SiteScope._note_z_edit`, which is deleted with its three connections; it was the unguarded slot #75 names. `grid_radius_spin` is hidden in site scope, so its field never arrives here.
 - `SiteScope._on_radius_changed`: still guarded. While `self.showing and not self.dock._updating`, it also calls `session.remember_site_resolution(radius_spacings=value)`. Every programmatic set of `radius_spacing_spin` goes through the new `set_radius_quietly(dock: Any, value: float) -> None` (signals blocked).

@@ -217,6 +217,21 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
 _RESOLUTION_KEYS = ("cell", "dz_ns", "t0_ns", "t1_ns", "radius_spacings")
 
 
+def _finite(value: object) -> float | None:
+    """`value` as a finite float, or None: for a non-number, a bool, NaN, an
+    infinity, or an integer too large for a float. JSON sets no limit on an
+    integer's size and `float()` overflows on one, so without the last a
+    hand-edited value blocked the survey from opening instead of reading as
+    unset (Review Focus 2, #71). Shared by the loader's tolerant cleaners."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _clean_resolution(value: object) -> dict[str, float]:
     """A remembered resolution (#71), each field kept only if usable.
 
@@ -230,9 +245,9 @@ def _clean_resolution(value: object) -> dict[str, float]:
         return {}
     out: dict[str, float] = {}
     for key in _RESOLUTION_KEYS:
-        raw = value.get(key)
-        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
-            out[key] = float(raw)
+        number = _finite(value.get(key))
+        if number is not None:
+            out[key] = number
     for key in ("cell", "dz_ns"):
         if key in out and out[key] <= 0:
             del out[key]
@@ -253,14 +268,9 @@ def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
             out["lines"] = None
         elif isinstance(lines, list) and all(isinstance(k, str) for k in lines):
             out["lines"] = list(lines)
-    gain = entry.get("gain")
-    if (
-        isinstance(gain, (int, float))
-        and not isinstance(gain, bool)
-        and math.isfinite(gain)
-        and gain > 0
-    ):
-        out["gain"] = float(gain)
+    gain = _finite(entry.get("gain"))
+    if gain is not None and gain > 0:
+        out["gain"] = gain
     resolution = _clean_resolution(entry.get("resolution"))
     if resolution:
         out["resolution"] = resolution
