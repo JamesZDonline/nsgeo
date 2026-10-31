@@ -57,6 +57,7 @@ def test_add_menu_is_grouped_in_processing_order(opened):
         ("Time", ["time_zero", "time_cutoff"]),
         ("Filters", ["dewow", "bandpass"]),
         ("Background", ["background_mean", "background_sliding", "background_svd"]),
+        ("Migration", ["migrate_fk"]),
         ("Gain", ["gain_curve", "gain_agc", "gain_parametric"]),
     ]
 
@@ -89,7 +90,13 @@ def test_add_menu_headings_draw_on_every_style_and_cannot_be_chosen(opened):
     _, dock, _ = opened
     actions = dock.add_menu.actions()
     headings = [a for a in actions if isinstance(a, QWidgetAction)]
-    assert [h.defaultWidget().text() for h in headings] == ["Time", "Filters", "Background", "Gain"]
+    assert [h.defaultWidget().text() for h in headings] == [
+        "Time",
+        "Filters",
+        "Background",
+        "Migration",
+        "Gain",
+    ]
     assert not any(h.isEnabled() for h in headings)
     assert not any(a.isSeparator() and a.text() for a in actions)  # no addSection
 

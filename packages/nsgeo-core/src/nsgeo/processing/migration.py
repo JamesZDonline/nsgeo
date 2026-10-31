@@ -76,8 +76,8 @@ def migrate_fk(
         depth_m = velocity_m_ns / 2.0 * abs(t0_ns)
         raise ValueError(
             f"time zero is not corrected: this record starts at {t0_ns:.2f} ns, which "
-            f"puts everything in it {depth_m:.2f} m off. Add a Time zero step "
-            f"(time_zero) ahead of migration."
+            f"puts everything in it {depth_m:.2f} m off. Correct it with a Time zero "
+            f"step (time_zero) ahead of migration."
         )
     arr = np.asarray(data, dtype=float)
     if not np.all(np.isfinite(arr)):

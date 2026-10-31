@@ -1051,3 +1051,55 @@ def test_residency_is_chosen_from_the_prepared_trace_count(sourced, monkeypatch)
     monkeypatch.setattr(slices_plan, "STREAM_MS_PER_TRACE", slices_plan.FRAME_BUDGET_MS / 200)
     engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
     assert engine.mode == "resident"
+
+
+#: Migration in a preset. `sample` mode rather than `first_break` because
+#: the synthetic's flat band sits at row 40, nine samples earlier than a
+#: real first break (k=49 on every local line), which would leave t0 at
+#: -2.43 ns -- outside migration's 2.0 ns tolerance. Sample 51 lands it at
+#: -0.04 ns, which is where a real line's time zero ends up.
+MIGRATING_PRESET = [
+    {"step": "time_zero", "params": {"mode": "sample", "sample": 51}, "enabled": True},
+    {"step": "migrate_fk", "params": {"velocity_m_ns": 0.0733}, "enabled": True},
+]
+
+
+def test_migration_reaches_the_cube_through_the_preset_alone(qgis_app, tmp_path):
+    """Spec section 8: the slices engine needs no change at all.
+
+    Two lines of DIFFERENT trace counts, one preset, one velocity. Each
+    comes back migrated, at its own trace count and its own dx_m, with
+    nothing carried from one `apply` call into the next.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    counts = {"FILE__001.DZT": 60, "FILE__002.DZT": 97}
+    lines = []
+    for i, (name, n_traces) in enumerate(counts.items()):
+        path = synthetic_dzt(tmp_path / "raw", name, n_traces=n_traces)
+        lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["plain"] = [MIGRATING_PRESET[0]]
+    session.site.presets["migrating"] = list(MIGRATING_PRESET)
+
+    errors: list[str] = []
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="plain")
+        plain = {line.key: np.array(line.data) for line in engine.prepared_lines()}
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="migrating")
+        migrated = {line.key: np.array(line.data) for line in engine.prepared_lines()}
+    finally:
+        engine.dispose()
+
+    assert errors == []
+    assert len(migrated) == 2
+    for key, before in plain.items():
+        after = migrated[key]
+        assert after.shape == before.shape, "migration must not change the trace count"
+        assert np.all(np.isfinite(after))
+        assert not np.allclose(after, before), f"{key} came back unmigrated"
+    # Each at its own trace count, so one preset really did serve two
+    # differently shaped lines.
+    assert sorted(a.shape[1] for a in migrated.values()) == [60, 97]

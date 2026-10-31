@@ -228,3 +228,29 @@ def test_from_profile_casts_to_float_and_copies_the_header_axis(tmp_path):
     assert rg_out.t0_ns == pytest.approx(profile.header.position_ns)
     assert rg_out.n_traces == profile.n_traces
     assert rg_out.data is not profile.data
+
+
+def test_from_profile_derives_dx_from_traces_per_metre(tmp_path):
+    """Trace spacing is the one piece of acquisition context a step needs,
+    and it comes from the header -- the same quantity
+    `GridPlacement.distance_along` already uses. No new source of truth."""
+    path = tmp_path / "L0.DZT"
+    write_dzt(path, np.zeros((512, 4), dtype=np.int32), traces_per_metre=60.0)
+    profile = Line.open(path, GridPlacement(grid_id="G1", axis="y", offset=0.0)).load()[0]
+
+    assert Radargram.from_profile(profile).dx_m == pytest.approx(1 / 60.0)
+
+
+def test_from_profile_leaves_dx_none_for_a_time_triggered_file(tmp_path):
+    """Collected on a timer, not a survey wheel: there is no spatial axis,
+    which is the same condition `GridPlacement` already refuses on. None,
+    not a guess, so migration can refuse rather than run on trace index."""
+    path = tmp_path / "L0.DZT"
+    write_dzt(path, np.zeros((512, 4), dtype=np.int32), traces_per_metre=0.0)
+    profile = Line.open(path, GridPlacement(grid_id="G1", axis="y", offset=0.0)).load()[0]
+
+    assert Radargram.from_profile(profile).dx_m is None
+
+
+def test_dx_m_defaults_to_none_so_existing_constructions_are_untouched():
+    assert Radargram(data=np.zeros((4, 4)), dt_ns=0.2, t0_ns=0.0).dx_m is None
