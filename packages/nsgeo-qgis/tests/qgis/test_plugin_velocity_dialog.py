@@ -411,3 +411,326 @@ def test_drawing_the_saved_curves_changes_the_picture(plugin):
     with_curve = view.grab().toImage()
     view.set_saved_velocity_fits([])
     assert view.grab().toImage() != with_curve
+
+
+# ---- deleting a saved fit ----------------------------------------------------
+
+
+def _answer_delete(answer_modal, button):
+    """Answer the delete prompt. Later questions (unload's save prompt) get
+    the same answer, which is harmless in a throwaway site folder."""
+    return answer_modal(QMessageBox, "question", button)
+
+
+def test_delete_is_enabled_only_while_a_fit_is_selected(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
+    dialog = _dialog(plugin)
+    assert not dialog.delete_button.isEnabled()
+
+    dialog.select_fit(fit_id)
+    assert dialog.delete_button.isEnabled()
+
+    dialog.table.clearSelection()
+    assert not dialog.delete_button.isEnabled()
+
+
+def test_delete_asks_which_fit_then_removes_it_from_the_line_and_the_list(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    keep = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.1500, 0.0040))
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(bad)
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "41.0 ns" in args[2] and "0.1500" in args[2]  # names the fit being deleted
+    assert set(s.line_for_key(key).velocity_fits) == {keep}
+    assert dialog.table.rowCount() == 1
+    assert dialog.fit_id_at_row(0) == keep
+    assert not dialog.delete_button.isEnabled()  # nothing is selected any more
+
+
+def test_answering_no_keeps_the_fit(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.No)
+    dialog = _dialog(plugin)
+    dialog.select_fit(fit_id)
+
+    dialog.delete_button.click()
+
+    assert fit_id in s.line_for_key(key).velocity_fits
+    assert dialog.table.rowCount() == 1
+
+
+def test_deleting_the_odd_fit_out_clears_the_disagreement_flag_on_the_rest(plugin, answer_modal):
+    ids, flagged, dialog = _flagged(plugin, (0.090, 0.002), (0.150, 0.002))
+    assert flagged == frozenset(ids)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog.select_fit(ids[1])
+
+    dialog.delete_button.click()
+
+    assert dialog.flagged_fit_ids() == frozenset()
+    assert dialog.flag_text(0) == ""
+
+
+def test_deleting_the_fit_behind_the_velocity_says_the_velocity_stays(plugin, answer_modal):
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    s.set_velocity_from_fit(key, fit_id)
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)  # opens with the applied fit selected
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "line's velocity" in args[2]  # the prompt warns before, not after
+    assert s.line_for_key(key).velocity == VelocityModel.constant(0.09)
+    assert velocity_source(s, key) == "line override"
+
+
+def test_the_prompt_for_a_fit_not_behind_the_velocity_does_not_mention_the_velocity(
+    plugin, answer_modal
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    fit_id = s.add_velocity_fit(key, _stored(18.0, 0.0900))
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(fit_id)
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "line's velocity" not in args[2]
+
+
+def test_after_a_delete_the_spin_box_shows_the_lines_own_velocity_again(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.0777))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.1500))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(bad)
+    assert dialog.spin.value() == pytest.approx(0.15)  # selecting copied the fit's velocity
+
+    dialog.delete_button.click()
+
+    assert dialog.spin.value() == pytest.approx(0.0777)  # not the deleted fit's number
+    assert dialog.selected_fit_id() is None
+
+
+def test_a_delete_stands_even_when_the_dialog_is_then_cancelled(plugin, answer_modal, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.15))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(
+        QDialog, "exec", lambda d: (d.select_fit(bad), d.delete_button.click(), d.reject())
+    )
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity_fits == {}
+    assert line.velocity is None  # deleting set no velocity on the way
+
+
+# ---- the selected fit, lit on the profile -------------------------------------
+
+
+def _highlighted_apex(view):
+    i = view._saved_velocity_highlight
+    if i is None:
+        return None
+    return min(view._saved_velocity_curves[i], key=lambda p: p[1])[0]
+
+
+def test_the_fit_selected_in_the_dialog_is_lit_on_the_profile_until_it_closes(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    shallow_left = s.add_velocity_fit(key, _stored(12.0, 0.12, apex=20))
+    deep = s.add_velocity_fit(key, _stored(41.0, 0.10, apex=40))
+    seen = []
+
+    def _drive(d):
+        d.select_fit(shallow_left)
+        seen.append(_highlighted_apex(view))
+        d.select_fit(deep)
+        seen.append(_highlighted_apex(view))
+        d.reject()
+
+    drive_dialog(QDialog, "exec", _drive)
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen[0] == pytest.approx(20, abs=0.5)
+    assert seen[1] == pytest.approx(40, abs=0.5)
+    assert view._saved_velocity_highlight is None
+
+
+def test_the_fit_behind_the_velocity_is_lit_as_the_dialog_opens(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    applied = s.add_velocity_fit(key, _stored(41.0, 0.12, apex=20))
+    s.set_line_velocity(key, VelocityModel.constant(0.12))
+    s.set_velocity_from_fit(key, applied)
+    seen = []
+    drive_dialog(QDialog, "exec", lambda d: (seen.append(_highlighted_apex(view)), d.reject()))
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen == [pytest.approx(20, abs=0.5)]
+
+
+def test_a_deleted_fit_is_no_longer_lit(plugin, answer_modal, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
+    bad = s.add_velocity_fit(key, _stored(41.0, 0.15, apex=20))
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    seen = []
+
+    def _drive(d):
+        d.select_fit(bad)
+        d.delete_button.click()
+        seen.append((view._saved_velocity_highlight, len(view._saved_velocity_curves)))
+        d.reject()
+
+    drive_dialog(QDialog, "exec", _drive)
+
+    plugin.open_velocity_dialog(key)
+
+    assert seen == [(None, 1)]
+
+
+def test_a_dialog_for_a_line_the_profile_is_not_showing_lights_nothing(plugin, drive_dialog):
+    s = plugin.session
+    other = s.keys()[1]
+    view = plugin.profile_dock.view
+    s.add_velocity_fit(s.keys()[0], _stored(18.0, 0.09))
+    fit_id = s.add_velocity_fit(other, _stored(41.0, 0.12))
+    seen = []
+    drive_dialog(
+        QDialog,
+        "exec",
+        lambda d: (d.select_fit(fit_id), seen.append(view._saved_velocity_highlight), d.reject()),
+    )
+
+    plugin.open_velocity_dialog(other)
+
+    assert seen == [None]
+
+
+def test_a_lit_saved_curve_is_drawn_stronger_than_an_unlit_one(plugin):
+    view = plugin.profile_dock.view
+    curve = [(float(t), 10.0 + 0.5 * t) for t in range(60)]
+    view.set_saved_velocity_fits([])
+    view.grab()  # warm-up: the first paint after a change is not the settled one
+    none = view.grab().toImage()
+    view.set_saved_velocity_fits([curve])
+    view.grab()
+    unlit = view.grab().toImage()
+    view.set_saved_velocity_fits([curve], highlighted=0)
+    view.grab()
+    lit = view.grab().toImage()
+
+    def _ink(img):
+        """Summed colour change against the empty picture: more, stronger
+        pixels means a bolder line."""
+        total = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                a, b = img.pixelColor(x, y), none.pixelColor(x, y)
+                total += abs(a.red() - b.red()) + abs(a.green() - b.green())
+                total += abs(a.blue() - b.blue())
+        return total
+
+    assert _ink(lit) > 2 * _ink(unlit) > 0
+
+
+def test_deleting_another_fit_leaves_the_applied_fit_selected_so_apply_keeps_it(
+    plugin, answer_modal, drive_dialog
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
+    other = s.add_velocity_fit(key, _stored(41.0, 0.15))
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    s.set_velocity_from_fit(key, applied)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(
+        QDialog,
+        "exec",
+        lambda d: (d.select_fit(other), d.delete_button.click(), d.accept()),
+    )
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity_from_fit == applied
+    assert line.velocity == VelocityModel.constant(0.09123456)  # not the box's 0.0912
+
+
+def test_apply_after_deleting_the_fit_behind_the_velocity_keeps_the_velocity_exactly(
+    plugin, answer_modal, drive_dialog
+):
+    s, key = plugin.session, plugin.session.keys()[0]
+    applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    s.set_velocity_from_fit(key, applied)
+    _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    drive_dialog(QDialog, "exec", lambda d: (d.delete_button.click(), d.accept()))
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09123456)  # "stays as it is"
+    assert line.velocity_from_fit is None
+
+
+def test_a_number_typed_over_the_untouched_override_still_applies(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
+    drive_dialog(QDialog, "exec", lambda d: (d.spin.setValue(0.0950), d.accept()))
+
+    plugin.open_velocity_dialog(key)
+
+    assert s.line_for_key(key).velocity == VelocityModel.constant(0.095)
+
+
+def test_a_lit_saved_curve_shows_over_a_working_curve_on_the_same_line(plugin):
+    """Select the fit just saved from the working points, and the two curves
+    coincide: the lit one must still be visible."""
+    view = plugin.profile_dock.view
+    curve = [(float(t), 10.0 + 0.5 * t) for t in range(60)]
+
+    def _picture(working, saved, highlighted):
+        view.set_velocity_fit([], working)
+        view.set_saved_velocity_fits(saved, highlighted=highlighted)
+        view.grab()  # warm-up: the first paint after a change is not the settled one
+        return view.grab().toImage()
+
+    def _ink(a, b):
+        total = 0
+        for y in range(a.height()):
+            for x in range(a.width()):
+                p, q = a.pixelColor(x, y), b.pixelColor(x, y)
+                total += abs(p.red() - q.red()) + abs(p.green() - q.green())
+                total += abs(p.blue() - q.blue())
+        return total
+
+    none = _picture([], [], None)
+    lit_alone = _picture([], [curve], 0)
+    unlit = _picture(curve, [curve], None)
+    lit = _picture(curve, [curve], 0)
+    # Lighting the curve changes at least a third as much ink as the lit curve
+    # makes on its own: antialiased edges peeking out from under the working
+    # curve are not "visible".
+    assert _ink(lit, unlit) > _ink(lit_alone, none) / 3

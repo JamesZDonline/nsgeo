@@ -36,6 +36,23 @@ every drag, never cached: a line switch or a stack edit can change what sits
 at the selected row, and a remembered "this is the cutoff" would then
 bypass, or write onto, the wrong step.
 
+The window across lines: every line on a grid, along the same axis, is drawn
+against one ruler (`_ruler_for`), and `_set_axes_holding` carries the window
+over in metres along the grid. On leaving a ruled view (or clearing it) it
+files the window under that ruler's key (`_held`), and the next line on that
+ruler starts from it, so a glance at a cross-line (another ruler) does not lose
+the hold. An axis the view shows whole -- the whole ruler, or the whole record
+-- is filed as "whole" rather than as numbers: the next line starts at its own
+fit there, so Fit stays Fit across a grid resize, and a record that grows (a
+bypassed step, a longer line) is shown in full instead of cropped to the
+window the shorter one had. A genuine zoom is held in metres (and ns), down to
+`with_window`'s minimum span, with the time window clamped into each line's
+own record. The hold covers opening a line and the hover preview alike, and
+runs on the header-only axes too, so the load that follows does not move it. A
+re-render of the same line keeps the exact transform object (not an equal
+one), so a stack or display change leaves the zoom alone. The held windows are
+forgotten when the site closes.
+
 Signal/slot hazard: an exception raised inside a slot connected via
 `connect()` never reaches whatever emitted the signal -- PyQt prints the
 traceback to stderr and `emit()` returns as if the slot had succeeded (see
@@ -86,6 +103,7 @@ from nsgeo_qgis.render.qimage import RadargramImage
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
+from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
 
 
 def time_param_name(step: Any) -> str | None:
@@ -153,34 +171,6 @@ def velocity_source(session: SiteSession, key: str) -> str:
     return "unknown source"
 
 
-def _trace_to_metres(distance: Any, traces: Any) -> Any:
-    """Metres along the line at (possibly fractional) `traces`, read off the
-    line's own distance array, so there is one trace-to-metre map. Beyond
-    either end it extends by the end spacing."""
-    d = np.asarray(distance, dtype=float)
-    tr = np.asarray(traces, dtype=float)
-    last = len(d) - 1
-    inside = np.interp(tr, np.arange(len(d)), d)
-    below = d[0] + tr * (d[1] - d[0])
-    above = d[-1] + (tr - last) * (d[-1] - d[-2])
-    return np.where(tr < 0, below, np.where(tr > last, above, inside))
-
-
-def _metres_to_trace(distance: Any, x_m: Any) -> Any:
-    """The inverse of `_trace_to_metres`, for a line whose distance runs
-    either way along the axis."""
-    d = np.asarray(distance, dtype=float)
-    x = np.asarray(x_m, dtype=float)
-    idx = np.arange(len(d), dtype=float)
-    if d[-1] < d[0]:
-        d, idx = d[::-1], idx[::-1]
-    last = len(d) - 1
-    inside = np.interp(x, d, idx)
-    below = idx[0] + (x - d[0]) / (d[1] - d[0]) * (idx[1] - idx[0])
-    above = idx[-1] + (x - d[-1]) / (d[-1] - d[-2]) * (idx[-1] - idx[-2])
-    return np.where(x < d[0], below, np.where(x > d[last], above, inside))
-
-
 class ProfileDock(QgsDockWidget):
     error = pyqtSignal(str)
     pick_requested = pyqtSignal(str, int, float)
@@ -201,10 +191,17 @@ class ProfileDock(QgsDockWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
-        # (line key, points, fit id) of the last Save: lets Apply tell
-        # whether the fit it applies is the stored one.
-        self._saved_velocity_fit: tuple[str, tuple[tuple[int, float], ...], str] | None = None
+        # (line key, fit id) the velocity dialog has selected, drawn bold.
+        self._highlighted_fit: tuple[str, str] | None = None
         self._working_key: str | None = None
+        self._axes_key: str | None = None  # the line the view's axes were last set for
+        # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
+        # it. A None pair means the whole ruler (metres) or the whole record
+        # (time) was showing, so the next line starts from its own fit there.
+        self._held: dict[
+            tuple[str, str],
+            tuple[float | None, float | None, float | None, float | None],
+        ] = {}
         self._preview_key: str | None = None
         self._strip_was_visible = False
         self._deferred_strip: tuple[list[list[float]], Any] | None = None
@@ -352,6 +349,8 @@ class ProfileDock(QgsDockWidget):
         session.selection_changed.connect(self._on_selection_changed)
         session.lines_changed.connect(self._refresh_velocity)
         session.grids_changed.connect(self._refresh_velocity)
+        session.lines_changed.connect(self._on_geometry_changed)
+        session.grids_changed.connect(self._on_geometry_changed)
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
 
@@ -411,6 +410,129 @@ class ProfileDock(QgsDockWidget):
             return line.distance_along()
         except ValueError:
             return None
+
+    def _ruler_for(self, line: Any, distance: Any) -> Ruler | None:
+        """The ruler `line` is drawn against: its grid's, over every line on
+        that grid running the same way. None when there is nothing to rule
+        against (no distance axis, no grid, no axis in the placement)."""
+        if distance is None or len(distance) < 2:
+            return None
+        grid = self.session.grid_for_line(line)
+        axis = getattr(line.placement, "axis", None)
+        if grid is None or axis is None:
+            return None
+        distances = []
+        for other_key in self.session.keys_on_grid(grid.id):
+            other = self.session.line_for_key(other_key)
+            if getattr(other.placement, "axis", None) != axis:
+                continue
+            d = self._safe_distance(other)
+            if d is not None:
+                distances.append(d)
+        return ruler_for(grid, axis, distances)
+
+    def _set_axes_holding(
+        self,
+        key: str,
+        n_traces: int,
+        n_samples: int,
+        t0_ns: float,
+        dt_ns: float,
+        distance: Any,
+    ) -> None:
+        """Set the view's axes for `key`, carrying the window over from
+        whatever was showing. The only place the dock sets axes.
+
+        The window is filed per ruler on leaving a view (`_held`), so it
+        survives a line on another ruler in between; an axis shown whole is
+        filed as whole (see `_file_window`). A zoom carries over in metres
+        (down to `with_window`'s minimum span) with the time window clamped
+        into the new line's record. Rule 1 puts back the very same transform
+        object, so a re-render of an unchanged line leaves anything holding
+        it (and the zoom itself) untouched.
+        """
+        view = self.view
+        old = view.transform
+        old_ruler = view.ruler
+        old_key = self._axes_key
+        self._file_window()
+        ruler = self._ruler_for(self.session.line_for_key(key), distance) if key else None
+        view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
+        new = view.transform
+        if (
+            old is not None
+            and new is not None
+            and key == old_key
+            and (new.n_traces, new.n_samples, new.bounds, new.mirrored)
+            == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
+        ):
+            view.transform = old
+        elif ruler is not None and ruler.key in self._held:
+            self._apply_held(self._held[ruler.key])
+        elif (
+            old is not None
+            and ruler is None
+            and old_ruler is None
+            and (old.n_traces, old.n_samples) == (n_traces, n_samples)
+        ):
+            view.transform = old
+        self._axes_key = key
+
+    def _file_window(self) -> None:
+        """File the window the view is showing under its ruler's key, with
+        None for an axis it shows whole (the whole ruler, the whole record):
+        a view at Fit is not a zoom, and filed as numbers it would crop a
+        longer record or a grown ruler on the next line."""
+        view = self.view
+        t, ruler, m = view.transform, view.ruler, view.window_m()
+        if t is None or ruler is None or m is None:
+            return
+        blo, bhi = t.trace_bounds
+        whole_x = abs(t.trace_lo - blo) <= 0.5 and abs(t.trace_hi - bhi) <= 0.5
+        whole_t = t.time_lo <= t.t0_ns + t.dt_ns / 2 and t.time_hi >= t.t_end - t.dt_ns / 2
+        self._held[ruler.key] = (
+            None if whole_x else m[0],
+            None if whole_x else m[1],
+            None if whole_t else t.time_lo,
+            None if whole_t else t.time_hi,
+        )
+
+    def _apply_held(self, held: Any) -> None:
+        """Put a filed window on the freshly fitted view: a None part keeps
+        the fresh fit on that axis."""
+        view = self.view
+        new = view.transform
+        lo_m, hi_m, t_lo, t_hi = held
+        if new is None or (lo_m is None and t_lo is None):
+            return
+        if t_lo is None:
+            t_lo, t_hi = new.time_lo, new.time_hi
+        if lo_m is None:
+            view.transform = new.with_window(new.trace_lo, new.trace_hi, t_lo, t_hi)
+            view.view_changed.emit()
+            view.update()
+        else:
+            view.set_window_m(lo_m, hi_m, t_lo, t_hi)
+
+    def _on_geometry_changed(self, *_: Any) -> None:
+        """A grid or line edit can change the ruler of the line on show (a
+        resize, an import past the edge): show it again, window held, so Fit
+        follows without reopening."""
+        try:
+            key = self._key
+            if key is None or not self.session.is_open:
+                return
+            try:
+                line = self.session.line_for_key(key)
+            except KeyError:
+                return  # removed in the same change; line_opened follows
+            if self._ruler_for(line, self._safe_distance(line)) != self.view.ruler:
+                self._show_line(key, is_preview=self._preview_key is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(
+                f"could not follow the grid change in the profile: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
 
     # ---- session events -------------------------------------------------
     def _on_line_opened(self, key: str) -> None:
@@ -553,7 +675,8 @@ class ProfileDock(QgsDockWidget):
             # render puts it back.
             self._cutoff_step = None
             self.view.set_cutoff(None)
-            self.view.set_axes(
+            self._set_axes_holding(
+                key,
                 line.n_traces,
                 line.header.n_samples,
                 line.header.position_ns,
@@ -634,9 +757,6 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
-        # Dock state, not site state: left alone it could match a line of the
-        # next site that happens to share a key and its points.
-        self._saved_velocity_fit = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -652,10 +772,15 @@ class ProfileDock(QgsDockWidget):
             self._clear_view_only()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the profile view: {exc}", Qgis.MessageLevel.Critical)
+        # After the clear, which files the departing window: a window in
+        # metres means nothing on another site.
+        self._held = {}
         if was_diff:
             self.difference_cleared.emit()
 
     def _clear_view_only(self) -> None:
+        self._file_window()  # the next line on this ruler starts from it
+        self._axes_key = None
         self.image = None
         self.gain_strip.set_headroom(None)
         self.view.clear()
@@ -838,7 +963,7 @@ class ProfileDock(QgsDockWidget):
         if distance is None:
             distance, _, _ = self._velocity_axis()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        t = hyperbola_time(fit, _trace_to_metres(distance, traces))
+        t = hyperbola_time(fit, trace_to_metres(distance, traces))
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
     def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
@@ -854,7 +979,7 @@ class ProfileDock(QgsDockWidget):
         return [
             self.velocity_curve_points(
                 HyperbolaFit(
-                    apex_x_m=float(_trace_to_metres(distance, float(f.apex_trace))),
+                    apex_x_m=float(trace_to_metres(distance, float(f.apex_trace))),
                     t0_ns=f.t0_ns,
                     v_m_ns=f.v_m_ns,
                     v_stderr_m_ns=f.v_stderr_m_ns,
@@ -865,6 +990,27 @@ class ProfileDock(QgsDockWidget):
             )
             for f in fits.values()
         ]
+
+    def _highlighted_index(self) -> int | None:
+        """Where the dialog's selected fit sits in `_saved_velocity_curves`,
+        which follows the line's own fit order; None when it is not on the
+        working line."""
+        if self._highlighted_fit is None or self._working_key is None:
+            return None
+        key, fit_id = self._highlighted_fit
+        if key != self._working_key:
+            return None
+        ids = list(self.session.line_for_key(key).velocity_fits)
+        return ids.index(fit_id) if fit_id in ids else None
+
+    def highlight_saved_fit(self, key: str, fit_id: str | None) -> None:
+        """Draw `fit_id`'s curve bold while the velocity dialog has it
+        selected, so its row can be matched to its curve; None to stop."""
+        try:
+            self._highlighted_fit = None if fit_id is None else (key, fit_id)
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not highlight the fit: {exc}", Qgis.MessageLevel.Critical)
 
     def _velocity_time_zero_note(self) -> str:
         t = self.view.transform
@@ -927,9 +1073,12 @@ class ProfileDock(QgsDockWidget):
                 # remove them. Saved fits, below, show regardless of mode.
                 self.view.set_velocity_fit([], [])
             # Saved fits belong to the working line too, never a hovered one.
-            self.view.set_saved_velocity_fits(
-                self._saved_velocity_curves() if self._preview_key is None else []
-            )
+            if self._preview_key is None:
+                self.view.set_saved_velocity_fits(
+                    self._saved_velocity_curves(), self._highlighted_index()
+                )
+            else:
+                self.view.set_saved_velocity_fits([])
             fit_ok = self._velocity_fit is not None
             self.apply_line_button.setEnabled(fit_ok)
             self.save_fit_button.setEnabled(fit_ok)
@@ -960,15 +1109,18 @@ class ProfileDock(QgsDockWidget):
                     self._working_key, VelocityModel.constant(fit.v_m_ns)
                 )
                 # `velocity_from_fit` is the fit that produced the override:
-                # the stored fit just applied, else none -- a bare "line" is
-                # better than a provenance the velocity does not have.
-                saved = self._saved_velocity_fit
-                same = saved is not None and saved[:2] == (
-                    self._working_key,
-                    tuple(self._velocity_points),
-                )
+                # a stored fit with these very points, else none -- a bare
+                # "line" is better than a provenance the velocity does not
+                # have. Same points, same fit: a fit reads nothing else of
+                # the line that could have changed, and no processing step
+                # moves a sample's time (time_zero crops rows, it does not
+                # rebase them). The store is asked rather than remembered,
+                # so a deleted fit is never named.
+                points = tuple(self._velocity_points)
+                fits = self.session.line_for_key(self._working_key).velocity_fits
+                stored = [i for i, f in fits.items() if f.points == points]
                 self.session.set_velocity_from_fit(
-                    self._working_key, saved[2] if saved is not None and same else None
+                    self._working_key, stored[-1] if stored else None
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
@@ -995,12 +1147,11 @@ class ProfileDock(QgsDockWidget):
                 v_m_ns=fit.v_m_ns,
                 v_stderr_m_ns=fit.v_stderr_m_ns,
                 rms_ns=fit.rms_ns,
-                apex_trace=round(float(_metres_to_trace(distance, fit.apex_x_m))),
+                apex_trace=round(float(metres_to_trace(distance, fit.apex_x_m))),
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
             )
-            fit_id = self.session.add_velocity_fit(self._working_key, stored)
-            self._saved_velocity_fit = (self._working_key, stored.points, fit_id)
+            self.session.add_velocity_fit(self._working_key, stored)
             # A saved fit goes quietly into the line's record; say where to
             # find it. The next fit action rewrites the read-out.
             self.velocity_readout.setText(
@@ -1140,13 +1291,9 @@ class ProfileDock(QgsDockWidget):
             line = self.session.line_for_key(self._key)
             if rg.n_traces == line.n_traces:
                 distance = self._safe_distance(line)
-        keep_window = (
-            self.view.transform is not None and self.view.transform.n_traces == rg.n_traces
+        self._set_axes_holding(
+            self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
         )
-        old = self.view.transform
-        self.view.set_axes(rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance)
-        if keep_window and old is not None and old.n_samples == rg.n_samples:
-            self.view.transform = old
         reference = self._scale_reference(rg)
         self.image = (
             self.image.with_radargram(rg, reference)

@@ -664,6 +664,21 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.lines_changed.emit()
 
+    def remove_velocity_fit(self, key: str, fit_id: str) -> None:
+        """Delete a stored fit. A velocity it set stays: it was applied
+        deliberately, and only the claim that this fit produced it goes."""
+        site = self._require_site()
+        line = self.line_for_key(key)
+        if fit_id not in line.velocity_fits:
+            raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
+        fits = {i: f for i, f in line.velocity_fits.items() if i != fit_id}
+        pointer = None if line.velocity_from_fit == fit_id else line.velocity_from_fit
+        new_line = dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=pointer)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
     def resolved_velocity(self, key: str) -> VelocityModel:
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
