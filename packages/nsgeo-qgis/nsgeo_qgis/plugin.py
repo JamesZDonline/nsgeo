@@ -1741,7 +1741,13 @@ class NsgeoPlugin:
             # loads fine and fails when its velocity is resolved.
             self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
             return
+        dock = self.profile_dock
         try:
+            # The selected fit is lit on the profile while the dialog is open,
+            # so its row can be matched to its curve.
+            if dock is not None:
+                dialog.fit_highlighted.connect(lambda fit_id: dock.highlight_saved_fit(key, fit_id))
+                dock.highlight_saved_fit(key, dialog.highlighted_fit_id())
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             model = dialog.velocity()
@@ -1752,6 +1758,8 @@ class NsgeoPlugin:
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
         finally:
+            if dock is not None:
+                dock.highlight_saved_fit(key, None)
             dialog.deleteLater()
 
     def open_line_choice_dialog(self) -> None:
