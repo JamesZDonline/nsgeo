@@ -17,7 +17,12 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, format_bytes
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_RADIUS_SPACINGS,
+    NO_TRANSFORM,
+    default_cell,
+    format_bytes,
+)
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -123,7 +128,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
     assert not dock.source_group.isHidden()
     assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
-    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
     assert not dock.save_button.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
@@ -132,7 +137,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
     assert dock.source_group.isHidden()
     assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
-    assert dock.radius_spin.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.grid_radius_row.isHidden() and not dock.radius_spacing_spin.isHidden()
     assert dock.save_button.isHidden()
     assert dock.export_button.text() == "Export site GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the site"
@@ -153,7 +158,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
     assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
-    assert not dock.radius_spin.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
 
@@ -411,6 +416,88 @@ def test_lines_chosen_in_the_site_for_this_grids_grid_are_what_this_grid_shows(p
     assert dock.engine.line_count == 2
 
 
+def _a_row(dock, plugin):
+    from nsgeo_qgis.ui import site_scope
+
+    rows = site_scope.site_rows(
+        plugin.session, dock.site_engine, site_scope.included_grids(plugin.session)
+    )
+    return next(r for r in rows if r.grid_id == "A")
+
+
+def test_both_scopes_read_a_line_choice_that_left_the_grid_as_every_line(plugin, site3):
+    """#74: remembered lines that have all left the grid mean every line, as
+    This grid already read them; the site no longer shows `no lines`. The
+    record is written while This grid shows B -- coming back to A would
+    rewrite it as `lines: None`, which is the very reading under test."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=("raw/gone/X.DZT",))
+    dock = whole_site(plugin)
+    assert site_scope.source_keys(plugin.session, "A") == site3.keys("A")
+    assert dock.site_engine.engine_for("A").line_count == 4
+    row = _a_row(dock, plugin)
+    assert row.lines == "4 / 4"
+    assert row.state != "no lines"
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.rebuild_source()
+    assert dock.line_choice_keys("A") == site3.keys("A")
+
+
+def test_removing_every_remembered_line_reads_as_every_line_in_both_scopes(plugin, site3):
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    gone = site3.keys("A")[:2]
+    rest = site3.keys("A")[2:]
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=gone)
+    plugin.session.remove_lines(gone)
+    dock = whole_site(plugin)
+    assert site_scope.source_keys(plugin.session, "A") == rest
+    assert dock.site_engine.engine_for("A").line_count == 2
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.rebuild_source()
+    assert dock.line_choice_keys("A") == rest
+
+
+def test_a_live_choice_emptied_by_removal_reads_as_every_line_in_both_scopes(plugin, site3):
+    """#74: the same removal with This grid ON A, holding an explicit choice.
+    Its live set used to prune to `()` (no lines) while the site read every line."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    chosen = site3.keys("A")[:2]
+    rest = site3.keys("A")[2:]
+    assert dock.grid_combo.currentText() == "A"
+    dock.set_included(chosen)
+    record = session.slice_source("A")
+    session.remove_lines(chosen)
+    assert session.slice_source("A") == record  # the fall-back writes nothing
+    assert site_scope.source_keys(session, "A") == rest
+    assert dock.included_keys() == rest
+    assert dock.line_choice_keys("A") == rest
+
+
+def test_a_source_edit_after_emptying_does_not_change_what_the_site_prepares(plugin):
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("B")
+    plugin.session.remember_slice_source("A", preset="p", lines=("raw/gone/X.DZT",))
+    dock = whole_site(plugin)
+    before = dock.site_engine.engine_for("A").line_count
+    dock.grid_scope_button.click()
+    dock.grid_combo.setCurrentText("A")
+    dock.preset_combo.setCurrentText("raw")  # rewrites the record as lines: None
+    dock = whole_site(plugin)
+    assert before == 4
+    assert dock.site_engine.engine_for("A").line_count == before
+
+
 # ---- normalisation and gain -------------------------------------------------------
 
 
@@ -501,7 +588,14 @@ def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, o
         expected.append(f"{grid_id} {lo:.2f}–{hi:.2f} m")
     assert parts == [*expected, "C no data"]
     assert expected[0] != expected[1].replace("B", "A"), "each grid's own velocity"
-    assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": dock.site_velocities()["C"]}
+    c_key = next(
+        k
+        for k in plugin.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        if getattr(plugin.session.line_for_key(k).placement, "grid_id", None) == "C"
+    )
+    v_c = plugin.session.resolved_velocity(c_key)  # C's own, worked out apart from the dock
+    assert v_c not in (v_a, v_b), "C must not borrow another grid's velocity"
+    assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": v_c}
     assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
 
 
@@ -592,6 +686,451 @@ def test_a_burst_of_slider_moves_draws_once_with_the_last_value(plugin, monkeypa
     site_z = site.site_z
     assert tops == [pytest.approx(site_z.t0_ns + 31 * site_z.dz_ns)]
     assert dock.current_site_slice().windows["A"].k0 == 31
+
+
+# ---- the site's resolution (spec 4.4, #75) -----------------------------------------------
+
+
+def test_the_site_cell_seeds_from_the_finest_spaced_grid(site3_factory, open_plugin):
+    """#75: spec 4.4 seeds the cell by M11's rule for the finest-spaced
+    included grid, here B at 0.3 m against A's and C's 1.5 m."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    floor = dock.cell_spin.minimum()
+    assert default_cell(0.3, floor) != pytest.approx(default_cell(1.5, floor))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, floor))
+
+
+def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_plugin):
+    """#75: with nothing remembered, the site is every grid that has lines."""
+    site = site3_factory()
+    site.session.remove_lines(site.keys("C"))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert "grids" not in plugin.session.site_view()
+    assert dock._site.included() == ("A", "B")
+
+
+def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_factory, open_plugin):
+    """#75: a change to the included grids seeds the cell again -- B's 0.3 m
+    spacing seeds 0.15 m, and unticking B seeds A's and C's 0.2 m -- and a
+    hand-set cell survives leaving the site and coming back. A hand-set cell
+    is remembered (#71), so it is laid over every later seed as well, the
+    seed an untick makes included."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)  # B
+    settle(dock)
+    assert dock.cell_spin.value() == pytest.approx(default_cell(1.5, dock.cell_spin.minimum()))
+
+    dock.cell_spin.setValue(0.35)
+    dock.flush_debounce()
+    dock.grid_scope_button.click()
+    whole_site(plugin)
+    assert dock.cell_spin.value() == pytest.approx(0.35)
+    dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
+    settle(dock)
+    assert dock._site.cell_seeded_for == ("A",), "the untick seeded the cell again"
+    assert dock.cell_spin.value() == pytest.approx(0.35), "the remembered cell outlives the seed"
+
+
+def test_a_remembered_site_cell_below_the_floor_is_clamped_up_to_it(site3_factory, open_plugin):
+    """#71 (approved behaviour 4): a remembered cell still respects the size
+    floor. A 40 m grid floors the cell above the box's own 0.01 m. Checked on
+    entry, before any slice of a frame that size is drawn."""
+    site = site3_factory()
+    grid = site.session.grid("A")
+    site.session.replace_grid(dataclasses.replace(grid, size_x=40.0, size_y=40.0))
+    site.session.set_site_view(grids=("A",))
+    site.session.remember_site_resolution(cell=0.012)
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    try:
+        floor = dock.cell_spin.minimum()
+        assert floor > 0.012
+        assert dock.cell_spin.value() == pytest.approx(floor)
+        assert plugin.session.site_resolution() == {"cell": 0.012}
+        assert not plugin.session.dirty
+    finally:
+        dock.grid_scope_button.click()
+
+
+def _resolution_spins(dock) -> tuple[float, float, float, float]:
+    return dock.cell_spin.value(), dock.dz_spin.value(), dock.z0_spin.value(), dock.z1_spin.value()
+
+
+def _snapped_ready_bounds(dock) -> tuple[float, float]:
+    """The union of the ready grids' prepared bounds, as the z spins hold it."""
+    from nsgeo_qgis.ui.site_scope import ready_z_bounds
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    low, high = ready_z_bounds(dock.site_engine)
+    return (
+        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+    )
+
+
+def _short_a_site(site3_factory, open_plugin, **remembered):
+    """site3 with A's lines a quarter as long, the site's resolution as given,
+    saved and reopened. A prepares first, so the first ready range the site
+    sees is A's alone (Ruling 14)."""
+    site = site3_factory(samples={"A": 128})
+    if remembered:
+        site.session.remember_site_resolution(**remembered)
+    site.session.save()
+    return open_plugin(site)
+
+
+def _every_grid_shown(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    a_high = dock.site_engine.engine_for("A").prepared_z_bounds()[1]
+    assert a_high < _snapped_ready_bounds(dock)[1] - 50.0, "A's range is the short one"
+    return dock
+
+
+@pytest.mark.parametrize(
+    "remembered", [{}, {"dz_ns": 0.5}, {"cell": 0.35}], ids=["nothing", "dz", "cell"]
+)
+def test_a_z_bound_never_chosen_follows_every_ready_grid(site3_factory, open_plugin, remembered):
+    """Ruling 14 (#71): z0 and z1 are the user's field by field. One never
+    chosen is the union of the ready grids however they became ready; a
+    remembered dz or cell does not hold it at the first grid's range."""
+    from nsgeo_qgis.ui.site_scope import ready_dt
+
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    dz = pytest.approx(remembered.get("dz_ns", ready_dt(dock.site_engine)), abs=1e-4)
+    assert dock.dz_spin.value() == dz  # the box holds 4 decimals
+    applied = dock._site.res_applied
+    assert (applied.dz_ns, applied.t1_ns) == (dz, dock.z1_spin.value())
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_z1_comes_back_once_every_grid_is_ready(site3_factory, open_plugin):
+    """Ruling 14: clamped from the remembered value each time, never from the
+    spin, so a z1 the first ready grid cut short comes back with the rest."""
+    plugin = _short_a_site(site3_factory, open_plugin, t1_ns=60.0)
+    dock = _every_grid_shown(plugin)
+    low, _high = _snapped_ready_bounds(dock)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (low, pytest.approx(60.0))
+    assert dock._site.res_applied.t1_ns == pytest.approx(60.0)
+    assert plugin.session.site_resolution() == {"t1_ns": 60.0}
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_range_wider_than_the_union_is_clamped_to_all_of_it(
+    site3_factory, open_plugin
+):
+    remembered = {"t0_ns": -50.0, "t1_ns": 500.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_range_past_the_first_ready_grid_comes_back_with_the_rest(
+    site3_factory, open_plugin
+):
+    """Wholly past A's range, so A alone takes the fallback; inside the union,
+    so the remembered range is what shows once B and C are ready."""
+    remembered = {"t0_ns": 30.0, "t1_ns": 60.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (30.0, 60.0)
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
+
+
+def test_a_site_resolution_edit_is_remembered_in_the_site_view(plugin):
+    """#71: the site's own resolution, apart from every grid's."""
+    dock = whole_site(plugin)
+    dock.cell_spin.setValue(0.35)
+    dock.flush_debounce()
+    assert plugin.session.site_resolution() == {"cell": 0.35}
+    assert plugin.session.slice_resolution("A") == {}
+    assert plugin.session.dirty
+
+
+def test_entering_the_site_never_remembers_its_seeded_resolution(plugin):
+    dock = whole_site(plugin)
+    dock.grid_scope_button.click()
+    whole_site(plugin)
+    assert plugin.session.site_resolution() == {}
+    assert not plugin.session.dirty
+
+
+def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_modal, open_plugin):
+    """#71, as `test_the_site_view_survives_save_and_reopen`, in a plugin of
+    its own the second time: nothing the first one held in memory helps."""
+    first = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = whole_site(first)
+        dock.cell_spin.setValue(0.35)
+        t0 = round(dock.z0_spin.value() + 5.0, 3)
+        dock.z0_spin.setValue(t0)
+        dock.radius_spacing_spin.setValue(1.25)
+        dock.flush_debounce()
+        settle(dock)
+        assert first.session.site_resolution() == {
+            "cell": 0.35,
+            "t0_ns": t0,
+            "radius_spacings": 1.25,
+        }
+        first.session.save()
+    finally:
+        _close(first, answer_modal)
+
+    plugin = open_plugin(site3)
+    dock = whole_site(plugin)
+    assert dock.cell_spin.value() == pytest.approx(0.35)
+    assert dock.z0_spin.value() == pytest.approx(t0)
+    assert dock.radius_spacing_spin.value() == pytest.approx(1.25)
+    assert "A 1.88 m" in dock.radius_spacing_spin.toolTip()  # 1.25 x 1.5 m
+    applied = dock._site.res_applied
+    assert (applied.cell, applied.t0_ns) == (pytest.approx(0.35), pytest.approx(t0))
+    assert dock.current_site_slice() is not None
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_site_z_range_is_clamped_not_reseeded(plugin):
+    """#71 with M11's rule: a remembered range is the user's, so the ready
+    grids only clamp it (z1 here), never re-seed it (dz and z0 stand), and
+    the clamp writes nothing."""
+    session = plugin.session
+    low, high = plugin.slices_dock.engine.prepared_z_bounds()  # every site3 grid's
+    remembered = {
+        "dz_ns": round(plugin.slices_dock.dz_spin.value() * 2, 4),
+        "t0_ns": round(low + 5.0, 3),
+        "t1_ns": round(high + 5.0, 3),
+    }
+    session.remember_site_resolution(**remembered)
+    session.save()
+    dock = whole_site(plugin)
+    assert dock.dz_spin.value() == pytest.approx(remembered["dz_ns"])
+    assert dock.z0_spin.value() == pytest.approx(remembered["t0_ns"])
+    assert dock.z1_spin.value() == _snapped_ready_bounds(dock)[1]
+    assert dock.site_engine.site_z.dz_ns == pytest.approx(remembered["dz_ns"])
+    assert dock.current_site_slice() is not None
+    assert session.site_resolution() == remembered
+    assert not session.dirty
+
+
+def test_a_remembered_site_z_range_wholly_outside_the_data_falls_back_to_the_ready_range(
+    site3_factory, open_plugin
+):
+    """Review Focus 1, the site's twin: clamped end by end, a range wholly
+    past the data leaves z1 below z0, and the site would draw nothing. The
+    fallback is the union of every ready grid, not of the first (Ruling 14)."""
+    beyond = {"t0_ns": 200.0, "t1_ns": 300.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **beyond)
+    session = plugin.session
+    errors: list[str] = []
+    plugin.slices_dock.error.connect(errors.append)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    assert errors == []
+    assert dock.current_site_slice() is not None
+    # The remembered values stand, for a later crop that frees the range.
+    assert session.site_resolution() == beyond
+    assert not session.dirty
+
+
+def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown_in_the_site(
+    fake_iface, site3_factory, answer_modal, open_plugin
+):
+    """Ruling 15 (#71), the site's twin: a z1 set against the fallback's range
+    used to leave the remembered t0 past it, so the next ready-set change
+    snapped z1 back to the data's end, and a reopen dropped the pair."""
+    site = site3_factory()
+    site.session.remember_site_resolution(t0_ns=200.0)  # past every grid's data
+    site.session.save()
+    first = _open(fake_iface, site, answer_modal)
+    try:
+        dock = whole_site(first)
+        shown_z0 = _snapped_ready_bounds(dock)[0]
+        assert dock.z0_spin.value() == shown_z0, "the fallback shows the data's range"
+        dock.z1_spin.setValue(60.0)
+        dock.flush_debounce()
+        settle(dock)
+        c_row = dock.site_panel.table.item(2, 0)
+        c_row.setCheckState(Qt.CheckState.Unchecked)
+        settle(dock)
+        c_row.setCheckState(Qt.CheckState.Checked)
+        settle(dock)
+        assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, 60.0)
+        assert first.session.site_resolution() == {"t0_ns": shown_z0, "t1_ns": 60.0}
+        first.session.save()
+    finally:
+        _close(first, answer_modal)
+
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert plugin.session.site_resolution() == {"t0_ns": shown_z0, "t1_ns": 60.0}
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, 60.0)
+    assert dock._site.res_applied.t1_ns == pytest.approx(60.0)
+    assert dock.current_site_slice() is not None
+    assert not plugin.session.dirty
+
+
+def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site3_factory):
+    dock = whole_site(plugin)
+    dock.radius_spacing_spin.setValue(1.25)
+    _events()
+    plugin.session.save()
+    other = site3_factory()
+    plugin.session.open_site(other.json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock = whole_site(plugin)
+    assert dock.radius_spacing_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert plugin.session.site_resolution() == {}
+    assert not plugin.session.dirty
+
+
+def test_a_hand_z_edit_in_the_site_is_clamped_from_then_on(site3_factory, open_plugin):
+    """#75: a dz/z0/z1 edit is the user's, so the ready grids clamp it from
+    then on and never re-seed it. The edit now arrives through the dock's
+    guarded `_on_resolution_edited`; the unguarded slot that saw it is gone.
+    Field by field (Ruling 14): z1, never edited, follows every ready grid."""
+    dock = _every_grid_shown(_short_a_site(site3_factory, open_plugin))
+    dz = round(dock.dz_spin.value() * 2, 4)
+    z0 = round(dock.z0_spin.value() + 5.0, 3)
+    dock.dz_spin.setValue(dz)
+    dock.z0_spin.setValue(z0)
+    dock.flush_debounce()
+    # A new transform re-prepares every grid, A first, and the ready grids
+    # coming back re-seed a seeded range.
+    dock.site_panel.transform_combo.set_value("amp_envelope")
+    settle(dock)
+    assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
+    assert dock.dz_spin.value() == pytest.approx(dz)
+    assert dock.z0_spin.value() == pytest.approx(z0)
+    assert dock.z1_spin.value() == _snapped_ready_bounds(dock)[1]
+    assert dock.site_engine.site_z.dz_ns == pytest.approx(dz)
+    assert dock.session.site_resolution() == {"dz_ns": dz, "t0_ns": z0}
+
+
+# ---- Ruling 12: This grid's seeds stay off the site's spins (#71) ------------------------
+
+
+def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolution(plugin):
+    """This grid falls back to B when its grid A is removed under the site.
+    B's seed and remembered resolution wait for This grid: they used to land
+    on the spins the site shares, and mark the site's z range as hand-set.
+    A is out of the site, so its removal changes no ready grid, and no tick
+    re-seeds the site's z range over what landed."""
+    session = plugin.session
+    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "radius_spacings": 1.5}
+    session.remember_slice_resolution("B", **b_res)
+    session.set_site_view(grids=("B", "C"))
+    session.save()
+    dock = whole_site(plugin)
+    site_spins = _resolution_spins(dock)
+    view = session.site_view()
+    session.remove_grid("A", with_lines=True)
+    settle(dock)
+    assert dock.grid_combo.currentText() == "B"
+    assert _resolution_spins(dock) == site_spins
+    assert session.site_view() == view, "nothing is remembered for the site"
+    assert session.slice_resolution("B") == b_res
+
+    dock.site_panel.select_grid(None)  # This grid comes back on its own grid
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
+    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(0.5)
+    assert dock.current_values() is not None
+    assert session.slice_resolution("B") == b_res
+
+
+def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
+    site3_factory, open_plugin
+):
+    """The same fall-back with nothing remembered for B: This grid comes back
+    with B's own seed (its 0.3 m spacing's cell, the default radius), not with
+    the values A had before the site."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.set_site_view(grids=("B", "C"))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = plugin.slices_dock
+    dock.grid_radius_spin.setValue(1.5)  # A's own, unlike B's seed
+    dock.flush_debounce()
+    assert dock.cell_spin.value() == pytest.approx(0.2)
+    whole_site(plugin)
+    plugin.session.remove_grid("A", with_lines=True)
+    settle(dock)
+    dock.site_panel.select_grid(None)
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.grid_radius_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.15)
+    assert dock.current_values() is not None
+    assert plugin.session.slice_resolution("B") == {}
+
+
+def test_importing_lines_under_this_grids_grid_while_the_site_shows_leaves_the_site_resolution(
+    site3_factory, open_plugin
+):
+    """This grid shows C before C has lines. Lines imported under C while
+    the site shows owe C's dz/z0/z1 seed to This grid, not to the site. C is
+    kept out of the site, so no tick re-seeds the site's z range over it."""
+    site = site3_factory()
+    c_keys = site.keys("C")
+    c_lines = [site.session.line_for_key(k) for k in c_keys]
+    site.session.remove_lines(c_keys)
+    site.session.set_site_view(grids=("A", "B"))
+    site.session.save()
+    plugin = open_plugin(site)
+    session = plugin.session
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("C")
+    _events()
+    session.save()
+    dock = whole_site(plugin)
+    site_spins = _resolution_spins(dock)
+    record = session.slice_source("C")
+    session.add_lines(c_lines)
+    settle(dock)
+    assert _resolution_spins(dock) == site_spins
+    assert session.site_resolution() == {}
+    assert session.slice_source("C") == record, "nothing is remembered for C"
+
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "C"
+    header = session.line_for_key(c_keys[0]).header
+    assert dock.dz_spin.value() == pytest.approx(header.dt_ns, abs=1e-4)
+    assert dock.z0_spin.value() == pytest.approx(header.position_ns, abs=1e-3)
+    end = header.position_ns + (header.n_samples - 1) * header.dt_ns
+    assert dock.z1_spin.value() == pytest.approx(end, abs=1e-4)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert spin_until(lambda: dock.engine.choice is not None and dock.engine.is_prepared)
+    assert dock.engine.choice.grid_id == "C"
+    assert session.slice_source("C") == record
 
 
 # ---- persistence -----------------------------------------------------------------------
@@ -709,11 +1248,16 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     assert dock.export_button.isEnabled()
 
 
-def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path, fake_iface):
+def test_the_export_message_names_a_grid_left_out(
+    plugin, site3, answer_modal, tmp_path, fake_iface
+):
     """Ruling T4-a: an included grid with no lines is named in the success message."""
     session = plugin.session
     dock = whole_site(plugin)
-    session.remember_slice_source("C", preset="p", lines=())
+    # A grid with no lines at all: an emptied line choice is every line (#74).
+    # Ticked outright, since a grid with no lines is otherwise not offered.
+    session.set_site_view(grids=("A", "B", "C"))
+    session.remove_lines(site3.keys("C"))
     session.lines_changed.emit()  # the survey changed: the site follows
     settle(dock)
     assert dock.site_engine.grid_state("C") == "no lines"
@@ -725,7 +1269,7 @@ def test_the_export_message_names_a_grid_left_out(plugin, answer_modal, tmp_path
     assert "exported" in text and "C (no lines)" in text, text
 
 
-def test_the_site_file_records_an_included_grid_it_left_out(plugin, answer_modal, tmp_path):
+def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, answer_modal, tmp_path):
     """Final review M4 (Ruling F-2): the file itself names an included grid
     it does not hold, with its state, and says nothing when none is left out."""
     session = plugin.session
@@ -734,7 +1278,8 @@ def test_the_site_file_records_an_included_grid_it_left_out(plugin, answer_modal
     answer_modal(QFileDialog, "getSaveFileName", (str(whole), "GeoTIFF (*.tif *.tiff)"))
     dock.export_button.click()
     assert "NSGEO_SITE_LEFT_OUT" not in _metadata(whole)
-    session.remember_slice_source("C", preset="p", lines=())
+    session.set_site_view(grids=("A", "B", "C"))
+    session.remove_lines(site3.keys("C"))  # no lines at all (#74)
     session.lines_changed.emit()
     settle(dock)
     part = tmp_path / "part.tif"
@@ -851,6 +1396,397 @@ def test_leaving_the_site_waits_out_a_task_that_outlived_its_cancel(plugin, monk
     assert not dock.engine.is_running, "This grid waits for it"
     assert spin_until(lambda: dock.engine.is_prepared, 30_000)
     assert counter.max_concurrent == 1
+
+
+def test_this_grid_opens_the_grid_selected_in_the_site_list(plugin):
+    """#70: Whole site's selected row names the grid This grid opens."""
+    dock = plugin.slices_dock
+    whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    site_z = dock.site_engine.site_z
+    site_top = site_z.t0_ns + dock.slice_slider.value() * site_z.dz_ns
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    assert dock.engine.choice.grid_id == "B"
+    z = dock.engine.z
+    back_top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    assert abs(back_top - site_top) <= z.dz_ns / 2 + 1e-9
+    assert not plugin.session.dirty
+
+
+def test_this_grid_opens_the_selected_grid_with_its_remembered_source(plugin, site3):
+    plugin.session.remember_slice_source("B", preset="raw", lines=site3.keys("B")[:2])
+    dock = whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == "raw"
+    assert dock.included_keys() == site3.keys("B")[:2]
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_with_this_grids_own_grid_selected_it_comes_back_as_it_was_left(plugin):
+    dock = plugin.slices_dock
+    # Non-default values, so skipping the restore would show.
+    dock.cell_spin.setValue(round(dock.cell_spin.value() * 2, 3))
+    dock.flush_debounce()
+    names = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    other = next(n for n in names if n != dock.palette_combo.currentText())
+    dock.palette_combo.setCurrentText(other)
+    cell, palette = dock.cell_spin.value(), dock.palette_combo.currentText()
+    assert palette == other
+    whole_site(plugin)
+    assert dock.cell_spin.value() != pytest.approx(cell), "the site's own cell shows"
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.cell_spin.value() == pytest.approx(cell)
+    assert dock.palette_combo.currentText() == palette
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.grid_id == "A"
+
+
+def _spurious(errors):
+    """Errors but the engine's own note that a 1 ms cancel gave up waiting."""
+    return [e for e in errors if "did not stop in time" not in e]
+
+
+def _narrow_a_then_site_mid_window(plugin):
+    """A narrowed This-grid z range and a site time well inside the window: a
+    time clamped to the left grid's axis would not survive (#70, Ruling 6)."""
+    dock = plugin.slices_dock
+    dock.z1_spin.setValue(dock.z0_spin.value() + (dock.z1_spin.value() - dock.z0_spin.value()) / 3)
+    dock.flush_debounce()
+    _events()
+    whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    return dock._site.shown_top()
+
+
+def _assert_on_b_axis(dock, site_top):
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    spin_until(lambda: False, 400)  # any debounce runs on its own
+    z = dock.engine.z
+    top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    assert abs(top - site_top) <= z.dz_ns / 2 + 1e-9, (top, site_top)
+
+
+def test_the_opened_grid_lands_on_the_site_time_not_the_left_grids_clamp(plugin):
+    dock = plugin.slices_dock
+    site_top = _narrow_a_then_site_mid_window(plugin)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    _assert_on_b_axis(dock, site_top)
+    assert dock.engine.z == dock.engine.z.__class__.from_range(
+        dock.z0_spin.value(), dock.z1_spin.value(), dock.dz_spin.value()
+    ), "the engine holds the resolution the spins show"
+
+
+def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
+    """#71 on #70's switch: the grid opened from the site list restores its
+    remembered resolution, and the owed apply carries it to the engine. The
+    switch is no choice, so nothing is written and the survey stays clean."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, radius_spacings=1.5)
+    session.save()
+    stored = session.slice_source("B")
+    whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.engine.wait_for_preparation(20_000)
+    spin_until(lambda: False, 400)  # any debounce runs on its own
+    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.dz_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(0.5)
+    assert dock.current_values() is not None
+    assert session.slice_source("B") == stored
+    assert not session.dirty
+
+
+def test_the_opened_grid_lands_on_the_site_time_when_a_site_task_outlived_its_cancel(
+    plugin, monkeypatch
+):
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    site_top = _narrow_a_then_site_mid_window(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    counter = LoadCounter(monkeypatch, delay=0.3)
+    dock.site_panel.select_grid("B")
+    # Re-queue a site read so a task is live when the cancel gives up.
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    spin_until(lambda: False, 300)  # the seeded spins' debounce fires in the window
+    assert _spurious(errors) == []
+    _assert_on_b_axis(dock, site_top)
+    assert counter.max_concurrent == 1
+    assert _spurious(errors) == []
+
+
+def test_opening_the_selected_grid_waits_for_a_site_task_that_outlived_its_cancel(
+    plugin, monkeypatch
+):
+    """#70 with R-P5: the switch owes B's preparation; it runs only once the
+    site's task, which outlived its bounded cancel, has stopped."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    counter = LoadCounter(monkeypatch, delay=0.15)
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.site_scope_button.click()
+    assert spin_until(lambda: counter.concurrent == 1)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task, "the cancelled task is still reading"
+    assert not dock.engine.is_running, "This grid waits for it"
+    spin_until(lambda: False, 300)  # the seeded spins' debounce fires in the window
+    dock.slice_slider.setValue(dock.slice_slider.value() + 1)  # and a drag
+    _events()
+    assert _spurious(errors) == []
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    assert counter.max_concurrent == 1
+    assert _spurious(errors) == []
+
+
+def _remove_selected_and_switch(plugin, grid_id):
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.site_panel.select_grid(grid_id)
+    plugin.session.remove_grid(grid_id, with_lines=True)
+    _events()
+    plugin.session.save()  # the removal itself dirties; the switch must not
+    assert not plugin.session.dirty
+    shown = dock.site_panel.selected_grid()
+    dock.grid_scope_button.click()
+    assert errors == []
+    return dock, shown
+
+
+def test_removing_the_selected_last_grid_opens_the_neighbour_the_panel_selects(plugin):
+    """Ruling 7: the rule is the row the list shows selected at the switch."""
+    dock, shown = _remove_selected_and_switch(plugin, "C")
+    assert shown == "B"
+    assert dock.grid_combo.currentText() == shown
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not plugin.session.dirty
+
+
+def test_removing_a_selected_middle_grid_leaves_no_selection_and_this_grid_stays(plugin):
+    dock, shown = _remove_selected_and_switch(plugin, "B")
+    assert shown is None
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not plugin.session.dirty
+
+
+def test_a_selection_naming_a_grid_this_grid_does_not_offer_is_ignored(plugin, monkeypatch):
+    """The `_grid_to_resume` guard itself, with a stale id the panel cannot make."""
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    monkeypatch.setattr(dock.site_panel, "selected_grid", lambda: "Z")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    assert errors == []
+
+
+def test_a_carried_time_never_overrides_a_later_resolution_change(plugin):
+    """A reopened survey prepares with nothing owed; the site's time must not
+    stay pending and replace the user's slider time at their next change."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    session.save()
+    path = session.json_path
+    session.open_site(path)
+    _events()
+    assert dock.engine.wait_for_preparation(20_000)
+    spin_until(lambda: False, 400)
+    dock.slice_slider.setValue(5)
+    _events()
+    z = dock.engine.z
+    user_top = z.t0_ns + dock.slice_slider.value() * z.dz_ns
+    dock.dz_spin.setValue(round(dock.dz_spin.value() * 2, 4))
+    dock.flush_debounce()
+    _events()
+    z = dock.engine.z
+    assert abs(z.t0_ns + dock.slice_slider.value() * z.dz_ns - user_top) <= z.dz_ns / 2 + 1e-9
+    assert dock._pending_top_ns is None
+
+
+def test_re_entering_the_site_inside_the_wait_window_keeps_the_window_time(plugin, monkeypatch):
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    dock.dz_spin.setValue(dock.dz_spin.value() * 3)  # A's axis differs from the site's
+    dock.flush_debounce()
+    _events()
+    whole_site(plugin)
+    dock.slice_slider.setValue(int(dock.slice_slider.maximum() * 0.8))
+    _events()
+    site_top = dock._site.shown_top()
+    counter = LoadCounter(monkeypatch, delay=0.6)
+    dock.site_panel.select_grid("B")
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task
+    dock.site_scope_button.click()
+    _events()
+    assert dock._site.shown_top() == pytest.approx(site_top, abs=0.5)
+
+
+def _in_wait_window(plugin, monkeypatch):
+    """B selected in the site, a site task outliving its cancel, This grid
+    clicked: the dock is in the wait window (#70). Returns dock, errors, the
+    site's time."""
+    monkeypatch.setattr(slices_engine, "_CANCEL_TIMEOUT_MS", 1)
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    site_top = _narrow_a_then_site_mid_window(plugin)
+    counter = LoadCounter(monkeypatch, delay=0.6)
+    dock.site_panel.select_grid("B")
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    dock.site_panel.table.item(0, 0).setCheckState(Qt.CheckState.Checked)
+    spin_until(lambda: counter.concurrent == 1, 5_000)
+    dock.grid_scope_button.click()
+    assert dock.site_engine.has_live_task
+    return dock, errors, site_top
+
+
+def _round_trip_through_the_site(dock):
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    spin_until(lambda: False, 300)
+    dock.grid_scope_button.click()
+
+
+def test_a_round_trip_through_the_site_in_the_wait_window_keeps_the_owed_resolution(
+    plugin, monkeypatch
+):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(60.0)
+    _events()
+    _round_trip_through_the_site(dock)
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "B", 30_000)
+    spin_until(lambda: False, 400)
+    z = dock.engine.z
+    assert z.t0_ns == pytest.approx(dock.z0_spin.value(), abs=z.dz_ns)
+    assert z.t0_ns + (z.nz - 1) * z.dz_ns == pytest.approx(dock.z1_spin.value(), abs=z.dz_ns)
+    assert dock.z1_spin.value() == pytest.approx(60.0)
+    assert _spurious(errors) == []
+
+
+def test_a_round_trip_through_the_site_in_the_wait_window_keeps_the_window_time(
+    plugin, monkeypatch
+):
+    dock, errors, site_top = _in_wait_window(plugin, monkeypatch)
+    _round_trip_through_the_site(dock)
+    _assert_on_b_axis(dock, site_top)
+    assert _spurious(errors) == []
+
+
+def _assert_a_slice_is_drawn_on_a(dock, errors):
+    assert spin_until(lambda: dock.engine.is_prepared and dock.engine.choice.grid_id == "A", 30_000)
+    spin_until(lambda: False, 400)
+    dock.z1_spin.setValue(dock.z1_spin.value() - 1)  # a later edit must not error either
+    dock.flush_debounce()
+    _events()
+    assert _spurious(errors) == []
+    assert dock.current_values() is not None
+
+
+def test_landing_on_the_grid_the_engine_already_holds_clamps_the_seeded_range(plugin, monkeypatch):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_landing_on_the_grid_the_engine_holds_falls_back_from_a_range_past_its_data(
+    plugin, monkeypatch
+):
+    """#71, Review Focus 1, on #70's owed path: `prepare()` is a no-op (the
+    engine still holds A), so `_run_pending_grid_prepare`'s own clamp is the
+    one that meets A's remembered range lying wholly past A's data."""
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    assert dock.engine.choice.grid_id == "A"
+    _low, high = dock.engine.prepared_z_bounds()
+    beyond = {"t0_ns": high + 10.0, "t1_ns": high + 50.0}
+    plugin.session.remember_slice_resolution("A", **beyond)
+    dock.site_scope_button.click()
+    _events()
+    assert spin_until(lambda: not dock.site_engine.has_live_task, 20_000)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.engine.is_prepared and not dock.engine.is_running, "the no-op path"
+    low, high = dock.engine.prepared_z_bounds()
+    assert dock.z0_spin.value() == _snap_inside(low, dock.z0_spin.decimals(), upper=False)
+    assert dock.z1_spin.value() == _snap_inside(high, dock.z1_spin.decimals(), upper=True)
+    assert plugin.session.slice_resolution("A") == beyond
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_a_grid_removed_inside_the_wait_window_clamps_the_fallback_grid(plugin, monkeypatch):
+    dock, errors, _ = _in_wait_window(plugin, monkeypatch)
+    plugin.session.remove_grid("B", with_lines=True)
+    _events()
+    assert dock.grid_combo.currentText() == "A"
+    # The engine already holds A, so `_assert_a_slice_is_drawn_on_a`'s own
+    # wait passes at once. The owed clamp runs only once the site task dies;
+    # waiting for that, not for a fixed time, catches a dropped clamp on any
+    # machine.
+    assert spin_until(
+        lambda: not dock.site_engine.has_live_task and not dock._resolution_owed, 30_000
+    )
+    _assert_a_slice_is_drawn_on_a(dock, errors)
+
+
+def test_a_raising_prepare_does_not_leave_the_owed_resolution_stuck(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    dock.site_panel.select_grid("B")
+    monkeypatch.setattr(dock, "prepare", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    dock.grid_scope_button.click()
+    assert dock._resolution_owed is False
+
+
+def test_a_failure_inside_resume_still_hands_this_grids_moves_back(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    real = dock._refresh_source_status
+    calls = []
+
+    def boom():
+        if not calls:
+            calls.append(1)
+            raise RuntimeError("boom")
+        real()
+
+    monkeypatch.setattr(dock, "_refresh_source_status", boom)
+    with pytest.raises(RuntimeError):
+        dock.set_scope("grid")
+    assert dock.engine.on_grid_moved is None
 
 
 def test_moving_this_grids_grid_while_a_site_task_outlives_its_cancel_never_overlaps(

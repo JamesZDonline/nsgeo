@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 import numpy as np
@@ -628,15 +629,15 @@ def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
     assert not np.allclose(first[both], second[both]), "a different depth must look different"
 
 
-def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
+def test_the_fill_radius_is_a_distance_and_survives_a_cell_size_change(docked):
     """The default radius is a multiple of the line spacing -- a distance
-    (spec 6.4; #81 made it 0.5 x). The spin box is therefore in metres and
-    the cell conversion happens underneath, so halving the cell size does
+    (spec 6.4; #81 made it 0.5 x; #72 made the box say so, in spacings).
+    The cell conversion happens underneath, so halving the cell size does
     not silently halve the smoothing.
 
     Strengthened from the brief's own draft: with this fixture's
     `GRID.default_spacing` of 0.5, the default radius is 0.25 m -- under
-    1 m before ANY conversion -- so `int(self.radius_spin.value())`
+    1 m before ANY conversion -- so `int(metres)`
     (metres misread as an already-integer cell count, the exact mutant
     Step 10 names) truncates to 0 both before and after the cell change,
     and `before * 2 == 0` too, so the relative-doubling check alone passes
@@ -646,13 +647,133 @@ def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
     get right by accident."""
     dock, session = docked
     _ready(dock)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     before = dock.radius_cells()
     assert before == round(0.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+
+
+def test_this_grid_sets_the_fill_radius_in_line_spacings(docked):
+    """#72: This grid's Fill radius reads like Whole site's, in line
+    spacings, with the metres it comes to shown beside the box."""
+    dock, _ = docked
+    _ready(dock)
+    spin = dock.grid_radius_spin
+    assert spin.suffix() == " × line spacing"
+    assert spin.value() == pytest.approx(0.5)
+    assert spin.singleStep() == 0.25
+    assert dock.grid_radius_metres.text() == "= 0.25 m"
+    assert dock.radius_cells() == round(0.25 / dock.cell_spin.value())
+
+
+def test_the_metres_beside_the_radius_follow_the_box(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    assert dock.grid_radius_metres.text() == "= 0.75 m"
+    assert dock.radius_cells() == round(0.75 / dock.cell_spin.value())
+
+
+def test_the_radius_follows_a_line_spacing_edit(docked):
+    """Review Focus 3: the radius is in spacings, so a spacing edit moves
+    the metres and the cells with no grid switch and no change to the box."""
+    dock, session = docked
+    _ready(dock)
+    before = dock.radius_cells()
+    dock.refresh_slice()
+    finite_before = np.isfinite(dock.current_values()).sum()
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_metres.text() == "= 0.5 m"
+    assert dock.radius_cells() == round(0.5 / dock.cell_spin.value())
+    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+    # The drawn fill follows too, with no other refresh: export reads
+    # `radius_cells()` live, so the map must not show the old radius.
+    assert np.isfinite(dock.current_values()).sum() > finite_before
+
+
+def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
+    """#72's redraw on a spacing edit compares the radius in cells with the
+    one the last draw used. A coverage draw left that unrecorded, so after a
+    cell edit every session signal redrew the coverage view."""
+    dock, session = docked
+    _ready(dock)
+    dock.coverage_check.setChecked(True)
+    before = dock.radius_cells()
+    dock.cell_spin.setValue(0.05)
+    dock.flush_debounce()
+    assert dock.radius_cells() != before
+    drawn: list[None] = []
+    dock.slice_changed.connect(lambda: drawn.append(None))
+    for _ in range(3):
+        session.presets_changed.emit()
+    assert drawn == []
+
+
+def test_a_seeded_radius_emits_no_value_changed(docked_two_grids):
+    """The seed is not an edit: Task 4's memory hangs on `valueChanged`."""
+    dock, _ = docked_two_grids
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    seen: list[float] = []
+    dock.grid_radius_spin.valueChanged.connect(seen.append)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert seen == []
+
+
+def test_with_no_grid_the_radius_reads_zero_and_blank(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = SlicesDock(session)  # no survey open
+    try:
+        assert dock.grid_radius_metres.text() == ""
+        assert dock.radius_cells() == 0
+        assert dock.view_settings().radius_m == 0.0
+        session.new_site(tmp_path)  # open, but no grid yet
+        assert dock.grid_radius_metres.text() == ""
+        assert dock.radius_cells() == 0
+        assert dock.view_settings().radius_m == 0.0
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_saved_cube_records_its_radius_in_metres(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.grid_radius_spin.setValue(1.5)
+    assert dock.view_settings().radius_m == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize("radius_m", [0.0, 0.25, 0.5, 0.75])
+def test_an_old_cubes_radius_reopens_with_the_same_radius_in_cells(docked, radius_m):
+    dock, session = docked
+    _ready(dock)
+    view = dock.view_settings()
+    _save_cube(dock, session, "A__r", dataclasses.replace(view, radius_m=radius_m))
+    dock.grid_radius_spin.setValue(3.0)
+    dock.restore_cube("A__r")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.grid_radius_spin.value() == pytest.approx(radius_m / 0.5)
+    assert dock.radius_cells() == max(0, round(radius_m / dock.cell_spin.value()))
+
+
+def test_a_cube_saved_before_a_spacing_edit_keeps_its_radius_in_metres(docked):
+    """Review Focus 5: `radius_m` is metres, the box is spacings, so the
+    conversion uses the grid's spacing now, keeping the metres."""
+    dock, session = docked
+    _ready(dock)
+    view = dock.view_settings()
+    _save_cube(dock, session, "A__s", dataclasses.replace(view, radius_m=0.5))
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    dock.restore_cube("A__s")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_radius_metres.text() == "= 0.5 m"
 
 
 def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
@@ -664,7 +785,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
@@ -680,7 +801,7 @@ def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
     dock = SlicesDock(session)
     try:
         assert dock.cell_spin.value() == pytest.approx(cell)
-        assert dock.radius_spin.value() == pytest.approx(0.5 * spacing)
+        assert dock.grid_radius_spin.value() == pytest.approx(0.5)
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -692,10 +813,10 @@ def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
     fill is most of the picture rather than a nicety."""
     dock, _ = docked
     _ready(dock)
-    dock.radius_spin.setValue(0.0)
+    dock.grid_radius_spin.setValue(0.0)
     dock.flush_debounce()
     unfilled = np.isfinite(dock.current_values()).sum()
-    dock.radius_spin.setValue(1.0)
+    dock.grid_radius_spin.setValue(2.0)  # 1 m on a 0.5 m spacing
     dock.flush_debounce()
     filled = np.isfinite(dock.current_values()).sum()
     assert filled > unfilled
@@ -1084,7 +1205,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
             palette=dock.palette_combo.currentText(),
             stretch="shared across the cube",
             coverage=False,
-        )
+        ),
+        spacing_m=GRID.default_spacing,
     )
     assert dock.cube_combo.currentText() == "(unsaved)", "perturbing must drop the claim"
 
@@ -1492,7 +1614,7 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
 
     Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
     or the decimals, so every one of these shipped with an arrow click
-    that moved a 0.75 m radius to 1.75 m and a 0.2165 ns dz to 1.2165.
+    that moved a 0.75 m radius to 1.75 m (the box is in spacings now) and a 0.2165 ns dz to 1.2165.
     `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
     per click is the only increment that means anything on a time axis.
     """
@@ -1500,7 +1622,7 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
     assert dock.engine.wait_for_preparation(20_000)
     header = dock.session.line_for_key(dock.session.keys()[0]).header
 
-    assert dock.radius_spin.singleStep() <= 0.1
+    assert dock.grid_radius_spin.singleStep() == 0.25  # a quarter spacing, not Qt's 1.0
     assert dock.cell_spin.singleStep() <= 0.1
     assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
     assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
@@ -1521,7 +1643,7 @@ def test_the_resolution_controls_say_what_they_do(docked):
     """
     dock, _ = docked
     for spin, must_say in (
-        (dock.radius_spin, "no line"),
+        (dock.grid_radius_spin, "no line"),
         (dock.dz_spin, "sample"),
         (dock.cell_spin, "spacing"),
         (dock.coverage_check, "traces"),
@@ -1673,6 +1795,23 @@ def _grid_keys(session, grid_id):
     )
 
 
+def test_an_old_cube_record_without_lines_restores_every_line(docked_two_grids):
+    """#74: an old record names no line list; it restores every line, as the
+    remembered record (final review D4) already says."""
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(
+        dock, session, "A__old", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    del session.site.cubes["A__old"]["lines"]
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.included_keys() == a_keys
+    assert session.slice_source("A")["lines"] is None
+    assert dock.engine.wait_for_preparation(20_000)
+
+
 def test_opening_a_site_does_not_mark_it_dirty(docked_two_grids):
     dock, session = docked_two_grids
     dock.engine.wait_for_preparation(20_000)
@@ -1706,6 +1845,76 @@ def test_a_default_line_choice_picks_up_a_line_imported_later(docked_two_grids, 
     dock.grid_combo.setCurrentText("A")
     assert len(dock.included_keys()) == 4
     assert dock.engine.wait_for_preparation(20_000)
+
+
+def _reopened_with_a_late_import(session, tmp_path):
+    """Save the survey, reopen it in a new session and dock, and import a
+    line for A there (#75: the pick-up must survive save and reopen)."""
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    new_line = _line(tmp_path, "A", "FILE__099", 9.0)
+    reopened.add_lines([new_line])
+    return reopened, dock2
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_default_line_choice_picks_up_an_import_after_save_and_reopen(docked_two_grids, tmp_path):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")  # the round trip records `lines: None`
+    assert session.slice_source("A")["lines"] is None
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        assert reopened.slice_source("A")["lines"] is None  # loaded as stored null
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert new_keys <= set(dock2.included_keys())
+    finally:
+        _dispose(dock2)
+
+
+def test_an_explicit_line_choice_does_not_pick_up_an_import_after_save_and_reopen(
+    docked_two_grids, tmp_path
+):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert not new_keys & set(dock2.included_keys())
+        assert dock2.included_keys() == a_keys[:2]
+    finally:
+        _dispose(dock2)
+
+
+def test_opening_a_survey_that_has_saved_cubes_stays_clean(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    _save_cube(dock, session, "A__kept", view)
+    session.save()
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert not reopened.dirty
+        items = [dock2.cube_combo.itemText(i) for i in range(dock2.cube_combo.count())]
+        assert "A__kept" in items
+    finally:
+        _dispose(dock2)
 
 
 def test_choosing_lines_remembers_them_for_that_grid_only(docked_two_grids):
@@ -1806,7 +2015,7 @@ def test_an_empty_remembered_line_set_is_the_default(docked_two_grids, tmp_path,
 def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_grids):
     """Final review D4: an old-format cube record names no line list, so
     picking it remembers `lines=None` ("every line"), not an empty choice.
-    The dock itself still restores its empty inclusion set (M11)."""
+    The dock restores every line too (#74; it used to restore an empty set)."""
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
@@ -1814,5 +2023,304 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     del record["lines"]  # written before cube records carried their lines
     dock.cube_combo.setCurrentText("A__old")
     assert dock.engine.wait_for_preparation(20_000)
-    assert dock.included_keys() == ()
+    assert dock.included_keys() == _grid_keys(session, "A")
     assert session.slice_source("A")["lines"] is None
+
+
+# ---- #71: each grid remembers its own resolution ----------------------------
+def _switch(dock, grid_id):
+    """Pick `grid_id` in This grid's combo, then let the change land."""
+    dock.grid_combo.setCurrentText(grid_id)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def _settle_sources(dock, session):
+    """A combo pick remembers that grid's preset and lines (M12), which
+    dirties the survey once. Done and saved first, so a later switch writes
+    nothing and only a resolution write could dirty it."""
+    assert dock.engine.wait_for_preparation(20_000)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    session.save()
+
+
+def _snapped_bounds(dock):
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    low, high = dock.engine.prepared_z_bounds()
+    return (
+        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+    )
+
+
+def test_a_resolution_edit_is_remembered_for_that_grid_only(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not session.dirty
+    dock.cell_spin.setValue(0.1)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert session.slice_resolution("B") == {}
+    assert session.dirty
+
+
+def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    seed_cell = dock.cell_spin.value()
+    seed_dz = dock.dz_spin.value()
+    dock.cell_spin.setValue(0.1)
+    dock.dz_spin.setValue(seed_dz * 2)
+    dock.grid_radius_spin.setValue(1.5)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _switch(dock, "B")
+    assert dock.cell_spin.value() == pytest.approx(seed_cell)
+    assert dock.dz_spin.value() == pytest.approx(seed_dz)
+    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
+    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    # On the engine too, not only in the boxes, and drawn.
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
+    assert dock.grid_radius_metres.text() == "= 0.75 m"
+    assert dock.current_values() is not None
+
+
+def test_seeding_never_remembers_a_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    # B's own spacing seeds a different cell, so every switch below really
+    # moves the box (and emits) rather than passing for want of a change.
+    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.3))
+    _settle_sources(dock, session)
+    seen: list[float] = []
+    dock.cell_spin.valueChanged.connect(seen.append)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert len(seen) >= 2
+    assert session.slice_resolution("A") == {}
+    assert session.slice_resolution("B") == {}
+    assert not session.dirty
+
+
+def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it(
+    docked_two_grids,
+):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.1)
+    dock.dz_spin.setValue(0.5)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.grid_radius_spin.setValue(1.5)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    stored = session.slice_source("A")
+    assert stored["resolution"] == {
+        "cell": 0.1,
+        "dz_ns": 0.5,
+        "t0_ns": 2.0,
+        "t1_ns": 30.0,
+        "radius_spacings": 1.5,
+    }
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.grid_combo.currentText() == "A"
+        assert dock2.cell_spin.value() == pytest.approx(0.1)
+        assert dock2.dz_spin.value() == pytest.approx(0.5)
+        assert dock2.z0_spin.value() == pytest.approx(2.0)
+        assert dock2.z1_spin.value() == pytest.approx(30.0)
+        assert dock2.grid_radius_spin.value() == pytest.approx(1.5)
+        dock2.flush_debounce()
+        assert dock2.engine.wait_for_preparation(20_000)
+        # The restored values reached the engine and drew a slice.
+        assert dock2.engine.frame.cell == pytest.approx(0.1)
+        assert dock2.engine.z.t0_ns == pytest.approx(2.0)
+        assert dock2.engine.z.dz_ns == pytest.approx(0.5)
+        assert dock2.engine.z.t_end_ns == pytest.approx(30.0)
+        assert dock2.current_values() is not None
+        assert not reopened.dirty
+        assert reopened.slice_source("A") == stored
+    finally:
+        dock2.engine.wait_for_preparation(20_000)
+        dock2.engine.dispose()
+        dock2.deleteLater()
+
+
+def test_a_remembered_z_range_is_clamped_to_the_prepared_lines_but_kept(docked_two_grids):
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    low, high = dock.engine.prepared_z_bounds()
+    wide = {"t0_ns": low - 5.0, "t1_ns": high + 5.0}
+    session.remember_slice_resolution("A", **wide)
+    session.save()
+    dock.grid_combo.setCurrentText("A")
+    # Restored first; the clamp waits for A's lines to be prepared.
+    assert dock.z0_spin.value() == pytest.approx(wide["t0_ns"], abs=1e-3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_bounds(dock)
+    assert session.slice_resolution("A") == wide
+    assert not session.dirty
+    assert dock.current_values() is not None
+
+
+def test_a_remembered_z_range_wholly_outside_the_data_falls_back_to_the_prepared_range(
+    docked_two_grids,
+):
+    """Review Focus 1: clamping each end of a range that lies wholly past the
+    data on its own leaves z1 below z0, and every slice would then fail."""
+    dock, session = docked_two_grids
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    _low, high = dock.engine.prepared_z_bounds()
+    beyond = {"t0_ns": high + 10.0, "t1_ns": high + 50.0}
+    session.remember_slice_resolution("A", **beyond)
+    session.save()
+    dock.grid_combo.setCurrentText("A")
+    assert dock.z0_spin.value() == pytest.approx(beyond["t0_ns"], abs=1e-3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_bounds(dock)
+    assert errors == []
+    assert dock.current_values() is not None
+    # The remembered values stand, for a later crop that frees the range.
+    assert session.slice_resolution("A") == beyond
+    assert not session.dirty
+
+
+def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown(docked_two_grids):
+    """Ruling 15 (#71): after the fallback the user edits against the range
+    shown, not the one remembered. A hand z0, a time cutoff past it, then a
+    hand z1 used to leave t0 > t1 in the record: the next restore snapped z1
+    back to the data's end, and a reopen dropped the reversed pair."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    low, high = dock.engine.prepared_z_bounds()
+    dock.z0_spin.setValue(round(low + 0.6 * (high - low), 3))
+    dock.flush_debounce()
+    cutoff = {"step": "time_cutoff", "params": {"end_ns": round(low + 0.4 * (high - low), 3)}}
+    session.site.presets["cut"] = [*PRESET, {**cutoff, "enabled": True}]
+    session.presets_changed.emit()
+    dock.preset_combo.setCurrentText("cut")
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    shown_z0 = _snapped_bounds(dock)[0]
+    assert dock.z0_spin.value() == shown_z0, "the fallback shows the data's range"
+    z1 = round(low + 0.3 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    dock.flush_debounce()
+
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, z1)
+    assert session.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        dock2.flush_debounce()
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert reopened.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+        assert (dock2.z0_spin.value(), dock2.z1_spin.value()) == (shown_z0, z1)
+        assert dock2.engine.z.t0_ns == pytest.approx(shown_z0)
+        assert dock2.current_values() is not None
+        assert not reopened.dirty
+    finally:
+        _dispose(dock2)
+
+
+def test_an_edit_after_a_clamp_that_left_the_range_usable_keeps_the_remembered_end(
+    docked_two_grids,
+):
+    """Ruling 15 remembers the shown end only when the pair would be empty: a
+    remembered z0 that a clamp only pulled up to the data is still the user's."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    low, high = dock.engine.prepared_z_bounds()
+    session.remember_slice_resolution("A", t0_ns=low - 5.0)
+    _switch(dock, "A")
+    assert dock.z0_spin.value() == _snapped_bounds(dock)[0]
+    z1 = round(low + 0.5 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    assert session.slice_resolution("A") == {"t0_ns": low - 5.0, "t1_ns": z1}
+
+
+def test_a_hand_resolution_on_an_empty_grid_survives_its_lines_arriving(qgis_app, tmp_path):
+    """#71, the ordinary new-survey flow: a grid picked before it has lines,
+    dz and z1 set by hand, then the lines imported. dz/z0/z1 are seeded only
+    once a line exists, after the grid change, so that late seed must lay
+    what the user chose back over itself (`_seed_dz_z_defaults`' restore)."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        assert dock.grid_combo.currentText() == "A"
+        dock.dz_spin.setValue(0.5)
+        dock.z1_spin.setValue(30.0)
+        remembered = {"dz_ns": 0.5, "t1_ns": 30.0}
+        assert session.slice_resolution("A") == remembered
+        session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+        header = session.line_for_key(session.keys()[0]).header
+        assert dock.z0_spin.value() == pytest.approx(header.position_ns, abs=1e-3), "seeded"
+        assert (dock.dz_spin.value(), dock.z1_spin.value()) == (0.5, 30.0)
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        assert dock.engine.z.dz_ns == pytest.approx(0.5)
+        assert dock.engine.z.t_end_ns == pytest.approx(30.0, abs=0.5)
+        assert dock.current_values() is not None
+        assert session.slice_resolution("A") == remembered
+    finally:
+        _dispose(dock)
+
+
+def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    _switch(dock, "B")
+    session.remember_slice_resolution("A", cell=0.001)
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == dock.cell_spin.minimum()
+    assert dock.engine.frame.cell == pytest.approx(dock.cell_spin.minimum())
+    assert session.slice_resolution("A") == {"cell": 0.001}
+
+
+def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.1)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(dock, session, "A__res", dock.view_settings())
+    dock.cell_spin.setValue(0.3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_resolution("A")["cell"] == pytest.approx(0.3)
+
+    dock.cube_combo.setCurrentText("A__res")
+    assert dock.engine.wait_for_preparation(20_000)
+    remembered = session.slice_resolution("A")
+    assert set(remembered) == {"cell", "dz_ns", "t0_ns", "t1_ns", "radius_spacings"}
+    assert remembered["cell"] == pytest.approx(0.1)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == pytest.approx(0.1)

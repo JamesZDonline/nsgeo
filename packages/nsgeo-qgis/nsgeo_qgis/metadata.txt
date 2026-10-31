@@ -5,8 +5,17 @@ qgisMaximumVersion=4.99
 supportsQt6=True
 description=Near-surface geophysics: GPR profiles in map context
 about=Process GPR surveys in their map context. Import GSSI DZT files into grids placed from corners typed, picked on the map or read from a polygon. Hover a line on the map to see its profile, with the profile cursor drawn back onto the map. Process each profile with steps you choose (time-zero, dewow, background removal, bandpass, gains); nothing runs unless you add it. Pick reflections into a point layer, and build time and depth slices across a grid, shown on the map and exportable as a GeoTIFF. The plugin is GPL-2.0-or-later; the bundled nsgeo core library is MIT.
-version=0.1.0
-changelog=0.1.0 - first release, experimental
+version=0.2.0
+changelog=0.2.0 - experimental
+    - Whole site: every grid's slice together on one map layer, with one depth slider and colour scale, and one GeoTIFF export
+    - Slices remember the resolution you set for each grid and for the whole site; This grid's fill radius is set in line spacings
+    - Velocity: measure a velocity by clicking a diffraction hyperbola; fits are saved with the survey and can be deleted
+    - Profiles: reversed lines on a zigzag survey are mirrored onto one ruler per grid
+    - Processing: a time cutoff dragged on the profile, a steadier gain curve, and a grouped Add step menu
+    - Grid dialog: corners picked from the map or a layer in any CRS, checked with a fit
+    - A Panels button, removing several lines at once, and fixes from the field
+    - Release notes: https://github.com/JamesZDonline/nsgeo/blob/v0.2.0/docs/releases/0.2.0.md
+    0.1.0 - first release, experimental
     - Sites and grids: import GSSI DZT files into grids placed from GNSS corners, digitised on the map, or read from a polygon
     - Map link: hover a line on the map to see its profile; the profile cursor and selected range are drawn on the map
     - Processing: time-zero, dewow, background removal, bandpass, gains and amplitude transforms, with a Difference view, presets and Apply to grid

@@ -913,7 +913,7 @@ class NsgeoPlugin:
           recoverable from a surviving neighbour, it never puts the cell
           itself back, so the loss is unconditional and radius only
           changes how much it matters. At `radius_cells() == 0` (spec
-          6.4's honest unfilled truth, and `radius_spin`'s own
+          6.4's honest unfilled truth, and `grid_radius_spin`'s own
           construction default) the success message is pushed at
           `Warning` rather than `Info`, naming the consequence -- the
           file itself also carries this, via `NSGEO_FILL_RADIUS_CELLS`/

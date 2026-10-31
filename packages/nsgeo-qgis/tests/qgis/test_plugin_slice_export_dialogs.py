@@ -166,7 +166,7 @@ def test_export_geotiff_adds_a_layer_to_the_slices_group(plugin, tmp_path, answe
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
-    dock.radius_spin.setValue(0.5)
+    dock.grid_radius_spin.setValue(1.0)  # 0.5 m on this grid's 0.5 m spacing
     dock.flush_debounce()
     assert dock.radius_cells() > 0  # keep this test focused on the layer-join claim
 
@@ -234,13 +234,13 @@ def test_an_export_after_the_user_deleted_the_site_group_still_shows(
 
 def test_export_geotiff_warns_when_fill_radius_is_zero(plugin, tmp_path, answer_modal, message_log):
     """Ruling AE: radius 0 is spec 6.4's honest unfilled truth and
-    `radius_spin`'s own construction default -- refusing it would take
+    `grid_radius_spin`'s own construction default -- refusing it would take
     away a view the spec calls valid, so the fix is a loud warning, not a
     refusal."""
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
-    dock.radius_spin.setValue(0.0)
+    dock.grid_radius_spin.setValue(0.0)
     dock.flush_debounce()
     assert dock.radius_cells() == 0
 

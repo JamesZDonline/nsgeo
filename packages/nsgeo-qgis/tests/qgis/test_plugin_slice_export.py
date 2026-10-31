@@ -112,7 +112,7 @@ def test_every_band_describes_the_window_it_averages_in_both_units(exportable, t
         eighth = ds.GetRasterBand(8).GetDescription()
         assert seventh != eighth
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_the_creation_options_are_the_measured_ones(exportable, tmp_path):
@@ -134,7 +134,7 @@ def test_the_creation_options_are_the_measured_ones(exportable, tmp_path):
         assert np.isnan(ds.GetRasterBand(1).GetNoDataValue())
         assert ds.GetRasterBand(1).DataType == gdal.GDT_Float32
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_the_export_is_north_up_and_carries_the_frames_crs(exportable, tmp_path):
@@ -149,7 +149,7 @@ def test_the_export_is_north_up_and_carries_the_frames_crs(exportable, tmp_path)
         assert gt[5] < 0.0 and gt[2] == 0.0 and gt[4] == 0.0
         assert "32616" in ds.GetProjection()
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_export_never_needs_a_resident_cube(exportable, tmp_path):
@@ -337,7 +337,7 @@ def test_coverage_exports_as_a_companion_single_band_raster(exportable, tmp_path
         counts = ds.GetRasterBand(1).ReadAsArray()
         assert np.nanmax(counts) >= 1
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(exportable, tmp_path):
@@ -364,7 +364,7 @@ def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(expo
         )
         assert not (arr == 0.0).any(), "an uncovered cell must be NaN, never a literal zero"
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_path):
@@ -448,7 +448,7 @@ def test_the_geotiff_carries_fill_radius_and_azimuth_metadata(exportable, tmp_pa
         assert tags["NSGEO_FILL_RADIUS_CELLS"] == "3"
         assert tags["NSGEO_FRAME_AZIMUTH_DEG"] == str(engine.frame.azimuth)
     finally:
-        ds = None
+        ds.Close()
 
 
 def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_path):
@@ -496,7 +496,7 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
             # the surveyed (rotated) frame and must read as nodata.
             assert np.isnan(arr).any()
         finally:
-            ds = None
+            ds.Close()
     finally:
         engine.dispose()
 

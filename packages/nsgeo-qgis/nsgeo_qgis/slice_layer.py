@@ -14,7 +14,9 @@ replace a file QGIS holds open, and GDAL's `Create()` deletes first -- an
 in-place rewrite failed there with "Permission denied" on the second
 tick (found in the 0.1.0 walkthrough; Linux allows it, so CI never saw
 it). QGIS's render threads can keep the old file open briefly after the
-switch too, so superseded files are deleted best-effort, on later ticks.
+switch too, so superseded files are deleted best-effort, at the end of
+the tick that supersedes them (#54); one a render thread still holds is
+met again by the next tick's scan.
 
 Uncompressed, unlike the export (plan Ruling 3). Measured here at GDAL
 3.8.4: `COMPRESS=DEFLATE, PREDICTOR=3` costs 8.8 ms for a 300x300 float
@@ -258,14 +260,19 @@ class SliceLayer(QObject):
             group.addLayer(self.layer)
 
     def _sweep(self) -> None:
-        """Delete every scratch file the layer does not read, and never raise.
+        """Delete every scratch file but the two that may be wanted, and
+        never raise.
 
         A scan of the directory rather than a list of superseded files, so
         a file whose write or repoint failed, and sidecars such as GDAL's
-        `.aux.xml` or an `.ovr`, are covered too. What the layer reads is
-        its live `source()` while it is alive -- if `setDataSource` raised
-        before taking effect, the previous file is still the one -- and
-        `self.path` otherwise. A file QGIS's render threads still hold open
+        `.aux.xml` or an `.ovr`, are covered too. Two files are kept, both
+        and not either (#54): `self.path`, the file the last successful
+        repoint set (or the one `_create_layer` was given), and the layer's
+        live `source()` while it is alive. They are the same file after a
+        good tick, and after a `setDataSource` that raised before taking
+        effect; they differ when it took a file the layer cannot read: the
+        layer is left invalid on the new file, and `self.path` still names
+        the last good one. A file QGIS's render threads still hold open
         cannot be deleted on Windows; it is simply met again by the next
         update's scan.
         """

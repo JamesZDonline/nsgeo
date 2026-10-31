@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.1.0, the first release. It is **experimental**, so keep
+This guide covers nsgeo 0.2.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.1.0](#5-known-issues-in-010)
+5. [Known issues in 0.2.0](#5-known-issues-in-020)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.1.0.zip` from the
+1. Download `nsgeo_qgis-0.2.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.1.0 · core 0.1.0 · build`, followed by
+   bar above the map should show `plugin 0.2.0 · core 0.2.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.1.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.2.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -358,7 +358,7 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-010) before you do.
+  [Known issues](#5-known-issues-in-020) before you do.
 - Do not drag a pick to a new place on the map. It keeps the trace, time and
   distance it was made at, so the point and its record would no longer agree.
   To move a pick, delete it and pick again on the profile.
@@ -382,10 +382,12 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), the top
    and bottom of the volume (**z0**, **z1**), and the **Fill radius** for cells
    no line crossed. Hover over each control for an explanation. A grid starts
-   at a 0.2 m cell, or half the line spacing if that is smaller, and a fill
-   radius of half the line spacing. That radius just closes the gaps between
-   lines. If a line strayed from its spacing and leaves an unfilled stripe,
-   raise the fill radius.
+   at a 0.2 m cell, or half the line spacing if that is smaller. The fill
+   radius is set in line spacings, as it is for the whole site, and starts at
+   0.5. Its metres are shown beside the box. That radius just closes the gaps
+   between lines. If a line strayed from its spacing and leaves an unfilled
+   stripe, raise the fill radius. Each grid remembers the resolution you set
+   for it, and saving the site saves it.
 4. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 5. **Save cube…** keeps the prepared volume in the site folder (click **Save
@@ -435,7 +437,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.1.0
+## 5. Known issues in 0.2.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -496,8 +498,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.1.0 · core
-   0.1.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.2.0 · core
+   0.2.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open
