@@ -1938,14 +1938,40 @@ class SlicesDock(QgsDockWidget):
                 # site's own radius is `SiteScope._on_radius_changed`'s.
                 if field == "radius_spacings" or not self.session.is_open:
                     return
-                self.session.remember_site_resolution(**{field: value})
+                edited = self._edited_fields(field, value, self.session.site_resolution())
+                self.session.remember_site_resolution(**edited)
                 return
             grid_id = self.grid_combo.currentText()
             if not grid_id or not self.session.is_open:
                 return
-            self.session.remember_slice_resolution(grid_id, **{field: value})
+            edited = self._edited_fields(field, value, self.session.slice_resolution(grid_id))
+            self.session.remember_slice_resolution(grid_id, **edited)
         except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
             _log(f"could not remember the slice resolution: {exc}")
+
+    def _edited_fields(
+        self, field: str, value: float, remembered: dict[str, float]
+    ) -> dict[str, float]:
+        """What one edit remembers: `field`, and for a z bound, sometimes the
+        other bound as shown (Ruling 15, #71).
+
+        After the empty-range fallback (Review Focus 1) the spins show the
+        data's range while the record keeps a range past it. An edit to the
+        other end is made against the range shown, so pairing it with the
+        remembered end would store t1 <= t0: the next restore would fall
+        back again, losing the edit, and a reopen would drop the pair as
+        damaged. So when the record holds the other end and the pair would
+        be empty, the other end's shown value is remembered too. A clamp
+        that left the pair usable keeps the remembered end, as before."""
+        fields = {field: value}
+        others = {"t0_ns": ("t1_ns", self.z1_spin), "t1_ns": ("t0_ns", self.z0_spin)}
+        if field in others:
+            other, spin = others[field]
+            if other in remembered:
+                pair = {field: value, other: remembered[other]}
+                if pair["t1_ns"] <= pair["t0_ns"]:
+                    fields[other] = spin.value()
+        return fields
 
     def _refill_palette_combo(self) -> None:
         """Spec 8's rule made concrete: only tables that suit the

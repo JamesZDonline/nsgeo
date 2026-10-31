@@ -2185,6 +2185,65 @@ def test_a_remembered_z_range_wholly_outside_the_data_falls_back_to_the_prepared
     assert not session.dirty
 
 
+def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown(docked_two_grids):
+    """Ruling 15 (#71): after the fallback the user edits against the range
+    shown, not the one remembered. A hand z0, a time cutoff past it, then a
+    hand z1 used to leave t0 > t1 in the record: the next restore snapped z1
+    back to the data's end, and a reopen dropped the reversed pair."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    low, high = dock.engine.prepared_z_bounds()
+    dock.z0_spin.setValue(round(low + 0.6 * (high - low), 3))
+    dock.flush_debounce()
+    cutoff = {"step": "time_cutoff", "params": {"end_ns": round(low + 0.4 * (high - low), 3)}}
+    session.site.presets["cut"] = [*PRESET, {**cutoff, "enabled": True}]
+    session.presets_changed.emit()
+    dock.preset_combo.setCurrentText("cut")
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    shown_z0 = _snapped_bounds(dock)[0]
+    assert dock.z0_spin.value() == shown_z0, "the fallback shows the data's range"
+    z1 = round(low + 0.3 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    dock.flush_debounce()
+
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, z1)
+    assert session.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        dock2.flush_debounce()
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert reopened.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+        assert (dock2.z0_spin.value(), dock2.z1_spin.value()) == (shown_z0, z1)
+        assert dock2.engine.z.t0_ns == pytest.approx(shown_z0)
+        assert dock2.current_values() is not None
+        assert not reopened.dirty
+    finally:
+        _dispose(dock2)
+
+
+def test_an_edit_after_a_clamp_that_left_the_range_usable_keeps_the_remembered_end(
+    docked_two_grids,
+):
+    """Ruling 15 remembers the shown end only when the pair would be empty: a
+    remembered z0 that a clamp only pulled up to the data is still the user's."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    low, high = dock.engine.prepared_z_bounds()
+    session.remember_slice_resolution("A", t0_ns=low - 5.0)
+    _switch(dock, "A")
+    assert dock.z0_spin.value() == _snapped_bounds(dock)[0]
+    z1 = round(low + 0.5 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    assert session.slice_resolution("A") == {"t0_ns": low - 5.0, "t1_ns": z1}
+
+
 def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_grids):
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)

@@ -950,6 +950,43 @@ def test_a_remembered_site_z_range_wholly_outside_the_data_falls_back_to_the_rea
     assert not session.dirty
 
 
+def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown_in_the_site(
+    fake_iface, site3_factory, answer_modal, open_plugin
+):
+    """Ruling 15 (#71), the site's twin: a z1 set against the fallback's range
+    used to leave the remembered t0 past it, so the next ready-set change
+    snapped z1 back to the data's end, and a reopen dropped the pair."""
+    site = site3_factory()
+    site.session.remember_site_resolution(t0_ns=200.0)  # past every grid's data
+    site.session.save()
+    first = _open(fake_iface, site, answer_modal)
+    try:
+        dock = whole_site(first)
+        shown_z0 = _snapped_ready_bounds(dock)[0]
+        assert dock.z0_spin.value() == shown_z0, "the fallback shows the data's range"
+        dock.z1_spin.setValue(60.0)
+        dock.flush_debounce()
+        settle(dock)
+        c_row = dock.site_panel.table.item(2, 0)
+        c_row.setCheckState(Qt.CheckState.Unchecked)
+        settle(dock)
+        c_row.setCheckState(Qt.CheckState.Checked)
+        settle(dock)
+        assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, 60.0)
+        assert first.session.site_resolution() == {"t0_ns": shown_z0, "t1_ns": 60.0}
+        first.session.save()
+    finally:
+        _close(first, answer_modal)
+
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert plugin.session.site_resolution() == {"t0_ns": shown_z0, "t1_ns": 60.0}
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, 60.0)
+    assert dock._site.res_applied.t1_ns == pytest.approx(60.0)
+    assert dock.current_site_slice() is not None
+    assert not plugin.session.dirty
+
+
 def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site3_factory):
     dock = whole_site(plugin)
     dock.radius_spacing_spin.setValue(1.25)
