@@ -8,9 +8,10 @@ plugin on top. Today it reads GSSI DZT files. The core is laid out so that other
 instruments, such as magnetometry, conductivity and resistivity, can be added later
 without touching the plugin.
 
-> **Status: 0.1.0, the first release, experimental.** The QGIS plugin imports
-> DZT files into grids placed on the map, links the map and the profile both
-> ways, processes profiles, records picks, and builds time and depth slices. It
+> **Status: 0.2.0, experimental.** The QGIS plugin imports DZT files into grids
+> placed on the map, links the map and the profile both ways, processes
+> profiles, records picks, measures velocities from diffraction hyperbolas, and
+> builds time and depth slices for one grid or the whole site. It
 > installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x, and each release's
 > zip is checked by installing it into QGIS 3.40, 3.44 and 4.2. macOS is
 > untested, and the [getting-started guide](docs/guide/getting-started.md) lists
