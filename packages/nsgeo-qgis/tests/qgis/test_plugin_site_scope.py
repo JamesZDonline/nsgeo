@@ -879,6 +879,117 @@ def test_a_hand_z_edit_in_the_site_is_clamped_from_then_on(plugin):
     assert plugin.session.site_resolution() == {"dz_ns": dz, "t0_ns": z0}
 
 
+# ---- Ruling 12: This grid's seeds stay off the site's spins (#71) ------------------------
+
+
+def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolution(plugin):
+    """This grid falls back to B when its grid A is removed under the site.
+    B's seed and remembered resolution wait for This grid: they used to land
+    on the spins the site shares, and mark the site's z range as hand-set.
+    A is out of the site, so its removal changes no ready grid, and no tick
+    re-seeds the site's z range over what landed."""
+    session = plugin.session
+    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "radius_spacings": 1.5}
+    session.remember_slice_resolution("B", **b_res)
+    session.set_site_view(grids=("B", "C"))
+    session.save()
+    dock = whole_site(plugin)
+    site_spins = _resolution_spins(dock)
+    view = session.site_view()
+    session.remove_grid("A", with_lines=True)
+    settle(dock)
+    assert dock.grid_combo.currentText() == "B"
+    assert _resolution_spins(dock) == site_spins
+    assert dock._site.z_custom is False
+    assert session.site_view() == view, "nothing is remembered for the site"
+    assert session.slice_resolution("B") == b_res
+
+    dock.site_panel.select_grid(None)  # This grid comes back on its own grid
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
+    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(0.5)
+    assert dock.current_values() is not None
+    assert session.slice_resolution("B") == b_res
+
+
+def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
+    site3_factory, open_plugin
+):
+    """The same fall-back with nothing remembered for B: This grid comes back
+    with B's own seed (its 0.3 m spacing's cell, the default radius), not with
+    the values A had before the site."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.set_site_view(grids=("B", "C"))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = plugin.slices_dock
+    dock.grid_radius_spin.setValue(1.5)  # A's own, unlike B's seed
+    dock.flush_debounce()
+    assert dock.cell_spin.value() == pytest.approx(0.2)
+    whole_site(plugin)
+    plugin.session.remove_grid("A", with_lines=True)
+    settle(dock)
+    dock.site_panel.select_grid(None)
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    assert dock.grid_radius_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.choice.grid_id == "B"
+    assert dock.engine.frame.cell == pytest.approx(0.15)
+    assert dock.current_values() is not None
+    assert plugin.session.slice_resolution("B") == {}
+
+
+def test_importing_lines_under_this_grids_grid_while_the_site_shows_leaves_the_site_resolution(
+    site3_factory, open_plugin
+):
+    """This grid shows C before C has lines. Lines imported under C while
+    the site shows owe C's dz/z0/z1 seed to This grid, not to the site. C is
+    kept out of the site, so no tick re-seeds the site's z range over it."""
+    site = site3_factory()
+    c_keys = site.keys("C")
+    c_lines = [site.session.line_for_key(k) for k in c_keys]
+    site.session.remove_lines(c_keys)
+    site.session.set_site_view(grids=("A", "B"))
+    site.session.save()
+    plugin = open_plugin(site)
+    session = plugin.session
+    dock = plugin.slices_dock
+    dock.grid_combo.setCurrentText("C")
+    _events()
+    session.save()
+    dock = whole_site(plugin)
+    site_spins = _resolution_spins(dock)
+    record = session.slice_source("C")
+    session.add_lines(c_lines)
+    settle(dock)
+    assert _resolution_spins(dock) == site_spins
+    assert dock._site.z_custom is False
+    assert session.site_resolution() == {}
+    assert session.slice_source("C") == record, "nothing is remembered for C"
+
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "C"
+    header = session.line_for_key(c_keys[0]).header
+    assert dock.dz_spin.value() == pytest.approx(header.dt_ns, abs=1e-4)
+    assert dock.z0_spin.value() == pytest.approx(header.position_ns, abs=1e-3)
+    end = header.position_ns + (header.n_samples - 1) * header.dt_ns
+    assert dock.z1_spin.value() == pytest.approx(end, abs=1e-4)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert spin_until(lambda: dock.engine.choice is not None and dock.engine.is_prepared)
+    assert dock.engine.choice.grid_id == "C"
+    assert session.slice_source("C") == record
+
+
 # ---- persistence -----------------------------------------------------------------------
 
 

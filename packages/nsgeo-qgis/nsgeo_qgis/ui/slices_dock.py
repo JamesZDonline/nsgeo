@@ -151,9 +151,11 @@ class SlicesDock(QgsDockWidget):
             exclusive_with=[self.engine],
             parent=self,
         )
-        #: This grid's values while the site shows: its Resolution spins,
-        #: palette and remembered source, and the top time carried back.
+        #: This grid's values while the site shows: its Resolution spins (and
+        #: the grid they were captured on), palette and remembered source,
+        #: and the top time carried back.
         self._grid_spins: site_scope.Spins | None = None
+        self._grid_spins_for: str | None = None
         self._grid_palette = ""
         self._grid_record_at_entry: tuple[Any, Any] | None = None
         self._pending_top_ns: float | None = None
@@ -1773,15 +1775,18 @@ class SlicesDock(QgsDockWidget):
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:
         """Re-seed `cell_spin`/`grid_radius_spin` from the grid that was just
         selected -- called only from `_sync_included`'s grid-changed
-        branch, so an unrelated session signal never overwrites a value
-        the user picked for the grid that is still selected. Spec 4's "no
+        branch (or, for a grid change made while the site showed, from
+        `_resume_grid`, #71), so an unrelated session signal never
+        overwrites a value the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
         spacing", and #81's 0.2 m cell and half-spacing fill radius -- both
         need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.
         """
-        if grid_id is None or not self.session.is_open:
+        if grid_id is None or not self.session.is_open or self._scope == "site":
+            # #71: in Whole site the spins are the site's. The seed is owed,
+            # and `_resume_grid` runs it on the way back to This grid.
             return
         try:
             grid = self.session.grid(grid_id)
@@ -1837,8 +1842,11 @@ class SlicesDock(QgsDockWidget):
         it, every `rebuild_source()` (an unrelated `presets_changed`,
         say) would re-seed over a value the user has since changed by
         hand.
+
+        In Whole site the spins are the site's (#71), so the seed stays owed,
+        `_dz_z_seeded_for` unmarked, and `_resume_grid` retries it.
         """
-        if self._dz_z_seeded_for == grid_id:
+        if self._dz_z_seeded_for == grid_id or self._scope == "site":
             return
         included = self._default_included(grid_id)
         if not included:
@@ -1875,8 +1883,11 @@ class SlicesDock(QgsDockWidget):
         A remembered cell below the grid's floor is clamped up by the spin
         itself; a remembered z range is clamped to the prepared lines later,
         by `_clamp_z_to_prepared`. Neither clamp touches the record, so a
-        freed range comes back on the next grid change or reopen."""
-        if not grid_id or not self.session.is_open:
+        freed range comes back on the next grid change or reopen.
+
+        Never in Whole site, whose spins these are meanwhile: both seeds
+        that call this wait for This grid there (#71)."""
+        if not grid_id or not self.session.is_open or self._scope == "site":
             return
         remembered = self.session.slice_resolution(grid_id)
         if not remembered:
@@ -2436,6 +2447,7 @@ class SlicesDock(QgsDockWidget):
                 top = z.t0_ns + self.slice_slider.value() * z.dz_ns
         if scope == "site":
             self._grid_spins = site_scope.capture_spins(self)
+            self._grid_spins_for = self.grid_combo.currentText() or None
             self._grid_palette = self.palette_combo.currentText()
             self._grid_record_at_entry = self._grid_record()
             self._scope = "site"
@@ -2466,7 +2478,9 @@ class SlicesDock(QgsDockWidget):
 
         A row selected in the site list that names another offered grid opens
         that grid, with its remembered preset and lines (`_switch_resumed_grid`);
-        with no such row This grid comes back exactly as it was left. Either
+        with no such row This grid comes back exactly as it was left, plus the
+        seeds that waited for it (#71): a grid it fell back to while the site
+        showed, or lines that arrived under its grid. Either
         way the hand-back of This grid's moves runs from a `finally` (#75
         F-9): an exception in the restore must not leave `on_grid_moved` on
         `_mark_grid_stale`, or a moved grid would never re-prepare.
@@ -2485,6 +2499,17 @@ class SlicesDock(QgsDockWidget):
                 return
             if self._grid_spins is not None:
                 site_scope.restore_spins(self, self._grid_spins)
+            # #71: This grid's seeds and restores wait while the site shows,
+            # so they are run here, over the snapshot as a grid change in This
+            # grid would run them over the spins. A combo that fell back to
+            # another grid (its own was removed) seeds and restores that grid;
+            # lines imported under the same grid owe only its dz/z0/z1 seed,
+            # a no-op once seeded.
+            grid_id = self.grid_combo.currentText() or None
+            if grid_id != self._grid_spins_for:
+                self._seed_resolution_defaults(grid_id)
+            else:
+                self._seed_dz_z_defaults(grid_id)
             self._refill_palette_combo()
             if self.palette_combo.findText(self._grid_palette) >= 0:
                 self.palette_combo.blockSignals(True)
