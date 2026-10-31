@@ -712,7 +712,8 @@ def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_fac
     """#75: a change to the included grids seeds the cell again -- B's 0.3 m
     spacing seeds 0.15 m, and unticking B seeds A's and C's 0.2 m -- and a
     hand-set cell survives leaving the site and coming back. A hand-set cell
-    is remembered (#71), so it is laid over every later seed as well."""
+    is remembered (#71), so it is laid over every later seed as well, the
+    seed an untick makes included."""
     site = site3_factory()
     site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
     site.session.save()
@@ -728,9 +729,33 @@ def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_fac
     dock.grid_scope_button.click()
     whole_site(plugin)
     assert dock.cell_spin.value() == pytest.approx(0.35)
-    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Checked)  # B again
+    dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
     settle(dock)
+    assert dock._site.cell_seeded_for == ("A",), "the untick seeded the cell again"
     assert dock.cell_spin.value() == pytest.approx(0.35), "the remembered cell outlives the seed"
+
+
+def test_a_remembered_site_cell_below_the_floor_is_clamped_up_to_it(site3_factory, open_plugin):
+    """#71 (approved behaviour 4): a remembered cell still respects the size
+    floor. A 40 m grid floors the cell above the box's own 0.01 m. Checked on
+    entry, before any slice of a frame that size is drawn."""
+    site = site3_factory()
+    grid = site.session.grid("A")
+    site.session.replace_grid(dataclasses.replace(grid, size_x=40.0, size_y=40.0))
+    site.session.set_site_view(grids=("A",))
+    site.session.remember_site_resolution(cell=0.012)
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    try:
+        floor = dock.cell_spin.minimum()
+        assert floor > 0.012
+        assert dock.cell_spin.value() == pytest.approx(floor)
+        assert plugin.session.site_resolution() == {"cell": 0.012}
+        assert not plugin.session.dirty
+    finally:
+        dock.grid_scope_button.click()
 
 
 def _resolution_spins(dock) -> tuple[float, float, float, float]:
@@ -747,6 +772,81 @@ def _snapped_ready_bounds(dock) -> tuple[float, float]:
         _snap_inside(low, dock.z0_spin.decimals(), upper=False),
         _snap_inside(high, dock.z1_spin.decimals(), upper=True),
     )
+
+
+def _short_a_site(site3_factory, open_plugin, **remembered):
+    """site3 with A's lines a quarter as long, the site's resolution as given,
+    saved and reopened. A prepares first, so the first ready range the site
+    sees is A's alone (Ruling 14)."""
+    site = site3_factory(samples={"A": 128})
+    if remembered:
+        site.session.remember_site_resolution(**remembered)
+    site.session.save()
+    return open_plugin(site)
+
+
+def _every_grid_shown(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    a_high = dock.site_engine.engine_for("A").prepared_z_bounds()[1]
+    assert a_high < _snapped_ready_bounds(dock)[1] - 50.0, "A's range is the short one"
+    return dock
+
+
+@pytest.mark.parametrize(
+    "remembered", [{}, {"dz_ns": 0.5}, {"cell": 0.35}], ids=["nothing", "dz", "cell"]
+)
+def test_a_z_bound_never_chosen_follows_every_ready_grid(site3_factory, open_plugin, remembered):
+    """Ruling 14 (#71): z0 and z1 are the user's field by field. One never
+    chosen is the union of the ready grids however they became ready; a
+    remembered dz or cell does not hold it at the first grid's range."""
+    from nsgeo_qgis.ui.site_scope import ready_dt
+
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    dz = pytest.approx(remembered.get("dz_ns", ready_dt(dock.site_engine)), abs=1e-4)
+    assert dock.dz_spin.value() == dz  # the box holds 4 decimals
+    applied = dock._site.res_applied
+    assert (applied.dz_ns, applied.t1_ns) == (dz, dock.z1_spin.value())
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_z1_comes_back_once_every_grid_is_ready(site3_factory, open_plugin):
+    """Ruling 14: clamped from the remembered value each time, never from the
+    spin, so a z1 the first ready grid cut short comes back with the rest."""
+    plugin = _short_a_site(site3_factory, open_plugin, t1_ns=60.0)
+    dock = _every_grid_shown(plugin)
+    low, _high = _snapped_ready_bounds(dock)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (low, pytest.approx(60.0))
+    assert dock._site.res_applied.t1_ns == pytest.approx(60.0)
+    assert plugin.session.site_resolution() == {"t1_ns": 60.0}
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_range_wider_than_the_union_is_clamped_to_all_of_it(
+    site3_factory, open_plugin
+):
+    remembered = {"t0_ns": -50.0, "t1_ns": 500.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_range_past_the_first_ready_grid_comes_back_with_the_rest(
+    site3_factory, open_plugin
+):
+    """Wholly past A's range, so A alone takes the fallback; inside the union,
+    so the remembered range is what shows once B and C are ready."""
+    remembered = {"t0_ns": 30.0, "t1_ns": 60.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **remembered)
+    dock = _every_grid_shown(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (30.0, 60.0)
+    assert plugin.session.site_resolution() == remembered
+    assert not plugin.session.dirty
 
 
 def test_a_site_resolution_edit_is_remembered_in_the_site_view(plugin):
@@ -824,18 +924,17 @@ def test_a_remembered_site_z_range_is_clamped_not_reseeded(plugin):
 
 
 def test_a_remembered_site_z_range_wholly_outside_the_data_falls_back_to_the_ready_range(
-    plugin,
+    site3_factory, open_plugin
 ):
     """Review Focus 1, the site's twin: clamped end by end, a range wholly
-    past the data leaves z1 below z0, and the site would draw nothing."""
+    past the data leaves z1 below z0, and the site would draw nothing. The
+    fallback is the union of every ready grid, not of the first (Ruling 14)."""
+    beyond = {"t0_ns": 200.0, "t1_ns": 300.0}
+    plugin = _short_a_site(site3_factory, open_plugin, **beyond)
     session = plugin.session
     errors: list[str] = []
     plugin.slices_dock.error.connect(errors.append)
-    _low, high = plugin.slices_dock.engine.prepared_z_bounds()
-    beyond = {"t0_ns": round(high + 10.0, 3), "t1_ns": round(high + 50.0, 3)}
-    session.remember_site_resolution(**beyond)
-    session.save()
-    dock = whole_site(plugin)
+    dock = _every_grid_shown(plugin)
     assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
     assert errors == []
     assert dock.current_site_slice() is not None
@@ -858,25 +957,27 @@ def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site
     assert not plugin.session.dirty
 
 
-def test_a_hand_z_edit_in_the_site_is_clamped_from_then_on(plugin):
+def test_a_hand_z_edit_in_the_site_is_clamped_from_then_on(site3_factory, open_plugin):
     """#75: a dz/z0/z1 edit is the user's, so the ready grids clamp it from
     then on and never re-seed it. The edit now arrives through the dock's
-    guarded `_on_resolution_edited`; the unguarded slot that saw it is gone."""
-    dock = whole_site(plugin)
+    guarded `_on_resolution_edited`; the unguarded slot that saw it is gone.
+    Field by field (Ruling 14): z1, never edited, follows every ready grid."""
+    dock = _every_grid_shown(_short_a_site(site3_factory, open_plugin))
     dz = round(dock.dz_spin.value() * 2, 4)
     z0 = round(dock.z0_spin.value() + 5.0, 3)
     dock.dz_spin.setValue(dz)
     dock.z0_spin.setValue(z0)
     dock.flush_debounce()
-    # A new transform re-prepares every grid, and the ready grids coming back
-    # re-seed a seeded range.
+    # A new transform re-prepares every grid, A first, and the ready grids
+    # coming back re-seed a seeded range.
     dock.site_panel.transform_combo.set_value("amp_envelope")
     settle(dock)
     assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
     assert dock.dz_spin.value() == pytest.approx(dz)
     assert dock.z0_spin.value() == pytest.approx(z0)
+    assert dock.z1_spin.value() == _snapped_ready_bounds(dock)[1]
     assert dock.site_engine.site_z.dz_ns == pytest.approx(dz)
-    assert plugin.session.site_resolution() == {"dz_ns": dz, "t0_ns": z0}
+    assert dock.session.site_resolution() == {"dz_ns": dz, "t0_ns": z0}
 
 
 # ---- Ruling 12: This grid's seeds stay off the site's spins (#71) ------------------------
@@ -900,7 +1001,6 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     settle(dock)
     assert dock.grid_combo.currentText() == "B"
     assert _resolution_spins(dock) == site_spins
-    assert dock._site.z_custom is False
     assert session.site_view() == view, "nothing is remembered for the site"
     assert session.slice_resolution("B") == b_res
 
@@ -973,7 +1073,6 @@ def test_importing_lines_under_this_grids_grid_while_the_site_shows_leaves_the_s
     session.add_lines(c_lines)
     settle(dock)
     assert _resolution_spins(dock) == site_spins
-    assert dock._site.z_custom is False
     assert session.site_resolution() == {}
     assert session.slice_source("C") == record, "nothing is remembered for C"
 

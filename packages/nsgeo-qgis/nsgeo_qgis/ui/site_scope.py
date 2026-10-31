@@ -480,11 +480,9 @@ class SiteScope:
         self.ready_handled: tuple[str, ...] | None = None
         self.limit_cache: tuple[tuple[Any, ...], float] | None = None
         #: The included set the cell was last seeded for (spec 4.4: only when
-        #: it changes), and whether dz/z0/z1 are the user's -- set by hand
-        #: here (`SlicesDock._on_resolution_edited`) or remembered (#71) --
-        #: so that they are clamped, as M11 clamps, never re-seeded.
+        #: it changes). Which of dz/z0/z1 are the user's is no flag here: it
+        #: is read off the remembered record each time (`seed_z`, #71).
         self.cell_seeded_for: tuple[str, ...] | None = None
-        self.z_custom = False
         #: The site's Resolution values when the dock last left it.
         self.spins: Spins | None = None
         #: Ruling T3-g: at most one tick per event-loop pass, latest values.
@@ -566,7 +564,6 @@ class SiteScope:
         the fill radius included (#71: a second survey inherited the first's)."""
         self.spins = None
         self.cell_seeded_for = None
-        self.z_custom = False
         self.source_sent = None
         self.res_applied = None
         self.limit_cache = None
@@ -727,71 +724,76 @@ class SiteScope:
 
     # ---- resolution ---------------------------------------------------------------
     def seed_resolution(self, included: tuple[str, ...]) -> None:
-        """Spec 4.4: the cell by M11's rule for the finest-spaced included grid;
-        dz/z0/z1 from what the grids cover -- the ready grids' prepared
-        bounds when there are any, else their headers.
+        """Spec 4.4: the cell by M11's rule for the finest-spaced included grid,
+        then dz/z0/z1 by `seed_z`, from the included grids' headers until one
+        is ready.
 
-        What the user chose for the site (#71) is then laid over the seed,
-        quietly, as This grid lays a grid's own over its seed: the cell, which
-        the floor just raised clamps, and any remembered dz/z0/z1 as the
-        user's (`z_custom`), clamped from then on and never re-seeded.
-        Each field on its own, so a remembered cell leaves the z range seeded.
+        A cell the user chose for the site (#71) is laid over the cell seed,
+        quietly, as This grid lays a grid's own over its seed; the floor just
+        raised clamps it. A remembered cell leaves the z range seeded.
         """
         dock = self.dock
         is_open = self.session.is_open
-        remembered = self.session.site_resolution() if is_open else {}
         seed = seed_cell(self.session, included) if is_open else None
         if seed is not None:
             floor, cell = seed
             set_cell_floor(dock, floor)
             set_spins_quietly(dock, cell=cell)
+        remembered = self.session.site_resolution() if is_open else {}
         if "cell" in remembered:
             set_spins_quietly(dock, cell=remembered["cell"])
         self.cell_seeded_for = included
-        if not self.z_custom and not self.seed_z_from_ready():
-            header = header_z_seed(self.session, included) if seed is not None else None
-            if header is not None:
-                dt, lo, hi = header
-                for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                    spin.setSingleStep(dt)
-                set_spins_quietly(dock, dz=dt, z0=lo, z1=hi)
-        chosen = {
-            name: remembered[field]
-            for field, name in (("dz_ns", "dz"), ("t0_ns", "z0"), ("t1_ns", "z1"))
-            if field in remembered
-        }
-        if chosen:
-            set_spins_quietly(dock, **chosen)
-            self.z_custom = True
+        self.seed_z(included)
 
-    def seed_z_from_ready(self) -> bool:
-        """dz/z0/z1 from the union of the ready grids' prepared bounds (spec
-        4.3), or -- once the user has set them -- only clamped into it, as
-        M11's `_clamp_z_to_prepared` does. Whether anything moved.
+    def seed_z(self, included: tuple[str, ...] | None = None) -> bool:
+        """dz/z0/z1, field by field (#71, Ruling 14), on every seed and every
+        change to the ready grids. Whether any spin moved.
 
-        As there (#71, Review Focus 1), a range the clamp would leave empty
-        (z1 <= z0) takes the ready range at both ends: a remembered range
-        wholly past the data, which the site would draw nothing for. The
-        clamp is no edit, so the remembered values stand."""
+        The bounds are the union of the ready grids' prepared bounds (spec
+        4.3), snapped inside them. Before any grid is ready they are the
+        headers of `included`, which only `seed_resolution` passes: a tick
+        with nothing ready leaves the spins alone.
+
+        A field the user chose -- a hand edit is remembered at once, through
+        `SlicesDock._on_resolution_edited` -- is read from the record, never
+        from its spin: dz as remembered, and z0/z1 clamped into the bounds as
+        M11's `_clamp_z_to_prepared` clamps. So a range clamped while only one
+        short grid was ready widens again as the others become ready. A field
+        never chosen takes the data's own value: the sample interval, or the
+        bounds. Each on its own, so a remembered dz does not hold z0/z1.
+
+        As in M11 (Review Focus 1), a range the clamp would leave empty
+        (z1 <= z0), such as a remembered one wholly past the data, takes the
+        bounds at both ends. The record is never written here: it stands, for
+        a later crop that frees the range."""
         from nsgeo_qgis.ui.slices_dock import _snap_inside  # the dock imports this module
 
         dock = self.dock
-        bounds = ready_z_bounds(self.engine)
-        if bounds is None:
+        if not self.session.is_open:
             return False
-        z0 = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
-        z1 = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
-        if self.z_custom:
-            top = max(dock.z0_spin.value(), z0)
-            bottom = min(dock.z1_spin.value(), z1)
-            if bottom <= top:
-                top, bottom = z0, z1
-            return bool(set_spins_quietly(dock, z0=top, z1=bottom))
+        bounds = ready_z_bounds(self.engine)
+        if bounds is not None:
+            low = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
+            high = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
+            dt = ready_dt(self.engine)
+        else:
+            header = header_z_seed(self.session, included) if included else None
+            if header is None:
+                return False
+            dt, low, high = header
+        remembered = self.session.site_resolution()
+        z0 = max(remembered["t0_ns"], low) if "t0_ns" in remembered else low
+        z1 = min(remembered["t1_ns"], high) if "t1_ns" in remembered else high
+        if z1 <= z0:
+            z0, z1 = low, high
         values = {"z0": z0, "z1": z1}
-        dt = ready_dt(self.engine)
         if dt is not None:
+            # One sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
                 spin.setSingleStep(dt)
+        if "dz_ns" in remembered:
+            values["dz"] = remembered["dz_ns"]
+        elif dt is not None:
             values["dz"] = dt
         return bool(set_spins_quietly(dock, **values))
 
@@ -859,7 +861,7 @@ class SiteScope:
                 # Grids became ready, or left: the axis may have changed.
                 self.ready_handled = ready
                 self.limit_cache = None
-                if self.seed_z_from_ready():
+                if self.seed_z():
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
                 self.update_export_button()

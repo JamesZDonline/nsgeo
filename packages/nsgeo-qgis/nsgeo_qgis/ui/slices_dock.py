@@ -1921,10 +1921,10 @@ class SlicesDock(QgsDockWidget):
         `_updating` (a cube restore, a clamp) are what tell them apart.
 
         In Whole site the four geometry spins are the site's, so the value is
-        the site's own (#71), and a dz/z0/z1 edit makes the site clamp its z
-        range from then on rather than re-seed it. This guarded slot replaces
-        the unguarded `SiteScope._note_z_edit` (#75). The site seeds and
-        restores with signals blocked, so only a user's edit gets here."""
+        the site's own (#71), and from the record `SiteScope.seed_z` clamps a
+        remembered dz/z0/z1 rather than re-seeding it. This guarded slot
+        replaces the unguarded `SiteScope._note_z_edit` (#75). The site seeds
+        and restores with signals blocked, so only a user's edit gets here."""
         try:
             if self._updating or self._seeding:
                 return
@@ -1934,8 +1934,6 @@ class SlicesDock(QgsDockWidget):
                 if field == "radius_spacings" or not self.session.is_open:
                     return
                 self.session.remember_site_resolution(**{field: value})
-                if field != "cell":
-                    self._site.z_custom = True
                 return
             grid_id = self.grid_combo.currentText()
             if not grid_id or not self.session.is_open:
@@ -2504,7 +2502,9 @@ class SlicesDock(QgsDockWidget):
             # grid would run them over the spins. A combo that fell back to
             # another grid (its own was removed) seeds and restores that grid;
             # lines imported under the same grid owe only its dz/z0/z1 seed,
-            # a no-op once seeded.
+            # a no-op once seeded. A fallback grid with no lines yet keeps the
+            # left grid's dz/z0/z1, as This grid's own grid change does: its
+            # seed needs a line, and `_sync_included` retries it when one comes.
             grid_id = self.grid_combo.currentText() or None
             if grid_id != self._grid_spins_for:
                 self._seed_resolution_defaults(grid_id)
