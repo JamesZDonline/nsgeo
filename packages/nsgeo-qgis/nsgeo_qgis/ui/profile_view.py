@@ -130,6 +130,7 @@ class ProfileView(QWidget):
         self._velocity_points: list[tuple[int, float]] = []
         self._velocity_curve: list[tuple[float, float]] = []
         self._saved_velocity_curves: list[list[tuple[float, float]]] = []
+        self._saved_velocity_highlight: int | None = None
         self._press: QPointF | None = None
         self._pan_last: QPointF | None = None
         self._dragging = False
@@ -272,10 +273,16 @@ class ProfileView(QWidget):
         self._velocity_curve = list(curve)
         self.update()
 
-    def set_saved_velocity_fits(self, curves: list[list[tuple[float, float]]]) -> None:
+    def set_saved_velocity_fits(
+        self, curves: list[list[tuple[float, float]]], highlighted: int | None = None
+    ) -> None:
         """The line's already-measured fits as (trace, ns) curves, drawn faint
-        beneath the working fit, which `set_velocity_fit` carries."""
+        beneath the working fit, which `set_velocity_fit` carries. The curve
+        at index `highlighted` is drawn bold, dashed and blue, over the
+        working fit: the fit selected in the velocity dialog, so its row can
+        be matched to its curve."""
         self._saved_velocity_curves = [list(c) for c in curves]
+        self._saved_velocity_highlight = highlighted
         self.update()
 
     def clear(self) -> None:
@@ -287,6 +294,7 @@ class ProfileView(QWidget):
         self._velocity_points = []
         self._velocity_curve = []
         self._saved_velocity_curves = []
+        self._saved_velocity_highlight = None
         self._slice_band = None
         self._cutoff_ns = None
         self._cutoff_grab = None
@@ -560,23 +568,32 @@ class ProfileView(QWidget):
     def _paint_velocity_fit(self, p: QPainter, r: QRect, t: ViewTransform) -> None:
         faint = QColor(CURSOR_COLOUR)
         faint.setAlpha(90)
-        for saved in self._saved_velocity_curves:
-            if len(saved) >= 2:
-                p.setPen(QPen(faint, 1))
-                spts = [
-                    QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
-                    for trace, time_ns in saved
-                ]
-                for a, b in zip(spts, spts[1:], strict=False):
-                    p.drawLine(a, b)
-        if len(self._velocity_curve) >= 2:
-            p.setPen(QPen(CURSOR_COLOUR, 2))
+        lit = self._saved_velocity_highlight
+        if lit is not None and not 0 <= lit < len(self._saved_velocity_curves):
+            lit = None
+
+        def _draw(curve: list[tuple[float, float]]) -> None:
             pts = [
                 QPointF(r.left() + t.x_of_trace(trace + 0.5), r.top() + t.y_of_time(time_ns))
-                for trace, time_ns in self._velocity_curve
+                for trace, time_ns in curve
             ]
             for a, b in zip(pts, pts[1:], strict=False):
                 p.drawLine(a, b)
+
+        p.setPen(QPen(faint, 1))
+        for i, saved in enumerate(self._saved_velocity_curves):
+            if i != lit and len(saved) >= 2:
+                _draw(saved)
+        if len(self._velocity_curve) >= 2:
+            p.setPen(QPen(CURSOR_COLOUR, 2))
+            _draw(self._velocity_curve)
+        # The lit fit last, over the working curve too, and in the selection
+        # blue: select the fit just saved from the working points and the two
+        # curves coincide, so a lit curve beneath it, or in its orange, would
+        # not show at all.
+        if lit is not None and len(self._saved_velocity_curves[lit]) >= 2:
+            p.setPen(QPen(SELECTION_EDGE, 2, Qt.PenStyle.DashLine))
+            _draw(self._saved_velocity_curves[lit])
         p.setPen(QPen(QColor(255, 255, 255), 1))
         p.setBrush(SELECTION_EDGE)
         for x, y in self._velocity_positions(t):
