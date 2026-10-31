@@ -17,7 +17,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, format_bytes
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, default_cell, format_bytes
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -674,6 +674,48 @@ def test_a_burst_of_slider_moves_draws_once_with_the_last_value(plugin, monkeypa
     site_z = site.site_z
     assert tops == [pytest.approx(site_z.t0_ns + 31 * site_z.dz_ns)]
     assert dock.current_site_slice().windows["A"].k0 == 31
+
+
+# ---- the site's resolution (spec 4.4, #75) -----------------------------------------------
+
+
+def test_the_site_cell_seeds_from_the_finest_spaced_grid(site3_factory, open_plugin):
+    """#75: spec 4.4 seeds the cell by M11's rule for the finest-spaced
+    included grid, here B at 0.3 m against A's and C's 1.5 m."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    floor = dock.cell_spin.minimum()
+    assert default_cell(0.3, floor) != pytest.approx(default_cell(1.5, floor))
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, floor))
+
+
+def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_plugin):
+    """#75: with nothing remembered, the site is every grid that has lines."""
+    site = site3_factory()
+    site.session.remove_lines(site.keys("C"))
+    site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert "grids" not in plugin.session.site_view()
+    assert dock._site.included() == ("A", "B")
+
+
+def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(plugin):
+    """#75: a hand-set cell survives leaving the site and coming back; a
+    change to the included grids seeds it again."""
+    dock = whole_site(plugin)
+    seeded = dock.cell_spin.value()
+    dock.cell_spin.setValue(0.35)
+    dock.flush_debounce()
+    dock.grid_scope_button.click()
+    whole_site(plugin)
+    assert dock.cell_spin.value() == pytest.approx(0.35)
+    dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
+    settle(dock)
+    assert dock.cell_spin.value() == pytest.approx(seeded)
 
 
 # ---- persistence -----------------------------------------------------------------------
