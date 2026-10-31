@@ -260,18 +260,21 @@ class SliceLayer(QObject):
             group.addLayer(self.layer)
 
     def _sweep(self) -> None:
-        """Delete every scratch file the layer does not read, and never raise.
+        """Delete every scratch file but the two that may be wanted, and
+        never raise.
 
         A scan of the directory rather than a list of superseded files, so
         a file whose write or repoint failed, and sidecars such as GDAL's
         `.aux.xml` or an `.ovr`, are covered too. Two files are kept, both
-        and not either (#54): `self.path`, the last file a repoint or a
-        create succeeded on, and the layer's live `source()` while it is
-        alive. They are the same file after a good tick; they differ when
-        `setDataSource` took a file the layer cannot read, or raised before
-        taking effect. A file QGIS's render threads still hold open cannot
-        be deleted on Windows; it is simply met again by the next update's
-        scan.
+        and not either (#54): `self.path`, the file the last successful
+        repoint set (or the one `_create_layer` was given), and the layer's
+        live `source()` while it is alive. They are the same file after a
+        good tick, and after a `setDataSource` that raised before taking
+        effect; they differ when it took a file the layer cannot read: the
+        layer is left invalid on the new file, and `self.path` still names
+        the last good one. A file QGIS's render threads still hold open
+        cannot be deleted on Windows; it is simply met again by the next
+        update's scan.
         """
         try:
             keep = {self.path.name}

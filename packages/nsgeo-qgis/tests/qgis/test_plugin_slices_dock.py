@@ -1850,9 +1850,12 @@ def _dispose(dock):
 def test_a_default_line_choice_picks_up_an_import_after_save_and_reopen(docked_two_grids, tmp_path):
     dock, session = docked_two_grids
     a_keys = _grid_keys(session, "A")
-    assert session.slice_source("A") is None  # nobody chose lines: the default
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")  # the round trip records `lines: None`
+    assert session.slice_source("A")["lines"] is None
     reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
     try:
+        assert reopened.slice_source("A")["lines"] is None  # loaded as stored null
         new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
         assert len(new_keys) == 1
         assert new_keys <= set(dock2.included_keys())

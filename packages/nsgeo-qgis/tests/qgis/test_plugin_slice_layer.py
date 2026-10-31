@@ -187,6 +187,8 @@ def test_a_persistently_failing_update_from_a_corrupt_file_keeps_the_scratch_fol
     assert [e.name for e in sl._dir.iterdir() if not e.name.startswith(keep)] == []
     assert len([e for e in sl._dir.iterdir() if e.suffix == ".tif"]) <= 2
     assert read.exists()
+    assert not sl.layer.isValid() and read != sl.path  # the real failure shape (#54)
+    assert sl.path.exists()  # the last good file: the `self.path` keep-guard
 
 
 def test_a_failed_write_leaves_no_file_behind(mapped, monkeypatch):
