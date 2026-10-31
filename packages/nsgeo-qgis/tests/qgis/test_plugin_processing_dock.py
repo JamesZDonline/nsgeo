@@ -5,6 +5,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index, needs_dialog
 from plugin_testing import synthetic_dzt
@@ -398,3 +399,62 @@ def test_the_cutoff_spinbox_falls_back_to_the_source_when_an_earlier_step_fails(
     spin = dock.form.editors["end_ns"]
     assert spin.maximum() == pytest.approx(src.t0_ns + src.n_samples * src.dt_ns)
     assert any("does not evaluate cleanly" in m for m in message_log)
+
+
+# ---- migration (#TBD) ----------------------------------------------------
+
+
+def test_migration_is_addable_to_a_stack_that_already_corrects_time_zero(opened):
+    """The blocker, and it is not migration's fault.
+
+    `build_add_dialog` probed `stack_for(key).source` -- the RAW radargram,
+    `t0 = -11.09` on every real file -- while `AddStepDialog._validate`
+    applies the candidate step to one trace of it on every keystroke. So
+    migration's time-zero refusal fired and OK stayed disabled even with
+    `time_zero` already first in the stack. `ProcessingDock.time_axis`
+    already defines this quantity as the stack's own `result()`, "exactly
+    as the new step's own `apply()` will see it"; the probe was the one
+    place reaching for `source`.
+    """
+    session, dock, key = opened
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    dialog = dock.build_add_dialog("migrate_fk")
+    dialog.form.set_value("velocity_m_ns", "0.0733")
+
+    assert dialog.form.message.text() == ""
+    assert dialog.ok_button.isEnabled()
+
+
+def test_the_velocity_is_prefilled_from_the_line(opened):
+    """`resolve_velocity`'s existing chain, so the prefill is the same
+    number the depth axis and every pick already use. With no line
+    override and no grid model, that is the header's dielectric: epsr 14
+    on these files, which is 0.0801 m/ns."""
+    _, dock, _ = opened
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert dialog.form.values()["velocity_m_ns"] == pytest.approx(0.0801, abs=5e-5)
+
+
+def test_the_prefill_follows_a_line_velocity_override(opened):
+    """A line that carries a measured velocity starts there instead."""
+    session, dock, key = opened
+    session.set_line_velocity(key, VelocityModel.constant(0.0733))
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert dialog.form.values()["velocity_m_ns"] == pytest.approx(0.0733)
+
+
+def test_the_prefill_is_a_seed_not_a_link(opened):
+    """Prefill only: once the step exists the value is its own, and a later
+    velocity change does not reach back into it."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+
+    session.set_line_velocity(key, VelocityModel.constant(0.0900))
+
+    step, _ = session.stack_for(key).entries[0]
+    assert step.params["velocity_m_ns"] == pytest.approx(0.0733)

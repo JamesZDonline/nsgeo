@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.processing import (
+    Radargram,
     build_step,
     default_params,
     get_step,
@@ -538,12 +539,59 @@ class ProcessingDock(QgsDockWidget):
         assert key is not None
         return self.input_axis(len(self.session.stack_for(key).entries))
 
+    def probe_radargram(self, key: str) -> Radargram | None:
+        """What a step appended right now would actually receive: the
+        stack's own `result()`, so a step already in the stack that changed
+        the record is accounted for, exactly as the new step's own
+        `apply()` will see it.
+
+        The same quantity `time_axis` already describes, and the same
+        fallback for the same reason: `result()` raises `ValueError` when
+        some OTHER step in the stack is misconfigured, which is a problem
+        with that step, not grounds for refusing to open the Add dialog.
+        Logged when it fires, because the probe then validates against the
+        raw source and can disagree with what the step will meet.
+
+        This was `stack.source` -- the raw radargram, `t0 = -11.09` on
+        every real file -- which left `migrate_fk` permanently un-addable
+        with a disabled OK button and a message about a time zero that was
+        already corrected two rows above it.
+        """
+        stack = self.session.stack_for(key)
+        if stack.source is None:
+            return None
+        try:
+            return stack.result()
+        except ValueError as exc:
+            _log(
+                f"probe_radargram: stack does not evaluate cleanly ({exc}); "
+                "validating the new step against the raw source instead"
+            )
+            return stack.source
+
+    def seed_params(self, name: str, key: str) -> dict[str, Any] | None:
+        """What to start `name`'s fields at for this line, or None.
+
+        Migration's velocity starts at whatever `resolve_velocity` says --
+        line override, then the grid, then the header's dielectric -- so
+        the field opens on the same number the depth axis and every pick
+        already use. A seed only: once the step exists the value is its
+        own, and a later velocity change does not reach back into it.
+        """
+        if name == "migrate_fk":
+            return {"velocity_m_ns": self.session.resolved_velocity(key).surface_velocity}
+        return None
+
     def build_add_dialog(self, name: str) -> AddStepDialog:
         key = self.key()
         assert key is not None
         line = self.session.line_for_key(key)
         return AddStepDialog(
-            name, header=line.header, radargram=self.session.stack_for(key).source, parent=self
+            name,
+            header=line.header,
+            radargram=self.probe_radargram(key),
+            params=self.seed_params(name, key),
+            parent=self,
         )
 
     def append_from_dialog(self, dialog: AddStepDialog) -> None:

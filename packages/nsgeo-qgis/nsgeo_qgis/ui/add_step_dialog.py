@@ -1,8 +1,10 @@
 """Collect REQUIRED parameters before a step enters the stack.
 
-Blank fields, header facts as read-only reference, OK disabled until the
-core builds the step and applies it to a one-trace slice of the current
-radargram without error. Nothing is guessed on the user's behalf.
+Blank fields unless the caller seeds one, header facts as read-only
+reference, OK disabled until the core builds the step and applies it to a
+one-trace slice of the current radargram without error. Nothing is guessed
+on the user's behalf -- a seed is a number the user can see and overwrite,
+and it comes from the line itself, not from this dialog.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ class AddStepDialog(QDialog):
         step_name: str,
         header: DztHeader | None = None,
         radargram: Radargram | None = None,
+        params: dict[str, Any] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -37,7 +40,9 @@ class AddStepDialog(QDialog):
         self.radargram = radargram
         layout = QVBoxLayout(self)
         self.form = ParamForm(self)
-        self.form.set_step(step_name)
+        # A seed, not a guess: the caller passes a value the user can see
+        # and overwrite, and `ParamForm.set_step` has always taken one.
+        self.form.set_step(step_name, params)
         layout.addWidget(self.form)
         self.facts = QLabel(header_facts(header) if header is not None else "")
         self.facts.setWordWrap(True)
