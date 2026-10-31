@@ -940,10 +940,15 @@ class SlicesDock(QgsDockWidget):
 
     def _remember_source(self, *, every_line: bool = False) -> None:
         """Record the user's own choice for the selected grid. Called only
-        from a real user change (`_on_source_changed`, `set_included`),
-        never from `rebuild_source`'s first computation: opening a site
-        must not mark it dirty. `every_line` remembers `lines=None` whatever
-        the inclusion set is: a cube record that names no line list (D4)."""
+        from a real user change (`_on_source_changed`, `set_included`) or
+        from picking a saved cube (`restore_cube`), never from
+        `rebuild_source`'s first computation: opening a site must not mark
+        it dirty. `every_line` remembers `lines=None` whatever the
+        inclusion set is: a cube record that names no line list (D4).
+
+        It writes the source only (preset and lines). The resolution is
+        remembered by `_on_resolution_edited` and, for a picked cube, by
+        `restore_cube` itself (#71, #75)."""
         grid_id = self.grid_combo.currentText()
         preset = self.preset_combo.currentText()
         if not grid_id or not preset or not self.session.is_open:

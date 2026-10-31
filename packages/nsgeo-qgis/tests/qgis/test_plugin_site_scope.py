@@ -588,7 +588,14 @@ def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, o
         expected.append(f"{grid_id} {lo:.2f}–{hi:.2f} m")
     assert parts == [*expected, "C no data"]
     assert expected[0] != expected[1].replace("B", "A"), "each grid's own velocity"
-    assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": dock.site_velocities()["C"]}
+    c_key = next(
+        k
+        for k in plugin.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        if getattr(plugin.session.line_for_key(k).placement, "grid_id", None) == "C"
+    )
+    v_c = plugin.session.resolved_velocity(c_key)  # C's own, worked out apart from the dock
+    assert v_c not in (v_a, v_b), "C must not borrow another grid's velocity"
+    assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": v_c}
     assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
 
 

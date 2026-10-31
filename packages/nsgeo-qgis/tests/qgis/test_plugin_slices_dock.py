@@ -1829,6 +1829,73 @@ def test_a_default_line_choice_picks_up_a_line_imported_later(docked_two_grids, 
     assert dock.engine.wait_for_preparation(20_000)
 
 
+def _reopened_with_a_late_import(session, tmp_path):
+    """Save the survey, reopen it in a new session and dock, and import a
+    line for A there (#75: the pick-up must survive save and reopen)."""
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    new_line = _line(tmp_path, "A", "FILE__099", 9.0)
+    reopened.add_lines([new_line])
+    return reopened, dock2
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_default_line_choice_picks_up_an_import_after_save_and_reopen(docked_two_grids, tmp_path):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    assert session.slice_source("A") is None  # nobody chose lines: the default
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert new_keys <= set(dock2.included_keys())
+    finally:
+        _dispose(dock2)
+
+
+def test_an_explicit_line_choice_does_not_pick_up_an_import_after_save_and_reopen(
+    docked_two_grids, tmp_path
+):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert not new_keys & set(dock2.included_keys())
+        assert dock2.included_keys() == a_keys[:2]
+    finally:
+        _dispose(dock2)
+
+
+def test_opening_a_survey_that_has_saved_cubes_stays_clean(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    _save_cube(dock, session, "A__kept", view)
+    session.save()
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert not reopened.dirty
+        items = [dock2.cube_combo.itemText(i) for i in range(dock2.cube_combo.count())]
+        assert "A__kept" in items
+    finally:
+        _dispose(dock2)
+
+
 def test_choosing_lines_remembers_them_for_that_grid_only(docked_two_grids):
     dock, session = docked_two_grids
     a_keys = _grid_keys(session, "A")
