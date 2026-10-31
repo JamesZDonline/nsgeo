@@ -40,6 +40,7 @@ from qgis.PyQt.QtCore import QTimer
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_plan import (
+    DEFAULT_RADIUS_SPACINGS,
     NO_TRANSFORM,
     Resolution,
     SiteSource,
@@ -445,6 +446,16 @@ def set_cell_floor(dock: Any, floor: float) -> None:
         dock.cell_spin.blockSignals(False)
 
 
+def set_radius_quietly(dock: Any, value: float) -> None:
+    """Set the site's fill radius with its signals blocked: a restore or a
+    reset, never the user's change, so it is not remembered (#71)."""
+    dock.radius_spacing_spin.blockSignals(True)
+    try:
+        dock.radius_spacing_spin.setValue(value)
+    finally:
+        dock.radius_spacing_spin.blockSignals(False)
+
+
 class SiteScope:
     """The dock's Whole-site half: its state, and what its widgets do in it.
 
@@ -469,8 +480,9 @@ class SiteScope:
         self.ready_handled: tuple[str, ...] | None = None
         self.limit_cache: tuple[tuple[Any, ...], float] | None = None
         #: The included set the cell was last seeded for (spec 4.4: only when
-        #: it changes), and whether the user set dz/z0/z1 by hand here (then
-        #: they are clamped, as M11 clamps, never re-seeded).
+        #: it changes), and whether dz/z0/z1 are the user's -- set by hand
+        #: here (`SlicesDock._on_resolution_edited`) or remembered (#71) --
+        #: so that they are clamped, as M11 clamps, never re-seeded.
         self.cell_seeded_for: tuple[str, ...] | None = None
         self.z_custom = False
         #: The site's Resolution values when the dock last left it.
@@ -487,8 +499,6 @@ class SiteScope:
         dock.normalisation_panel.method_changed.connect(self._on_method_changed)
         dock.normalisation_panel.gain_changed.connect(self._on_gain_changed)
         dock.radius_spacing_spin.valueChanged.connect(self._on_radius_changed)
-        for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-            spin.valueChanged.connect(self._note_z_edit)
 
     @property
     def session(self) -> Any:
@@ -520,6 +530,11 @@ class SiteScope:
             )
         )
         dock.normalisation_panel.set_method(stored_method(self.session))
+        # #71: the radius the user chose for the site, before the rows'
+        # tooltip turns it into metres.
+        remembered = self.session.site_resolution()
+        if "radius_spacings" in remembered:
+            set_radius_quietly(dock, remembered["radius_spacings"])
         self.refresh_rows()
         if panel.selected_grid() is None:
             panel.select_grid(dock.grid_combo.currentText() or None)
@@ -547,13 +562,15 @@ class SiteScope:
         self.window = None
 
     def forget(self) -> None:
-        """A different survey: nothing the last one's site view held applies."""
+        """A different survey: nothing the last one's site view held applies,
+        the fill radius included (#71: a second survey inherited the first's)."""
         self.spins = None
         self.cell_seeded_for = None
         self.z_custom = False
         self.source_sent = None
         self.res_applied = None
         self.limit_cache = None
+        set_radius_quietly(self.dock, DEFAULT_RADIUS_SPACINGS)
 
     def shown_top(self) -> float | None:
         z = self.z_shown
@@ -696,11 +713,15 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- a slot on a panel signal
             self.dock.error.emit(f"could not change grid {grid_id!r}'s gain: {exc}")
 
-    def _on_radius_changed(self, _value: float) -> None:
+    def _on_radius_changed(self, value: float) -> None:
         try:
             if self.showing:
                 self.refresh_rows()  # the tooltip's metres per grid
                 self.dock._debounce.start()
+                if not self.dock._updating:
+                    # #71: the user's own (every other set is quiet,
+                    # `set_radius_quietly`), so the site remembers it.
+                    self.session.remember_site_resolution(radius_spacings=value)
         except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
             _log(f"could not follow the fill radius: {exc}")
 
@@ -708,27 +729,50 @@ class SiteScope:
     def seed_resolution(self, included: tuple[str, ...]) -> None:
         """Spec 4.4: the cell by M11's rule for the finest-spaced included grid;
         dz/z0/z1 from what the grids cover -- the ready grids' prepared
-        bounds when there are any, else their headers."""
+        bounds when there are any, else their headers.
+
+        What the user chose for the site (#71) is then laid over the seed,
+        quietly, as This grid lays a grid's own over its seed: the cell, which
+        the floor just raised clamps, and any remembered dz/z0/z1 as the
+        user's (`z_custom`), clamped from then on and never re-seeded.
+        Each field on its own, so a remembered cell leaves the z range seeded.
+        """
         dock = self.dock
-        seed = seed_cell(self.session, included) if self.session.is_open else None
+        is_open = self.session.is_open
+        remembered = self.session.site_resolution() if is_open else {}
+        seed = seed_cell(self.session, included) if is_open else None
         if seed is not None:
             floor, cell = seed
             set_cell_floor(dock, floor)
             set_spins_quietly(dock, cell=cell)
+        if "cell" in remembered:
+            set_spins_quietly(dock, cell=remembered["cell"])
         self.cell_seeded_for = included
-        if self.z_custom or self.seed_z_from_ready():
-            return
-        header = header_z_seed(self.session, included) if seed is not None else None
-        if header is not None:
-            dt, lo, hi = header
-            for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                spin.setSingleStep(dt)
-            set_spins_quietly(dock, dz=dt, z0=lo, z1=hi)
+        if not self.z_custom and not self.seed_z_from_ready():
+            header = header_z_seed(self.session, included) if seed is not None else None
+            if header is not None:
+                dt, lo, hi = header
+                for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
+                    spin.setSingleStep(dt)
+                set_spins_quietly(dock, dz=dt, z0=lo, z1=hi)
+        chosen = {
+            name: remembered[field]
+            for field, name in (("dz_ns", "dz"), ("t0_ns", "z0"), ("t1_ns", "z1"))
+            if field in remembered
+        }
+        if chosen:
+            set_spins_quietly(dock, **chosen)
+            self.z_custom = True
 
     def seed_z_from_ready(self) -> bool:
         """dz/z0/z1 from the union of the ready grids' prepared bounds (spec
         4.3), or -- once the user has set them -- only clamped into it, as
-        M11's `_clamp_z_to_prepared` does. Whether anything moved."""
+        M11's `_clamp_z_to_prepared` does. Whether anything moved.
+
+        As there (#71, Review Focus 1), a range the clamp would leave empty
+        (z1 <= z0) takes the ready range at both ends: a remembered range
+        wholly past the data, which the site would draw nothing for. The
+        clamp is no edit, so the remembered values stand."""
         from nsgeo_qgis.ui.slices_dock import _snap_inside  # the dock imports this module
 
         dock = self.dock
@@ -738,11 +782,11 @@ class SiteScope:
         z0 = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
         z1 = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
         if self.z_custom:
-            return bool(
-                set_spins_quietly(
-                    dock, z0=max(dock.z0_spin.value(), z0), z1=min(dock.z1_spin.value(), z1)
-                )
-            )
+            top = max(dock.z0_spin.value(), z0)
+            bottom = min(dock.z1_spin.value(), z1)
+            if bottom <= top:
+                top, bottom = z0, z1
+            return bool(set_spins_quietly(dock, z0=top, z1=bottom))
         values = {"z0": z0, "z1": z1}
         dt = ready_dt(self.engine)
         if dt is not None:
@@ -750,12 +794,6 @@ class SiteScope:
                 spin.setSingleStep(dt)
             values["dz"] = dt
         return bool(set_spins_quietly(dock, **values))
-
-    def _note_z_edit(self, _value: float) -> None:
-        """A dz/z0/z1 change while the site shows that is not a seed (seeds are
-        signal-blocked) is the user's: clamped from now on, never re-seeded."""
-        if self.showing and not self.dock._updating:
-            self.z_custom = True
 
     def apply_resolution(self, *, refresh: bool = True) -> None:
         """The Resolution spins to the site, then the slider and a tick. An

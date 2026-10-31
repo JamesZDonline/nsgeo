@@ -17,7 +17,12 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, default_cell, format_bytes
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_RADIUS_SPACINGS,
+    NO_TRANSFORM,
+    default_cell,
+    format_bytes,
+)
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -703,19 +708,175 @@ def test_the_site_includes_every_grid_with_lines_by_default(site3_factory, open_
     assert dock._site.included() == ("A", "B")
 
 
-def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(plugin):
-    """#75: a hand-set cell survives leaving the site and coming back; a
-    change to the included grids seeds it again."""
+def test_the_site_cell_is_reseeded_only_when_the_included_grids_change(site3_factory, open_plugin):
+    """#75: a change to the included grids seeds the cell again -- B's 0.3 m
+    spacing seeds 0.15 m, and unticking B seeds A's and C's 0.2 m -- and a
+    hand-set cell survives leaving the site and coming back. A hand-set cell
+    is remembered (#71), so it is laid over every later seed as well."""
+    site = site3_factory()
+    site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
+    site.session.save()
+    plugin = open_plugin(site)
     dock = whole_site(plugin)
-    seeded = dock.cell_spin.value()
+    assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
+    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)  # B
+    settle(dock)
+    assert dock.cell_spin.value() == pytest.approx(default_cell(1.5, dock.cell_spin.minimum()))
+
     dock.cell_spin.setValue(0.35)
     dock.flush_debounce()
     dock.grid_scope_button.click()
     whole_site(plugin)
     assert dock.cell_spin.value() == pytest.approx(0.35)
-    dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C
+    dock.site_panel.table.item(1, 0).setCheckState(Qt.CheckState.Checked)  # B again
     settle(dock)
-    assert dock.cell_spin.value() == pytest.approx(seeded)
+    assert dock.cell_spin.value() == pytest.approx(0.35), "the remembered cell outlives the seed"
+
+
+def _resolution_spins(dock) -> tuple[float, float, float, float]:
+    return dock.cell_spin.value(), dock.dz_spin.value(), dock.z0_spin.value(), dock.z1_spin.value()
+
+
+def _snapped_ready_bounds(dock) -> tuple[float, float]:
+    """The union of the ready grids' prepared bounds, as the z spins hold it."""
+    from nsgeo_qgis.ui.site_scope import ready_z_bounds
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    low, high = ready_z_bounds(dock.site_engine)
+    return (
+        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+    )
+
+
+def test_a_site_resolution_edit_is_remembered_in_the_site_view(plugin):
+    """#71: the site's own resolution, apart from every grid's."""
+    dock = whole_site(plugin)
+    dock.cell_spin.setValue(0.35)
+    dock.flush_debounce()
+    assert plugin.session.site_resolution() == {"cell": 0.35}
+    assert plugin.session.slice_resolution("A") == {}
+    assert plugin.session.dirty
+
+
+def test_entering_the_site_never_remembers_its_seeded_resolution(plugin):
+    dock = whole_site(plugin)
+    dock.grid_scope_button.click()
+    whole_site(plugin)
+    assert plugin.session.site_resolution() == {}
+    assert not plugin.session.dirty
+
+
+def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_modal, open_plugin):
+    """#71, as `test_the_site_view_survives_save_and_reopen`, in a plugin of
+    its own the second time: nothing the first one held in memory helps."""
+    first = _open(fake_iface, site3, answer_modal)
+    try:
+        dock = whole_site(first)
+        dock.cell_spin.setValue(0.35)
+        t0 = round(dock.z0_spin.value() + 5.0, 3)
+        dock.z0_spin.setValue(t0)
+        dock.radius_spacing_spin.setValue(1.25)
+        dock.flush_debounce()
+        settle(dock)
+        assert first.session.site_resolution() == {
+            "cell": 0.35,
+            "t0_ns": t0,
+            "radius_spacings": 1.25,
+        }
+        first.session.save()
+    finally:
+        _close(first, answer_modal)
+
+    plugin = open_plugin(site3)
+    dock = whole_site(plugin)
+    assert dock.cell_spin.value() == pytest.approx(0.35)
+    assert dock.z0_spin.value() == pytest.approx(t0)
+    assert dock.radius_spacing_spin.value() == pytest.approx(1.25)
+    assert "A 1.88 m" in dock.radius_spacing_spin.toolTip()  # 1.25 x 1.5 m
+    applied = dock._site.res_applied
+    assert (applied.cell, applied.t0_ns) == (pytest.approx(0.35), pytest.approx(t0))
+    assert dock.current_site_slice() is not None
+    assert not plugin.session.dirty
+
+
+def test_a_remembered_site_z_range_is_clamped_not_reseeded(plugin):
+    """#71 with M11's rule: a remembered range is the user's, so the ready
+    grids only clamp it (z1 here), never re-seed it (dz and z0 stand), and
+    the clamp writes nothing."""
+    session = plugin.session
+    low, high = plugin.slices_dock.engine.prepared_z_bounds()  # every site3 grid's
+    remembered = {
+        "dz_ns": round(plugin.slices_dock.dz_spin.value() * 2, 4),
+        "t0_ns": round(low + 5.0, 3),
+        "t1_ns": round(high + 5.0, 3),
+    }
+    session.remember_site_resolution(**remembered)
+    session.save()
+    dock = whole_site(plugin)
+    assert dock.dz_spin.value() == pytest.approx(remembered["dz_ns"])
+    assert dock.z0_spin.value() == pytest.approx(remembered["t0_ns"])
+    assert dock.z1_spin.value() == _snapped_ready_bounds(dock)[1]
+    assert dock.site_engine.site_z.dz_ns == pytest.approx(remembered["dz_ns"])
+    assert dock.current_site_slice() is not None
+    assert session.site_resolution() == remembered
+    assert not session.dirty
+
+
+def test_a_remembered_site_z_range_wholly_outside_the_data_falls_back_to_the_ready_range(
+    plugin,
+):
+    """Review Focus 1, the site's twin: clamped end by end, a range wholly
+    past the data leaves z1 below z0, and the site would draw nothing."""
+    session = plugin.session
+    errors: list[str] = []
+    plugin.slices_dock.error.connect(errors.append)
+    _low, high = plugin.slices_dock.engine.prepared_z_bounds()
+    beyond = {"t0_ns": round(high + 10.0, 3), "t1_ns": round(high + 50.0, 3)}
+    session.remember_site_resolution(**beyond)
+    session.save()
+    dock = whole_site(plugin)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
+    assert errors == []
+    assert dock.current_site_slice() is not None
+    # The remembered values stand, for a later crop that frees the range.
+    assert session.site_resolution() == beyond
+    assert not session.dirty
+
+
+def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site3_factory):
+    dock = whole_site(plugin)
+    dock.radius_spacing_spin.setValue(1.25)
+    _events()
+    plugin.session.save()
+    other = site3_factory()
+    plugin.session.open_site(other.json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock = whole_site(plugin)
+    assert dock.radius_spacing_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert plugin.session.site_resolution() == {}
+    assert not plugin.session.dirty
+
+
+def test_a_hand_z_edit_in_the_site_is_clamped_from_then_on(plugin):
+    """#75: a dz/z0/z1 edit is the user's, so the ready grids clamp it from
+    then on and never re-seed it. The edit now arrives through the dock's
+    guarded `_on_resolution_edited`; the unguarded slot that saw it is gone."""
+    dock = whole_site(plugin)
+    dz = round(dock.dz_spin.value() * 2, 4)
+    z0 = round(dock.z0_spin.value() + 5.0, 3)
+    dock.dz_spin.setValue(dz)
+    dock.z0_spin.setValue(z0)
+    dock.flush_debounce()
+    # A new transform re-prepares every grid, and the ready grids coming back
+    # re-seed a seeded range.
+    dock.site_panel.transform_combo.set_value("amp_envelope")
+    settle(dock)
+    assert dock.site_engine.engine_for("A").choice.transform == "amp_envelope"
+    assert dock.dz_spin.value() == pytest.approx(dz)
+    assert dock.z0_spin.value() == pytest.approx(z0)
+    assert dock.site_engine.site_z.dz_ns == pytest.approx(dz)
+    assert plugin.session.site_resolution() == {"dz_ns": dz, "t0_ns": z0}
 
 
 # ---- persistence -----------------------------------------------------------------------

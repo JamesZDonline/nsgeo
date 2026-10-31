@@ -1907,12 +1907,25 @@ class SlicesDock(QgsDockWidget):
         the cell does not freeze a z range that was only ever seeded.
 
         Seeds and restores emit `valueChanged` too; `_seeding` and
-        `_updating` (a cube restore, a clamp) are what tell them apart."""
+        `_updating` (a cube restore, a clamp) are what tell them apart.
+
+        In Whole site the four geometry spins are the site's, so the value is
+        the site's own (#71), and a dz/z0/z1 edit makes the site clamp its z
+        range from then on rather than re-seed it. This guarded slot replaces
+        the unguarded `SiteScope._note_z_edit` (#75). The site seeds and
+        restores with signals blocked, so only a user's edit gets here."""
         try:
             if self._updating or self._seeding:
                 return
             if self._scope == "site":
-                return  # Task 5: the site's own resolution
+                # `grid_radius_spin` is This grid's, hidden in the site; the
+                # site's own radius is `SiteScope._on_radius_changed`'s.
+                if field == "radius_spacings" or not self.session.is_open:
+                    return
+                self.session.remember_site_resolution(**{field: value})
+                if field != "cell":
+                    self._site.z_custom = True
+                return
             grid_id = self.grid_combo.currentText()
             if not grid_id or not self.session.is_open:
                 return
