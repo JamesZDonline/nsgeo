@@ -410,7 +410,8 @@ def format_status(
     binding constraint -- halving the cell doubles the time and
     quadruples the cube.
     """
-    held = estimate.lines_bytes
+    # The interpolation weights are held in either mode (interpolation spec §8).
+    held = estimate.lines_bytes + estimate.weights_bytes
     noun = "line" if n_lines == 1 else "lines"
     if mode == "resident":
         held += estimate.cube_bytes

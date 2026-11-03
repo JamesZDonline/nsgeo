@@ -13,6 +13,7 @@ joining `layers.group`.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
@@ -166,9 +167,10 @@ def test_export_geotiff_adds_a_layer_to_the_slices_group(plugin, tmp_path, answe
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
-    dock.grid_radius_spin.setValue(1.0)  # 0.5 m on this grid's 0.5 m spacing
-    dock.flush_debounce()
-    assert dock.radius_cells() > 0  # keep this test focused on the layer-join claim
+    # Keep this test focused on the layer-join claim, with a finish that does work.
+    dock.grid_finish.max_distance_spin.setValue(1.0)  # 0.5 m on this grid's 0.5 m spacing
+    dock._finish_debounce.stop()
+    assert dock.slice_finish().method != "none"
 
     target = tmp_path / "slices" / "cube.tif"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -232,24 +234,89 @@ def test_an_export_after_the_user_deleted_the_site_group_still_shows(
     assert project.layerTreeRoot().children()[0].layerId() == layer.id()
 
 
-def test_export_geotiff_warns_when_fill_radius_is_zero(plugin, tmp_path, answer_modal, message_log):
-    """Ruling AE: radius 0 is spec 6.4's honest unfilled truth and
-    `grid_radius_spin`'s own construction default -- refusing it would take
-    away a view the spec calls valid, so the fix is a loud warning, not a
-    refusal."""
+def _export_levels(dock, tmp_path, answer_modal):
+    """Export through the button and return the message levels pushed to the log."""
+    from plugin_testing import connect_message_log
+
+    levels: list[tuple[str, object]] = []
+    disconnect = connect_message_log(lambda msg, tag, level: levels.append((msg, level)))
+    try:
+        target = tmp_path / "slices" / "cube.tif"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+        dock.export_button.click()
+        assert target.exists()
+    finally:
+        disconnect()
+    return target, levels
+
+
+def test_exporting_a_rotated_grid_reports_no_fill_warning(plugin, tmp_path, answer_modal):
+    """Ruling AE, reworked (interpolation spec §8): a rotated frame is
+    resampled at half the cell, so it drops no cell and the success message
+    is plain Info -- whatever the interpolation, `none` included. This
+    replaces the radius-0 warning, which no longer has a condition."""
+    from qgis.core import Qgis
+
+    plugin, s = plugin
+    s.replace_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    assert dock.engine.frame.azimuth == 30.0
+    dock.grid_finish.method_combo.setCurrentIndex(dock.grid_finish.method_combo.findData("none"))
+    dock._finish_debounce.stop()
+    assert dock.slice_finish().method == "none"
+
+    _target, levels = _export_levels(dock, tmp_path, answer_modal)
+
+    exported = [(m, lv) for m, lv in levels if m.startswith("exported ")]
+    assert len(exported) == 1 and exported[0][1] == Qgis.MessageLevel.Info
+    assert not any(lv == Qgis.MessageLevel.Warning for _m, lv in levels)
+
+
+def test_an_export_after_a_refused_resolution_uses_the_frames_cell(plugin, tmp_path, answer_modal):
+    """#104: a resolution the dock refuses (z1 <= z0) leaves the cell spin
+    ahead of the engine's frame. The export used to take its fill radius in
+    cells from the spin, so the fill was sized for a cell the array does not
+    have. Now every band is finished at the frame's own cell, and the
+    metadata's max distance is the grid's spacing times the setting."""
+    from nsgeo_qgis.slices_plan import SliceFinish
+    from osgeo import gdal
+
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
-    dock.grid_radius_spin.setValue(0.0)
+    engine = dock.engine
+    frame_cell = engine.frame.cell
+    dock.cell_spin.setValue(0.5)  # a different cell...
+    dock.z1_spin.setValue(dock.z0_spin.value() - 1.0)  # ...and a range the dock refuses
+    errors: list[str] = []
+    dock.error.connect(errors.append)
     dock.flush_debounce()
-    assert dock.radius_cells() == 0
+    assert errors, "the dock must have refused this resolution"
+    assert engine.frame.cell == frame_cell != dock.cell_spin.value()
 
-    target = tmp_path / "slices" / "cube.tif"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert target.exists()
-    assert any("fill radius 0" in m for m in message_log)
+    target, _levels = _export_levels(dock, tmp_path, answer_modal)
+
+    thickness_levels, step_levels = dock.thickness_step_levels()
+    from nsgeo.slices import plan_windows
+
+    windows = list(plan_windows(engine.z, thickness_levels, step_levels))
+    finish = dock.slice_finish()
+    ds = gdal.Open(str(target))
+    try:
+        assert ds.RasterCount == len(windows)
+        assert float(ds.GetMetadataItem("NSGEO_MAX_DISTANCE_M")) == pytest.approx(
+            SliceFinish().max_distance_spacings * 0.5
+        )
+        from nsgeo.slices import to_north_up
+
+        for index, window in enumerate(windows, start=1):
+            want, _gt = to_north_up(engine.finish(*engine.slice_at(window), finish), engine.frame)
+            got = ds.GetRasterBand(index).ReadAsArray()
+            np.testing.assert_array_equal(got, want)
+    finally:
+        ds.Close()
 
 
 def test_export_geotiff_also_writes_coverage_when_checked(plugin, tmp_path, answer_modal):

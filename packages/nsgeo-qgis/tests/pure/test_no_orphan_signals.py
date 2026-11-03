@@ -84,11 +84,10 @@ SHADOWED = {
     # open_line_choice_dialog) and SiteSourcePanel's own, carrying the grid
     # id (slices_dock.py connects it to re-emit the dock's). Both consumed.
     "choose_lines_requested": {"declared": 2, "connects": 2},
-    # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. Only
-    # ParamForm's is connected so far; the dock connects the panel's in Task 4
-    # (connects rises to 3 with the two panels), and until then it is the
-    # panel's own signal that has no consumer.
-    "edited": {"declared": 2, "connects": 1},
+    # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
+    # connects This grid's panel (Task 4); Task 5 connects the site's, raising
+    # connects to 3.
+    "edited": {"declared": 2, "connects": 2},
 }
 
 

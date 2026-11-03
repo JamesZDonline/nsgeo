@@ -908,17 +908,14 @@ class NsgeoPlugin:
 
         Two additions from Task 6 fix round 1:
 
-        * Ruling AE: the export is a lossy resample at ANY fill radius,
-          radius 0 included -- `fill` only makes a dropped cell
-          recoverable from a surviving neighbour, it never puts the cell
-          itself back, so the loss is unconditional and radius only
-          changes how much it matters. At `radius_cells() == 0` (spec
-          6.4's honest unfilled truth, and `grid_radius_spin`'s own
-          construction default) the success message is pushed at
-          `Warning` rather than `Info`, naming the consequence -- the
-          file itself also carries this, via `NSGEO_FILL_RADIUS_CELLS`/
-          `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata (see `slice_export
-          .GeoTiffSliceWriter.write`).
+        * Ruling AE, reworked by the interpolation spec §8: a rotated frame
+          is resampled north-up at half its cell, so no frame cell is
+          dropped and the success message is always plain. The file carries
+          how its values were made -- `NSGEO_INTERPOLATION`,
+          `NSGEO_MAX_DISTANCE_M`, `NSGEO_SMOOTH_X_M`, `NSGEO_SMOOTH_Y_M` --
+          and the frame's `NSGEO_FRAME_AZIMUTH_DEG` as dataset metadata (see
+          `slice_export.GeoTiffSliceWriter.write`). The finish is the
+          dock's `slice_finish()`, applied at the engine's own cell.
         * Ruling AH: spec 9.4 says coverage exports as a companion
           single-band raster "when asked" -- wired here to the control
           that already asks for exactly that, the dock's own coverage
@@ -954,9 +951,8 @@ class NsgeoPlugin:
                 return
             thickness_levels, step_levels = dock.thickness_step_levels()
             _key, velocity = dock._resolved_velocity()
-            radius_cells = dock.radius_cells()
             plan = export_slices(
-                engine, Path(path), thickness_levels, step_levels, velocity, radius_cells
+                engine, Path(path), thickness_levels, step_levels, velocity, dock.slice_finish()
             )
             layer = QgsRasterLayer(path, Path(path).stem, "gdal")
             if not layer.isValid():
@@ -990,15 +986,7 @@ class NsgeoPlugin:
                         f"could not be written: {exc}",
                         Qgis.MessageLevel.Warning,
                     )
-            message = ", ".join(parts)
-            if radius_cells == 0:
-                self.message(
-                    f"{message} -- fill radius 0: cells a rotated frame's north-up resample "
-                    f"drops are not in this file at all, only recoverable at a larger radius",
-                    Qgis.MessageLevel.Warning,
-                )
-            else:
-                self.message(message)
+            self.message(", ".join(parts))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 

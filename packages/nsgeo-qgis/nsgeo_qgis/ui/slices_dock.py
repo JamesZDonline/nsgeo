@@ -28,8 +28,8 @@ import numpy as np
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
+    FinishSettings,
     SliceWindow,
-    fill,
     limit_over_slices,
     plan_windows,
     window_label,
@@ -70,16 +70,17 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     default_cell,
     depth_scroll_delta,
     estimate_memory,
     format_bytes,
     frame_cells,
-    radius_cells_for,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
+from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
 from nsgeo_qgis.ui.profile_dock import velocity_source
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
@@ -166,10 +167,10 @@ class SlicesDock(QgsDockWidget):
         #: #70: a grid switch left the engine on the grid that was left; its
         #: resolution is the spins' to apply once the new grid is prepared.
         self._resolution_owed = False
-        #: The fill radius (cells) at the last successful This-grid draw, a
-        #: coverage draw included, so a line spacing edit that changes it
-        #: (#72) can redraw. Set by `refresh_slice`.
-        self._filled_radius_cells: int | None = None
+        #: The finish, in metres, at the last successful This-grid draw, a
+        #: coverage draw included, so a line spacing edit that moves it (#72,
+        #: interpolation spec §8) can redraw. Set by `refresh_slice`.
+        self._drawn_finish: FinishSettings | None = None
         #: The survey the site scope's memory belongs to.
         self._site_seen: Any = None
         #: R-P5: retries the owed This-grid preparation every 50 ms until no
@@ -234,10 +235,10 @@ class SlicesDock(QgsDockWidget):
         self._values: np.ndarray | None = None
         self._window: SliceWindow | None = None
         #: `(key, limit)` from the last `shared_limit()` call, where `key`
-        #: is `(n_levels, engine.choice, engine.mode, radius_cells)` --
-        #: everything `engine.shared_limit` actually measures over (fix
-        #: round: `radius_cells` joined the other three once `shared_limit`
-        #: started filling each window before measuring it -- see its own
+        #: is `(n_levels, engine.choice, engine.mode, finish settings in
+        #: metres)` -- everything `engine.shared_limit` actually measures
+        #: over (the settings joined the other three once `shared_limit`
+        #: started finishing each window before measuring it -- see its own
         #: docstring). Recomputing it is a pass over every window in the
         #: cube (tens of them), not a per-tick cost, so `display_limit()`
         #: only pays for it again when one of those four actually changed
@@ -468,35 +469,6 @@ class SlicesDock(QgsDockWidget):
         )
         resolution_form.addRow("z1", self.z1_spin)
 
-        # #72: This grid's radius is set in line spacings, like Whole
-        # site's, so one habit works in both scopes and a spacing edit moves
-        # the distance without moving the box. The metres it comes to sit
-        # beside the box (one grid, so a label rather than a tooltip).
-        # Constructed at 0, the unfilled truth, and seeded on a grid change.
-        self.grid_radius_spin = QDoubleSpinBox()
-        self.grid_radius_spin.setRange(0.0, 10.0)
-        self.grid_radius_spin.setDecimals(2)
-        self.grid_radius_spin.setSuffix(" × line spacing")
-        self.grid_radius_spin.setValue(0.0)
-        # Qt's default 1.0 would move the seeded 0.5 to 1.5 in one click
-        # (walkthrough round 2, W5); a quarter spacing is a nudge.
-        self.grid_radius_spin.setSingleStep(0.25)
-        self.grid_radius_spin.setToolTip(
-            "Fills cells that no line crossed from their neighbours within "
-            "this many line spacings (spec 6.4).\n"
-            "Default is half a spacing, which just closes the gap between "
-            "lines. The binned truth is kept underneath either way -- tick "
-            "Show coverage to see it, and set this to 0 to display it unfilled."
-        )
-        self.grid_radius_metres = QLabel("")
-        self.grid_radius_row = QWidget()
-        _radius_layout = QHBoxLayout(self.grid_radius_row)
-        _radius_layout.setContentsMargins(0, 0, 0, 0)
-        _radius_layout.addWidget(self.grid_radius_spin)
-        _radius_layout.addWidget(self.grid_radius_metres)
-        _radius_layout.addStretch(1)
-        resolution_form.addRow("Fill radius", self.grid_radius_row)
-
         # M12 spec 4.4: in site scope the radius is a multiple of each grid's
         # own line spacing; the tooltip gives the metres per grid.
         self.radius_spacing_spin = QDoubleSpinBox()
@@ -508,9 +480,13 @@ class SlicesDock(QgsDockWidget):
         resolution_form.addRow("Fill radius", self.radius_spacing_spin)
         self._resolution_form = resolution_form
         site_scope.set_row_visible(self, self.radius_spacing_spin, False)
-        self.grid_radius_spin.valueChanged.connect(lambda _value: self._update_radius_metres())
 
         outer.addWidget(self.resolution_group)
+        # This grid's Interpolation group (interpolation spec §8): its own
+        # panel, so it keeps its own remembered values beside the site's
+        # (plan call 3). Its metres label sits beside the max distance.
+        self.grid_finish = FinishPanel(metres_label=True)
+        outer.addWidget(self.grid_finish)
         self.normalisation_panel = NormalisationPanel()
         self.normalisation_panel.setVisible(False)
         outer.addWidget(self.normalisation_panel)
@@ -522,6 +498,12 @@ class SlicesDock(QgsDockWidget):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(120)
         self._debounce.timeout.connect(self._apply_resolution)
+        # The Interpolation panel's own, same interval: a finish edit only
+        # redraws (the engine and its weights are untouched until then).
+        self._finish_debounce = QTimer(self)
+        self._finish_debounce.setSingleShot(True)
+        self._finish_debounce.setInterval(120)
+        self._finish_debounce.timeout.connect(self._on_finish_timeout)
 
         # ---- Display: how the slice is coloured and stretched, never
         # what it contains -- spec 8's comparability-by-default,
@@ -655,7 +637,6 @@ class SlicesDock(QgsDockWidget):
             self.dz_spin,
             self.z0_spin,
             self.z1_spin,
-            self.grid_radius_spin,
         ):
             _spin.valueChanged.connect(lambda _value: self._debounce.start())
 
@@ -663,23 +644,24 @@ class SlicesDock(QgsDockWidget):
         # the four fields that decide what the cube IS (spec 5.4's split,
         # `cube_record`'s own docstring) moves -- `cell`/`dz_ns`/`t0_ns`/
         # `t1_ns`, i.e. the `Resolution` dataclass's own fields. Deliberately
-        # NOT `grid_radius_spin`: the fill radius is a `ViewSettings` field (it
+        # NOT the Interpolation panel: the finish is a `ViewSettings` field (it
         # changes no pixel in the array, only how it is displayed -- see
         # `Resolution`'s own docstring), so moving it alone leaves the
         # combo's claim about the array still true.
         for _spin in (self.cell_spin, self.dz_spin, self.z0_spin, self.z1_spin):
             _spin.valueChanged.connect(lambda _value: self._mark_cube_unsaved())
 
-        # #71: each of the five, edited by hand, is remembered for the grid
-        # it was edited on, field by field (`_on_resolution_edited`).
+        # #71: each of the four, edited by hand, is remembered for the grid
+        # it was edited on, field by field (`_on_resolution_edited`); the
+        # Interpolation panel's four are too (`_on_finish_edited`).
         for _spin, _field in (
             (self.cell_spin, "cell"),
             (self.dz_spin, "dz_ns"),
             (self.z0_spin, "t0_ns"),
             (self.z1_spin, "t1_ns"),
-            (self.grid_radius_spin, "radius_spacings"),
         ):
             _spin.valueChanged.connect(partial(self._on_resolution_edited, _field))
+        self.grid_finish.edited.connect(self._on_finish_edited)
 
         # Display changes no value `refresh_slice()` fetches from the
         # engine, but each still changes what the map ought to show --
@@ -747,7 +729,7 @@ class SlicesDock(QgsDockWidget):
             self.refresh_cube_combo()
             self._sync_included()
             self._update_included_label()
-            self._update_radius_metres()
+            self.grid_finish.set_spacing(self._grid_spacing())
             self._refresh_source_status()
             # Cheap cluster (final review): the established pattern
             # (`processing_dock.py`'s own `has_line` loop) -- there is
@@ -766,12 +748,12 @@ class SlicesDock(QgsDockWidget):
                 and self.engine.is_prepared
                 and self.engine.choice is not None
                 and self.engine.choice.grid_id == self.grid_combo.currentText()
-                and self._filled_radius_cells is not None
-                and self.radius_cells() != self._filled_radius_cells
+                and self._finish_moved()
             ):
-                # #72: a spacing edit moved the radius in cells without
-                # touching the box; redraw so the map and an export agree.
-                # Direct, like the sliders: no resolution change to debounce.
+                # #72: a spacing edit moved the max distance in metres without
+                # touching the box; redraw so the map and an export agree
+                # (interpolation spec §8). Direct, like the sliders: no
+                # resolution change to debounce.
                 self.refresh_slice()
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
@@ -866,7 +848,7 @@ class SlicesDock(QgsDockWidget):
         outlive the other two.
 
         An actual grid change is also the one moment `_seed_resolution_
-        defaults` re-seeds `cell_spin`/`grid_radius_spin` from `grid_id`'s own
+        defaults` re-seeds `cell_spin` and the Interpolation panel from `grid_id`'s own
         `default_spacing` (spec 4, spec 6.4) -- tied to this branch and
         not to every call here, for the same reason `_included_is_default`
         exists at all: reseeding on every `presets_changed` would silently
@@ -1415,7 +1397,7 @@ class SlicesDock(QgsDockWidget):
             # would override the user's next resolution change (#70).
             self._sync_grid_slider()
             # Final review, Important 1 (part 3): the cache's key
-            # (`n_levels`, `engine.choice`, `engine.mode`, `radius_cells`)
+            # (`n_levels`, `engine.choice`, `engine.mode`, finish settings)
             # cannot always tell a re-preparation happened -- `_on_grids_
             # changed` re-prepares with the SAME `SourceChoice` object
             # after a grid move, so none of those four values need to
@@ -1481,7 +1463,7 @@ class SlicesDock(QgsDockWidget):
     def _mark_cube_unsaved(self) -> None:
         """Fall back to `"(unsaved)"` the moment a widget that decides
         what the cube IS moves away from a just-restored cube's own
-        values -- a `view` field (Display, Position, the fill radius) does
+        values -- a `view` field (Display, Position, the Interpolation panel) does
         not change the array, so moving only those leaves the combo's
         claim still true; the Source combos and the four `Resolution`
         geometry spins do, and are wired to call this (see their own
@@ -1516,25 +1498,33 @@ class SlicesDock(QgsDockWidget):
             _log(f"could not restore the cube {text!r}: {exc}")
 
     def view_settings(self) -> ViewSettings:
-        """The six values `cube_record`'s `view` half carries, read off
-        the widgets that hold them right now. `plugin.save_cube` calls
+        """The values `cube_record`'s `view` half carries (the six of 0.2.0
+        and the Interpolation panel's four), read off the widgets that hold
+        them right now. `plugin.save_cube` calls
         this so a saved record carries what was actually on screen at the
         moment of saving, not a value re-derived some other way."""
+        finish = self.grid_finish.value()
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
-            radius_m=self.grid_radius_spin.value() * (self._grid_spacing() or 0.0),
+            method=finish.method,
+            max_distance_spacings=finish.max_distance_spacings,
+            smooth_x_m=finish.smooth_x_m,
+            smooth_y_m=finish.smooth_y_m,
+            # What 0.2.0 reads as its fill radius (interpolation spec §8).
+            radius_m=finish.max_distance_spacings * (self._grid_spacing() or 0.0),
             palette=self.palette_combo.currentText(),
             stretch=self.stretch_combo.currentText(),
             coverage=self.coverage_check.isChecked(),
         )
 
     def apply_view(self, view: ViewSettings, *, spacing_m: float) -> None:
-        """The inverse of `view_settings()`: write `view`'s six fields
-        back onto their widgets, signals blocked throughout. `view.radius_m`
-        is metres and the box is line spacings (#72), so `spacing_m` -- the
-        grid's spacing NOW, which `restore_cube` reads before the grid combo
-        has moved -- converts it; 0 or less reads as an unfilled 0.
+        """The inverse of `view_settings()`: write `view`'s fields back onto
+        their widgets, signals blocked throughout. The Interpolation panel
+        takes `view.finish`; `view.radius_m` is a 0.2.0 compatibility field
+        and is ignored (interpolation spec §8). `spacing_m` -- the grid's
+        spacing NOW, which `restore_cube` reads before the grid combo has
+        moved -- is what the panel's metres label multiplies by.
 
         `thickness_spin`/`step_spin`/`stretch_combo`/`palette_combo`/
         `coverage_check` are wired straight to `refresh_slice()`,
@@ -1542,12 +1532,9 @@ class SlicesDock(QgsDockWidget):
         `self._updating` themselves -- so setting all of them without
         blocking would fire that many redundant redraws before
         `restore_cube`'s own single `prepare()` produces the real
-        picture. `grid_radius_spin` only ever restarts the Resolution
-        debounce (harmless to retrigger, and `flush_debounce()` applies
-        it deliberately, once, right after `restore_cube` finishes
-        setting every widget), but is blocked here too so this method is
-        a complete, self-contained inverse of `view_settings()` regardless
-        of what a future caller does after it.
+        picture. `grid_finish` announces nothing on `set_value` (it blocks its
+        own widgets), so this method is a complete, self-contained inverse
+        of `view_settings()` regardless of what a future caller does after it.
 
         `palette` and `stretch` are each set only if currently offered --
         both are non-editable combos, and Qt's `setCurrentText` on one is
@@ -1569,7 +1556,6 @@ class SlicesDock(QgsDockWidget):
         widgets = (
             self.thickness_spin,
             self.step_spin,
-            self.grid_radius_spin,
             self.palette_combo,
             self.stretch_combo,
             self.coverage_check,
@@ -1579,7 +1565,8 @@ class SlicesDock(QgsDockWidget):
         try:
             self.thickness_spin.setValue(view.thickness_ns)
             self.step_spin.setValue(view.step_ns)
-            self.grid_radius_spin.setValue(view.radius_m / spacing_m if spacing_m > 0 else 0.0)
+            self.grid_finish.set_value(view.finish)
+            self.grid_finish.set_spacing(spacing_m if spacing_m > 0 else None)
             palette_names = [
                 self.palette_combo.itemText(i) for i in range(self.palette_combo.count())
             ]
@@ -1722,9 +1709,10 @@ class SlicesDock(QgsDockWidget):
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
                     self.z0_spin.setValue(recipe.resolution.t0_ns)
                     self.z1_spin.setValue(recipe.resolution.t1_ns)
-                # `apply_view` blocked the box's signals, so the metres
-                # beside it are refreshed here, once the grid is selected.
-                self._update_radius_metres()
+                # `apply_view` was given the grid's spacing before the combo
+                # moved; the metres beside the panel are refreshed here, once
+                # the grid is selected.
+                self.grid_finish.set_spacing(self._grid_spacing())
             finally:
                 self._updating -= 1
             # M12 spec 4.2 (controller ruling T2-b): picking a saved cube is
@@ -1736,8 +1724,8 @@ class SlicesDock(QgsDockWidget):
             # as every line, not as an empty choice (final review D4).
             self._remember_source(every_line="lines" not in record)
             # #71: so are its resolution settings, as that grid's own. The
-            # radius is read off the box, which `apply_view` set in spacings.
-            remembered: dict[str, float] = {}
+            # finish is read off the panel, which `apply_view` set.
+            remembered: dict[str, float | str] = {}
             if recipe.resolution is not None:
                 remembered.update(
                     cell=recipe.resolution.cell,
@@ -1746,7 +1734,13 @@ class SlicesDock(QgsDockWidget):
                     t1_ns=recipe.resolution.t1_ns,
                 )
             if recipe.view is not None:
-                remembered["radius_spacings"] = self.grid_radius_spin.value()
+                finish = self.grid_finish.value()
+                remembered.update(
+                    method=finish.method,
+                    max_distance_spacings=finish.max_distance_spacings,
+                    smooth_x_m=finish.smooth_x_m,
+                    smooth_y_m=finish.smooth_y_m,
+                )
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
@@ -1783,13 +1777,13 @@ class SlicesDock(QgsDockWidget):
 
     # ---- Position/Resolution/Display -------------------------------------
     def _seed_resolution_defaults(self, grid_id: str | None) -> None:
-        """Re-seed `cell_spin`/`grid_radius_spin` from the grid that was just
+        """Re-seed `cell_spin` and the Interpolation panel from the grid that was just
         selected -- called only from `_sync_included`'s grid-changed
         branch (or, for a grid change made while the site showed, from
         `_resume_grid`, #71), so an unrelated session signal never
         overwrites a value the user picked for the grid that is still selected. Spec 4's "no
         smaller than the trace spacing, no larger than half the line
-        spacing", and #81's 0.2 m cell and half-spacing fill radius -- both
+        spacing", and #81's 0.2 m cell and the interpolation defaults -- both
         need only the grid itself. `dz_spin`/`z0_spin`/`z1_spin` are seeded
         separately, by `_seed_dz_z_defaults`: see its own docstring for
         why a grid change is not the only moment that needs to try them.
@@ -1815,13 +1809,9 @@ class SlicesDock(QgsDockWidget):
             self.cell_spin.setMinimum(floor)
             self.cell_spin.setValue(default_cell(grid.default_spacing, floor))
             # Quiet: a seed is not an edit, and a grid change re-prepares and
-            # `refresh_slice` reads `radius_cells()` live, so no debounce either.
-            self.grid_radius_spin.blockSignals(True)
-            try:
-                self.grid_radius_spin.setValue(DEFAULT_RADIUS_SPACINGS)
-            finally:
-                self.grid_radius_spin.blockSignals(False)
-            self._update_radius_metres()
+            # `refresh_slice` reads the panel live, so no debounce either.
+            self.grid_finish.set_value(SliceFinish())
+            self.grid_finish.set_spacing(self._grid_spacing())
             self._seed_dz_z_defaults(grid_id)
             # Last, so what the user chose for this grid wins over its seed
             # (#71), and the cell lands above the floor just raised.
@@ -1887,8 +1877,10 @@ class SlicesDock(QgsDockWidget):
         so nothing is remembered, and only after the seeds, so a seed never
         overwrites it. The four geometry spins emit as a seed does, which is
         how the values reach the engine (the debounce, or the owed apply on
-        a switch from the site, #70). The radius is set quietly, as its seed
-        is: `refresh_slice` reads it live.
+        a switch from the site, #70). The finish is set quietly, as its seed
+        is: `refresh_slice` reads it live. Laid over the defaults field by
+        field, so a 0.2.0 record's `radius_spacings` (or a damaged field) is
+        ignored and the rest still restores (interpolation spec §8).
 
         A remembered cell below the grid's floor is clamped up by the spin
         itself; a remembered z range is clamped to the prepared lines later,
@@ -1912,13 +1904,8 @@ class SlicesDock(QgsDockWidget):
             ):
                 if field in remembered:
                     spin.setValue(remembered[field])
-            if "radius_spacings" in remembered:
-                self.grid_radius_spin.blockSignals(True)
-                try:
-                    self.grid_radius_spin.setValue(remembered["radius_spacings"])
-                finally:
-                    self.grid_radius_spin.blockSignals(False)
-                self._update_radius_metres()
+            self.grid_finish.set_value(SliceFinish().updated(remembered))
+            self.grid_finish.set_spacing(self._grid_spacing())
         finally:
             self._seeding -= 1
 
@@ -1939,9 +1926,9 @@ class SlicesDock(QgsDockWidget):
             if self._updating or self._seeding:
                 return
             if self._scope == "site":
-                # `grid_radius_spin` is This grid's, hidden in the site; the
+                # This grid's Interpolation panel is hidden in the site; the
                 # site's own radius is `SiteScope._on_radius_changed`'s.
-                if field == "radius_spacings" or not self.session.is_open:
+                if not self.session.is_open:
                     return
                 edited = self._edited_fields(field, value, self.session.site_resolution())
                 self.session.remember_site_resolution(**edited)
@@ -1955,7 +1942,7 @@ class SlicesDock(QgsDockWidget):
             _log(f"could not remember the slice resolution: {exc}")
 
     def _edited_fields(
-        self, field: str, value: float, remembered: dict[str, float]
+        self, field: str, value: float, remembered: dict[str, float | str]
     ) -> dict[str, float]:
         """What one edit remembers: `field`, and for a z bound, sometimes the
         other bound as shown (Ruling 15, #71).
@@ -1973,7 +1960,7 @@ class SlicesDock(QgsDockWidget):
         if field in others:
             other, spin = others[field]
             if other in remembered:
-                pair = {field: value, other: remembered[other]}
+                pair = {field: value, other: float(remembered[other])}
                 if pair["t1_ns"] <= pair["t0_ns"]:
                     fields[other] = spin.value()
         return fields
@@ -2029,27 +2016,44 @@ class SlicesDock(QgsDockWidget):
         except KeyError:
             return None
 
-    def _update_radius_metres(self) -> None:
-        """Refresh the metres beside the radius box. Run on the box's own
-        edits, after a seed, after a cube restore and from `rebuild_source`
-        (which a spacing edit reaches through `grids_changed`), so the label
-        cannot go stale however the spacing or the box moved (#72)."""
+    def _finish_moved(self) -> bool:
+        """Whether the finish, in metres, differs from the last draw's: a
+        spacing edit moves it without touching the panel. False when there is
+        no draw to compare with or no source to measure against."""
+        if self._drawn_finish is None:
+            return False
         try:
-            spacing = self._grid_spacing()
-            if spacing is None:
-                self.grid_radius_metres.setText("")
-            else:
-                self.grid_radius_metres.setText(
-                    f"= {self.grid_radius_spin.value() * spacing:.3g} m"
-                )
-        except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
-            _log(f"could not refresh the fill radius in metres: {exc}")
+            return self.engine.finish_settings(self.grid_finish.value()) != self._drawn_finish
+        except (RuntimeError, KeyError):
+            return False
 
-    def radius_cells(self) -> int:
-        spacing = self._grid_spacing()
-        if spacing is None:
-            return 0
-        return radius_cells_for(spacing, self.grid_radius_spin.value(), self.cell_spin.value())
+    def slice_finish(self) -> SliceFinish:
+        """This grid's Interpolation settings, as the panel shows them now."""
+        return self.grid_finish.value()
+
+    def _on_finish_edited(self, field: str, value: float | str) -> None:
+        """The Interpolation panel was edited by hand: remember the value for
+        the grid it was set on (#71), refresh the metres label and start the
+        redraw. A seed or restore never reaches here (the panel's `set_value`
+        announces nothing), but `_updating` and `_seeding` are checked as
+        `_on_resolution_edited` does, for a restore that sets other widgets
+        around it. Guarded: a raising receiver of `FinishPanel.edited` is
+        reported by PyQt's unraisable hook, not by the panel's own guard."""
+        try:
+            self.grid_finish.set_spacing(self._grid_spacing())
+            if not (self._updating or self._seeding or self._scope == "site"):
+                grid_id = self.grid_combo.currentText()
+                if grid_id and self.session.is_open:
+                    self.session.remember_slice_resolution(grid_id, **{field: value})
+            self._finish_debounce.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
+            _log(f"could not remember the interpolation setting: {exc}")
+
+    def _on_finish_timeout(self) -> None:
+        try:
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            _log(f"could not redraw after an interpolation edit: {exc}")
 
     def _step_levels(self, z: Any) -> int:
         """`step_spin`'s nanoseconds, in levels of `z` -- at least 1, so a
@@ -2145,7 +2149,7 @@ class SlicesDock(QgsDockWidget):
                     )
                     return
             self.engine.set_resolution(resolution)
-            # Keyed on `(n_levels, choice, mode, radius_cells)` -- see the
+            # Keyed on `(n_levels, choice, mode, finish settings)` -- see the
             # field's own docstring -- and a geometry change can only have
             # moved `n_levels` (the axis it is measured against changed),
             # so there is no cheaper way to know the old cache is still
@@ -2196,12 +2200,18 @@ class SlicesDock(QgsDockWidget):
                 self.window_cleared.emit()
                 return
             values, coverage = self.engine.slice_at(window)
-            radius = self.radius_cells()
+            finish = self.grid_finish.value()
+            drawn = self.engine.finish_settings(finish)
             if self.coverage_check.isChecked():
                 shown = coverage.astype(float)
                 shown[coverage == 0] = np.nan
+            elif self.engine.weights_cached(finish):
+                shown = self.engine.finish(values, coverage, finish)
             else:
-                shown = fill(values, coverage, radius)
+                # Building the weights takes seconds at a fine cell: say so
+                # (interpolation spec §7).
+                with busy_cursor():
+                    shown = self.engine.finish(values, coverage, finish)
             self._values = shown
             self._window = window
             self._update_readout(window)
@@ -2209,11 +2219,11 @@ class SlicesDock(QgsDockWidget):
             self.window_changed.emit(lo_ns, hi_ns)
             self.status_label.setText(self._grid_status_text())
             # Recorded only once the draw succeeded, and by a coverage draw
-            # too (#72): `rebuild_source` redraws when the radius in cells
-            # differs from this, so a value left over from an earlier fill
+            # too (#72): `rebuild_source` redraws when the finish in metres
+            # differs from this, so a value left over from an earlier draw
             # redrew the coverage view on every session signal. Unticking
-            # coverage redraws through its own toggle, at the radius then.
-            self._filled_radius_cells = radius
+            # coverage redraws through its own toggle, at the finish then.
+            self._drawn_finish = drawn
             self.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slider slots; an
             # escape passes locally and aborts the CI container.
@@ -2379,7 +2389,8 @@ class SlicesDock(QgsDockWidget):
         The shared branch is cached (`_shared_limit_cache`) because it is
         a pass over every window in the cube, not a per-tick cost, and is
         only recomputed when the key it is measured over -- `(n_levels,
-        engine.choice, engine.mode, radius_cells)` -- actually changed;
+        engine.choice, engine.mode, finish settings in metres)` -- actually
+        changed;
         see that field's own docstring for why those four and nothing
         else.
 
@@ -2395,9 +2406,9 @@ class SlicesDock(QgsDockWidget):
         coverage view rendered as one flat colour.
 
         Final review, Important 1 + Minor 9: BOTH remaining branches now
-        measure exactly what `refresh_slice()` displays (`fill(values,
-        coverage, radius_cells())`), never the raw unfilled array --
-        `engine.shared_limit` takes `radius_cells()` and fills every
+        measure exactly what `refresh_slice()` displays (the engine's
+        `finish(values, coverage, slice_finish())`), never the raw unfilled
+        array -- `engine.shared_limit` takes the finish and finishes every
         window itself (see its own docstring for the measured before/after
         numbers, on this repo's four real DZT files); "this slice" is
         routed through `limit_over_slices` instead of calling
@@ -2422,10 +2433,16 @@ class SlicesDock(QgsDockWidget):
         window = self._window
         if window is None:
             return 1.0
-        radius_cells = self.radius_cells()
-        key = (window.n_levels, self.engine.choice, self.engine.mode, radius_cells)
+        finish = self.grid_finish.value()
+        # In metres, so a line spacing edit invalidates the cache too.
+        key = (
+            window.n_levels,
+            self.engine.choice,
+            self.engine.mode,
+            self.engine.finish_settings(finish),
+        )
         if self._shared_limit_cache is None or self._shared_limit_cache[0] != key:
-            value = self.engine.shared_limit(window.n_levels, clip, radius_cells)
+            value = self.engine.shared_limit(window.n_levels, clip, finish)
             self._shared_limit_cache = (key, value)
         return self._shared_limit_cache[1]
 

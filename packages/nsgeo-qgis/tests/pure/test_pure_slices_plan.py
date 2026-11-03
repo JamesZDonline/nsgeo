@@ -175,6 +175,15 @@ def test_the_status_line_says_what_is_held_and_how_fast_it_redraws():
     assert "redraw in —" in format_status("streaming", 24, est, redraw_ms=None)
 
 
+def test_the_status_line_counts_the_interpolation_weights_as_held():
+    """`total_bytes` counts the weights, so the readout does too: in both modes."""
+    est = MemoryEstimate(lines_bytes=28_000_000, cube_bytes=83_000_000, weights_bytes=40_000_000)
+    assert format_status("streaming", 24, est, 3.6) == (
+        "24 lines held in memory, 68 MB · slices redraw in 4 ms"
+    )
+    assert "151 MB" in format_status("resident", 24, est, 0.56)
+
+
 def test_the_value_objects_validate_themselves():
     with pytest.raises(ValueError):
         Resolution(cell=0.0, dz_ns=0.5, t0_ns=0.0, t1_ns=50.0)

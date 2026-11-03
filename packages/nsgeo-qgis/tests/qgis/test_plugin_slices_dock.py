@@ -11,10 +11,10 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.render import colormap_names
-from nsgeo.slices import plan_windows, window_depths_m, window_times_ns
+from nsgeo.slices import plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
-from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
+from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, SliceFinish, transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QT_VERSION_STR, QEvent, Qt
@@ -629,83 +629,132 @@ def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
     assert not np.allclose(first[both], second[both]), "a different depth must look different"
 
 
-def test_the_fill_radius_is_a_distance_and_survives_a_cell_size_change(docked):
-    """The default radius is a multiple of the line spacing -- a distance
-    (spec 6.4; #81 made it 0.5 x; #72 made the box say so, in spacings).
-    The cell conversion happens underneath, so halving the cell size does
-    not silently halve the smoothing.
+def _set_finish(dock, **fields):
+    """Set the Interpolation panel the way a user does (its widgets, so
+    `edited` fires), then apply the debounced redraw immediately."""
+    panel = dock.grid_finish
+    if "method" in fields:
+        panel.method_combo.setCurrentIndex(panel.method_combo.findData(fields["method"]))
+    if "max_distance_spacings" in fields:
+        panel.max_distance_spin.setValue(fields["max_distance_spacings"])
+    if "smooth_x_m" in fields:
+        panel.smooth_x_spin.setValue(fields["smooth_x_m"])
+    if "smooth_y_m" in fields:
+        panel.smooth_y_spin.setValue(fields["smooth_y_m"])
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()
 
-    Strengthened from the brief's own draft: with this fixture's
-    `GRID.default_spacing` of 0.5, the default radius is 0.25 m -- under
-    1 m before ANY conversion -- so `int(metres)`
-    (metres misread as an already-integer cell count, the exact mutant
-    Step 10 names) truncates to 0 both before and after the cell change,
-    and `before * 2 == 0` too, so the relative-doubling check alone passes
-    even against that mutant (verified: all 37 tests in this file and
-    `test_plugin_slice_layer.py` still passed with that mutant applied).
-    The added absolute check pins the one number the mutant cannot also
-    get right by accident."""
+
+def _finished_by_the_core(dock, window, *, method, max_distance_m, search_radius_m=None):
+    """What the drawn slice must equal, from the core pipeline alone."""
+    from nsgeo.slices import finish_slice
+
+    engine = dock.engine
+    values, coverage = engine.slice_at(window)
+    settings = dataclasses.replace(
+        engine.finish_settings(dock.slice_finish()),
+        method=method,
+        max_distance_m=max_distance_m,
+        search_radius_m=max(search_radius_m or 0.0, 2.0 * 0.5, 2.0 * max_distance_m),
+    )
+    weights = plan_fill(
+        coverage > 0, engine.frame.cell, method, max_distance_m, settings.search_radius_m
+    )
+    return finish_slice(values, weights, engine.frame.cell, settings)
+
+
+def test_the_interpolation_group_replaces_fill_radius(docked_two_grids):
+    """#104's panel: no "Fill radius" row for This grid, an Interpolation
+    group in its place, visible in This grid and at the defaults after a seed."""
+    dock, _ = docked_two_grids
+    _ready(dock)
+    form = dock._resolution_form
+    labels = [
+        form.itemAt(row, form.ItemRole.LabelRole).widget().text() for row in range(form.rowCount())
+    ]
+    # Only the site's own row (Task 5's) still says it.
+    assert labels.count("Fill radius") == 1
+    assert form.labelForField(dock.radius_spacing_spin).text() == "Fill radius"
+    assert not hasattr(dock, "grid_radius_spin")
+    assert dock.grid_finish.title() == "Interpolation"
+    assert not dock.grid_finish.isHidden()
+    _set_finish(dock, method="idw", max_distance_spacings=1.5)
+    _switch(dock, "B")
+    assert dock.grid_finish.value() == SliceFinish()
+    assert dock.slice_finish() == SliceFinish()
+
+
+def test_the_max_distance_is_a_distance_and_survives_a_cell_size_change(docked):
+    """The default max distance is a multiple of the line spacing -- a
+    distance (interpolation spec §8). The cell conversion happens underneath
+    (the weights are planned at the frame's own cell), so halving the cell
+    does not move the distance, and the drawn slice is the core pipeline's at
+    the new cell."""
     dock, session = docked
     _ready(dock)
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
-    before = dock.radius_cells()
-    assert before == round(0.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.25)
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
-    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+    assert dock.engine.frame.cell == pytest.approx(0.125)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.25)
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        _finished_by_the_core(dock, dock.current_window(), method="kriging", max_distance_m=0.25),
+    )
 
 
-def test_this_grid_sets_the_fill_radius_in_line_spacings(docked):
-    """#72: This grid's Fill radius reads like Whole site's, in line
-    spacings, with the metres it comes to shown beside the box."""
+def test_this_grid_sets_the_max_distance_in_line_spacings(docked):
+    """#72: This grid's distance reads like Whole site's, in line spacings,
+    with the metres it comes to shown beside the box."""
     dock, _ = docked
     _ready(dock)
-    spin = dock.grid_radius_spin
+    spin = dock.grid_finish.max_distance_spin
     assert spin.suffix() == " × line spacing"
     assert spin.value() == pytest.approx(0.5)
     assert spin.singleStep() == 0.25
-    assert dock.grid_radius_metres.text() == "= 0.25 m"
-    assert dock.radius_cells() == round(0.25 / dock.cell_spin.value())
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.25 m"
 
 
-def test_the_metres_beside_the_radius_follow_the_box(docked):
+def test_the_metres_beside_the_max_distance_follow_the_box(docked):
     dock, _ = docked
     _ready(dock)
-    dock.grid_radius_spin.setValue(1.5)
-    assert dock.grid_radius_metres.text() == "= 0.75 m"
-    assert dock.radius_cells() == round(0.75 / dock.cell_spin.value())
+    dock.grid_finish.max_distance_spin.setValue(1.5)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
 
 
-def test_the_radius_follows_a_line_spacing_edit(docked):
-    """Review Focus 3: the radius is in spacings, so a spacing edit moves
-    the metres and the cells with no grid switch and no change to the box."""
+def test_max_distance_follows_a_line_spacing_edit(docked):
+    """Review Focus 2: the distance is in spacings, so a spacing edit moves
+    the metres and the drawn slice with no grid switch and no change to the
+    box (0.5 spacings of 1.0 m is 0.5 m)."""
     dock, session = docked
     _ready(dock)
-    before = dock.radius_cells()
     dock.refresh_slice()
-    finite_before = np.isfinite(dock.current_values()).sum()
+    before = dock.current_values().copy()
     session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
-    assert dock.grid_radius_metres.text() == "= 0.5 m"
-    assert dock.radius_cells() == round(0.5 / dock.cell_spin.value())
-    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
-    # The drawn fill follows too, with no other refresh: export reads
-    # `radius_cells()` live, so the map must not show the old radius.
-    assert np.isfinite(dock.current_values()).sum() > finite_before
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.5 m"
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.5)
+    # The drawn slice follows too, with no other refresh: export reads the
+    # finish live, so the map must not show the old distance.
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        _finished_by_the_core(
+            dock, dock.current_window(), method="kriging", max_distance_m=0.5, search_radius_m=2.0
+        ),
+    )
+    assert np.isfinite(dock.current_values()).sum() > np.isfinite(before).sum()
 
 
 def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
-    """#72's redraw on a spacing edit compares the radius in cells with the
+    """#72's redraw on a spacing edit compares the finish in metres with the
     one the last draw used. A coverage draw left that unrecorded, so after a
-    cell edit every session signal redrew the coverage view."""
+    finish edit every session signal redrew the coverage view."""
     dock, session = docked
     _ready(dock)
     dock.coverage_check.setChecked(True)
-    before = dock.radius_cells()
-    dock.cell_spin.setValue(0.05)
-    dock.flush_debounce()
-    assert dock.radius_cells() != before
+    _set_finish(dock, max_distance_spacings=1.5)
     drawn: list[None] = []
     dock.slice_changed.connect(lambda: drawn.append(None))
     for _ in range(3):
@@ -713,28 +762,26 @@ def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
     assert drawn == []
 
 
-def test_a_seeded_radius_emits_no_value_changed(docked_two_grids):
-    """The seed is not an edit: Task 4's memory hangs on `valueChanged`."""
-    dock, _ = docked_two_grids
+def test_a_seeded_finish_announces_nothing(docked_two_grids):
+    """The seed is not an edit: the memory hangs on `edited`."""
+    dock, session = docked_two_grids
     _ready(dock)
-    dock.grid_radius_spin.setValue(1.5)
-    seen: list[float] = []
-    dock.grid_radius_spin.valueChanged.connect(seen.append)
+    _set_finish(dock, max_distance_spacings=1.5)
+    seen: list[tuple[str, object]] = []
+    dock.grid_finish.edited.connect(lambda field, value: seen.append((field, value)))
     dock.grid_combo.setCurrentText("B")
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_finish.value() == SliceFinish()
     assert seen == []
 
 
-def test_with_no_grid_the_radius_reads_zero_and_blank(qgis_app, tmp_path):
+def test_with_no_grid_the_max_distance_reads_blank(qgis_app, tmp_path):
     session = SiteSession()
     dock = SlicesDock(session)  # no survey open
     try:
-        assert dock.grid_radius_metres.text() == ""
-        assert dock.radius_cells() == 0
+        assert dock.grid_finish.max_distance_metres.text() == ""
         assert dock.view_settings().radius_m == 0.0
         session.new_site(tmp_path)  # open, but no grid yet
-        assert dock.grid_radius_metres.text() == ""
-        assert dock.radius_cells() == 0
+        assert dock.grid_finish.max_distance_metres.text() == ""
         assert dock.view_settings().radius_m == 0.0
     finally:
         dock.engine.wait_for_preparation(20_000)
@@ -742,41 +789,152 @@ def test_with_no_grid_the_radius_reads_zero_and_blank(qgis_app, tmp_path):
         dock.deleteLater()
 
 
-def test_a_saved_cube_records_its_radius_in_metres(docked):
+def test_a_finish_edit_redraws_and_is_remembered_for_the_grid(docked_two_grids):
+    dock, session = docked_two_grids
+    _ready(dock)
+    session.save()
+    window = dock.current_window()
+    dock.grid_finish.method_combo.setCurrentIndex(dock.grid_finish.method_combo.findData("idw"))
+    assert dock._finish_debounce.isActive()
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()  # the debounce, flushed
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        dock.engine.finish(*dock.engine.slice_at(window), SliceFinish(method="idw")),
+    )
+    assert session.slice_resolution("A")["method"] == "idw"
+    assert session.slice_resolution("B") == {}
+    assert session.dirty
+
+
+def test_a_finish_edit_redraws_through_its_own_debounce(docked):
+    """The timer, not only the flush: an edit starts `_finish_debounce`, and
+    its timeout alone redraws."""
+    from plugin_testing import spin_until
+
     dock, _ = docked
     _ready(dock)
-    dock.grid_radius_spin.setValue(1.5)
-    assert dock.view_settings().radius_m == pytest.approx(0.75)
+    drawn: list[None] = []
+    dock.slice_changed.connect(lambda: drawn.append(None))
+    dock.grid_finish.smooth_x_spin.setValue(0.5)
+    assert drawn == [] and dock._finish_debounce.isActive()
+    assert spin_until(lambda: bool(drawn), 2000)
+    assert not dock._finish_debounce.isActive()
+
+
+def test_seeding_a_grid_resets_the_panel_and_remembers_nothing(docked_two_grids):
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _set_finish(dock, method="idw", max_distance_spacings=1.5, smooth_x_m=0.4)
+    session.save()
+    assert not session.dirty
+    _switch(dock, "B")
+    assert dock.slice_finish() == SliceFinish()
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.25 m"  # B's spacing is 0.5 too
+    assert session.slice_resolution("B") == {}
+    assert not session.dirty
+
+
+def test_a_remembered_finish_is_restored_on_a_grid_switch(docked_two_grids):
+    dock, session = docked_two_grids
+    _ready(dock)
+    wanted = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.4, smooth_y_m=0.2)
+    _set_finish(dock, **dataclasses.asdict(wanted))
+    _switch(dock, "B")
+    assert dock.slice_finish() == SliceFinish()
+    _switch(dock, "A")
+    assert dock.slice_finish() == wanted
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    assert dock.current_values() is not None
+    window = dock.current_window()
+    np.testing.assert_array_equal(
+        dock.current_values(), dock.engine.finish(*dock.engine.slice_at(window), wanted)
+    )
+
+
+def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids):
+    """Review Focus 3: a 0.2.0 survey remembers `radius_spacings: 0.5` for a
+    grid. This build opens it on the new defaults, with no holes, and does
+    not mark the survey dirty. Put into the record directly, not through
+    `remember_slice_resolution`, whose `radius_spacings=` keyword Task 5
+    removes."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _set_finish(dock, method="none")
+    _switch(dock, "B")
+    session._update_source("A", resolution={"radius_spacings": 0.5})
+    session.save()
+    assert not session.dirty
+    _switch(dock, "A")
+    assert dock.slice_finish() == SliceFinish()
+    assert not session.dirty
+    assert session.slice_resolution("A") == {"radius_spacings": 0.5}  # left as found
+    # No holes: the default fills between the lines.
+    window = dock.current_window()
+    values, coverage = dock.engine.slice_at(window)
+    assert np.isfinite(dock.current_values()).sum() > (coverage > 0).sum()
+
+
+def test_saving_a_cube_records_the_finish_and_radius_m(docked):
+    dock, _ = docked
+    _ready(dock)
+    _set_finish(dock, method="idw", max_distance_spacings=1.5, smooth_x_m=0.4, smooth_y_m=0.2)
+    view = dock.view_settings()
+    assert view.finish == SliceFinish("idw", 1.5, 0.4, 0.2)
+    # What 0.2.0 reads as its fill radius (interpolation spec §8): spacings x spacing.
+    assert view.radius_m == pytest.approx(0.75)
 
 
 @pytest.mark.parametrize("radius_m", [0.0, 0.25, 0.5, 0.75])
-def test_an_old_cubes_radius_reopens_with_the_same_radius_in_cells(docked, radius_m):
+def test_restoring_a_0_2_0_cube_record_shows_the_defaults(docked, radius_m):
+    """Review Focus 3: a 0.2.0 cube record's `view` has only the six 0.2.0
+    keys, `radius_m` among them. It opens on the defaults, never mapping the
+    old radius onto the new controls."""
     dock, session = docked
     _ready(dock)
-    view = dock.view_settings()
-    _save_cube(dock, session, "A__r", dataclasses.replace(view, radius_m=radius_m))
-    dock.grid_radius_spin.setValue(3.0)
-    dock.restore_cube("A__r")
+    record = _save_cube(dock, session, "A__r", dock.view_settings())
+    record["view"] = {
+        key: record["view"][key]
+        for key in ("thickness_ns", "step_ns", "radius_m", "palette", "stretch", "coverage")
+    }
+    record["view"]["radius_m"] = radius_m
+    _set_finish(dock, method="none", max_distance_spacings=3.0, smooth_x_m=0.5)
+    dock.cube_combo.setCurrentText("A__r")
     assert dock.engine.wait_for_preparation(20_000)
-    assert dock.grid_radius_spin.value() == pytest.approx(radius_m / 0.5)
-    assert dock.radius_cells() == max(0, round(radius_m / dock.cell_spin.value()))
+    assert dock.slice_finish() == SliceFinish()
 
 
-def test_a_cube_saved_before_a_spacing_edit_keeps_its_radius_in_metres(docked):
-    """Review Focus 5: `radius_m` is metres, the box is spacings, so the
-    conversion uses the grid's spacing now, keeping the metres."""
+def test_restoring_a_cube_restores_the_finish_and_remembers_it(docked):
     dock, session = docked
     _ready(dock)
-    view = dock.view_settings()
-    _save_cube(dock, session, "A__s", dataclasses.replace(view, radius_m=0.5))
+    wanted = SliceFinish("idw", 1.5, 0.4, 0.2)
+    _set_finish(dock, **dataclasses.asdict(wanted))
+    _save_cube(dock, session, "A__f", dock.view_settings())
+    _set_finish(dock, method="none", max_distance_spacings=0.25, smooth_x_m=0.0, smooth_y_m=0.0)
+    dock.cube_combo.setCurrentText("A__f")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.slice_finish() == wanted
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    remembered = session.slice_resolution("A")
+    assert {k: remembered[k] for k in dataclasses.asdict(wanted)} == dataclasses.asdict(wanted)
+
+
+def test_a_cube_saved_before_a_spacing_edit_follows_the_new_spacing(docked):
+    """A cube records its max distance in line spacings (and the metres only
+    for 0.2.0's sake), so after a spacing edit it restores the same spacings
+    and the metres follow the grid's spacing now."""
+    dock, session = docked
+    _ready(dock)
+    _set_finish(dock, max_distance_spacings=1.0)
+    _save_cube(dock, session, "A__s", dock.view_settings())
     session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
     dock.restore_cube("A__s")
     assert dock.engine.wait_for_preparation(20_000)
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
-    assert dock.grid_radius_metres.text() == "= 0.5 m"
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.0)
+    assert dock.grid_finish.max_distance_metres.text() == "= 1 m"
 
 
-def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
+def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(docked):
     """#81: what a grid's slices start from before anything is remembered
     for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
     spacing, so nothing is clamped here."""
@@ -785,7 +943,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.slice_finish() == SliceFinish()  # kriging out to half a spacing, no smoothing
 
 
 @pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
@@ -794,32 +952,55 @@ def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
 ):
     """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
     0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
-    fill radius is always half the grid's own spacing."""
+    max distance is always half the grid's own spacing."""
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", spacing))
     dock = SlicesDock(session)
     try:
         assert dock.cell_spin.value() == pytest.approx(cell)
-        assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+        assert dock.slice_finish() == SliceFinish()
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
 
 
-def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
+def test_filling_reaches_between_the_lines_and_none_does_not(docked):
     """Spec 6.4: at realistic spacing about 80% of cells are empty, so the
     fill is most of the picture rather than a nicety."""
     dock, _ = docked
     _ready(dock)
-    dock.grid_radius_spin.setValue(0.0)
-    dock.flush_debounce()
+    _set_finish(dock, method="none")
     unfilled = np.isfinite(dock.current_values()).sum()
-    dock.grid_radius_spin.setValue(2.0)  # 1 m on a 0.5 m spacing
-    dock.flush_debounce()
+    _set_finish(dock, method="idw", max_distance_spacings=2.0)  # 1 m on a 0.5 m spacing
     filled = np.isfinite(dock.current_values()).sum()
     assert filled > unfilled
+
+
+def test_the_shared_stretch_follows_a_finish_change(docked):
+    """The shared limit is measured over the finished slices, so a finish
+    that changes them (smoothing flattens peaks) changes the limit: the cache
+    is keyed on the finish in metres, not served stale."""
+    dock, _ = docked
+    _ready(dock)
+    first = dock.display_limit()
+    assert first > 0.0
+    assert dock.display_limit() == first  # cached, unchanged
+    _set_finish(dock, smooth_x_m=1.0, smooth_y_m=1.0)
+    smoothed = dock.display_limit()
+    assert smoothed != pytest.approx(first, rel=1e-6)
+    clip = dock.engine.output_unipolar
+    from nsgeo.render import PercentileClip, UnipolarClip
+
+    expected = dock.engine.shared_limit(
+        dock.current_window().n_levels,
+        UnipolarClip() if clip else PercentileClip(),
+        dock.slice_finish(),
+    )
+    assert smoothed == pytest.approx(expected)
+    _set_finish(dock, smooth_x_m=0.0, smooth_y_m=0.0)
+    assert dock.display_limit() == pytest.approx(first)
 
 
 def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
@@ -1169,10 +1350,14 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     view = ViewSettings(
         thickness_ns=4.0,
         step_ns=2.0,
-        radius_m=0.5,
+        radius_m=0.75,  # max_distance_spacings x this grid's spacing
         palette=dock.palette_combo.currentText(),
         stretch="this slice",
         coverage=True,
+        method="idw",
+        max_distance_spacings=1.5,
+        smooth_x_m=0.4,
+        smooth_y_m=0.2,
     )
     record = _save_cube(dock, session, "A__test", view)
     assert record["z"]["t1_ns"] == pytest.approx(29.9285)
@@ -1608,7 +1793,7 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         dock.deleteLater()
 
 
-def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
+def test_the_resolution_and_max_distance_spins_step_by_a_useful_increment(docked):
     """Walkthrough round 2, W5/W7: "the up/down amount skips by 1 m at a
     time, which is too big an increment."
 
@@ -1622,7 +1807,9 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
     assert dock.engine.wait_for_preparation(20_000)
     header = dock.session.line_for_key(dock.session.keys()[0]).header
 
-    assert dock.grid_radius_spin.singleStep() == 0.25  # a quarter spacing, not Qt's 1.0
+    assert (
+        dock.grid_finish.max_distance_spin.singleStep() == 0.25
+    )  # a quarter spacing, not Qt's 1.0
     assert dock.cell_spin.singleStep() <= 0.1
     assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
     assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
@@ -1643,7 +1830,7 @@ def test_the_resolution_controls_say_what_they_do(docked):
     """
     dock, _ = docked
     for spin, must_say in (
-        (dock.grid_radius_spin, "no line"),
+        (dock.grid_finish.max_distance_spin, "blank"),
         (dock.dz_spin, "sample"),
         (dock.cell_spin, "spacing"),
         (dock.coverage_check, "traces"),
@@ -2074,23 +2261,23 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     seed_dz = dock.dz_spin.value()
     dock.cell_spin.setValue(0.1)
     dock.dz_spin.setValue(seed_dz * 2)
-    dock.grid_radius_spin.setValue(1.5)
+    dock.grid_finish.max_distance_spin.setValue(1.5)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
 
     _switch(dock, "B")
     assert dock.cell_spin.value() == pytest.approx(seed_cell)
     assert dock.dz_spin.value() == pytest.approx(seed_dz)
-    assert dock.grid_radius_spin.value() == pytest.approx(0.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
 
     _switch(dock, "A")
     assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
-    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     # On the engine too, not only in the boxes, and drawn.
     assert dock.engine.frame.cell == pytest.approx(0.1)
     assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
-    assert dock.grid_radius_metres.text() == "= 0.75 m"
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
     assert dock.current_values() is not None
 
 
@@ -2119,7 +2306,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
     dock.dz_spin.setValue(0.5)
     dock.z0_spin.setValue(2.0)
     dock.z1_spin.setValue(30.0)
-    dock.grid_radius_spin.setValue(1.5)
+    dock.grid_finish.max_distance_spin.setValue(1.5)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
     session.save()
@@ -2129,7 +2316,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         "dz_ns": 0.5,
         "t0_ns": 2.0,
         "t1_ns": 30.0,
-        "radius_spacings": 1.5,
+        "max_distance_spacings": 1.5,
     }
 
     reopened = SiteSession()
@@ -2141,7 +2328,7 @@ def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it
         assert dock2.dz_spin.value() == pytest.approx(0.5)
         assert dock2.z0_spin.value() == pytest.approx(2.0)
         assert dock2.z1_spin.value() == pytest.approx(30.0)
-        assert dock2.grid_radius_spin.value() == pytest.approx(1.5)
+        assert dock2.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
         dock2.flush_debounce()
         assert dock2.engine.wait_for_preparation(20_000)
         # The restored values reached the engine and drew a slice.
@@ -2319,7 +2506,16 @@ def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
     dock.cube_combo.setCurrentText("A__res")
     assert dock.engine.wait_for_preparation(20_000)
     remembered = session.slice_resolution("A")
-    assert set(remembered) == {"cell", "dz_ns", "t0_ns", "t1_ns", "radius_spacings"}
+    assert set(remembered) == {
+        "cell",
+        "dz_ns",
+        "t0_ns",
+        "t1_ns",
+        "method",
+        "max_distance_spacings",
+        "smooth_x_m",
+        "smooth_y_m",
+    }
     assert remembered["cell"] == pytest.approx(0.1)
     _switch(dock, "B")
     _switch(dock, "A")

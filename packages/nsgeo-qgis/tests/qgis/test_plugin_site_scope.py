@@ -20,6 +20,7 @@ from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_plan import (
     DEFAULT_RADIUS_SPACINGS,
     NO_TRANSFORM,
+    SliceFinish,
     default_cell,
     format_bytes,
 )
@@ -128,7 +129,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
     assert not dock.source_group.isHidden()
     assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
-    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.radius_spacing_spin.isHidden()
     assert not dock.save_button.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
@@ -137,7 +138,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
     assert dock.source_group.isHidden()
     assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
-    assert dock.grid_radius_row.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.grid_finish.isHidden() and not dock.radius_spacing_spin.isHidden()
     assert dock.save_button.isHidden()
     assert dock.export_button.text() == "Export site GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the site"
@@ -158,7 +159,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
     assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
-    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.radius_spacing_spin.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
 
@@ -1034,7 +1035,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     A is out of the site, so its removal changes no ready grid, and no tick
     re-seeds the site's z range over what landed."""
     session = plugin.session
-    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "radius_spacings": 1.5}
+    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
     session.remember_slice_resolution("B", **b_res)
     session.set_site_view(grids=("B", "C"))
     session.save()
@@ -1052,7 +1053,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
     assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
-    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
@@ -1066,7 +1067,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site3_factory, open_plugin
 ):
     """The same fall-back with nothing remembered for B: This grid comes back
-    with B's own seed (its 0.3 m spacing's cell, the default radius), not with
+    with B's own seed (its 0.3 m spacing's cell, the default interpolation), not with
     the values A had before the site."""
     site = site3_factory()
     site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
@@ -1074,7 +1075,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site.session.save()
     plugin = open_plugin(site)
     dock = plugin.slices_dock
-    dock.grid_radius_spin.setValue(1.5)  # A's own, unlike B's seed
+    dock.grid_finish.max_distance_spin.setValue(1.5)  # A's own, unlike B's seed
     dock.flush_debounce()
     assert dock.cell_spin.value() == pytest.approx(0.2)
     whole_site(plugin)
@@ -1084,7 +1085,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
     assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
-    assert dock.grid_radius_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
@@ -1491,7 +1492,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     switch is no choice, so nothing is written and the survey stays clean."""
     dock = plugin.slices_dock
     session = plugin.session
-    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, radius_spacings=1.5)
+    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, max_distance_spacings=1.5)
     session.save()
     stored = session.slice_source("B")
     whole_site(plugin)
@@ -1502,7 +1503,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     spin_until(lambda: False, 400)  # any debounce runs on its own
     assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.dz_spin.value() == pytest.approx(0.5)
-    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.1)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)
