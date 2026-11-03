@@ -83,6 +83,8 @@ Read from `origin/main` at `2878db2` on 2026-11-02. Line numbers are from that c
 9. **A wait is acceptable when the interpolation is set up**, as long as viewing slices
    afterwards is quick.
 10. **Acceptance is a ballpark visual comparison** against the user's Surfer-gridded data (§10).
+11. **This goes ahead of M15 (cut anywhere).** M15's approved design is revised afterwards onto
+    these settings (§12).
 
 **Design calls made in this document** (the user hasn't seen these; each is marked *design call*
 where it appears):
@@ -436,3 +438,16 @@ export, and the guide's paragraph. Walkthrough plus the Surfer comparison (§10.
 The Surfer comparison waits for B because it is only meaningful once both methods the user
 named are present. Kriging can be eyeballed against the Surfer grids during A's walkthrough if the
 user wants an early read.
+
+**Relationship to M15 (cut anywhere).** The user's call: this work goes first. M15's approved
+design (`2026-10-30-nsgeo-cut-anywhere-design.md` on `nsgeo-m15-cut-anywhere`) is revised
+afterwards. Its sections, its cut-pick provenance (`stack_json`) and its site-scope reads are
+currently written against the fill radius. No cut pick has been saved yet, so there is no legacy
+format to carry. Two things milestone A owes that revision:
+
+- **An API a cut can use.** Applying the IDW or kriging weights to any single level, and to
+  only the cells under a cut, must be possible without filling a whole slice. Every method is
+  linear, so per-level interpolation then window-averaging agrees with the slice view.
+- **Minimum curvature on cuts is left to the M15 revision.** It has no reusable weights, so a
+  section through every level costs a full-frame solve per level. M15 decides between leaving
+  it off cuts, solving lazily, or accepting the cost.
