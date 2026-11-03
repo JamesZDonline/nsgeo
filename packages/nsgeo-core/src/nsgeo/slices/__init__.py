@@ -27,6 +27,7 @@ from nsgeo.slices.display import (
 )
 from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
+from nsgeo.slices.interpolate import METHODS, FillWeights, plan_fill
 from nsgeo.slices.site import (
     AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
@@ -58,8 +59,10 @@ __all__ = [
     "CoverageError",
     "CubeFrame",
     "CubeStoreError",
+    "FillWeights",
     "Footprint",
     "LinePlan",
+    "METHODS",
     "MIN_SEAM_CELLS",
     "NORMALISATION_METHODS",
     "PreparedLine",
@@ -86,6 +89,7 @@ __all__ = [
     "load_cube",
     "normalise",
     "npz_path",
+    "plan_fill",
     "plan_line",
     "plan_windows",
     "save_cube",

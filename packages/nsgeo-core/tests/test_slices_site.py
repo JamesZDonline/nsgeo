@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 
 import numpy as np
 import pytest
-from nsgeo.io.dzt import read_header, read_samples
-from nsgeo.processing import build_step
-from nsgeo.processing.base import Radargram
 from nsgeo.slices import (
     NORMALISATION_METHODS,
     CubeFrame,
     Footprint,
-    PreparedLine,
     Seam,
     SiteLattice,
     SliceWindow,
@@ -28,20 +23,21 @@ from nsgeo.slices import (
     grid_axis,
     lattice_pixel,
     normalise,
-    plan_line,
     seam_masks,
     site_axis,
     slice_extent,
     snap_azimuth,
-    stream_slice,
     to_north_up,
     window_on,
 )
 
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
-needs_real_files = pytest.mark.skipif(
-    len(FILES) < 10, reason="needs the ten real DZT files in tests/data/local"
+from tests.real_lines import (
+    CELL,
+    SPACING,
+    WINDOWS,
+    binned,
+    needs_real_files,
+    prepared_lines,
 )
 
 CRS = "EPSG:32616"
@@ -530,64 +526,20 @@ def test_normalise_refuses_an_unknown_method():
 
 # --- real data -----------------------------------------------------------------
 
-CELL = 0.2
-SPACING = 0.5
-_AXIS = ZAxis.from_range(1.0, 40.0, 0.2165)
-_WINDOWS = [(10 + 20 * k, 28 + 20 * k) for k in range(5)]
-_RADARGRAMS: list = []
-
-
-def _radargrams():
-    if not _RADARGRAMS:
-        for path in FILES[:10]:
-            header = read_header(path)
-            rg = Radargram(
-                data=np.asarray(read_samples(path, header)[0], dtype=float),
-                dt_ns=header.dt_ns,
-                t0_ns=header.position_ns,
-            )
-            for name in ("time_zero", "dewow", "background_mean", "gain_agc", "amp_envelope"):
-                rg = build_step(name).apply(rg)
-            _RADARGRAMS.append((path.name, rg))
-    return _RADARGRAMS
-
-
-def _lines(indices, to_world):
-    out = []
-    for i in indices:
-        name, rg = _radargrams()[i]
-        n = rg.data.shape[1]
-        local = np.column_stack([np.linspace(0.0, 19.99, n), np.full(n, 0.25 + i * SPACING)])
-        out.append(
-            PreparedLine(
-                key=name,
-                data=rg.data.astype(np.float32),
-                dt_ns=rg.dt_ns,
-                t0_ns=rg.t0_ns,
-                coords=to_world(local),
-            )
-        )
-    return out
-
-
-def _binned(lines, frame, k0, k1):
-    plans = [plan_line(p, frame, _AXIS) for p in lines]
-    return stream_slice(lines, plans, frame, _AXIS, k0, k1)
-
 
 def _real_split():
     """Frame A holds lines 0-4; frame B (origin y = 2.6) holds 5-9 at B-local y 0.15..2.15."""
     frame_a = CubeFrame((0.0, 0.0), 0.0, CELL, 100, 13, "EPSG:32633")
     frame_b = CubeFrame((0.0, 2.6), 0.0, CELL, 100, 13, "EPSG:32633")
     world = lambda local: local  # noqa: E731 - lines keep their natural world positions
-    return frame_a, frame_b, _lines(range(0, 5), world), _lines(range(5, 10), world)
+    return frame_a, frame_b, prepared_lines(range(0, 5), world), prepared_lines(range(5, 10), world)
 
 
 def _split_slices(k, gain):
     frame_a, frame_b, lines_a, lines_b = _real_split()
-    k0, k1 = _WINDOWS[k]
-    va, ca = _binned(lines_a, frame_a, k0, k1)
-    vb, cb = _binned(lines_b, frame_b, k0, k1)
+    k0, k1 = WINDOWS[k]
+    va, ca = binned(lines_a, frame_a, k0, k1)
+    vb, cb = binned(lines_b, frame_b, k0, k1)
     frames = {"A": frame_a, "B": frame_b}
     seams = find_seams(frames, {"A": ca, "B": cb}, {"A": SPACING, "B": SPACING})
     return {"A": (va, ca), "B": (vb * gain, cb)}, seams
@@ -663,11 +615,11 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam():
         # lines 5-9 sit at B-local y 0.15..2.15; the shared corner is B's origin
         return origin + local[:, :1] * x_hat + (local[:, 1:] - 2.6) * y_hat
 
-    lines_a = _lines(range(0, 5), lambda local: local)
-    lines_b = _lines(range(5, 10), rotate)
-    k0, k1 = _WINDOWS[1]
-    va, ca = _binned(lines_a, frame_a, k0, k1)
-    vb, cb = _binned(lines_b, frame_b, k0, k1)
+    lines_a = prepared_lines(range(0, 5), lambda local: local)
+    lines_b = prepared_lines(range(5, 10), rotate)
+    k0, k1 = WINDOWS[1]
+    va, ca = binned(lines_a, frame_a, k0, k1)
+    vb, cb = binned(lines_b, frame_b, k0, k1)
 
     seams = find_seams({"A": frame_a, "B": frame_b}, {"A": ca, "B": cb}, dict(A=SPACING, B=SPACING))
     assert [(s.a, s.b) for s in seams] == [("A", "B")]
@@ -701,10 +653,10 @@ def _chain_slices(k, g_b, g_c):
     }
     members = {"A": range(0, 3), "B": range(3, 6), "C": range(6, 10)}
     gain = {"A": 1.0, "B": g_b, "C": g_c}
-    k0, k1 = _WINDOWS[k]
+    k0, k1 = WINDOWS[k]
     slices, covs = {}, {}
     for g, frame in frames.items():
-        v, c = _binned(_lines(members[g], lambda local: local), frame, k0, k1)
+        v, c = binned(prepared_lines(members[g], lambda local: local), frame, k0, k1)
         slices[g], covs[g] = (v * gain[g], c), c
     seams = find_seams(frames, covs, dict.fromkeys(frames, SPACING))
     return slices, seams
