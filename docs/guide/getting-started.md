@@ -379,18 +379,34 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
    **Step** set the window and how far each step moves it. You can also hold
    Shift and use the mouse wheel over the map to step through the slices.
-3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), the top
-   and bottom of the volume (**z0**, **z1**), and the **Fill radius** for cells
-   no line crossed. Hover over each control for an explanation. A grid starts
-   at a 0.2 m cell, or half the line spacing if that is smaller. The fill
-   radius is set in line spacings, as it is for the whole site, and starts at
-   0.5. Its metres are shown beside the box. That radius just closes the gaps
-   between lines. If a line strayed from its spacing and leaves an unfilled
-   stripe, raise the fill radius. Each grid remembers the resolution you set
-   for it, and saving the site saves it.
-4. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
+3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), and the
+   top and bottom of the volume (**z0**, **z1**). Hover over each control for an
+   explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
+   is smaller. Each grid remembers the resolution you set for it, and saving the
+   site saves it.
+4. **Interpolation** decides what is drawn in the cells no line crossed, and
+   whether the slice is smoothed. The same box appears for **Whole site**, with
+   its own settings.
+   - **Method** chooses how blank cells are filled from the cells around them.
+     Pick **Kriging**, the default, for most data. Pick **Inverse distance
+     (IDW)** for a quicker fill in which nearer cells count more. Pick **None
+     (binned only)** to see only the cells a line crossed.
+   - **Max distance to data** is how far from a line a blank cell may be and
+     still be filled. It is set in line spacings (for a grid its metres are
+     shown beside the box; for the whole site, hover over the box) and starts at 0.5, which just closes the gap between neighbouring
+     lines. Cells farther from any line stay blank, so a missing line or the
+     edge of the survey is never filled in. If a line strayed and leaves a blank
+     stripe, raise it. It does nothing when the method is **None**.
+   - **Smoothing X** and **Smoothing Y** blur the slice along the grid's X or Y
+     axis, by a distance in metres. They start at 0, which is off. Smoothing is
+     the only setting that changes the cells a line crossed.
+
+   Each grid remembers its own settings, and so does the whole site. The first time you choose a fine cell
+   or a new method, nsgeo may take a few seconds to prepare the fill and shows a
+   wait cursor while it does.
+5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
-5. **Save cube…** keeps the prepared volume in the site folder (click **Save
+6. **Save cube…** keeps the prepared volume in the site folder (click **Save
    site** afterwards so the site remembers it). **Export GeoTIFF…** writes every
    slice as one multi-band GeoTIFF and adds it to the map.
 

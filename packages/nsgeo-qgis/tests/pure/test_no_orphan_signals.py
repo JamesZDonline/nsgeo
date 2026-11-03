@@ -87,7 +87,7 @@ SHADOWED = {
     # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
     # connects This grid's panel (Task 4); Task 5 connects the site's, raising
     # connects to 3.
-    "edited": {"declared": 2, "connects": 2},
+    "edited": {"declared": 2, "connects": 3},
 }
 
 

@@ -1430,13 +1430,13 @@ def test_remember_slice_resolution_merges_fields_and_keeps_the_source(session):
 def test_remembering_an_unchanged_resolution_does_not_dirty(session):
     session.add_grid(GRID)
     session.remember_slice_resolution("A", cell=0.1, t0_ns=2.0)
-    session.remember_site_resolution(radius_spacings=1.5)
+    session.remember_site_resolution(max_distance_spacings=1.5)
     assert session.dirty
     session.save()
     session.remember_slice_resolution("A", cell=0.1)
     session.remember_slice_resolution("A", t0_ns=2.0, dz_ns=None)
     session.remember_slice_resolution("A")
-    session.remember_site_resolution(radius_spacings=1.5)
+    session.remember_site_resolution(max_distance_spacings=1.5)
     session.remember_site_resolution()
     assert not session.dirty
     assert session.slice_resolution("A") == {"cell": 0.1, "t0_ns": 2.0}
@@ -1448,10 +1448,10 @@ def test_site_resolution_is_remembered_apart_from_each_grid(session):
     session.add_grid(GRID)
     session.set_site_view(grids=("A",), transform="none")
     assert session.site_resolution() == {}
-    session.remember_site_resolution(cell=0.2, radius_spacings=0.75)
+    session.remember_site_resolution(cell=0.2, max_distance_spacings=0.75)
     session.remember_slice_resolution("A", cell=0.1)
     session.remember_site_resolution(dz_ns=0.3)
-    assert session.site_resolution() == {"cell": 0.2, "dz_ns": 0.3, "radius_spacings": 0.75}
+    assert session.site_resolution() == {"cell": 0.2, "dz_ns": 0.3, "max_distance_spacings": 0.75}
     assert session.slice_resolution("A") == {"cell": 0.1}
     # The site view's other choices stay where they were.
     view = session.site_view()
@@ -1463,7 +1463,7 @@ def test_site_resolution_is_remembered_apart_from_each_grid(session):
 
 def test_removing_a_grid_drops_its_remembered_resolution(session):
     session.add_grid(GRID)
-    session.remember_slice_resolution("A", cell=0.1, radius_spacings=1.0)
+    session.remember_slice_resolution("A", cell=0.1, max_distance_spacings=1.0)
     session.remember_site_resolution(cell=0.2)
     session.remove_grid("A")
     assert session.slice_resolution("A") == {}

@@ -1039,7 +1039,7 @@ class NsgeoPlugin:
                     step_levels,
                     transform=dock.site_panel.transform(),
                     method=dock.normalisation_panel.method(),
-                    radius_spacings=dock.radius_spacing_spin.value(),
+                    finish=dock.site_finish.value(),
                     gains=dock.site_gains(),
                     velocities=dock.site_velocities(),
                     left_out=dock.site_left_out_states(),

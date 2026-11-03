@@ -18,12 +18,12 @@ from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_plan import (
-    DEFAULT_RADIUS_SPACINGS,
     NO_TRANSFORM,
     SliceFinish,
     default_cell,
     format_bytes,
 )
+from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -129,7 +129,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
     assert not dock.source_group.isHidden()
     assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
-    assert not dock.grid_finish.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
     assert not dock.save_button.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
@@ -138,7 +138,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
     assert dock.source_group.isHidden()
     assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
-    assert dock.grid_finish.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.grid_finish.isHidden() and not dock.site_finish.isHidden()
     assert dock.save_button.isHidden()
     assert dock.export_button.text() == "Export site GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the site"
@@ -151,17 +151,77 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
     # Normalisation is off by default (spec 4.6).
     assert dock.normalisation_panel.method() == "none"
-    spin = dock.radius_spacing_spin
-    assert spin.suffix() == " × line spacing"
-    assert (spin.minimum(), spin.maximum(), spin.singleStep(), spin.value()) == (0, 10, 0.25, 0.5)
-    assert "A 0.75 m" in spin.toolTip()  # 0.5 x A's 1.5 m spacing (#81)
+    assert dock.site_finish.value() == SliceFinish()
+    assert "A 0.75 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.5 x A's 1.5 m (#81)
 
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
     assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
-    assert not dock.grid_finish.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
+
+
+def test_each_scope_shows_its_own_interpolation_panel(plugin):
+    """One Interpolation group at a time, never both, and no Fill radius row
+    (interpolation spec §8, plan call 3)."""
+    dock = plugin.slices_dock
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
+    assert not hasattr(dock, "radius_spacing_spin")
+    whole_site(plugin)
+    assert dock.grid_finish.isHidden() and not dock.site_finish.isHidden()
+    # The site's panel gives no metres readout: each grid has its own spacing.
+    assert not hasattr(dock.site_finish, "max_distance_metres")
+    dock.grid_scope_button.click()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
+
+
+def test_a_site_finish_edit_is_remembered_for_the_site_not_the_grid(plugin):
+    dock = whole_site(plugin)
+    session = plugin.session
+    grid_before = session.slice_resolution("A")
+    dock.site_finish.smooth_x_spin.setValue(0.4)
+    dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
+    settle(dock)
+    assert session.site_resolution() == {"smooth_x_m": 0.4, "method": "idw"}
+    assert session.slice_resolution("A") == grid_before
+    assert dock.grid_finish.value() == SliceFinish()  # This grid's panel is untouched
+    assert session.dirty
+
+
+def test_entering_the_site_restores_its_remembered_finish_quietly(plugin):
+    dock = whole_site(plugin)
+    dock.site_finish.smooth_y_spin.setValue(0.3)
+    dock.site_finish.max_distance_spin.setValue(1.0)
+    settle(dock)
+    dock.grid_scope_button.click()
+    # Something else changed what the panel shows, as another survey would.
+    dock.site_finish.set_value(SliceFinish())
+    plugin.session.save()
+    assert not plugin.session.dirty
+    dock.site_scope_button.click()
+    settle(dock)
+    shown = dock.site_finish.value()
+    assert (shown.smooth_y_m, shown.max_distance_spacings) == (0.3, 1.0)
+    assert not plugin.session.dirty
+
+
+def test_a_site_finish_edit_redraws(plugin):
+    dock = whole_site(plugin)
+    before = dock.current_site_slice()
+    assert before is not None
+    dock.site_finish.smooth_x_spin.setValue(1.0)
+    spin_until(lambda: dock.current_site_slice() is not before, 5_000)
+    drawn = dock.current_site_slice()
+    assert not np.array_equal(drawn.array, before.array, equal_nan=True)
+
+
+def test_the_max_distance_tooltip_gives_each_grids_metres(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_finish.max_distance_spin.toolTip() == (
+        DISTANCE_TIP + " (in each grid's own line spacings, so grids with different spacings are "
+        "treated alike)\nA 0.75 m · B 0.75 m · C 0.75 m"
+    )
 
 
 def test_whole_site_draws_one_layer_covering_every_grid(plugin):
@@ -219,7 +279,9 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     whole_site(plugin)
     site = dock.site_engine
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
+    # Lines, and the weights each engine has built for the drawn slice.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
+    held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
@@ -291,7 +353,7 @@ def test_refreshing_the_grid_list_reads_each_line_once(plugin, monkeypatch):
     table = dock.site_panel.table
     assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
-    assert "A 0.75 m" in dock.radius_spacing_spin.toolTip()
+    assert "A 0.75 m" in dock.site_finish.max_distance_spin.toolTip()
 
 
 def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
@@ -644,7 +706,7 @@ def test_a_velocity_edit_keeps_the_site_stretch_and_a_spacing_edit_re_measures_i
 ):
     """Final review I2: the cached stretch goes only on a change to the
     values drawn. A velocity edit relabels depths; a spacing edit changes
-    each grid's fill radius in cells and the seams."""
+    each grid's max distance in metres and the seams."""
     dock = whole_site(plugin)
     session = plugin.session
     site = dock.site_engine
@@ -884,13 +946,13 @@ def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_
         dock.cell_spin.setValue(0.35)
         t0 = round(dock.z0_spin.value() + 5.0, 3)
         dock.z0_spin.setValue(t0)
-        dock.radius_spacing_spin.setValue(1.25)
+        dock.site_finish.max_distance_spin.setValue(1.25)
         dock.flush_debounce()
         settle(dock)
         assert first.session.site_resolution() == {
             "cell": 0.35,
             "t0_ns": t0,
-            "radius_spacings": 1.25,
+            "max_distance_spacings": 1.25,
         }
         first.session.save()
     finally:
@@ -900,8 +962,8 @@ def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_
     dock = whole_site(plugin)
     assert dock.cell_spin.value() == pytest.approx(0.35)
     assert dock.z0_spin.value() == pytest.approx(t0)
-    assert dock.radius_spacing_spin.value() == pytest.approx(1.25)
-    assert "A 1.88 m" in dock.radius_spacing_spin.toolTip()  # 1.25 x 1.5 m
+    assert dock.site_finish.value().max_distance_spacings == pytest.approx(1.25)
+    assert "A 1.88 m" in dock.site_finish.max_distance_spin.toolTip()  # 1.25 x 1.5 m
     applied = dock._site.res_applied
     assert (applied.cell, applied.t0_ns) == (pytest.approx(0.35), pytest.approx(t0))
     assert dock.current_site_slice() is not None
@@ -988,16 +1050,19 @@ def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown_in_the
     assert not plugin.session.dirty
 
 
-def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site3_factory):
+def test_a_different_survey_starts_the_site_finish_from_the_default(plugin, site3_factory):
     dock = whole_site(plugin)
-    dock.radius_spacing_spin.setValue(1.25)
+    # By hand, so the first survey's site remembers it.
+    dock.site_finish.max_distance_spin.setValue(1.25)
+    dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
     _events()
+    assert plugin.session.site_resolution()["method"] == "idw"
     plugin.session.save()
     other = site3_factory()
     plugin.session.open_site(other.json_path)
     assert dock.engine.wait_for_preparation(20_000)
     dock = whole_site(plugin)
-    assert dock.radius_spacing_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.site_finish.value() == SliceFinish()
     assert plugin.session.site_resolution() == {}
     assert not plugin.session.dirty
 
@@ -1184,7 +1249,8 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
         md = ds.GetMetadata()
         assert md["NSGEO_SITE_NORMALISATION"] == "background"
         assert md["NSGEO_SITE_TRANSFORM"] == "amp_square"  # #81's default
-        assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 0.5
+        assert md["NSGEO_SITE_INTERPOLATION"] == "kriging"  # the default finish
+        assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 0.5
         assert [g["grid_id"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == ["A", "B", "C"]
         thickness, step = dock.thickness_step_levels()  # the dock's own, on the site axis
         assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1

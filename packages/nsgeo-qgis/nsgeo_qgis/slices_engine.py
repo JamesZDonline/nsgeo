@@ -133,7 +133,6 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
-    clear_kernel_cache,
     finish_slice,
     limit_over_slices,
     plan_fill,
@@ -1009,6 +1008,11 @@ class SliceEngine(QObject):
             return False
         return self._weights[0] == self._weights_key(frame, self.finish_settings(finish))
 
+    @property
+    def weights_nbytes(self) -> int:
+        """The bytes of the weights held now, 0 before any are built."""
+        return 0 if self._weights is None else self._weights[1].nbytes
+
     @staticmethod
     def _weights_key(frame: CubeFrame, settings: FinishSettings) -> tuple[Any, ...]:
         # Smoothing is applied after the weights and is not part of them.
@@ -1227,9 +1231,6 @@ class SliceEngine(QObject):
         self._weights = None
         self._redraw_ms = None
         self._running = False
-        # A large cube's kernel spectra are tens of megabytes and have no
-        # reason to outlive the source that needed them.
-        clear_kernel_cache()
 
     def dispose(self) -> None:
         # Cheap cluster (M11 final review): set, and never cleared. A

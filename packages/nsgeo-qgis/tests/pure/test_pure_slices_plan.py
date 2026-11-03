@@ -306,22 +306,6 @@ def test_a_site_source_shares_one_transform_and_names_each_grid_once():
         SiteSource(transform="amp_envelope", grids=(a, b, again_a))
 
 
-def test_the_fill_radius_follows_each_grids_own_line_spacing():
-    """Spec 4.4: in site scope the radius is a multiple of each grid's own
-    spacing, so a 0.5 m grid and a 1.0 m grid in one site each get
-    M11's 1.5x. Rounded like the dock's `radius_cells` (round, not floor:
-    3.6 cells is 4, which a floor would make 3), and never negative."""
-    from nsgeo_qgis.slices_plan import radius_cells_for
-
-    assert radius_cells_for(0.5, 1.5, 0.25) == 3
-    assert radius_cells_for(1.0, 1.5, 0.25) == 6
-    assert radius_cells_for(0.6, 1.5, 0.25) == 4  # 3.6 cells
-    assert radius_cells_for(0.5, 0.0, 0.25) == 0
-    assert radius_cells_for(0.5, -2.0, 0.25) == 0
-    with pytest.raises(ValueError):
-        radius_cells_for(0.5, 1.5, 0.0)
-
-
 def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
     """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
     line the detail is set by the trace spacing, so a widely spaced grid

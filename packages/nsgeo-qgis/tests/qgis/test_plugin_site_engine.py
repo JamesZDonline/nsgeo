@@ -14,7 +14,6 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     compose,
-    fill,
     find_seams,
     limit_over_slices,
     normalise,
@@ -29,10 +28,10 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     format_bytes,
     limit_windows,
-    radius_cells_for,
 )
 from plugin_testing import LoadCounter, spin_until
 from qgis.core import (
@@ -44,7 +43,11 @@ from qgis.core import (
 
 #: M11's test resolution, with the z range widened to hold the whole site.
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
-TICK = {"radius_spacings": 1.5, "method": "none", "manual": {}}
+#: What the 1.5-spacing disc fill stood for: IDW reaching 1.5 line spacings.
+FINISH = SliceFinish(method="idw", max_distance_spacings=1.5)
+#: Binned cells as they are, the old radius 0.
+NONE = SliceFinish(method="none")
+TICK = {"finish": FINISH, "method": "none", "manual": {}}
 
 
 @pytest.fixture
@@ -81,10 +84,11 @@ def grid_pixels(site: SiteEngine, grid_id: str) -> np.ndarray:
     return (ids >= 0).reshape(lattice.height, lattice.width)
 
 
-def expected_shown(site, session, top_ns, thickness_ns, *, radius_spacings, method, manual):
+def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manual):
     """Each present grid's slice as spec 4.6 says it is shown, from public parts.
 
-    Binned and unfilled for the statistics, then `a * fill(v) + b`.
+    Binned and unfinished for the statistics, then `a * finish(v) + b`, the
+    finish being each grid's own engine's (interpolation spec §8).
     """
     binned = {}
     for g in site.ready_grids:
@@ -103,9 +107,7 @@ def expected_shown(site, session, top_ns, thickness_ns, *, radius_spacings, meth
     shown = {}
     for g, (values, cov) in binned.items():
         a, b = factors[g]
-        cell = site.engine_for(g).frame.cell
-        radius = radius_cells_for(session.grid(g).default_spacing, radius_spacings, cell)
-        shown[g] = a * fill(values, cov, radius) + b
+        shown[g] = a * site.engine_for(g).finish(values, cov, finish) + b
     return shown, factors
 
 
@@ -546,8 +548,8 @@ def test_background_normalisation_evens_out_a_grid_recorded_at_double_gain(
     site, _ = prepared(make_site, site3, source=site3.source(preset="raw"))
     a, b = grid_pixels(site, "A"), grid_pixels(site, "B")
 
-    plain = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="none", manual={})
-    evened = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="background", manual={})
+    plain = site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    evened = site.slice_at(20.0, 5.0, finish=FINISH, method="background", manual={})
 
     plain_ratio = np.nanmean(plain.array[b]) / np.nanmean(plain.array[a])
     evened_ratio = np.nanmean(evened.array[b]) / np.nanmean(evened.array[a])
@@ -559,8 +561,8 @@ def test_the_manual_gain_multiplies_only_that_grids_pixels(site3, make_site):
     site, _ = prepared(make_site, site3)
     a, b, c = (grid_pixels(site, g) for g in "ABC")
     for method in ("none", "background"):
-        plain = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={})
-        gained = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={"B": 2.5})
+        plain = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={})
+        gained = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={"B": 2.5})
         np.testing.assert_allclose(gained.array[b], 2.5 * plain.array[b], rtol=1e-5)
         np.testing.assert_array_equal(gained.array[a], plain.array[a])
         np.testing.assert_array_equal(gained.array[c], plain.array[c])
@@ -571,7 +573,7 @@ def test_the_manual_gain_multiplies_only_that_grids_pixels(site3, make_site):
 def test_normalising_a_signed_site_gives_finite_factors(site3, make_site):
     site, _ = prepared(make_site, site3, source=site3.source(transform=NO_TRANSFORM))
     for method in NORMALISATION_METHODS:
-        drawn = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={})
+        drawn = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={})
         assert set(drawn.factors) == {"A", "B", "C"}
         for gain, shift in drawn.factors.values():
             assert np.isfinite(gain) and np.isfinite(shift) and gain > 0.0, (method, drawn.factors)
@@ -582,13 +584,13 @@ def test_normalising_a_signed_site_gives_finite_factors(site3, make_site):
 def test_histogram_factors_apply_to_the_filled_slice_as_a_gain_and_a_shift(site3, make_site):
     """Spec 4.6: measured on binned cells, applied to the displayed
     (filled) slice. Histogram match is the one method with a shift, so it
-    pins the composition `a * fill(v) + b` exactly, manual gain included."""
+    pins the composition `a * finish(v) + b` exactly, manual gain included."""
     session = site3.session
     site, _ = prepared(make_site, site3)
     manual = {"C": 1.5}
-    drawn = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="histogram", manual=manual)
+    drawn = site.slice_at(20.0, 5.0, finish=FINISH, method="histogram", manual=manual)
     shown, factors = expected_shown(
-        site, session, 20.0, 5.0, radius_spacings=1.5, method="histogram", manual=manual
+        site, session, 20.0, 5.0, finish=FINISH, method="histogram", manual=manual
     )
     assert any(abs(shift) > 1e-3 for _, shift in factors.values()), factors
     for g in "ABC":
@@ -600,11 +602,93 @@ def test_histogram_factors_apply_to_the_filled_slice_as_a_gain_and_a_shift(site3
     np.testing.assert_allclose(drawn.array, compose(lattice, layers), rtol=1e-6, atol=1e-7)
 
 
+def test_site_slices_are_each_grids_finished_slice_times_its_gain(site3, make_site):
+    """Interpolation spec §8: what a grid shows on the site is its own
+    engine's finished slice (interpolated, smoothed), times the grid's gain."""
+    finish = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.2)
+    site, _ = prepared(make_site, site3)
+    drawn = site.slice_at(20.0, 5.0, finish=finish, method="none", manual={"B": 2.0})
+    engine = site.engine_for("B")
+    values, coverage = engine.slice_at(drawn.windows["B"])
+    finished = engine.finish(values, coverage, finish)
+    assert drawn.factors["B"] == (2.0, 0.0)
+    only_b = grid_pixels(site, "B")
+    for g in "AC":
+        only_b &= ~grid_pixels(site, g)
+    ids = engine.frame.cell_index(drawn.lattice.pixel_centres())[only_b.ravel()]
+    expected = 2.0 * finished.ravel()[ids]
+    assert np.isfinite(expected).sum() > 50
+    np.testing.assert_allclose(drawn.array.ravel()[only_b.ravel()], expected, equal_nan=True)
+    # It is the finish that was applied, not the binned values.
+    assert not np.array_equal(finished, values)
+
+
+@pytest.mark.parametrize("method", ["none", "idw", "kriging"])
+def test_site_gains_commute_with_every_method(site3, make_site, method):
+    """Interpolation is linear in the data and smoothing a normalised average,
+    so a gain and shift measured on the binned cells may be applied after the
+    finish (spec 4.6). This is what lets the site finish once per grid."""
+    finish = SliceFinish(method=method, max_distance_spacings=1.5, smooth_y_m=0.15)
+    site, _ = prepared(make_site, site3)
+    a, b = 1.7, -0.3
+    engine = site.engine_for("A")
+    window = window_on(engine.z, 20.0, 5.0)
+    values, coverage = engine.slice_at(window)
+    after = a * engine.finish(values, coverage, finish) + b
+    before = engine.finish(np.where(coverage > 0, a * values + b, values), coverage, finish)
+    np.testing.assert_allclose(after, before, rtol=1e-4, atol=1e-5, equal_nan=True)
+
+
+def test_site_shared_limit_measures_finished_slices(site3, make_site):
+    """The site's stretch is measured over the slices as drawn, finish
+    included (interpolation spec §8), so the settings move it."""
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    smoothed = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=1.0, smooth_y_m=1.0)
+    plain = site.shared_limit(2.0, clip, finish=NONE, method="none", manual={})
+    finished = site.shared_limit(2.0, clip, finish=smoothed, method="none", manual={})
+    z = site.site_z
+    slices = []
+    for w in limit_windows(z, round(2.0 / z.dz_ns)):
+        shown, _ = expected_shown(
+            site,
+            site3.session,
+            z.t0_ns + w.k0 * z.dz_ns,
+            w.n_levels * z.dz_ns,
+            finish=smoothed,
+            method="none",
+            manual={},
+        )
+        slices.extend(shown.values())
+    assert finished == pytest.approx(limit_over_slices(slices, clip), rel=1e-6)
+    assert finished != pytest.approx(plain, rel=1e-3)
+
+
+def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site):
+    """`weights_cached` lets the scope show a wait cursor only when a tick
+    will build weights (interpolation spec §8)."""
+    site, _ = prepared(make_site, site3)
+    assert not site.weights_cached(FINISH)
+    site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    assert site.weights_cached(FINISH)
+    # Smoothing is not part of the weights; a different method or distance is.
+    assert site.weights_cached(dataclasses.replace(FINISH, smooth_x_m=0.4))
+    assert not site.weights_cached(dataclasses.replace(FINISH, method="kriging"))
+
+
+def test_the_sites_held_bytes_count_the_weights_it_built(site3, make_site):
+    """The status line names what is held; the weights are held too."""
+    site, _ = prepared(make_site, site3)
+    before = site.held_bytes
+    site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    assert site.held_bytes > before
+
+
 def test_coverage_mode_shows_the_counts_without_normalising(site3, make_site):
     """Ruling 7: coverage is composed like values; nothing is normalised."""
     site, _ = prepared(make_site, site3)
     drawn = site.slice_at(
-        20.0, 5.0, radius_spacings=1.5, method="background", manual={"B": 3.0}, coverage=True
+        20.0, 5.0, finish=FINISH, method="background", manual={"B": 3.0}, coverage=True
     )
     a = grid_pixels(site, "A")
     _, coverage = site.engine_for("A").slice_at(drawn.windows["A"])
@@ -624,8 +708,8 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
     session = site3.session
     site, _ = prepared(make_site, site3, source=site3.source(preset="raw"))
     clip = UnipolarClip()
-    plain = site.shared_limit(2.0, clip, radius_spacings=1.5, method="none", manual={})
-    evened = site.shared_limit(2.0, clip, radius_spacings=1.5, method="background", manual={})
+    plain = site.shared_limit(2.0, clip, finish=FINISH, method="none", manual={})
+    evened = site.shared_limit(2.0, clip, finish=FINISH, method="background", manual={})
 
     z = site.site_z
     windows = limit_windows(z, round(2.0 / z.dz_ns))
@@ -637,7 +721,7 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
             session,
             z.t0_ns + w.k0 * z.dz_ns,
             w.n_levels * z.dz_ns,
-            radius_spacings=1.5,
+            finish=FINISH,
             method="background",
             manual={},
         )
@@ -645,7 +729,7 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
     assert evened == pytest.approx(limit_over_slices(slices, clip), rel=1e-6)
     assert abs(evened - plain) > 0.05 * plain
 
-    gained = site.shared_limit(2.0, clip, radius_spacings=1.5, method="none", manual={"A": 3.0})
+    gained = site.shared_limit(2.0, clip, finish=FINISH, method="none", manual={"A": 3.0})
     assert gained > plain
 
 
@@ -661,13 +745,13 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     pass. A zone change cannot be skipped."""
     site3 = site3_factory(crs={"B": "EPSG:32615"})
     site, errors = prepared(make_site, site3)
-    drawn = site.slice_at(20.0, 5.0, radius_spacings=0.0, method="none", manual={})
+    drawn = site.slice_at(20.0, 5.0, finish=NONE, method="none", manual={})
     lattice = drawn.lattice
     frame_b = site.engine_for("B").frame
     assert frame_b.crs == "EPSG:32615" and lattice.crs == "EPSG:32616"
 
     values, coverage = site.engine_for("B").slice_at(drawn.windows["B"])
-    shown_b = fill(values, coverage, 0)
+    shown_b = site.engine_for("B").finish(values, coverage, NONE)
     to_b = QgsCoordinateTransform(
         QgsCoordinateReferenceSystem("EPSG:32616"),
         QgsCoordinateReferenceSystem("EPSG:32615"),
@@ -773,7 +857,7 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     session = site3.session
     site, errors = prepared(make_site, site3)
     assert current_seams(site, session) == [("A", "B"), ("B", "C")]
-    before = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    before = site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert before.lattice.x0 == 500.0
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(490.0, 700.0)))
@@ -781,12 +865,10 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     assert site.grid_state("A") == "ready"
     assert site.engine_for("A").frame.origin == (490.0, 700.0)
 
-    after = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    after = site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert (after.lattice.x0, after.lattice.width) == (490.0, 112)
     assert current_seams(site, session) == [("B", "C")]  # A no longer meets B
-    _, factors = expected_shown(
-        site, session, 20.0, 5.0, radius_spacings=1.5, method="edge", manual={}
-    )
+    _, factors = expected_shown(site, session, 20.0, 5.0, finish=FINISH, method="edge", manual={})
     for g in "ABC":
         assert after.factors[g] == pytest.approx(factors[g]), g
     assert errors == [], errors
@@ -840,7 +922,7 @@ def test_a_velocity_edit_keeps_every_other_grids_cube_and_every_cache(
     site, errors = prepared(make_site, site3)
     for g in "ABC":
         site.engine_for(g).set_always_resident(True)
-    tick = {"radius_spacings": 1.5, "method": "edge", "manual": {}}
+    tick = {"finish": FINISH, "method": "edge", "manual": {}}
     before = site.slice_at(20.0, 5.0, **tick)
     assert all(site.engine_for(g).has_cube for g in "ABC")
     gathers = dict(site._gathers)
@@ -866,13 +948,13 @@ def test_a_spacing_edit_drops_the_seams_but_no_gather(site3, make_site):
     (Ruling 3), so the seams go; it moves no frame, so every gather stays."""
     session = site3.session
     site, _ = prepared(make_site, site3)
-    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     gathers, seams = dict(site._gathers), site._seams
     session.replace_grid(dataclasses.replace(session.grid("C"), default_spacing=2.0))
     assert site.wait_until_idle(5_000)
     assert site._seams is None
     assert all(site._gathers.get(g) is gathers[g] for g in "ABC")
-    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert site._seams is not seams and site._seams is not None
 
 
@@ -881,7 +963,9 @@ def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     assert site.status_text().endswith("slices redraw in —")
     site.slice_at(20.0, 5.0, **TICK)
     text = site.status_text()
+    # The weights each engine built are held too.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
+    held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
     assert text.startswith(f"3 grids · 12 lines held in memory, {format_bytes(held)} · ")
     assert re.fullmatch(r".* · slices redraw in \d+ ms", text), text

@@ -38,7 +38,7 @@ _METHOD_TIP = (
     "Inverse distance: a weighted average in which nearer cells count more.\n"
     "None: show only the cells a line crossed."
 )
-_DISTANCE_TIP = (
+DISTANCE_TIP = (
     "Cells farther than this from any line are left blank, so the edge of the survey or a "
     "missing line is never filled in.\n"
     "Half a line spacing just closes the gap between neighbouring lines; raise it if a line "
@@ -82,7 +82,7 @@ class FinishPanel(QGroupBox):
         for key, label in METHOD_LABELS.items():
             self.method_combo.addItem(label, key)
         self.method_combo.setToolTip(_METHOD_TIP)
-        self.max_distance_spin = _spin(10.0, 0.25, " × line spacing", _DISTANCE_TIP)
+        self.max_distance_spin = _spin(10.0, 0.25, " × line spacing", DISTANCE_TIP)
         self.smooth_x_spin = _spin(5.0, 0.05, " m", _SMOOTH_TIP.format(axis="X"))
         self.smooth_y_spin = _spin(5.0, 0.05, " m", _SMOOTH_TIP.format(axis="Y"))
         # The defaults, set before any connect so setting them announces nothing.

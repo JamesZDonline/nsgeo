@@ -220,7 +220,6 @@ _RESOLUTION_KEYS = (
     "dz_ns",
     "t0_ns",
     "t1_ns",
-    "radius_spacings",
     "max_distance_spacings",
     "smooth_x_m",
     "smooth_y_m",
@@ -262,7 +261,7 @@ def _clean_resolution(value: object) -> dict[str, float | str]:
     for key in ("cell", "dz_ns"):
         if key in numbers and numbers[key] <= 0:
             del numbers[key]
-    for key in ("radius_spacings", "max_distance_spacings", "smooth_x_m", "smooth_y_m"):
+    for key in ("max_distance_spacings", "smooth_x_m", "smooth_y_m"):
         if numbers.get(key, 0.0) < 0:
             del numbers[key]
     if "t0_ns" in numbers and "t1_ns" in numbers and numbers["t1_ns"] <= numbers["t0_ns"]:

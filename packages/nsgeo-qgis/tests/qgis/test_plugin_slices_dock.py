@@ -672,9 +672,8 @@ def test_the_interpolation_group_replaces_fill_radius(docked_two_grids):
     labels = [
         form.itemAt(row, form.ItemRole.LabelRole).widget().text() for row in range(form.rowCount())
     ]
-    # Only the site's own row (Task 5's) still says it.
-    assert labels.count("Fill radius") == 1
-    assert form.labelForField(dock.radius_spacing_spin).text() == "Fill radius"
+    assert "Fill radius" not in labels
+    assert not hasattr(dock, "radius_spacing_spin")
     assert not hasattr(dock, "grid_radius_spin")
     assert dock.grid_finish.title() == "Interpolation"
     assert not dock.grid_finish.isHidden()
@@ -858,9 +857,8 @@ def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids, radius_spacings)
     grid (1.5 is the case that tells ignoring it from mapping it onto the
     max distance, whose default is also 0.5). This build opens it on the
     new defaults, with no holes, and does not mark the survey dirty. Put
-    into the record directly, not through
-    `remember_slice_resolution`, whose `radius_spacings=` keyword Task 5
-    removes."""
+    into the record directly: `remember_slice_resolution`
+    no longer takes that keyword."""
     dock, session = docked_two_grids
     _settle_sources(dock, session)
     _set_finish(dock, method="none")

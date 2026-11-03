@@ -109,12 +109,9 @@ several grids' slices into one site view.
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `build_cube` | Bin every line into a resident cube. |
-| `clear_kernel_cache` | Drop the cached fill-kernel spectra. |
 | `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
 | `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
-| `disc_kernel` | A flat disc kernel of a given radius. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
-| `fill` | Smear values and counts with a disc; the weighted mean. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `footprint` | The tight window around the placed pixels of a block of cell ids. |

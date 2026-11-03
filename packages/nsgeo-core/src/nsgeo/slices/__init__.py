@@ -25,7 +25,6 @@ from nsgeo.slices.display import (
     window_label,
     window_times_ns,
 )
-from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill
 from nsgeo.slices.finish import FinishSettings, finish_slice
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.slices.interpolate import METHODS, NEIGHBOURS_PER_QUADRANT, FillWeights, plan_fill
@@ -79,12 +78,9 @@ __all__ = [
     "ZAxis",
     "background_level",
     "build_cube",
-    "clear_kernel_cache",
     "compose",
     "compose_footprints",
-    "disc_kernel",
     "edge_match_solve",
-    "fill",
     "find_seams",
     "finish_slice",
     "footprint",

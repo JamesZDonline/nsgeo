@@ -128,8 +128,9 @@ class Resolution:
     frame bins every trace into the wrong cell, with no exception and
     plausible-looking coverage.
 
-    The fill radius is NOT here: it is a display parameter applied after
-    binning (spec 6.4), so it changes no plan.
+    The interpolation settings are NOT here (`SliceFinish`): they are display
+    parameters applied after binning (interpolation spec §8), so they change
+    no plan.
     """
 
     cell: float
@@ -332,12 +333,6 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 #: the trace spacing. `default_cell` caps it at half the line spacing.
 DEFAULT_CELL_M = 0.2
 
-#: Issue #81: the fill radius a grid starts from, in line spacings. Half a
-#: spacing is the smallest radius that still closes the gap between lines
-#: at their nominal offsets, so it smears far less than spec 6.4's 1.5x but
-#: has no margin: a line that wanders off its offset can leave a stripe.
-DEFAULT_RADIUS_SPACINGS = 0.5
-
 
 def default_cell(spacing_m: float, floor: float) -> float:
     """The cell a grid is seeded with: `DEFAULT_CELL_M`, no larger than half
@@ -446,20 +441,6 @@ def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
 #: grid, so a ten-grid site measured at every window would cost seconds
 #: per change -- and a display percentile does not need every window.
 SITE_LIMIT_WINDOWS = 12
-
-
-def radius_cells_for(spacing_m: float, radius_spacings: float, cell: float) -> int:
-    """A grid's fill radius in cells, from a multiple of its own line spacing.
-
-    Spec 4.4: in site scope the radius is a multiple of each grid's
-    spacing, because one radius in metres would over-smooth a finely
-    spaced grid and leave stripes in a coarse one. Rounded exactly as the
-    dock's `radius_cells` rounds metres, so at equal spacings the site and
-    This grid fill identically.
-    """
-    if not cell > 0.0:
-        raise ValueError(f"cell must be positive, got {cell}")
-    return max(0, int(round(radius_spacings * spacing_m / cell)))
 
 
 def limit_windows(

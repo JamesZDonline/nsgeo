@@ -64,7 +64,6 @@ from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     DEFAULT_CELL_M,
-    DEFAULT_RADIUS_SPACINGS,
     DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
@@ -468,18 +467,7 @@ class SlicesDock(QgsDockWidget):
             "line actually covers once they are prepared."
         )
         resolution_form.addRow("z1", self.z1_spin)
-
-        # M12 spec 4.4: in site scope the radius is a multiple of each grid's
-        # own line spacing; the tooltip gives the metres per grid.
-        self.radius_spacing_spin = QDoubleSpinBox()
-        self.radius_spacing_spin.setRange(0.0, 10.0)
-        self.radius_spacing_spin.setDecimals(2)
-        self.radius_spacing_spin.setSingleStep(0.25)
-        self.radius_spacing_spin.setSuffix(" × line spacing")
-        self.radius_spacing_spin.setValue(DEFAULT_RADIUS_SPACINGS)
-        resolution_form.addRow("Fill radius", self.radius_spacing_spin)
         self._resolution_form = resolution_form
-        site_scope.set_row_visible(self, self.radius_spacing_spin, False)
 
         outer.addWidget(self.resolution_group)
         # This grid's Interpolation group (interpolation spec §8): its own
@@ -487,11 +475,17 @@ class SlicesDock(QgsDockWidget):
         # (plan call 3). Its metres label sits beside the max distance.
         self.grid_finish = FinishPanel(metres_label=True)
         outer.addWidget(self.grid_finish)
+        # The site's own, hidden until Whole site shows. No metres label: its
+        # max distance is in each grid's own spacings, so the tooltip gives
+        # the metres per grid instead (`site_scope.max_distance_tooltip`).
+        self.site_finish = FinishPanel(metres_label=False)
+        self.site_finish.setVisible(False)
+        outer.addWidget(self.site_finish)
         self.normalisation_panel = NormalisationPanel()
         self.normalisation_panel.setVisible(False)
         outer.addWidget(self.normalisation_panel)
 
-        # One debounce for all five Resolution widgets: `flush_debounce()`
+        # One debounce for all four Resolution widgets: `flush_debounce()`
         # stops the timer and applies immediately, for tests and for
         # anything that needs the current geometry right away.
         self._debounce = QTimer(self)
@@ -630,7 +624,7 @@ class SlicesDock(QgsDockWidget):
         self.thickness_spin.valueChanged.connect(lambda _value: self.refresh_slice())
         self.step_spin.valueChanged.connect(lambda _value: self.refresh_slice())
 
-        # Resolution is not: every one of these five widgets only starts
+        # Resolution is not: every one of these four widgets only starts
         # the shared debounce (see its own construction above for why).
         for _spin in (
             self.cell_spin,
@@ -1910,7 +1904,7 @@ class SlicesDock(QgsDockWidget):
             self._seeding -= 1
 
     def _on_resolution_edited(self, field: str, value: float) -> None:
-        """One of the five Resolution spins moved: remember the user's value
+        """One of the four Resolution spins moved: remember the user's value
         for the grid it was set on (#71). Each field on its own, so changing
         the cell does not freeze a z range that was only ever seeded.
 
@@ -1927,7 +1921,7 @@ class SlicesDock(QgsDockWidget):
                 return
             if self._scope == "site":
                 # This grid's Interpolation panel is hidden in the site; the
-                # site's own radius is `SiteScope._on_radius_changed`'s.
+                # site's own is `SiteScope._on_finish_edited`'s.
                 if not self.session.is_open:
                     return
                 edited = self._edited_fields(field, value, self.session.site_resolution())
