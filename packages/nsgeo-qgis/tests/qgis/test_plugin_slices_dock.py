@@ -16,7 +16,7 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, SliceFinish, transform_names
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
+from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
 from qgis.PyQt.QtCore import QT_VERSION_STR, QEvent, Qt
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -664,8 +664,9 @@ def _finished_by_the_core(dock, window, *, method, max_distance_m, search_radius
 
 
 def test_the_interpolation_group_replaces_fill_radius(docked_two_grids):
-    """#104's panel: no "Fill radius" row for This grid, an Interpolation
-    group in its place, visible in This grid and at the defaults after a seed."""
+    """Interpolation spec §8: no "Fill radius" row for This grid, an
+    Interpolation group in its place, visible in This grid and at the
+    defaults after a seed."""
     dock, _ = docked_two_grids
     _ready(dock)
     form = dock._resolution_form
@@ -744,6 +745,24 @@ def test_max_distance_follows_a_line_spacing_edit(docked):
         ),
     )
     assert np.isfinite(dock.current_values()).sum() > np.isfinite(before).sum()
+
+
+def test_a_line_spacing_of_zero_does_not_abort_the_rebuild(docked):
+    """Only a hand-edited survey holds a spacing <= 0, and `SliceFinish.in_metres`
+    refuses it with ValueError. `_finish_moved` reads that as nothing to compare,
+    as it reads a missing source, so `rebuild_source` runs on to its site
+    follow-ups instead of stopping in its own guard."""
+    dock, session = docked
+    _ready(dock)
+    dock.refresh_slice()
+    messages: list[str] = []
+    disconnect = connect_message_log(lambda msg, tag, level: messages.append(msg))
+    try:
+        session.replace_grid(dataclasses.replace(GRID, default_spacing=0.0))
+        assert dock._finish_moved() is False
+    finally:
+        disconnect()
+    assert not [m for m in messages if "could not rebuild the slice source controls" in m]
 
 
 def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
@@ -884,6 +903,12 @@ def test_saving_a_cube_records_the_finish_and_radius_m(docked):
     assert view.finish == SliceFinish("idw", 1.5, 0.4, 0.2)
     # What 0.2.0 reads as its fill radius (interpolation spec §8): spacings x spacing.
     assert view.radius_m == pytest.approx(0.75)
+    # Under None nothing is filled, so 0.2.0 is told to fill nothing too: it
+    # shows that cube unfilled, as this build does, whatever the distance box holds.
+    _set_finish(dock, method="none")
+    view = dock.view_settings()
+    assert view.finish == SliceFinish("none", 1.5, 0.4, 0.2)
+    assert view.radius_m == 0.0
 
 
 @pytest.mark.parametrize("radius_m", [0.0, 0.25, 0.5, 0.75])

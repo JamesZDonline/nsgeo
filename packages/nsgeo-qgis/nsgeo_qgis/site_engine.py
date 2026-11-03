@@ -862,7 +862,7 @@ class SiteEngine(QObject):
 
         Spec 4.6: factors are measured on binned cells (`normalise` takes
         the unfinished values) and applied to the finished slice,
-        `a * finish(values) + b` (interpolation spec §8): interpolation is
+        `a * finish(values) + b` (interpolation spec §4, §8): interpolation is
         linear in the data and smoothing a normalised average, so the order
         loses nothing and each grid is finished once, by its own engine at
         its own line spacing. Coverage mode shows the counts, 0 as NaN,

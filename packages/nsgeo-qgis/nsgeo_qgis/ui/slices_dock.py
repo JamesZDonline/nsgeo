@@ -1498,6 +1498,13 @@ class SlicesDock(QgsDockWidget):
         this so a saved record carries what was actually on screen at the
         moment of saving, not a value re-derived some other way."""
         finish = self.grid_finish.value()
+        # What 0.2.0 reads as its fill radius (interpolation spec §8): the max
+        # distance in metres, or 0 under None, so 0.2.0 shows that cube
+        # unfilled as this build does.
+        if finish.method == "none":
+            radius_m = 0.0
+        else:
+            radius_m = finish.max_distance_spacings * (self._grid_spacing() or 0.0)
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
@@ -1505,8 +1512,7 @@ class SlicesDock(QgsDockWidget):
             max_distance_spacings=finish.max_distance_spacings,
             smooth_x_m=finish.smooth_x_m,
             smooth_y_m=finish.smooth_y_m,
-            # What 0.2.0 reads as its fill radius (interpolation spec §8).
-            radius_m=finish.max_distance_spacings * (self._grid_spacing() or 0.0),
+            radius_m=radius_m,
             palette=self.palette_combo.currentText(),
             stretch=self.stretch_combo.currentText(),
             coverage=self.coverage_check.isChecked(),
@@ -2013,12 +2019,14 @@ class SlicesDock(QgsDockWidget):
     def _finish_moved(self) -> bool:
         """Whether the finish, in metres, differs from the last draw's: a
         spacing edit moves it without touching the panel. False when there is
-        no draw to compare with or no source to measure against."""
+        no draw to compare with, no source to measure against, or a spacing
+        that is no distance (a hand-edited survey's <= 0, which
+        `SliceFinish.in_metres` refuses with ValueError)."""
         if self._drawn_finish is None:
             return False
         try:
             return self.engine.finish_settings(self.grid_finish.value()) != self._drawn_finish
-        except (RuntimeError, KeyError):
+        except (RuntimeError, KeyError, ValueError):
             return False
 
     def slice_finish(self) -> SliceFinish:

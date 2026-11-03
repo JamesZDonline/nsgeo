@@ -994,8 +994,9 @@ class NsgeoPlugin:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.
 
         M12 spec 4.7, following M11's `export_geotiff`: a path defaulting to
-        `slices/site.tif`, the dock's own thickness and step levels, method,
-        radius, gains and velocities, then the layer in the site group with
+        `slices/site.tif`, the dock's own thickness and step levels,
+        normalisation, the site's Interpolation panel (`dock.site_finish`),
+        gains and velocities, then the layer in the site group with
         its bands on the Temporal Controller, and -- when the coverage toggle
         is on -- the companion in its own `try` (Ruling AH).
 

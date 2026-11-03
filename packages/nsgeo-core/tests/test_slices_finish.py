@@ -1,4 +1,4 @@
-"""The finished slice: interpolate, then smooth (interpolation spec §6)."""
+"""The finished slice: interpolate, then smooth (interpolation spec §4)."""
 
 from __future__ import annotations
 

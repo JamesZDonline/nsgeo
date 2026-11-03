@@ -641,7 +641,7 @@ def test_site_gains_commute_with_every_method(site3, make_site, method):
 
 def test_site_shared_limit_measures_finished_slices(site3, make_site):
     """The site's stretch is measured over the slices as drawn, finish
-    included (interpolation spec §8), so the settings move it."""
+    included (interpolation spec §7), so the settings move it."""
     site, _ = prepared(make_site, site3)
     clip = UnipolarClip()
     smoothed = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=1.0, smooth_y_m=1.0)
@@ -666,7 +666,7 @@ def test_site_shared_limit_measures_finished_slices(site3, make_site):
 
 def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site):
     """`weights_cached` lets the scope show a wait cursor only when a tick
-    will build weights (interpolation spec §8)."""
+    will build weights (interpolation spec §7)."""
     site, _ = prepared(make_site, site3)
     assert not site.weights_cached(FINISH)
     site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})

@@ -313,7 +313,8 @@ still open what this build saves). Two places hold fill settings today:
   ignored, because there is no faithful mapping from a disc radius to a method. Going the other
   way, 0.2.0's `from_dict` raises if `radius_m` is missing, so this build **keeps writing
   `radius_m`**, set to the max distance in metres. That is a sensible disc radius for 0.2.0 to
-  show.
+  show. Under None it is 0, so 0.2.0 shows that cube unfilled, as this build does (final review
+  of milestone A).
 - **Remembered per-grid and site resolutions** (`slice_sources[g].resolution`,
   `site_view.resolution`, cleaned by `project.py:235` `_clean_resolution` against
   `_RESOLUTION_KEYS`). The new numeric keys join `_RESOLUTION_KEYS`. The method is a string, so

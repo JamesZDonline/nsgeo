@@ -1,4 +1,4 @@
-"""The finished slice: interpolate the gaps, then smooth (interpolation spec §6).
+"""The finished slice: interpolate the gaps, then smooth (interpolation spec §4).
 
 One place that joins the two steps, so the dock's drawing and the exporter's
 bands apply the same settings in the same order.

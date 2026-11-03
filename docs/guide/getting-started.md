@@ -389,8 +389,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    its own settings.
    - **Method** chooses how blank cells are filled from the cells around them.
      Pick **Kriging**, the default, for most data. Pick **Inverse distance
-     (IDW)** for a quicker fill in which nearer cells count more. Pick **None
-     (binned only)** to see only the cells a line crossed.
+     (IDW)** for a fill that never goes beyond the values around it: nearer
+     cells count more, and a filled cell always lies within the range of the
+     cells it is filled from, where kriging can overshoot a little beside a
+     strong contrast. Pick **None (binned only)** to see only the cells a line
+     crossed.
    - **Max distance to data** is how far from a line a blank cell may be and
      still be filled. It is set in line spacings (for a grid its metres are
      shown beside the box; for the whole site, hover over the box). Cells
@@ -406,9 +409,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
      axis, by a distance in metres. They start at 0, which is off. Smoothing is
      the only setting that changes the cells a line crossed.
 
-   Each grid remembers its own settings, and so does the whole site. The first time you choose a fine cell
-   or a new method, nsgeo may take a few seconds to prepare the fill and shows a
-   wait cursor while it does.
+   Each grid remembers its own settings, and so does the whole site. nsgeo
+   prepares the fill again when you change the cell size, the method or the
+   max distance; at a fine cell that can take a few seconds, and it shows a
+   wait cursor while it does. Stepping through the slices, the smoothing and
+   **dz**, **z0** and **z1** reuse the fill already prepared.
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save
