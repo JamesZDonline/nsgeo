@@ -156,8 +156,8 @@ def test_one_line_fills_both_sides_out_to_max_distance_and_no_further(method):
     pop = np.zeros((21, 30), bool)
     pop[10] = True
     out = plan(pop, method).apply(values(pop))
-    fin = np.isfinite(out).all(axis=1)
-    assert fin[5:16].all() and not fin[:5].any() and not fin[16:].any()
+    assert np.isfinite(out[5:16]).all()
+    assert np.isnan(out[:5]).all() and np.isnan(out[16:]).all()
     one = np.zeros((21, 21), bool)
     one[10, 10] = True
     out = plan(one, method).apply(np.ones(one.shape))
@@ -170,7 +170,7 @@ def test_a_cross_hatched_grid_fills_without_holes(method):
     pop = lines((5, 15, 25, 35), ny=60, nx=60)
     pop[:, 5:56:10] = True
     out = plan(pop, method).apply(values(pop))
-    assert np.isfinite(out[5:36, 5:56]).all()
+    assert np.isfinite(out[5:56, 5:56]).all()
 
 
 def test_idw_halfway_between_two_cells_is_their_mean():
@@ -221,11 +221,32 @@ def test_a_nan_data_value_does_not_poison_targets_with_other_sources(method):
 
 
 @BOTH
-def test_apply_at_matches_apply(method):
+def test_renormalising_over_finite_sources_keeps_a_constant_field(method):
     pop = lines()
+    fw = plan(pop, method)
+    v = np.full(pop.shape, 3.5)
+    v[15, 30] = np.nan
+    out = fw.apply(v)
+    hit = np.flatnonzero((fw.sources == 15 * 60 + 30).any(axis=1))
+    assert hit.size
+    np.testing.assert_allclose(out.ravel()[fw.targets[hit]], 3.5, rtol=1e-5)
+
+
+@BOTH
+def test_all_blank_input_gives_all_blank_output(method):
+    fw = plan(lines(), method)
+    assert np.isnan(fw.apply(np.full((40, 60), np.nan))).all()
+
+
+@BOTH
+def test_apply_at_matches_apply(method):
+    pop = lines((5, 15, 35))  # rows around 25 are neither data nor targets
     fw = plan(pop, method)
     v = values(pop)
     ids = np.random.default_rng(1).integers(0, pop.size, 200)
+    is_target = np.isin(ids, fw.targets)
+    assert pop.ravel()[ids].any() and is_target.any()
+    assert (~pop.ravel()[ids] & ~is_target).any()
     same(fw.apply_at(v, ids), fw.apply(v).ravel()[ids], rtol=0, atol=0)
     assert fw.apply_at(v, ids).dtype == np.float32
 

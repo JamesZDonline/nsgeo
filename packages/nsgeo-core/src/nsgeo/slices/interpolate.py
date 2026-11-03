@@ -6,12 +6,12 @@ stripe instead of being papered over (interpolation spec §5.1). A data cell is
 never changed.
 
 Which cells get filled, and from which neighbours with which weights, depends
-only on where data is, never on its values (spec §5.2). So the work is split:
+only on where data is, never on its values (interpolation spec §5.2). So the work is split:
 `plan_fill` builds a sparse weights table once per grid, method and distance,
 and `FillWeights.apply` turns it into a slice with one gather and one sum.
 That is why scrubbing through slices stays cheap although kriging is dear.
 
-Neighbours are the 3 nearest data cells in each of four quadrants (spec §5.3).
+Neighbours are the 3 nearest data cells in each of four quadrants (interpolation spec §5.3).
 Plain nearest-N would pick all its cells from one side of a single line and
 leave a step wherever the choice switched; quadrants make every cell between
 two lines draw on both, and a cell beside the outermost line draw on one.
@@ -21,10 +21,10 @@ numpy only, no scipy. Measured medians for the plan and for one apply, on a
 radius 1.0 m) and on the ten real lines (25 x 100 cells at 0.2 m):
 
     case                  plan IDW   plan kriging   apply
-    real lines, 0.2 m     0.006 s    0.006 s        0.4 ms
-    50 m grid, 0.2 m      0.09 s     0.08 s         11-15 ms
-    50 m grid, 0.1 m      0.94 s     1.0 s          90-160 ms
-    50 m grid, 0.05 m     9.7 s      10.5 s         0.8-1.1 s
+    real lines, 0.2 m     0.006 s    0.006 s        0.1 ms
+    50 m grid, 0.2 m      0.09 s     0.08 s         2 ms
+    50 m grid, 0.1 m      0.94 s     1.0 s          10-13 ms
+    50 m grid, 0.05 m     9.7 s      10.5 s         about 0.1 s
 """
 
 from __future__ import annotations
@@ -57,35 +57,46 @@ class FillWeights:
     sources: np.ndarray  # (m, 12) int32 flat ids, -1 = empty slot
     weights: np.ndarray  # same shape, float32, 0.0 in empty slots
 
-    def _blend(self, rows: np.ndarray, flat: np.ndarray) -> np.ndarray:
+    def _blend(self, rows: np.ndarray | slice, flat: np.ndarray) -> np.ndarray:
         """Σ wᵢvᵢ / Σ wᵢ for the given target rows; NaN where no source is finite.
 
-        Renormalising over finite sources means one NaN data value shows as NaN
-        itself but does not poison its neighbours (plan call 5).
+        `flat` carries one extra 0.0 at its end, so an empty slot (id -1) reads
+        a zero with zero weight and the common case is one gather and one dot
+        in float32. Only rows that touch a non-finite source take the slow path,
+        which renormalises over their finite sources: a NaN data value shows as
+        NaN itself but does not poison the cells filled from its neighbours.
         """
-        src = self.sources[rows]
-        v = flat[np.where(src >= 0, src, 0)].astype(np.float64)
-        w = np.where((src >= 0) & np.isfinite(v), self.weights[rows], 0.0).astype(np.float64)
-        den = w.sum(axis=1)
-        num = (w * np.where(w != 0.0, v, 0.0)).sum(axis=1)
-        out = np.full(len(rows), np.nan)
-        ok = (w != 0.0).any(axis=1) & (den != 0.0)
-        out[ok] = num[ok] / den[ok]
-        return out.astype(np.float32)
+        w = self.weights[rows]
+        out = np.einsum("ij,ij->i", w, flat[self.sources[rows]])
+        bad = np.flatnonzero(~np.isfinite(out))
+        if bad.size:
+            src = self.sources[rows][bad]
+            v = flat[src].astype(np.float64)
+            ok = (src >= 0) & np.isfinite(v)
+            wb = np.where(ok, w[bad], 0.0).astype(np.float64)
+            den = wb.sum(axis=1)
+            num = (wb * np.where(ok, v, 0.0)).sum(axis=1)
+            good = ok.any(axis=1) & (den != 0.0)
+            res = np.full(bad.size, np.nan)
+            res[good] = num[good] / den[good]
+            out[bad] = res
+        return out.astype(np.float32, copy=False)
 
     def _flat(self, values: np.ndarray) -> np.ndarray:
         values = np.asarray(values)
         if values.shape != self.shape:
             raise ValueError(f"values shape {values.shape} != weights shape {self.shape}")
-        return values.ravel().astype(np.float32)
+        flat = np.zeros(values.size + 1, dtype=np.float32)
+        flat[:-1] = values.ravel()
+        return flat
 
     def apply(self, values: np.ndarray) -> np.ndarray:
         """The filled slice: data cells as they are, targets interpolated, the rest NaN."""
         flat = self._flat(values)
-        out = np.full(flat.size, np.nan, dtype=np.float32)
-        out[self.populated] = flat[self.populated]
+        out = np.full(flat.size - 1, np.nan, dtype=np.float32)
+        out[self.populated] = flat[:-1][self.populated]
         if self.targets.size:
-            out[self.targets] = self._blend(np.arange(self.targets.size), flat)
+            out[self.targets] = self._blend(slice(None), flat)
         return out.reshape(self.shape)
 
     def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray:
