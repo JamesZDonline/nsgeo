@@ -95,6 +95,10 @@ where it appears):
 - Smoothing is a Gaussian, and its X and Y values are standard deviations in metres.
 - IDW and kriging are split into a one-time weight computation plus a cheap per-slice apply.
   Minimum curvature is solved per slice.
+- The single-grid preview and export adopt the site's half-pitch lattice rule on rotated grids,
+  so no data cell is dropped (§8).
+- Survey and cube files stay readable both ways between 0.2.0 and this build. Old fill settings
+  are ignored, not translated (§8).
 - The work is delivered as two milestones: A covers everything except minimum curvature, B adds
   minimum curvature (§12).
 
@@ -287,17 +291,41 @@ defaults by the same path. Single-grid and site scope share these controls. Toda
 `grid_radius_spin`/`radius_spacing_spin` pair collapses into one max-distance control, because
 both are already in × line spacing.
 
-**Saved cubes.** `ViewSettings` replaces `radius_m` with `method`, `max_distance_spacings`,
-`smooth_x_m` and `smooth_y_m`. `from_dict` must still read a record written by 0.2.0. A record
-with `radius_m` and none of the new keys loads with the new defaults, and its old `radius_m` is
-ignored (*design call*: there is no faithful mapping from a disc radius to a method).
+**Saved settings, both directions** (*design call*: no `SCHEMA_VERSION` bump, and 0.2.0 must
+still open what this build saves). Two places hold fill settings today:
+
+- **Saved cube records.** `ViewSettings` gains `method`, `max_distance_spacings`, `smooth_x_m`
+  and `smooth_y_m`. `from_dict` must still read a record written by 0.2.0. A record with
+  `radius_m` and none of the new keys loads with the new defaults, and its old `radius_m` is
+  ignored, because there is no faithful mapping from a disc radius to a method. Going the other
+  way, 0.2.0's `from_dict` raises if `radius_m` is missing, so this build **keeps writing
+  `radius_m`**, set to the max distance in metres. That is a sensible disc radius for 0.2.0 to
+  show.
+- **Remembered per-grid and site resolutions** (`slice_sources[g].resolution`,
+  `site_view.resolution`, cleaned by `project.py:235` `_clean_resolution` against
+  `_RESOLUTION_KEYS`). The new numeric keys join `_RESOLUTION_KEYS`. The method is a string, so
+  it needs its own tolerant cleaner: a known method name is kept, and anything else reads as
+  unset. An old remembered `radius_spacings` is **ignored, not mapped onto max distance**.
+  Mapping 0.2.0's seeded 0.5 would bring back the holes this work removes. 0.2.0's cleaner
+  already drops keys it doesn't know, so files saved by this build open in 0.2.0, which seeds
+  its own radius default.
 
 **Exports.** `NSGEO_FILL_RADIUS_CELLS` is replaced by `NSGEO_INTERPOLATION` (method),
 `NSGEO_MAX_DISTANCE_M`, `NSGEO_SMOOTH_X_M` and `NSGEO_SMOOTH_Y_M`. The site export's
 `NSGEO_SITE_FILL_RADIUS_SPACINGS` is replaced by `NSGEO_SITE_INTERPOLATION`,
-`NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M` and `NSGEO_SITE_SMOOTH_Y_M`. The
-rotated-export warning at `plugin.py:994` now fires for method None, not for radius 0. Ruling AE
-(the north-up resample is lossy at any setting) is unchanged.
+`NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M` and `NSGEO_SITE_SMOOTH_Y_M`.
+
+**The north-up resample stops dropping cells** (*design call*). Ruling AE accepted that the
+single-grid north-up resample (`to_north_up`, pixel = cell) drops 15–18% of a rotated frame's
+cells, because the disc fill spread every cell into its neighbours first. That premise no
+longer holds. Interpolation never touches a data cell and smoothing is off by default, so a
+dropped data cell would simply be lost from the preview and the export. The user's real grids
+are rotated (Grid 1 at 10.497°). The single-grid preview and export therefore adopt the site
+lattice's existing rule, Ruling 2 (`slices/site.py:136` `lattice_pixel`): pitch = cell, or
+cell / 2 when the frame is rotated. At half pitch every rotated cell contains a pixel centre.
+The radius-0 warning at `plugin.py:994` is removed rather than moved, because there is nothing
+left to warn about. A rotated single-grid export has four times the pixels it had in 0.2.0,
+which is the same cost site exports already pay.
 
 **Site scope.** Each grid is interpolated with its own weights in its own frame, then blanked
 with its own spacing × the shared multiple, then smoothed. Seam statistics stay measured on
@@ -309,7 +337,8 @@ geophysicists.
 
 **Retiring the disc fill.** `fill()` and `disc_kernel()` leave the slice path. Whether
 `fill.py` is deleted or kept for its helpers is the **builder's call**. No dead public API should
-remain in `nsgeo.slices`.
+remain in `nsgeo.slices`. One unmerged branch, `nsgeo-m14`, has a test that imports `fill` from
+`nsgeo.slices`. Whichever of the two merges second updates that test.
 
 ---
 
@@ -347,7 +376,10 @@ misses the cache, and an unchanged one hits it.
 blank. An edge cell next to a blank is not pulled toward zero.
 
 **Plugin:** the dock controls and per-grid memory; a `ViewSettings` round trip, including a 0.2.0
-record carrying only `radius_m`; the export metadata keys; site gains commuting with every
+record carrying only `radius_m`, and a record from this build read by 0.2.0's `from_dict` (a
+copy of that function as a fixture); remembered resolutions that carry an old `radius_spacings`
+or a damaged method name; a rotated single-grid export at half pitch keeping every data cell;
+the export metadata keys; site gains commuting with every
 method; #104's scenario (refuse a Resolution after a cell edit, export, and check that the
 recorded max distance matches the frame's cell); the numpy-only boundary test still passing.
 
@@ -383,7 +415,8 @@ These are human gates. They are tracked and reported, never passed silently.
 - Other methods (natural neighbour, triangulation, splines, nearest neighbour, moving average).
 - Interpolating across depth (3-D); each slice is interpolated on its own.
 - Using counts as data weights or measurement error.
-- Rectangular cells, de-striping, and changes to binning or to the north-up resample.
+- Rectangular cells, de-striping, and changes to binning. The north-up resample changes only as
+  §8 says: the single-grid pitch adopts the site's Ruling 2.
 - Any new dependency.
 
 ---
