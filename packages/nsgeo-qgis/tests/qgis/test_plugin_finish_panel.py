@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from nsgeo_qgis.slices_plan import METHOD_LABELS, SliceFinish
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
+from plugin_testing import connect_message_log
 from qgis.PyQt.QtWidgets import QApplication
 
 
@@ -118,3 +119,18 @@ def test_busy_cursor_is_restored_after_an_exception(qgis_app):
         assert QApplication.overrideCursor() is not None
         raise RuntimeError("boom")
     assert QApplication.overrideCursor() is None
+
+
+def test_a_slot_that_raises_in_its_own_body_is_logged(panel, monkeypatch):
+    def broken():
+        raise RuntimeError("sync broke")
+
+    monkeypatch.setattr(panel, "_sync", broken)
+    messages: list[str] = []
+    disconnect = connect_message_log(lambda msg, tag, level: messages.append(msg))
+    try:
+        panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
+        panel.max_distance_spin.setValue(0.75)
+    finally:
+        disconnect()
+    assert any("sync broke" in m for m in messages)

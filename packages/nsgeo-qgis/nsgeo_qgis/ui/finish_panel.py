@@ -29,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_plan import METHOD_LABELS, SliceFinish
 
 _METHOD_TIP = (
@@ -101,17 +102,37 @@ class FinishPanel(QGroupBox):
 
         self.method_combo.currentIndexChanged.connect(self._on_method)
         self.max_distance_spin.valueChanged.connect(self._on_distance)
-        self.smooth_x_spin.valueChanged.connect(lambda v: self.edited.emit("smooth_x_m", v))
-        self.smooth_y_spin.valueChanged.connect(lambda v: self.edited.emit("smooth_y_m", v))
+        self.smooth_x_spin.valueChanged.connect(self._on_smooth_x)
+        self.smooth_y_spin.valueChanged.connect(self._on_smooth_y)
         self._sync()
 
+    # Every slot guards its own body: `emit` runs the dock's slot
+    # synchronously, and nothing raised there may escape into Qt.
     def _on_method(self, _index: int) -> None:
-        self._sync()
-        self.edited.emit("method", self.method_combo.currentData())
+        try:
+            self._sync()
+            self.edited.emit("method", self.method_combo.currentData())
+        except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
+            _log(f"could not change the interpolation method: {exc}")
 
     def _on_distance(self, value: float) -> None:
-        self._sync()
-        self.edited.emit("max_distance_spacings", value)
+        try:
+            self._sync()
+            self.edited.emit("max_distance_spacings", value)
+        except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
+            _log(f"could not change the max distance: {exc}")
+
+    def _on_smooth_x(self, value: float) -> None:
+        try:
+            self.edited.emit("smooth_x_m", value)
+        except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
+            _log(f"could not change the X smoothing: {exc}")
+
+    def _on_smooth_y(self, value: float) -> None:
+        try:
+            self.edited.emit("smooth_y_m", value)
+        except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
+            _log(f"could not change the Y smoothing: {exc}")
 
     def _sync(self) -> None:
         # Nothing to reach for under "none", so the distance does not apply.

@@ -405,17 +405,13 @@ def test_updated_lays_known_fields_over_and_ignores_the_rest():
     assert got == SliceFinish("kriging", 1.5, 0.3, 0.4)
 
 
-@pytest.mark.parametrize("bad", ["bogus", 3])
-def test_updated_ignores_a_bad_method(bad):
+def test_updated_ignores_a_bad_method_or_number():
     base = SliceFinish("idw", 1.0, 0.1, 0.2)
-    assert base.updated({"method": bad}) == base
-
-
-@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), True])
-@pytest.mark.parametrize("field", ["max_distance_spacings", "smooth_x_m", "smooth_y_m"])
-def test_updated_ignores_a_bad_number(field, bad):
-    base = SliceFinish("idw", 1.0, 0.1, 0.2)
-    assert base.updated({field: bad}) == base
+    for bad in ("bogus", 3):
+        assert base.updated({"method": bad}) == base
+    for field in ("max_distance_spacings", "smooth_x_m", "smooth_y_m"):
+        for bad in (-1.0, float("nan"), float("inf"), True):
+            assert base.updated({field: bad}) == base, (field, bad)
 
 
 def test_updated_accepts_an_int_as_a_number():

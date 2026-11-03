@@ -1474,21 +1474,21 @@ def test_removing_a_grid_drops_its_remembered_resolution(session):
 
 def test_remembering_a_method_keeps_it_a_string_and_marks_dirty_once(session):
     session.add_grid(GRID)
-    session.save()
-    session.remember_slice_resolution("A", method="idw", max_distance_spacings=1.0, smooth_x_m=0.2)
-    assert session.dirty
-    assert session.slice_resolution("A") == {
-        "method": "idw",
-        "max_distance_spacings": 1.0,
-        "smooth_x_m": 0.2,
-    }
-    assert isinstance(session.slice_resolution("A")["method"], str)
-    session.save()
     session.remember_site_resolution(method="none", smooth_y_m=0.1)
-    assert session.dirty
-    assert session.site_resolution() == {"method": "none", "smooth_y_m": 0.1}
     session.save()
-    assert session.site_resolution() == {"method": "none", "smooth_y_m": 0.1}
+    flips = Spy(session.dirty_changed)
+    session.remember_slice_resolution("A", method="idw", max_distance_spacings=1.0, smooth_x_m=0.2)
+    session.remember_slice_resolution("A", method="idw")
+    assert flips.calls == [(True,)]
+    want = {"method": "idw", "max_distance_spacings": 1.0, "smooth_x_m": 0.2}
+    assert session.slice_resolution("A") == want
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    assert reopened.slice_resolution("A") == want
+    assert isinstance(reopened.slice_resolution("A")["method"], str)
+    assert reopened.site_resolution() == {"method": "none", "smooth_y_m": 0.1}
+    assert isinstance(reopened.site_resolution()["method"], str)
 
 
 def test_remembering_the_same_method_again_does_not_mark_dirty(session):

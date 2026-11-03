@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -752,26 +754,36 @@ def test_a_view_record_with_a_bad_method_falls_back_to_the_defaults():
     assert got.finish == SliceFinish(smooth_x_m=0.3)
 
 
-def _from_dict_0_2_0(doc):
-    """Release 0.2.0's `ViewSettings.from_dict`, verbatim (git show
-    v0.2.0:packages/nsgeo-qgis/nsgeo_qgis/slice_export.py), as a function."""
-    return (
-        float(doc["thickness_ns"]),
-        float(doc["step_ns"]),
-        float(doc["radius_m"]),
-        str(doc["palette"]),
-        str(doc["stretch"]),
-        bool(doc.get("coverage", False)),
-    )
+@dataclass(frozen=True)
+class _ViewSettings020:
+    """Release 0.2.0's `ViewSettings`: the six fields, as in
+    `git show v0.2.0:packages/nsgeo-qgis/nsgeo_qgis/slice_export.py`."""
+
+    thickness_ns: float
+    step_ns: float
+    radius_m: float
+    palette: str
+    stretch: str
+    coverage: bool
+
+    @classmethod
+    def from_dict(cls, doc: dict[str, Any]) -> _ViewSettings020:
+        # Body copied verbatim from 0.2.0.
+        return cls(
+            thickness_ns=float(doc["thickness_ns"]),
+            step_ns=float(doc["step_ns"]),
+            radius_m=float(doc["radius_m"]),
+            palette=str(doc["palette"]),
+            stretch=str(doc["stretch"]),
+            # `.get(..., False)`, not `doc["coverage"]` (Task 7): tolerant
+            # of a `view` dict that carries the other five fields but not
+            # this one -- the same reader-tolerance this module's `Task 7`
+            # functions extend to the record as a whole.
+            coverage=bool(doc.get("coverage", False)),
+        )
 
 
 def test_a_record_from_this_build_still_loads_in_0_2_0():
     view = ViewSettings(**_OLD_KEYS, method="idw", max_distance_spacings=1.0)
-    assert _from_dict_0_2_0(view.to_dict()) == (
-        5.0,
-        2.5,
-        0.25,
-        "amp_heat",
-        "shared across the cube",
-        True,
-    )
+    got = _ViewSettings020.from_dict(view.to_dict())
+    assert got == _ViewSettings020(**_OLD_KEYS)
