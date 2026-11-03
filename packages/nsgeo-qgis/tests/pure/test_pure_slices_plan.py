@@ -8,8 +8,10 @@ from nsgeo_qgis.slices_plan import (
     FRAME_BUDGET_MS,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
+    WEIGHT_BYTES_PER_CELL,
     MemoryEstimate,
     Resolution,
+    SliceFinish,
     SourceChoice,
     choose_residency,
     estimate_memory,
@@ -82,7 +84,7 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230)
     assert est.lines_bytes == 10_000_000 * 4
     assert est.cube_bytes == 230 * 90_000 * 4 + 90_000 * 4
-    assert est.total_bytes == est.lines_bytes + est.cube_bytes
+    assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
 
 
 #: The lines spec 7.4 was measured on: the ten real files, 606-666 traces.
@@ -373,3 +375,54 @@ def test_limit_windows_keep_at_most_twelve_evenly_spread_with_both_ends():
     assert len(limit_windows(z, 60)) == 4  # three whole windows and the tail: under the cap
     with pytest.raises(ValueError):
         limit_windows(z, 5, max_windows=1)
+
+
+def test_slice_finish_defaults():
+    assert SliceFinish() == SliceFinish("kriging", 0.5, 0.0, 0.0)
+
+
+def test_in_metres_scales_by_the_spacing_and_sets_the_search_radius():
+    got = SliceFinish().in_metres(0.5)
+    assert got.max_distance_m == 0.25
+    assert got.search_radius_m == 1.0
+    wide = SliceFinish(max_distance_spacings=3.0).in_metres(0.5)
+    assert wide.max_distance_m == 1.5
+    assert wide.search_radius_m == 3.0
+
+
+@pytest.mark.parametrize("spacing", [0.0, -0.5])
+def test_in_metres_refuses_a_spacing_that_is_not_positive(spacing):
+    with pytest.raises(ValueError):
+        SliceFinish().in_metres(spacing)
+
+
+def test_updated_lays_known_fields_over_and_ignores_the_rest():
+    got = SliceFinish().updated({"method": "idw", "radius_spacings": 0.5, "cell": 0.2})
+    assert got == SliceFinish(method="idw")
+    got = SliceFinish().updated(
+        {"max_distance_spacings": 1.5, "smooth_x_m": 0.3, "smooth_y_m": 0.4}
+    )
+    assert got == SliceFinish("kriging", 1.5, 0.3, 0.4)
+
+
+@pytest.mark.parametrize("bad", ["bogus", 3])
+def test_updated_ignores_a_bad_method(bad):
+    base = SliceFinish("idw", 1.0, 0.1, 0.2)
+    assert base.updated({"method": bad}) == base
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), True])
+@pytest.mark.parametrize("field", ["max_distance_spacings", "smooth_x_m", "smooth_y_m"])
+def test_updated_ignores_a_bad_number(field, bad):
+    base = SliceFinish("idw", 1.0, 0.1, 0.2)
+    assert base.updated({field: bad}) == base
+
+
+def test_updated_accepts_an_int_as_a_number():
+    assert SliceFinish().updated({"smooth_x_m": 1}).smooth_x_m == 1.0
+
+
+def test_the_estimate_counts_the_fill_weights():
+    est = estimate_memory(0, 1000, 10)
+    assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
+    assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes

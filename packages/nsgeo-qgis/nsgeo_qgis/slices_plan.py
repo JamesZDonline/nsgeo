@@ -24,13 +24,21 @@ with reasons rather than layout:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from nsgeo.processing import get_step, grouped_steps
-from nsgeo.slices import SliceWindow, ZAxis, plan_windows
+from nsgeo.slices import (
+    METHODS,
+    NEIGHBOURS_PER_QUADRANT,
+    FinishSettings,
+    SliceWindow,
+    ZAxis,
+    plan_windows,
+)
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -138,6 +146,81 @@ class Resolution:
             raise ValueError(f"t1_ns must exceed t0_ns, got {self.t0_ns}..{self.t1_ns}")
 
 
+#: What a grid is finished with unless the user says otherwise (interpolation
+#: spec §8): kriging, out to half a line spacing, which just closes the gap
+#: between neighbouring lines.
+DEFAULT_METHOD = "kriging"
+DEFAULT_MAX_DISTANCE_SPACINGS = 0.5
+#: The neighbour search reaches at least this many line spacings (plan call 1).
+SEARCH_RADIUS_SPACINGS = 2.0
+
+#: Method keys in `METHODS` order, with the labels the Method combo shows.
+METHOD_LABELS: dict[str, str] = {
+    "none": "None (binned only)",
+    "idw": "Inverse distance (IDW)",
+    "kriging": "Kriging",
+}
+
+#: Per cell, the fill weights' int32 source index and float32 weight for each
+#: of the four quadrants' nearest neighbours. Deliberately the weights proper,
+#: not `FillWeights.nbytes` (populated mask, targets): the estimate only has to
+#: be the right order of magnitude to warn before anything is built.
+WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8
+
+#: The remembered fields a `SliceFinish` is made of.
+FINISH_FIELDS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
+
+
+def _non_negative(value: object) -> float | None:
+    """`value` as a finite non-negative float, or None. A bool is no number,
+    matching the core loader's `_finite`."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0.0 else None
+
+
+@dataclass(frozen=True)
+class SliceFinish:
+    """How a slice is finished: the fill method, how far from data it may
+    reach (in line spacings, so it follows a grid's spacing), and the X/Y
+    smoothing in metres (interpolation spec §8)."""
+
+    method: str = DEFAULT_METHOD
+    max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
+    smooth_x_m: float = 0.0
+    smooth_y_m: float = 0.0
+
+    def in_metres(self, spacing_m: float) -> FinishSettings:
+        if not spacing_m > 0.0:
+            raise ValueError(f"line spacing must be positive, got {spacing_m}")
+        max_distance_m = self.max_distance_spacings * spacing_m
+        return FinishSettings(
+            method=self.method,
+            max_distance_m=max_distance_m,
+            search_radius_m=max(SEARCH_RADIUS_SPACINGS * spacing_m, 2.0 * max_distance_m),
+            smooth_x_m=self.smooth_x_m,
+            smooth_y_m=self.smooth_y_m,
+        )
+
+    def updated(self, fields: Mapping[str, object]) -> SliceFinish:
+        """`self` with the finish fields in `fields` laid over it. A method
+        this build does not know, a negative or non-finite number, and every
+        other key are ignored, so a damaged record falls back field by field."""
+        method = fields.get("method")
+        kept: dict[str, Any] = {}
+        if isinstance(method, str) and method in METHODS:
+            kept["method"] = method
+        for key in FINISH_FIELDS[1:]:
+            number = _non_negative(fields.get(key))
+            if number is not None:
+                kept[key] = number
+        return dataclasses.replace(self, **kept)
+
+
 @dataclass(frozen=True)
 class MemoryEstimate:
     """Held bytes, split the way spec 7.4 splits them.
@@ -150,10 +233,13 @@ class MemoryEstimate:
 
     lines_bytes: int
     cube_bytes: int
+    #: The interpolation weights, built once per grid and kept (interpolation
+    #: spec §8). Counted so a fine cell on a large grid warns before building.
+    weights_bytes: int = 0
 
     @property
     def total_bytes(self) -> int:
-        return self.lines_bytes + self.cube_bytes
+        return self.lines_bytes + self.cube_bytes + self.weights_bytes
 
 
 def transform_names() -> list[str]:
@@ -270,6 +356,7 @@ def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstim
     return MemoryEstimate(
         lines_bytes=int(prepared_samples) * 4,
         cube_bytes=int(nz) * int(n_cells) * 4 + int(n_cells) * 4,
+        weights_bytes=int(n_cells) * WEIGHT_BYTES_PER_CELL,
     )
 
 

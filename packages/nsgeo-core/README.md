@@ -97,6 +97,7 @@ several grids' slices into one site view.
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
+| `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `Provenance` | What a reader needs to trust a cube. |

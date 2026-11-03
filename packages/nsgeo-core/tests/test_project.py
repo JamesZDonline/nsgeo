@@ -656,3 +656,30 @@ def test_empty_ones_are_not_written(tmp_path):
     doc = json.loads(path.read_text())
     assert "slice_sources" not in doc
     assert "site_view" not in doc
+
+
+def test_remembered_finish_fields_are_kept_and_cleaned(tmp_path):
+    good = {"method": "kriging", "max_distance_spacings": 0.75, "smooth_x_m": 0.3}
+    loaded = _load_with_resolution(tmp_path, {**good, "cell": 0.2})
+    assert loaded.slice_sources == {"A": {"preset": "p", "resolution": {**good, "cell": 0.2}}}
+    assert loaded.site_view == {"transform": "none", "resolution": {**good, "cell": 0.2}}
+    for bad in (
+        {"method": "bogus"},
+        {"method": 3},
+        {"max_distance_spacings": -1},
+        {"smooth_x_m": float("nan")},
+        {"smooth_y_m": -1},
+    ):
+        loaded = _load_with_resolution(tmp_path, {**good, **bad})
+        (key,) = bad
+        kept = loaded.site_view["resolution"]
+        assert key not in kept
+        assert {k: v for k, v in good.items() if k != key} == {
+            k: v for k, v in kept.items() if k != key
+        }
+
+
+def test_an_old_radius_spacings_still_loads(tmp_path):
+    # Task 5 flips this: the dock still reads radius_spacings until then.
+    loaded = _load_with_resolution(tmp_path, {"cell": 0.2, "radius_spacings": 0.5})
+    assert loaded.site_view["resolution"] == {"cell": 0.2, "radius_spacings": 0.5}

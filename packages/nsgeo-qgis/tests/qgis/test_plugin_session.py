@@ -1470,3 +1470,32 @@ def test_removing_a_grid_drops_its_remembered_resolution(session):
     assert session.slice_source("A") is None
     # The site's own resolution is not the removed grid's to take with it.
     assert session.site_resolution() == {"cell": 0.2}
+
+
+def test_remembering_a_method_keeps_it_a_string_and_marks_dirty_once(session):
+    session.add_grid(GRID)
+    session.save()
+    session.remember_slice_resolution("A", method="idw", max_distance_spacings=1.0, smooth_x_m=0.2)
+    assert session.dirty
+    assert session.slice_resolution("A") == {
+        "method": "idw",
+        "max_distance_spacings": 1.0,
+        "smooth_x_m": 0.2,
+    }
+    assert isinstance(session.slice_resolution("A")["method"], str)
+    session.save()
+    session.remember_site_resolution(method="none", smooth_y_m=0.1)
+    assert session.dirty
+    assert session.site_resolution() == {"method": "none", "smooth_y_m": 0.1}
+    session.save()
+    assert session.site_resolution() == {"method": "none", "smooth_y_m": 0.1}
+
+
+def test_remembering_the_same_method_again_does_not_mark_dirty(session):
+    session.add_grid(GRID)
+    session.remember_slice_resolution("A", method="kriging", max_distance_spacings=0.5)
+    session.remember_site_resolution(method="kriging", smooth_x_m=0.0)
+    session.save()
+    session.remember_slice_resolution("A", method="kriging", max_distance_spacings=0.5)
+    session.remember_site_resolution(method="kriging", smooth_x_m=0.0)
+    assert not session.dirty

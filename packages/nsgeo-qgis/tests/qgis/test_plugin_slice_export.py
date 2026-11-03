@@ -24,7 +24,7 @@ from nsgeo_qgis.slice_export import (
     write_coverage,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SliceFinish, SourceChoice
 from plugin_testing import synthetic_dzt
 from qgis.core import QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
@@ -710,3 +710,68 @@ def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session
     }
     with pytest.raises(ValueError, match="z"):
         recipe_from_record(bad)
+
+
+_OLD_KEYS = {
+    "thickness_ns": 5.0,
+    "step_ns": 2.5,
+    "radius_m": 0.25,
+    "palette": "amp_heat",
+    "stretch": "shared across the cube",
+    "coverage": True,
+}
+
+
+def test_view_settings_round_trip_the_finish():
+    view = ViewSettings(
+        **{**_OLD_KEYS, "radius_m": 0.0},
+        method="idw",
+        max_distance_spacings=1.5,
+        smooth_x_m=0.3,
+        smooth_y_m=0.4,
+    )
+    again = ViewSettings.from_dict(view.to_dict())
+    assert again == view
+    assert again.finish == SliceFinish("idw", 1.5, 0.3, 0.4)
+    assert set(view.to_dict()) == set(_OLD_KEYS) | {
+        "method",
+        "max_distance_spacings",
+        "smooth_x_m",
+        "smooth_y_m",
+    }
+
+
+def test_a_0_2_0_view_record_loads_with_the_new_defaults():
+    got = ViewSettings.from_dict(dict(_OLD_KEYS))
+    assert got.radius_m == 0.25
+    assert got.finish == SliceFinish()
+
+
+def test_a_view_record_with_a_bad_method_falls_back_to_the_defaults():
+    got = ViewSettings.from_dict({**_OLD_KEYS, "method": "bogus", "smooth_x_m": 0.3})
+    assert got.finish == SliceFinish(smooth_x_m=0.3)
+
+
+def _from_dict_0_2_0(doc):
+    """Release 0.2.0's `ViewSettings.from_dict`, verbatim (git show
+    v0.2.0:packages/nsgeo-qgis/nsgeo_qgis/slice_export.py), as a function."""
+    return (
+        float(doc["thickness_ns"]),
+        float(doc["step_ns"]),
+        float(doc["radius_m"]),
+        str(doc["palette"]),
+        str(doc["stretch"]),
+        bool(doc.get("coverage", False)),
+    )
+
+
+def test_a_record_from_this_build_still_loads_in_0_2_0():
+    view = ViewSettings(**_OLD_KEYS, method="idw", max_distance_spacings=1.0)
+    assert _from_dict_0_2_0(view.to_dict()) == (
+        5.0,
+        2.5,
+        0.25,
+        "amp_heat",
+        "shared across the cube",
+        True,
+    )

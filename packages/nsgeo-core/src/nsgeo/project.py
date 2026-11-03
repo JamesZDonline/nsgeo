@@ -23,6 +23,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
+from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 
@@ -214,7 +215,16 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
-_RESOLUTION_KEYS = ("cell", "dz_ns", "t0_ns", "t1_ns", "radius_spacings")
+_RESOLUTION_KEYS = (
+    "cell",
+    "dz_ns",
+    "t0_ns",
+    "t1_ns",
+    "radius_spacings",
+    "max_distance_spacings",
+    "smooth_x_m",
+    "smooth_y_m",
+)
 
 
 def _finite(value: object) -> float | None:
@@ -232,7 +242,7 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _clean_resolution(value: object) -> dict[str, float]:
+def _clean_resolution(value: object) -> dict[str, float | str]:
     """A remembered resolution (#71), each field kept only if usable.
 
     Fields are vetted one by one, so a single damaged value reads as unset
@@ -243,18 +253,26 @@ def _clean_resolution(value: object) -> dict[str, float]:
     """
     if not isinstance(value, dict):
         return {}
-    out: dict[str, float] = {}
+    out: dict[str, float | str] = {}
+    numbers: dict[str, float] = {}
     for key in _RESOLUTION_KEYS:
         number = _finite(value.get(key))
         if number is not None:
-            out[key] = number
+            numbers[key] = number
     for key in ("cell", "dz_ns"):
-        if key in out and out[key] <= 0:
-            del out[key]
-    if out.get("radius_spacings", 0.0) < 0:
-        del out["radius_spacings"]
-    if "t0_ns" in out and "t1_ns" in out and out["t1_ns"] <= out["t0_ns"]:
-        del out["t0_ns"], out["t1_ns"]
+        if key in numbers and numbers[key] <= 0:
+            del numbers[key]
+    for key in ("radius_spacings", "max_distance_spacings", "smooth_x_m", "smooth_y_m"):
+        if numbers.get(key, 0.0) < 0:
+            del numbers[key]
+    if "t0_ns" in numbers and "t1_ns" in numbers and numbers["t1_ns"] <= numbers["t0_ns"]:
+        del numbers["t0_ns"], numbers["t1_ns"]
+    out.update(numbers)
+    # The interpolation method is a string, kept only if this build knows it
+    # (interpolation spec §8): an unknown one reads as unset.
+    method = value.get("method")
+    if isinstance(method, str) and method in METHODS:
+        out["method"] = method
     return out
 
 

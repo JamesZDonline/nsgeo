@@ -82,7 +82,13 @@ from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsR
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import Resolution, SourceChoice
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_MAX_DISTANCE_SPACINGS,
+    DEFAULT_METHOD,
+    Resolution,
+    SliceFinish,
+    SourceChoice,
+)
 
 
 @dataclass(frozen=True)
@@ -497,6 +503,18 @@ class ViewSettings:
     palette: str
     stretch: str
     coverage: bool
+    # The finish (interpolation spec §8). `radius_m` stays and is still
+    # written, because 0.2.0's reader requires it; this build ignores it.
+    method: str = DEFAULT_METHOD
+    max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
+    smooth_x_m: float = 0.0
+    smooth_y_m: float = 0.0
+
+    @property
+    def finish(self) -> SliceFinish:
+        return SliceFinish(
+            self.method, self.max_distance_spacings, self.smooth_x_m, self.smooth_y_m
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -506,14 +524,21 @@ class ViewSettings:
             "palette": self.palette,
             "stretch": self.stretch,
             "coverage": self.coverage,
+            "method": self.method,
+            "max_distance_spacings": self.max_distance_spacings,
+            "smooth_x_m": self.smooth_x_m,
+            "smooth_y_m": self.smooth_y_m,
         }
 
     @classmethod
     def from_dict(cls, doc: dict[str, Any]) -> ViewSettings:
+        # A 0.2.0 record has no "method": it opens on the defaults, its
+        # `radius_m` read for the record's sake and never mapped onto them.
+        finish = SliceFinish().updated(doc) if "method" in doc else SliceFinish()
         return cls(
             thickness_ns=float(doc["thickness_ns"]),
             step_ns=float(doc["step_ns"]),
-            radius_m=float(doc["radius_m"]),
+            radius_m=float(doc.get("radius_m", 0.0)),
             palette=str(doc["palette"]),
             stretch=str(doc["stretch"]),
             # `.get(..., False)`, not `doc["coverage"]` (Task 7): tolerant
@@ -521,6 +546,10 @@ class ViewSettings:
             # this one -- the same reader-tolerance this module's `Task 7`
             # functions extend to the record as a whole.
             coverage=bool(doc.get("coverage", False)),
+            method=finish.method,
+            max_distance_spacings=finish.max_distance_spacings,
+            smooth_x_m=finish.smooth_x_m,
+            smooth_y_m=finish.smooth_y_m,
         )
 
 

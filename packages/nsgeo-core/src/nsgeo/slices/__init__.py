@@ -28,7 +28,7 @@ from nsgeo.slices.display import (
 from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill
 from nsgeo.slices.finish import FinishSettings, finish_slice
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
-from nsgeo.slices.interpolate import METHODS, FillWeights, plan_fill
+from nsgeo.slices.interpolate import METHODS, NEIGHBOURS_PER_QUADRANT, FillWeights, plan_fill
 from nsgeo.slices.site import (
     AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
@@ -67,6 +67,7 @@ __all__ = [
     "LinePlan",
     "METHODS",
     "MIN_SEAM_CELLS",
+    "NEIGHBOURS_PER_QUADRANT",
     "NORMALISATION_METHODS",
     "PreparedLine",
     "Provenance",
