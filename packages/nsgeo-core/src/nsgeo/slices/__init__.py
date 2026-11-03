@@ -26,6 +26,7 @@ from nsgeo.slices.display import (
     window_times_ns,
 )
 from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill
+from nsgeo.slices.finish import FinishSettings, finish_slice
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.slices.interpolate import METHODS, FillWeights, plan_fill
 from nsgeo.slices.site import (
@@ -51,6 +52,7 @@ from nsgeo.slices.site import (
     snap_azimuth,
     window_on,
 )
+from nsgeo.slices.smooth import smooth
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 
 __all__ = [
@@ -60,6 +62,7 @@ __all__ = [
     "CubeFrame",
     "CubeStoreError",
     "FillWeights",
+    "FinishSettings",
     "Footprint",
     "LinePlan",
     "METHODS",
@@ -82,6 +85,7 @@ __all__ = [
     "edge_match_solve",
     "fill",
     "find_seams",
+    "finish_slice",
     "footprint",
     "grid_axis",
     "lattice_pixel",
@@ -97,6 +101,7 @@ __all__ = [
     "shared_limit",
     "site_axis",
     "slice_extent",
+    "smooth",
     "snap_azimuth",
     "stream_slice",
     "to_north_up",

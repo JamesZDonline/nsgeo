@@ -9,8 +9,8 @@ produced. `for_points` is that constructor.
 
 Cells are square. A rectangular cell would let the along-line and
 cross-line resolutions be tuned apart, which sounds useful and is not: it
-bakes an acquisition artefact into the product, and the fill radius already
-covers the real need.
+bakes an acquisition artefact into the product, and directional smoothing
+(interpolation spec §6) covers the real need.
 """
 
 from __future__ import annotations

@@ -34,35 +34,12 @@ Two decisions this task owns, recorded here rather than only in the task
 report because a future reader of this file needs them as much as a
 reviewer of this task does:
 
-* **North-up pitch is the frame's own cell size, not a finer one (Ruling
-  AE, Task 6 fix round 1, corrects this bullet's own first draft).**
-  `to_north_up` (Task 1) drops 15-18% of frame cells at rotated azimuths
-  under nearest-neighbour resampling, which is a real, measured gap, and
-  the loss is UNCONDITIONAL: `fill` never puts a dropped cell into the
-  output at all, at any radius -- it only makes that cell's value
-  recoverable from a surviving neighbour before this module ever sees the
-  array. Radius only changes how much the loss matters, never whether it
-  happens, and radius 0 (spec 6.4's own honest unfilled truth,
-  `grid_radius_spin`'s construction default, and a value `export_geotiff`
-  passes straight through with no refusal) is not a debugging-only case
-  this module gets to assume away. This writer does not compensate with a
-  finer output pitch anyway, for reasons that hold regardless: (1) a
-  finer pitch is a MITIGATION, not a fix -- nearest-neighbour at half
-  pitch still drops cells, it only lowers the probability that a given
-  cell is sampled by no output pixel at all; the actual fix is forward
-  scatter-mapping inside `to_north_up` itself, which is Task 1 work, not
-  this module's; (2) it multiplies the pixel count (4x at half-cell),
-  which multiplies the per-band write cost `INTERLEAVE=BAND` exists to
-  keep small, for a partial mitigation of a problem it does not solve --
-  the wrong trade twice over; (3) implementing even that partial
-  mitigation needs `to_north_up`'s own resample loop, and that function
-  is already the single source both `SliceLayer` and this module read --
-  duplicating its arithmetic here would let the two drift, which is
-  exactly the failure `window_label` being shared between the dock and
-  this module already avoids for the text labels. What this module does
-  instead: say so, on both the file (`NSGEO_FILL_RADIUS_CELLS`/
-  `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata, `GeoTiffSliceWriter.write`)
-  and the message bar (`plugin.export_geotiff`, at radius 0).
+* **North-up pitch follows Ruling 2: the cell, or half of it on a rotated
+  frame (interpolation spec §8).** `to_north_up` now samples a rotated
+  frame at half the cell, so no frame cell is dropped, and this writer
+  just takes the pitch from the geotransform it returns. History: Ruling
+  AE once wrote the frame's own cell size and recorded a 15-18% loss at
+  rotated azimuths, which is what this replaces.
 * **The per-band `cell_index` solve is not hoisted out of the export
   loop.** Task 1's review measured ~1.4 s of repeated solving across 39
   bands of a 400x300x400 cube, because `to_north_up`'s resample grid does

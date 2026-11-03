@@ -299,3 +299,41 @@ def test_north_up_of_an_axis_aligned_frame_has_exactly_the_frames_shape():
         out, _ = to_north_up(values, frame)
         assert out.shape == (ny, nx), f"{nx}x{ny} at cell={cell} gained a phantom row/column"
         np.testing.assert_allclose(out, values[::-1])
+
+
+def _frame(azimuth, nx=40, ny=25, cell=0.2):
+    return CubeFrame(
+        origin=(500000.0, 4500000.0), azimuth=azimuth, cell=cell, nx=nx, ny=ny, crs="EPSG:32633"
+    )
+
+
+def test_a_rotated_frame_is_resampled_at_half_the_cell():
+    """Ruling 2 (interpolation spec §8): at pitch = cell a backward
+    nearest-neighbour gather loses 15-18% of a rotated frame's cells."""
+    frame = _frame(10.497)
+    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(0.1)
+    assert gt[5] == pytest.approx(-0.1)
+
+
+@pytest.mark.parametrize("azimuth", [10.497, 33.0, 45.0, 77.3])
+def test_no_cell_is_dropped_on_a_rotated_frame(azimuth):
+    frame = _frame(azimuth)
+    values = np.arange(frame.nx * frame.ny).reshape(frame.ny, frame.nx)
+    out, _ = to_north_up(values, frame)
+    assert set(out[np.isfinite(out)].astype(int)) == set(range(frame.nx * frame.ny))
+
+
+@pytest.mark.parametrize("azimuth", [0.0, 90.0, 180.0])
+def test_an_axis_aligned_frame_keeps_the_full_pitch(azimuth):
+    frame = _frame(azimuth)
+    out, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(frame.cell)
+    if azimuth == 0.0:
+        assert out.shape == (frame.ny, frame.nx)
+
+
+def test_a_hair_off_axis_frame_keeps_the_full_pitch():
+    frame = _frame(1e-7, nx=100, ny=100)  # 20 m
+    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(frame.cell)

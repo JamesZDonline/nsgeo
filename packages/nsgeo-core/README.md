@@ -92,6 +92,7 @@ several grids' slices into one site view.
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
 | `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
+| `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
 | `Footprint` | Where one grid lands on a site lattice: a window, and the cell ids inside it. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging. |
@@ -114,6 +115,7 @@ several grids' slices into one site view.
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `fill` | Smear values and counts with a disc; the weighted mean. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
+| `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `footprint` | The tight window around the placed pixels of a block of cell ids. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `lattice_pixel` | The site lattice pitch: the cell, or half of it if any frame is rotated. |
@@ -129,6 +131,7 @@ several grids' slices into one site view.
 | `shared_limit` | One display limit for the whole cube. |
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
+| `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
 | `snap_azimuth` | The nearest right angle, when a frame is axis-aligned in effect. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster. |

@@ -217,18 +217,27 @@ def to_north_up(
       never surveyed.
 
     Nearest neighbour, not bilinear: these values are already cell means
-    over real traces, and `fill` (spec 6.4) is the one place smoothing is
-    a decision the user makes with a radius they can see. Interpolating
-    again here would invent structure below the cell size and do it
-    invisibly.
+    over real traces, and interpolation and smoothing (interpolation spec
+    §5, §6) are the places a user chooses to invent or blur anything, with
+    settings they can see. Interpolating again here would invent structure
+    below the cell size and do it invisibly.
+
+    The pixel pitch follows Ruling 2 (interpolation spec §8): the cell for
+    an axis-aligned frame, half of it for a rotated one, because a backward
+    nearest-neighbour gather at pitch = cell drops 15-18% of a rotated
+    frame's cells. At half the pitch every cell holds a pixel centre.
     """
+    # Imported here: site.py imports this module.
+    from nsgeo.slices.site import lattice_pixel, snap_azimuth
+
     values = np.asarray(values, dtype=float)
     if values.shape != (frame.ny, frame.nx):
         raise ValueError(
             f"values must be {(frame.ny, frame.nx)} to match the frame, got {values.shape}"
         )
     xmin, ymin, xmax, ymax = slice_extent(frame)
-    cell = frame.cell
+    extent = math.hypot(frame.nx, frame.ny) * frame.cell
+    pixel = lattice_pixel(frame.cell, [snap_azimuth(frame.azimuth, extent, frame.cell)])
     # `(xmax - xmin) / cell` is an exact integer for an axis-aligned frame,
     # but in floating point it lands a few ulps above one, so a plain
     # ceil() adds a phantom all-nodata row and column. Snap the ratio --
@@ -244,17 +253,17 @@ def to_north_up(
     # a plain `1e-9` is itself too small (measured residual 1.86e-9 to
     # 3.73e-9 above the true integer at cell=0.1 and cell=0.05), so the
     # bound is scaled by the same `64 * eps * max(1, |coord|)` margin
-    # `cell_index` uses, converted from metres to cells by dividing by
-    # `cell`.
-    eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / cell
-    width = max(1, int(math.ceil((xmax - xmin) / cell - eps)))
-    height = max(1, int(math.ceil((ymax - ymin) / cell - eps)))
+    # `cell_index` uses, converted from metres to pixels by dividing by
+    # the pixel pitch.
+    eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / pixel
+    width = max(1, int(math.ceil((xmax - xmin) / pixel - eps)))
+    height = max(1, int(math.ceil((ymax - ymin) / pixel - eps)))
 
-    # Cell CENTRES, so a sample lands in the middle of its output pixel
+    # Pixel CENTRES, so a sample lands in the middle of its output pixel
     # rather than on a boundary where round-off decides which cell it
     # reads -- the same reason `cell_index` has its own edge tolerance.
-    xs = xmin + (np.arange(width, dtype=float) + 0.5) * cell
-    ys = ymax - (np.arange(height, dtype=float) + 0.5) * cell  # row 0 is north
+    xs = xmin + (np.arange(width, dtype=float) + 0.5) * pixel
+    ys = ymax - (np.arange(height, dtype=float) + 0.5) * pixel  # row 0 is north
     grid_x, grid_y = np.meshgrid(xs, ys)
     world = np.column_stack([grid_x.ravel(), grid_y.ravel()])
 
@@ -265,4 +274,4 @@ def to_north_up(
     # read the frame's LAST cell instead.
     gathered = flat[np.clip(ids, 0, flat.size - 1)]
     out = np.where(ids >= 0, gathered, np.nan).reshape(height, width)
-    return out.astype(np.float32), (xmin, cell, 0.0, ymax, 0.0, -cell)
+    return out.astype(np.float32), (xmin, pixel, 0.0, ymax, 0.0, -pixel)
