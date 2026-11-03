@@ -216,6 +216,30 @@ def test_a_site_finish_edit_redraws(plugin):
     assert not np.array_equal(drawn.array, before.array, equal_nan=True)
 
 
+def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
+    """0.2.0's site radius went through the dock's 120 ms debounce, and an
+    Interpolation edit re-plans every grid's weights: two edits a keystroke
+    apart redraw once, after the pause, as This grid's panel does. The value
+    is remembered, and the tooltip's metres follow, at once."""
+    dock = whole_site(plugin)
+    site = dock._site
+    drawn = []
+    real = site.refresh_slice
+    monkeypatch.setattr(site, "refresh_slice", lambda: drawn.append(1) or real())
+    spin = dock.site_finish.max_distance_spin
+    spin.setValue(1.0)
+    _events()
+    spin.setValue(1.25)
+    _events()
+    assert drawn == []
+    assert plugin.session.site_resolution()["max_distance_spacings"] == 1.25
+    assert "A 1.88 m" in spin.toolTip()  # 1.25 x A's 1.5 m
+    assert spin_until(lambda: drawn, 5_000)
+    spin_until(lambda: False, 300)  # long past another debounce
+    assert drawn == [1]
+    assert dock.current_site_slice() is not None
+
+
 def test_the_max_distance_tooltip_gives_each_grids_metres(plugin):
     dock = whole_site(plugin)
     assert dock.site_finish.max_distance_spin.toolTip() == (
@@ -1262,6 +1286,53 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
     assert plugin.layers.group.findLayer(
         next(lyr for lyr in plugin.layers.project.mapLayers().values() if lyr.name() == "site").id()
     )
+
+
+def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal, tmp_path):
+    """The plugin hands the site export the site panel's finish, not the
+    default. Set as a user would; the file must record it, and its bands must
+    be the site engine's own slices at that finish (the writer stores
+    `SiteSlice.array` as it comes, already on the site lattice)."""
+    dock = whole_site(plugin)
+    panel = dock.site_finish
+    panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
+    panel.max_distance_spin.setValue(1.5)
+    panel.smooth_y_spin.setValue(0.3)
+    chosen = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_y_m=0.3)
+    assert panel.value() == chosen != SliceFinish()
+    target = tmp_path / "finished.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+
+    site = dock.site_engine
+    z = site.site_z
+    thickness, step = dock.thickness_step_levels()
+    windows = plan_windows(z, thickness, step)[:2]
+
+    def drawn(finish, window):
+        return site.slice_at(
+            z.t0_ns + window.k0 * z.dz_ns,
+            window.n_levels * z.dz_ns,
+            finish=finish,
+            method=dock.normalisation_panel.method(),
+            manual=dock.site_gains(),
+        ).array
+
+    md = _metadata(target)
+    ds = gdal.Open(str(target))
+    try:
+        bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(len(windows))]
+    finally:
+        ds.Close()
+    assert md["NSGEO_SITE_INTERPOLATION"] == "idw"
+    assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 1.5
+    assert float(md["NSGEO_SITE_SMOOTH_X_M"]) == 0.0
+    assert float(md["NSGEO_SITE_SMOOTH_Y_M"]) == 0.3
+    for band, window in zip(bands, windows, strict=True):
+        np.testing.assert_array_equal(band, drawn(chosen, window))
+    # The comparison can tell the two apart.
+    assert not np.array_equal(bands[0], drawn(SliceFinish(), windows[0]), equal_nan=True)
 
 
 def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(

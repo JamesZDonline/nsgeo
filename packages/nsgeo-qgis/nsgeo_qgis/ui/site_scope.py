@@ -475,6 +475,15 @@ class SiteScope:
         self.tick.setSingleShot(True)
         self.tick.setInterval(0)
         self.tick.timeout.connect(self._run_tick)
+        #: An Interpolation edit's redraw waits out This grid's pause
+        #: (`dock._finish_debounce`): it re-plans every grid's weights and
+        #: re-measures the shared stretch, so a keystroke or a held arrow must
+        #: not pay that once a step. 0.2.0's site radius went through
+        #: `dock._debounce`, the same 120 ms.
+        self.finish_debounce = QTimer(dock)
+        self.finish_debounce.setSingleShot(True)
+        self.finish_debounce.setInterval(dock._finish_debounce.interval())
+        self.finish_debounce.timeout.connect(self._on_finish_timeout)
 
         dock.site_panel.included_changed.connect(self._on_included_changed)
         dock.site_panel.transform_changed.connect(self._on_transform_changed)
@@ -539,6 +548,7 @@ class SiteScope:
         """
         self.spins = capture_spins(self.dock)
         self.tick.stop()
+        self.finish_debounce.stop()
         self.engine.cancel()
         self.slice = None
         self.window = None
@@ -696,17 +706,25 @@ class SiteScope:
 
     def _on_finish_edited(self, field: str, value: float | str) -> None:
         """The site's Interpolation panel was edited by hand: remember it for
-        the site (#71), refresh the tooltip's metres and redraw. A seed or
-        restore never gets here (`FinishPanel.set_value` announces nothing).
-        Guarded: a raising receiver of `FinishPanel.edited` is reported by
-        PyQt's unraisable hook, not by the panel's own guard."""
+        the site (#71) and refresh the tooltip's metres at once, as This grid
+        remembers and relabels at once, then redraw after the pause
+        (`finish_debounce`). A seed or restore never gets here
+        (`FinishPanel.set_value` announces nothing). Guarded: a raising
+        receiver of `FinishPanel.edited` is reported by PyQt's unraisable
+        hook, not by the panel's own guard."""
         try:
             if self.showing and self.session.is_open:
                 self.session.remember_site_resolution(**{field: value})
                 self.refresh_rows()
-                self.schedule_refresh()
+                self.finish_debounce.start()
         except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
             _log(f"could not follow the interpolation setting: {exc}")
+
+    def _on_finish_timeout(self) -> None:
+        try:
+            self.schedule_refresh()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            _log(f"could not redraw after an interpolation edit: {exc}")
 
     # ---- resolution ---------------------------------------------------------------
     def seed_resolution(self, included: tuple[str, ...]) -> None:
@@ -856,7 +874,7 @@ class SiteScope:
             if self.engine.weights_cached(finish):
                 self.refresh_slice()
             else:
-                # Building the weights takes seconds at a fine cell (interpolation spec §8).
+                # Building the weights takes seconds at a fine cell (interpolation spec §7).
                 with busy_cursor():
                     self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
@@ -987,3 +1005,4 @@ class SiteScope:
 
     def dispose(self) -> None:
         self.tick.stop()
+        self.finish_debounce.stop()
