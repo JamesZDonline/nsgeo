@@ -34,7 +34,7 @@ grids of their own data, made with unrecorded settings. These grids are the acce
 (§10).
 
 **Success.** At default settings, slices of the user's real grids have no holes between adjacent
-lines and no disc-shaped artefacts. They are in the same ballpark as the user's Surfer grids.
+lines at their nominal spacing and no disc-shaped artefacts. They are in the same ballpark as the user's Surfer grids.
 Scrubbing through depth stays live for IDW and kriging.
 
 ---
@@ -85,12 +85,12 @@ Read from `origin/main` at `2878db2` on 2026-11-02. Line numbers are from that c
 10. **Acceptance is a ballpark visual comparison** against the user's Surfer-gridded data (§10).
 11. **This goes ahead of M15 (cut anywhere).** M15's approved design is revised afterwards onto
     these settings (§12).
+12. **Max distance to data defaults to 0.5 × line spacing** (§5.2).
 
 **Design calls made in this document** (the user hasn't seen these; each is marked *design call*
 where it appears):
 
 - The default method is **kriging**.
-- The default maximum distance is **0.75 × line spacing**.
 - A **None (binned only)** method is kept in the dropdown. It replaces today's "radius 0".
 - **Fill radius is removed.** There is no "disc" option in the dropdown.
 - Interpolation **never changes a cell that has data**. Only smoothing does.
@@ -165,14 +165,20 @@ A cell is filled only if the nearest data cell's centre is within this distance 
 centre. Otherwise it is NaN. This applies to all three methods, and it is the only place a hole
 can appear. It is the replacement for today's radius as the "how far to trust" control.
 
-- **Default 0.75 × line spacing** (*design call*). At nominal spacing the midpoint between two
-  lines is 0.5 × spacing from each, so the default fills every normal gap, with margin for a line
-  that wanders. A skipped line leaves a 2 × spacing gap whose middle is 1.0 × spacing from data,
-  so it shows as a narrow blank stripe. The user can raise the value to bridge it.
+- **Default 0.5 × line spacing** (the user's decision). At nominal spacing the midpoint between
+  two lines is exactly 0.5 × spacing from each, so the default just closes every normal gap, and
+  nothing is filled any further from data than that. It has **no margin**: a line that wanders
+  off its offset can leave a thin blank stripe, and the user raises the value to close it, as
+  with today's radius. A skipped line leaves a 2 × spacing gap whose middle is 1.0 × spacing from
+  data, so it shows as a blank stripe.
+- **Compared in metres and inclusively** (distance ≤ max distance, with a small tolerance, e.g.
+  1e-9 m). The distance is never rounded to whole cells. At the default, the midpoint cell sits
+  exactly on the limit, and a rounding or strict comparison would turn every normal gap into a
+  stripe. Tested at nominal spacing for both odd and even numbers of cells between lines.
 - Expressed in **× line spacing with an `= x m` readout** and remembered per grid, exactly as
   `grid_radius_spin` is today. Site scope uses each grid's own spacing.
-- Converted to cells using the **engine's applied frame cell**, never `cell_spin.value()`. This
-  fixes #104 by construction.
+- Cell-centre distances come from the **engine's applied frame cell**, never
+  `cell_spin.value()`. This fixes #104 by construction.
 - Disabled when the method is None.
 
 ### 5.3 The neighbourhood (IDW and kriging)
@@ -283,7 +289,7 @@ Resolution group.
 | Control | Kind | Notes |
 |---|---|---|
 | Method | combo | None (binned only) / Inverse distance (IDW) / Kriging / Minimum curvature. Default Kriging. |
-| Max distance to data | spin, × line spacing, `= x m` readout | Default 0.75. Disabled for None. Site scope: the per-grid metres go in the tooltip, as `site_scope.radius_tooltip` does today. |
+| Max distance to data | spin, × line spacing, `= x m` readout | Default 0.5. Disabled for None. Site scope: the per-grid metres go in the tooltip, as `site_scope.radius_tooltip` does today. |
 | Smoothing X | spin, metres | Default 0. |
 | Smoothing Y | spin, metres | Default 0. |
 
@@ -358,7 +364,8 @@ apart, the default cell.
 - Affine equivariance: `f(a·x + b) == a·f(x) + b` for the same coverage.
 - Cells beyond the max distance are NaN, and cells within it are finite.
 - An all-blank input gives an all-blank output, and a single data cell does not crash.
-- No holes between adjacent lines at the default max distance; a skipped line leaves a blank
+- No holes between adjacent lines at nominal spacing at the default max distance. A line offset
+  by 0.1 × spacing leaves a stripe at 0.5 that closes at 0.6. A skipped line leaves a blank
   stripe.
 - No neighbourhood discontinuity (§5.3): on a smooth synthetic field sampled on line geometry, the
   largest step between adjacent filled cells is bounded by the field's own gradient × cell size,
@@ -385,8 +392,9 @@ the export metadata keys; site gains commuting with every
 method; #104's scenario (refuse a Resolution after a cell edit, export, and check that the
 recorded max distance matches the frame's cell); the numpy-only boundary test still passing.
 
-**Real data:** run every method on the local grids. Check for no holes at defaults and unchanged
-data cells, and record the timings from §7.
+**Real data:** run every method on the local grids. Assert that data cells are unchanged.
+Record, rather than assert, any blank stripes at the default max distance, because real lines
+wander. Record the timings from §7.
 
 ---
 
@@ -396,7 +404,8 @@ These are human gates. They are tracked and reported, never passed silently.
 
 1. **Walkthrough on the deployed plugin** (ns-geo profile, per the usual build-and-walkthrough
    rule), on the user's real grids:
-   - at defaults, no polka dots and no holes between lines;
+   - at defaults, no polka dots and no holes between lines at their nominal spacing. Any stripe
+     from a wandering line closes when max distance is raised a little;
    - a skipped line or obstacle shows as blank;
    - Smoothing X and Y each act along the expected grid axis;
    - depth scrubbing is live with IDW and kriging;
