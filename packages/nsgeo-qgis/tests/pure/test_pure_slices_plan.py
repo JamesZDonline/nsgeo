@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import tracemalloc
 
 import numpy as np
 import pytest
@@ -384,11 +385,11 @@ def test_the_default_max_distance_is_three_quarters_of_a_spacing(spacing):
     assert SliceFinish().in_metres(spacing).max_distance_m == 0.75 * spacing
 
 
-def _binned_rows(spacing, cell, size=10.0, skip=()):
+def _binned_rows(spacing, cell, size=10.0, skip=(), nx=40):
     """Lines along X from `spacing / 2`, each on the row of the cell its
     centre falls in, as binning places them; every column populated."""
     ny = int(math.ceil(size / cell))
-    pop = np.zeros((ny, 40), bool)
+    pop = np.zeros((ny, nx), bool)
     for i, y in enumerate(np.arange(spacing / 2, size - 1e-9, spacing)):
         if i not in skip:
             pop[int(y // cell)] = True
@@ -459,6 +460,32 @@ def test_updated_ignores_a_bad_method_or_number():
 
 def test_updated_accepts_an_int_as_a_number():
     assert SliceFinish().updated({"smooth_x_m": 1}).smooth_x_m == 1.0
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_weights_estimate_covers_building_them(method, monkeypatch):
+    """The over-budget warning counts `WEIGHT_BYTES_PER_CELL` before any weights
+    exist (interpolation spec §7), so building them must not need much more:
+    within half as much again. Measured on wandering 0.5 m lines over 50 m at
+    0.05 m: 105-107 B a cell, against 466-561 B before `plan_fill` chunked its
+    working set. Small chunks here, so their fixed few megabytes do not swamp a
+    grid this size."""
+    from nsgeo.slices import interpolate
+
+    monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
+    monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
+    settings = SliceFinish(method=method).in_metres(0.5)
+    pop = _binned_rows(0.5, 0.05, nx=200)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before, _ = tracemalloc.get_traced_memory()
+        fw = plan_fill(pop, 0.05, method, settings.max_distance_m, settings.search_radius_m)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert fw.targets.size > 0.8 * pop.size
+    assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
 
 
 def test_the_estimate_counts_the_fill_weights():

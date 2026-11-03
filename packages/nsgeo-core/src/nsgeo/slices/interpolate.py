@@ -2,11 +2,11 @@
 
 An empty cell is filled only when a data cell lies within the max distance;
 beyond it the cell stays blank, so a skipped or wandering line shows as a
-stripe instead of being papered over (interpolation spec §5.1). A data cell is
+stripe instead of being papered over (interpolation spec §5.2). A data cell is
 never changed.
 
 Which cells get filled, and from which neighbours with which weights, depends
-only on where data is, never on its values (interpolation spec §5.2). So the work is split:
+only on where data is, never on its values (interpolation spec §7). So the work is split:
 `plan_fill` builds a sparse weights table once per grid, method and distance,
 and `FillWeights.apply` turns it into a slice with one gather and one sum.
 That is why scrubbing through slices stays cheap although kriging is dear.
@@ -18,13 +18,16 @@ two lines draw on both, and a cell beside the outermost line draw on one.
 
 numpy only, no scipy. Measured medians for the plan and for one apply, on a
 50 m x 50 m grid of lines 0.5 m apart along X (max distance 0.25 m, search
-radius 1.0 m) and on the ten real lines (25 x 100 cells at 0.2 m):
+radius 1.0 m) and on the ten real lines (25 x 100 cells at 0.2 m). The 50 m
+rows were re-measured once the plan ran in chunks (`_PLAN_CHUNK`); on the
+same machine one pass had taken 0.67 / 0.65 s at 0.1 m and 6.5 / 6.4 s at
+0.05 m, and the 0.75 x spacing default costs the same:
 
     case                  plan IDW   plan kriging   apply
     real lines, 0.2 m     0.006 s    0.006 s        0.1 ms
-    50 m grid, 0.2 m      0.09 s     0.08 s         2 ms
-    50 m grid, 0.1 m      0.94 s     1.0 s          10-13 ms
-    50 m grid, 0.05 m     9.7 s      10.5 s         about 0.1 s
+    50 m grid, 0.2 m      0.08 s     0.07 s         2 ms
+    50 m grid, 0.1 m      0.59 s     0.48 s         9-10 ms
+    50 m grid, 0.05 m     5.4 s      5.4 s          50-75 ms
 """
 
 from __future__ import annotations
@@ -39,11 +42,22 @@ NEIGHBOURS_PER_QUADRANT: int = 3
 # The limit is inclusive: a cell exactly halfway between lines must fill. The
 # tolerance keeps hypot(...) * cell on the right side of the comparison.
 DISTANCE_TOL_M: float = 1e-9
-IDW_POWER = 2  # (interpolation spec §5.2)
+IDW_POWER = 2  # (interpolation spec §5.1)
 
 _SLOTS = 4 * NEIGHBOURS_PER_QUADRANT
 _PRUNE_EVERY = 32  # offsets between dropping targets whose quadrants are all full
-_SOLVE_CHUNK = 50_000  # kriging systems per np.linalg.solve
+# Targets per pass of the stages after the neighbour search, and kriging
+# systems per np.linalg.solve. Both bound a working set that otherwise grows
+# with the grid: one pass over every target at once peaked near 6 x the
+# weights it kept (466-561 B a cell, wandering 0.5 m lines at 0.1 and 0.05 m),
+# against the 96 B a cell `MemoryEstimate` counts. A pass costs about 0.5 KB
+# a target and a kriging system about 7 KB, so planning stays within about
+# 20 MB of the weights it returns whatever the grid: measured 4 MB over them
+# on line data, 18 MB on a random mask where every pattern is new. No weight
+# depends on them: a target's offsets and weights are its own, and each
+# system is solved on its own (checked bit for bit against one pass).
+_PLAN_CHUNK = 8192
+_SOLVE_CHUNK = 2048
 _EMPTY = np.iinfo(np.int32).min  # offset sentinel for an empty slot in pattern keys
 
 
@@ -150,12 +164,13 @@ def _neighbourhoods(
     """Per target, the K nearest data cells in each quadrant as flat ids (-1 = empty)."""
     ny, nx = pop2.shape
     k = NEIGHBOURS_PER_QUADRANT
-    ty, tx = np.divmod(targets, nx)
+    # int32 throughout, as `sources` already is: half the working set of intp.
+    ty, tx = np.divmod(targets.astype(np.int32), nx)
     angle = np.mod(np.arctan2(dy, dx), 2 * math.pi)
     quad = np.minimum((angle / (math.pi / 2)).astype(np.intp), 3)
     sources = np.full((targets.size, _SLOTS), -1, dtype=np.int32)
     count = np.zeros((targets.size, 4), dtype=np.int8)
-    active = np.arange(targets.size)
+    active = np.arange(targets.size, dtype=np.int32)
     for i, (oy, ox, q) in enumerate(zip(dy.tolist(), dx.tolist(), quad.tolist(), strict=True)):
         if i % _PRUNE_EVERY == 0 and i:
             active = active[(count[active] < k).any(axis=1)]
@@ -172,6 +187,17 @@ def _neighbourhoods(
     return sources
 
 
+def _offsets(sources: np.ndarray, targets: np.ndarray, nx: int) -> tuple[np.ndarray, np.ndarray]:
+    """Each source's (dy, dx) from its target in cells, int32 with (0, 0) in an
+    empty slot, and which slots hold a source."""
+    valid = sources >= 0
+    ty, tx = np.divmod(targets.astype(np.int32), nx)
+    safe = np.where(valid, sources, 0)
+    rel = np.stack([safe // nx - ty[:, None], safe % nx - tx[:, None]], axis=-1).astype(np.int32)
+    rel[~valid] = 0
+    return rel, valid
+
+
 def _idw_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndarray:
     d = np.hypot(rel[..., 0], rel[..., 1]) * cell
     w = np.where(valid, np.where(valid, d, 1.0) ** -float(IDW_POWER), 0.0)
@@ -179,7 +205,7 @@ def _idw_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndarray:
 
 
 def _kriging_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndarray:
-    """Ordinary kriging, linear variogram, no nugget, isotropic (interpolation spec §5.2).
+    """Ordinary kriging, linear variogram, no nugget, isotropic (interpolation spec §5.1).
 
     Weights depend only on the sources' offsets from the target, and regular
     line geometry repeats a few dozen offset patterns across thousands of
@@ -249,11 +275,10 @@ def plan_fill(
         return empty
     sy, sx, _ = _disc_offsets(search_radius_m, cell)
     sources = _neighbourhoods(pop2, targets, sy, sx)
-    valid = sources >= 0
-    ty, tx = np.divmod(targets, nx)
-    safe = np.where(valid, sources, 0)
-    rel = np.stack([safe // nx - ty[:, None], safe % nx - tx[:, None]], axis=-1)
-    rel = np.where(valid[..., None], rel, 0)
     build = _idw_weights if method == "idw" else _kriging_weights
-    weights = build(rel, valid, cell).astype(np.float32)
+    weights = np.empty(sources.shape, dtype=np.float32)
+    for lo in range(0, targets.size, _PLAN_CHUNK):
+        rows = slice(lo, lo + _PLAN_CHUNK)
+        rel, valid = _offsets(sources[rows], targets[rows], nx)
+        weights[rows] = build(rel, valid, cell)
     return FillWeights(shape, flat_pop, targets, sources, weights)

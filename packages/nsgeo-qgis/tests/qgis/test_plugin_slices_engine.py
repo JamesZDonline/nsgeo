@@ -376,6 +376,45 @@ def test_a_new_cell_or_setting_rebuilds_the_weights(sourced, monkeypatch):
     assert calls[-1][1] == pytest.approx(0.2)  # the frame's cell
 
 
+def test_a_z_only_resolution_edit_keeps_the_weights(sourced, monkeypatch):
+    """dz, z0 and z1 leave the frame as it was, so its weights stand: rebuilding
+    them on every z edit cost seconds at a fine cell (10.5 s at 0.05 m on a 50 m
+    grid, as measured by the final review). A new cell is a
+    new frame and still rebuilds. The slice drawn from the kept weights equals
+    a fresh engine's at the same resolution."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    calls = []
+    real = slices_engine.plan_fill
+    monkeypatch.setattr(
+        slices_engine, "plan_fill", lambda *a, **k: calls.append(a) or real(*a, **k)
+    )
+    finish = SliceFinish()
+    engine.finish(*engine.slice_at(SliceWindow(4, 14)), finish)
+    assert len(calls) == 1
+    edited = Resolution(cell=0.25, dz_ns=0.25, t0_ns=4.0, t1_ns=26.0)
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.25, t0_ns=2.0, t1_ns=30.0))
+    engine.set_resolution(edited)
+    assert engine.weights_cached(finish)
+    window = SliceWindow(10, 30)
+    drawn = engine.finish(*engine.slice_at(window), finish)
+    assert len(calls) == 1
+
+    fresh = SliceEngine(session)
+    try:
+        fresh.set_source(engine.choice)
+        assert fresh.wait_for_preparation(20_000)
+        fresh.set_resolution(edited)
+        np.testing.assert_array_equal(drawn, fresh.finish(*fresh.slice_at(window), finish))
+    finally:
+        fresh.dispose()
+
+    engine.set_resolution(Resolution(cell=0.2, dz_ns=0.25, t0_ns=4.0, t1_ns=26.0))
+    assert not engine.weights_cached(finish)
+    engine.finish(*engine.slice_at(window), finish)
+    assert len(calls) == 3  # the fresh engine's build, then the new cell's
+
+
 def test_the_weights_are_rebuilt_when_the_populated_cells_differ(sourced, monkeypatch):
     """`weights_cached` compares the key only, so `finish` itself must catch a
     coverage the held weights were not planned for."""

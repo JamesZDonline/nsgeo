@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import tracemalloc
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
-from nsgeo.slices import CubeFrame, FillWeights, plan_fill
+from nsgeo.slices import CubeFrame, FillWeights, interpolate, plan_fill
 from nsgeo.slices.interpolate import DISTANCE_TOL_M, METHODS, NEIGHBOURS_PER_QUADRANT
 
 from tests.real_lines import (
@@ -312,6 +314,61 @@ def test_nbytes_counts_the_tables():
     )
     assert isinstance(fw, FillWeights)
     assert fw.sources.shape[1] == 4 * NEIGHBOURS_PER_QUADRANT
+
+
+def traced_peak(fn, *args):
+    """`fn(*args)` and the most memory it allocated at once, in bytes."""
+    started = not tracemalloc.is_tracing()
+    if started:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before, _ = tracemalloc.get_traced_memory()
+        out = fn(*args)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        if started:
+            tracemalloc.stop()
+    return out, peak - before
+
+
+def dense_lines(cell=0.05, size=10.0):
+    """0.5 m lines at a fine cell: nine in ten cells are targets, the worst case
+    for memory."""
+    ny = int(np.ceil(size / cell))
+    pop = np.zeros((ny, ny), bool)
+    for y in np.arange(0.25, size - 1e-9, 0.5):
+        pop[int(y // cell)] = True
+    return pop
+
+
+@BOTH
+def test_the_plan_does_not_depend_on_the_chunk_size(method, monkeypatch):
+    """Planning runs its per-target stages in chunks to bound memory; no
+    weight may move. A random mask gives kriging many distinct patterns, so
+    the chunks dedupe and solve different sets."""
+    pop = np.random.default_rng(5).random((60, 70)) < 0.12
+    want = plan_fill(pop, 0.1, method, 0.3, 0.6)
+    monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 7)
+    monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 5)
+    got = plan_fill(pop, 0.1, method, 0.3, 0.6)
+    assert np.array_equal(got.targets, want.targets)
+    assert np.array_equal(got.sources, want.sources)
+    assert np.array_equal(got.weights, want.weights)
+
+
+@BOTH
+def test_planning_needs_little_more_memory_than_the_weights_it_returns(method, monkeypatch):
+    """Spec §7: the weights' memory is estimated before they are built, so the
+    build must not need several times what it keeps. Measured before the
+    chunking: 5.9-6.1 x `nbytes` on this grid. Small chunks here, so their
+    fixed working set (a few megabytes at the shipped sizes) does not swamp a
+    grid this size."""
+    monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
+    monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
+    fw, peak = traced_peak(plan_fill, dense_lines(), 0.05, method, 0.375, 1.0)
+    assert fw.targets.size > 0.8 * fw.populated.size
+    assert peak <= 1.5 * fw.nbytes
 
 
 def test_plan_fill_refuses_bad_input():

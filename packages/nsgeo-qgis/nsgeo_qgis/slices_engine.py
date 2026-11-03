@@ -823,6 +823,13 @@ class SliceEngine(QObject):
         # because `set_resolution` also calls this method and must not
         # blank a fingerprint that still correctly describes the grid the
         # CURRENT lines were prepared against.
+        #
+        # The fill weights are the exception: they depend on the frame and the
+        # populated cells, never on the z axis, so a dz/z0/z1 edit keeps them
+        # (rebuilding takes about 5 s at 0.05 m on a 50 m grid). Kept only while
+        # the frame is unchanged; `_weights_for` still checks the key and the
+        # populated mask before reusing them. `set_source` and `clear` drop them.
+        held = self._weights
         self._plans = None
         self._cube = None
         self._weights = None
@@ -836,6 +843,8 @@ class SliceEngine(QObject):
         res = self._resolution
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
+        if held is not None and held[0][0] == self._frame:
+            self._weights = held
         self._choose_mode()
 
     @staticmethod

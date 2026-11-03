@@ -129,7 +129,7 @@ class Resolution:
     plausible-looking coverage.
 
     The interpolation settings are NOT here (`SliceFinish`): they are display
-    parameters applied after binning (interpolation spec §8), so they change
+    parameters applied after binning (interpolation spec §4), so they change
     no plan.
     """
 
@@ -170,7 +170,11 @@ METHOD_LABELS: dict[str, str] = {
 #: Per cell, the fill weights' int32 source index and float32 weight for each
 #: of the four quadrants' nearest neighbours. Deliberately the weights proper,
 #: not `FillWeights.nbytes` (populated mask, targets): the estimate only has to
-#: be the right order of magnitude to warn before anything is built.
+#: be the right order of magnitude to warn before anything is built. Building
+#: them peaks a little above it: 105-107 B a cell, measured on wandering 0.5 m
+#: lines over 50 m at 0.05 m, once `plan_fill` chunked its working set (466-561
+#: B before), within the half again this estimate is allowed
+#: (`test_the_weights_estimate_covers_building_them`).
 WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8
 
 #: The remembered fields a `SliceFinish` is made of.
@@ -240,7 +244,7 @@ class MemoryEstimate:
     lines_bytes: int
     cube_bytes: int
     #: The interpolation weights, built once per grid and kept (interpolation
-    #: spec §8). Counted so a fine cell on a large grid warns before building.
+    #: spec §7). Counted so a fine cell on a large grid warns before building.
     weights_bytes: int = 0
 
     @property
@@ -285,14 +289,17 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: The most cells a frame may have before the Slices dock refuses the
 #: geometry. Not a memory *budget* -- spec 7.4 is explicit that those
 #: warn rather than hard-cap -- but a floor under what can be drawn at
-#: all. Cell count goes as 1/cell**2, so the arithmetic runs away fast:
-#: measured on this repo, a 40 m grid at 0.01 m is 4000 x 4000, about a
-#: gigabyte for ONE filled slice (the fill's FFT working set, ~64 B/cell,
-#: dominates the 4 B/cell array), and 100 m is 6.4 GB. Streaming is no
-#: escape: the per-slice array is the problem, not the cube. 4 million
-#: cells keeps a filled slice near a quarter of a gigabyte, which still
-#: covers a 100 m grid at 0.05 m -- far finer than any trace spacing
-#: spec 4's own "no smaller than the trace spacing" would allow.
+#: all. Cell count goes as 1/cell**2, so the arithmetic runs away fast: a
+#: 40 m grid at 0.01 m is 4000 x 4000, 16 million cells, and 100 m is 100
+#: million. Streaming is no escape: what grows is per cell, not the cube.
+#: The interpolation dominates (interpolation spec §7), measured on 0.5 m
+#: lines at 0.05 m: the weights hold about 95 B a cell and peak near 107 B
+#: while they are built (`WEIGHT_BYTES_PER_CELL`), and each finished slice
+#: needs about 55 B a cell more to apply them and 41 B to smooth, against
+#: the 4 B a cell of the slice itself. 4 million cells is then about 0.4 GB
+#: of weights and 0.2 GB a slice (0.4 GB smoothed), inside the 1.5 GB
+#: default budget, and still covers a 100 m grid at 0.05 m -- far finer
+#: than spec 4's own "no smaller than the trace spacing" would allow.
 MAX_FRAME_CELLS = 4_000_000
 
 
@@ -410,7 +417,7 @@ def format_status(
     binding constraint -- halving the cell doubles the time and
     quadruples the cube.
     """
-    # The interpolation weights are held in either mode (interpolation spec §8).
+    # The interpolation weights are held in either mode (interpolation spec §7).
     held = estimate.lines_bytes + estimate.weights_bytes
     noun = "line" if n_lines == 1 else "lines"
     if mode == "resident":
