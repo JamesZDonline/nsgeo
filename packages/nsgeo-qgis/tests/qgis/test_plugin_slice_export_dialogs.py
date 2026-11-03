@@ -319,6 +319,48 @@ def test_an_export_after_a_refused_resolution_uses_the_frames_cell(plugin, tmp_p
         ds.Close()
 
 
+def test_the_plugin_exports_the_docks_finish(plugin, tmp_path, answer_modal):
+    """`export_geotiff` must hand the dock's own finish to the exporter: the
+    file's bands and metadata describe what the map shows, not the defaults.
+    The oracle is the core pipeline, not `engine.finish`."""
+    from nsgeo.slices import finish_slice, plan_fill, plan_windows, to_north_up
+    from osgeo import gdal
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    panel = dock.grid_finish
+    panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
+    panel.max_distance_spin.setValue(1.0)
+    panel.smooth_x_spin.setValue(0.25)
+    dock._finish_debounce.stop()
+    spacing = GRID.default_spacing
+
+    target, _levels = _export_levels(dock, tmp_path, answer_modal)
+
+    engine = dock.engine
+    cell = engine.frame.cell
+    settings = engine.finish_settings(dock.slice_finish())
+    thickness_levels, step_levels = dock.thickness_step_levels()
+    windows = list(plan_windows(engine.z, thickness_levels, step_levels))
+    ds = gdal.Open(str(target))
+    try:
+        tags = ds.GetMetadata()
+        assert tags["NSGEO_INTERPOLATION"] == "idw"
+        assert tags["NSGEO_MAX_DISTANCE_M"] == str(1.0 * spacing)
+        assert tags["NSGEO_SMOOTH_X_M"] == "0.25"
+        assert tags["NSGEO_SMOOTH_Y_M"] == "0.0"
+        for index, window in enumerate(windows, start=1):
+            values, coverage = engine.slice_at(window)
+            weights = plan_fill(
+                coverage > 0, cell, "idw", settings.max_distance_m, settings.search_radius_m
+            )
+            want, _gt = to_north_up(finish_slice(values, weights, cell, settings), engine.frame)
+            np.testing.assert_array_equal(ds.GetRasterBand(index).ReadAsArray(), want)
+    finally:
+        ds.Close()
+
+
 def test_export_geotiff_also_writes_coverage_when_checked(plugin, tmp_path, answer_modal):
     """Ruling AH: `write_coverage` had no caller anywhere in the plugin
     before this fix -- wired to the dock's own coverage toggle, the

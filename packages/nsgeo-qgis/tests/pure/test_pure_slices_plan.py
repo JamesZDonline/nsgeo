@@ -405,8 +405,10 @@ def test_in_metres_refuses_a_spacing_that_is_not_positive(spacing):
         SliceFinish().in_metres(spacing)
 
 
-def test_updated_lays_known_fields_over_and_ignores_the_rest():
-    got = SliceFinish().updated({"method": "idw", "radius_spacings": 0.5, "cell": 0.2})
+@pytest.mark.parametrize("radius_spacings", [0.5, 1.5])
+def test_updated_lays_known_fields_over_and_ignores_the_rest(radius_spacings):
+    # 1.5 differs from the default max distance, so mapping the 0.2.0 radius onto it shows.
+    got = SliceFinish().updated({"method": "idw", "radius_spacings": radius_spacings, "cell": 0.2})
     assert got == SliceFinish(method="idw")
     got = SliceFinish().updated(
         {"max_distance_spacings": 1.5, "smooth_x_m": 0.3, "smooth_y_m": 0.4}

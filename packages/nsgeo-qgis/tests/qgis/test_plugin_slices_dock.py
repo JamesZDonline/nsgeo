@@ -852,23 +852,26 @@ def test_a_remembered_finish_is_restored_on_a_grid_switch(docked_two_grids):
     )
 
 
-def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids):
-    """Review Focus 3: a 0.2.0 survey remembers `radius_spacings: 0.5` for a
-    grid. This build opens it on the new defaults, with no holes, and does
-    not mark the survey dirty. Put into the record directly, not through
+@pytest.mark.parametrize("radius_spacings", [0.5, 1.5])
+def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids, radius_spacings):
+    """Review Focus 3: a 0.2.0 survey remembers `radius_spacings` for a
+    grid (1.5 is the case that tells ignoring it from mapping it onto the
+    max distance, whose default is also 0.5). This build opens it on the
+    new defaults, with no holes, and does not mark the survey dirty. Put
+    into the record directly, not through
     `remember_slice_resolution`, whose `radius_spacings=` keyword Task 5
     removes."""
     dock, session = docked_two_grids
     _settle_sources(dock, session)
     _set_finish(dock, method="none")
     _switch(dock, "B")
-    session._update_source("A", resolution={"radius_spacings": 0.5})
+    session._update_source("A", resolution={"radius_spacings": radius_spacings})
     session.save()
     assert not session.dirty
     _switch(dock, "A")
     assert dock.slice_finish() == SliceFinish()
     assert not session.dirty
-    assert session.slice_resolution("A") == {"radius_spacings": 0.5}  # left as found
+    assert session.slice_resolution("A") == {"radius_spacings": radius_spacings}  # left as found
     # No holes: the default fills between the lines.
     window = dock.current_window()
     values, coverage = dock.engine.slice_at(window)
