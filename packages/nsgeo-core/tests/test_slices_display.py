@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
@@ -337,3 +339,29 @@ def test_a_hair_off_axis_frame_keeps_the_full_pitch():
     frame = _frame(1e-7, nx=100, ny=100)  # 20 m
     _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
     assert gt[1] == pytest.approx(frame.cell)
+
+
+def test_the_north_up_gather_is_planned_once_per_frame(monkeypatch):
+    """Which frame cell each pixel reads depends only on the frame, so a
+    slider tick on the same frame reuses it: solving it every tick made a
+    rotated preview tick 60-290 ms. An equal frame (not the same object)
+    shares the plan; another frame gets its own."""
+    from nsgeo.slices import display
+
+    display._north_up_plan.cache_clear()
+    built = []
+    real = display._build_north_up_plan
+    monkeypatch.setattr(display, "_build_north_up_plan", lambda f: built.append(f) or real(f))
+    frame = _frame(10.497)
+    values = np.random.default_rng(0).random((frame.ny, frame.nx))
+    out, gt = to_north_up(values, frame)
+    again, gt_again = to_north_up(2.0 * values, dataclasses.replace(frame))
+    assert len(built) == 1
+    assert gt_again == gt
+    np.testing.assert_array_equal(np.isnan(again), np.isnan(out))
+    np.testing.assert_array_equal(again[np.isfinite(out)], (2.0 * out)[np.isfinite(out)])
+    other = _frame(33.0)
+    _, gt_other = to_north_up(values, other)
+    assert len(built) == 2 and built[-1] == other
+    assert gt_other != gt
+    display._north_up_plan.cache_clear()

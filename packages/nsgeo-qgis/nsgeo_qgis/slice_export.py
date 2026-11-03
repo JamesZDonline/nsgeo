@@ -40,18 +40,15 @@ reviewer of this task does:
   just takes the pitch from the geotransform it returns. History: Ruling
   AE once wrote the frame's own cell size and recorded a 15-18% loss at
   rotated azimuths, which is what this replaces.
-* **The per-band `cell_index` solve is not hoisted out of the export
-  loop.** `to_north_up`'s resample grid does not depend on the values
-  being resampled, so the solve repeats for every band. Measured on a
-  400x300 frame at cell 0.05: 0.019 s axis-aligned, 0.112 s at 10.497
-  degrees (half-pitch sampling), about 4.4 s over 39 bands on a rotated
-  frame. Hoisting it needs either a new `to_north_up` entry point that
-  accepts precomputed indices (a change to a shipped API, and to
-  `SliceLayer`'s only other caller) or reimplementing the resample here,
-  a duplicate of core code. The cost is paid once, on an explicit "Export
-  GeoTIFF..." click, not on every tick of a slider the way
-  `SliceLayer.update` is; this module accepts it rather than hiding a
-  latency.
+* **The per-band `cell_index` solve is planned once per frame.**
+  `to_north_up`'s resample grid does not depend on the values being
+  resampled, so the core keeps it per frame (`display._north_up_plan`) and
+  every band after the first is one gather. Before that it was solved for
+  every band: measured on a 400x300 frame at cell 0.05, 0.019 s
+  axis-aligned, 0.112 s at 10.497 degrees (half-pitch sampling), about
+  4.4 s over 39 bands on a rotated frame. The same plan serves
+  `SliceLayer.update`'s ticks, so an export of the frame on screen starts
+  with it already built.
 """
 
 from __future__ import annotations
