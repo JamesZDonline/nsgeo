@@ -56,12 +56,12 @@ def test_set_value_is_quiet_and_round_trips(panel):
 def test_a_user_edit_emits_the_field_and_value(panel):
     got = _record(panel)
     panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
-    panel.max_distance_spin.setValue(0.75)
+    panel.max_distance_spin.setValue(1.25)  # off the 0.75 default, so it is an edit
     panel.smooth_x_spin.setValue(0.3)
     panel.smooth_y_spin.setValue(0.4)
     assert got == [
         ("method", "idw"),
-        ("max_distance_spacings", 0.75),
+        ("max_distance_spacings", 1.25),
         ("smooth_x_m", 0.3),
         ("smooth_y_m", 0.4),
     ]
@@ -79,7 +79,7 @@ def test_max_distance_is_disabled_for_none(panel):
 
 def test_the_metres_label_follows_the_spacing(panel):
     panel.set_spacing(0.5)
-    assert panel.max_distance_metres.text() == "= 0.25 m"
+    assert panel.max_distance_metres.text() == "= 0.375 m"
     panel.max_distance_spin.setValue(1.0)
     assert panel.max_distance_metres.text() == "= 0.5 m"
     panel.set_spacing(None)
@@ -103,8 +103,9 @@ def test_the_tooltips_are_the_pinned_copy(panel):
     assert panel.max_distance_spin.toolTip() == (
         "Cells farther than this from any line are left blank, so the edge of the survey or a "
         "missing line is never filled in.\n"
-        "Half a line spacing just closes the gap between neighbouring lines; raise it if a line "
-        "strayed and left a blank stripe."
+        "Three quarters of a line spacing closes the gap between neighbouring lines, with room "
+        "for a line that wandered; lower it toward half a spacing to fill less, or raise it if a "
+        "line strayed and left a blank stripe."
     )
     for axis, spin in (("X", panel.smooth_x_spin), ("Y", panel.smooth_y_spin)):
         assert spin.toolTip() == (

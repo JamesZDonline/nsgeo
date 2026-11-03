@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import pytest
+from nsgeo.slices import plan_fill
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
@@ -371,12 +375,56 @@ def test_limit_windows_keep_at_most_twelve_evenly_spread_with_both_ends():
 
 
 def test_slice_finish_defaults():
-    assert SliceFinish() == SliceFinish("kriging", 0.5, 0.0, 0.0)
+    # Max distance 0.75 x spacing: the user's decision of 2026-11-03.
+    assert SliceFinish() == SliceFinish("kriging", 0.75, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("spacing", [0.5, 0.7, 1.5])
+def test_the_default_max_distance_is_three_quarters_of_a_spacing(spacing):
+    assert SliceFinish().in_metres(spacing).max_distance_m == 0.75 * spacing
+
+
+def _binned_rows(spacing, cell, size=10.0, skip=()):
+    """Lines along X from `spacing / 2`, each on the row of the cell its
+    centre falls in, as binning places them; every column populated."""
+    ny = int(math.ceil(size / cell))
+    pop = np.zeros((ny, 40), bool)
+    for i, y in enumerate(np.arange(spacing / 2, size - 1e-9, spacing)):
+        if i not in skip:
+            pop[int(y // cell)] = True
+    return pop
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+@pytest.mark.parametrize(
+    ("spacing", "cell"), [(0.5, 0.2), (0.75, 0.2), (0.7, 0.2), (0.5, 0.15), (1.5, 0.2)]
+)
+def test_the_default_finish_closes_every_gap_between_binned_lines(method, spacing, cell):
+    """Binning moves a line up to half a cell, so its gaps are floor or
+    ceil(spacing / cell) cells; 0.5 x spacing striped the even ones."""
+    settings = SliceFinish(method=method).in_metres(spacing)
+    pop = _binned_rows(spacing, cell)
+    rows = np.flatnonzero(pop.any(axis=1))
+    out = plan_fill(pop, cell, method, settings.max_distance_m, settings.search_radius_m).apply(
+        np.where(pop, 1.0, np.nan)
+    )
+    assert np.isfinite(out[rows[0] : rows[-1] + 1]).all()
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_default_finish_leaves_a_skipped_line_blank(method):
+    settings = SliceFinish(method=method).in_metres(0.5)
+    pop = _binned_rows(0.5, 0.2, skip=(10,))
+    rows = np.flatnonzero(pop.any(axis=1))
+    out = plan_fill(pop, 0.2, method, settings.max_distance_m, settings.search_radius_m).apply(
+        np.where(pop, 1.0, np.nan)
+    )
+    assert np.isnan(out[rows[0] : rows[-1] + 1]).all(axis=1).any()
 
 
 def test_in_metres_scales_by_the_spacing_and_sets_the_search_radius():
     got = SliceFinish().in_metres(0.5)
-    assert got.max_distance_m == 0.25
+    assert got.max_distance_m == 0.375
     assert got.search_radius_m == 1.0
     wide = SliceFinish(max_distance_spacings=3.0).in_metres(0.5)
     assert wide.max_distance_m == 1.5

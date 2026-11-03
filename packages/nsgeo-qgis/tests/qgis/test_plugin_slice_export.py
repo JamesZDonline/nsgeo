@@ -441,7 +441,7 @@ def test_write_coverage_also_accepts_a_substituted_writer(exportable, tmp_path):
 def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
     """Ruling AE, reworked (interpolation spec §8): a reader with only the
     `.tif` must see how its values were made. The defaults at this grid's
-    0.5 m spacing: kriging out to half a spacing, no smoothing; and the
+    0.5 m spacing: kriging out to three quarters of a spacing, no smoothing; and the
     old cells-based radius key is gone."""
     from osgeo import gdal
 
@@ -452,7 +452,7 @@ def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
     try:
         tags = ds.GetMetadata()
         assert tags["NSGEO_INTERPOLATION"] == "kriging"
-        assert tags["NSGEO_MAX_DISTANCE_M"] == "0.25"
+        assert tags["NSGEO_MAX_DISTANCE_M"] == "0.375"
         assert tags["NSGEO_SMOOTH_X_M"] == "0.0"
         assert tags["NSGEO_SMOOTH_Y_M"] == "0.0"
         assert tags["NSGEO_FRAME_AZIMUTH_DEG"] == str(engine.frame.azimuth)

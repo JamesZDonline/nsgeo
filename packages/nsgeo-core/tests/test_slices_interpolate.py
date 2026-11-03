@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from nsgeo.geometry.grid import Grid
 from nsgeo.slices import CubeFrame, FillWeights, plan_fill
 from nsgeo.slices.interpolate import DISTANCE_TOL_M, METHODS, NEIGHBOURS_PER_QUADRANT
 
@@ -121,6 +122,59 @@ def test_a_skipped_line_leaves_a_blank_stripe(method):
     v = values(pop)
     assert np.isnan(plan(pop, method, 0.25).apply(v)[25]).all()
     assert np.isfinite(plan(pop, method, 0.5, 1.0).apply(v)[25]).all()
+
+
+def binned_lines(spacing, cell, size=10.0, skip=()):
+    """The populated mask of straight lines along X, `spacing` apart from
+    `spacing / 2`, binned through `CubeFrame.for_grid` and `cell_index` as the
+    cube bins traces. Each datum lands on its cell's centre, up to half a cell
+    from its line, so data rows are floor or ceil(spacing / cell) cells apart."""
+    grid = Grid("A", (0.0, 0.0), 0.0, size, size, "EPSG:32633", spacing)
+    frame = CubeFrame.for_grid(grid, cell)
+    pop = np.zeros(frame.n_cells, bool)
+    xs = np.arange(0.01, size, 0.03)
+    for i, y in enumerate(np.arange(spacing / 2, size - 1e-9, spacing)):
+        if i not in skip:
+            ids = frame.cell_index(grid.to_world(np.column_stack([xs, np.full(xs.size, y)])))
+            pop[ids[ids >= 0]] = True
+    return pop.reshape(frame.ny, frame.nx)
+
+
+def between_lines(pop, out):
+    rows = np.flatnonzero(pop.any(axis=1))
+    return out[rows[0] : rows[-1] + 1]
+
+
+@BOTH
+@pytest.mark.parametrize(("spacing", "cell"), [(0.75, 0.2), (0.7, 0.2), (0.5, 0.15), (1.5, 0.2)])
+def test_binned_lines_fill_at_three_quarters_of_a_spacing(method, spacing, cell):
+    """The plugin's default max distance. When ceil(spacing / cell) is even
+    the middle row is ceil(spacing / cell) * cell / 2 from both lines, at most
+    (spacing + cell) / 2, which is within 0.75 x spacing for any cell up to
+    half the spacing."""
+    pop = binned_lines(spacing, cell)
+    assert len(set(np.diff(np.flatnonzero(pop.any(axis=1))).tolist())) == 2  # floor and ceil
+    out = plan_fill(pop, cell, method, 0.75 * spacing, 2 * spacing).apply(values(pop))
+    assert np.isfinite(between_lines(pop, out)).all()
+
+
+@BOTH
+def test_half_a_spacing_stripes_binned_lines(method):
+    """Why the default is not 0.5 x spacing: with 0.75 m lines at a 0.2 m cell,
+    every gap of 4 cells leaves its middle row 0.4 m from data, past 0.375 m."""
+    pop = binned_lines(0.75, 0.2)
+    out = plan_fill(pop, 0.2, method, 0.5 * 0.75, 2 * 0.75).apply(values(pop))
+    assert np.isnan(between_lines(pop, out)).all(axis=1).any()
+
+
+@BOTH
+def test_a_skipped_binned_line_leaves_a_blank_stripe_at_three_quarters_of_a_spacing(method):
+    """The user's 0.5 m lines at a 0.2 m cell: the skipped line's gap is 5
+    cells, so its middle rows are 0.4 m from data, past 0.375 m."""
+    pop = binned_lines(0.5, 0.2, skip=(10,))
+    out = plan_fill(pop, 0.2, method, 0.75 * 0.5, 2 * 0.5).apply(values(pop))
+    blank = np.flatnonzero(np.isnan(between_lines(pop, out)).all(axis=1))
+    assert blank.size == 2
 
 
 @BOTH

@@ -152,7 +152,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     # Normalisation is off by default (spec 4.6).
     assert dock.normalisation_panel.method() == "none"
     assert dock.site_finish.value() == SliceFinish()
-    assert "A 0.75 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.5 x A's 1.5 m (#81)
+    assert "A 1.12 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.75 x A's 1.5 m (#81)
 
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
@@ -220,7 +220,7 @@ def test_the_max_distance_tooltip_gives_each_grids_metres(plugin):
     dock = whole_site(plugin)
     assert dock.site_finish.max_distance_spin.toolTip() == (
         DISTANCE_TIP + " (in each grid's own line spacings, so grids with different spacings are "
-        "treated alike)\nA 0.75 m · B 0.75 m · C 0.75 m"
+        "treated alike)\nA 1.12 m · B 1.12 m · C 1.12 m"
     )
 
 
@@ -353,7 +353,7 @@ def test_refreshing_the_grid_list_reads_each_line_once(plugin, monkeypatch):
     table = dock.site_panel.table
     assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
-    assert "A 0.75 m" in dock.site_finish.max_distance_spin.toolTip()
+    assert "A 1.12 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.75 x 1.5 m
 
 
 def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
@@ -1250,7 +1250,7 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
         assert md["NSGEO_SITE_NORMALISATION"] == "background"
         assert md["NSGEO_SITE_TRANSFORM"] == "amp_square"  # #81's default
         assert md["NSGEO_SITE_INTERPOLATION"] == "kriging"  # the default finish
-        assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 0.5
+        assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 0.75
         assert [g["grid_id"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == ["A", "B", "C"]
         thickness, step = dock.thickness_step_levels()  # the dock's own, on the site axis
         assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1

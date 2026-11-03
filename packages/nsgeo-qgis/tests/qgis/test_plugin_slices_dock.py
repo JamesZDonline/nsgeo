@@ -691,16 +691,16 @@ def test_the_max_distance_is_a_distance_and_survives_a_cell_size_change(docked):
     the new cell."""
     dock, session = docked
     _ready(dock)
-    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
-    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.25)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.375)
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
     assert dock.engine.frame.cell == pytest.approx(0.125)
-    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
-    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.25)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.375)
     np.testing.assert_array_equal(
         dock.current_values(),
-        _finished_by_the_core(dock, dock.current_window(), method="kriging", max_distance_m=0.25),
+        _finished_by_the_core(dock, dock.current_window(), method="kriging", max_distance_m=0.375),
     )
 
 
@@ -711,9 +711,9 @@ def test_this_grid_sets_the_max_distance_in_line_spacings(docked):
     _ready(dock)
     spin = dock.grid_finish.max_distance_spin
     assert spin.suffix() == " × line spacing"
-    assert spin.value() == pytest.approx(0.5)
+    assert spin.value() == pytest.approx(0.75)
     assert spin.singleStep() == 0.25
-    assert dock.grid_finish.max_distance_metres.text() == "= 0.25 m"
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.375 m"
 
 
 def test_the_metres_beside_the_max_distance_follow_the_box(docked):
@@ -726,21 +726,21 @@ def test_the_metres_beside_the_max_distance_follow_the_box(docked):
 def test_max_distance_follows_a_line_spacing_edit(docked):
     """Review Focus 2: the distance is in spacings, so a spacing edit moves
     the metres and the drawn slice with no grid switch and no change to the
-    box (0.5 spacings of 1.0 m is 0.5 m)."""
+    box (0.75 spacings of 1.0 m is 0.75 m)."""
     dock, session = docked
     _ready(dock)
     dock.refresh_slice()
     before = dock.current_values().copy()
     session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
-    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
-    assert dock.grid_finish.max_distance_metres.text() == "= 0.5 m"
-    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.75)
     # The drawn slice follows too, with no other refresh: export reads the
     # finish live, so the map must not show the old distance.
     np.testing.assert_array_equal(
         dock.current_values(),
         _finished_by_the_core(
-            dock, dock.current_window(), method="kriging", max_distance_m=0.5, search_radius_m=2.0
+            dock, dock.current_window(), method="kriging", max_distance_m=0.75, search_radius_m=2.0
         ),
     )
     assert np.isfinite(dock.current_values()).sum() > np.isfinite(before).sum()
@@ -829,7 +829,7 @@ def test_seeding_a_grid_resets_the_panel_and_remembers_nothing(docked_two_grids)
     assert not session.dirty
     _switch(dock, "B")
     assert dock.slice_finish() == SliceFinish()
-    assert dock.grid_finish.max_distance_metres.text() == "= 0.25 m"  # B's spacing is 0.5 too
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.375 m"  # B's spacing is 0.5 too
     assert session.slice_resolution("B") == {}
     assert not session.dirty
 
@@ -854,8 +854,8 @@ def test_a_remembered_finish_is_restored_on_a_grid_switch(docked_two_grids):
 @pytest.mark.parametrize("radius_spacings", [0.5, 1.5])
 def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids, radius_spacings):
     """Review Focus 3: a 0.2.0 survey remembers `radius_spacings` for a
-    grid (1.5 is the case that tells ignoring it from mapping it onto the
-    max distance, whose default is also 0.5). This build opens it on the
+    grid (0.2.0 seeded 0.5; the max distance's default is 0.75, so either
+    value tells ignoring it from mapping it). This build opens it on the
     new defaults, with no holes, and does not mark the survey dirty. Put
     into the record directly: `remember_slice_resolution`
     no longer takes that keyword."""
@@ -944,7 +944,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(do
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
-    assert dock.slice_finish() == SliceFinish()  # kriging out to half a spacing, no smoothing
+    assert dock.slice_finish() == SliceFinish()  # kriging out to 0.75 x spacing, no smoothing
 
 
 @pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
@@ -2269,7 +2269,7 @@ def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_
     _switch(dock, "B")
     assert dock.cell_spin.value() == pytest.approx(seed_cell)
     assert dock.dz_spin.value() == pytest.approx(seed_dz)
-    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
 
     _switch(dock, "A")
     assert dock.cell_spin.value() == pytest.approx(0.1)

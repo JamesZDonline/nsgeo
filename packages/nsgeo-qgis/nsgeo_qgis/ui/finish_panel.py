@@ -41,7 +41,8 @@ _METHOD_TIP = (
 DISTANCE_TIP = (
     "Cells farther than this from any line are left blank, so the edge of the survey or a "
     "missing line is never filled in.\n"
-    "Half a line spacing just closes the gap between neighbouring lines; raise it if a line "
+    "Three quarters of a line spacing closes the gap between neighbouring lines, with room for "
+    "a line that wandered; lower it toward half a spacing to fill less, or raise it if a line "
     "strayed and left a blank stripe."
 )
 _SMOOTH_TIP = (

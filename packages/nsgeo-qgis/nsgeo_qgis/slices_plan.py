@@ -148,10 +148,15 @@ class Resolution:
 
 
 #: What a grid is finished with unless the user says otherwise (interpolation
-#: spec §8): kriging, out to half a line spacing, which just closes the gap
-#: between neighbouring lines.
+#: spec §8): kriging, out to three quarters of a line spacing (the user's
+#: decision of 2026-11-03, interpolation spec §5.2). Half a spacing was the
+#: first default and striped nominal gaps: binning moves each line up to half
+#: a cell, so a gap's middle cell can be ceil(spacing / cell) * cell / 2 from
+#: data, at most (spacing + cell) / 2, which 0.75 covers for any cell up to
+#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.2 m
+#: cell its middle rows are 0.4 m from data.
 DEFAULT_METHOD = "kriging"
-DEFAULT_MAX_DISTANCE_SPACINGS = 0.5
+DEFAULT_MAX_DISTANCE_SPACINGS = 0.75
 #: The neighbour search reaches at least this many line spacings (plan call 1).
 SEARCH_RADIUS_SPACINGS = 2.0
 

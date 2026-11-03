@@ -54,7 +54,7 @@
   | Setting | Value |
   |---|---|
   | Default method | `"kriging"` |
-  | Default max distance | `0.5` × line spacing |
+  | Default max distance | `0.75` × line spacing (user, 2026-11-03) |
   | Distance comparison | inclusive, `≤ max_distance_m + 1e-9` |
   | Smoothing default | `0.0` m on both axes |
   | Smoothing kernel | Gaussian σ in metres, truncated at 4σ |

@@ -85,7 +85,8 @@ Read from `origin/main` at `2878db2` on 2026-11-02. Line numbers are from that c
 10. **Acceptance is a ballpark visual comparison** against the user's Surfer-gridded data (§10).
 11. **This goes ahead of M15 (cut anywhere).** M15's approved design is revised afterwards onto
     these settings (§12).
-12. **Max distance to data defaults to 0.5 × line spacing** (§5.2).
+12. **Max distance to data defaults to 0.75 × line spacing** (user, 2026-11-03; reverses 0.5
+    after binning quantisation striped nominal gaps) (§5.2).
 
 **Design calls made in this document** (the user hasn't seen these; each is marked *design call*
 where it appears):
@@ -165,16 +166,20 @@ A cell is filled only if the nearest data cell's centre is within this distance 
 centre. Otherwise it is NaN. This applies to all three methods, and it is the only place a hole
 can appear. It is the replacement for today's radius as the "how far to trust" control.
 
-- **Default 0.5 × line spacing** (the user's decision). At nominal spacing the midpoint between
-  two lines is exactly 0.5 × spacing from each, so the default just closes every normal gap, and
-  nothing is filled any further from data than that. It has **no margin**: a line that wanders
-  off its offset can leave a thin blank stripe, and the user raises the value to close it, as
-  with today's radius. A skipped line leaves a 2 × spacing gap whose middle is 1.0 × spacing from
-  data, so it shows as a blank stripe.
+- **Default 0.75 × line spacing** (the user's decision of 2026-11-03, reversing 0.5). Binning
+  puts each datum at its cell centre, up to half a cell from its line, so two lines a spacing `s`
+  apart become data rows `floor(s / c)` or `ceil(s / c)` cells apart at cell `c`. Where that is
+  even, the middle cell is `ceil(s / c) · c / 2` from both, more than 0.5 × `s`: at 0.5 × spacing,
+  straight lines at their nominal offsets striped (20 of 26 gaps for 0.75 m lines at a 0.2 m
+  cell, 13 of 39 for 0.5 m lines at 0.15 m). That middle cell is at most `(s + c) / 2` from data,
+  which is ≤ 0.75 × `s` whenever the cell is at most half the spacing, so 0.75 closes every
+  nominal gap with room for a line that wanders a little. A skipped line still shows: its gap is
+  2 × spacing, and at 0.5 m lines and a 0.2 m cell the stripe's nearest cells are 0.4 m from
+  data, beyond 0.375 m.
 - **Compared in metres and inclusively** (distance ≤ max distance, with a small tolerance, e.g.
-  1e-9 m). The distance is never rounded to whole cells. At the default, the midpoint cell sits
-  exactly on the limit, and a rounding or strict comparison would turn every normal gap into a
-  stripe. Tested at nominal spacing for both odd and even numbers of cells between lines.
+  1e-9 m). The distance is never rounded to whole cells. A cell exactly on the limit fills: at
+  0.5 × spacing the midpoint of an aligned gap sits on it, and a rounding or strict comparison
+  would turn that gap into a stripe. Tested for both odd and even numbers of cells between lines.
 - Expressed in **× line spacing with an `= x m` readout** and remembered per grid, exactly as
   `grid_radius_spin` is today. Site scope uses each grid's own spacing.
 - Cell-centre distances come from the **engine's applied frame cell**, never
@@ -289,7 +294,7 @@ Resolution group.
 | Control | Kind | Notes |
 |---|---|---|
 | Method | combo | None (binned only) / Inverse distance (IDW) / Kriging / Minimum curvature. Default Kriging. |
-| Max distance to data | spin, × line spacing, `= x m` readout | Default 0.5. Disabled for None. Site scope: the per-grid metres go in the tooltip, as `site_scope.radius_tooltip` does today. |
+| Max distance to data | spin, × line spacing, `= x m` readout | Default 0.75 (§5.2). Disabled for None. Site scope: the per-grid metres go in the tooltip, as `site_scope.radius_tooltip` does today. |
 | Smoothing X | spin, metres | Default 0. |
 | Smoothing Y | spin, metres | Default 0. |
 

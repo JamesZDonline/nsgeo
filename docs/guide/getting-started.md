@@ -393,10 +393,15 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
      (binned only)** to see only the cells a line crossed.
    - **Max distance to data** is how far from a line a blank cell may be and
      still be filled. It is set in line spacings (for a grid its metres are
-     shown beside the box; for the whole site, hover over the box) and starts at 0.5, which just closes the gap between neighbouring
-     lines. Cells farther from any line stay blank, so a missing line or the
-     edge of the survey is never filled in. If a line strayed and leaves a blank
-     stripe, raise it. It does nothing when the method is **None**.
+     shown beside the box; for the whole site, hover over the box). Cells
+     farther from any line stay blank, so a missing line or the edge of the
+     survey is never filled in. It starts at 0.75. Each line is drawn on the
+     cells it crossed, and those can sit up to half a cell off the line itself,
+     so half a spacing would leave thin blank stripes between lines that never
+     strayed. Three quarters closes every gap between neighbouring lines, with
+     room for a line that wandered a little. Lower it toward 0.5 to fill less,
+     or raise it if a line strayed and left a blank stripe. It does nothing
+     when the method is **None**.
    - **Smoothing X** and **Smoothing Y** blur the slice along the grid's X or Y
      axis, by a distance in metres. They start at 0, which is off. Smoothing is
      the only setting that changes the cells a line crossed.
