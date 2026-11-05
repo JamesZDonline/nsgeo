@@ -46,7 +46,7 @@
    | 50 m synthetic, full coverage, 0.05 m | about 11 s |
    | 50 m, lines over 40% plus a skipped line, 0.2 m | about 0.2–0.65 s |
 
-   **Escalate, rather than ship,** if Task 1 measures more than 0.25 s per slice at 0.2 m on the fully covered 50 m synthetic. A faster solver (multigrid) is a filed follow-up (user, 2026-11-05: ship this solver and file the speed-up).
+   **Escalate, rather than ship,** if Task 1 measures more than 0.25 s per slice at 0.2 m on the fully covered 50 m synthetic. A faster solver (multigrid) is filed as #111 (user, 2026-11-05: ship this solver and file the speed-up).
 5. **Responsiveness (spec §7).**
    - **Drag budget.** `DRAG_SOLVE_BUDGET_MS = 50.0` is the slowest solve that still follows a drag live.
    - **Held drag.** When the last solve took longer and the slider is down, the panel holds the last drawn slice, shows the new window in the readout, and says to release. On release the full slice is drawn.
@@ -512,4 +512,4 @@ These are the manual checkpoints from spec §10. Track them and report them; nev
    - an export with progress and a cancel;
    - a saved cube.
 2. **Surfer comparison (spec §10.2).** The user compares nsgeo's kriging and minimum curvature, at defaults, against their Surfer grids. The question is "same ballpark". This gate is required for B.
-3. **File the deferred follow-ups** from review. Note that the faster solver (multigrid) is already filed.
+3. **File the deferred follow-ups** from review. Note that the faster solver (multigrid) is already filed as #111.
