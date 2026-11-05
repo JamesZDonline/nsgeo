@@ -39,7 +39,7 @@ Read §5.4, §7, §9 and §10 before your task. Where the plan and the spec disa
 3. **Solver.**
    - Matrix-free conjugate gradients in float32, with dot products accumulated in float64 and a Jacobi (diagonal) preconditioner.
    - The operator is 13 per-cell coefficient arrays, built once per plan.
-   - Start from linear interpolation between the nearest data cells along each column (Y) and each row (X), averaged where both exist. Otherwise use the one side that exists, or the data mean.
+   - Start from linear interpolation between the nearest data cells along each column (Y) and each row (X), averaged with weights 1/span where both are bracketed. Otherwise use the one-sided estimates, or the data mean. *(Amended during Task 1, 2026-11-05: an equal average cost about 40% more iterations on wandering lines, because a row crosses them only occasionally, so its span runs to metres. Columns only would have been fastest, but it depends on the lines' orientation.)*
    - Stop when `‖r‖ ≤ CURVATURE_TOL · ‖b‖`, with `CURVATURE_TOL = 1e-6`, or after `CURVATURE_MAX_ITERATIONS = 10_000`.
    - `should_stop()`, when given, is called once before every iteration. If it returns True, the solve raises `SolveStopped`. One iteration takes about 25 ms at 0.05 m on a 50 m grid, so that bounds how long a cancel takes.
    - The spike measured this solver's error against a tight solve at 1e-5 of the data range at 0.2 m, 1e-4 at 0.1 m and 4e-4 at 0.05 m.
@@ -227,6 +227,8 @@ These are the inputs most likely to hurt a user that the spec does not spell out
       reach: np.ndarray         # (ny*nx,) bool: finite in the output
       domain: np.ndarray        # (ny, nx) bool: the solve area D (plan call 2)
       coefficients: np.ndarray  # (13, ny, nx) float32: A's row at each unknown, by stencil offset; 0 elsewhere
+      cell: float               # amended during Task 1: kept so plan call 10 can re-plan around a
+      max_distance_m: float     # non-finite data cell
       def solve(
           self, values: np.ndarray, should_stop: Callable[[], bool] | None = None
       ) -> tuple[np.ndarray, int]: ...                                  # (the slice, CG iterations run)
@@ -290,7 +292,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - `plan.solve(v)[1]`, the iteration count, is ≤ 400. The whole-frame solve took 14,593.
   - `test_one_line_continues_flat_across_it`
     - One populated row 10 in 21 × 30 at 0.05 m, with values `sin(x)` along the row and max 0.25 m.
-    - Every finite cell in column `j` is within `1e-4` of row 10's value in column `j`.
+    - *(Amended during Task 1: the exact energy bends a varying line by up to about 1e-2, so "within 1e-4 of the line" was wrong.)* A straight (linear) profile along the row stays flat across it within `1e-4`, and `sin(x)` data are symmetric about the row: no tilt.
     - A single populated cell gives that value on its whole disc.
   - `test_a_nan_data_value_does_not_poison_the_cells_around_it`
     - On "lines", set one data cell's value to NaN.
