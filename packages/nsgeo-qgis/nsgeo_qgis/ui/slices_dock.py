@@ -2273,10 +2273,12 @@ class SlicesDock(QgsDockWidget):
         """The finished slice This grid draws (interpolation spec §7, plan
         call 5).
 
-        A slow minimum-curvature slice is drawn as its kriging preview: a
-        refine still running for another window is cancelled before the
-        preview is computed, and the rest restarts, so this slice's solve
-        starts once the depth rests. Anything else is drawn in full. A full
+        A draw that builds new weights or a new plan cancels a running refine
+        first: it was made on the plan about to be dropped. A slow
+        minimum-curvature slice is drawn as its kriging preview: a refine
+        still running for another window is cancelled before the preview is
+        computed, and the rest restarts, so this slice's solve starts once
+        the depth rests. Anything else is drawn in full. A full
         minimum-curvature draw (a cache hit, or a solve inside the budget)
         leaves a running list alone, so the stretch windows queued behind a
         landed slice still land; another method's draw stops it
@@ -2287,9 +2289,11 @@ class SlicesDock(QgsDockWidget):
         """
         curvature = finish.method == "min_curvature"
         key = solve_key(values) if curvature else None
+        cached = self.engine.weights_cached(finish)
+        self._grid_refine.before_draw(rebuilds=not cached)
         # Building the weights, or the plan and its preview, takes seconds at
         # a fine cell: say so (interpolation spec §7).
-        waiting = contextlib.nullcontext() if self.engine.weights_cached(finish) else busy_cursor()
+        waiting = contextlib.nullcontext() if cached else busy_cursor()
         with waiting:
             if key is not None and self.engine.finish_is_slow(values, coverage, finish, key=key):
                 self._refine_slice = (values, coverage)

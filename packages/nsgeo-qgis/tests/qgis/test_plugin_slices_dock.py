@@ -2934,6 +2934,67 @@ def test_a_final_stretch_queues_no_stretch_solves_at_rest(docked, monkeypatch):
     assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
 
 
+def test_a_redraw_keeps_its_own_solve_but_a_new_plan_cancels_it(docked, monkeypatch):
+    """The keep rule (`RefineFlow.previewed`) in This grid. A redraw of the
+    slice still being solved (a palette change) waits for exactly the running
+    list's head, on the plan held, so the solve runs on. A max distance edit
+    rebuilds the plan but leaves the values, and so the solve key, as they
+    were: that solve could never land, so it is cancelled before the new plan
+    is built, and the rest restarts."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    held: list = []
+    real = engine.pending_solve
+
+    def gated(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
+        if job is not None and not held:
+            held.append(job)
+            run = job.run
+
+            def run_held(should_stop):
+                gate.wait(10)
+                run(should_stop)
+
+            job.run = run_held
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", gated)
+    building: list[bool] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(dock.refiner.busy)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    try:
+        dock.slice_slider.setValue(20)
+        _pump_until(lambda: dock.refiner.busy)  # rested; the solve is held
+        combo = dock.palette_combo
+        combo.setCurrentIndex((combo.currentIndex() + 1) % combo.count())
+        assert dock.provisional
+        assert dock.refiner.busy, "a redraw of the slice being solved stopped its solve"
+        assert not dock._grid_refine.rest.isActive()
+        assert building == []
+        _set_finish(dock, max_distance_spacings=dock.grid_finish.max_distance_spin.value() + 0.5)
+        assert dock.provisional
+        assert not dock.refiner.busy, "a solve on the dropped plan ran on"
+        assert dock._grid_refine.rest.isActive()
+        assert building and not any(building), "the old solve ran through the rebuild"
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not dock.provisional
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
 class _Looping:
     """A refine job that runs until it is asked to stop, or 10 s pass."""
 

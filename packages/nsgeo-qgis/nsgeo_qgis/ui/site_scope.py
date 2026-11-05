@@ -915,6 +915,12 @@ class SiteScope:
         window cancels a running list, a landed grid's redraw while the
         others still solve does not. A full minimum-curvature tick leaves a
         running list alone; any other method's stops it (plan call 5).
+
+        Which grids the tick previews is known only once it has drawn them,
+        but whether it builds new weights or plans is known before: a tick
+        that does cancels a running list first, so the old list neither
+        competes with every grid's build nor keeps the plans it drops alive
+        through it (`RefineFlow.before_draw`).
         """
         dock = self.dock
         try:
@@ -940,13 +946,16 @@ class SiteScope:
                 raise RuntimeError("the slider is off the site's time axis")
             finish = dock.site_finish.value()
             curvature = finish.method == "min_curvature"
+            coverage = dock.coverage_check.isChecked()
+            if not coverage:  # a coverage tick finishes nothing, so builds nothing
+                self.refine.before_draw(rebuilds=not self.engine.weights_cached(finish))
             shown = self.engine.slice_at(
                 top,
                 thickness * z.dz_ns,
                 finish=finish,
                 method=dock.normalisation_panel.method(),
                 manual=self.gains(),
-                coverage=dock.coverage_check.isChecked(),
+                coverage=coverage,
                 preview=curvature,
             )
             self.slice = shown

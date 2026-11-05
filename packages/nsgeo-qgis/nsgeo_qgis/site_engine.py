@@ -1060,10 +1060,12 @@ class SiteEngine(QObject):
 
         `drawn` is the tick that previewed this window, when the caller has
         it: a grid it previewed is solved from the binned slice and key that
-        tick took, so the rest neither re-slices nor re-hashes it. Only for
-        the same engine and the same grid window; anything else is sliced
-        afresh. The key is the values' own (`solve_key`), so a reused pair
-        can never land one slice's solve under another's key.
+        tick took, so the rest neither re-slices nor re-hashes it (only for
+        the same engine and the same grid window), and a grid it drew in full
+        at the same grid window is skipped: that draw solved it or found it
+        solved. Anything else is sliced afresh. The key is the values' own
+        (`solve_key`), so a reused pair can never land one slice's solve
+        under another's key.
         """
         if finish.method != "min_curvature":
             return []
@@ -1076,6 +1078,8 @@ class SiteEngine(QObject):
             held = drawn.previewed.get(grid_id) if drawn is not None else None
             if held is not None and held.engine is engine and held.window == window:
                 job = engine.pending_solve(held.values, held.coverage, finish, key=held.key)
+            elif held is None and drawn is not None and drawn.windows.get(grid_id) == window:
+                continue  # drawn in full by that very tick: solved already
             else:
                 job = engine.window_solve(window, finish)
             if job is not None:

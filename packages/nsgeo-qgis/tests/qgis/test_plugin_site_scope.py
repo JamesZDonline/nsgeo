@@ -2264,12 +2264,18 @@ def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch)
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
 
 
-def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch):
+@pytest.mark.parametrize("quick", [0, 1])
+def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, quick):
     """Hashing a slice costs about 7 ms at a million cells, and a tick needs
     each grid's key two or three times: it is computed once per grid and
-    passed on, and the rest's solves take the tick's keys, hashing nothing."""
+    passed on, and the rest hashes nothing. A grid the tick previewed is
+    solved from the tick's slice and key; one it drew in full (`quick`: its
+    solve inside the budget) is solved already, so it is not even sliced."""
     dock = _site_minimum_curvature(plugin, 500.0)
     site, scope = dock.site_engine, dock._site
+    first, *others = site.ready_grids
+    if quick:
+        site.engine_for(first)._last_solve_ms = 5.0
     where = ["rest"]
     hashes: list[str] = []
 
@@ -2292,14 +2298,105 @@ def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch):
             ticks.append(len(hashes) - before)
 
     monkeypatch.setattr(site, "slice_at", counted)
+    sliced: list[str] = []
+    real_window_solve = SliceEngine.window_solve
+
+    def counted_window_solve(self, window, finish):
+        sliced.append(where[0])
+        return real_window_solve(self, window, finish)
+
+    monkeypatch.setattr(SliceEngine, "window_solve", counted_window_solve)
     dock.slice_slider.setValue(30)
     _events()
     assert scope.provisional
+    assert list(scope.slice.previewed) == (others if quick else [first, *others])
     _wait_for_refine(dock)
     assert not scope.provisional
     assert len(ticks) >= 2  # the preview, then the refined slice
     assert ticks == [len(site.ready_grids)] * len(ticks)
     assert "rest" not in hashes
+    assert sliced == []
+
+
+def _held_first_list(site, gate: threading.Event, monkeypatch) -> None:
+    """The first list's first solve waits for `gate`; later lists run freely."""
+    real = site.pending_solves
+    held: list = []
+
+    def gated(top_ns, thickness_ns, finish, **kwargs):
+        jobs = real(top_ns, thickness_ns, finish, **kwargs)
+        if jobs and not held:
+            held.append(jobs[0])
+            _held_until(gate, jobs[0])
+        return jobs
+
+    monkeypatch.setattr(site, "pending_solves", gated)
+
+
+def test_a_max_distance_edit_cancels_the_site_list_before_rebuilding(plugin, monkeypatch):
+    """A max distance edit rebuilds every grid's plan but leaves the values,
+    and so the solve keys, as they were. The running list was made on the
+    dropped plans, so none of it could land: it is cancelled before the new
+    plans are built, rather than solving on and holding them alive through
+    the rebuild, and the rest restarts for the new ones."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    _held_first_list(site, gate, monkeypatch)
+    building: list[bool] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(dock.refiner.busy)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    try:
+        dock.slice_slider.setValue(30)
+        _events()
+        _pump_until(lambda: dock.refiner.busy)  # rested; the first solve is held
+        assert building == []
+        spin = dock.site_finish.max_distance_spin
+        spin.setValue(spin.value() + 0.5)
+        _pump_until(lambda: not scope.finish_debounce.isActive() and not scope.tick.isActive())
+        assert scope.provisional
+        assert not dock.refiner.busy, "a list for the dropped plans ran on"
+        assert scope.refine.rest.isActive()
+        assert building and not any(building), "the old list ran through the rebuild"
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_leaving_the_site_cancels_the_list(plugin, monkeypatch):
+    """A preview keeps a running list only when it waits for exactly that
+    list's head. Once a grid has left the site, the list solves a grid no
+    longer drawn: it is cancelled, and the rest restarts for the grids left."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    _held_first_list(site, gate, monkeypatch)
+    try:
+        dock.slice_slider.setValue(30)
+        _events()
+        _pump_until(lambda: dock.refiner.busy)
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C leaves
+        _pump_until(lambda: not scope.tick.isActive() and "C" not in scope.slice.windows)
+        assert scope.provisional
+        assert not dock.refiner.busy, "the list for a grid that left ran on"
+        assert scope.refine.rest.isActive()
+    finally:
+        gate.set()
+    settle(dock)
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
 
 
 def test_the_site_stretch_with_minimum_curvature_uses_twelve_windows(plugin, monkeypatch):

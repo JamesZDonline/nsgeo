@@ -244,6 +244,12 @@ class PendingSolve:
         apart: two of a site's grids can hold equal values."""
         return self._engine
 
+    @property
+    def plan(self) -> CurvaturePlan:
+        """The plan this solve runs on. It lands only while its engine still
+        holds it (`SliceEngine.holds`)."""
+        return self._plan
+
     def run(self, should_stop: Callable[[], bool]) -> None:
         """Solve, on the worker thread; `SolveStopped` when `should_stop` asks."""
         values = self._values
@@ -1195,12 +1201,17 @@ class SliceEngine(QObject):
         while len(self._solved) > SOLVED_SLICES_KEPT:
             self._solved.popitem(last=False)
 
+    def holds(self, plan: SliceFill) -> bool:
+        """Whether `plan` is the plan or weights held now. Identity, not
+        equality: a rebuilt plan for the same settings is another plan, and a
+        solve made on a dropped one never lands (see the module docstring)."""
+        held = self._weights
+        return held is not None and held[1] is plan
+
     def _land(self, plan: CurvaturePlan, key: bytes, solved: np.ndarray, ms: float) -> bool:
         """`PendingSolve.land`: keep a background solve only while `plan` is
-        still the one held. Identity, not equality: a rebuilt plan for the
-        same settings is another plan (see the module docstring)."""
-        held = self._weights
-        if held is None or held[1] is not plan:
+        still the one held (`holds`)."""
+        if not self.holds(plan):
             return False
         self._keep_solved(key, solved)
         self._last_solve_ms = ms

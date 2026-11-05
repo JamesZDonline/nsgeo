@@ -9,13 +9,18 @@ windows it is measured over are solved. What a rest queues, how a scope
 redraws and where its status goes stay the scope's own. The rules both
 scopes follow are kept here, once, so the two cannot drift apart:
 
-* **A preview cancels the running list and restarts the rest**, unless
-  every solve it waits for is still at the head of that list. That is a
-  redraw of the window being solved, not a new slow window: a site grid
-  whose solve landed is drawn while the others still solve, and a cancel
-  there would lose the solve in progress and start the rest over at every
-  landing. A list for a window left behind is always cancelled, so it
-  never draws over the newer one.
+* **A draw that builds new weights or a new plan cancels the running list
+  first** (`before_draw`): every solve in it was made on a plan about to
+  be dropped, so none could land, and each would hold its dropped plan
+  alive through the build.
+* **A preview cancels the running list and restarts the rest**, unless it
+  waits for exactly the solves at the head of that list, each still on
+  the plan its engine holds. That is a redraw of the window being solved,
+  not a new slow window: a site grid whose solve landed is drawn while the
+  others still solve, and a cancel there would lose the solve in progress
+  and start the rest over at every landing. A list for a window left
+  behind, for a plan since dropped, or for a grid that has left the site
+  is always cancelled, so it never draws over the newer one.
 * **A full minimum-curvature draw** (a cache hit, or a solve inside the
   budget) leaves a running list alone, so stretch windows queued behind a
   landed slice still land. Another method's draw stops it.
@@ -47,7 +52,9 @@ SolveId = tuple[Any, bytes]
 
 
 def solve_id(job: Any) -> SolveId:
-    """`job`'s `SolveId`: a `PendingSolve`, or any job with `engine` and `key`."""
+    """`job`'s `SolveId`: a `PendingSolve`, or any job with `engine` and `key`.
+    The plan is checked apart (`RefineFlow.previewed`), never held in an id:
+    an id held past a rebuild would keep the dropped plan alive."""
     return (job.engine, job.key)
 
 
@@ -77,8 +84,9 @@ class RefineFlow:
         self.stretch: tuple[Any, float, bool] | None = None
         #: The solves the preview on screen waits for.
         self._awaited: frozenset[SolveId] = frozenset()
-        #: The running list's head: the slice on screen's solves not landed yet.
-        self._head: set[SolveId] = set()
+        #: The running list's head: the slice on screen's solves not landed
+        #: yet, by `SolveId`. Kept as jobs, so their plans can be checked.
+        self._head: dict[SolveId, Any] = {}
 
     def status(self, normal: str) -> str:
         """The scope's status line: the refine's progress while the worker
@@ -91,16 +99,34 @@ class RefineFlow:
         return normal
 
     # ---- draws ------------------------------------------------------------
+    def before_draw(self, *, rebuilds: bool) -> None:
+        """A draw is about to start. When it `rebuilds` the weights or the
+        plan (a finish edit, a new cell or source, another method), the
+        running list is cancelled now: it was made on a plan about to be
+        dropped, so it neither competes with the build nor keeps that plan
+        alive through it. The rest is the draw's to decide."""
+        if rebuilds:
+            self.refiner.cancel()
+            self._head = {}
+
     def previewed(self, awaited: Iterable[SolveId]) -> None:
-        """The scope drew a preview waiting for the solves `awaited`. Any
-        other list is for a window left behind: cancelled, and the rest
-        restarted. A list whose head still holds every one of them is this
-        window's own, and runs on."""
+        """The scope drew a preview waiting for the solves `awaited`. A list
+        whose head is exactly those solves, each still on its engine's held
+        plan, is this window's own, and runs on. Any other is cancelled and
+        the rest restarted: a list for a window left behind, for a plan
+        since dropped (its solves could never land), or with a grid that has
+        left the site."""
         waits = frozenset(awaited)
         self.provisional = True
-        if not (waits and self.refiner.busy and waits <= self._head):
+        keep = (
+            bool(waits)
+            and self.refiner.busy
+            and waits == set(self._head)
+            and all(job.engine.holds(job.plan) for job in self._head.values())
+        )
+        if not keep:
             self.refiner.cancel()
-            self._head = set()
+            self._head = {}
             self.rest.start()
         self._awaited = waits
 
@@ -123,7 +149,7 @@ class RefineFlow:
         self.rest.stop()
         self.provisional = False
         self._awaited = frozenset()
-        self._head = set()
+        self._head = {}
         return stood
 
     # ---- the list ---------------------------------------------------------
@@ -144,7 +170,7 @@ class RefineFlow:
             queued.setdefault(solve_id(job), job)
         redraw = self.provisional and not current
         if queued:
-            self._head = {solve_id(job) for job in current}
+            self._head = {solve_id(job): job for job in current}
             self.done, self.total = 0, len(queued)
             self.refiner.start(list(queued.values()), on_landed, on_error)
         elif self.stretch is not None and not self.stretch[2]:
@@ -160,10 +186,10 @@ class RefineFlow:
         landed = job.land()
         ident = solve_id(job)
         self.done += 1
-        self._head.discard(ident)
+        self._head.pop(ident, None)
         redraw = landed and self.provisional and ident in self._awaited
         if not self.refiner.busy:
-            self._head = set()
+            self._head = {}
             if self.stretch is not None and not self.stretch[2]:
                 self.stretch = None
             redraw = True
@@ -172,7 +198,7 @@ class RefineFlow:
     def failed(self, message: str) -> str:
         """The list ended in an error. The preview stays on screen, blanks
         and all; what the scope reports."""
-        self._head = set()
+        self._head = {}
         return f"minimum curvature failed: {message}"
 
     # ---- the shared stretch -------------------------------------------------
