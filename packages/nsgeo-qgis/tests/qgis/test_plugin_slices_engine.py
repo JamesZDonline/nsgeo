@@ -707,6 +707,7 @@ def test_the_minimum_curvature_stretch_is_measured_over_twelve_windows_at_most(s
     previews = [engine.preview(*engine._slice(w), MC) for w in windows]
     provisional = engine.shared_limit(1, clip, MC, preview=True)
     assert provisional == pytest.approx(limit_over_slices(previews, clip))
+    assert engine.stretch_limit(1, clip, MC) == (provisional, False)
     assert len(solves) == 0
     for job in jobs:
         job.run(lambda: False)
@@ -715,9 +716,33 @@ def test_the_minimum_curvature_stretch_is_measured_over_twelve_windows_at_most(s
     assert engine.stretch_solves(1, MC) == []
     final = engine.shared_limit(1, clip, MC)
     assert len(solves) == ran, "the stretch must be measured over the landed solves"
+    assert engine.stretch_limit(1, clip, MC) == (final, True)
+    assert len(solves) == ran
     finished = [engine.finish(*engine._slice(w), MC) for w in windows]
     assert final == pytest.approx(limit_over_slices(finished, clip))
     assert engine.stretch_solves(1, SliceFinish()) == []
+    kriging = SliceFinish()
+    assert engine.stretch_limit(1, clip, kriging) == (engine.shared_limit(1, clip, kriging), True)
+
+
+def test_a_rebuild_drops_the_old_plan_before_building_the_new(sourced, monkeypatch):
+    """Holding the old plan, preview and solved slices while the new ones
+    are built would double the peak: about 0.9 GB more at the cell cap."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    assert engine.weights_nbytes > 0
+    held_while_building: list[int] = []
+    real = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        held_while_building.append(engine.weights_nbytes)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    engine.finish(values, coverage, dataclasses.replace(MC, max_distance_spacings=1.0))
+    assert held_while_building == [0, 0], "the plan, then its preview, built over nothing"
 
 
 def test_weights_nbytes_counts_the_plan_the_preview_and_the_cache(sourced):

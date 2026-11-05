@@ -1167,6 +1167,10 @@ class SliceEngine(QObject):
         held = self._held_fill(populated, frame, settings)
         if held is not None:
             return held[1], held[2]
+        # Dropped first: holding the old plan, preview and solved slices while
+        # the new ones are built would double the peak, about 0.9 GB more at
+        # the cell cap (`MAX_FRAME_CELLS`).
+        self._drop_fill()
         md, sr = settings.max_distance_m, settings.search_radius_m
         fill = plan_fill(populated, frame.cell, settings.method, md, sr)
         preview: FillWeights | None = None
@@ -1174,7 +1178,6 @@ class SliceEngine(QObject):
             built = plan_fill(populated, frame.cell, PREVIEW_METHOD, md, sr)
             assert isinstance(built, FillWeights)  # kriging plans weights
             preview = built
-        self._drop_fill()
         self._weights = (self._weights_key(frame, settings), fill, preview)
         return fill, preview
 
@@ -1197,10 +1200,13 @@ class SliceEngine(QObject):
         self._last_solve_ms = ms
         return True
 
-    def _solved_slice(self, plan: CurvaturePlan, values: np.ndarray) -> np.ndarray:
+    def _solved_slice(
+        self, plan: CurvaturePlan, values: np.ndarray, key: bytes | None
+    ) -> np.ndarray:
         """`values` solved on `plan`, unsmoothed: from the cache, or solved
         here and timed (plan calls 5 and 8)."""
-        key = solve_key(values)
+        if key is None:
+            key = solve_key(values)
         solved = self._solved.get(key)
         if solved is not None:
             self._solved.move_to_end(key)
@@ -1211,11 +1217,23 @@ class SliceEngine(QObject):
         self._keep_solved(key, solved)
         return solved
 
-    def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
+    def finish(
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None = None,
+    ) -> np.ndarray:
         """`values` interpolated into blank cells and smoothed (interpolation
         spec §5-6), with the weights built on first use and reused after.
         Always the full result: minimum curvature is solved here if it is not
         cached, never previewed (`preview` is the dock's choice to make).
+
+        `key` is `solve_key(values)` when the caller has it already. A draw
+        hashes its slice once and passes the key on (`finish_is_slow`,
+        `pending_solve`): a hash costs about 7 ms at a million cells. It is
+        trusted, so it must be of these values.
 
         The cell is the frame's, never a widget's: a refused resolution edit
         leaves the spin ahead of the frame, and the weights must describe the
@@ -1229,7 +1247,7 @@ class SliceEngine(QObject):
         settings = self.finish_settings(finish)
         fill, _ = self._fill_for(coverage, frame, settings)
         if isinstance(fill, CurvaturePlan):
-            solved = self._solved_slice(fill, values)
+            solved = self._solved_slice(fill, values, key)
             return smooth(solved, frame.cell, settings.smooth_x_m, settings.smooth_y_m)
         return finish_slice(values, fill, frame.cell, settings)
 
@@ -1246,39 +1264,61 @@ class SliceEngine(QObject):
         assert preview is not None  # built with the plan
         return finish_slice(values, preview, frame.cell, settings)
 
-    def finish_is_slow(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> bool:
+    def finish_is_slow(
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None = None,
+    ) -> bool:
         """Plan call 5's "slow": minimum curvature, these values not solved
         on the plan held, and the last solve on it over `LIVE_SOLVE_BUDGET_MS`
         or none timed on it yet. A plan not built yet has none, so the first
         draw on a new plan is always a preview. False for any other method.
-        Builds nothing."""
+        Builds nothing. `key` as for `finish`."""
         if finish.method != "min_curvature":
             return False
         frame, _ = self._require_geometry()
         if self._held_fill(coverage > 0, frame, self.finish_settings(finish)) is None:
             return True
-        if solve_key(values) in self._solved:
+        if (solve_key(values) if key is None else key) in self._solved:
             return False
         return self._last_solve_ms is None or self._last_solve_ms > LIVE_SOLVE_BUDGET_MS
 
     def pending_solve(
-        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None = None,
     ) -> PendingSolve | None:
         """A job that solves `values` in the background (plan call 6), or None
         when the method is not minimum curvature or they are solved already.
-        Builds the plan if it is not held."""
+        Builds the plan if it is not held. `key` as for `finish`."""
         if finish.method != "min_curvature":
             return None
-        return self._job_for(values, coverage, finish, copy=True)
+        return self._job_for(values, coverage, finish, key=key, copy=True)
 
     def _job_for(
-        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish, *, copy: bool
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None,
+        copy: bool,
     ) -> PendingSolve | None:
         frame, _ = self._require_geometry()
         plan, _ = self._fill_for(coverage, frame, self.finish_settings(finish))
         assert isinstance(plan, CurvaturePlan)  # the method is minimum curvature
-        key = solve_key(values)
+        if key is None:
+            key = solve_key(values)
         if key in self._solved:
+            # Recently used: what a list is about to land must evict other
+            # slices, never the stretch windows it is completing.
+            self._solved.move_to_end(key)
             return None
         return PendingSolve(self, plan, values, key, copy=copy)
 
@@ -1292,10 +1332,40 @@ class SliceEngine(QObject):
         jobs: list[PendingSolve] = []
         for window in limit_windows(z, thickness_levels):
             # Sliced here for this job alone, so it is private without a copy.
-            job = self._job_for(*self._slice(window), finish, copy=False)
+            job = self._job_for(*self._slice(window), finish, key=None, copy=False)
             if job is not None:
                 jobs.append(job)
         return jobs
+
+    def stretch_limit(
+        self, thickness_levels: int, clip: Any, finish: SliceFinish
+    ) -> tuple[float, bool]:
+        """The shared limit to show now, and whether it is final (plan call 7).
+
+        For minimum curvature: `shared_limit` over the solved windows when
+        every one is solved, else the provisional `shared_limit(...,
+        preview=True)`. One pass decides and, when final, measures: each
+        window is sliced and hashed once, and its cached solve smoothed, with
+        no job built and nothing copied. Any other method is always final.
+        """
+        if finish.method != "min_curvature":
+            return self.shared_limit(thickness_levels, clip, finish), True
+        frame, z = self._require_geometry()
+        settings = self.finish_settings(finish)
+        solved: list[np.ndarray] = []
+        for window in limit_windows(z, thickness_levels):
+            values, coverage = self._slice(window)
+            hit = None
+            if self._held_fill(coverage > 0, frame, settings) is not None:
+                key = solve_key(values)
+                hit = self._solved.get(key)
+                if hit is not None:
+                    self._solved.move_to_end(key)
+            if hit is None:
+                return self.shared_limit(thickness_levels, clip, finish, preview=True), False
+            solved.append(hit)
+        sx, sy = settings.smooth_x_m, settings.smooth_y_m
+        return limit_over_slices((smooth(s, frame.cell, sx, sy) for s in solved), clip), True
 
     def shared_limit(
         self, thickness_levels: int, clip: Any, finish: SliceFinish, *, preview: bool = False

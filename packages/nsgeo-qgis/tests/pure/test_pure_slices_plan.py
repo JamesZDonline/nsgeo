@@ -483,7 +483,10 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
     settings = SliceFinish(method=method).in_metres(0.5)
     pop = _binned_rows(0.5, 0.05, nx=200)
-    values = np.where(pop, 1.0, np.nan).astype(np.float32)
+    # Varying data, so the solve really runs: constant data leave nothing to
+    # solve (b = 0) and the CG buffers would never be allocated.
+    yy, xx = np.indices(pop.shape)
+    values = np.where(pop, np.sin(xx * 0.05) + np.cos(yy * 0.03), np.nan).astype(np.float32)
     out = None
     tracemalloc.start()
     try:
@@ -497,6 +500,8 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
         tracemalloc.stop()
     if out is None:
         out = fw.apply(values)
+    else:
+        assert fw.solve(values)[1] > 0, "the measured solve must have iterated"
     assert (np.isfinite(out) & ~pop).sum() > 0.8 * pop.size
     assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
 

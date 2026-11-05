@@ -2646,18 +2646,26 @@ def test_a_slow_slice_shows_the_preview_then_refines(docked, move):
 
 
 def test_the_refine_waits_for_the_depth_to_rest(docked, monkeypatch):
+    """Each move restarts the rest, and the refine starts only when it runs
+    out. No events are processed between the moves, so a stalled process can
+    only make the rest look later, never fire it between them."""
     dock, _ = docked
     _minimum_curvature(dock, 500.0)
     starts = _starts(dock, monkeypatch)
     moved = 0.0
+    left: int | None = None
     for value in (15, 20, 25):
         dock.slice_slider.setValue(value)
         moved = time.monotonic()
         assert dock.provisional
         assert not dock.refiner.busy
         assert dock._rest.isActive()
-        _pump_for(0.1)
-        assert starts == [], "a refine started while the depth was still moving"
+        if left is not None:
+            assert dock._rest.remainingTime() > left, "a move must restart the rest"
+        time.sleep(0.1)  # the depth still moving: no events, so the rest cannot fire
+        left = dock._rest.remainingTime()
+        assert left < REFINE_REST_MS
+    assert starts == [], "a refine started while the depth was still moving"
     _wait_for_refine(dock)
     assert len(starts) == 1
     # A coarse Qt timer may fire up to 5% early.
@@ -2703,8 +2711,8 @@ def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
     held: dict[str, bytes] = {}
     real = engine.pending_solve
 
-    def gated(values, coverage, finish):
-        job = real(values, coverage, finish)
+    def gated(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
         if job is not None and job.key == held.get("a"):
             run = job.run
 
@@ -2782,8 +2790,8 @@ def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch)
     engine = dock.engine
     real = engine.pending_solve
 
-    def failing(values, coverage, finish):
-        job = real(values, coverage, finish)
+    def failing(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
 
         def run(should_stop):
             raise ValueError("no convergence")
@@ -2801,6 +2809,93 @@ def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch)
     assert dock.provisional, "the preview stays on screen"
     assert dock.current_values() is preview
     assert dock.status_label.text() == dock._grid_status_text()
+
+
+def test_a_preview_solved_during_the_rest_is_drawn_at_the_rest(docked, monkeypatch):
+    """Finding 2a: if the previewed slice is solved while the depth rests (an
+    export solves every band), the rest makes no job, and must still replace
+    the preview, since nothing would arm the rest for it again."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    assert dock.provisional
+    engine = dock.engine
+    engine.finish(*engine.slice_at(dock.current_window()), dock.slice_finish())
+    _wait_for_refine(dock)
+    assert starts == []
+    assert not dock.provisional
+    assert dock.status_label.text() == dock._grid_status_text()
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
+def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_draw(
+    docked, monkeypatch
+):
+    """Finding 2b: a refine that ends in an error leaves the shared stretch
+    provisional with nothing armed; the next draw must arm the rest again."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    real = engine.stretch_solves
+    calls: list[int] = []
+
+    def failing_once(thickness_levels, finish):
+        jobs = real(thickness_levels, finish)
+        calls.append(len(jobs))
+        if len(calls) == 1 and jobs:
+
+            def run(should_stop):
+                raise ValueError("no convergence")
+
+            jobs[-1].run = run  # the others land first
+        return jobs
+
+    monkeypatch.setattr(engine, "stretch_solves", failing_once)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    _wait_for_refine(dock)
+    assert errors == ["minimum curvature failed: no convergence"]
+    assert dock._shared_limit_cache is not None and dock._shared_limit_cache[2] is False
+    assert not dock.refiner.busy and not dock._rest.isActive()
+
+    dock.refresh_slice()  # the next draw, whatever prompts it
+    assert dock._rest.isActive(), "the provisional stretch must arm the rest again"
+    _wait_for_refine(dock)
+    assert len(calls) == 2 and calls[1] == 1  # only the window that failed
+    n = dock.current_window().n_levels
+    assert dock._shared_limit_cache is not None and dock._shared_limit_cache[2] is True
+    clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, dock.slice_finish()))
+
+
+def test_a_draw_hashes_its_slice_once(docked, monkeypatch):
+    """Finding 1: hashing a slice costs about 7 ms at a million cells, and a
+    draw needs its key two or three times, so it is computed once and passed
+    on, through the rest's job too."""
+    from nsgeo_qgis import slices_engine
+    from nsgeo_qgis.ui import slices_dock
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    hashes: list[int] = []
+
+    def counting(values):
+        hashes.append(1)
+        return solve_key(values)
+
+    monkeypatch.setattr(slices_engine, "solve_key", counting)
+    monkeypatch.setattr(slices_dock, "solve_key", counting)
+    dock.slice_slider.setValue(20)  # slow: the preview
+    assert dock.provisional and len(hashes) == 1
+    hashes.clear()
+    _wait_for_refine(dock)  # the rest's job, then the redraw it lands
+    assert not dock.provisional and len(hashes) == 1
+    hashes.clear()
+    dock.engine._last_solve_ms = 5.0
+    dock.slice_slider.setValue(30)  # quick: solved at once
+    assert not dock.provisional and len(hashes) == 1
 
 
 class _Looping:
@@ -2825,10 +2920,6 @@ class _Looping:
 
     def land(self) -> bool:
         return False
-
-
-def _refine_threads() -> list[threading.Thread]:
-    return [t for t in threading.enumerate() if t.name.startswith("nsgeo-refine") and t.is_alive()]
 
 
 def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_modal, monkeypatch):
@@ -2858,7 +2949,7 @@ def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_moda
         dock = plugin.slices_dock
         _ready(dock)
         job = _Looping()
-        monkeypatch.setattr(dock.engine, "pending_solve", lambda *args: job)
+        monkeypatch.setattr(dock.engine, "pending_solve", lambda *args, **kwargs: job)
         _set_finish(dock, method="min_curvature")  # a new plan's first draw is a preview
         assert dock.provisional
         _pump_until(job.started.is_set)
@@ -2866,8 +2957,11 @@ def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_moda
         plugin.unload()
         unloaded = True
         assert job.stopped_by_request, "unload did not ask the solve to stop"
-        _pump_until(lambda: not _refine_threads(), 2.0)
-        assert job.thread is not None and not job.thread.is_alive()
+        # This dock's own worker, as the job saw it: other tests' refiners
+        # may legitimately still have threads of the same name.
+        worker = job.thread
+        assert worker is not None and worker.name.startswith("nsgeo-refine")
+        _pump_until(lambda: not worker.is_alive(), 2.0)
         gc.collect()
         _pump_for(0.05)
     finally:
