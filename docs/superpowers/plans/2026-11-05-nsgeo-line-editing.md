@@ -45,7 +45,7 @@
 - **Tool versions:** ruff 0.17.1 and mypy 2.4.0, as pinned in CI.
 - **Commits:**
   - End every commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-  - Push each commit to `origin nsgeo-line-editing` as it is made. GitHub was unreachable when this plan was written: the merge of main (`285e9cc`) and this plan's commit are still local. Push them first.
+  - Push each commit to `origin nsgeo-line-editing` as it is made.
 - **Do not touch `.worktrees/nsgeo-slice-interpolation-b`.** It is being built and changes the same slices files as Task 3. Whichever branch merges second resolves the overlap (spec call 13).
 
 ## Before Task 1 (coordinator)
