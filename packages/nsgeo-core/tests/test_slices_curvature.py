@@ -155,12 +155,43 @@ def test_partial_coverage_solves_in_few_iterations():
     assert plan.solve(v)[1] <= 400
 
 
+def test_the_start_weights_each_direction_by_its_span():
+    """Plan call 3 as amended (controller, 2026-11-05). A wandering line
+    crosses a row only now and then, so a row's bracketing data can be metres
+    apart. An equal average of the column and row estimates needed about 40%
+    more iterations on such lines. Columns alone suit lines along X only, and a
+    grid may hold lines both ways. So a bracketed estimate counts by 1 / its
+    span in cells; a one-sided one counts only where neither direction is
+    bracketed."""
+    from nsgeo.slices.curvature import _start
+
+    d = np.random.default_rng(3).normal(size=(9, 21)).astype(np.float32)
+    pop = np.zeros(d.shape, bool)
+    pop[[2, 6]] = True
+    pop[:, [0, 20]] = True
+    start = _start(d, pop)
+    along_y = d[2, 10] + 0.5 * (d[6, 10] - d[2, 10])  # span 4, halfway
+    along_x = d[4, 0] + 0.5 * (d[4, 20] - d[4, 0])  # span 20, halfway
+    want = (along_y / 4 + along_x / 20) / (1 / 4 + 1 / 20)
+    assert start[4, 10] == pytest.approx(want, abs=1e-6)
+    # Above row 2 a column has data on one side only; the row is bracketed.
+    assert start[0, 10] == pytest.approx(d[0, 0] + 0.5 * (d[0, 20] - d[0, 0]), abs=1e-6)
+    corner = np.zeros(d.shape, bool)
+    corner[2] = True
+    corner[:, 0] = True
+    # Below row 2 and right of column 0, both sides are one-sided: averaged.
+    assert _start(d, corner)[5, 8] == pytest.approx((d[2, 8] + d[5, 0]) / 2, abs=1e-6)
+
+
 def test_one_line_continues_flat_across_it():
     """Data on one line leave a tilt across it that costs no curvature; the
     slope term settles it flat (plan call 1). A profile that is straight
-    along the line carries on unchanged across it. A curved one bends away
-    from the line, as the thin plate should (sin x by up to 0.011 in
-    `dense_solve`), but the same on both sides."""
+    along the line carries on unchanged across it.
+
+    A curved one may not: the exact solution bends away from the line, as a
+    thin plate should (sin x by up to 0.011 in `dense_solve`). So it is held
+    to the same on both sides, which is what no tilt means, and not to flat
+    within 1e-4, as the plan first asked: a correct solve would fail that."""
     pop = np.zeros((21, 30), bool)
     pop[10] = True
     plan = plan_curvature(pop, STEP, 0.25)

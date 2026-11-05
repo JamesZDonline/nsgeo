@@ -30,12 +30,12 @@ D and the operator depend only on where data is, never on its values
 (interpolation spec §7), so `plan_curvature` builds them once per grid and
 distance. `CurvaturePlan.solve` then runs conjugate gradients per slice
 (plan call 3): matrix-free in float32 with float64 dot products, Jacobi
-preconditioned, started from linear interpolation along columns and rows, and
-stopped at `CURVATURE_TOL` of the right-hand side. Against a float64 solve
-to 1e-12 on the full 50 m grids below, its largest error inside the max
-distance was 2.6e-6 of the data range at 0.2 m, 3.3e-5 at 0.1 m and 2.8e-4
-at 0.05 m, where 99% of cells were within 1.8e-5. A multigrid solver would
-be faster (#111).
+preconditioned, started from linear interpolation along columns and rows
+weighted by span (`_start`), and stopped at `CURVATURE_TOL` of the
+right-hand side. Against a float64 solve to 1e-12 on the full 50 m grids
+below, its largest error inside the max distance was 6.2e-6 of the data
+range at 0.2 m, 4.8e-5 at 0.1 m and 4.0e-4 at 0.05 m, where 99% of cells were
+within 2.2e-5. A multigrid solver would be faster (#111).
 
 numpy only, no scipy. Measured medians per slice, at max distance 0.375 m
 (0.75 x the 0.5 m line spacing): on the ten real lines (25 x 100 cells at
@@ -44,17 +44,18 @@ same lines over the lower 40% of the frame with one skipped:
 
     case                             plan      solve    iterations
     real lines, 0.2 m                0.001 s   4 ms      38
-    50 m grid, 0.2 m                 0.004 s   69 ms     56
-    50 m grid, 0.1 m                 0.02 s    0.90 s   184
-    50 m grid, 0.05 m (one slice)    0.11 s    14.6 s   544
-    50 m, 40% covered, line skipped  0.004 s   0.16 s   150
+    50 m grid, 0.2 m                 0.004 s   49 ms     42
+    50 m grid, 0.1 m                 0.02 s    0.79 s   158
+    50 m grid, 0.05 m (one slice)    0.11 s    12.2 s   459
+    50 m, 40% covered, line skipped  0.003 s   0.16 s   141
 
 An iteration costs about what it did in the spike (27 ms at 0.05 m against
-25), but the full grids take more of them than its 40-60 ms, 0.55 s and
-10 s did. Its start ran along columns only, which suits lines along X; plan
-call 3 averages columns and rows, so lines along Y start as well, and
-wandering lines need about 40% more iterations. The kriging preview's
-figures are in `interpolate.py`.
+25), but the finer grids take more of them than its 0.55 s and 10 s did.
+Its start ran along columns only: 39 and 131 iterations at 0.2 and 0.1 m
+here, but 61 and 207 on the same lines turned along Y, where the span
+weighting's 42 and 158 do not change. An equal average of the two
+directions needed 56 and 184. The kriging preview's figures are in
+`interpolate.py`.
 """
 
 from __future__ import annotations
@@ -299,9 +300,11 @@ def _stencil(domain: np.ndarray, unknown: np.ndarray) -> np.ndarray:
     return out
 
 
-def _along_columns(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
-    """Per column, linear between the nearest data cells above and below, the
-    one that exists where only one does, and NaN where the column has none."""
+def _along_columns(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per column, an estimate and its weight. The estimate is linear between
+    the nearest data cells above and below, the one that exists where only
+    one does, and NaN where the column has none. The weight is 1 / the span
+    between the two in cells where both exist, else 0."""
     ny, nx = pop.shape
     rows = np.arange(ny, dtype=np.int32)[:, None]
     above = np.maximum.accumulate(np.where(pop, rows, np.int32(-1)), axis=0)
@@ -312,27 +315,46 @@ def _along_columns(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
     hi = data[np.minimum(below, ny - 1), cols]
     np.copyto(lo, hi, where=~has_above)
     np.copyto(hi, lo, where=~has_below)
-    t = np.zeros(pop.shape, np.float32)
-    np.divide(rows - above, below - above, out=t, where=has_above & has_below & (below > above))
+    weight = np.zeros(pop.shape, np.float32)
+    np.divide(1.0, below - above, out=weight, where=has_above & has_below & (below > above))
+    # lo + (hi − lo) · (row − above) / span; 0 · anything where one side is missing.
     hi -= lo
-    hi *= t
+    hi *= rows - above
+    hi *= weight
     hi += lo
     hi[~has_above & ~has_below] = np.nan
-    return hi
+    return hi, weight
 
 
 def _start(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
-    """The first guess (plan call 3): linear along each column (Y) and each
-    row (X), averaged where both exist, else the one that does, else the data
-    mean. Exact for a constant field, and for a plane between lines."""
-    start = _along_columns(data, pop)
-    along_x = _along_columns(data.T, pop.T).T
+    """The first guess: linear along each column (Y) and each row (X)
+    (plan call 3, amended by the controller on 2026-11-05).
+
+    Where data bracket a cell in either direction, the bracketed estimates
+    are averaged, each weighted by 1 / its span in cells, so the nearer pair
+    of data counts most. A wandering line crosses a row only now and then,
+    and an equal average of the two directions needed about 40% more
+    iterations on such lines. Columns alone would suit lines along X only,
+    and a grid may hold lines both ways. Where neither direction is
+    bracketed, the one-sided estimates are averaged, or the one there is
+    taken, or else the data mean. Exact, up to rounding, for a constant
+    field and for a plane between lines.
+    """
+    start, weight = _along_columns(data, pop)
+    along_x, weight_x = (a.T for a in _along_columns(data.T, pop.T))
     has_y, has_x = ~np.isnan(start), ~np.isnan(along_x)
+    total = weight + weight_x
+    # The weighted sum, in `weight`'s buffer. A zero weight is skipped, not
+    # multiplied, because its estimate may be NaN.
+    np.multiply(start, weight, out=weight, where=weight > 0)
+    np.multiply(along_x, weight_x, out=weight_x, where=weight_x > 0)
+    weight += weight_x
     both = has_y & has_x
     np.add(start, along_x, out=start, where=both)
     np.multiply(start, 0.5, out=start, where=both)
     np.copyto(start, along_x, where=has_x & ~has_y)
     np.copyto(start, np.float32(np.mean(data[pop], dtype=np.float64)), where=~has_x & ~has_y)
+    np.divide(weight, total, out=start, where=total > 0)
     return start
 
 
