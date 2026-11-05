@@ -26,12 +26,15 @@ class Job:
         self.error = error
         self.ran = False
         self.thread_name = None
+        self.thread = None
+        self.stopped_by_request = False
         self.started = threading.Event()
         self.returned = threading.Event()
 
     def run(self, should_stop):
         self.ran = True
-        self.thread_name = threading.current_thread().name
+        self.thread = threading.current_thread()
+        self.thread_name = self.thread.name
         self.started.set()
         try:
             if self.error is not None:
@@ -39,7 +42,10 @@ class Job:
             if self.gate is not None:
                 self.gate.wait(5)
             deadline = time.monotonic() + 5  # a cancel regression must not hang the suite
-            while self.loop and not should_stop() and time.monotonic() < deadline:
+            while self.loop and time.monotonic() < deadline:
+                if should_stop():
+                    self.stopped_by_request = True
+                    break
                 time.sleep(0.001)
         finally:
             self.returned.set()
@@ -182,9 +188,11 @@ def test_shutdown_joins_the_worker(refiner):
     looping = Job("loop", loop=True)
     refiner.start([looping], lambda j: None, lambda m: None)
     assert looping.started.wait(2)
-    worker = next(t for t in threading.enumerate() if t.name == looping.thread_name)
+    t0 = time.monotonic()
     refiner.shutdown()
-    assert not worker.is_alive()  # joined, not merely asked to stop
+    assert time.monotonic() - t0 < 1.0  # cancelled, not left to run out its bound
+    assert looping.stopped_by_request
+    assert not looping.thread.is_alive()  # joined, not merely asked to stop
     assert _refine_threads() == []
     refiner.shutdown()
 
@@ -202,6 +210,18 @@ def test_shutdown_survives_a_deleted_parent_and_ends_starts(qgis_app):
     assert not job.ran
 
 
+def test_a_start_after_the_parent_is_deleted_is_a_no_op(qgis_app):
+    parent = QObject()
+    r = Refiner(parent)
+    sip.delete(parent)
+    job = Job("late")
+    r.start([job], lambda j: None, lambda m: None)
+    assert not r.busy
+    time.sleep(0.05)
+    assert not job.ran
+    r.shutdown()
+
+
 def test_an_unrequested_solve_stop_is_reported(refiner):
     errors, landed = [], []
     refiner.start([Job("s", error=SolveStopped())], landed.append, errors.append)
@@ -211,12 +231,29 @@ def test_an_unrequested_solve_stop_is_reported(refiner):
     assert not refiner.busy
 
 
-def test_a_base_exception_still_ends_the_list(refiner):
+def test_an_error_with_no_message_is_reported_by_its_type(refiner):
     errors = []
     refiner.start([Job("m", error=MemoryError())], lambda j: None, errors.append)
     _pump_until(lambda: errors)
     assert errors == ["MemoryError"]
     assert not refiner.busy
+
+
+class Fatal(BaseException):
+    """Not an Exception, as KeyboardInterrupt and SystemExit are not."""
+
+
+def test_a_base_exception_still_ends_the_list(refiner):
+    errors, landed = [], []
+    refiner.start([Job("f", error=Fatal("boom"))], landed.append, errors.append)
+    _pump_until(lambda: errors)
+    assert errors == ["boom"]
+    assert not refiner.busy
+    _pump_until(lambda: not refiner._poll.isActive())
+    after = Job("after")
+    refiner.start([after], landed.append, errors.append)
+    _pump_until(lambda: landed)
+    assert landed == [after]
 
 
 class SolveJob:

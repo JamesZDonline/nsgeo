@@ -83,7 +83,7 @@ class Refiner:
     ) -> None:
         """Cancel whatever runs, then run `jobs` in order; each lands on the
         GUI thread through `on_landed` after it finishes."""
-        if self._closed:
+        if self._closed or sip.isdeleted(self._poll):
             _log("a refine was started after the worker shut down; ignored")
             return
         self.cancel()
