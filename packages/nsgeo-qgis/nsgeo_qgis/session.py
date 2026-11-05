@@ -85,10 +85,16 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
-def _merge_resolution(old: dict[str, float], **fields: float | None) -> dict[str, float] | None:
+def _merge_resolution(
+    old: dict[str, float | str], **fields: float | str | None
+) -> dict[str, float | str] | None:
     """`old` with the non-None `fields` laid over it, or None when that
-    changes nothing -- the caller's cue not to mark the survey dirty (#71)."""
-    new = {**old, **{k: float(v) for k, v in fields.items() if v is not None}}
+    changes nothing -- the caller's cue not to mark the survey dirty (#71).
+    A string (the interpolation method) stays one; a number becomes a float."""
+    new = {
+        **old,
+        **{k: v if isinstance(v, str) else float(v) for k, v in fields.items() if v is not None},
+    }
     return None if new == old else new
 
 
@@ -832,7 +838,7 @@ class SiteSession(QObject):
         is "every line"). Keeps an existing gain."""
         self._update_source(grid_id, preset=preset, lines=None if lines is None else list(lines))
 
-    def slice_resolution(self, grid_id: str) -> dict[str, float]:
+    def slice_resolution(self, grid_id: str) -> dict[str, float | str]:
         """A copy of the grid's remembered resolution (#71), or {}."""
         entry = self._require_site().slice_sources.get(grid_id) or {}
         return dict(entry.get("resolution", {}))
@@ -845,7 +851,10 @@ class SiteSession(QObject):
         dz_ns: float | None = None,
         t0_ns: float | None = None,
         t1_ns: float | None = None,
-        radius_spacings: float | None = None,
+        method: str | None = None,
+        max_distance_spacings: float | None = None,
+        smooth_x_m: float | None = None,
+        smooth_y_m: float | None = None,
     ) -> None:
         """Merge the given resolution fields into the grid's record (#71);
         None leaves a field as it is. Keeps the preset, lines and gain."""
@@ -855,7 +864,10 @@ class SiteSession(QObject):
             dz_ns=dz_ns,
             t0_ns=t0_ns,
             t1_ns=t1_ns,
-            radius_spacings=radius_spacings,
+            method=method,
+            max_distance_spacings=max_distance_spacings,
+            smooth_x_m=smooth_x_m,
+            smooth_y_m=smooth_y_m,
         )
         if merged is not None:
             self._update_source(grid_id, resolution=merged)
@@ -898,7 +910,7 @@ class SiteSession(QObject):
         self._require_site().site_view = new
         self._set_dirty(True)
 
-    def site_resolution(self) -> dict[str, float]:
+    def site_resolution(self) -> dict[str, float | str]:
         """A copy of Whole site's remembered resolution (#71), or {}."""
         return dict(self._require_site().site_view.get("resolution", {}))
 
@@ -909,7 +921,10 @@ class SiteSession(QObject):
         dz_ns: float | None = None,
         t0_ns: float | None = None,
         t1_ns: float | None = None,
-        radius_spacings: float | None = None,
+        method: str | None = None,
+        max_distance_spacings: float | None = None,
+        smooth_x_m: float | None = None,
+        smooth_y_m: float | None = None,
     ) -> None:
         """Merge the given fields into Whole site's remembered resolution
         (#71), apart from every grid's own; None leaves a field as it is."""
@@ -919,7 +934,10 @@ class SiteSession(QObject):
             dz_ns=dz_ns,
             t0_ns=t0_ns,
             t1_ns=t1_ns,
-            radius_spacings=radius_spacings,
+            method=method,
+            max_distance_spacings=max_distance_spacings,
+            smooth_x_m=smooth_x_m,
+            smooth_y_m=smooth_y_m,
         )
         if merged is None:
             return

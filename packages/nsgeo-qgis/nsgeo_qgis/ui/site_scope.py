@@ -40,14 +40,15 @@ from qgis.PyQt.QtCore import QTimer
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_plan import (
-    DEFAULT_RADIUS_SPACINGS,
     NO_TRANSFORM,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     default_cell,
     smallest_safe_cell,
 )
+from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
 from nsgeo_qgis.ui.site_panel import SiteRow
 
 
@@ -352,12 +353,14 @@ def depths_text(
     return " · ".join(parts)
 
 
-def radius_tooltip(session: Any, included: Iterable[str], radius_spacings: float) -> str:
-    """The fill radius control's tooltip, with each grid's radius in metres (spec 4.4)."""
-    metres = [f"{g} {radius_spacings * session.grid(g).default_spacing:.2f} m" for g in included]
+def max_distance_tooltip(session: Any, included: Iterable[str], spacings: float) -> str:
+    """The Max distance control's tooltip, with each included grid's metres
+    (interpolation spec §8): the one value is a multiple of every grid's own
+    line spacing, so grids with different spacings are treated alike."""
+    metres = [f"{g} {spacings * session.grid(g).default_spacing:.2f} m" for g in included]
     text = (
-        "Fills cells no line crossed, within this many of each grid's own line "
-        "spacings, so grids with different spacings are filled alike (spec 4.4)."
+        DISTANCE_TIP + " (in each grid's own line spacings, so grids with different spacings "
+        "are treated alike)"
     )
     return text + ("\n" + " · ".join(metres) if metres else "")
 
@@ -376,8 +379,8 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
-    set_row_visible(dock, dock.grid_radius_row, not site)
-    set_row_visible(dock, dock.radius_spacing_spin, site)
+    dock.grid_finish.setVisible(not site)
+    dock.site_finish.setVisible(site)
     # Residency stays per grid and automatic in the site (spec 4.8).
     dock.resident_check.setVisible(not site)
     dock.save_button.setVisible(not site)
@@ -392,14 +395,6 @@ def show_scope_widgets(dock: Any) -> None:
         )
     finally:
         dock.stretch_combo.blockSignals(False)
-
-
-def set_row_visible(dock: Any, field: Any, visible: bool) -> None:
-    """Show or hide one Resolution row, its label with it."""
-    label = dock._resolution_form.labelForField(field)
-    if label is not None:
-        label.setVisible(visible)
-    field.setVisible(visible)
 
 
 def capture_spins(dock: Any) -> Spins:
@@ -446,22 +441,12 @@ def set_cell_floor(dock: Any, floor: float) -> None:
         dock.cell_spin.blockSignals(False)
 
 
-def set_radius_quietly(dock: Any, value: float) -> None:
-    """Set the site's fill radius with its signals blocked: a restore or a
-    reset, never the user's change, so it is not remembered (#71)."""
-    dock.radius_spacing_spin.blockSignals(True)
-    try:
-        dock.radius_spacing_spin.setValue(value)
-    finally:
-        dock.radius_spacing_spin.blockSignals(False)
-
-
 class SiteScope:
     """The dock's Whole-site half: its state, and what its widgets do in it.
 
     Built by `SlicesDock`, which owns the widgets, the `SiteEngine` and the
     scope switch, and delegates to this. `dock.site_panel`,
-    `dock.normalisation_panel` and `dock.radius_spacing_spin` are wired here.
+    `dock.normalisation_panel` and `dock.site_finish` are wired here.
     """
 
     def __init__(self, dock: Any) -> None:
@@ -490,13 +475,22 @@ class SiteScope:
         self.tick.setSingleShot(True)
         self.tick.setInterval(0)
         self.tick.timeout.connect(self._run_tick)
+        #: An Interpolation edit's redraw waits out This grid's pause
+        #: (`dock._finish_debounce`): it re-plans every grid's weights and
+        #: re-measures the shared stretch, so a keystroke or a held arrow must
+        #: not pay that once a step. 0.2.0's site radius went through
+        #: `dock._debounce`, the same 120 ms.
+        self.finish_debounce = QTimer(dock)
+        self.finish_debounce.setSingleShot(True)
+        self.finish_debounce.setInterval(dock._finish_debounce.interval())
+        self.finish_debounce.timeout.connect(self._on_finish_timeout)
 
         dock.site_panel.included_changed.connect(self._on_included_changed)
         dock.site_panel.transform_changed.connect(self._on_transform_changed)
         dock.site_panel.selected_changed.connect(self._on_selected_changed)
         dock.normalisation_panel.method_changed.connect(self._on_method_changed)
         dock.normalisation_panel.gain_changed.connect(self._on_gain_changed)
-        dock.radius_spacing_spin.valueChanged.connect(self._on_radius_changed)
+        dock.site_finish.edited.connect(self._on_finish_edited)
 
     @property
     def session(self) -> Any:
@@ -528,11 +522,10 @@ class SiteScope:
             )
         )
         dock.normalisation_panel.set_method(stored_method(self.session))
-        # #71: the radius the user chose for the site, before the rows'
-        # tooltip turns it into metres.
-        remembered = self.session.site_resolution()
-        if "radius_spacings" in remembered:
-            set_radius_quietly(dock, remembered["radius_spacings"])
+        # #71: the finish the user chose for the site, before the rows'
+        # tooltip turns the max distance into metres. Quietly: a restore never
+        # writes (interpolation spec §8).
+        dock.site_finish.set_value(SliceFinish().updated(self.session.site_resolution()))
         self.refresh_rows()
         if panel.selected_grid() is None:
             panel.select_grid(dock.grid_combo.currentText() or None)
@@ -555,19 +548,20 @@ class SiteScope:
         """
         self.spins = capture_spins(self.dock)
         self.tick.stop()
+        self.finish_debounce.stop()
         self.engine.cancel()
         self.slice = None
         self.window = None
 
     def forget(self) -> None:
         """A different survey: nothing the last one's site view held applies,
-        the fill radius included (#71: a second survey inherited the first's)."""
+        the interpolation settings included (#71: a second survey inherited the first's)."""
         self.spins = None
         self.cell_seeded_for = None
         self.source_sent = None
         self.res_applied = None
         self.limit_cache = None
-        set_radius_quietly(self.dock, DEFAULT_RADIUS_SPACINGS)
+        self.dock.site_finish.set_value(SliceFinish())
 
     def shown_top(self) -> float | None:
         z = self.z_shown
@@ -636,7 +630,7 @@ class SiteScope:
 
     # ---- the grid list and normalisation ----------------------------------------
     def refresh_rows(self) -> None:
-        """The grid list and the radius tooltip, from one pass over the lines (M3)."""
+        """The grid list and the max distance tooltip, from one pass over the lines (M3)."""
         dock = self.dock
         if not self.session.is_open:
             dock.site_panel.set_rows([])
@@ -644,8 +638,8 @@ class SiteScope:
         by_grid = keys_by_grid(self.session)
         included = included_grids(self.session, by_grid)
         dock.site_panel.set_rows(site_rows(self.session, self.engine, included, by_grid))
-        dock.radius_spacing_spin.setToolTip(
-            radius_tooltip(self.session, included, dock.radius_spacing_spin.value())
+        dock.site_finish.max_distance_spin.setToolTip(
+            max_distance_tooltip(self.session, included, dock.site_finish.max_distance_spin.value())
         )
 
     def update_export_button(self) -> None:
@@ -710,17 +704,27 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- a slot on a panel signal
             self.dock.error.emit(f"could not change grid {grid_id!r}'s gain: {exc}")
 
-    def _on_radius_changed(self, value: float) -> None:
+    def _on_finish_edited(self, field: str, value: float | str) -> None:
+        """The site's Interpolation panel was edited by hand: remember it for
+        the site (#71) and refresh the tooltip's metres at once, as This grid
+        remembers and relabels at once, then redraw after the pause
+        (`finish_debounce`). A seed or restore never gets here
+        (`FinishPanel.set_value` announces nothing). Guarded: a raising
+        receiver of `FinishPanel.edited` is reported by PyQt's unraisable
+        hook, not by the panel's own guard."""
         try:
-            if self.showing:
-                self.refresh_rows()  # the tooltip's metres per grid
-                self.dock._debounce.start()
-                if not self.dock._updating:
-                    # #71: the user's own (every other set is quiet,
-                    # `set_radius_quietly`), so the site remembers it.
-                    self.session.remember_site_resolution(radius_spacings=value)
-        except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
-            _log(f"could not follow the fill radius: {exc}")
+            if self.showing and self.session.is_open:
+                self.session.remember_site_resolution(**{field: value})
+                self.refresh_rows()
+                self.finish_debounce.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
+            _log(f"could not follow the interpolation setting: {exc}")
+
+    def _on_finish_timeout(self) -> None:
+        try:
+            self.schedule_refresh()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            _log(f"could not redraw after an interpolation edit: {exc}")
 
     # ---- resolution ---------------------------------------------------------------
     def seed_resolution(self, included: tuple[str, ...]) -> None:
@@ -866,7 +870,13 @@ class SiteScope:
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
                 self.update_export_button()
-            self.refresh_slice()
+            finish = self.dock.site_finish.value()
+            if self.engine.weights_cached(finish):
+                self.refresh_slice()
+            else:
+                # Building the weights takes seconds at a fine cell (interpolation spec §7).
+                with busy_cursor():
+                    self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not redraw the site: {exc}")
 
@@ -895,7 +905,7 @@ class SiteScope:
             shown = self.engine.slice_at(
                 top,
                 thickness * z.dz_ns,
-                radius_spacings=dock.radius_spacing_spin.value(),
+                finish=dock.site_finish.value(),
                 method=dock.normalisation_panel.method(),
                 manual=self.gains(),
                 coverage=dock.coverage_check.isChecked(),
@@ -974,7 +984,7 @@ class SiteScope:
         thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
         gains = self.gains()
         method = dock.normalisation_panel.method()
-        radius = dock.radius_spacing_spin.value()
+        finish = dock.site_finish.value()
         key = (
             thickness,
             self.source_sent,
@@ -982,16 +992,17 @@ class SiteScope:
             self.engine.ready_grids,
             method,
             tuple(sorted(gains.items())),
-            radius,
+            finish,
             self.unipolar(),
             self.engine.values_key(),
         )
         if self.limit_cache is None or self.limit_cache[0] != key:
             value = self.engine.shared_limit(
-                thickness * z.dz_ns, clip, radius_spacings=radius, method=method, manual=gains
+                thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
             )
             self.limit_cache = (key, value)
         return self.limit_cache[1]
 
     def dispose(self) -> None:
         self.tick.stop()
+        self.finish_debounce.stop()

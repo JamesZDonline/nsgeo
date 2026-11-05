@@ -124,6 +124,8 @@ import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
+    FillWeights,
+    FinishSettings,
     LinePlan,
     PreparedLine,
     Provenance,
@@ -131,9 +133,9 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
-    clear_kernel_cache,
-    fill,
+    finish_slice,
     limit_over_slices,
+    plan_fill,
     plan_line,
     plan_windows,
     stream_slice,
@@ -145,6 +147,7 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     MemoryEstimate,
     Resolution,
+    SliceFinish,
     SourceChoice,
     choose_residency,
     estimate_memory,
@@ -224,6 +227,14 @@ class SliceEngine(QObject):
         #: moved nothing was to THIS grid -- its velocity -- or to another.
         self._grid_seen: Any = None
         self._cube: SliceCube | None = None
+        #: The interpolation weights for the current frame and settings, built
+        #: on first use and kept: applying them is cheap per slice, building
+        #: them is not (interpolation spec §7). One `(key, weights)` with
+        #: `key = (frame, method, max distance, search radius)`: the settings
+        #: the weights are built from, so a smoothing drag never rebuilds
+        #: them. Dropped wherever the lines or the frame can have changed,
+        #: and checked against each slice's coverage too.
+        self._weights: tuple[tuple[Any, ...], FillWeights] | None = None
         self._mode = "streaming"
         self._always_resident = False
         self._redraw_ms: float | None = None
@@ -536,6 +547,7 @@ class SliceEngine(QObject):
             self._steps = ()
             self._plans = None
             self._cube = None
+            self._weights = None
             self._grid_fp = None
             self._grid_seen = None
             self._redraw_ms = None
@@ -811,8 +823,16 @@ class SliceEngine(QObject):
         # because `set_resolution` also calls this method and must not
         # blank a fingerprint that still correctly describes the grid the
         # CURRENT lines were prepared against.
+        #
+        # The fill weights are the exception: they depend on the frame and the
+        # populated cells, never on the z axis, so a dz/z0/z1 edit keeps them
+        # (rebuilding takes about 5 s at 0.05 m on a 50 m grid). Kept only while
+        # the frame is unchanged; `_weights_for` still checks the key and the
+        # populated mask before reusing them. `set_source` and `clear` drop them.
+        held = self._weights
         self._plans = None
         self._cube = None
+        self._weights = None
         self._frame = None
         self._z = None
         self._redraw_ms = None
@@ -823,6 +843,8 @@ class SliceEngine(QObject):
         res = self._resolution
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
+        if held is not None and held[0][0] == self._frame:
+            self._weights = held
         self._choose_mode()
 
     @staticmethod
@@ -832,7 +854,7 @@ class SliceEngine(QObject):
         Deliberately NOT the whole `Grid`. `velocity` relabels depths
         without rebinning -- that is the entire reason the z axis is
         two-way time (spec 5.2) -- and `default_spacing` only seeds the
-        dock's default fill radius, so re-running 0.9 s of preparation
+        dock's default cell and its interpolation distance, so re-running 0.9 s of preparation
         for either would be waste. `Grid` is a frozen dataclass, so these
         compare exactly.
         """
@@ -960,7 +982,7 @@ class SliceEngine(QObject):
         """One slice and its coverage, both (ny, nx) in the grid-local frame.
 
         `values` is NaN where `coverage` is zero -- unfilled, which is
-        what the coverage view shows and what `fill` consumes.
+        what the coverage view shows and what `finish` consumes.
         """
         if self._mode == "resident":
             self.cube()  # built outside the timer: a build is not a redraw
@@ -975,7 +997,72 @@ class SliceEngine(QObject):
         else:
             self._redraw_ms = _REDRAW_SMOOTHING * self._redraw_ms + (1.0 - _REDRAW_SMOOTHING) * ms
 
-    def shared_limit(self, thickness_levels: int, clip: Any, radius_cells: int) -> float:
+    def finish_settings(self, finish: SliceFinish) -> FinishSettings:
+        """`finish` in metres, at the chosen grid's line spacing NOW.
+
+        The spacing is read from the session each time, so a spacing edit
+        moves the metres without the finish moving (interpolation spec §8).
+        """
+        if self._choice is None or not self.session.is_open:
+            raise RuntimeError("no source is chosen")
+        return finish.in_metres(self.session.grid(self._choice.grid_id).default_spacing)
+
+    def weights_cached(self, finish: SliceFinish) -> bool:
+        """Whether `finish` would reuse the weights already built, so the
+        caller knows to show a wait cursor when it would not. Compares the
+        key only: a change of lines goes through `set_source`, which clears
+        the cache, and `_weights_for` checks coverage as well."""
+        frame = self._frame
+        if self._weights is None or frame is None:
+            return False
+        return self._weights[0] == self._weights_key(frame, self.finish_settings(finish))
+
+    @property
+    def weights_nbytes(self) -> int:
+        """The bytes of the weights held now, 0 before any are built."""
+        return 0 if self._weights is None else self._weights[1].nbytes
+
+    @staticmethod
+    def _weights_key(frame: CubeFrame, settings: FinishSettings) -> tuple[Any, ...]:
+        # Smoothing is applied after the weights and is not part of them.
+        return (frame, settings.method, settings.max_distance_m, settings.search_radius_m)
+
+    def _weights_for(
+        self, coverage: np.ndarray, frame: CubeFrame, settings: FinishSettings
+    ) -> FillWeights:
+        populated = coverage > 0
+        key = self._weights_key(frame, settings)
+        held = self._weights
+        if (
+            held is not None
+            and held[0] == key
+            and np.array_equal(held[1].populated, populated.ravel())
+        ):
+            return held[1]
+        weights = plan_fill(
+            populated,
+            frame.cell,
+            settings.method,
+            settings.max_distance_m,
+            settings.search_radius_m,
+        )
+        self._weights = (key, weights)
+        return weights
+
+    def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
+        """`values` interpolated into blank cells and smoothed (interpolation
+        spec §5-6), with the weights built on first use and reused after.
+
+        The cell is the frame's, never a widget's: a refused resolution edit
+        leaves the spin ahead of the frame, and the weights must describe the
+        array they are applied to (#104).
+        """
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        weights = self._weights_for(coverage, frame, settings)
+        return finish_slice(values, weights, frame.cell, settings)
+
+    def shared_limit(self, thickness_levels: int, clip: Any, finish: SliceFinish) -> float:
         """One display limit for the whole source, at this thickness.
 
         Spec 8's shared stretch. Measured over slices at the thickness
@@ -983,41 +1070,25 @@ class SliceEngine(QObject):
         `nsgeo.slices.display.shared_limit` for the measurement that makes
         the difference a bug rather than a nuance.
 
-        Final review, Important 1: measured over `fill(...)`ed slices, not
-        raw (unfilled) ones -- `radius_cells` is now a required argument,
-        not an afterthought. `refresh_slice()` always displays `fill(values,
-        coverage, radius_cells())`; this method used to measure the shared
-        limit over `self._slice(w)[0]` (the UNFILLED array, coverage-zero
-        cells still `NaN`) while `display_limit()`'s "this slice" branch
-        measured the FILLED one -- two branches of the same stretch
-        measuring two different quantities, and the shared (default)
-        branch measuring something never actually drawn. Measured directly
-        on this repo's own four real DZT files at the dock's own seeded
-        defaults (thickness 23 levels, radius 0.75 m, cell 0.25 m -> 3
-        cells; see `test_shared_limit_measures_the_filled_array_actually_
-        displayed`): the unfilled measurement came out 1.10x too high with
-        `amp_envelope` (2.114 vs. the correct 1.926) and 1.69x too high
-        with no transform (0.364 vs. 0.215) -- the out-of-the-box
-        configuration, since `transform_combo` auto-selects "none" -- so
-        every slice rendered noticeably dimmer than intended, identically
-        at every depth: exactly the "reads as dim data rather than a wrong
-        limit" failure `render.UnipolarClip`'s and `display.shared_limit`'s
-        own docstrings exist to prevent, one layer further out. Both
-        numbers are a property of this corpus and this processing, not a
-        guarantee about any other one -- do not turn them into a
-        threshold.
+        Measured over the FINISHED slices (interpolated and smoothed), the
+        arrays `refresh_slice()` displays, never the raw unfilled ones: with
+        a raw measurement the default (shared) stretch measured something
+        never drawn. On this repo's four real DZT files at the dock's then
+        seeded defaults the unfilled measurement came out 1.10x too high with
+        `amp_envelope` and 1.69x too high with no transform, so every slice
+        rendered noticeably dimmer than intended (final review, Important 1;
+        a property of that corpus, not a threshold).
 
-        Builds its own window list and fills each one directly, in BOTH
+        Builds its own window list and finishes each one directly, in BOTH
         modes, rather than delegating the resident branch to
         `nsgeo.slices.display.shared_limit`: that function reads
-        `cube.slice_levels` straight, with no fill step of its own, so
-        using it here would leave the resident branch with the same bug
-        this fix removes from the streaming one. Windows abut (`step ==
-        thickness`) and a thinner FINAL window is appended whenever
-        `thickness_levels` does not evenly divide `z.nz`, exactly as the
-        core `shared_limit` does -- omitting it would silently measure the
-        resident and streaming stretch over two different sets of levels,
-        which is the mismatch a mode switch must never produce.
+        `cube.slice_levels` straight, with no finishing step, so it would
+        leave the resident branch with the bug the streaming one was fixed
+        for. Windows abut (`step == thickness`) and a thinner FINAL window is
+        appended whenever `thickness_levels` does not evenly divide `z.nz`,
+        exactly as the core `shared_limit` does -- omitting it would measure
+        the resident and streaming stretch over two different sets of levels,
+        which a mode switch must never produce.
         """
         _, z = self._require_geometry()
         windows = list(plan_windows(z, thickness_levels, thickness_levels))
@@ -1026,9 +1097,9 @@ class SliceEngine(QObject):
         if self._mode == "resident":
             cube = self.cube()
             coverage = cube.coverage()
-            slices = (fill(cube.slice_levels(w.k0, w.k1), coverage, radius_cells) for w in windows)
+            slices = (self.finish(cube.slice_levels(w.k0, w.k1), coverage, finish) for w in windows)
         else:
-            slices = (fill(*self._slice(w), radius_cells) for w in windows)
+            slices = (self.finish(*self._slice(w), finish) for w in windows)
         return limit_over_slices(slices, clip)
 
     def cube(self) -> SliceCube:
@@ -1166,11 +1237,9 @@ class SliceEngine(QObject):
         self._grid_fp = None
         self._grid_seen = None
         self._cube = None
+        self._weights = None
         self._redraw_ms = None
         self._running = False
-        # A large cube's kernel spectra are tens of megabytes and have no
-        # reason to outlive the source that needed them.
-        clear_kernel_cache()
 
     def dispose(self) -> None:
         # Cheap cluster (M11 final review): set, and never cleared. A

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -24,7 +26,7 @@ from nsgeo_qgis.slice_export import (
     write_coverage,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SourceChoice
+from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SliceFinish, SourceChoice
 from plugin_testing import synthetic_dzt
 from qgis.core import QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
@@ -39,6 +41,9 @@ PRESET = [
 # `cube_record`'s `view` argument: what the reader had on screen. Not
 # exercised by any test's assertions on its own values, so one shared
 # instance is enough.
+# "No interpolation, no smoothing": the slice as binned.
+NONE = SliceFinish(method="none")
+
 _VIEW = ViewSettings(
     thickness_ns=5.0,
     step_ns=2.5,
@@ -103,7 +108,7 @@ def test_every_band_describes_the_window_it_averages_in_both_units(exportable, t
     engine = exportable
     path = tmp_path / "cube.tif"
     velocity = VelocityModel.constant(0.08)
-    plan = export_slices(engine, path, 10, 5, velocity, radius_cells=2)
+    plan = export_slices(engine, path, 10, 5, velocity, SliceFinish())
     ds = gdal.Open(str(path))
     try:
         assert ds.RasterCount == len(plan.bands)
@@ -125,7 +130,7 @@ def test_the_creation_options_are_the_measured_ones(exportable, tmp_path):
 
     engine = exportable
     path = tmp_path / "cube.tif"
-    export_slices(engine, path, 10, 5, None, radius_cells=2)
+    export_slices(engine, path, 10, 5, None, SliceFinish())
     ds = gdal.Open(str(path))
     try:
         interleave = ds.GetMetadata("IMAGE_STRUCTURE").get("INTERLEAVE")
@@ -142,7 +147,7 @@ def test_the_export_is_north_up_and_carries_the_frames_crs(exportable, tmp_path)
 
     engine = exportable
     path = tmp_path / "cube.tif"
-    export_slices(engine, path, 10, 5, None, radius_cells=0)
+    export_slices(engine, path, 10, 5, None, NONE)
     ds = gdal.Open(str(path))
     try:
         gt = ds.GetGeoTransform()
@@ -159,7 +164,7 @@ def test_export_never_needs_a_resident_cube(exportable, tmp_path):
     engine = exportable
     engine.set_always_resident(False)
     assert engine.mode == "streaming"
-    export_slices(engine, tmp_path / "cube.tif", 10, 5, None, radius_cells=0)
+    export_slices(engine, tmp_path / "cube.tif", 10, 5, None, NONE)
     assert not engine.has_cube, "export must not have built a cube behind the user's back"
 
 
@@ -212,7 +217,7 @@ def test_the_temporal_mapping_is_one_nanosecond_to_one_second(exportable, tmp_pa
 
     engine = exportable
     path = tmp_path / "cube.tif"
-    plan = export_slices(engine, path, 4, 1, None, radius_cells=0)
+    plan = export_slices(engine, path, 4, 1, None, NONE)
     layer = QgsRasterLayer(str(path), "cube", "gdal")
     apply_temporal_properties(layer, plan)
     props = layer.temporalProperties()
@@ -413,7 +418,7 @@ def test_export_slices_streams_through_a_substituted_writer(exportable, tmp_path
     engine = exportable
     writer = _RecordingWriter()
     path = tmp_path / "cube.tif"
-    plan = export_slices(engine, path, 10, 5, None, radius_cells=0, writer=writer)
+    plan = export_slices(engine, path, 10, 5, None, NONE, writer=writer)
     assert len(writer.calls) == 1
     called_path, called_plan, slices = writer.calls[0]
     assert called_path == path
@@ -430,38 +435,104 @@ def test_write_coverage_also_accepts_a_substituted_writer(exportable, tmp_path):
     assert len(writer.calls) == 1
     _path, plan, slices = writer.calls[0]
     assert len(slices) == 1
-    assert plan.radius_cells is None  # coverage is never filled
+    assert plan.finish is None  # coverage is never finished
 
 
-def test_the_geotiff_carries_fill_radius_and_azimuth_metadata(exportable, tmp_path):
-    """Ruling AE (Task 6 fix round 1): the export is a lossy resample at
-    ANY fill radius, radius 0 included -- a reader with only the `.tif`
-    must be able to see that without this module's source in hand."""
+def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
+    """Ruling AE, reworked (interpolation spec §8): a reader with only the
+    `.tif` must see how its values were made. The defaults at this grid's
+    0.5 m spacing: kriging out to three quarters of a spacing, no smoothing; and the
+    old cells-based radius key is gone."""
     from osgeo import gdal
 
     engine = exportable
     path = tmp_path / "cube.tif"
-    export_slices(engine, path, 10, 5, None, radius_cells=3)
+    export_slices(engine, path, 10, 5, None, SliceFinish())
     ds = gdal.Open(str(path))
     try:
         tags = ds.GetMetadata()
-        assert tags["NSGEO_FILL_RADIUS_CELLS"] == "3"
+        assert tags["NSGEO_INTERPOLATION"] == "kriging"
+        assert tags["NSGEO_MAX_DISTANCE_M"] == "0.375"
+        assert tags["NSGEO_SMOOTH_X_M"] == "0.0"
+        assert tags["NSGEO_SMOOTH_Y_M"] == "0.0"
         assert tags["NSGEO_FRAME_AZIMUTH_DEG"] == str(engine.frame.azimuth)
+        assert "NSGEO_FILL_RADIUS_CELLS" not in tags
+    finally:
+        ds.Close()
+
+
+def test_the_geotiff_metadata_follows_the_chosen_finish(exportable, tmp_path):
+    from osgeo import gdal
+
+    engine = exportable
+    path = tmp_path / "cube.tif"
+    finish = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.3, smooth_y_m=0.1)
+    export_slices(engine, path, 10, 5, None, finish)
+    ds = gdal.Open(str(path))
+    try:
+        tags = ds.GetMetadata()
+        assert tags["NSGEO_INTERPOLATION"] == "idw"
+        assert float(tags["NSGEO_MAX_DISTANCE_M"]) == pytest.approx(0.75)
+        assert float(tags["NSGEO_SMOOTH_X_M"]) == pytest.approx(0.3)
+        assert float(tags["NSGEO_SMOOTH_Y_M"]) == pytest.approx(0.1)
+    finally:
+        ds.Close()
+
+
+def test_the_coverage_companion_carries_no_interpolation_metadata(exportable, tmp_path):
+    """Coverage counts are exact; there is nothing interpolated to record."""
+    from osgeo import gdal
+
+    engine = exportable
+    path = tmp_path / "coverage.tif"
+    write_coverage(engine, path)
+    ds = gdal.Open(str(path))
+    try:
+        tags = ds.GetMetadata()
+        for key in (
+            "NSGEO_INTERPOLATION",
+            "NSGEO_MAX_DISTANCE_M",
+            "NSGEO_SMOOTH_X_M",
+            "NSGEO_SMOOTH_Y_M",
+            "NSGEO_FILL_RADIUS_CELLS",
+        ):
+            assert key not in tags
+        assert tags["NSGEO_FRAME_AZIMUTH_DEG"] == str(engine.frame.azimuth)
+    finally:
+        ds.Close()
+
+
+def test_export_bands_equal_the_finished_slices(exportable, tmp_path):
+    """Each band is `engine.finish` of its window, north-up: the file holds
+    what the dock draws."""
+    from nsgeo.slices import plan_windows, to_north_up
+    from osgeo import gdal
+
+    engine = exportable
+    path = tmp_path / "cube.tif"
+    finish = SliceFinish(method="idw", max_distance_spacings=1.0, smooth_x_m=0.25)
+    plan = export_slices(engine, path, 10, 5, None, finish)
+    windows = list(plan_windows(engine.z, 10, 5))
+    assert len(plan.bands) == len(windows)
+    ds = gdal.Open(str(path))
+    try:
+        for index, window in enumerate(windows, start=1):
+            want, _gt = to_north_up(engine.finish(*engine.slice_at(window), finish), engine.frame)
+            np.testing.assert_array_equal(ds.GetRasterBand(index).ReadAsArray(), want)
     finally:
         ds.Close()
 
 
 def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_path):
     """Cheap cluster (final review): every export test above uses this
-    file's `GRID`, at azimuth 0.0 -- the ONE azimuth at which `to_north_up`
-    drops nothing (see this module's own docstring, Ruling AE: the loss is
-    real and UNCONDITIONAL at any other azimuth, at any fill radius). So
-    the exporter's most-argued property -- what a rotated frame does to
-    the north-up resample -- was exercised nowhere. Not a numeric pin on
-    the drop rate (that belongs to `to_north_up`'s own core tests); what
-    matters here is that a rotated export still lands every band on the
-    same grid (no truncation error) and that its own bounding box genuinely
-    is not fully covered by the rotated frame's cells."""
+    file's `GRID`, at azimuth 0.0 -- the one azimuth at which `to_north_up`
+    needs no resample at all. So the exporter's most-argued property -- what
+    a rotated frame does to the north-up resample -- was exercised nowhere.
+    What matters here is that a rotated export still lands every band on
+    the same grid (no truncation error) and that its own bounding box
+    genuinely is not fully covered by the rotated frame's cells. That no
+    frame cell is lost is `test_a_rotated_export_is_at_half_pitch_and_keeps_
+    every_cell`'s."""
     from osgeo import gdal
 
     session = SiteSession()
@@ -486,7 +557,7 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
         assert engine.frame.azimuth == 30.0
 
         path = tmp_path / "rotated.tif"
-        plan = export_slices(engine, path, 10, 5, None, radius_cells=0)
+        plan = export_slices(engine, path, 10, 5, None, NONE)
         ds = gdal.Open(str(path))
         try:
             assert ds.RasterCount == len(plan.bands)
@@ -495,6 +566,54 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
             # own cells -- some north-up pixels genuinely fall outside
             # the surveyed (rotated) frame and must read as nodata.
             assert np.isnan(arr).any()
+        finally:
+            ds.Close()
+    finally:
+        engine.dispose()
+
+
+def test_a_rotated_export_is_at_half_pitch_and_keeps_every_cell(qgis_app, tmp_path):
+    """Interpolation spec §9: on a rotated frame `to_north_up` samples at half
+    the cell, so no frame cell is dropped (it used to lose 15-18% of them at
+    the cell's own pitch). Pinned with `none`, so no value is mixed, and with
+    a unique id in every frame cell: each id must survive among the band's
+    finite pixels, and the pixel pitch is half the frame's cell."""
+    from osgeo import gdal
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", 1.0 + i * 1.0, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    engine = SliceEngine(session)
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+        frame = engine.frame
+        assert frame.azimuth == 30.0
+        ids = np.arange(1, frame.ny * frame.nx + 1, dtype=np.float32).reshape(frame.ny, frame.nx)
+        everywhere = np.ones((frame.ny, frame.nx), dtype=np.int32)
+        engine.slice_at = lambda _window: (ids, everywhere)  # type: ignore[method-assign]
+
+        path = tmp_path / "ids.tif"
+        export_slices(engine, path, 10, 5, None, NONE)
+
+        ds = gdal.Open(str(path))
+        try:
+            assert ds.GetGeoTransform()[1] == pytest.approx(frame.cell / 2.0)
+            band = ds.GetRasterBand(1).ReadAsArray()
+            seen = set(np.unique(band[np.isfinite(band)]).astype(np.int64))
+            missing = set(range(1, frame.ny * frame.nx + 1)) - seen
+            assert not missing, f"{len(missing)} of {frame.ny * frame.nx} frame cells lost"
         finally:
             ds.Close()
     finally:
@@ -710,3 +829,78 @@ def test_a_record_with_a_broken_field_is_refused_by_name(exportable_with_session
     }
     with pytest.raises(ValueError, match="z"):
         recipe_from_record(bad)
+
+
+_OLD_KEYS = {
+    "thickness_ns": 5.0,
+    "step_ns": 2.5,
+    "radius_m": 0.25,
+    "palette": "amp_heat",
+    "stretch": "shared across the cube",
+    "coverage": True,
+}
+
+
+def test_view_settings_round_trip_the_finish():
+    view = ViewSettings(
+        **{**_OLD_KEYS, "radius_m": 0.0},
+        method="idw",
+        max_distance_spacings=1.5,
+        smooth_x_m=0.3,
+        smooth_y_m=0.4,
+    )
+    again = ViewSettings.from_dict(view.to_dict())
+    assert again == view
+    assert again.finish == SliceFinish("idw", 1.5, 0.3, 0.4)
+    assert set(view.to_dict()) == set(_OLD_KEYS) | {
+        "method",
+        "max_distance_spacings",
+        "smooth_x_m",
+        "smooth_y_m",
+    }
+
+
+def test_a_0_2_0_view_record_loads_with_the_new_defaults():
+    got = ViewSettings.from_dict(dict(_OLD_KEYS))
+    assert got.radius_m == 0.25
+    assert got.finish == SliceFinish()
+
+
+def test_a_view_record_with_a_bad_method_falls_back_to_the_defaults():
+    got = ViewSettings.from_dict({**_OLD_KEYS, "method": "bogus", "smooth_x_m": 0.3})
+    assert got.finish == SliceFinish(smooth_x_m=0.3)
+
+
+@dataclass(frozen=True)
+class _ViewSettings020:
+    """Release 0.2.0's `ViewSettings`: the six fields, as in
+    `git show v0.2.0:packages/nsgeo-qgis/nsgeo_qgis/slice_export.py`."""
+
+    thickness_ns: float
+    step_ns: float
+    radius_m: float
+    palette: str
+    stretch: str
+    coverage: bool
+
+    @classmethod
+    def from_dict(cls, doc: dict[str, Any]) -> _ViewSettings020:
+        # Body copied verbatim from 0.2.0.
+        return cls(
+            thickness_ns=float(doc["thickness_ns"]),
+            step_ns=float(doc["step_ns"]),
+            radius_m=float(doc["radius_m"]),
+            palette=str(doc["palette"]),
+            stretch=str(doc["stretch"]),
+            # `.get(..., False)`, not `doc["coverage"]` (Task 7): tolerant
+            # of a `view` dict that carries the other five fields but not
+            # this one -- the same reader-tolerance this module's `Task 7`
+            # functions extend to the record as a whole.
+            coverage=bool(doc.get("coverage", False)),
+        )
+
+
+def test_a_record_from_this_build_still_loads_in_0_2_0():
+    view = ViewSettings(**_OLD_KEYS, method="idw", max_distance_spacings=1.0)
+    got = _ViewSettings020.from_dict(view.to_dict())
+    assert got == _ViewSettings020(**_OLD_KEYS)

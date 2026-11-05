@@ -91,9 +91,13 @@ several grids' slices into one site view.
 | `CoverageError` | A line cannot contribute to the requested cube. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
+| `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
+| `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
 | `Footprint` | Where one grid lands on a site lattice: a window, and the cell ids inside it. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
+| `METHODS` | The interpolation methods: none, IDW, kriging. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
+| `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `Provenance` | What a reader needs to trust a cube. |
@@ -105,13 +109,11 @@ several grids' slices into one site view.
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `build_cube` | Bin every line into a resident cube. |
-| `clear_kernel_cache` | Drop the cached fill-kernel spectra. |
 | `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
 | `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
-| `disc_kernel` | A flat disc kernel of a given radius. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
-| `fill` | Smear values and counts with a disc; the weighted mean. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
+| `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `footprint` | The tight window around the placed pixels of a block of cell ids. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `lattice_pixel` | The site lattice pitch: the cell, or half of it if any frame is rotated. |
@@ -119,6 +121,7 @@ several grids' slices into one site view.
 | `load_cube` | Read a cube written by `save_cube`. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
+| `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_windows` | Every window of a thickness, at a step. |
 | `save_cube` | Write a cube to disk. |
@@ -126,6 +129,7 @@ several grids' slices into one site view.
 | `shared_limit` | One display limit for the whole cube. |
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
+| `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
 | `snap_azimuth` | The nearest right angle, when a frame is axis-aligned in effect. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster. |

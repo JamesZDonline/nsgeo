@@ -24,13 +24,21 @@ with reasons rather than layout:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from nsgeo.processing import get_step, grouped_steps
-from nsgeo.slices import SliceWindow, ZAxis, plan_windows
+from nsgeo.slices import (
+    METHODS,
+    NEIGHBOURS_PER_QUADRANT,
+    FinishSettings,
+    SliceWindow,
+    ZAxis,
+    plan_windows,
+)
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -120,8 +128,9 @@ class Resolution:
     frame bins every trace into the wrong cell, with no exception and
     plausible-looking coverage.
 
-    The fill radius is NOT here: it is a display parameter applied after
-    binning (spec 6.4), so it changes no plan.
+    The interpolation settings are NOT here (`SliceFinish`): they are display
+    parameters applied after binning (interpolation spec §4), so they change
+    no plan.
     """
 
     cell: float
@@ -138,6 +147,90 @@ class Resolution:
             raise ValueError(f"t1_ns must exceed t0_ns, got {self.t0_ns}..{self.t1_ns}")
 
 
+#: What a grid is finished with unless the user says otherwise (interpolation
+#: spec §8): kriging, out to three quarters of a line spacing (the user's
+#: decision of 2026-11-03, interpolation spec §5.2). Half a spacing was the
+#: first default and striped nominal gaps: binning moves each line up to half
+#: a cell, so a gap's middle cell can be ceil(spacing / cell) * cell / 2 from
+#: data, at most (spacing + cell) / 2, which 0.75 covers for any cell up to
+#: half the spacing. A skipped line still shows: at 0.5 m lines and a 0.2 m
+#: cell its middle rows are 0.4 m from data.
+DEFAULT_METHOD = "kriging"
+DEFAULT_MAX_DISTANCE_SPACINGS = 0.75
+#: The neighbour search reaches at least this many line spacings (plan call 1).
+SEARCH_RADIUS_SPACINGS = 2.0
+
+#: Method keys in `METHODS` order, with the labels the Method combo shows.
+METHOD_LABELS: dict[str, str] = {
+    "none": "None (binned only)",
+    "idw": "Inverse distance (IDW)",
+    "kriging": "Kriging",
+}
+
+#: Per cell, the fill weights' int32 source index and float32 weight for each
+#: of the four quadrants' nearest neighbours. Deliberately the weights proper,
+#: not `FillWeights.nbytes` (populated mask, targets): the estimate only has to
+#: be the right order of magnitude to warn before anything is built. Building
+#: them peaks a little above it: 105-107 B a cell, measured on wandering 0.5 m
+#: lines over 50 m at 0.05 m, once `plan_fill` chunked its working set (466-561
+#: B before), within the half again this estimate is allowed
+#: (`test_the_weights_estimate_covers_building_them`).
+WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8
+
+#: The remembered fields a `SliceFinish` is made of.
+FINISH_FIELDS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
+
+
+def _non_negative(value: object) -> float | None:
+    """`value` as a finite non-negative float, or None. A bool is no number,
+    matching the core loader's `_finite`."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0.0 else None
+
+
+@dataclass(frozen=True)
+class SliceFinish:
+    """How a slice is finished: the fill method, how far from data it may
+    reach (in line spacings, so it follows a grid's spacing), and the X/Y
+    smoothing in metres (interpolation spec §8)."""
+
+    method: str = DEFAULT_METHOD
+    max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
+    smooth_x_m: float = 0.0
+    smooth_y_m: float = 0.0
+
+    def in_metres(self, spacing_m: float) -> FinishSettings:
+        if not spacing_m > 0.0:
+            raise ValueError(f"line spacing must be positive, got {spacing_m}")
+        max_distance_m = self.max_distance_spacings * spacing_m
+        return FinishSettings(
+            method=self.method,
+            max_distance_m=max_distance_m,
+            search_radius_m=max(SEARCH_RADIUS_SPACINGS * spacing_m, 2.0 * max_distance_m),
+            smooth_x_m=self.smooth_x_m,
+            smooth_y_m=self.smooth_y_m,
+        )
+
+    def updated(self, fields: Mapping[str, object]) -> SliceFinish:
+        """`self` with the finish fields in `fields` laid over it. A method
+        this build does not know, a negative or non-finite number, and every
+        other key are ignored, so a damaged record falls back field by field."""
+        method = fields.get("method")
+        kept: dict[str, Any] = {}
+        if isinstance(method, str) and method in METHODS:
+            kept["method"] = method
+        for key in FINISH_FIELDS[1:]:
+            number = _non_negative(fields.get(key))
+            if number is not None:
+                kept[key] = number
+        return dataclasses.replace(self, **kept)
+
+
 @dataclass(frozen=True)
 class MemoryEstimate:
     """Held bytes, split the way spec 7.4 splits them.
@@ -150,10 +243,13 @@ class MemoryEstimate:
 
     lines_bytes: int
     cube_bytes: int
+    #: The interpolation weights, built once per grid and kept (interpolation
+    #: spec §7). Counted so a fine cell on a large grid warns before building.
+    weights_bytes: int = 0
 
     @property
     def total_bytes(self) -> int:
-        return self.lines_bytes + self.cube_bytes
+        return self.lines_bytes + self.cube_bytes + self.weights_bytes
 
 
 def transform_names() -> list[str]:
@@ -193,14 +289,17 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: The most cells a frame may have before the Slices dock refuses the
 #: geometry. Not a memory *budget* -- spec 7.4 is explicit that those
 #: warn rather than hard-cap -- but a floor under what can be drawn at
-#: all. Cell count goes as 1/cell**2, so the arithmetic runs away fast:
-#: measured on this repo, a 40 m grid at 0.01 m is 4000 x 4000, about a
-#: gigabyte for ONE filled slice (the fill's FFT working set, ~64 B/cell,
-#: dominates the 4 B/cell array), and 100 m is 6.4 GB. Streaming is no
-#: escape: the per-slice array is the problem, not the cube. 4 million
-#: cells keeps a filled slice near a quarter of a gigabyte, which still
-#: covers a 100 m grid at 0.05 m -- far finer than any trace spacing
-#: spec 4's own "no smaller than the trace spacing" would allow.
+#: all. Cell count goes as 1/cell**2, so the arithmetic runs away fast: a
+#: 40 m grid at 0.01 m is 4000 x 4000, 16 million cells, and 100 m is 100
+#: million. Streaming is no escape: what grows is per cell, not the cube.
+#: The interpolation dominates (interpolation spec §7), measured on 0.5 m
+#: lines at 0.05 m: the weights hold about 95 B a cell and peak near 107 B
+#: while they are built (`WEIGHT_BYTES_PER_CELL`), and each finished slice
+#: needs about 55 B a cell more to apply them and 41 B to smooth, against
+#: the 4 B a cell of the slice itself. 4 million cells is then about 0.4 GB
+#: of weights and 0.2 GB a slice (0.4 GB smoothed), inside the 1.5 GB
+#: default budget, and still covers a 100 m grid at 0.05 m -- far finer
+#: than spec 4's own "no smaller than the trace spacing" would allow.
 MAX_FRAME_CELLS = 4_000_000
 
 
@@ -246,12 +345,6 @@ def smallest_safe_cell(size_x: float, size_y: float, max_cells: int = MAX_FRAME_
 #: the trace spacing. `default_cell` caps it at half the line spacing.
 DEFAULT_CELL_M = 0.2
 
-#: Issue #81: the fill radius a grid starts from, in line spacings. Half a
-#: spacing is the smallest radius that still closes the gap between lines
-#: at their nominal offsets, so it smears far less than spec 6.4's 1.5x but
-#: has no margin: a line that wanders off its offset can leave a stripe.
-DEFAULT_RADIUS_SPACINGS = 0.5
-
 
 def default_cell(spacing_m: float, floor: float) -> float:
     """The cell a grid is seeded with: `DEFAULT_CELL_M`, no larger than half
@@ -270,6 +363,7 @@ def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstim
     return MemoryEstimate(
         lines_bytes=int(prepared_samples) * 4,
         cube_bytes=int(nz) * int(n_cells) * 4 + int(n_cells) * 4,
+        weights_bytes=int(n_cells) * WEIGHT_BYTES_PER_CELL,
     )
 
 
@@ -323,7 +417,8 @@ def format_status(
     binding constraint -- halving the cell doubles the time and
     quadruples the cube.
     """
-    held = estimate.lines_bytes
+    # The interpolation weights are held in either mode (interpolation spec §7).
+    held = estimate.lines_bytes + estimate.weights_bytes
     noun = "line" if n_lines == 1 else "lines"
     if mode == "resident":
         held += estimate.cube_bytes
@@ -358,20 +453,6 @@ def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
 #: grid, so a ten-grid site measured at every window would cost seconds
 #: per change -- and a display percentile does not need every window.
 SITE_LIMIT_WINDOWS = 12
-
-
-def radius_cells_for(spacing_m: float, radius_spacings: float, cell: float) -> int:
-    """A grid's fill radius in cells, from a multiple of its own line spacing.
-
-    Spec 4.4: in site scope the radius is a multiple of each grid's
-    spacing, because one radius in metres would over-smooth a finely
-    spaced grid and leave stripes in a coarse one. Rounded exactly as the
-    dock's `radius_cells` rounds metres, so at equal spacings the site and
-    This grid fill identically.
-    """
-    if not cell > 0.0:
-        raise ValueError(f"cell must be positive, got {cell}")
-    return max(0, int(round(radius_spacings * spacing_m / cell)))
 
 
 def limit_windows(

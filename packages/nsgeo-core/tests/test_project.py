@@ -509,13 +509,19 @@ def test_slice_sources_and_site_view_round_trip(tmp_path):
     assert loaded.site_view == site.site_view
 
 
-_FULL_RESOLUTION = {"cell": 0.1, "dz_ns": 0.25, "t0_ns": 2.0, "t1_ns": 40.0, "radius_spacings": 1.5}
+_FULL_RESOLUTION = {
+    "cell": 0.1,
+    "dz_ns": 0.25,
+    "t0_ns": 2.0,
+    "t1_ns": 40.0,
+    "max_distance_spacings": 1.5,
+}
 
 
 def test_a_remembered_resolution_round_trips(tmp_path):
     site = _two_grid_site()
     site.slice_sources = {"A": {"preset": "p", "resolution": dict(_FULL_RESOLUTION)}}
-    site.site_view = {"grids": ["A"], "resolution": {"cell": 0.2, "radius_spacings": 0.75}}
+    site.site_view = {"grids": ["A"], "resolution": {"cell": 0.2, "max_distance_spacings": 0.75}}
     path = tmp_path / "survey.nsgeo.json"
     save_site(site, path)
     loaded = load_site(path)
@@ -547,7 +553,7 @@ def _load_with_resolution(tmp_path, resolution):
         {"cell": -1.0},
         {"dz_ns": 0},
         {"cell": True},
-        {"radius_spacings": -0.5},
+        {"max_distance_spacings": -0.5},
         {"t0_ns": 5.0, "t1_ns": 5.0},
         {"t0_ns": 9.0, "t1_ns": 2.0},
         {"colour": 1},
@@ -561,7 +567,7 @@ def _load_with_resolution(tmp_path, resolution):
         "negative-cell",
         "zero-dz",
         "bool-cell",
-        "negative-radius",
+        "negative-max-distance",
         "empty-z-range",
         "reversed-z-range",
         "unknown-key",
@@ -656,3 +662,31 @@ def test_empty_ones_are_not_written(tmp_path):
     doc = json.loads(path.read_text())
     assert "slice_sources" not in doc
     assert "site_view" not in doc
+
+
+def test_remembered_finish_fields_are_kept_and_cleaned(tmp_path):
+    good = {"method": "kriging", "max_distance_spacings": 0.75, "smooth_x_m": 0.3}
+    loaded = _load_with_resolution(tmp_path, {**good, "cell": 0.2})
+    assert loaded.slice_sources == {"A": {"preset": "p", "resolution": {**good, "cell": 0.2}}}
+    assert loaded.site_view == {"transform": "none", "resolution": {**good, "cell": 0.2}}
+    for bad in (
+        {"method": "bogus"},
+        {"method": 3},
+        {"max_distance_spacings": -1},
+        {"smooth_x_m": float("nan")},
+        {"smooth_y_m": -1},
+    ):
+        loaded = _load_with_resolution(tmp_path, {**good, **bad})
+        (key,) = bad
+        kept = loaded.site_view["resolution"]
+        assert key not in kept
+        assert {k: v for k, v in good.items() if k != key} == {
+            k: v for k, v in kept.items() if k != key
+        }
+
+
+def test_an_old_radius_spacings_is_dropped_on_load(tmp_path):
+    # A 0.2.0 survey remembers a fill radius; this build has none and never
+    # maps it onto the new controls (interpolation spec §8).
+    loaded = _load_with_resolution(tmp_path, {"cell": 0.2, "radius_spacings": 0.5})
+    assert loaded.site_view["resolution"] == {"cell": 0.2}

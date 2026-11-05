@@ -18,11 +18,12 @@ from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_plan import (
-    DEFAULT_RADIUS_SPACINGS,
     NO_TRANSFORM,
+    SliceFinish,
     default_cell,
     format_bytes,
 )
+from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -128,7 +129,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.grid_scope_button.isChecked() and not dock.site_scope_button.isChecked()
     assert not dock.source_group.isHidden()
     assert dock.site_panel.isHidden() and dock.normalisation_panel.isHidden()
-    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
     assert not dock.save_button.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
@@ -137,7 +138,7 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert dock.site_scope_button.isChecked() and not dock.grid_scope_button.isChecked()
     assert dock.source_group.isHidden()
     assert not dock.site_panel.isHidden() and not dock.normalisation_panel.isHidden()
-    assert dock.grid_radius_row.isHidden() and not dock.radius_spacing_spin.isHidden()
+    assert dock.grid_finish.isHidden() and not dock.site_finish.isHidden()
     assert dock.save_button.isHidden()
     assert dock.export_button.text() == "Export site GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the site"
@@ -150,17 +151,101 @@ def test_the_scope_switch_swaps_the_source_controls(plugin):
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
     # Normalisation is off by default (spec 4.6).
     assert dock.normalisation_panel.method() == "none"
-    spin = dock.radius_spacing_spin
-    assert spin.suffix() == " × line spacing"
-    assert (spin.minimum(), spin.maximum(), spin.singleStep(), spin.value()) == (0, 10, 0.25, 0.5)
-    assert "A 0.75 m" in spin.toolTip()  # 0.5 x A's 1.5 m spacing (#81)
+    assert dock.site_finish.value() == SliceFinish()
+    assert "A 1.12 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.75 x A's 1.5 m (#81)
 
     dock.grid_scope_button.click()
     assert dock.scope() == "grid"
     assert not dock.source_group.isHidden() and dock.site_panel.isHidden()
-    assert not dock.grid_radius_row.isHidden() and dock.radius_spacing_spin.isHidden()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
     assert dock.export_button.text() == "Export GeoTIFF…"
     assert dock.stretch_combo.itemText(0) == "shared across the cube"
+
+
+def test_each_scope_shows_its_own_interpolation_panel(plugin):
+    """One Interpolation group at a time, never both, and no Fill radius row
+    (interpolation spec §8, plan call 3)."""
+    dock = plugin.slices_dock
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
+    assert not hasattr(dock, "radius_spacing_spin")
+    whole_site(plugin)
+    assert dock.grid_finish.isHidden() and not dock.site_finish.isHidden()
+    # The site's panel gives no metres readout: each grid has its own spacing.
+    assert not hasattr(dock.site_finish, "max_distance_metres")
+    dock.grid_scope_button.click()
+    assert not dock.grid_finish.isHidden() and dock.site_finish.isHidden()
+
+
+def test_a_site_finish_edit_is_remembered_for_the_site_not_the_grid(plugin):
+    dock = whole_site(plugin)
+    session = plugin.session
+    grid_before = session.slice_resolution("A")
+    dock.site_finish.smooth_x_spin.setValue(0.4)
+    dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
+    settle(dock)
+    assert session.site_resolution() == {"smooth_x_m": 0.4, "method": "idw"}
+    assert session.slice_resolution("A") == grid_before
+    assert dock.grid_finish.value() == SliceFinish()  # This grid's panel is untouched
+    assert session.dirty
+
+
+def test_entering_the_site_restores_its_remembered_finish_quietly(plugin):
+    dock = whole_site(plugin)
+    dock.site_finish.smooth_y_spin.setValue(0.3)
+    dock.site_finish.max_distance_spin.setValue(1.0)
+    settle(dock)
+    dock.grid_scope_button.click()
+    # Something else changed what the panel shows, as another survey would.
+    dock.site_finish.set_value(SliceFinish())
+    plugin.session.save()
+    assert not plugin.session.dirty
+    dock.site_scope_button.click()
+    settle(dock)
+    shown = dock.site_finish.value()
+    assert (shown.smooth_y_m, shown.max_distance_spacings) == (0.3, 1.0)
+    assert not plugin.session.dirty
+
+
+def test_a_site_finish_edit_redraws(plugin):
+    dock = whole_site(plugin)
+    before = dock.current_site_slice()
+    assert before is not None
+    dock.site_finish.smooth_x_spin.setValue(1.0)
+    spin_until(lambda: dock.current_site_slice() is not before, 5_000)
+    drawn = dock.current_site_slice()
+    assert not np.array_equal(drawn.array, before.array, equal_nan=True)
+
+
+def test_quick_site_finish_edits_redraw_once(plugin, monkeypatch):
+    """0.2.0's site radius went through the dock's 120 ms debounce, and an
+    Interpolation edit re-plans every grid's weights: two edits a keystroke
+    apart redraw once, after the pause, as This grid's panel does. The value
+    is remembered, and the tooltip's metres follow, at once."""
+    dock = whole_site(plugin)
+    site = dock._site
+    drawn = []
+    real = site.refresh_slice
+    monkeypatch.setattr(site, "refresh_slice", lambda: drawn.append(1) or real())
+    spin = dock.site_finish.max_distance_spin
+    spin.setValue(1.0)
+    _events()
+    spin.setValue(1.25)
+    _events()
+    assert drawn == []
+    assert plugin.session.site_resolution()["max_distance_spacings"] == 1.25
+    assert "A 1.88 m" in spin.toolTip()  # 1.25 x A's 1.5 m
+    assert spin_until(lambda: drawn, 5_000)
+    spin_until(lambda: False, 300)  # long past another debounce
+    assert drawn == [1]
+    assert dock.current_site_slice() is not None
+
+
+def test_the_max_distance_tooltip_gives_each_grids_metres(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_finish.max_distance_spin.toolTip() == (
+        DISTANCE_TIP + " (in each grid's own line spacings, so grids with different spacings are "
+        "treated alike)\nA 1.12 m · B 1.12 m · C 1.12 m"
+    )
 
 
 def test_whole_site_draws_one_layer_covering_every_grid(plugin):
@@ -218,7 +303,9 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     whole_site(plugin)
     site = dock.site_engine
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
+    # Lines, and the weights each engine has built for the drawn slice.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
+    held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
@@ -290,7 +377,7 @@ def test_refreshing_the_grid_list_reads_each_line_once(plugin, monkeypatch):
     table = dock.site_panel.table
     assert [table.item(r, 3).text() for r in range(3)] == ["4 / 4"] * 3
     assert [table.item(r, 4).text() for r in range(3)] == ["ready"] * 3
-    assert "A 0.75 m" in dock.radius_spacing_spin.toolTip()
+    assert "A 1.12 m" in dock.site_finish.max_distance_spin.toolTip()  # 0.75 x 1.5 m
 
 
 def test_the_list_shows_each_grids_progress_while_it_prepares(plugin, monkeypatch):
@@ -643,7 +730,7 @@ def test_a_velocity_edit_keeps_the_site_stretch_and_a_spacing_edit_re_measures_i
 ):
     """Final review I2: the cached stretch goes only on a change to the
     values drawn. A velocity edit relabels depths; a spacing edit changes
-    each grid's fill radius in cells and the seams."""
+    each grid's max distance in metres and the seams."""
     dock = whole_site(plugin)
     session = plugin.session
     site = dock.site_engine
@@ -883,13 +970,13 @@ def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_
         dock.cell_spin.setValue(0.35)
         t0 = round(dock.z0_spin.value() + 5.0, 3)
         dock.z0_spin.setValue(t0)
-        dock.radius_spacing_spin.setValue(1.25)
+        dock.site_finish.max_distance_spin.setValue(1.25)
         dock.flush_debounce()
         settle(dock)
         assert first.session.site_resolution() == {
             "cell": 0.35,
             "t0_ns": t0,
-            "radius_spacings": 1.25,
+            "max_distance_spacings": 1.25,
         }
         first.session.save()
     finally:
@@ -899,8 +986,8 @@ def test_the_site_resolution_survives_save_and_reopen(fake_iface, site3, answer_
     dock = whole_site(plugin)
     assert dock.cell_spin.value() == pytest.approx(0.35)
     assert dock.z0_spin.value() == pytest.approx(t0)
-    assert dock.radius_spacing_spin.value() == pytest.approx(1.25)
-    assert "A 1.88 m" in dock.radius_spacing_spin.toolTip()  # 1.25 x 1.5 m
+    assert dock.site_finish.value().max_distance_spacings == pytest.approx(1.25)
+    assert "A 1.88 m" in dock.site_finish.max_distance_spin.toolTip()  # 1.25 x 1.5 m
     applied = dock._site.res_applied
     assert (applied.cell, applied.t0_ns) == (pytest.approx(0.35), pytest.approx(t0))
     assert dock.current_site_slice() is not None
@@ -987,16 +1074,19 @@ def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown_in_the
     assert not plugin.session.dirty
 
 
-def test_a_different_survey_starts_the_site_radius_from_the_default(plugin, site3_factory):
+def test_a_different_survey_starts_the_site_finish_from_the_default(plugin, site3_factory):
     dock = whole_site(plugin)
-    dock.radius_spacing_spin.setValue(1.25)
+    # By hand, so the first survey's site remembers it.
+    dock.site_finish.max_distance_spin.setValue(1.25)
+    dock.site_finish.method_combo.setCurrentIndex(dock.site_finish.method_combo.findData("idw"))
     _events()
+    assert plugin.session.site_resolution()["method"] == "idw"
     plugin.session.save()
     other = site3_factory()
     plugin.session.open_site(other.json_path)
     assert dock.engine.wait_for_preparation(20_000)
     dock = whole_site(plugin)
-    assert dock.radius_spacing_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.site_finish.value() == SliceFinish()
     assert plugin.session.site_resolution() == {}
     assert not plugin.session.dirty
 
@@ -1034,7 +1124,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     A is out of the site, so its removal changes no ready grid, and no tick
     re-seeds the site's z range over what landed."""
     session = plugin.session
-    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "radius_spacings": 1.5}
+    b_res = {"cell": 0.1, "dz_ns": 0.5, "t0_ns": 2.0, "t1_ns": 30.0, "max_distance_spacings": 1.5}
     session.remember_slice_resolution("B", **b_res)
     session.set_site_view(grids=("B", "C"))
     session.save()
@@ -1052,7 +1142,7 @@ def test_removing_this_grids_grid_while_the_site_shows_leaves_the_site_resolutio
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
     assert _resolution_spins(dock) == pytest.approx((0.1, 0.5, 2.0, 30.0))
-    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
@@ -1066,7 +1156,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site3_factory, open_plugin
 ):
     """The same fall-back with nothing remembered for B: This grid comes back
-    with B's own seed (its 0.3 m spacing's cell, the default radius), not with
+    with B's own seed (its 0.3 m spacing's cell, the default interpolation), not with
     the values A had before the site."""
     site = site3_factory()
     site.session.replace_grid(dataclasses.replace(site.session.grid("B"), default_spacing=0.3))
@@ -1074,7 +1164,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     site.session.save()
     plugin = open_plugin(site)
     dock = plugin.slices_dock
-    dock.grid_radius_spin.setValue(1.5)  # A's own, unlike B's seed
+    dock.grid_finish.max_distance_spin.setValue(1.5)  # A's own, unlike B's seed
     dock.flush_debounce()
     assert dock.cell_spin.value() == pytest.approx(0.2)
     whole_site(plugin)
@@ -1084,7 +1174,7 @@ def test_the_grid_this_grid_fell_back_to_under_the_site_comes_back_seeded(
     dock.grid_scope_button.click()
     assert dock.grid_combo.currentText() == "B"
     assert dock.cell_spin.value() == pytest.approx(default_cell(0.3, dock.cell_spin.minimum()))
-    assert dock.grid_radius_spin.value() == pytest.approx(DEFAULT_RADIUS_SPACINGS)
+    assert dock.slice_finish() == SliceFinish()
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.choice.grid_id == "B"
@@ -1183,7 +1273,8 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
         md = ds.GetMetadata()
         assert md["NSGEO_SITE_NORMALISATION"] == "background"
         assert md["NSGEO_SITE_TRANSFORM"] == "amp_square"  # #81's default
-        assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 0.5
+        assert md["NSGEO_SITE_INTERPOLATION"] == "kriging"  # the default finish
+        assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 0.75
         assert [g["grid_id"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == ["A", "B", "C"]
         thickness, step = dock.thickness_step_levels()  # the dock's own, on the site axis
         assert ds.RasterCount == len(plan_windows(dock.site_engine.site_z, thickness, step)) > 1
@@ -1195,6 +1286,53 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
     assert plugin.layers.group.findLayer(
         next(lyr for lyr in plugin.layers.project.mapLayers().values() if lyr.name() == "site").id()
     )
+
+
+def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal, tmp_path):
+    """The plugin hands the site export the site panel's finish, not the
+    default. Set as a user would; the file must record it, and its bands must
+    be the site engine's own slices at that finish (the writer stores
+    `SiteSlice.array` as it comes, already on the site lattice)."""
+    dock = whole_site(plugin)
+    panel = dock.site_finish
+    panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
+    panel.max_distance_spin.setValue(1.5)
+    panel.smooth_y_spin.setValue(0.3)
+    chosen = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_y_m=0.3)
+    assert panel.value() == chosen != SliceFinish()
+    target = tmp_path / "finished.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+
+    site = dock.site_engine
+    z = site.site_z
+    thickness, step = dock.thickness_step_levels()
+    windows = plan_windows(z, thickness, step)[:2]
+
+    def drawn(finish, window):
+        return site.slice_at(
+            z.t0_ns + window.k0 * z.dz_ns,
+            window.n_levels * z.dz_ns,
+            finish=finish,
+            method=dock.normalisation_panel.method(),
+            manual=dock.site_gains(),
+        ).array
+
+    md = _metadata(target)
+    ds = gdal.Open(str(target))
+    try:
+        bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(len(windows))]
+    finally:
+        ds.Close()
+    assert md["NSGEO_SITE_INTERPOLATION"] == "idw"
+    assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 1.5
+    assert float(md["NSGEO_SITE_SMOOTH_X_M"]) == 0.0
+    assert float(md["NSGEO_SITE_SMOOTH_Y_M"]) == 0.3
+    for band, window in zip(bands, windows, strict=True):
+        np.testing.assert_array_equal(band, drawn(chosen, window))
+    # The comparison can tell the two apart.
+    assert not np.array_equal(bands[0], drawn(SliceFinish(), windows[0]), equal_nan=True)
 
 
 def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
@@ -1491,7 +1629,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     switch is no choice, so nothing is written and the survey stays clean."""
     dock = plugin.slices_dock
     session = plugin.session
-    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, radius_spacings=1.5)
+    session.remember_slice_resolution("B", cell=0.1, dz_ns=0.5, max_distance_spacings=1.5)
     session.save()
     stored = session.slice_source("B")
     whole_site(plugin)
@@ -1502,7 +1640,7 @@ def test_the_opened_grid_brings_its_remembered_resolution_to_the_engine(plugin):
     spin_until(lambda: False, 400)  # any debounce runs on its own
     assert dock.cell_spin.value() == pytest.approx(0.1)
     assert dock.dz_spin.value() == pytest.approx(0.5)
-    assert dock.grid_radius_spin.value() == pytest.approx(1.5)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
     assert dock.engine.choice.grid_id == "B"
     assert dock.engine.frame.cell == pytest.approx(0.1)
     assert dock.engine.z.dz_ns == pytest.approx(0.5)

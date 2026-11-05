@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import math
+import tracemalloc
+
+import numpy as np
 import pytest
+from nsgeo.slices import plan_fill
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
+    WEIGHT_BYTES_PER_CELL,
     MemoryEstimate,
     Resolution,
+    SliceFinish,
     SourceChoice,
     choose_residency,
     estimate_memory,
@@ -82,7 +89,7 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230)
     assert est.lines_bytes == 10_000_000 * 4
     assert est.cube_bytes == 230 * 90_000 * 4 + 90_000 * 4
-    assert est.total_bytes == est.lines_bytes + est.cube_bytes
+    assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
 
 
 #: The lines spec 7.4 was measured on: the ten real files, 606-666 traces.
@@ -171,6 +178,15 @@ def test_the_status_line_says_what_is_held_and_how_fast_it_redraws():
     assert "111 MB" in resident  # lines AND cube, because both are held
     assert format_status("streaming", 1, est, 3.6).startswith("1 line held")  # not "1 lines"
     assert "redraw in —" in format_status("streaming", 24, est, redraw_ms=None)
+
+
+def test_the_status_line_counts_the_interpolation_weights_as_held():
+    """`total_bytes` counts the weights, so the readout does too: in both modes."""
+    est = MemoryEstimate(lines_bytes=28_000_000, cube_bytes=83_000_000, weights_bytes=40_000_000)
+    assert format_status("streaming", 24, est, 3.6) == (
+        "24 lines held in memory, 68 MB · slices redraw in 4 ms"
+    )
+    assert "151 MB" in format_status("resident", 24, est, 0.56)
 
 
 def test_the_value_objects_validate_themselves():
@@ -295,22 +311,6 @@ def test_a_site_source_shares_one_transform_and_names_each_grid_once():
         SiteSource(transform="amp_envelope", grids=(a, b, again_a))
 
 
-def test_the_fill_radius_follows_each_grids_own_line_spacing():
-    """Spec 4.4: in site scope the radius is a multiple of each grid's own
-    spacing, so a 0.5 m grid and a 1.0 m grid in one site each get
-    M11's 1.5x. Rounded like the dock's `radius_cells` (round, not floor:
-    3.6 cells is 4, which a floor would make 3), and never negative."""
-    from nsgeo_qgis.slices_plan import radius_cells_for
-
-    assert radius_cells_for(0.5, 1.5, 0.25) == 3
-    assert radius_cells_for(1.0, 1.5, 0.25) == 6
-    assert radius_cells_for(0.6, 1.5, 0.25) == 4  # 3.6 cells
-    assert radius_cells_for(0.5, 0.0, 0.25) == 0
-    assert radius_cells_for(0.5, -2.0, 0.25) == 0
-    with pytest.raises(ValueError):
-        radius_cells_for(0.5, 1.5, 0.0)
-
-
 def test_the_default_cell_is_0_2_m_no_larger_than_half_the_spacing():
     """#81: a fixed 0.2 m, not a fraction of the line spacing -- along a
     line the detail is set by the trace spacing, so a widely spaced grid
@@ -373,3 +373,122 @@ def test_limit_windows_keep_at_most_twelve_evenly_spread_with_both_ends():
     assert len(limit_windows(z, 60)) == 4  # three whole windows and the tail: under the cap
     with pytest.raises(ValueError):
         limit_windows(z, 5, max_windows=1)
+
+
+def test_slice_finish_defaults():
+    # Max distance 0.75 x spacing: the user's decision of 2026-11-03.
+    assert SliceFinish() == SliceFinish("kriging", 0.75, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("spacing", [0.5, 0.7, 1.5])
+def test_the_default_max_distance_is_three_quarters_of_a_spacing(spacing):
+    assert SliceFinish().in_metres(spacing).max_distance_m == 0.75 * spacing
+
+
+def _binned_rows(spacing, cell, size=10.0, skip=(), nx=40):
+    """Lines along X from `spacing / 2`, each on the row of the cell its
+    centre falls in, as binning places them; every column populated."""
+    ny = int(math.ceil(size / cell))
+    pop = np.zeros((ny, nx), bool)
+    for i, y in enumerate(np.arange(spacing / 2, size - 1e-9, spacing)):
+        if i not in skip:
+            pop[int(y // cell)] = True
+    return pop
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+@pytest.mark.parametrize(
+    ("spacing", "cell"), [(0.5, 0.2), (0.75, 0.2), (0.7, 0.2), (0.5, 0.15), (1.5, 0.2)]
+)
+def test_the_default_finish_closes_every_gap_between_binned_lines(method, spacing, cell):
+    """Binning moves a line up to half a cell, so its gaps are floor or
+    ceil(spacing / cell) cells; 0.5 x spacing striped the even ones."""
+    settings = SliceFinish(method=method).in_metres(spacing)
+    pop = _binned_rows(spacing, cell)
+    rows = np.flatnonzero(pop.any(axis=1))
+    out = plan_fill(pop, cell, method, settings.max_distance_m, settings.search_radius_m).apply(
+        np.where(pop, 1.0, np.nan)
+    )
+    assert np.isfinite(out[rows[0] : rows[-1] + 1]).all()
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_default_finish_leaves_a_skipped_line_blank(method):
+    settings = SliceFinish(method=method).in_metres(0.5)
+    pop = _binned_rows(0.5, 0.2, skip=(10,))
+    rows = np.flatnonzero(pop.any(axis=1))
+    out = plan_fill(pop, 0.2, method, settings.max_distance_m, settings.search_radius_m).apply(
+        np.where(pop, 1.0, np.nan)
+    )
+    assert np.isnan(out[rows[0] : rows[-1] + 1]).all(axis=1).any()
+
+
+def test_in_metres_scales_by_the_spacing_and_sets_the_search_radius():
+    got = SliceFinish().in_metres(0.5)
+    assert got.max_distance_m == 0.375
+    assert got.search_radius_m == 1.0
+    wide = SliceFinish(max_distance_spacings=3.0).in_metres(0.5)
+    assert wide.max_distance_m == 1.5
+    assert wide.search_radius_m == 3.0
+
+
+@pytest.mark.parametrize("spacing", [0.0, -0.5])
+def test_in_metres_refuses_a_spacing_that_is_not_positive(spacing):
+    with pytest.raises(ValueError):
+        SliceFinish().in_metres(spacing)
+
+
+@pytest.mark.parametrize("radius_spacings", [0.5, 1.5])
+def test_updated_lays_known_fields_over_and_ignores_the_rest(radius_spacings):
+    # 1.5 differs from the default max distance, so mapping the 0.2.0 radius onto it shows.
+    got = SliceFinish().updated({"method": "idw", "radius_spacings": radius_spacings, "cell": 0.2})
+    assert got == SliceFinish(method="idw")
+    got = SliceFinish().updated(
+        {"max_distance_spacings": 1.5, "smooth_x_m": 0.3, "smooth_y_m": 0.4}
+    )
+    assert got == SliceFinish("kriging", 1.5, 0.3, 0.4)
+
+
+def test_updated_ignores_a_bad_method_or_number():
+    base = SliceFinish("idw", 1.0, 0.1, 0.2)
+    for bad in ("bogus", 3):
+        assert base.updated({"method": bad}) == base
+    for field in ("max_distance_spacings", "smooth_x_m", "smooth_y_m"):
+        for bad in (-1.0, float("nan"), float("inf"), True):
+            assert base.updated({field: bad}) == base, (field, bad)
+
+
+def test_updated_accepts_an_int_as_a_number():
+    assert SliceFinish().updated({"smooth_x_m": 1}).smooth_x_m == 1.0
+
+
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_weights_estimate_covers_building_them(method, monkeypatch):
+    """The over-budget warning counts `WEIGHT_BYTES_PER_CELL` before any weights
+    exist (interpolation spec §7), so building them must not need much more:
+    within half as much again. Measured on wandering 0.5 m lines over 50 m at
+    0.05 m: 105-107 B a cell, against 466-561 B before `plan_fill` chunked its
+    working set. Small chunks here, so their fixed few megabytes do not swamp a
+    grid this size."""
+    from nsgeo.slices import interpolate
+
+    monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
+    monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
+    settings = SliceFinish(method=method).in_metres(0.5)
+    pop = _binned_rows(0.5, 0.05, nx=200)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before, _ = tracemalloc.get_traced_memory()
+        fw = plan_fill(pop, 0.05, method, settings.max_distance_m, settings.search_radius_m)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert fw.targets.size > 0.8 * pop.size
+    assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
+
+
+def test_the_estimate_counts_the_fill_weights():
+    est = estimate_memory(0, 1000, 10)
+    assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
+    assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
