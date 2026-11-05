@@ -43,10 +43,12 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     default_cell,
     smallest_safe_cell,
 )
+from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
 from nsgeo_qgis.ui.site_panel import SiteRow
 
 
@@ -107,13 +109,16 @@ def default_preset(session: Any, grid_id: str) -> str | None:
 def source_keys(
     session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
-    """The grid's remembered lines, still on it and in survey order; every line if none."""
+    """The grid's remembered lines, still on it and in survey order; every line
+    if none is remembered or they have all left the grid (#74: the reading
+    `SlicesDock._restore_remembered_source` gives This grid, so both scopes agree)."""
     every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:
         return every
     wanted = set(lines)
-    return tuple(k for k in every if k in wanted)
+    kept = tuple(k for k in every if k in wanted)
+    return kept if kept else every
 
 
 def included_grids(
@@ -348,12 +353,14 @@ def depths_text(
     return " · ".join(parts)
 
 
-def radius_tooltip(session: Any, included: Iterable[str], radius_spacings: float) -> str:
-    """The fill radius control's tooltip, with each grid's radius in metres (spec 4.4)."""
-    metres = [f"{g} {radius_spacings * session.grid(g).default_spacing:.2f} m" for g in included]
+def max_distance_tooltip(session: Any, included: Iterable[str], spacings: float) -> str:
+    """The Max distance control's tooltip, with each included grid's metres
+    (interpolation spec §8): the one value is a multiple of every grid's own
+    line spacing, so grids with different spacings are treated alike."""
+    metres = [f"{g} {spacings * session.grid(g).default_spacing:.2f} m" for g in included]
     text = (
-        "Fills cells no line crossed, within this many of each grid's own line "
-        "spacings, so grids with different spacings are filled alike (spec 4.4)."
+        DISTANCE_TIP + " (in each grid's own line spacings, so grids with different spacings "
+        "are treated alike)"
     )
     return text + ("\n" + " · ".join(metres) if metres else "")
 
@@ -372,8 +379,8 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
-    set_row_visible(dock, dock.radius_spin, not site)
-    set_row_visible(dock, dock.radius_spacing_spin, site)
+    dock.grid_finish.setVisible(not site)
+    dock.site_finish.setVisible(site)
     # Residency stays per grid and automatic in the site (spec 4.8).
     dock.resident_check.setVisible(not site)
     dock.save_button.setVisible(not site)
@@ -388,14 +395,6 @@ def show_scope_widgets(dock: Any) -> None:
         )
     finally:
         dock.stretch_combo.blockSignals(False)
-
-
-def set_row_visible(dock: Any, field: Any, visible: bool) -> None:
-    """Show or hide one Resolution row, its label with it."""
-    label = dock._resolution_form.labelForField(field)
-    if label is not None:
-        label.setVisible(visible)
-    field.setVisible(visible)
 
 
 def capture_spins(dock: Any) -> Spins:
@@ -447,7 +446,7 @@ class SiteScope:
 
     Built by `SlicesDock`, which owns the widgets, the `SiteEngine` and the
     scope switch, and delegates to this. `dock.site_panel`,
-    `dock.normalisation_panel` and `dock.radius_spacing_spin` are wired here.
+    `dock.normalisation_panel` and `dock.site_finish` are wired here.
     """
 
     def __init__(self, dock: Any) -> None:
@@ -466,10 +465,9 @@ class SiteScope:
         self.ready_handled: tuple[str, ...] | None = None
         self.limit_cache: tuple[tuple[Any, ...], float] | None = None
         #: The included set the cell was last seeded for (spec 4.4: only when
-        #: it changes), and whether the user set dz/z0/z1 by hand here (then
-        #: they are clamped, as M11 clamps, never re-seeded).
+        #: it changes). Which of dz/z0/z1 are the user's is no flag here: it
+        #: is read off the remembered record each time (`seed_z`, #71).
         self.cell_seeded_for: tuple[str, ...] | None = None
-        self.z_custom = False
         #: The site's Resolution values when the dock last left it.
         self.spins: Spins | None = None
         #: Ruling T3-g: at most one tick per event-loop pass, latest values.
@@ -477,15 +475,22 @@ class SiteScope:
         self.tick.setSingleShot(True)
         self.tick.setInterval(0)
         self.tick.timeout.connect(self._run_tick)
+        #: An Interpolation edit's redraw waits out This grid's pause
+        #: (`dock._finish_debounce`): it re-plans every grid's weights and
+        #: re-measures the shared stretch, so a keystroke or a held arrow must
+        #: not pay that once a step. 0.2.0's site radius went through
+        #: `dock._debounce`, the same 120 ms.
+        self.finish_debounce = QTimer(dock)
+        self.finish_debounce.setSingleShot(True)
+        self.finish_debounce.setInterval(dock._finish_debounce.interval())
+        self.finish_debounce.timeout.connect(self._on_finish_timeout)
 
         dock.site_panel.included_changed.connect(self._on_included_changed)
         dock.site_panel.transform_changed.connect(self._on_transform_changed)
         dock.site_panel.selected_changed.connect(self._on_selected_changed)
         dock.normalisation_panel.method_changed.connect(self._on_method_changed)
         dock.normalisation_panel.gain_changed.connect(self._on_gain_changed)
-        dock.radius_spacing_spin.valueChanged.connect(self._on_radius_changed)
-        for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-            spin.valueChanged.connect(self._note_z_edit)
+        dock.site_finish.edited.connect(self._on_finish_edited)
 
     @property
     def session(self) -> Any:
@@ -517,6 +522,10 @@ class SiteScope:
             )
         )
         dock.normalisation_panel.set_method(stored_method(self.session))
+        # #71: the finish the user chose for the site, before the rows'
+        # tooltip turns the max distance into metres. Quietly: a restore never
+        # writes (interpolation spec §8).
+        dock.site_finish.set_value(SliceFinish().updated(self.session.site_resolution()))
         self.refresh_rows()
         if panel.selected_grid() is None:
             panel.select_grid(dock.grid_combo.currentText() or None)
@@ -539,18 +548,20 @@ class SiteScope:
         """
         self.spins = capture_spins(self.dock)
         self.tick.stop()
+        self.finish_debounce.stop()
         self.engine.cancel()
         self.slice = None
         self.window = None
 
     def forget(self) -> None:
-        """A different survey: nothing the last one's site view held applies."""
+        """A different survey: nothing the last one's site view held applies,
+        the interpolation settings included (#71: a second survey inherited the first's)."""
         self.spins = None
         self.cell_seeded_for = None
-        self.z_custom = False
         self.source_sent = None
         self.res_applied = None
         self.limit_cache = None
+        self.dock.site_finish.set_value(SliceFinish())
 
     def shown_top(self) -> float | None:
         z = self.z_shown
@@ -619,7 +630,7 @@ class SiteScope:
 
     # ---- the grid list and normalisation ----------------------------------------
     def refresh_rows(self) -> None:
-        """The grid list and the radius tooltip, from one pass over the lines (M3)."""
+        """The grid list and the max distance tooltip, from one pass over the lines (M3)."""
         dock = self.dock
         if not self.session.is_open:
             dock.site_panel.set_rows([])
@@ -627,8 +638,8 @@ class SiteScope:
         by_grid = keys_by_grid(self.session)
         included = included_grids(self.session, by_grid)
         dock.site_panel.set_rows(site_rows(self.session, self.engine, included, by_grid))
-        dock.radius_spacing_spin.setToolTip(
-            radius_tooltip(self.session, included, dock.radius_spacing_spin.value())
+        dock.site_finish.max_distance_spin.setToolTip(
+            max_distance_tooltip(self.session, included, dock.site_finish.max_distance_spin.value())
         )
 
     def update_export_button(self) -> None:
@@ -693,66 +704,103 @@ class SiteScope:
         except Exception as exc:  # noqa: BLE001 -- a slot on a panel signal
             self.dock.error.emit(f"could not change grid {grid_id!r}'s gain: {exc}")
 
-    def _on_radius_changed(self, _value: float) -> None:
+    def _on_finish_edited(self, field: str, value: float | str) -> None:
+        """The site's Interpolation panel was edited by hand: remember it for
+        the site (#71) and refresh the tooltip's metres at once, as This grid
+        remembers and relabels at once, then redraw after the pause
+        (`finish_debounce`). A seed or restore never gets here
+        (`FinishPanel.set_value` announces nothing). Guarded: a raising
+        receiver of `FinishPanel.edited` is reported by PyQt's unraisable
+        hook, not by the panel's own guard."""
         try:
-            if self.showing:
-                self.refresh_rows()  # the tooltip's metres per grid
-                self.dock._debounce.start()
-        except Exception as exc:  # noqa: BLE001 -- a slot on valueChanged
-            _log(f"could not follow the fill radius: {exc}")
+            if self.showing and self.session.is_open:
+                self.session.remember_site_resolution(**{field: value})
+                self.refresh_rows()
+                self.finish_debounce.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
+            _log(f"could not follow the interpolation setting: {exc}")
+
+    def _on_finish_timeout(self) -> None:
+        try:
+            self.schedule_refresh()
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            _log(f"could not redraw after an interpolation edit: {exc}")
 
     # ---- resolution ---------------------------------------------------------------
     def seed_resolution(self, included: tuple[str, ...]) -> None:
-        """Spec 4.4: the cell by M11's rule for the finest-spaced included grid;
-        dz/z0/z1 from what the grids cover -- the ready grids' prepared
-        bounds when there are any, else their headers."""
+        """Spec 4.4: the cell by M11's rule for the finest-spaced included grid,
+        then dz/z0/z1 by `seed_z`, from the included grids' headers until one
+        is ready.
+
+        A cell the user chose for the site (#71) is laid over the cell seed,
+        quietly, as This grid lays a grid's own over its seed; the floor just
+        raised clamps it. A remembered cell leaves the z range seeded.
+        """
         dock = self.dock
-        seed = seed_cell(self.session, included) if self.session.is_open else None
+        is_open = self.session.is_open
+        seed = seed_cell(self.session, included) if is_open else None
         if seed is not None:
             floor, cell = seed
             set_cell_floor(dock, floor)
             set_spins_quietly(dock, cell=cell)
+        remembered = self.session.site_resolution() if is_open else {}
+        if "cell" in remembered:
+            set_spins_quietly(dock, cell=remembered["cell"])
         self.cell_seeded_for = included
-        if self.z_custom or self.seed_z_from_ready():
-            return
-        header = header_z_seed(self.session, included) if seed is not None else None
-        if header is not None:
-            dt, lo, hi = header
-            for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
-                spin.setSingleStep(dt)
-            set_spins_quietly(dock, dz=dt, z0=lo, z1=hi)
+        self.seed_z(included)
 
-    def seed_z_from_ready(self) -> bool:
-        """dz/z0/z1 from the union of the ready grids' prepared bounds (spec
-        4.3), or -- once the user has set them -- only clamped into it, as
-        M11's `_clamp_z_to_prepared` does. Whether anything moved."""
+    def seed_z(self, included: tuple[str, ...] | None = None) -> bool:
+        """dz/z0/z1, field by field (#71, Ruling 14), on every seed and every
+        change to the ready grids. Whether any spin moved.
+
+        The bounds are the union of the ready grids' prepared bounds (spec
+        4.3), snapped inside them. Before any grid is ready they are the
+        headers of `included`, which only `seed_resolution` passes: a tick
+        with nothing ready leaves the spins alone.
+
+        A field the user chose -- a hand edit is remembered at once, through
+        `SlicesDock._on_resolution_edited` -- is read from the record, never
+        from its spin: dz as remembered, and z0/z1 clamped into the bounds as
+        M11's `_clamp_z_to_prepared` clamps. So a range clamped while only one
+        short grid was ready widens again as the others become ready. A field
+        never chosen takes the data's own value: the sample interval, or the
+        bounds. Each on its own, so a remembered dz does not hold z0/z1.
+
+        As in M11 (Review Focus 1), a range the clamp would leave empty
+        (z1 <= z0), such as a remembered one wholly past the data, takes the
+        bounds at both ends. The record is never written here: it stands, for
+        a later crop that frees the range, until the user edits the other end
+        against the range shown (Ruling 15, `SlicesDock._edited_fields`)."""
         from nsgeo_qgis.ui.slices_dock import _snap_inside  # the dock imports this module
 
         dock = self.dock
-        bounds = ready_z_bounds(self.engine)
-        if bounds is None:
+        if not self.session.is_open:
             return False
-        z0 = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
-        z1 = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
-        if self.z_custom:
-            return bool(
-                set_spins_quietly(
-                    dock, z0=max(dock.z0_spin.value(), z0), z1=min(dock.z1_spin.value(), z1)
-                )
-            )
+        bounds = ready_z_bounds(self.engine)
+        if bounds is not None:
+            low = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
+            high = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
+            dt = ready_dt(self.engine)
+        else:
+            header = header_z_seed(self.session, included) if included else None
+            if header is None:
+                return False
+            dt, low, high = header
+        remembered = self.session.site_resolution()
+        z0 = max(remembered["t0_ns"], low) if "t0_ns" in remembered else low
+        z1 = min(remembered["t1_ns"], high) if "t1_ns" in remembered else high
+        if z1 <= z0:
+            z0, z1 = low, high
         values = {"z0": z0, "z1": z1}
-        dt = ready_dt(self.engine)
         if dt is not None:
+            # One sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
                 spin.setSingleStep(dt)
+        if "dz_ns" in remembered:
+            values["dz"] = remembered["dz_ns"]
+        elif dt is not None:
             values["dz"] = dt
         return bool(set_spins_quietly(dock, **values))
-
-    def _note_z_edit(self, _value: float) -> None:
-        """A dz/z0/z1 change while the site shows that is not a seed (seeds are
-        signal-blocked) is the user's: clamped from now on, never re-seeded."""
-        if self.showing and not self.dock._updating:
-            self.z_custom = True
 
     def apply_resolution(self, *, refresh: bool = True) -> None:
         """The Resolution spins to the site, then the slider and a tick. An
@@ -818,11 +866,17 @@ class SiteScope:
                 # Grids became ready, or left: the axis may have changed.
                 self.ready_handled = ready
                 self.limit_cache = None
-                if self.seed_z_from_ready():
+                if self.seed_z():
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
                 self.update_export_button()
-            self.refresh_slice()
+            finish = self.dock.site_finish.value()
+            if self.engine.weights_cached(finish):
+                self.refresh_slice()
+            else:
+                # Building the weights takes seconds at a fine cell (interpolation spec §7).
+                with busy_cursor():
+                    self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not redraw the site: {exc}")
 
@@ -851,7 +905,7 @@ class SiteScope:
             shown = self.engine.slice_at(
                 top,
                 thickness * z.dz_ns,
-                radius_spacings=dock.radius_spacing_spin.value(),
+                finish=dock.site_finish.value(),
                 method=dock.normalisation_panel.method(),
                 manual=self.gains(),
                 coverage=dock.coverage_check.isChecked(),
@@ -930,7 +984,7 @@ class SiteScope:
         thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
         gains = self.gains()
         method = dock.normalisation_panel.method()
-        radius = dock.radius_spacing_spin.value()
+        finish = dock.site_finish.value()
         key = (
             thickness,
             self.source_sent,
@@ -938,16 +992,17 @@ class SiteScope:
             self.engine.ready_grids,
             method,
             tuple(sorted(gains.items())),
-            radius,
+            finish,
             self.unipolar(),
             self.engine.values_key(),
         )
         if self.limit_cache is None or self.limit_cache[0] != key:
             value = self.engine.shared_limit(
-                thickness * z.dz_ns, clip, radius_spacings=radius, method=method, manual=gains
+                thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
             )
             self.limit_cache = (key, value)
         return self.limit_cache[1]
 
     def dispose(self) -> None:
         self.tick.stop()
+        self.finish_debounce.stop()

@@ -127,8 +127,10 @@ class Site:
     #:   `.npz`, relative to the survey file).
     #: * How it was BEING READ -- changes no pixel in the cube: `view`, the
     #:   `ViewSettings` (`nsgeo_qgis.slice_export`) the reader had on
-    #:   screen when the cube was saved: thickness, step, fill radius,
-    #:   palette, stretch, and whether coverage was showing.
+    #:   screen when the cube was saved: thickness, step, the interpolation
+    #:   (method, max distance, X and Y smoothing; `radius_m` is still
+    #:   written for 0.2.0's reader), palette, stretch, and whether coverage
+    #:   was showing.
     #:
     #: `nsgeo_qgis.slice_export.cube_record` is this shape's one writer.
     #:

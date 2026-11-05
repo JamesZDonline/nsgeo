@@ -183,6 +183,12 @@ class LineChoiceDialog(QDialog):
                     self.table.setItem(row, column, QTableWidgetItem(text))
         finally:
             self.table.blockSignals(False)
+        # #74: an empty choice reads as every line in both scopes, so it is
+        # never offered as a choice; OK waits for a tick.
+        ok = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        empty = not self._included
+        ok.setEnabled(not empty)
+        ok.setToolTip("Tick at least one line." if empty else "")
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         # A slot on a Qt signal: an exception here is swallowed by PyQt

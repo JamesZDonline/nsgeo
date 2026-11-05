@@ -88,7 +88,6 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     compose_footprints,
-    fill,
     find_seams,
     footprint,
     grid_axis,
@@ -113,10 +112,10 @@ from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     format_bytes,
     limit_windows,
-    radius_cells_for,
 )
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
@@ -772,7 +771,7 @@ class SiteEngine(QObject):
         """What a grid edit can change in the values drawn (final review I2).
 
         Each ready grid's registration and line spacing -- the spacing sets
-        the fill radius in cells and the seam width. Never its velocity,
+        the interpolation's reach in metres and the seam width. Never its velocity,
         which only relabels depths. For a cache of something measured over
         the drawn values, such as the dock's shared stretch.
         """
@@ -852,7 +851,7 @@ class SiteEngine(QObject):
         self,
         top_ns: float,
         thickness_ns: float,
-        radius_spacings: float,
+        finish: SliceFinish,
         method: str,
         manual: Mapping[str, float],
         coverage: bool,
@@ -862,11 +861,14 @@ class SiteEngine(QObject):
         """Each present grid's displayed slice, grid-local, and what was applied.
 
         Spec 4.6: factors are measured on binned cells (`normalise` takes
-        the unfilled values) and applied to the filled slice,
-        `a * fill(values) + b`. Coverage mode shows the counts, 0 as NaN,
+        the unfinished values) and applied to the finished slice,
+        `a * finish(values) + b` (interpolation spec §4, §8): interpolation is
+        linear in the data and smoothing a normalised average, so the order
+        loses nothing and each grid is finished once, by its own engine at
+        its own line spacing. Coverage mode shows the counts, 0 as NaN,
         and normalises nothing (Ruling 7).
         """
-        _, res = self._require_lattice()
+        self._require_lattice()
         windows: dict[str, SliceWindow | None] = {}
         binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for grid_id in self.ready_grids:
@@ -887,10 +889,7 @@ class SiteEngine(QObject):
         shown: dict[str, np.ndarray] = {}
         for grid_id, (values, cov) in binned.items():
             a, b = factors[grid_id]
-            spacing = self.session.grid(grid_id).default_spacing
-            shown[grid_id] = (
-                a * fill(values, cov, radius_cells_for(spacing, radius_spacings, res.cell)) + b
-            )
+            shown[grid_id] = a * self._engines[grid_id].finish(values, cov, finish) + b
         return windows, shown, factors
 
     def slice_at(
@@ -898,7 +897,7 @@ class SiteEngine(QObject):
         top_ns: float,
         thickness_ns: float,
         *,
-        radius_spacings: float,
+        finish: SliceFinish,
         method: str,
         manual: Mapping[str, float],
         coverage: bool = False,
@@ -917,7 +916,7 @@ class SiteEngine(QObject):
             self._site_seams()
         started = time.perf_counter()
         windows, shown, factors = self._shown(
-            top_ns, thickness_ns, radius_spacings, method, manual, coverage
+            top_ns, thickness_ns, finish, method, manual, coverage
         )
         array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
         self._record_redraw((time.perf_counter() - started) * 1000.0)
@@ -934,13 +933,13 @@ class SiteEngine(QObject):
         thickness_ns: float,
         clip: Any,
         *,
-        radius_spacings: float,
+        finish: SliceFinish,
         method: str,
         manual: Mapping[str, float],
     ) -> float:
         """One display limit for the site at this thickness (spec 4.5, Ruling 4).
 
-        Measured over every present grid's filled slice AFTER
+        Measured over every present grid's finished slice AFTER
         normalisation and manual adjustment -- the values drawn -- at
         `limit_windows` of the site axis (at most twelve, both ends kept),
         never over raw levels (trap 4).
@@ -955,7 +954,7 @@ class SiteEngine(QObject):
             _, shown, _ = self._shown(
                 z.t0_ns + window.k0 * z.dz_ns,
                 window.n_levels * z.dz_ns,
-                radius_spacings,
+                finish,
                 method,
                 manual,
                 coverage=False,
@@ -965,13 +964,22 @@ class SiteEngine(QObject):
             return float(clip.limit(np.array([], dtype=float)))
         return limit_over_slices(slices, clip)
 
+    def weights_cached(self, finish: SliceFinish) -> bool:
+        """Whether a tick at `finish` would build no weights: every ready
+        grid's engine already holds them. For the scope's wait cursor."""
+        return all(self._engines[g].weights_cached(finish) for g in self.ready_grids)
+
     @property
     def held_bytes(self) -> int:
         """What the site holds in memory, as M11's `format_status` counts it.
 
         The prepared lines, plus a cube only where an engine keeps one
-        resident. Still held after leaving site scope (Ruling 1), so This
-        grid's status line names it too (final review M2).
+        resident, plus the interpolation weights each engine has built.
+        Counted from the weights themselves, not the estimate's
+        `weights_bytes`: that is a worst case at the chosen cell, and the
+        weights held are what the status line should name. Still held after
+        leaving site scope (Ruling 1), so This grid's status line names it
+        too (final review M2).
         """
         held = 0
         for engine in self._engines.values():
@@ -981,6 +989,7 @@ class SiteEngine(QObject):
             held += estimate.lines_bytes
             if engine.mode == "resident":
                 held += estimate.cube_bytes
+            held += engine.weights_nbytes
         return held
 
     def status_text(self) -> str:

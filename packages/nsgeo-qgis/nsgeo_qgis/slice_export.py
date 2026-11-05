@@ -34,46 +34,21 @@ Two decisions this task owns, recorded here rather than only in the task
 report because a future reader of this file needs them as much as a
 reviewer of this task does:
 
-* **North-up pitch is the frame's own cell size, not a finer one (Ruling
-  AE, Task 6 fix round 1, corrects this bullet's own first draft).**
-  `to_north_up` (Task 1) drops 15-18% of frame cells at rotated azimuths
-  under nearest-neighbour resampling, which is a real, measured gap, and
-  the loss is UNCONDITIONAL: `fill` never puts a dropped cell into the
-  output at all, at any radius -- it only makes that cell's value
-  recoverable from a surviving neighbour before this module ever sees the
-  array. Radius only changes how much the loss matters, never whether it
-  happens, and radius 0 (spec 6.4's own honest unfilled truth,
-  `radius_spin`'s construction default, and a value `export_geotiff`
-  passes straight through with no refusal) is not a debugging-only case
-  this module gets to assume away. This writer does not compensate with a
-  finer output pitch anyway, for reasons that hold regardless: (1) a
-  finer pitch is a MITIGATION, not a fix -- nearest-neighbour at half
-  pitch still drops cells, it only lowers the probability that a given
-  cell is sampled by no output pixel at all; the actual fix is forward
-  scatter-mapping inside `to_north_up` itself, which is Task 1 work, not
-  this module's; (2) it multiplies the pixel count (4x at half-cell),
-  which multiplies the per-band write cost `INTERLEAVE=BAND` exists to
-  keep small, for a partial mitigation of a problem it does not solve --
-  the wrong trade twice over; (3) implementing even that partial
-  mitigation needs `to_north_up`'s own resample loop, and that function
-  is already the single source both `SliceLayer` and this module read --
-  duplicating its arithmetic here would let the two drift, which is
-  exactly the failure `window_label` being shared between the dock and
-  this module already avoids for the text labels. What this module does
-  instead: say so, on both the file (`NSGEO_FILL_RADIUS_CELLS`/
-  `NSGEO_FRAME_AZIMUTH_DEG` dataset metadata, `GeoTiffSliceWriter.write`)
-  and the message bar (`plugin.export_geotiff`, at radius 0).
-* **The per-band `cell_index` solve is not hoisted out of the export
-  loop.** Task 1's review measured ~1.4 s of repeated solving across 39
-  bands of a 400x300x400 cube, because `to_north_up`'s resample grid does
-  not depend on the values being resampled. Hoisting it needs either a
-  new `to_north_up` entry point that accepts precomputed indices (a
-  change to a shipped Task 1 API, and to `SliceLayer`'s only other
-  caller) or reimplementing the resample here -- the same duplication
-  cost the pitch decision above already rejects. 1.4 s is paid once, on
-  an explicit "Export GeoTIFF..." click, not on every tick of a slider
-  the way `SliceLayer.update` is; that is a cost this module accepts
-  rather than a latency it needs to hide.
+* **North-up pitch follows Ruling 2: the cell, or half of it on a rotated
+  frame (interpolation spec §8).** `to_north_up` now samples a rotated
+  frame at half the cell, so no frame cell is dropped, and this writer
+  just takes the pitch from the geotransform it returns. History: Ruling
+  AE once wrote the frame's own cell size and recorded a 15-18% loss at
+  rotated azimuths, which is what this replaces.
+* **The per-band `cell_index` solve is planned once per frame.**
+  `to_north_up`'s resample grid does not depend on the values being
+  resampled, so the core keeps it per frame (`display._north_up_plan`) and
+  every band after the first is one gather. Before that it was solved for
+  every band: measured on a 400x300 frame at cell 0.05, 0.019 s
+  axis-aligned, 0.112 s at 10.497 degrees (half-pitch sampling), about
+  4.4 s over 39 bands on a rotated frame. The same plan serves
+  `SliceLayer.update`'s ticks, so an export of the frame on screen starts
+  with it already built.
 """
 
 from __future__ import annotations
@@ -88,10 +63,10 @@ import numpy as np
 from nsgeo.project import line_key
 from nsgeo.slices import (
     CubeFrame,
+    FinishSettings,
     Provenance,
     SliceWindow,
     ZAxis,
-    fill,
     npz_path,
     plan_windows,
     save_cube,
@@ -105,7 +80,13 @@ from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsR
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import Resolution, SourceChoice
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_MAX_DISTANCE_SPACINGS,
+    DEFAULT_METHOD,
+    Resolution,
+    SliceFinish,
+    SourceChoice,
+)
 
 
 @dataclass(frozen=True)
@@ -131,14 +112,15 @@ class ExportPlan:
     module docstring names) that would want to record it in the file
     itself, the way `save_cube_npz` already does for the `.npz`.
 
-    `radius_cells` is `None` for a plan that carries no fill radius at
-    all (`write_coverage`'s companion raster is never filled -- coverage
+    `finish` is `None` for a plan that carries no interpolation at all
+    (`write_coverage`'s companion raster is never finished -- coverage
     counts are exact, and smearing a count is not a display decision the
     way smearing an amplitude is). `GeoTiffSliceWriter.write` records it,
-    and the frame's azimuth, as dataset-level metadata -- see Ruling AE
-    (Task 6 fix round 1) for why: the export is a lossy resample at any
-    fill radius, radius 0 included, and a reader five years from now with
-    only the `.tif` in hand needs a way to see that from the file itself.
+    in metres, and the frame's azimuth, as dataset-level metadata -- see
+    Ruling AE (Task 6 fix round 1) for why: a reader five years from now
+    with only the `.tif` in hand needs to see how the values were made
+    (interpolated and smoothed) and on which frame (a rotated frame is
+    resampled to north-up, at half the cell) from the file itself.
     """
 
     frame: CubeFrame
@@ -146,7 +128,7 @@ class ExportPlan:
     crs: str
     bands: tuple[SliceBand, ...]
     provenance: Provenance
-    radius_cells: int | None = None
+    finish: FinishSettings | None = None
 
 
 def plan_export(
@@ -154,7 +136,7 @@ def plan_export(
     thickness_levels: int,
     step_levels: int,
     velocity: VelocityModel | None,
-    radius_cells: int | None = None,
+    finish: FinishSettings | None = None,
 ) -> ExportPlan:
     """The band list a GeoTIFF export would write, without writing anything.
 
@@ -162,9 +144,9 @@ def plan_export(
     its own docstring), so `len(plan.bands)` and the dock's slice count
     are never two agreeing implementations, only one.
 
-    `radius_cells` is carried through onto the plan only -- it changes no
-    band here, only what `GeoTiffSliceWriter.write` later records as
-    metadata. Optional and keyword-compatible with every existing caller
+    `finish` is carried through onto the plan only -- it changes no band
+    here, only what `GeoTiffSliceWriter.write` later records as metadata.
+    Optional and keyword-compatible with every existing caller
     (`export_slices` is the only one that has a real value to pass).
     """
     frame, z = engine.frame, engine.z
@@ -178,7 +160,7 @@ def plan_export(
         crs=frame.crs,
         bands=bands,
         provenance=engine.provenance(),
-        radius_cells=radius_cells,
+        finish=finish,
     )
 
 
@@ -258,11 +240,11 @@ class GeoTiffSliceWriter:
         the loop is answering "is there more?", which a plain `len()`
         check could not do without the caller pre-materialising it.
 
-        `plan.radius_cells`/`plan.frame.azimuth` are written as dataset
-        metadata once the dataset exists (Ruling AE, same fix round): the
-        export is a lossy resample at ANY fill radius including 0 (see
-        `ExportPlan`'s own docstring), and a reader with only the `.tif`
-        needs a way to see that without this module's source in hand.
+        `plan.finish`/`plan.frame.azimuth` are written as dataset metadata
+        once the dataset exists (Ruling AE, same fix round): a reader with
+        only the `.tif` needs a way to see how the values were finished,
+        and that a rotated frame was resampled, without this module's
+        source in hand (see `ExportPlan`'s own docstring).
         """
         if not plan.bands:
             raise ValueError("an export plan needs at least one band")
@@ -296,10 +278,14 @@ class GeoTiffSliceWriter:
                             )
                             dataset.SetGeoTransform(geotransform)
                             dataset.SetProjection(QgsCoordinateReferenceSystem(plan.crs).toWkt())
-                            if plan.radius_cells is not None:
-                                dataset.SetMetadataItem(
-                                    "NSGEO_FILL_RADIUS_CELLS", str(plan.radius_cells)
-                                )
+                            if plan.finish is not None:
+                                for key, value in (
+                                    ("NSGEO_INTERPOLATION", plan.finish.method),
+                                    ("NSGEO_MAX_DISTANCE_M", str(plan.finish.max_distance_m)),
+                                    ("NSGEO_SMOOTH_X_M", str(plan.finish.smooth_x_m)),
+                                    ("NSGEO_SMOOTH_Y_M", str(plan.finish.smooth_y_m)),
+                                ):
+                                    dataset.SetMetadataItem(key, value)
                             dataset.SetMetadataItem(
                                 "NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)
                             )
@@ -352,7 +338,7 @@ def export_slices(
     thickness_levels: int,
     step_levels: int,
     velocity: VelocityModel | None,
-    radius_cells: int,
+    finish: SliceFinish,
     *,
     writer: SliceWriter | None = None,
 ) -> ExportPlan:
@@ -372,15 +358,16 @@ def export_slices(
     test substitutes a stub here to observe the streaming property
     without touching GDAL at all.
     """
-    plan = plan_export(engine, thickness_levels, step_levels, velocity, radius_cells=radius_cells)
+    plan = plan_export(
+        engine, thickness_levels, step_levels, velocity, finish=engine.finish_settings(finish)
+    )
     writer = writer if writer is not None else GeoTiffSliceWriter()
 
-    def _filled_slices() -> Iterable[np.ndarray]:
+    def _finished_slices() -> Iterable[np.ndarray]:
         for band in plan.bands:
-            values, coverage = engine.slice_at(band.window)
-            yield fill(values, coverage, radius_cells)
+            yield engine.finish(*engine.slice_at(band.window), finish)
 
-    writer.write(path, plan, _filled_slices())
+    writer.write(path, plan, _finished_slices())
     return plan
 
 
@@ -428,10 +415,10 @@ def write_coverage(
     so the full axis is used here only to have a window to ask for -- not
     because coverage varies with depth.
 
-    `radius_cells=None` on the plan: a coverage raster is never filled
+    `finish=None` on the plan: a coverage raster is never finished
     (see `ExportPlan`'s own docstring) -- smearing a count is not a
     display decision the way smearing an amplitude is, so there is no
-    fill radius to record here. `writer` mirrors `export_slices`'s own
+    interpolation to record here. `writer` mirrors `export_slices`'s own
     substitution seam (Ruling AG).
 
     Final review, Minor 7: `engine._slice(window)`, not `engine.slice_at
@@ -465,7 +452,7 @@ def write_coverage(
         crs=frame.crs,
         bands=(SliceBand(window=window, description="coverage: traces per cell"),),
         provenance=engine.provenance(),
-        radius_cells=None,
+        finish=None,
     )
     writer = writer if writer is not None else GeoTiffSliceWriter()
     writer.write(path, plan, [shown])
@@ -520,6 +507,18 @@ class ViewSettings:
     palette: str
     stretch: str
     coverage: bool
+    # The finish (interpolation spec §8). `radius_m` stays and is still
+    # written, because 0.2.0's reader requires it; this build ignores it.
+    method: str = DEFAULT_METHOD
+    max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
+    smooth_x_m: float = 0.0
+    smooth_y_m: float = 0.0
+
+    @property
+    def finish(self) -> SliceFinish:
+        return SliceFinish(
+            self.method, self.max_distance_spacings, self.smooth_x_m, self.smooth_y_m
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -529,14 +528,21 @@ class ViewSettings:
             "palette": self.palette,
             "stretch": self.stretch,
             "coverage": self.coverage,
+            "method": self.method,
+            "max_distance_spacings": self.max_distance_spacings,
+            "smooth_x_m": self.smooth_x_m,
+            "smooth_y_m": self.smooth_y_m,
         }
 
     @classmethod
     def from_dict(cls, doc: dict[str, Any]) -> ViewSettings:
+        # A 0.2.0 record has no "method": it opens on the defaults, its
+        # `radius_m` read for the record's sake and never mapped onto them.
+        finish = SliceFinish().updated(doc) if "method" in doc else SliceFinish()
         return cls(
             thickness_ns=float(doc["thickness_ns"]),
             step_ns=float(doc["step_ns"]),
-            radius_m=float(doc["radius_m"]),
+            radius_m=float(doc.get("radius_m", 0.0)),
             palette=str(doc["palette"]),
             stretch=str(doc["stretch"]),
             # `.get(..., False)`, not `doc["coverage"]` (Task 7): tolerant
@@ -544,6 +550,10 @@ class ViewSettings:
             # this one -- the same reader-tolerance this module's `Task 7`
             # functions extend to the record as a whole.
             coverage=bool(doc.get("coverage", False)),
+            method=finish.method,
+            max_distance_spacings=finish.max_distance_spacings,
+            smooth_x_m=finish.smooth_x_m,
+            smooth_y_m=finish.smooth_y_m,
         )
 
 
