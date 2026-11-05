@@ -14,7 +14,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
-from nsgeo.slices import plan_fill, plan_windows, window_depths_m, window_times_ns
+from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_engine import solve_key
@@ -23,6 +23,7 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_STATUS,
     REFINE_REST_MS,
     SliceFinish,
+    limit_windows,
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
@@ -2583,7 +2584,7 @@ def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
     until the refine worker has landed its list and no rest is pending."""
     start = time.monotonic()
     rested = start + (REFINE_REST_MS + 150) / 1000.0
-    while time.monotonic() < rested or dock.refiner.busy or dock._rest.isActive():
+    while time.monotonic() < rested or dock.refiner.busy or dock._grid_refine.rest.isActive():
         if time.monotonic() - start > timeout_s:
             pytest.fail("the refine did not finish")
         QCoreApplication.processEvents()
@@ -2659,11 +2660,11 @@ def test_the_refine_waits_for_the_depth_to_rest(docked, monkeypatch):
         moved = time.monotonic()
         assert dock.provisional
         assert not dock.refiner.busy
-        assert dock._rest.isActive()
+        assert dock._grid_refine.rest.isActive()
         if left is not None:
-            assert dock._rest.remainingTime() > left, "a move must restart the rest"
+            assert dock._grid_refine.rest.remainingTime() > left, "a move must restart the rest"
         time.sleep(0.1)  # the depth still moving: no events, so the rest cannot fire
-        left = dock._rest.remainingTime()
+        left = dock._grid_refine.rest.remainingTime()
         assert left < REFINE_REST_MS
     assert starts == [], "a refine started while the depth was still moving"
     _wait_for_refine(dock)
@@ -2679,7 +2680,7 @@ def test_a_quick_solve_draws_minimum_curvature_at_once(docked, monkeypatch):
     starts = _starts(dock, monkeypatch)
     dock.slice_slider.setValue(20)
     assert not dock.provisional
-    assert not dock._rest.isActive()
+    assert not dock._grid_refine.rest.isActive()
     assert dock.status_label.text() == dock._grid_status_text()
     np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
     _pump_for((REFINE_REST_MS + 150) / 1000.0)
@@ -2694,7 +2695,7 @@ def test_kriging_never_previews(docked, monkeypatch):
         dock.stretch_combo.setCurrentText(stretch)
         dock.slice_slider.setValue(value)
         assert not dock.provisional
-        assert not dock._rest.isActive()
+        assert not dock._grid_refine.rest.isActive()
         np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
     _pump_for((REFINE_REST_MS + 150) / 1000.0)
     assert starts == []
@@ -2760,7 +2761,7 @@ def test_the_shared_stretch_is_provisional_until_its_windows_are_solved(docked):
     assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc, preview=True))
     finals: list[Any] = []
     dock.slice_changed.connect(
-        lambda: finals.append(dock._shared_limit_cache and dock._shared_limit_cache[2])
+        lambda: finals.append(dock._grid_refine.stretch and dock._grid_refine.stretch[2])
     )
     _wait_for_refine(dock)
     assert engine.stretch_solves(n, mc) == []
@@ -2857,15 +2858,15 @@ def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_dr
     dock.stretch_combo.setCurrentText("shared across the cube")
     _wait_for_refine(dock)
     assert errors == ["minimum curvature failed: no convergence"]
-    assert dock._shared_limit_cache is not None and dock._shared_limit_cache[2] is False
-    assert not dock.refiner.busy and not dock._rest.isActive()
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is False
+    assert not dock.refiner.busy and not dock._grid_refine.rest.isActive()
 
     dock.refresh_slice()  # the next draw, whatever prompts it
-    assert dock._rest.isActive(), "the provisional stretch must arm the rest again"
+    assert dock._grid_refine.rest.isActive(), "the provisional stretch must arm the rest again"
     _wait_for_refine(dock)
     assert len(calls) == 2 and calls[1] == 1  # only the window that failed
     n = dock.current_window().n_levels
-    assert dock._shared_limit_cache is not None and dock._shared_limit_cache[2] is True
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
     clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
     assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, dock.slice_finish()))
 
@@ -2898,10 +2899,46 @@ def test_a_draw_hashes_its_slice_once(docked, monkeypatch):
     assert not dock.provisional and len(hashes) == 1
 
 
+def test_a_final_stretch_queues_no_stretch_solves_at_rest(docked, monkeypatch):
+    """Ruling R11: a rest asks for the stretch's solves only while the stretch
+    shown is provisional. Asking slices and hashes its twelve windows on the
+    GUI thread (about 84 ms at a million cells), for nothing once it is final."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0, stretch="shared across the cube")
+    engine = dock.engine
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
+    asked: list[int] = []
+    real = engine.stretch_solves
+
+    def counted(thickness_levels, finish):
+        asked.append(thickness_levels)
+        return real(thickness_levels, finish)
+
+    monkeypatch.setattr(engine, "stretch_solves", counted)
+    starts = _starts(dock, monkeypatch)
+    # A window off the stretch: the stretch's own were solved with it.
+    n = dock.current_window().n_levels
+    measured = set(limit_windows(engine.z, n))
+    dock.slice_slider.setValue(
+        next(k for k in range(15, engine.z.nz - n) if SliceWindow(k, k + n) not in measured)
+    )
+    assert dock.provisional
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    assert asked == []
+    assert not dock.provisional
+    # A thickness not measured yet is provisional again, and its rest asks.
+    dock.thickness_spin.setValue(dock.thickness_spin.value() * 2)
+    _wait_for_refine(dock)
+    assert asked
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
+
+
 class _Looping:
     """A refine job that runs until it is asked to stop, or 10 s pass."""
 
     key = b"looping"
+    engine = None
 
     def __init__(self) -> None:
         self.started = threading.Event()

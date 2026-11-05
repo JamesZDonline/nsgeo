@@ -23,7 +23,10 @@ spec §7). When the last solve did, This grid draws the slice's kriging
 preview and starts a rest timer; once the depth rests, `refiner` solves
 the slice in the background, then any stretch windows still unsolved, and
 a result redraws only if it is still the slice on screen (plan calls 5 and
-7). Only a preview, or another method's draw, cancels the worker.
+7). Only a preview of a new window, or another method's draw, cancels the
+worker. The rules are `refine_flow.RefineFlow`'s, which Whole site follows
+too; the two scopes share `refiner`, so switching scope cancels the list of
+the scope left.
 """
 
 from __future__ import annotations
@@ -76,9 +79,6 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
-    PREVIEW_STATUS,
-    REFINE_REST_MS,
-    REFINING_STATUS,
     Resolution,
     SiteSource,
     SliceFinish,
@@ -93,6 +93,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
 from nsgeo_qgis.ui.profile_dock import velocity_source
+from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
 
@@ -148,28 +149,20 @@ class SlicesDock(QgsDockWidget):
             on_error=self._on_engine_error,
             on_progress=self._on_progress,
         )
-        #: The background minimum-curvature solves (plan call 6). `plugin.
-        #: unload` shuts it down, cancelling and joining its thread, before
-        #: any engine is disposed.
+        #: The background minimum-curvature solves (plan call 6), shared by
+        #: both scopes. `plugin.unload` shuts it down, cancelling and joining
+        #: its thread, before any engine is disposed.
         self.refiner = Refiner(self)
-        #: Whether what This grid draws is a kriging preview, refined once
-        #: the depth rests (plan call 5).
-        self.provisional = False
+        #: This grid's side of it (plan calls 5 and 7): its rest timer, its
+        #: preview, the running list's progress, and its shared stretch,
+        #: `(key, limit, final)` keyed by `_stretch_key`. Built here, with the
+        #: refiner, because `refresh_slice` reaches both, its `except` branch
+        #: included.
+        self._grid_refine = RefineFlow(self, self.refiner, self._on_rest)
         #: The previewed slice's `(values, coverage)` and solve key, for the
-        #: refine the rest timer starts and for knowing a landed solve is it.
+        #: refine the rest timer starts.
         self._refine_slice: tuple[np.ndarray, np.ndarray] | None = None
         self._refine_key: bytes | None = None
-        #: How many of the running list have landed, of how many: the status.
-        self._refine_done = 0
-        self._refine_total = 0
-        # Minimum curvature's rest (plan call 5): every preview draw restarts
-        # it, so the background refine starts only once the depth has rested,
-        # however it was moved. Built here, with the refiner, because
-        # `refresh_slice` reaches both, its `except` branch included.
-        self._rest = QTimer(self)
-        self._rest.setSingleShot(True)
-        self._rest.setInterval(REFINE_REST_MS)
-        self._rest.timeout.connect(self._on_rest)
         # ---- M12: the Whole site scope (spec 4.1-4.5) ---------------------
         #: "grid" (M11's This grid) or "site". Never persisted (plan Ruling
         #: 5): the dock always opens in This grid.
@@ -264,25 +257,9 @@ class SlicesDock(QgsDockWidget):
         #: `SliceWindow` they came from, as `refresh_slice()` last left
         #: them -- `None` before anything has been prepared. `display_limit()`
         #: reads both: the array for "this slice"'s own clip, `_window
-        #: .n_levels` as half the shared-limit cache's key.
+        #: .n_levels` as part of the shared stretch's key (`_stretch_key`).
         self._values: np.ndarray | None = None
         self._window: SliceWindow | None = None
-        #: `(key, limit, final)` from the last `shared_limit()` call, where
-        #: `key` is `(n_levels, engine.choice, engine.mode, finish settings
-        #: in metres)` -- everything `engine.shared_limit` actually measures
-        #: over (the settings joined the other three once `shared_limit`
-        #: started finishing each window before measuring it -- see its own
-        #: docstring). Recomputing it is a pass over every window in the
-        #: cube (tens of them), not a per-tick cost, so `display_limit()`
-        #: only pays for it again when one of those four actually changed
-        #: -- and `_on_prepared` also clears it unconditionally on every
-        #: successful preparation, because `_on_grids_changed` can
-        #: re-prepare against the SAME `SourceChoice` (a grid move), which
-        #: changes what was measured without moving any of these four.
-        #: `final` is False for minimum curvature's provisional stretch,
-        #: measured over kriging previews until its windows are solved
-        #: (plan call 7); `_on_landed` drops it when the worker's list ends.
-        self._shared_limit_cache: tuple[tuple[Any, ...], float, bool] | None = None
         #: Task 7: a palette name `restore_cube` still owes `palette_combo`
         #: once the preparation it just dispatched finishes. `_on_prepared`
         #: always calls `_refill_palette_combo()`, which resets the combo
@@ -1416,7 +1393,7 @@ class SlicesDock(QgsDockWidget):
             if self._scope == "site":
                 # M12: the Resolution and Display widgets are the site's
                 # now; This grid's clamp and redraw run on the way back.
-                self._shared_limit_cache = None
+                self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
             # Before anything asks the engine for a slice: the seeded z
@@ -1427,16 +1404,15 @@ class SlicesDock(QgsDockWidget):
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
             self._sync_grid_slider()
-            # Final review, Important 1 (part 3): the cache's key
-            # (`n_levels`, `engine.choice`, `engine.mode`, finish settings)
-            # cannot always tell a re-preparation happened -- `_on_grids_
-            # changed` re-prepares with the SAME `SourceChoice` object
-            # after a grid move, so none of those four values need to
-            # change even though the prepared lines' own coordinates just
-            # did. Every successful preparation lands here, so clearing
-            # unconditionally here is what actually keeps the cache from
-            # outliving the data it was measured over.
-            self._shared_limit_cache = None
+            # Final review, Important 1 (part 3): the stretch's key
+            # (`_stretch_key`) cannot always tell a re-preparation happened
+            # -- `_on_grids_changed` re-prepares with the SAME `SourceChoice`
+            # object after a grid move, so none of its values need to change
+            # even though the prepared lines' own coordinates just did. Every
+            # successful preparation lands here, so clearing unconditionally
+            # here is what actually keeps the stretch from outliving the data
+            # it was measured over.
+            self._grid_refine.stretch = None
             self._update_included_label()
             self._refresh_source_status()
             # Spec 8's rule enforced here, not just described: the combo
@@ -2188,12 +2164,11 @@ class SlicesDock(QgsDockWidget):
                     )
                     return
             self.engine.set_resolution(resolution)
-            # Keyed on `(n_levels, choice, mode, finish settings)` -- see the
-            # field's own docstring -- and a geometry change can only have
-            # moved `n_levels` (the axis it is measured against changed),
-            # so there is no cheaper way to know the old cache is still
-            # good.
-            self._shared_limit_cache = None
+            # Keyed on `(n_levels, choice, mode, finish settings)` -- see
+            # `_stretch_key` -- and a geometry change can only have moved
+            # `n_levels` (the axis it is measured against changed), so there
+            # is no cheaper way to know the old stretch is still good.
+            self._grid_refine.stretch = None
             # `engine.estimate.cube_bytes` depends on `frame`/`z`, both of
             # which `set_resolution` may just have moved.
             self._update_resident_check_label()
@@ -2227,7 +2202,8 @@ class SlicesDock(QgsDockWidget):
         try:
             window = self.current_window()
             if window is None or not self.engine.is_prepared:
-                self._end_refine()
+                if self._end_refine():
+                    self.status_label.setText(self._grid_status_text())
                 self._values = None
                 # Fix round 1, Important 4: emitted here too. `set_source`
                 # empties the engine's lines SYNCHRONOUSLY, before any
@@ -2245,7 +2221,7 @@ class SlicesDock(QgsDockWidget):
             if self.coverage_check.isChecked():
                 shown = coverage.astype(float)
                 shown[coverage == 0] = np.nan
-                self.provisional = False
+                self._grid_refine.finished(stop=finish.method != "min_curvature")
             else:
                 shown = self._finished(values, coverage, finish)
             self._values = shown
@@ -2281,7 +2257,8 @@ class SlicesDock(QgsDockWidget):
             # "error: ...", the exact same stale-state failure `_values`/
             # `_window`/`readout` are already reset here to avoid. And no
             # preview stands, so no refine is owed (plan call 5).
-            self._end_refine()
+            if self._end_refine():
+                self.status_label.setText(self._grid_status_text())
             self._values = None
             self._window = None
             self.readout.setText(f"error: {exc}")
@@ -2296,13 +2273,14 @@ class SlicesDock(QgsDockWidget):
         """The finished slice This grid draws (interpolation spec §7, plan
         call 5).
 
-        A slow minimum-curvature slice is drawn as its kriging preview: any
-        refine still running is for a window left behind, so it is cancelled,
-        and the rest timer restarts, so this slice's solve starts once the
-        depth rests. Anything else is drawn in full. A full minimum-curvature
-        draw (a cache hit, or a solve inside the budget) leaves a running list
-        alone, so the stretch windows queued behind a landed slice still
-        land; another method's draw stops it.
+        A slow minimum-curvature slice is drawn as its kriging preview: a
+        refine still running for another window is cancelled before the
+        preview is computed, and the rest restarts, so this slice's solve
+        starts once the depth rests. Anything else is drawn in full. A full
+        minimum-curvature draw (a cache hit, or a solve inside the budget)
+        leaves a running list alone, so the stretch windows queued behind a
+        landed slice still land; another method's draw stops it
+        (`RefineFlow`).
 
         The slice is hashed once, here, and its key passed on: a hash costs
         about 7 ms at a million cells, and a draw needs it two or three times.
@@ -2313,52 +2291,62 @@ class SlicesDock(QgsDockWidget):
         # a fine cell: say so (interpolation spec §7).
         waiting = contextlib.nullcontext() if self.engine.weights_cached(finish) else busy_cursor()
         with waiting:
-            if curvature and self.engine.finish_is_slow(values, coverage, finish, key=key):
-                self.refiner.cancel()
-                shown = self.engine.preview(values, coverage, finish)
-                self.provisional = True
+            if key is not None and self.engine.finish_is_slow(values, coverage, finish, key=key):
                 self._refine_slice = (values, coverage)
                 self._refine_key = key
-                self._rest.start()
-                return shown
+                self._grid_refine.previewed([(self.engine, key)])
+                return self.engine.preview(values, coverage, finish)
             shown = self.engine.finish(values, coverage, finish, key=key)
-        self.provisional = False
         self._refine_slice = None
-        if not curvature:
-            self.refiner.cancel()
-            self._rest.stop()
+        self._grid_refine.finished(stop=not curvature)
         return shown
 
-    def _end_refine(self) -> None:
-        """No preview stands (nothing is drawn, or the draw failed), so no
-        refine is owed: stop the worker and the rest (plan call 5)."""
-        if self.provisional or self.refiner.busy:
-            self.status_label.setText(self._grid_status_text())
-        self.refiner.cancel()
-        self._rest.stop()
-        self.provisional = False
+    def _end_refine(self) -> bool:
+        """No preview stands (nothing is drawn, the draw failed, or the site
+        shows), so no refine is owed: stop the worker and the rest (plan call
+        5). Whether one stood, so the status line, which said so, is reset."""
         self._refine_slice = None
         self._refine_key = None
+        return self._grid_refine.stop()
+
+    @property
+    def provisional(self) -> bool:
+        """Whether what This grid draws is a kriging preview, refined once
+        the depth rests (plan call 5)."""
+        return self._grid_refine.provisional
 
     def _refine_status(self) -> str:
         """This grid's status line: the refine's progress while the worker
         runs, the preview's note while one is drawn, and today's text
         otherwise (plan call 5)."""
-        if self.refiner.busy:
-            return REFINING_STATUS.format(done=self._refine_done, total=self._refine_total)
-        if self.provisional:
-            return PREVIEW_STATUS
-        return self._grid_status_text()
+        return self._grid_refine.status(self._grid_status_text())
+
+    def _stretch_key(self, window: SliceWindow, finish: SliceFinish) -> tuple[Any, ...]:
+        """What This grid's shared stretch is measured over: `(n_levels,
+        engine.choice, engine.mode, finish settings in metres)`, everything
+        `engine.shared_limit` reads (the settings joined the other three once
+        it started finishing each window before measuring it). In metres, so
+        a line spacing edit re-measures too. Measuring is a pass over the
+        cube's windows, so `display_limit` pays for it again only when the
+        key moves -- and `_on_prepared` drops the stretch on every
+        preparation, because a grid move re-prepares against the SAME choice,
+        which changes what was measured without moving any of these four."""
+        return (
+            window.n_levels,
+            self.engine.choice,
+            self.engine.mode,
+            self.engine.finish_settings(finish),
+        )
 
     def _on_rest(self) -> None:
         """The depth has rested: solve, in the background, the previewed slice
         first, then any shared-stretch windows still unsolved (plan calls 5
         and 7). The rest timer's slot, so it guards its own body.
 
-        Nothing left to solve is a state to leave too, never one to keep: a
-        preview whose slice was solved meanwhile (an export solves every
-        band), or a provisional stretch whose windows all are, is redrawn
-        here, since nothing would arm the rest for it again.
+        A stretch already final for what is drawn asks for no solves (Ruling
+        R11): asking slices and hashes its twelve windows here, on the GUI
+        thread. Nothing left to solve is a state to leave too, never one to
+        keep (`RefineFlow.rested`).
         """
         try:
             window = self._window
@@ -2369,52 +2357,34 @@ class SlicesDock(QgsDockWidget):
                 or self.coverage_check.isChecked()
             ):
                 return
+            refine = self._grid_refine
             finish = self.grid_finish.value()
-            current: PendingSolve | None = None
-            if self.provisional and self._refine_slice is not None:
-                current = self.engine.pending_solve(
-                    *self._refine_slice, finish, key=self._refine_key
-                )
-            jobs = [] if current is None else [current]
-            if self.stretch_combo.currentText() != "this slice":
-                jobs.extend(self.engine.stretch_solves(window.n_levels, finish))
-            # The slice on screen may be one of the stretch's windows too.
-            queued: dict[bytes, PendingSolve] = {}
-            for job in jobs:
-                queued.setdefault(job.key, job)
-            # Solved meanwhile, or no longer minimum curvature: draw it now.
-            redraw = self.provisional and current is None
-            if queued:
-                self._refine_done, self._refine_total = 0, len(queued)
-                self.refiner.start(list(queued.values()), self._on_landed, self._on_refine_error)
-                self.status_label.setText(self._refine_status())
-            else:
-                cached = self._shared_limit_cache
-                if cached is not None and not cached[2]:
-                    self._shared_limit_cache = None  # every window is solved
-                    redraw = True
-            if redraw:
+            current: list[PendingSolve] = []
+            if refine.provisional and self._refine_slice is not None:
+                job = self.engine.pending_solve(*self._refine_slice, finish, key=self._refine_key)
+                if job is not None:
+                    current.append(job)
+            stretch: list[PendingSolve] = []
+            if self.stretch_combo.currentText() != "this slice" and not refine.stretch_final(
+                self._stretch_key(window, finish)
+            ):
+                stretch = self.engine.stretch_solves(window.n_levels, finish)
+            if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
                 self.refresh_slice()
+            else:
+                self.status_label.setText(self._refine_status())
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
             self.error.emit(f"could not start refining the slice: {exc}")
 
     def _on_landed(self, job: Any) -> None:
         """A background solve has finished, handed over on the GUI thread
         (plan calls 5 and 7). It lands in the engine's cache whatever is on
-        screen, but redraws only when it is the slice previewed now: a solve
-        for a window left behind never draws over the newer one. The redraw
-        is then a cache hit. When the list ends, a provisional shared stretch
-        is dropped, so the redraw measures the final one over the solved
-        windows. A refine callback, so it guards its own body."""
+        screen, but redraws only when it is the slice previewed now, or the
+        list has ended (`RefineFlow.landed`): a solve for a window left behind
+        never draws over the newer one. A refine callback, so it guards its
+        own body."""
         try:
-            landed = job.land()
-            self._refine_done += 1
-            redraw = landed and self.provisional and job.key == self._refine_key
-            if not self.refiner.busy:
-                cached = self._shared_limit_cache
-                if cached is not None and not cached[2]:
-                    self._shared_limit_cache = None
-                redraw = True
+            redraw = self._grid_refine.landed(job)
             if self._scope != "grid":
                 return
             if redraw:
@@ -2428,7 +2398,7 @@ class SlicesDock(QgsDockWidget):
         """The background solve failed: say so, and leave the preview on
         screen, blanks and all, with today's status line."""
         try:
-            self.error.emit(f"minimum curvature failed: {message}")
+            self.error.emit(self._grid_refine.failed(message))
             if self._scope == "grid":
                 self.status_label.setText(self._grid_status_text())
         except Exception:  # noqa: BLE001 -- from the refine worker's poll timer
@@ -2568,13 +2538,11 @@ class SlicesDock(QgsDockWidget):
         comparable; a limit measured on just this slice, on demand, for
         legibility when a deep, dim window would otherwise wash out.
 
-        The shared branch is cached (`_shared_limit_cache`) because it is
-        a pass over every window in the cube, not a per-tick cost, and is
-        only recomputed when the key it is measured over -- `(n_levels,
+        The shared branch is held (`RefineFlow.stretch`) because it is a
+        pass over every window in the cube, not a per-tick cost, and is only
+        recomputed when the key it is measured over -- `(n_levels,
         engine.choice, engine.mode, finish settings in metres)` -- actually
-        changed;
-        see that field's own docstring for why those four and nothing
-        else.
+        changed; see `_stretch_key` for why those four and nothing else.
 
         Fix round 1, Important 2 (Ruling AB): the coverage view measures
         its OWN limit -- the greatest trace count actually on screen,
@@ -2604,9 +2572,10 @@ class SlicesDock(QgsDockWidget):
         measured over are solved, the shared limit is provisional, measured
         over their kriging previews, and this ARMS THE REST TIMER (when the
         worker is idle and no rest is pending) so that the next rest queues
-        their solves. A provisional limit found in the cache arms it too, so
-        a refine that failed or was cancelled is retried at the next draw.
-        `_on_landed` drops the provisional limit once its list ends.
+        their solves. A provisional limit already held arms it too, so a
+        refine that failed or was cancelled is retried at the next draw.
+        `_on_landed` drops the provisional limit once its list ends
+        (`RefineFlow.stretch_limit`).
         """
         if self._scope == "site":
             return self._site.display_limit()
@@ -2624,28 +2593,10 @@ class SlicesDock(QgsDockWidget):
         if window is None:
             return 1.0
         finish = self.grid_finish.value()
-        # In metres, so a line spacing edit invalidates the cache too.
-        key = (
-            window.n_levels,
-            self.engine.choice,
-            self.engine.mode,
-            self.engine.finish_settings(finish),
+        return self._grid_refine.stretch_limit(
+            self._stretch_key(window, finish),
+            lambda: self.engine.stretch_limit(window.n_levels, clip, finish),
         )
-        cached = self._shared_limit_cache
-        if cached is not None and cached[0] == key:
-            if not cached[2] and not self.refiner.busy and not self._rest.isActive():
-                # Provisional, and nothing on its way to finish it: a refine
-                # that failed, or one a failed draw cancelled.
-                self._rest.start()
-            return cached[1]
-        value, final = self.engine.stretch_limit(window.n_levels, clip, finish)
-        if not final and not self.refiner.busy:
-            # Minimum curvature with windows unsolved: kriging's stretch over
-            # the same windows stands in, and the rest queues their solves
-            # behind the slice's (plan call 7). `_on_landed` drops it.
-            self._rest.start()
-        self._shared_limit_cache = (key, value, final)
-        return value
 
     def display_unipolar(self) -> bool:
         """Whether `current_values()` has no negative side, for the LUT
@@ -2709,6 +2660,9 @@ class SlicesDock(QgsDockWidget):
             self._grid_palette = self.palette_combo.currentText()
             self._grid_record_at_entry = self._grid_record()
             self._scope = "site"
+            # The two scopes share `refiner`: This grid's list (up to thirteen
+            # solves) must not run on under the site, nor its rest fire there.
+            self._end_refine()
             # R-P5: a moved grid's This-grid engine clears itself and owes a
             # preparation, rather than re-preparing beside the site's.
             self.engine.on_grid_moved = self._mark_grid_stale

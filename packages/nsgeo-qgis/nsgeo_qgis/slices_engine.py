@@ -238,6 +238,12 @@ class PendingSolve:
         self.solved: np.ndarray | None = None
         self.ms: float | None = None
 
+    @property
+    def engine(self) -> SliceEngine:
+        """The engine this solve lands in. With `key`, what tells two jobs
+        apart: two of a site's grids can hold equal values."""
+        return self._engine
+
     def run(self, should_stop: Callable[[], bool]) -> None:
         """Solve, on the worker thread; `SolveStopped` when `should_stop` asks."""
         values = self._values
@@ -1286,6 +1292,25 @@ class SliceEngine(QObject):
             return False
         return self._last_solve_ms is None or self._last_solve_ms > LIVE_SOLVE_BUDGET_MS
 
+    def is_solved(
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None = None,
+    ) -> bool:
+        """Whether `finish` would serve `values` from the solved-slice cache:
+        minimum curvature, the plan for these settings and cells held, and
+        these values solved on it (plan call 8). Builds and solves nothing.
+        `key` as for `finish`."""
+        if finish.method != "min_curvature":
+            return False
+        frame, _ = self._require_geometry()
+        if self._held_fill(coverage > 0, frame, self.finish_settings(finish)) is None:
+            return False
+        return (solve_key(values) if key is None else key) in self._solved
+
     def pending_solve(
         self,
         values: np.ndarray,
@@ -1300,6 +1325,14 @@ class SliceEngine(QObject):
         if finish.method != "min_curvature":
             return None
         return self._job_for(values, coverage, finish, key=key, copy=True)
+
+    def window_solve(self, window: SliceWindow, finish: SliceFinish) -> PendingSolve | None:
+        """`pending_solve` for this engine's own `window`, sliced here for the
+        job alone, so it is private without a copy. Untimed: handing out
+        jobs is not a redraw."""
+        if finish.method != "min_curvature":
+            return None
+        return self._job_for(*self._slice(window), finish, key=None, copy=False)
 
     def _job_for(
         self,
@@ -1331,8 +1364,7 @@ class SliceEngine(QObject):
         _, z = self._require_geometry()
         jobs: list[PendingSolve] = []
         for window in limit_windows(z, thickness_levels):
-            # Sliced here for this job alone, so it is private without a copy.
-            job = self._job_for(*self._slice(window), finish, key=None, copy=False)
+            job = self.window_solve(window, finish)
             if job is not None:
                 jobs.append(job)
         return jobs

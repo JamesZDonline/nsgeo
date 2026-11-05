@@ -15,6 +15,14 @@ Spec 4.1-4.5. Two halves:
 Every method reached from a Qt signal or timer guards its body, as every
 slot in this plugin does (an exception escaping a slot aborts the CI
 container). Nothing here prepares This grid's engine (ruling R-P5).
+
+Minimum curvature follows This grid's flow (interpolation spec §7, plan
+calls 5 and 7; `refine_flow.RefineFlow`) on the dock's one `refiner`: a
+tick that previews a slow grid starts the site's own rest, the rest queues
+`SiteEngine.pending_solves` for that tick and then the stretch windows not
+solved, and a landed solve redraws through `schedule_refresh()` when the
+tick on screen waits for it. A tick by any other method stops the list and
+the rest, as before minimum curvature came. Leaving the site stops them too.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from qgis.PyQt.QtCore import QTimer
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.site_engine import SiteSlice
+from nsgeo_qgis.slices_engine import PendingSolve
 from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     Resolution,
@@ -49,6 +58,7 @@ from nsgeo_qgis.slices_plan import (
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
+from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import SiteRow
 
 
@@ -463,7 +473,9 @@ class SiteScope:
         self.res_applied: Resolution | None = None
         #: The ready grids the last tick was set up for.
         self.ready_handled: tuple[str, ...] | None = None
-        self.limit_cache: tuple[tuple[Any, ...], float] | None = None
+        #: `(top_ns, thickness_ns)` of the last tick, as `slice_at` took them:
+        #: the window its rest solves, never one re-derived from the spins.
+        self.drawn_at: tuple[float, float] | None = None
         #: The included set the cell was last seeded for (spec 4.4: only when
         #: it changes). Which of dz/z0/z1 are the user's is no flag here: it
         #: is read off the remembered record each time (`seed_z`, #71).
@@ -484,6 +496,10 @@ class SiteScope:
         self.finish_debounce.setSingleShot(True)
         self.finish_debounce.setInterval(dock._finish_debounce.interval())
         self.finish_debounce.timeout.connect(self._on_finish_timeout)
+        #: The site's side of the dock's refiner (plan calls 5 and 7): its
+        #: rest, its preview, the running list's progress, and the shared
+        #: stretch, `(key, limit, final)` keyed by `stretch_key`.
+        self.refine = RefineFlow(dock, dock.refiner, self._on_rest)
 
         dock.site_panel.included_changed.connect(self._on_included_changed)
         dock.site_panel.transform_changed.connect(self._on_transform_changed)
@@ -504,6 +520,12 @@ class SiteScope:
     def showing(self) -> bool:
         return self.dock.scope() == "site"
 
+    @property
+    def provisional(self) -> bool:
+        """Whether the site tick on screen previews a grid, refined once the
+        depth rests (plan call 5)."""
+        return self.refine.provisional
+
     def included(self) -> tuple[str, ...]:
         return included_grids(self.session) if self.session.is_open else ()
 
@@ -514,7 +536,7 @@ class SiteScope:
         self.pending_top = top
         self.z_shown = None
         self.ready_handled = None
-        self.limit_cache = None
+        self.refine.stretch = None
         panel = dock.site_panel
         panel.set_transform(
             stored_transform(
@@ -549,9 +571,13 @@ class SiteScope:
         self.spins = capture_spins(self.dock)
         self.tick.stop()
         self.finish_debounce.stop()
+        # The two scopes share the refiner: the site's list must not run on
+        # under This grid, nor its rest fire there.
+        self.refine.stop()
         self.engine.cancel()
         self.slice = None
         self.window = None
+        self.drawn_at = None
 
     def forget(self) -> None:
         """A different survey: nothing the last one's site view held applies,
@@ -560,7 +586,7 @@ class SiteScope:
         self.cell_seeded_for = None
         self.source_sent = None
         self.res_applied = None
-        self.limit_cache = None
+        self.refine.stretch = None
         self.dock.site_finish.set_value(SliceFinish())
 
     def shown_top(self) -> float | None:
@@ -588,7 +614,7 @@ class SiteScope:
             return
         try:
             self.source_sent = source
-            self.limit_cache = None
+            self.refine.stretch = None
             self.engine.set_source(source)
         except Exception as exc:  # noqa: BLE001 -- reported, never raised past a slot
             self.dock.error.emit(f"could not prepare the site: {exc}")
@@ -819,7 +845,7 @@ class SiteScope:
         try:
             if resolution != self.res_applied:
                 self.res_applied = None
-                self.limit_cache = None
+                self.refine.stretch = None
                 self.engine.set_resolution(resolution)
                 self.res_applied = resolution
         except Exception as exc:  # noqa: BLE001 -- e.g. a lattice too large to draw
@@ -865,7 +891,7 @@ class SiteScope:
             if ready != self.ready_handled:
                 # Grids became ready, or left: the axis may have changed.
                 self.ready_handled = ready
-                self.limit_cache = None
+                self.refine.stretch = None
                 if self.seed_z():
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
@@ -881,13 +907,23 @@ class SiteScope:
             _log(f"could not redraw the site: {exc}")
 
     def refresh_slice(self) -> None:
-        """One tick, now: every ready grid at the slider's window."""
+        """One tick, now: every ready grid at the slider's window.
+
+        With minimum curvature a grid whose solve is slow is drawn as its
+        kriging preview, and the flow decides the rest and the worker from
+        what the tick previewed (`RefineFlow.previewed`): a preview of a new
+        window cancels a running list, a landed grid's redraw while the
+        others still solve does not. A full minimum-curvature tick leaves a
+        running list alone; any other method's stops it (plan call 5).
+        """
         dock = self.dock
         try:
             z = self.engine.site_z
             if not self.showing or z is None or self.engine.lattice is None:
+                self.refine.stop()  # nothing drawn: no refine is owed
                 self.slice = None
                 self.window = None
+                self.drawn_at = None
                 dock.readout.setText(
                     "preparing the site…" if self.engine.is_running else "not prepared"
                 )
@@ -902,16 +938,24 @@ class SiteScope:
             window = window_on(z, top, thickness * z.dz_ns)
             if window is None:
                 raise RuntimeError("the slider is off the site's time axis")
+            finish = dock.site_finish.value()
+            curvature = finish.method == "min_curvature"
             shown = self.engine.slice_at(
                 top,
                 thickness * z.dz_ns,
-                finish=dock.site_finish.value(),
+                finish=finish,
                 method=dock.normalisation_panel.method(),
                 manual=self.gains(),
                 coverage=dock.coverage_check.isChecked(),
+                preview=curvature,
             )
             self.slice = shown
             self.window = window
+            self.drawn_at = (top, thickness * z.dz_ns)
+            if shown.provisional:
+                self.refine.previewed((g.engine, g.key) for g in shown.previewed.values())
+            else:
+                self.refine.finished(stop=not curvature)
             dock.readout.setText(readout(z, window, thickness, step))
             dock.site_depths_label.setText(
                 depths_text(self.engine, shown.windows, self.velocities())
@@ -919,17 +963,93 @@ class SiteScope:
             self.update_legend()
             lo_ns, hi_ns = window_times_ns(z, window)
             dock.window_changed.emit(lo_ns, hi_ns)
-            dock.status_label.setText(self.engine.status_text())
+            dock.status_label.setText(self.status_text())
             dock.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slots and timers
+            # No preview stands, so no refine is owed (plan call 5).
+            if self.refine.stop():
+                dock.status_label.setText(self.engine.status_text())
             self.slice = None
             self.window = None
+            self.drawn_at = None
             dock.readout.setText(f"error: {exc}")
             dock.site_depths_label.setText("")
             dock.legend_label.setText("")
             dock.slice_changed.emit()
             dock.window_cleared.emit()
             dock.error.emit(str(exc))
+
+    # ---- minimum curvature's refine ---------------------------------------------------
+    def status_text(self) -> str:
+        """The site's status line: the refine's progress while the worker runs,
+        the preview's note while one is drawn, and the site's own otherwise."""
+        return self.refine.status(self.engine.status_text())
+
+    def _on_rest(self) -> None:
+        """The depth has rested: solve, in the background, the grids the tick
+        on screen previewed, then any shared-stretch window still unsolved
+        (plan calls 5 and 7). The rest timer's slot, so it guards its own body.
+
+        `pending_solves` is given the tick itself, so its slices and keys are
+        reused rather than taken again. A stretch already final for what is
+        drawn asks for no solves (Ruling R11): asking slices and hashes every
+        grid's window of every stretch window here, on the GUI thread.
+        """
+        dock = self.dock
+        try:
+            z, drawn, at = self.engine.site_z, self.slice, self.drawn_at
+            if (
+                not self.showing
+                or z is None
+                or drawn is None
+                or at is None
+                or dock.coverage_check.isChecked()
+            ):
+                return
+            refine = self.refine
+            finish = dock.site_finish.value()
+            top, thickness_ns = at
+            current: list[PendingSolve] = []
+            if refine.provisional:
+                current = self.engine.pending_solves(top, thickness_ns, finish, drawn=drawn)
+            stretch: list[PendingSolve] = []
+            if dock.stretch_combo.currentIndex() != 1 and not refine.stretch_final(
+                self.stretch_key(z)
+            ):
+                stretch = self.engine.stretch_solves(thickness_ns, finish)
+            if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
+                self.schedule_refresh()
+            else:
+                dock.status_label.setText(self.status_text())
+        except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            dock.error.emit(f"could not start refining the site: {exc}")
+
+    def _on_landed(self, job: Any) -> None:
+        """A background solve has finished, handed over on the GUI thread. It
+        lands in its grid's engine whatever is on screen, and redraws only
+        when the tick on screen waits for it, or the list has ended
+        (`RefineFlow.landed`): a solve for a window left behind never draws
+        over the newer one. A refine callback, so it guards its own body."""
+        try:
+            redraw = self.refine.landed(job)
+            if not self.showing:
+                return
+            if redraw:
+                self.schedule_refresh()
+            else:
+                self.dock.status_label.setText(self.status_text())
+        except Exception as exc:  # noqa: BLE001 -- from the refine worker's poll timer
+            self.dock.error.emit(f"could not draw the refined site: {exc}")
+
+    def _on_refine_error(self, message: str) -> None:
+        """A background solve failed: say so, and leave the preview on screen,
+        blanks and all, with the site's own status line."""
+        try:
+            self.dock.error.emit(self.refine.failed(message))
+            if self.showing:
+                self.dock.status_label.setText(self.engine.status_text())
+        except Exception:  # noqa: BLE001 -- from the refine worker's poll timer
+            _log(f"could not report that minimum curvature failed on the site: {message}")
 
     # ---- display ---------------------------------------------------------------------
     def refill_palette(self) -> None:
@@ -960,14 +1080,37 @@ class SiteScope:
     def unipolar(self) -> bool:
         return self.transform() != NO_TRANSFORM
 
+    def stretch_key(self, z: ZAxis) -> tuple[Any, ...]:
+        """Everything the site's shared stretch is measured over, and never
+        the slider: it costs seconds on a large streaming site (Task 3's
+        measurement). `values_key` is each ready grid's registration and
+        line spacing (final review I2): a grid edit re-measures only when it
+        changes the values drawn, never for a velocity edit."""
+        dock = self.dock
+        thickness, _ = levels(z, dock.thickness_spin.value(), dock.step_spin.value())
+        return (
+            thickness,
+            self.source_sent,
+            self.res_applied,
+            self.engine.ready_grids,
+            dock.normalisation_panel.method(),
+            tuple(sorted(self.gains().items())),
+            dock.site_finish.value(),
+            self.unipolar(),
+            self.engine.values_key(),
+        )
+
     def display_limit(self) -> float:
         """Spec 4.5: shared across the site by default, measured after
-        normalisation and the manual gains (`SiteEngine.shared_limit`).
-        Cached by everything it measures over and never by the slider: it
-        costs seconds on a large streaming site (Task 3's measurement).
-        `values_key` is each ready grid's registration and line spacing
-        (final review I2): a grid edit re-measures only when it changes
-        the values drawn, never for a velocity edit."""
+        normalisation and the manual gains (`SiteEngine.shared_limit`), and
+        held until `stretch_key` moves.
+
+        Minimum curvature (plan call 7, Ruling R3): until each grid's window
+        of the windows it is measured over is solved, the limit is the
+        provisional one over their kriging previews (`SiteEngine.
+        stretch_limit`), and it arms the site's rest while nothing is on its
+        way to finish it, so the next rest queues their solves. The landing
+        that ends the list drops it (`RefineFlow.stretch_limit`)."""
         dock = self.dock
         shown = self.slice
         if dock.coverage_check.isChecked():
@@ -985,24 +1128,14 @@ class SiteScope:
         gains = self.gains()
         method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
-        key = (
-            thickness,
-            self.source_sent,
-            self.res_applied,
-            self.engine.ready_grids,
-            method,
-            tuple(sorted(gains.items())),
-            finish,
-            self.unipolar(),
-            self.engine.values_key(),
-        )
-        if self.limit_cache is None or self.limit_cache[0] != key:
-            value = self.engine.shared_limit(
+        return self.refine.stretch_limit(
+            self.stretch_key(z),
+            lambda: self.engine.stretch_limit(
                 thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
-            )
-            self.limit_cache = (key, value)
-        return self.limit_cache[1]
+            ),
+        )
 
     def dispose(self) -> None:
         self.tick.stop()
         self.finish_debounce.stop()
+        self.refine.stop()

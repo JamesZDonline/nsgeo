@@ -67,6 +67,18 @@ grid changed, so `_seen` records what the caches were derived from.
 **Progress** (spec 4.2): each engine reports lines done through its own
 `on_progress`, bound to its grid id; `grid_progress` and `on_changed`
 carry it to the grid list.
+
+**Minimum curvature** (interpolation spec §7, plan calls 5-7) is each
+grid's own engine's, as in This grid. A live tick (`slice_at(...,
+preview=True)`) draws every grid whose solve is slow as its kriging
+preview and names it in `SiteSlice.previewed`, with the binned slice and
+solve key the tick took, so its rest (`pending_solves(..., drawn=)`)
+neither re-slices nor re-hashes. The shared stretch is measured over the
+SITE axis's `limit_windows`, mapped onto each grid with `window_on`
+(Ruling R3): `shared_limit`, `stretch_limit` and `stretch_solves` all walk
+exactly those grid windows, so the solves queued for the stretch are the
+ones its final measurement reads, and none is left to solve on the GUI
+thread. Every grid is finished by one `_shown`, whatever draws it.
 """
 
 from __future__ import annotations
@@ -76,7 +88,7 @@ import functools
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -107,7 +119,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
-from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, SliceEngine
+from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
     Resolution,
@@ -131,6 +143,32 @@ def _ignore() -> None:
     """A retiring engine's `on_grid_moved`: its moves no longer matter."""
 
 
+#: How `_shown` draws one present grid: `(grid id, its window, binned
+#: values, coverage)` to its finished slice, grid-local, before the factors.
+_Draw = Callable[[str, SliceWindow, np.ndarray, np.ndarray], np.ndarray]
+
+
+class _NotSolved(Exception):
+    """A grid's window the stretch is measured over is not solved yet."""
+
+
+@dataclass(frozen=True, eq=False)
+class PreviewedGrid:
+    """A grid a live tick drew as its kriging preview (plan call 5).
+
+    The binned slice and its solve key as the tick took them, so the rest's
+    solve neither re-slices nor re-hashes it; the engine and the window, so
+    they are reused only for that very grid window (`pending_solves`).
+    `eq=False`, as for `SiteSlice`.
+    """
+
+    engine: SliceEngine
+    window: SliceWindow
+    values: np.ndarray
+    coverage: np.ndarray
+    key: bytes
+
+
 @dataclass(frozen=True, eq=False)
 class SiteSlice:
     """One tick of the site view.
@@ -140,6 +178,11 @@ class SiteSlice:
     this time (spec 4.3: a blank grid that is named). `factors` is the
     `(a, b)` applied to each present grid, manual gain included.
 
+    `previewed` names each grid a live tick drew as its kriging preview,
+    and `provisional` whether there is any: the tick is then refined once
+    the depth rests (plan call 5). Both are empty and False for a full
+    result.
+
     `eq=False`, as for `Seam` (Ruling T1-a): a generated `__eq__` over an
     ndarray field raises rather than comparing.
     """
@@ -148,6 +191,8 @@ class SiteSlice:
     lattice: SiteLattice
     windows: dict[str, SliceWindow | None]
     factors: dict[str, tuple[float, float]]
+    previewed: dict[str, PreviewedGrid] = field(default_factory=dict)
+    provisional: bool = False
 
 
 class SiteEngine(QObject):
@@ -847,14 +892,20 @@ class SiteEngine(QObject):
         return self._lattice, self._resolution
 
     # ---- slices -----------------------------------------------------------
+    def _grid_window(self, grid_id: str, top_ns: float, thickness_ns: float) -> SliceWindow | None:
+        """`grid_id`'s window at this site time (spec 4.3, `window_on`), or
+        None where its axis misses it."""
+        z = self._engines[grid_id].z
+        return window_on(z, top_ns, thickness_ns) if z is not None else None
+
     def _shown(
         self,
         top_ns: float,
         thickness_ns: float,
-        finish: SliceFinish,
         method: str,
         manual: Mapping[str, float],
         coverage: bool,
+        draw: _Draw,
     ) -> tuple[
         dict[str, SliceWindow | None], dict[str, np.ndarray], dict[str, tuple[float, float]]
     ]:
@@ -862,22 +913,22 @@ class SiteEngine(QObject):
 
         Spec 4.6: factors are measured on binned cells (`normalise` takes
         the unfinished values) and applied to the finished slice,
-        `a * finish(values) + b` (interpolation spec §4, §8): interpolation is
+        `a * draw(values) + b` (interpolation spec §4, §8): interpolation is
         linear in the data and smoothing a normalised average, so the order
         loses nothing and each grid is finished once, by its own engine at
-        its own line spacing. Coverage mode shows the counts, 0 as NaN,
-        and normalises nothing (Ruling 7).
+        its own line spacing. `draw` is how: in full, as the preview, as a
+        live tick decides, or from the solved-slice cache alone (`_draw_full`,
+        `_draw_preview`, `_draw_live`, `_draw_solved`). Coverage mode shows
+        the counts, 0 as NaN, and normalises nothing (Ruling 7).
         """
         self._require_lattice()
         windows: dict[str, SliceWindow | None] = {}
         binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         for grid_id in self.ready_grids:
-            engine = self._engines[grid_id]
-            z = engine.z
-            window = window_on(z, top_ns, thickness_ns) if z is not None else None
+            window = self._grid_window(grid_id, top_ns, thickness_ns)
             windows[grid_id] = window
             if window is not None:
-                binned[grid_id] = engine.slice_at(window)
+                binned[grid_id] = self._engines[grid_id].slice_at(window)
         if coverage:
             counts = {
                 g: np.where(cov > 0, cov, np.nan).astype(np.float32)
@@ -888,9 +939,67 @@ class SiteEngine(QObject):
         factors = normalise(method, binned, seams, manual)
         shown: dict[str, np.ndarray] = {}
         for grid_id, (values, cov) in binned.items():
+            window = windows[grid_id]
+            assert window is not None  # binned only where present
             a, b = factors[grid_id]
-            shown[grid_id] = a * self._engines[grid_id].finish(values, cov, finish) + b
+            shown[grid_id] = a * draw(grid_id, window, values, cov) + b
         return windows, shown, factors
+
+    def _draw_full(self, finish: SliceFinish) -> _Draw:
+        """Each grid's full result: minimum curvature solved here if it is
+        not cached. What an export and the final stretch draw."""
+
+        def draw(
+            grid_id: str, _window: SliceWindow, values: np.ndarray, cov: np.ndarray
+        ) -> np.ndarray:
+            return self._engines[grid_id].finish(values, cov, finish)
+
+        return draw
+
+    def _draw_preview(self, finish: SliceFinish) -> _Draw:
+        """Each grid's kriging preview: the provisional stretch (plan call 7)."""
+
+        def draw(
+            grid_id: str, _window: SliceWindow, values: np.ndarray, cov: np.ndarray
+        ) -> np.ndarray:
+            return self._engines[grid_id].preview(values, cov, finish)
+
+        return draw
+
+    def _draw_live(self, finish: SliceFinish, previewed: dict[str, PreviewedGrid]) -> _Draw:
+        """A live tick's draw (plan call 5): a grid whose solve is slow as its
+        preview, recorded in `previewed`, any other in full. Each grid's
+        slice is hashed once and the key passed on: a hash costs about 7 ms
+        at a million cells, and the tick needs it two or three times."""
+
+        def draw(
+            grid_id: str, window: SliceWindow, values: np.ndarray, cov: np.ndarray
+        ) -> np.ndarray:
+            engine = self._engines[grid_id]
+            if finish.method != "min_curvature":
+                return engine.finish(values, cov, finish)
+            key = solve_key(values)
+            if engine.finish_is_slow(values, cov, finish, key=key):
+                previewed[grid_id] = PreviewedGrid(engine, window, values, cov, key)
+                return engine.preview(values, cov, finish)
+            return engine.finish(values, cov, finish, key=key)
+
+        return draw
+
+    def _draw_solved(self, finish: SliceFinish) -> _Draw:
+        """`stretch_limit`'s final pass: each grid's solve from the cache,
+        smoothed; `_NotSolved` at the first that is not. Solves nothing."""
+
+        def draw(
+            grid_id: str, _window: SliceWindow, values: np.ndarray, cov: np.ndarray
+        ) -> np.ndarray:
+            engine = self._engines[grid_id]
+            key = solve_key(values)
+            if not engine.is_solved(values, cov, finish, key=key):
+                raise _NotSolved(grid_id)
+            return engine.finish(values, cov, finish, key=key)
+
+        return draw
 
     def slice_at(
         self,
@@ -901,11 +1010,19 @@ class SiteEngine(QObject):
         method: str,
         manual: Mapping[str, float],
         coverage: bool = False,
+        preview: bool = False,
     ) -> SiteSlice:
         """One tick: every ready grid's window, normalised, filled and composed.
 
         Spec 4.3: the same time window in every grid (`window_on`); a grid
         whose range misses it is absent (`windows[g] is None`) and nodata.
+
+        `preview=True` is a live tick's (plan call 5): each grid whose
+        minimum-curvature solve is slow (`SliceEngine.finish_is_slow`) is
+        drawn as its kriging preview, normalised and composed as the full
+        result is, and named in `previewed`. Without it every grid is the
+        full result, solved here if need be: an export never writes a
+        preview.
         """
         lattice, _ = self._require_lattice()
         # Per-geometry caches are built outside the timer: they are not a redraw.
@@ -914,19 +1031,90 @@ class SiteEngine(QObject):
                 self._gather(grid_id, lattice)
         if method == "edge" and not coverage:
             self._site_seams()
+        previewed: dict[str, PreviewedGrid] = {}
+        draw = self._draw_live(finish, previewed) if preview else self._draw_full(finish)
         started = time.perf_counter()
-        windows, shown, factors = self._shown(
-            top_ns, thickness_ns, finish, method, manual, coverage
-        )
+        windows, shown, factors = self._shown(top_ns, thickness_ns, method, manual, coverage, draw)
         array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
         self._record_redraw((time.perf_counter() - started) * 1000.0)
-        return SiteSlice(array=array, lattice=lattice, windows=windows, factors=factors)
+        return SiteSlice(
+            array=array,
+            lattice=lattice,
+            windows=windows,
+            factors=factors,
+            previewed=previewed,
+            provisional=bool(previewed),
+        )
+
+    def pending_solves(
+        self,
+        top_ns: float,
+        thickness_ns: float,
+        finish: SliceFinish,
+        *,
+        drawn: SiteSlice | None = None,
+    ) -> list[PendingSolve]:
+        """A background solve for each ready grid whose slice at this window
+        is not solved yet, in `ready_grids` order (plan call 6); [] for any
+        other method.
+
+        `drawn` is the tick that previewed this window, when the caller has
+        it: a grid it previewed is solved from the binned slice and key that
+        tick took, so the rest neither re-slices nor re-hashes it. Only for
+        the same engine and the same grid window; anything else is sliced
+        afresh. The key is the values' own (`solve_key`), so a reused pair
+        can never land one slice's solve under another's key.
+        """
+        if finish.method != "min_curvature":
+            return []
+        jobs: list[PendingSolve] = []
+        for grid_id in self.ready_grids:
+            window = self._grid_window(grid_id, top_ns, thickness_ns)
+            if window is None:
+                continue
+            engine = self._engines[grid_id]
+            held = drawn.previewed.get(grid_id) if drawn is not None else None
+            if held is not None and held.engine is engine and held.window == window:
+                job = engine.pending_solve(held.values, held.coverage, finish, key=held.key)
+            else:
+                job = engine.window_solve(window, finish)
+            if job is not None:
+                jobs.append(job)
+        return jobs
 
     def _record_redraw(self, ms: float) -> None:
         if self._redraw_ms is None:
             self._redraw_ms = ms
         else:
             self._redraw_ms = _REDRAW_SMOOTHING * self._redraw_ms + (1.0 - _REDRAW_SMOOTHING) * ms
+
+    def _limit_windows_ns(self, thickness_ns: float) -> list[tuple[float, float]]:
+        """`(top_ns, thickness_ns)` of each window the site's shared stretch is
+        measured over: `limit_windows` of the SITE axis, at most twelve with
+        both ends kept (Ruling 4), each then mapped onto every grid as a tick
+        maps it (Ruling R3)."""
+        self._require_lattice()
+        z = self._site_z
+        if z is None:
+            raise RuntimeError("no site time axis: no ready grid covers the z range")
+        thickness_levels = max(1, int(round(thickness_ns / z.dz_ns)))
+        return [
+            (z.t0_ns + w.k0 * z.dz_ns, w.n_levels * z.dz_ns)
+            for w in limit_windows(z, thickness_levels)
+        ]
+
+    def _measure(
+        self, thickness_ns: float, clip: Any, method: str, manual: Mapping[str, float], draw: _Draw
+    ) -> float:
+        """`clip`'s limit over every present grid's slice, as `draw` draws it,
+        at each window the stretch is measured over (`_limit_windows_ns`)."""
+        slices: list[np.ndarray] = []
+        for top, thickness in self._limit_windows_ns(thickness_ns):
+            _, shown, _ = self._shown(top, thickness, method, manual, False, draw)
+            slices.extend(shown.values())
+        if not slices:
+            return float(clip.limit(np.array([], dtype=float)))
+        return limit_over_slices(slices, clip)
 
     def shared_limit(
         self,
@@ -936,6 +1124,7 @@ class SiteEngine(QObject):
         finish: SliceFinish,
         method: str,
         manual: Mapping[str, float],
+        preview: bool = False,
     ) -> float:
         """One display limit for the site at this thickness (spec 4.5, Ruling 4).
 
@@ -943,26 +1132,67 @@ class SiteEngine(QObject):
         normalisation and manual adjustment -- the values drawn -- at
         `limit_windows` of the site axis (at most twelve, both ends kept),
         never over raw levels (trap 4).
+
+        Minimum curvature solves every grid window it measures. With
+        `preview=True` it measures their kriging previews instead: the
+        provisional stretch that stands in until those windows are solved;
+        the final limit always comes from minimum-curvature slices
+        (interpolation spec §7, plan call 7).
         """
-        self._require_lattice()
-        z = self._site_z
-        if z is None:
-            raise RuntimeError("no site time axis: no ready grid covers the z range")
-        thickness_levels = max(1, int(round(thickness_ns / z.dz_ns)))
-        slices: list[np.ndarray] = []
-        for window in limit_windows(z, thickness_levels):
-            _, shown, _ = self._shown(
-                z.t0_ns + window.k0 * z.dz_ns,
-                window.n_levels * z.dz_ns,
-                finish,
-                method,
-                manual,
-                coverage=False,
+        draw = self._draw_preview(finish) if preview else self._draw_full(finish)
+        return self._measure(thickness_ns, clip, method, manual, draw)
+
+    def stretch_limit(
+        self,
+        thickness_ns: float,
+        clip: Any,
+        *,
+        finish: SliceFinish,
+        method: str,
+        manual: Mapping[str, float],
+    ) -> tuple[float, bool]:
+        """The shared limit to show now, and whether it is final (plan call 7,
+        Ruling R3): `SliceEngine.stretch_limit` for the site.
+
+        For minimum curvature, `shared_limit` itself when every grid window
+        it measures is solved, else the provisional `shared_limit(...,
+        preview=True)`. One pass decides and, when final, measures: each grid
+        window is sliced and hashed once and its cached solve smoothed, with
+        no job built and nothing solved on the GUI thread. Any other method
+        is always final.
+        """
+        if finish.method != "min_curvature":
+            value = self.shared_limit(
+                thickness_ns, clip, finish=finish, method=method, manual=manual
             )
-            slices.extend(shown.values())
-        if not slices:
-            return float(clip.limit(np.array([], dtype=float)))
-        return limit_over_slices(slices, clip)
+            return value, True
+        try:
+            return self._measure(
+                thickness_ns, clip, method, manual, self._draw_solved(finish)
+            ), True
+        except _NotSolved:
+            value = self.shared_limit(
+                thickness_ns, clip, finish=finish, method=method, manual=manual, preview=True
+            )
+            return value, False
+
+    def stretch_solves(self, thickness_ns: float, finish: SliceFinish) -> list[PendingSolve]:
+        """A background solve for each grid window the minimum-curvature
+        stretch is measured over (`shared_limit`'s, Ruling R3) that is not
+        solved yet, window by window in `ready_grids` order (plan call 7).
+        [] when all are, and for any other method."""
+        if finish.method != "min_curvature":
+            return []
+        jobs: list[PendingSolve] = []
+        for top, thickness in self._limit_windows_ns(thickness_ns):
+            for grid_id in self.ready_grids:
+                window = self._grid_window(grid_id, top, thickness)
+                if window is None:
+                    continue
+                job = self._engines[grid_id].window_solve(window, finish)
+                if job is not None:
+                    jobs.append(job)
+        return jobs
 
     def weights_cached(self, finish: SliceFinish) -> bool:
         """Whether a tick at `finish` would build no weights: every ready

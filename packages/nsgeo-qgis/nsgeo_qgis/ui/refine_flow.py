@@ -1,0 +1,206 @@
+"""One scope's minimum-curvature refine: the preview, the rest and the list.
+
+Interpolation spec §7, plan calls 5 and 7. This grid and Whole site share
+the dock's one `Refiner`, so two solves never run at once, and each scope
+keeps one `RefineFlow`: its own rest timer, whether what it draws is a
+kriging preview and which solves that preview waits for, the running
+list's progress, and the scope's shared stretch, provisional until the
+windows it is measured over are solved. What a rest queues, how a scope
+redraws and where its status goes stay the scope's own. The rules both
+scopes follow are kept here, once, so the two cannot drift apart:
+
+* **A preview cancels the running list and restarts the rest**, unless
+  every solve it waits for is still at the head of that list. That is a
+  redraw of the window being solved, not a new slow window: a site grid
+  whose solve landed is drawn while the others still solve, and a cancel
+  there would lose the solve in progress and start the rest over at every
+  landing. A list for a window left behind is always cancelled, so it
+  never draws over the newer one.
+* **A full minimum-curvature draw** (a cache hit, or a solve inside the
+  budget) leaves a running list alone, so stretch windows queued behind a
+  landed slice still land. Another method's draw stops it.
+* **A landed solve redraws** only when the preview on screen waits for it.
+  When the list ends, a provisional stretch is dropped, so the redraw
+  measures the final one; the redraw is then a cache hit.
+* **Nothing left to solve is a state to leave, never one to keep.** A rest
+  with no job redraws a preview whose slices were solved meanwhile (an
+  export solves every band), and a provisional stretch found with nothing
+  on its way to finish it arms the rest again.
+
+Solves are told apart by `(engine, key)`, never the key alone: two of a
+site's grids can hold equal values. Owns no widgets and declares no
+signals. The rest timer's slot is the scope's, and guards its own body.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
+from qgis.PyQt.QtCore import QObject, QTimer
+
+from nsgeo_qgis.refine import Refiner
+from nsgeo_qgis.slices_plan import PREVIEW_STATUS, REFINE_REST_MS, REFINING_STATUS
+
+#: A solve as a flow tells it apart: the engine it lands in, and its key.
+SolveId = tuple[Any, bytes]
+
+
+def solve_id(job: Any) -> SolveId:
+    """`job`'s `SolveId`: a `PendingSolve`, or any job with `engine` and `key`."""
+    return (job.engine, job.key)
+
+
+class RefineFlow:
+    """One scope's side of the shared refiner (see the module docstring)."""
+
+    def __init__(self, parent: QObject, refiner: Refiner, on_rest: Callable[[], None]) -> None:
+        #: The dock's one worker, shared by both scopes.
+        self.refiner = refiner
+        #: Minimum curvature's rest (plan call 5): every preview that cancels
+        #: restarts it, so the refine starts only once the depth has rested,
+        #: however it was moved.
+        self.rest = QTimer(parent)
+        self.rest.setSingleShot(True)
+        self.rest.setInterval(REFINE_REST_MS)
+        self.rest.timeout.connect(on_rest)
+        #: Whether what the scope draws is a kriging preview, refined once the
+        #: depth rests.
+        self.provisional = False
+        #: How many of the running list have landed, of how many: the status.
+        self.done = 0
+        self.total = 0
+        #: `(key, limit, final)`: the scope's shared stretch and the scope's
+        #: own key for what it was measured over. `final` is False for minimum
+        #: curvature's provisional stretch, measured over kriging previews
+        #: until its windows are solved (plan call 7).
+        self.stretch: tuple[Any, float, bool] | None = None
+        #: The solves the preview on screen waits for.
+        self._awaited: frozenset[SolveId] = frozenset()
+        #: The running list's head: the slice on screen's solves not landed yet.
+        self._head: set[SolveId] = set()
+
+    def status(self, normal: str) -> str:
+        """The scope's status line: the refine's progress while the worker
+        runs, the preview's note while one is drawn, and `normal` otherwise
+        (plan call 5)."""
+        if self.refiner.busy:
+            return REFINING_STATUS.format(done=self.done, total=self.total)
+        if self.provisional:
+            return PREVIEW_STATUS
+        return normal
+
+    # ---- draws ------------------------------------------------------------
+    def previewed(self, awaited: Iterable[SolveId]) -> None:
+        """The scope drew a preview waiting for the solves `awaited`. Any
+        other list is for a window left behind: cancelled, and the rest
+        restarted. A list whose head still holds every one of them is this
+        window's own, and runs on."""
+        waits = frozenset(awaited)
+        self.provisional = True
+        if not (waits and self.refiner.busy and waits <= self._head):
+            self.refiner.cancel()
+            self._head = set()
+            self.rest.start()
+        self._awaited = waits
+
+    def finished(self, *, stop: bool) -> None:
+        """The scope drew in full, so nothing on screen waits. `stop` when the
+        method is not minimum curvature: a running list is then for a method
+        no longer shown."""
+        self.provisional = False
+        self._awaited = frozenset()
+        if stop:
+            self.stop()
+
+    def stop(self) -> bool:
+        """No refine is owed: nothing is drawn, the draw failed, another
+        method shows, or the scope was left. Cancels the list and the rest.
+        Whether a preview or a refine stood, so the scope's status line, which
+        said so, needs resetting."""
+        stood = self.provisional or self.refiner.busy
+        self.refiner.cancel()
+        self.rest.stop()
+        self.provisional = False
+        self._awaited = frozenset()
+        self._head = set()
+        return stood
+
+    # ---- the list ---------------------------------------------------------
+    def rested(
+        self,
+        current: Sequence[Any],
+        stretch: Sequence[Any],
+        on_landed: Callable[[Any], None],
+        on_error: Callable[[str], None],
+    ) -> bool:
+        """The depth rested: queue `current`, the slice on screen's solves,
+        then `stretch`, the stretch windows not solved yet, each once (plan
+        calls 5 and 7). Whether the scope must redraw now, since nothing would
+        arm the rest for it again: a preview with nothing left to solve, or a
+        provisional stretch whose windows all are."""
+        queued: dict[SolveId, Any] = {}
+        for job in (*current, *stretch):
+            queued.setdefault(solve_id(job), job)
+        redraw = self.provisional and not current
+        if queued:
+            self._head = {solve_id(job) for job in current}
+            self.done, self.total = 0, len(queued)
+            self.refiner.start(list(queued.values()), on_landed, on_error)
+        elif self.stretch is not None and not self.stretch[2]:
+            self.stretch = None  # every window is solved: measure the final one
+            redraw = True
+        return redraw
+
+    def landed(self, job: Any) -> bool:
+        """A solve finished, handed over on the GUI thread. It lands in its
+        engine's cache whatever is on screen. Whether the scope redraws: for
+        a solve the preview on screen waits for, and once the list ends,
+        with a provisional stretch dropped so the final one is measured."""
+        landed = job.land()
+        ident = solve_id(job)
+        self.done += 1
+        self._head.discard(ident)
+        redraw = landed and self.provisional and ident in self._awaited
+        if not self.refiner.busy:
+            self._head = set()
+            if self.stretch is not None and not self.stretch[2]:
+                self.stretch = None
+            redraw = True
+        return redraw
+
+    def failed(self, message: str) -> str:
+        """The list ended in an error. The preview stays on screen, blanks
+        and all; what the scope reports."""
+        self._head = set()
+        return f"minimum curvature failed: {message}"
+
+    # ---- the shared stretch -------------------------------------------------
+    def stretch_limit(self, key: Any, measure: Callable[[], tuple[float, bool]]) -> float:
+        """The shared stretch for `key`, re-measured (`measure() -> (limit,
+        final)`) only when the one held is for another key: a measurement
+        is a pass over many windows, never a per-tick cost. A provisional
+        stretch, held or just measured, arms the rest when nothing is on its
+        way to finish it (a refine that failed, or one a failed draw
+        cancelled), so the next rest queues its windows (plan call 7)."""
+        held = self.stretch
+        if held is not None and held[0] == key:
+            if not held[2]:
+                self._arm()
+            return held[1]
+        value, final = measure()
+        self.stretch = (key, value, final)
+        if not final:
+            self._arm()
+        return value
+
+    def stretch_final(self, key: Any) -> bool:
+        """Whether the stretch held is final for `key`. A rest then asks for
+        no stretch solves (Ruling R11): asking slices and hashes every window
+        on the GUI thread, about 84 ms at a million cells, for nothing."""
+        held = self.stretch
+        return held is not None and held[0] == key and held[2]
+
+    def _arm(self) -> None:
+        if not self.refiner.busy and not self.rest.isActive():
+            self.rest.start()
