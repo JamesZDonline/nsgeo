@@ -100,7 +100,7 @@ The user's words for what they wanted instead: *"I would have liked to be able t
 10. **Nothing changes until OK, and OK is one change:** one dirty mark and one `lines_changed`, however many lines changed. Cancel discards everything. Changed cells are highlighted until then. A status line reads "N lines changed · M picks will move with them".
 11. **No live map preview** while the table is open. You see the result after OK.
 12. **A line moved to another grid joins it the way an imported line would** for the remembered slice lines. It leaves the old grid's `slice_sources[…].lines` list if it was in one.
-13. **This branch is cut from main at `8fcc37d`.** The slices cleaning round (`nsgeo-slices-cleanup`, planned, not built) also touches the Slices panel. Whichever merges second resolves the overlap.
+13. **This branch was cut from main at `8fcc37d`** and brought up to main `617399e` (slice interpolation milestone A) before planning. Slice interpolation milestone B (`nsgeo-slice-interpolation-b`, being built) also changes `slices_engine.py`, `ui/slices_dock.py`, `site_engine.py` and `ui/site_scope.py`. Whichever merges second resolves the overlap.
 14. **The table holds edits, not a copy of the lines.** Lines can change elsewhere while it is open: Edit grid, Move to grid ▸, another grid's Edit lines table, or remove-and-re-import. So OK works like this:
     - **Only the fields the user changed are written,** on top of each line's placement as it is at OK.
     - **Starts that come from the inset rule** (Flip, Snap, a Grid change) are worked out again at OK, against the grid's length as it is then.
