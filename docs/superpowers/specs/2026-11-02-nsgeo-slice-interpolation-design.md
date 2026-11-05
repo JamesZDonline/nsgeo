@@ -283,11 +283,33 @@ must not freeze. The slice shown when the drag stops must be the full minimum-cu
 preview, a warm start from the previous slice) is the **builder's call**, recorded with the
 measurements.
 
+*Changed 2026-11-05, the user's call:* the bridge is a **kriging preview**. While the depth
+moves faster than minimum curvature can keep up, the panel shows kriging at the same max
+distance and smoothing, so the blanks are the same. Once the depth has rested for a moment,
+minimum curvature is solved in the background and replaces the preview. Moving on abandons
+that solve. Exports never use the preview. The aim, in the user's words: explore dynamically,
+and when you pause to investigate, what you are looking at gets better while you look.
+Measured on the 50 m synthetic grid with lines 0.5 m apart:
+
+| Cell | Minimum curvature | Kriging preview |
+|---|---|---|
+| 0.1 m | 0.54 s a slice | 12 ms a slice, after 0.6 s and 21 MB of setup |
+| 0.05 m | 9.6 s a slice | 62 ms a slice, after 5.9 s and 95 MB of setup |
+
+In the filled gaps, kriging was within 0.5% of the data range of the minimum-curvature result
+in 99% of cells. A lower-resolution minimum-curvature preview (0.2 m cells) was also tried. It
+was further from the final result (1.4%), and it gave the full solve no head start (375
+iterations against 389).
+
 **Shared stretch.** `shared_limit` is measured over every window's final slice (interpolated and
 smoothed), as it is measured over filled slices today. That is cheap for IDW and kriging. For
 minimum curvature it means solving every window, so the builder may compute it in the background
 and use the current slice's stretch until it is ready. Whatever is chosen is recorded, and the
 final limit must come from minimum-curvature slices, not another method's.
+
+*Chosen for milestone B (2026-11-05):* for minimum curvature the stretch is measured over at
+most 12 windows, the site's existing rule. Kriging's stretch over the same windows stands in
+until those windows have been solved in the background.
 
 **Export** of a multi-band GeoTIFF runs every band through the full pipeline, with progress and
 cancel through the existing export path. Minimum curvature makes this slower. That is acceptable.
