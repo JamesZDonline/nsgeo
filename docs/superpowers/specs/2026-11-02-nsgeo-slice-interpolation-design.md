@@ -215,11 +215,19 @@ KD-tree or scipy is needed.
 
 ### 5.4 Minimum curvature
 
-Solve the biharmonic (minimum-curvature) equation over the whole frame on the cell lattice, with
-data cells fixed at their values, tension 0, and natural (zero-curvature) conditions at the frame
-edge. Then blank beyond the max distance. The iterative scheme (e.g. red–black relaxation with a
-coarse-to-fine start, as in Smith & Wessel 1990) and its convergence tolerance are the **builder's
-call**. The chosen tolerance is recorded and tested against a reference case (§9).
+Solve the biharmonic (minimum-curvature) equation on the cell lattice **near the data**: over the
+cells within the max distance of a data cell, plus 2 cells. Data cells are fixed at their values,
+tension is 0, and natural (zero-curvature) conditions apply at the edge of that area. Then blank
+beyond the max distance. The iterative scheme (e.g. red–black relaxation with a coarse-to-fine
+start, as in Smith & Wessel 1990) and its convergence tolerance are the **builder's call**. The
+chosen tolerance is recorded and tested against a reference case (§9).
+
+*Changed 2026-11-05, the user's call:* this section first said "over the whole frame". The
+milestone B spike showed why that cannot stand. On a 50 m grid at a 0.2 m cell, with lines over
+40% of it and one skipped line, a whole-frame solve took 59 s per slice. Solving near the data
+took 0.65 s. Inside the max distance the two differed by at most 1.2% of the data range, and by
+under 0.1% in 99% of cells, all near the edge of coverage. With full coverage both take about
+40 ms.
 
 **Known behaviour:** at tension 0, minimum curvature overshoots near sharp changes, so a strong
 return can produce a faint ring of opposite sign between lines. This is the standard
