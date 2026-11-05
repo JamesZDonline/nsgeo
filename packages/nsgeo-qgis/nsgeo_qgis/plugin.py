@@ -548,6 +548,10 @@ class NsgeoPlugin:
             # disconnects them (and frees the kernel cache) deterministically,
             # before the session it is connected to is torn down below.
             #
+            # The minimum-curvature refine worker before anything else
+            # (interpolation spec §7, plan call 6): cancelled and joined, so
+            # no solve is still running, or lands, once an engine is gone.
+            self.slices_dock.refiner.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
             # -- so nothing it owns can start or outlive the teardown.

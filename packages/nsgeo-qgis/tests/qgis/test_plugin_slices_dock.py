@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -10,14 +13,22 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.render import colormap_names
+from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
-from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, SliceFinish, transform_names
+from nsgeo_qgis.slices_engine import solve_key
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_BUDGET_BYTES,
+    PREVIEW_STATUS,
+    REFINE_REST_MS,
+    SliceFinish,
+    transform_names,
+)
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QEvent, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -53,7 +64,9 @@ def docked(qgis_app, tmp_path):
     # worker threads inside dewow's `running_mean` at once), not merely a
     # slow teardown. Waiting here, before dispose(), is what keeps every
     # test's background work finished before the next test's fixture ever
-    # starts building a new one.
+    # starts building a new one. The refine worker first: it is joined, so
+    # no solve outlives the test that started it.
+    dock.refiner.shutdown()
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
@@ -2541,3 +2554,323 @@ def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
     _switch(dock, "B")
     _switch(dock, "A")
     assert dock.cell_spin.value() == pytest.approx(0.1)
+
+
+# ---- minimum curvature: preview while the depth moves, refine once it rests --
+# Plan calls 5 and 7 (interpolation spec §7). A solve's real duration never
+# decides anything here: `_last_solve_ms` is set by hand, once the plan exists
+# (Ruling R1: building one resets it).
+
+
+def _pump_for(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _pump_until(predicate, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() > deadline:
+            pytest.fail("timed out waiting for the condition")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
+    """Let the depth rest (`REFINE_REST_MS` and a margin), then pump events
+    until the refine worker has landed its list and no rest is pending."""
+    start = time.monotonic()
+    rested = start + (REFINE_REST_MS + 150) / 1000.0
+    while time.monotonic() < rested or dock.refiner.busy or dock._rest.isActive():
+        if time.monotonic() - start > timeout_s:
+            pytest.fail("the refine did not finish")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _minimum_curvature(dock, last_solve_ms, stretch="this slice"):
+    """The dock on minimum curvature at slider 10, that slice refined, and the
+    last solve then said to have taken `last_solve_ms`."""
+    _ready(dock)
+    dock.stretch_combo.setCurrentText(stretch)
+    dock.slice_slider.setValue(10)
+    _set_finish(dock, method="min_curvature")
+    _wait_for_refine(dock)
+    assert not dock.provisional
+    dock.engine._last_solve_ms = last_solve_ms
+
+
+def _drawn_by_the_engine(dock, how):
+    """`engine.preview` or `engine.finish` of the dock's current window."""
+    engine = dock.engine
+    values, coverage = engine.slice_at(dock.current_window())
+    draw = engine.preview if how == "preview" else engine.finish
+    return draw(values, coverage, dock.slice_finish())
+
+
+def _starts(dock, monkeypatch) -> list[float]:
+    """When the refiner was asked to start a list, by the monotonic clock."""
+    times: list[float] = []
+    real = dock.refiner.start
+
+    def recording(*args, **kwargs):
+        times.append(time.monotonic())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dock.refiner, "start", recording)
+    return times
+
+
+@pytest.mark.parametrize("move", ["slider", "step"])
+def test_a_slow_slice_shows_the_preview_then_refines(docked, move):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    if move == "slider":
+        dock.slice_slider.setValue(20)
+    else:
+        dock.step_slice(1)
+    window = dock.current_window()
+    assert dock.provisional
+    assert dock.status_label.text() == PREVIEW_STATUS
+    preview = dock.current_values()
+    np.testing.assert_array_equal(preview, _drawn_by_the_engine(dock, "preview"))
+
+    _wait_for_refine(dock)
+    assert not dock.provisional
+    assert dock.status_label.text() == dock._grid_status_text()
+    assert dock.current_window() == window
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    assert not np.array_equal(dock.current_values(), preview, equal_nan=True)
+
+
+def test_the_refine_waits_for_the_depth_to_rest(docked, monkeypatch):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    moved = 0.0
+    for value in (15, 20, 25):
+        dock.slice_slider.setValue(value)
+        moved = time.monotonic()
+        assert dock.provisional
+        assert not dock.refiner.busy
+        assert dock._rest.isActive()
+        _pump_for(0.1)
+        assert starts == [], "a refine started while the depth was still moving"
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    # A coarse Qt timer may fire up to 5% early.
+    assert starts[0] - moved >= 0.9 * REFINE_REST_MS / 1000.0
+    assert not dock.provisional
+
+
+def test_a_quick_solve_draws_minimum_curvature_at_once(docked, monkeypatch):
+    dock, _ = docked
+    _minimum_curvature(dock, 5.0)
+    starts = _starts(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    assert not dock.provisional
+    assert not dock._rest.isActive()
+    assert dock.status_label.text() == dock._grid_status_text()
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_kriging_never_previews(docked, monkeypatch):
+    dock, _ = docked
+    _ready(dock)
+    starts = _starts(dock, monkeypatch)
+    for stretch, value in (("this slice", 20), ("shared across the cube", 30)):
+        dock.stretch_combo.setCurrentText(stretch)
+        dock.slice_slider.setValue(value)
+        assert not dock.provisional
+        assert not dock._rest.isActive()
+        np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
+    """Review Focus 2. Window A's solve is held until the person has moved on
+    to B, and ignores the cancel, so it finishes late on purpose. It must not
+    land, and nothing drawn after the move may be A's."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    gate, finished_late = threading.Event(), threading.Event()
+    held: dict[str, bytes] = {}
+    real = engine.pending_solve
+
+    def gated(values, coverage, finish):
+        job = real(values, coverage, finish)
+        if job is not None and job.key == held.get("a"):
+            run = job.run
+
+            def run_late(should_stop):
+                gate.wait(10)
+                run(lambda: False)  # deaf to the cancel
+                finished_late.set()
+
+            job.run = run_late
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", gated)
+    dock.slice_slider.setValue(20)
+    a_values, a_coverage = engine.slice_at(dock.current_window())
+    held["a"] = solve_key(a_values)
+    _pump_until(lambda: dock.refiner.busy)  # A rested and its solve began
+    drawn: list[np.ndarray] = []
+    dock.slice_changed.connect(lambda: drawn.append(dock.current_values()))
+    dock.slice_slider.setValue(30)
+    b_window = dock.current_window()
+    assert dock.provisional
+    gate.set()
+    _wait_for_refine(dock)
+
+    assert finished_late.is_set()
+    assert solve_key(a_values) not in engine._solved, "A's late result landed"
+    assert dock.current_window() == b_window
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    a_full = engine.finish(a_values, a_coverage, dock.slice_finish())
+    shown = [values for values in drawn if values is not None]
+    assert len(shown) >= 2  # B's preview, then B
+    assert not any(np.array_equal(values, a_full, equal_nan=True) for values in shown)
+
+
+def test_the_shared_stretch_is_provisional_until_its_windows_are_solved(docked):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    mc = dock.slice_finish()
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(20)
+    n = dock.current_window().n_levels
+    clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
+    assert engine.stretch_solves(n, mc) != []
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc, preview=True))
+    finals: list[Any] = []
+    dock.slice_changed.connect(
+        lambda: finals.append(dock._shared_limit_cache and dock._shared_limit_cache[2])
+    )
+    _wait_for_refine(dock)
+    assert engine.stretch_solves(n, mc) == []
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc))
+    assert finals and finals[-1] is True, "the slice must be redrawn with the final stretch"
+
+
+def test_a_landed_slice_does_not_cancel_the_stretch_solves(docked):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(20)
+    states: list[tuple[bool, bool]] = []
+    dock.slice_changed.connect(lambda: states.append((dock.provisional, dock.refiner.busy)))
+    _wait_for_refine(dock)
+    refined = [busy for provisional, busy in states if not provisional]
+    assert refined, "the refined slice was never drawn"
+    assert refined[0] is True, "the stretch windows must still be solving when the slice lands"
+    assert refined[-1] is False
+    n = dock.current_window().n_levels
+    assert dock.engine.stretch_solves(n, dock.slice_finish()) == []
+
+
+def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    real = engine.pending_solve
+
+    def failing(values, coverage, finish):
+        job = real(values, coverage, finish)
+
+        def run(should_stop):
+            raise ValueError("no convergence")
+
+        job.run = run
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", failing)
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    dock.slice_slider.setValue(20)
+    preview = dock.current_values()
+    _wait_for_refine(dock)
+    assert seen == ["minimum curvature failed: no convergence"]
+    assert dock.provisional, "the preview stays on screen"
+    assert dock.current_values() is preview
+    assert dock.status_label.text() == dock._grid_status_text()
+
+
+class _Looping:
+    """A refine job that runs until it is asked to stop, or 10 s pass."""
+
+    key = b"looping"
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.stopped_by_request = False
+
+    def run(self, should_stop) -> None:
+        self.thread = threading.current_thread()
+        self.started.set()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if should_stop():
+                self.stopped_by_request = True
+                return
+            time.sleep(0.001)
+
+    def land(self) -> bool:
+        return False
+
+
+def _refine_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name.startswith("nsgeo-refine") and t.is_alive()]
+
+
+def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_modal, monkeypatch):
+    """Review Focus 3: closing QGIS mid-refine stops and joins the worker
+    before any engine is disposed. Nothing may escape to `sys.excepthook` or
+    `sys.unraisablehook` (conftest's autouse guard fails the test if it does)."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    unloaded = False
+    try:
+        session = plugin.session
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        session.add_lines(
+            [
+                Line.open(
+                    synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                    GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+                )
+                for i in range(3)
+            ]
+        )
+        session.site.presets["p"] = list(PRESET)
+        session.presets_changed.emit()
+        dock = plugin.slices_dock
+        _ready(dock)
+        job = _Looping()
+        monkeypatch.setattr(dock.engine, "pending_solve", lambda *args: job)
+        _set_finish(dock, method="min_curvature")  # a new plan's first draw is a preview
+        assert dock.provisional
+        _pump_until(job.started.is_set)
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+        unloaded = True
+        assert job.stopped_by_request, "unload did not ask the solve to stop"
+        _pump_until(lambda: not _refine_threads(), 2.0)
+        assert job.thread is not None and not job.thread.is_alive()
+        gc.collect()
+        _pump_for(0.05)
+    finally:
+        if not unloaded:
+            answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+            plugin.unload()
