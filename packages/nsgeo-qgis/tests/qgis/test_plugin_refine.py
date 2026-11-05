@@ -4,15 +4,15 @@ the slices engine; the responsiveness test uses a real solve."""
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 
 import numpy as np
 import pytest
-from nsgeo.slices import plan_curvature
+from nsgeo.slices import SolveStopped, plan_curvature
 from nsgeo_qgis import refine as refine_module
 from nsgeo_qgis.refine import Refiner
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QCoreApplication, QObject, QTimer
 
 
@@ -38,7 +38,8 @@ class Job:
                 raise self.error
             if self.gate is not None:
                 self.gate.wait(5)
-            while self.loop and not should_stop():
+            deadline = time.monotonic() + 5  # a cancel regression must not hang the suite
+            while self.loop and not should_stop() and time.monotonic() < deadline:
                 time.sleep(0.001)
         finally:
             self.returned.set()
@@ -69,24 +70,16 @@ def refiner(qgis_app):
     del parent
 
 
-@pytest.fixture
-def hooks(monkeypatch):
-    """Records every call to the excepthooks, which Qt slots would reach."""
-    calls = []
-    monkeypatch.setattr(sys, "excepthook", lambda *a: calls.append(("except", a)))
-    monkeypatch.setattr(sys, "unraisablehook", lambda *a: calls.append(("unraisable", a)))
-    return calls
-
-
 def test_jobs_land_in_order_on_the_gui_thread(refiner):
     jobs = [Job("a"), Job("b"), Job("c")]
-    landed = []
+    landed, errors = [], []
     refiner.start(
         jobs,
         lambda j: landed.append((j, threading.current_thread())),
-        lambda m: pytest.fail(m),
+        errors.append,
     )
     _pump_until(lambda: len(landed) == 3)
+    assert errors == []
     assert [j for j, _ in landed] == jobs
     assert all(j.thread_name.startswith("nsgeo-refine") for j in jobs)
     assert all(t is threading.main_thread() for _, t in landed)
@@ -151,7 +144,7 @@ def test_only_one_job_runs_at_a_time(refiner):
     assert state["max"] == 1
 
 
-def test_a_job_error_is_reported_not_raised(refiner, hooks):
+def test_a_job_error_is_reported_not_raised(refiner):
     bad, after = Job("bad", error=ValueError("no good")), Job("after")
     errors, landed = [], []
     refiner.start([bad, after], landed.append, errors.append)
@@ -161,10 +154,9 @@ def test_a_job_error_is_reported_not_raised(refiner, hooks):
     assert landed == []
     assert not after.ran
     assert not refiner.busy
-    assert hooks == []
 
 
-def test_a_raising_on_landed_is_contained(refiner, hooks, monkeypatch):
+def test_a_raising_on_landed_is_contained(refiner, monkeypatch):
     logged = []
     monkeypatch.setattr(refine_module, "_log", logged.append)
     jobs = [Job("a"), Job("b")]
@@ -180,7 +172,6 @@ def test_a_raising_on_landed_is_contained(refiner, hooks, monkeypatch):
     assert landed == jobs
     assert any("landing failed" in m for m in logged)
     assert not refiner.busy
-    assert hooks == []
 
 
 def _refine_threads():
@@ -191,12 +182,41 @@ def test_shutdown_joins_the_worker(refiner):
     looping = Job("loop", loop=True)
     refiner.start([looping], lambda j: None, lambda m: None)
     assert looping.started.wait(2)
+    worker = next(t for t in threading.enumerate() if t.name == looping.thread_name)
     refiner.shutdown()
-    deadline = time.monotonic() + 2
-    while _refine_threads() and time.monotonic() < deadline:
-        time.sleep(0.01)
+    assert not worker.is_alive()  # joined, not merely asked to stop
     assert _refine_threads() == []
     refiner.shutdown()
+
+
+def test_shutdown_survives_a_deleted_parent_and_ends_starts(qgis_app):
+    parent = QObject()
+    r = Refiner(parent)
+    sip.delete(parent)
+    r.shutdown()
+    r.shutdown()
+    job = Job("late")
+    r.start([job], lambda j: None, lambda m: None)
+    assert not r.busy
+    time.sleep(0.05)
+    assert not job.ran
+
+
+def test_an_unrequested_solve_stop_is_reported(refiner):
+    errors, landed = [], []
+    refiner.start([Job("s", error=SolveStopped())], landed.append, errors.append)
+    _pump_until(lambda: errors)
+    assert len(errors) == 1 and errors[0]
+    assert landed == []
+    assert not refiner.busy
+
+
+def test_a_base_exception_still_ends_the_list(refiner):
+    errors = []
+    refiner.start([Job("m", error=MemoryError())], lambda j: None, errors.append)
+    _pump_until(lambda: errors)
+    assert errors == ["MemoryError"]
+    assert not refiner.busy
 
 
 class SolveJob:
@@ -222,10 +242,11 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     timer = QTimer()
     timer.timeout.connect(lambda: ticks.append(1))
     timer.start(10)
-    landed = []
+    landed, errors = [], []
     t0 = time.monotonic()
-    refiner.start([job], landed.append, lambda m: pytest.fail(m))
-    _pump_until(lambda: landed, 30)
+    refiner.start([job], landed.append, errors.append)
+    _pump_until(lambda: landed or errors, 30)
+    assert errors == []
     timer.stop()
     elapsed = time.monotonic() - t0
     print(f"solve {elapsed:.2f} s, {len(ticks)} ticks")

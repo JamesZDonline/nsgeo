@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Protocol
 
 from nsgeo.slices import SolveStopped
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QObject, QTimer
 
 from nsgeo_qgis.log import log as _log
@@ -44,6 +45,11 @@ from nsgeo_qgis.slices_plan import REFINE_POLL_MS
 
 #: The worker thread's name prefix; tests and crash reports look for it.
 THREAD_NAME_PREFIX = "nsgeo-refine"
+
+
+def _describe(exc: BaseException) -> str:
+    """The message, or the type when there is none (`MemoryError()`)."""
+    return str(exc) or type(exc).__name__
 
 
 class RefineJob(Protocol):
@@ -58,6 +64,7 @@ class Refiner:
         self._generation = 0
         self._stop = threading.Event()
         self._remaining = 0
+        self._closed = False
         self._on_landed: Callable[[RefineJob], None] | None = None
         self._on_error: Callable[[str], None] | None = None
         self._poll = QTimer(parent)
@@ -76,6 +83,9 @@ class Refiner:
     ) -> None:
         """Cancel whatever runs, then run `jobs` in order; each lands on the
         GUI thread through `on_landed` after it finishes."""
+        if self._closed:
+            _log("a refine was started after the worker shut down; ignored")
+            return
         self.cancel()
         self._generation += 1
         self._stop = threading.Event()
@@ -96,9 +106,12 @@ class Refiner:
 
     def shutdown(self) -> None:
         """Cancel, then join the worker. Safe to call twice."""
+        self._closed = True
         self.cancel()
         self._executor.shutdown(wait=True, cancel_futures=True)
-        self._poll.stop()
+        # The timer is parented to the dock, which may be gone by now.
+        if not sip.isdeleted(self._poll):
+            self._poll.stop()
 
     def _run_list(self, generation: int, jobs: list, stop: threading.Event) -> None:
         # Worker thread. Anything raised here would be lost in the future,
@@ -109,9 +122,15 @@ class Refiner:
             try:
                 job.run(stop.is_set)
             except SolveStopped:
+                if stop.is_set():
+                    return
+                # Nobody asked it to stop, so the list must not end silently.
+                self._done.put((generation, None, "the solve stopped unexpectedly"))
                 return
-            except Exception as exc:
-                self._done.put((generation, None, str(exc)))
+            except BaseException as exc:
+                self._done.put((generation, None, _describe(exc)))
+                if not isinstance(exc, Exception):
+                    raise
                 return
             self._done.put((generation, job, None))
 
