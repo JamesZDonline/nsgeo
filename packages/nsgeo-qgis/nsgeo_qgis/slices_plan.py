@@ -71,6 +71,11 @@ STREAM_MS_PER_TRACE = STREAM_MS_PER_LINE / MEASURED_TRACES_PER_LINE
 #: One 60 Hz frame. Below this, streaming is imperceptible.
 FRAME_BUDGET_MS = 16.0
 
+#: How often the GUI thread looks for a finished background solve (plan
+#: call 6). Short enough that a result appears within a frame or two of
+#: landing, long enough that an idle poll costs nothing.
+REFINE_POLL_MS = 20
+
 #: What the plugin will hold before it stops promoting to a resident cube.
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
 DEFAULT_BUDGET_BYTES = 1_500_000_000
