@@ -149,7 +149,9 @@ def _reach(pop2: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
     """Cells with a data cell within the offsets (data cells included)."""
     ny, nx = pop2.shape
     reach = pop2.copy()
-    for oy, ox in zip(dy.tolist(), dx.tolist(), strict=True):
+    # zip without strict=: that is Python 3.10+, and the core supports 3.9.
+    # The offsets come in equal-length arrays by construction.
+    for oy, ox in zip(dy.tolist(), dx.tolist()):
         # reach[y, x] |= pop[y + oy, x + ox], reading False outside the frame
         ys, ye = max(0, -oy), min(ny, ny - oy)
         xs, xe = max(0, -ox), min(nx, nx - ox)
@@ -171,7 +173,7 @@ def _neighbourhoods(
     sources = np.full((targets.size, _SLOTS), -1, dtype=np.int32)
     count = np.zeros((targets.size, 4), dtype=np.int8)
     active = np.arange(targets.size, dtype=np.int32)
-    for i, (oy, ox, q) in enumerate(zip(dy.tolist(), dx.tolist(), quad.tolist(), strict=True)):
+    for i, (oy, ox, q) in enumerate(zip(dy.tolist(), dx.tolist(), quad.tolist())):  # 3.9: no strict
         if i % _PRUNE_EVERY == 0 and i:
             active = active[(count[active] < k).any(axis=1)]
             if not active.size:
