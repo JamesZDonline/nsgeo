@@ -12,7 +12,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.project import ProjectError, load_site
-from nsgeo.slices import SliceWindow, ZAxis, load_cube
+from nsgeo.slices import METHODS, SliceWindow, ZAxis, load_cube
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
@@ -841,17 +841,18 @@ _OLD_KEYS = {
 }
 
 
-def test_view_settings_round_trip_the_finish():
+@pytest.mark.parametrize("method", METHODS)
+def test_view_settings_round_trip_the_finish(method):
     view = ViewSettings(
         **{**_OLD_KEYS, "radius_m": 0.0},
-        method="idw",
+        method=method,
         max_distance_spacings=1.5,
         smooth_x_m=0.3,
         smooth_y_m=0.4,
     )
     again = ViewSettings.from_dict(view.to_dict())
     assert again == view
-    assert again.finish == SliceFinish("idw", 1.5, 0.3, 0.4)
+    assert again.finish == SliceFinish(method, 1.5, 0.3, 0.4)
     assert set(view.to_dict()) == set(_OLD_KEYS) | {
         "method",
         "max_distance_spacings",
@@ -900,7 +901,8 @@ class _ViewSettings020:
         )
 
 
-def test_a_record_from_this_build_still_loads_in_0_2_0():
-    view = ViewSettings(**_OLD_KEYS, method="idw", max_distance_spacings=1.0)
+@pytest.mark.parametrize("method", METHODS)
+def test_a_record_from_this_build_still_loads_in_0_2_0(method):
+    view = ViewSettings(**_OLD_KEYS, method=method, max_distance_spacings=1.0)
     got = _ViewSettings020.from_dict(view.to_dict())
     assert got == _ViewSettings020(**_OLD_KEYS)

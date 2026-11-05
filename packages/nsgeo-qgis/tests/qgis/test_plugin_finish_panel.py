@@ -98,6 +98,9 @@ def test_the_tooltips_are_the_pinned_copy(panel):
         "Kriging: a weighted average that follows how values vary with distance; "
         "the usual choice.\n"
         "Inverse distance: a weighted average in which nearer cells count more.\n"
+        "Minimum curvature: the smoothest surface through the lines. It can overshoot beside a "
+        "sharp change. It is slower, so at a fine cell you see kriging while the depth moves and "
+        "minimum curvature once it rests.\n"
         "None: show only the cells a line crossed."
     )
     assert panel.max_distance_spin.toolTip() == (

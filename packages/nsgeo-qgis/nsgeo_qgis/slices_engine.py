@@ -109,12 +109,22 @@ them live here:
   wheel or held key over a combo cannot trigger the reentrancy in the
   first place (a `QTimer` or a queued signal still can, which is why the
   guard is still needed even with the narrower event mask).
+* **A background solve must never land on a plan it was not made from**
+  (interpolation spec §7, plan calls 6 and 8). Minimum curvature keeps its
+  solved slices keyed by the values alone, so a solve made on the plan for
+  one cell or line set, landing after that plan was replaced, would be
+  served for the new one: plausible, and wrong. `PendingSolve.land` checks
+  that the engine still holds the very plan object the job was made from,
+  and every place that drops or replaces the plan drops the solved slices
+  with it (`_drop_fill`). The cache is written on the GUI thread only.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -124,12 +134,14 @@ import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
+    CurvaturePlan,
     FillWeights,
     FinishSettings,
     LinePlan,
     PreparedLine,
     Provenance,
     SliceCube,
+    SliceFill,
     SliceWindow,
     ZAxis,
     build_cube,
@@ -138,13 +150,17 @@ from nsgeo.slices import (
     plan_fill,
     plan_line,
     plan_windows,
+    smooth,
     stream_slice,
 )
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.slices_plan import (
+    LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
+    PREVIEW_METHOD,
+    SOLVED_SLICES_KEPT,
     MemoryEstimate,
     Resolution,
     SliceFinish,
@@ -152,6 +168,7 @@ from nsgeo_qgis.slices_plan import (
     choose_residency,
     estimate_memory,
     format_status,
+    limit_windows,
     preset_transform_conflict,
 )
 
@@ -176,6 +193,73 @@ _CANCEL_TIMEOUT_MS = 250
 #: (clearing the source), so `None` cannot double as "nothing queued" the
 #: way it usually would.
 _NOT_QUEUED = object()
+
+
+def solve_key(values: np.ndarray) -> bytes:
+    """The solved-slice cache key of `values` (plan call 8): a BLAKE2b digest
+    of their bytes, shape and dtype. The values themselves, never the window
+    they came from: another preset or line set at the same window gives other
+    values on the same plan, and must not be served this solve."""
+    values = np.ascontiguousarray(values)
+    digest = hashlib.blake2b(values.tobytes(), digest_size=16)
+    digest.update(str(values.shape).encode())
+    digest.update(str(values.dtype).encode())
+    return digest.digest()
+
+
+class PendingSolve:
+    """One minimum-curvature solve for the refine worker (a `RefineJob`,
+    plan calls 6 and 8).
+
+    `run` is the worker's, and touches only the job: its private copy of the
+    values, the plan (frozen: read, never written) and its own result
+    fields. `land` is the GUI thread's, and the only way a background solve
+    reaches the engine's cache. It lands only while the engine still holds
+    the very plan the job was made from (see the module docstring).
+    """
+
+    def __init__(
+        self,
+        engine: SliceEngine,
+        plan: CurvaturePlan,
+        values: np.ndarray,
+        key: bytes,
+        *,
+        copy: bool = True,
+    ) -> None:
+        self._engine = engine
+        self._plan = plan
+        # `copy=False` only for an array the engine has just made and hands
+        # to no one else (`stretch_solves`), which is private already.
+        self._values: np.ndarray | None = np.array(values, copy=True) if copy else values
+        #: The solved-slice cache key of the values (`solve_key`).
+        self.key = key
+        #: Set by `run`: the unsmoothed slice, and the solve's own time in ms.
+        self.solved: np.ndarray | None = None
+        self.ms: float | None = None
+
+    def run(self, should_stop: Callable[[], bool]) -> None:
+        """Solve, on the worker thread; `SolveStopped` when `should_stop` asks."""
+        values = self._values
+        if values is None:
+            raise RuntimeError("this solve has already run")
+        try:
+            started = time.perf_counter()
+            solved, _ = self._plan.solve(values, should_stop)
+            self.ms = (time.perf_counter() - started) * 1000.0
+            self.solved = solved
+        finally:
+            # A list holds its jobs until it ends: twelve stretch windows'
+            # values need not outlive their solves.
+            self._values = None
+
+    def land(self) -> bool:
+        """Into the engine's cache, and its last solve time, on the GUI
+        thread, only if the engine still holds the plan this job was made
+        from. Whether it did."""
+        if self.solved is None or self.ms is None:
+            return False
+        return self._engine._land(self._plan, self.key, self.solved, self.ms)
 
 
 class SliceEngine(QObject):
@@ -229,12 +313,22 @@ class SliceEngine(QObject):
         self._cube: SliceCube | None = None
         #: The interpolation weights for the current frame and settings, built
         #: on first use and kept: applying them is cheap per slice, building
-        #: them is not (interpolation spec §7). One `(key, weights)` with
-        #: `key = (frame, method, max distance, search radius)`: the settings
-        #: the weights are built from, so a smoothing drag never rebuilds
-        #: them. Dropped wherever the lines or the frame can have changed,
-        #: and checked against each slice's coverage too.
-        self._weights: tuple[tuple[Any, ...], FillWeights] | None = None
+        #: them is not (interpolation spec §7). One `(key, weights, preview)`
+        #: with `key = (frame, method, max distance, search radius)`: the
+        #: settings the weights are built from, so a smoothing drag never
+        #: rebuilds them. Dropped wherever the lines or the frame can have
+        #: changed, and checked against each slice's coverage too. For
+        #: minimum curvature `weights` is the `CurvaturePlan` and `preview`
+        #: the kriging weights built with it (plan call 5); for any other
+        #: method `preview` is None.
+        self._weights: tuple[tuple[Any, ...], SliceFill, FillWeights | None] | None = None
+        #: Slices solved on that plan, unsmoothed, least recently used first
+        #: (plan call 8), keyed by `solve_key`; at most `SOLVED_SLICES_KEPT`.
+        #: Written on the GUI thread only, and dropped with the plan.
+        self._solved: OrderedDict[bytes, np.ndarray] = OrderedDict()
+        #: How long the last solve on that plan took, in ms; None before one
+        #: has run on it (plan call 5). Dropped with the plan.
+        self._last_solve_ms: float | None = None
         self._mode = "streaming"
         self._always_resident = False
         self._redraw_ms: float | None = None
@@ -547,7 +641,7 @@ class SliceEngine(QObject):
             self._steps = ()
             self._plans = None
             self._cube = None
-            self._weights = None
+            self._drop_fill()
             self._grid_fp = None
             self._grid_seen = None
             self._redraw_ms = None
@@ -827,12 +921,14 @@ class SliceEngine(QObject):
         # The fill weights are the exception: they depend on the frame and the
         # populated cells, never on the z axis, so a dz/z0/z1 edit keeps them
         # (rebuilding takes about 5 s at 0.05 m on a 50 m grid). Kept only while
-        # the frame is unchanged; `_weights_for` still checks the key and the
+        # the frame is unchanged; `_fill_for` still checks the key and the
         # populated mask before reusing them. `set_source` and `clear` drop them.
-        held = self._weights
+        # The slices solved on a kept plan stay with it: a solve depends on the
+        # plan and the values alone (plan call 8).
+        held = (self._weights, self._solved, self._last_solve_ms)
         self._plans = None
         self._cube = None
-        self._weights = None
+        self._drop_fill()
         self._frame = None
         self._z = None
         self._redraw_ms = None
@@ -843,8 +939,8 @@ class SliceEngine(QObject):
         res = self._resolution
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
-        if held is not None and held[0][0] == self._frame:
-            self._weights = held
+        if held[0] is not None and held[0][0][0] == self._frame:
+            self._weights, self._solved, self._last_solve_ms = held
         self._choose_mode()
 
     @staticmethod
@@ -1011,7 +1107,9 @@ class SliceEngine(QObject):
         """Whether `finish` would reuse the weights already built, so the
         caller knows to show a wait cursor when it would not. Compares the
         key only: a change of lines goes through `set_source`, which clears
-        the cache, and `_weights_for` checks coverage as well."""
+        the cache, and `_fill_for` checks coverage as well. For minimum
+        curvature the plan and its kriging preview are built together, so
+        this means both."""
         frame = self._frame
         if self._weights is None or frame is None:
             return False
@@ -1019,50 +1117,189 @@ class SliceEngine(QObject):
 
     @property
     def weights_nbytes(self) -> int:
-        """The bytes of the weights held now, 0 before any are built."""
-        return 0 if self._weights is None else self._weights[1].nbytes
+        """The bytes held for interpolation now, 0 before anything is built:
+        the weights, and for minimum curvature the plan, its kriging preview
+        and the solved slices (plan call 9)."""
+        if self._weights is None:
+            return 0
+        _, fill, preview = self._weights
+        held = fill.nbytes + (0 if preview is None else preview.nbytes)
+        return held + sum(solved.nbytes for solved in self._solved.values())
+
+    @property
+    def last_solve_ms(self) -> float | None:
+        """How long the last minimum-curvature solve on the plan held now
+        took; None before one has run on it, and after it is dropped."""
+        return self._last_solve_ms
 
     @staticmethod
     def _weights_key(frame: CubeFrame, settings: FinishSettings) -> tuple[Any, ...]:
         # Smoothing is applied after the weights and is not part of them.
         return (frame, settings.method, settings.max_distance_m, settings.search_radius_m)
 
-    def _weights_for(
-        self, coverage: np.ndarray, frame: CubeFrame, settings: FinishSettings
-    ) -> FillWeights:
-        populated = coverage > 0
-        key = self._weights_key(frame, settings)
+    def _drop_fill(self) -> None:
+        """Drop the weights, or the minimum-curvature plan with its preview,
+        and every slice solved on it (plan call 8)."""
+        self._weights = None
+        self._solved = OrderedDict()
+        self._last_solve_ms = None
+
+    def _held_fill(
+        self, populated: np.ndarray, frame: CubeFrame, settings: FinishSettings
+    ) -> tuple[tuple[Any, ...], SliceFill, FillWeights | None] | None:
+        """What is held, if it was built for these settings and these cells."""
         held = self._weights
         if (
             held is not None
-            and held[0] == key
+            and held[0] == self._weights_key(frame, settings)
             and np.array_equal(held[1].populated, populated.ravel())
         ):
-            return held[1]
-        weights = plan_fill(
-            populated,
-            frame.cell,
-            settings.method,
-            settings.max_distance_m,
-            settings.search_radius_m,
-        )
-        self._weights = (key, weights)
-        return weights
+            return held
+        return None
+
+    def _fill_for(
+        self, coverage: np.ndarray, frame: CubeFrame, settings: FinishSettings
+    ) -> tuple[SliceFill, FillWeights | None]:
+        """The weights for these settings and cells, built if they are not
+        held. For minimum curvature, the plan and the kriging preview at the
+        same max distance and search radius, built together (plan call 5)."""
+        populated = coverage > 0
+        held = self._held_fill(populated, frame, settings)
+        if held is not None:
+            return held[1], held[2]
+        md, sr = settings.max_distance_m, settings.search_radius_m
+        fill = plan_fill(populated, frame.cell, settings.method, md, sr)
+        preview: FillWeights | None = None
+        if isinstance(fill, CurvaturePlan):
+            built = plan_fill(populated, frame.cell, PREVIEW_METHOD, md, sr)
+            assert isinstance(built, FillWeights)  # kriging plans weights
+            preview = built
+        self._drop_fill()
+        self._weights = (self._weights_key(frame, settings), fill, preview)
+        return fill, preview
+
+    def _keep_solved(self, key: bytes, solved: np.ndarray) -> None:
+        """Into the solved-slice cache as the most recent; the least recently
+        used go past `SOLVED_SLICES_KEPT` (plan call 8)."""
+        self._solved[key] = solved
+        self._solved.move_to_end(key)
+        while len(self._solved) > SOLVED_SLICES_KEPT:
+            self._solved.popitem(last=False)
+
+    def _land(self, plan: CurvaturePlan, key: bytes, solved: np.ndarray, ms: float) -> bool:
+        """`PendingSolve.land`: keep a background solve only while `plan` is
+        still the one held. Identity, not equality: a rebuilt plan for the
+        same settings is another plan (see the module docstring)."""
+        held = self._weights
+        if held is None or held[1] is not plan:
+            return False
+        self._keep_solved(key, solved)
+        self._last_solve_ms = ms
+        return True
+
+    def _solved_slice(self, plan: CurvaturePlan, values: np.ndarray) -> np.ndarray:
+        """`values` solved on `plan`, unsmoothed: from the cache, or solved
+        here and timed (plan calls 5 and 8)."""
+        key = solve_key(values)
+        solved = self._solved.get(key)
+        if solved is not None:
+            self._solved.move_to_end(key)
+            return solved
+        started = time.perf_counter()
+        solved, _ = plan.solve(values)
+        self._last_solve_ms = (time.perf_counter() - started) * 1000.0
+        self._keep_solved(key, solved)
+        return solved
 
     def finish(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
         """`values` interpolated into blank cells and smoothed (interpolation
         spec §5-6), with the weights built on first use and reused after.
+        Always the full result: minimum curvature is solved here if it is not
+        cached, never previewed (`preview` is the dock's choice to make).
 
         The cell is the frame's, never a widget's: a refused resolution edit
         leaves the spin ahead of the frame, and the weights must describe the
         array they are applied to (#104).
+
+        For minimum curvature this is `finish_slice` split in two, so the cache
+        can hold the solve without the smoothing: a smoothing edit or a scrub
+        back to a slice already seen never solves again (plan call 8).
         """
         frame, _ = self._require_geometry()
         settings = self.finish_settings(finish)
-        weights = self._weights_for(coverage, frame, settings)
-        return finish_slice(values, weights, frame.cell, settings)
+        fill, _ = self._fill_for(coverage, frame, settings)
+        if isinstance(fill, CurvaturePlan):
+            solved = self._solved_slice(fill, values)
+            return smooth(solved, frame.cell, settings.smooth_x_m, settings.smooth_y_m)
+        return finish_slice(values, fill, frame.cell, settings)
 
-    def shared_limit(self, thickness_levels: int, clip: Any, finish: SliceFinish) -> float:
+    def preview(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> np.ndarray:
+        """What a slow slice is drawn as while the depth moves (plan call 5):
+        for minimum curvature, kriging at the same max distance, search radius
+        and smoothing, so its blanks are the full result's. Any other method
+        is quick already, so its preview is `finish` itself."""
+        if finish.method != "min_curvature":
+            return self.finish(values, coverage, finish)
+        frame, _ = self._require_geometry()
+        settings = self.finish_settings(finish)
+        _, preview = self._fill_for(coverage, frame, settings)
+        assert preview is not None  # built with the plan
+        return finish_slice(values, preview, frame.cell, settings)
+
+    def finish_is_slow(self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish) -> bool:
+        """Plan call 5's "slow": minimum curvature, these values not solved
+        on the plan held, and the last solve on it over `LIVE_SOLVE_BUDGET_MS`
+        or none timed on it yet. A plan not built yet has none, so the first
+        draw on a new plan is always a preview. False for any other method.
+        Builds nothing."""
+        if finish.method != "min_curvature":
+            return False
+        frame, _ = self._require_geometry()
+        if self._held_fill(coverage > 0, frame, self.finish_settings(finish)) is None:
+            return True
+        if solve_key(values) in self._solved:
+            return False
+        return self._last_solve_ms is None or self._last_solve_ms > LIVE_SOLVE_BUDGET_MS
+
+    def pending_solve(
+        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish
+    ) -> PendingSolve | None:
+        """A job that solves `values` in the background (plan call 6), or None
+        when the method is not minimum curvature or they are solved already.
+        Builds the plan if it is not held."""
+        if finish.method != "min_curvature":
+            return None
+        return self._job_for(values, coverage, finish, copy=True)
+
+    def _job_for(
+        self, values: np.ndarray, coverage: np.ndarray, finish: SliceFinish, *, copy: bool
+    ) -> PendingSolve | None:
+        frame, _ = self._require_geometry()
+        plan, _ = self._fill_for(coverage, frame, self.finish_settings(finish))
+        assert isinstance(plan, CurvaturePlan)  # the method is minimum curvature
+        key = solve_key(values)
+        if key in self._solved:
+            return None
+        return PendingSolve(self, plan, values, key, copy=copy)
+
+    def stretch_solves(self, thickness_levels: int, finish: SliceFinish) -> list[PendingSolve]:
+        """A job for each window the minimum-curvature stretch is measured
+        over (`limit_windows`) that is not solved yet, in their order (plan
+        call 7). [] when all are, and for any other method."""
+        if finish.method != "min_curvature":
+            return []
+        _, z = self._require_geometry()
+        jobs: list[PendingSolve] = []
+        for window in limit_windows(z, thickness_levels):
+            # Sliced here for this job alone, so it is private without a copy.
+            job = self._job_for(*self._slice(window), finish, copy=False)
+            if job is not None:
+                jobs.append(job)
+        return jobs
+
+    def shared_limit(
+        self, thickness_levels: int, clip: Any, finish: SliceFinish, *, preview: bool = False
+    ) -> float:
         """One display limit for the whole source, at this thickness.
 
         Spec 8's shared stretch. Measured over slices at the thickness
@@ -1089,17 +1326,28 @@ class SliceEngine(QObject):
         exactly as the core `shared_limit` does -- omitting it would measure
         the resident and streaming stretch over two different sets of levels,
         which a mode switch must never produce.
+
+        Minimum curvature solves every window it measures, so it measures at
+        most twelve (`limit_windows`, both ends kept: the site's rule, plan
+        call 7). With `preview=True` it measures their kriging previews
+        instead, the provisional stretch that stands in until those windows
+        are solved; the final limit always comes from minimum-curvature
+        slices (interpolation spec §7).
         """
         _, z = self._require_geometry()
-        windows = list(plan_windows(z, thickness_levels, thickness_levels))
-        if windows[-1].k1 < z.nz:
-            windows.append(SliceWindow(windows[-1].k1, z.nz))
+        if finish.method == "min_curvature":
+            windows = list(limit_windows(z, thickness_levels))
+        else:
+            windows = list(plan_windows(z, thickness_levels, thickness_levels))
+            if windows[-1].k1 < z.nz:
+                windows.append(SliceWindow(windows[-1].k1, z.nz))
+        draw = self.preview if preview else self.finish
         if self._mode == "resident":
             cube = self.cube()
             coverage = cube.coverage()
-            slices = (self.finish(cube.slice_levels(w.k0, w.k1), coverage, finish) for w in windows)
+            slices = (draw(cube.slice_levels(w.k0, w.k1), coverage, finish) for w in windows)
         else:
-            slices = (self.finish(*self._slice(w), finish) for w in windows)
+            slices = (draw(*self._slice(w), finish) for w in windows)
         return limit_over_slices(slices, clip)
 
     def cube(self) -> SliceCube:
@@ -1237,7 +1485,7 @@ class SliceEngine(QObject):
         self._grid_fp = None
         self._grid_seen = None
         self._cube = None
-        self._weights = None
+        self._drop_fill()
         self._redraw_ms = None
         self._running = False
 

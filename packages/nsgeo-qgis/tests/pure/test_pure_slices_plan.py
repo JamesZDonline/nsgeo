@@ -7,10 +7,11 @@ import tracemalloc
 
 import numpy as np
 import pytest
-from nsgeo.slices import plan_fill
+from nsgeo.slices import METHODS, plan_fill
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
+    METHOD_LABELS,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
     WEIGHT_BYTES_PER_CELL,
@@ -396,7 +397,7 @@ def _binned_rows(spacing, cell, size=10.0, skip=(), nx=40):
     return pop
 
 
-@pytest.mark.parametrize("method", ["idw", "kriging"])
+@pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 @pytest.mark.parametrize(
     ("spacing", "cell"), [(0.5, 0.2), (0.75, 0.2), (0.7, 0.2), (0.5, 0.15), (1.5, 0.2)]
 )
@@ -412,7 +413,7 @@ def test_the_default_finish_closes_every_gap_between_binned_lines(method, spacin
     assert np.isfinite(out[rows[0] : rows[-1] + 1]).all()
 
 
-@pytest.mark.parametrize("method", ["idw", "kriging"])
+@pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 def test_the_default_finish_leaves_a_skipped_line_blank(method):
     settings = SliceFinish(method=method).in_metres(0.5)
     pop = _binned_rows(0.5, 0.2, skip=(10,))
@@ -462,30 +463,48 @@ def test_updated_accepts_an_int_as_a_number():
     assert SliceFinish().updated({"smooth_x_m": 1}).smooth_x_m == 1.0
 
 
-@pytest.mark.parametrize("method", ["idw", "kriging"])
+@pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     """The over-budget warning counts `WEIGHT_BYTES_PER_CELL` before any weights
     exist (interpolation spec §7), so building them must not need much more:
     within half as much again. Measured on wandering 0.5 m lines over 50 m at
     0.05 m: 105-107 B a cell, against 466-561 B before `plan_fill` chunked its
     working set. Small chunks here, so their fixed few megabytes do not swamp a
-    grid this size."""
+    grid this size.
+
+    Minimum curvature's plan is only about 55 B a cell, but its solve needs
+    buffers of its own, so it is measured over the plan and one `apply`
+    together (plan call 9): about 103 B a cell. IDW's and kriging's `apply` is
+    a slice's transient, the 55 B a cell `MAX_FRAME_CELLS` already counts, so
+    they are measured over building alone, as before."""
     from nsgeo.slices import interpolate
 
     monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
     monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
     settings = SliceFinish(method=method).in_metres(0.5)
     pop = _binned_rows(0.5, 0.05, nx=200)
+    values = np.where(pop, 1.0, np.nan).astype(np.float32)
+    out = None
     tracemalloc.start()
     try:
         tracemalloc.reset_peak()
         before, _ = tracemalloc.get_traced_memory()
         fw = plan_fill(pop, 0.05, method, settings.max_distance_m, settings.search_radius_m)
+        if method == "min_curvature":
+            out = fw.apply(values)
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    assert fw.targets.size > 0.8 * pop.size
+    if out is None:
+        out = fw.apply(values)
+    assert (np.isfinite(out) & ~pop).sum() > 0.8 * pop.size
     assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
+
+
+def test_method_labels_follow_methods():
+    """The Method combo lists every core method, in the core's order."""
+    assert list(METHOD_LABELS) == list(METHODS)
+    assert METHOD_LABELS["min_curvature"] == "Minimum curvature"
 
 
 def test_the_estimate_counts_the_fill_weights():

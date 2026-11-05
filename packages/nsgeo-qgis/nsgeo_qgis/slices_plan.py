@@ -76,6 +76,29 @@ FRAME_BUDGET_MS = 16.0
 #: landing, long enough that an idle poll costs nothing.
 REFINE_POLL_MS = 20
 
+#: The longest a minimum-curvature solve may take and still follow the depth
+#: live (plan call 5, interpolation spec §7). A slice whose last solve took
+#: longer is drawn as its kriging preview and refined once the depth rests.
+LIVE_SOLVE_BUDGET_MS = 50.0
+
+#: How long the depth must rest before the background refine starts (plan
+#: call 5). Every preview draw restarts it, so dragging, the wheel, the arrow
+#: keys and edits all wait the same way.
+REFINE_REST_MS = 300
+
+#: The most solved, unsmoothed slices an engine keeps (plan call 8): the
+#: twelve stretch windows (`SITE_LIMIT_WINDOWS`) and a few recently viewed.
+SOLVED_SLICES_KEPT = 16
+
+#: The method a slow minimum-curvature slice is previewed with (plan call 5),
+#: at the same max distance, search radius and smoothing, so its blanks are
+#: the full result's.
+PREVIEW_METHOD = "kriging"
+
+#: The status line while a preview is drawn, and while the worker refines.
+PREVIEW_STATUS = "Kriging preview: minimum curvature follows when the depth rests."
+REFINING_STATUS = "Refining with minimum curvature ({done} of {total})…"
+
 #: What the plugin will hold before it stops promoting to a resident cube.
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
 DEFAULT_BUDGET_BYTES = 1_500_000_000
@@ -170,6 +193,7 @@ METHOD_LABELS: dict[str, str] = {
     "none": "None (binned only)",
     "idw": "Inverse distance (IDW)",
     "kriging": "Kriging",
+    "min_curvature": "Minimum curvature",
 }
 
 #: Per cell, the fill weights' int32 source index and float32 weight for each
