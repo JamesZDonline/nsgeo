@@ -1,9 +1,10 @@
 """FFT bandpass with cosine-tapered passband edges.
 
 scipy.signal.butter plus filtfilt is the textbook route. An FFT bandpass is
-equally valid *provided* the passband edges are tapered: a brick-wall filter
-rings, and that ringing can be mistaken for real stratigraphy. The taper is
-the whole reason this implementation is acceptable without scipy.
+equally valid *provided* two things hold. The passband edges are tapered: a
+brick-wall filter rings, and that ringing can be mistaken for real
+stratigraphy. And each trace is zero-padded: an unpadded FFT convolves
+circularly, wrapping the direct wave into the bottom of the trace.
 """
 
 from __future__ import annotations
@@ -101,7 +102,14 @@ class Bandpass:
                 f"({nyquist:.1f} MHz) for a {rg.dt_ns} ns sample interval"
             )
 
-        spectrum = np.fft.rfft(rg.data, axis=0)
-        freqs_mhz = np.fft.rfftfreq(rg.n_samples, d=rg.dt_ns * 1e-9) / 1e6
+        # Zero-pad to at least twice the trace. Unpadded, the FFT filters each
+        # trace as one period of a repeating signal: the response to the
+        # record's opening edge (time_zero crops partway up the direct wave)
+        # wraps into the last rows, where late-time signal is a thousandth of
+        # the direct wave and AGC gains whatever is there to full strength.
+        n = rg.n_samples
+        n_fft = 1 << (2 * n - 1).bit_length()
+        spectrum = np.fft.rfft(rg.data, n=n_fft, axis=0)
+        freqs_mhz = np.fft.rfftfreq(n_fft, d=rg.dt_ns * 1e-9) / 1e6
         filtered = spectrum * self._mask(freqs_mhz)[:, None]
-        return rg.replace(data=np.fft.irfft(filtered, n=rg.n_samples, axis=0))
+        return rg.replace(data=np.fft.irfft(filtered, n=n_fft, axis=0)[:n])

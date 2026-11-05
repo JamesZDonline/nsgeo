@@ -105,3 +105,26 @@ def test_mask_has_hard_edges_at_zero_taper_and_ramps_otherwise():
     ramp_idx = (freqs > 200.0 - width) & (freqs < 200.0)
     ramp = mask[ramp_idx]
     assert np.all(np.diff(ramp) > 0)
+
+
+def cropped_direct_wave(n_samples=463, dt_ns=0.2165, freq_mhz=350.0, peak_ns=1.5):
+    """What time_zero leaves on a real HS350 line: a record that opens partway
+    up a direct wave of ~1e6 counts and is otherwise quiet. Real late-time
+    signal is ~2e3 counts, so 1e-3 of the peak is the level it lives at."""
+    t = np.arange(n_samples) * dt_ns - peak_ns
+    a = (np.pi * freq_mhz * 1e-3 * t) ** 2
+    wave = 1e6 * (1.0 - 2.0 * a) * np.exp(-a)  # Ricker
+    return Radargram(data=np.tile(wave[:, None], (1, 3)), dt_ns=dt_ns, t0_ns=0.0)
+
+
+@pytest.mark.parametrize(("low", "high"), [(250.0, 750.0), (200.0, 600.0), (100.0, 600.0)])
+def test_the_direct_wave_does_not_wrap_into_the_bottom_of_the_trace(low, high):
+    """An unpadded FFT filters each trace as one period of a repeating
+    signal, so the response to the record's opening edge lands half at the
+    top and half at the bottom. On real lines that put 2-3% of the direct
+    wave into the last 15% of the record, over ten times the real signal
+    there, and AGC then gained it to full strength."""
+    out = build_step("bandpass", low_mhz=low, high_mhz=high).apply(cropped_direct_wave()).data
+    n = out.shape[0]
+    bottom = out[n - (15 * n) // 100 :]
+    assert np.sqrt((bottom**2).mean()) < 1e-4 * np.abs(out).max()
