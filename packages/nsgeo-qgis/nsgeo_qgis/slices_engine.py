@@ -1120,7 +1120,14 @@ class SliceEngine(QObject):
             if self.on_grid_moved is not None:
                 self._hand_over_the_move(choice.grid_id)
                 return
-            narrowed = tuple(k for k in choice.line_keys if self._on_grid(k, choice.grid_id))
+            # In survey order, as the dock's own choice is: a reorder can
+            # arrive in the same change as the edit.
+            held = set(choice.line_keys)
+            narrowed = tuple(
+                k
+                for k in self.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+                if k in held and self._on_grid(k, choice.grid_id)
+            )
             try:
                 self.set_source(dataclasses.replace(choice, line_keys=narrowed))
             except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise

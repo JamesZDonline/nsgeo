@@ -1302,7 +1302,7 @@ class SlicesDock(QgsDockWidget):
         choice = self.source_choice()
         if (
             choice is not None
-            and choice == self.engine.choice
+            and choice.same_source(self.engine.choice)
             and self._prepared_steps_match(choice.preset)
         ):
             return
@@ -1418,7 +1418,7 @@ class SlicesDock(QgsDockWidget):
         if current.transform != choice.transform:
             self.source_status.setText("stale · the transform changed since this was prepared")
             return
-        if current.line_keys != choice.line_keys:
+        if set(current.line_keys) != set(choice.line_keys):  # a reorder is no change
             self.source_status.setText("stale · the lines changed since this was prepared")
             return
         if not self._prepared_steps_match(choice.preset):

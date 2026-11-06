@@ -3330,3 +3330,45 @@ def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_tw
     assert dock.engine.wait_for_preparation(20_000)
     assert a_keys[2] not in dock.included_keys()
     assert any("moved to another grid since it was saved" in e for e in errors), errors
+
+
+def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
+    """Line editing spec §4.5: a cube is a sum over lines, so the survey
+    order is not part of what it was built from. No re-preparation, and no
+    false "stale" with no Prepare button to clear it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    before = dock.engine.choice
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines([], grid_id="A", order=list(reversed(a_keys)))
+    assert dock.included_keys() == tuple(reversed(a_keys))
+    assert not dock.engine.is_running
+    assert dock.engine.wait_for_preparation(2_000)
+    assert count == []
+    assert dock.engine.choice == before
+    assert dock.source_status.text() == "prepared · 3 lines"
+
+
+def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docked_two_grids):
+    from nsgeo_qgis.line_edit import LineEdit
+
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines(
+        [LineEdit(a_keys[0], session.line_for_key(a_keys[0]).placement, offset=1.5)],
+        grid_id="A",
+        order=list(reversed(a_keys)),
+    )
+    assert dock.engine.wait_for_preparation(20_000)
+    assert count == [1]
+    assert dock.engine.choice.line_keys == tuple(reversed(a_keys))
+    assert dock.source_status.text() == "prepared · 3 lines"
