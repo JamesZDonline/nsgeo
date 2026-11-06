@@ -5,6 +5,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import available_steps, build_step, get_step, is_unipolar
+from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock, dest_index, needs_dialog
 from plugin_testing import synthetic_dzt
@@ -57,6 +58,7 @@ def test_add_menu_is_grouped_in_processing_order(opened):
         ("Time", ["time_zero", "time_cutoff"]),
         ("Filters", ["dewow", "bandpass"]),
         ("Background", ["background_mean", "background_sliding", "background_svd"]),
+        ("Migration", ["migrate_fk"]),
         ("Gain", ["gain_curve", "gain_agc", "gain_parametric"]),
     ]
 
@@ -89,7 +91,13 @@ def test_add_menu_headings_draw_on_every_style_and_cannot_be_chosen(opened):
     _, dock, _ = opened
     actions = dock.add_menu.actions()
     headings = [a for a in actions if isinstance(a, QWidgetAction)]
-    assert [h.defaultWidget().text() for h in headings] == ["Time", "Filters", "Background", "Gain"]
+    assert [h.defaultWidget().text() for h in headings] == [
+        "Time",
+        "Filters",
+        "Background",
+        "Migration",
+        "Gain",
+    ]
     assert not any(h.isEnabled() for h in headings)
     assert not any(a.isSeparator() and a.text() for a in actions)  # no addSection
 
@@ -391,3 +399,132 @@ def test_the_cutoff_spinbox_falls_back_to_the_source_when_an_earlier_step_fails(
     spin = dock.form.editors["end_ns"]
     assert spin.maximum() == pytest.approx(src.t0_ns + src.n_samples * src.dt_ns)
     assert any("does not evaluate cleanly" in m for m in message_log)
+
+
+# ---- migration (#123) ----------------------------------------------------
+
+
+def test_migration_is_addable_to_a_stack_that_already_corrects_time_zero(opened):
+    """The blocker, and it is not migration's fault.
+
+    `build_add_dialog` probed `stack_for(key).source` -- the RAW radargram,
+    `t0 = -11.09` on every real file -- while `AddStepDialog._validate`
+    applies the candidate step to one trace of it on every keystroke. So
+    migration's time-zero refusal fired and OK stayed disabled even with
+    `time_zero` already first in the stack. `ProcessingDock.time_axis`
+    already defines this quantity as the stack's own `result()`, "exactly
+    as the new step's own `apply()` will see it"; the probe was the one
+    place reaching for `source`.
+    """
+    session, dock, key = opened
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    dialog = dock.build_add_dialog("migrate_fk")
+    dialog.form.set_value("velocity_m_ns", "0.0733")
+
+    assert dialog.form.message.text() == ""
+    assert dialog.ok_button.isEnabled()
+
+
+def test_the_velocity_is_prefilled_from_the_line(opened):
+    """`resolve_velocity`'s existing chain, so the prefill is the same
+    number the depth axis and every pick already use. With no line
+    override and no grid model, that is the header's dielectric: epsr 14
+    on these files, which is 0.0801 m/ns."""
+    _, dock, _ = opened
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert dialog.form.values()["velocity_m_ns"] == pytest.approx(0.0801, abs=5e-5)
+
+
+def test_the_prefill_follows_a_line_velocity_override(opened):
+    """A line that carries a measured velocity starts there instead."""
+    session, dock, key = opened
+    session.set_line_velocity(key, VelocityModel.constant(0.0733))
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert dialog.form.values()["velocity_m_ns"] == pytest.approx(0.0733)
+
+
+def test_the_prefill_is_a_seed_not_a_link(opened):
+    """Prefill only: once the step exists the value is its own, and a later
+    velocity change does not reach back into it."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+
+    session.set_line_velocity(key, VelocityModel.constant(0.0900))
+
+    step, _ = session.stack_for(key).entries[0]
+    assert step.params["velocity_m_ns"] == pytest.approx(0.0733)
+
+
+def test_the_step_row_says_when_its_velocity_is_not_this_lines(opened):
+    """The hazard in a prefilled value is not being wrong, it is being
+    silent: a velocity frozen three lines ago looks identical to one that
+    belongs to the open line. 0.0733 against this line's 0.0801 is 8.5%
+    apart -- both literals, neither computed from the threshold."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+
+    text = dock.list.item(0).text()
+
+    assert "0.0733 m/ns" in text
+    assert "this line says 0.0801" in text
+
+
+def test_the_step_row_says_nothing_when_they_agree(opened):
+    """0.0810 against this line's 0.0801 is 1.1% apart -- a different
+    number, inside the band, so no read-out. A threshold that fired on any
+    difference at all would fire on every step ever added."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0810))
+
+    text = dock.list.item(0).text()
+
+    assert "0.0810 m/ns" in text
+    assert "this line says" not in text
+
+
+def test_a_step_without_a_velocity_keeps_its_plain_title(opened):
+    session, dock, key = opened
+    session.append_step(key, build_step("dewow"))
+
+    assert dock.list.item(0).text() == "Dewow"
+
+
+def _unresolvable(session, monkeypatch):
+    """A header with epsr 0 loads fine and makes `resolved_velocity` raise
+    when anything asks for the line's velocity."""
+
+    def boom(key):
+        raise ValueError("relative dielectric permittivity must be positive, got 0.0")
+
+    monkeypatch.setattr(session, "resolved_velocity", boom)
+
+
+def test_a_line_whose_velocity_cannot_be_resolved_still_lists_its_steps(opened, monkeypatch):
+    """`rebuild` runs inside a Qt slot, after `list.clear()` and before the
+    row buttons are updated. An exception there is swallowed to stderr and
+    leaves the panel showing no steps for a line that has them."""
+    session, dock, key = opened
+    session.append_step(key, build_step("migrate_fk", velocity_m_ns=0.0733))
+    _unresolvable(session, monkeypatch)
+
+    dock.rebuild()
+
+    assert dock.list.count() == 1
+    assert dock.list.item(0).text() == "Migration (Stolt f-k)"
+
+
+def test_a_line_whose_velocity_cannot_be_resolved_still_opens_the_add_dialog(opened, monkeypatch):
+    """The prefill is a convenience. A line that cannot supply one must
+    still be able to have a step added to it, with the field left blank."""
+    session, dock, key = opened
+    _unresolvable(session, monkeypatch)
+
+    dialog = dock.build_add_dialog("migrate_fk")
+
+    assert not dialog.ok_button.isEnabled()
+    assert dialog.form.editors["velocity_m_ns"].text() == ""

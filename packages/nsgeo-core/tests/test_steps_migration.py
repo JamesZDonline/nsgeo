@@ -1,0 +1,525 @@
+"""Stolt f-k migration (#123).
+
+The synthetic point diffractor is the test that catches a sign error in the
+omega->kz map, an fftshift slip and a wrong obliquity factor. It is written
+against the real data's own numbers -- 0.2165 ns sampling, 60 traces/m, a
+350 MHz antenna -- so that what passes here is the geometry and the
+bandwidth the local lines actually have.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+from nsgeo.io.dzt import read_header, read_samples
+from nsgeo.processing.base import Radargram, build_step
+from nsgeo.processing.migration import migrate_fk
+
+# The real local lines: dt 0.2165 ns, 60 traces/m, HS350US at 350 MHz, and
+# M13's measured velocity.
+V, DT_NS, DX_M = 0.0733, 0.2165, 1 / 60.0
+FC_GHZ = 0.35
+
+#: The real lines, gitignored and so absent on CI (see test_real_files.py).
+DATA = Path(__file__).parent / "data" / "local"
+FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
+
+
+def _diffraction(
+    n_samples, n_traces, dt_ns, dx_m, v, apex_trace, apex_t_ns, fc_ghz=FC_GHZ, amplitude=1.0
+):
+    """The hyperbola a single point scatterer writes into a zero field.
+
+    Two-way time at lateral offset `x` from a scatterer whose apex is at
+    `apex_t_ns`: `sqrt(apex_t_ns**2 + (2x/v)**2)`. A Ricker wavelet of
+    centre frequency `fc_ghz` is laid along it, scaled by `(apex/t)**1.5`
+    for geometrical spreading.
+
+    Band-limited rather than a bare spike on purpose: a spike is broadband
+    to Nyquist, and the hyperbola's moveout reaches about two samples per
+    trace on its steep tails, so a spike synthetic is spatially aliased and
+    the test would be measuring that aliasing instead of the solver.
+    """
+    times = np.arange(n_samples, dtype=float) * dt_ns
+    data = np.zeros((n_samples, n_traces), dtype=float)
+    for trace in range(n_traces):
+        x = (trace - apex_trace) * dx_m
+        t = np.sqrt(apex_t_ns**2 + (2 * x / v) ** 2)
+        if t > times[-1]:
+            continue
+        arg = (np.pi * fc_ghz * (times - t)) ** 2
+        data[:, trace] = amplitude * (apex_t_ns / t) ** 1.5 * (1 - 2 * arg) * np.exp(-arg)
+    return data
+
+
+def _focus(out, row, trace, half=8):
+    """Fraction of the image's energy inside a small box around
+    (row, trace) -- the measure that tells a collapse from a narrowing.
+
+    Energy, so sums of squares: the sum of |amplitude| over a 512 x 640
+    image is dominated by a broad low-amplitude artefact floor spread over
+    300,000 pixels, and would report a perfect focus and a smear as nearly
+    the same number.
+    """
+    box = out[max(row - half, 0) : row + half + 1, max(trace - half, 0) : trace + half + 1]
+    return float((box**2).sum() / (out**2).sum())
+
+
+@pytest.mark.parametrize("depth_m", [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
+def test_a_point_diffractor_collapses_to_its_apex(depth_m):
+    """Every depth the record reaches, not one.
+
+    The spectrum of an event at two-way time `t` turns through `360*t/T`
+    degrees per frequency bin, for a record `T = 110.9 ns` long. Sampled at
+    `d_omega = 2*pi/T`, an event past `T/2` turns more than half a turn per
+    bin: it is aliased along the frequency axis, and no interpolator can
+    recover it. A single apex at 40 ns hides that completely -- it is the
+    last depth whose collapse still clears this threshold.
+    """
+    n_samples, n_traces = 512, 640
+    apex_trace, apex_t_ns = 320, 2 * depth_m / V
+    data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, apex_trace, apex_t_ns)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    peak = np.unravel_index(np.argmax(np.abs(out)), out.shape)
+    assert abs(peak[1] - apex_trace) <= 2
+    assert abs(peak[0] - round(apex_t_ns / DT_NS)) <= 2
+    # The collapse, not merely a narrowing: most of the energy inside a small
+    # box around the apex. 0.5 is a literal chosen to sit above what blurring
+    # achieves and below a true collapse, not derived from anything the solver
+    # computes. Measured at the default aperture: 0.10 unmigrated, and
+    # 0.971 0.975 0.975 0.975 0.975 0.973 0.960 migrated, 0.5 m to 3.5 m.
+    assert _focus(out, peak[0], peak[1]) > 0.5
+
+
+def test_a_flat_reflector_comes_through_at_its_own_amplitude():
+    """Zero dip is the one case with nothing to migrate, so migration is
+    the identity there and the amplitude must survive it.
+
+    What this pins is that the obliquity factor is the dimensionless
+    `|kz|/root` and not `vm*|kz|/root`: the `vm` is the Jacobian of a
+    change of variable the choice `kz = omega/vm` has already made, and
+    carrying it twice scales the whole image by the velocity the user
+    typed. At 0.0733 m/ns that is a factor of 27, which turns the
+    Difference view of a migration step into a copy of the record and
+    makes the image dim or brighten when the velocity is retyped.
+    """
+    data = np.zeros((512, 640))
+    data[200, :] = 1.0
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert np.abs(out).max() == pytest.approx(1.0, abs=0.1)
+
+
+def _plane_event(slope_ns_per_m, n_samples=512, n_traces=640, t_ns=40.0):
+    """A band-limited plane reflector dipping at `slope_ns_per_m`."""
+    times = np.arange(n_samples, dtype=float) * DT_NS
+    data = np.zeros((n_samples, n_traces))
+    for trace in range(n_traces):
+        t = t_ns + slope_ns_per_m * (trace - n_traces // 2) * DX_M
+        if not 2.0 < t < times[-1] - 2.0:
+            continue
+        arg = (np.pi * FC_GHZ * (times - t)) ** 2
+        data[:, trace] = (1 - 2 * arg) * np.exp(-arg)
+    return data
+
+
+def test_a_steep_reflector_does_not_come_out_louder_than_a_flat_one():
+    """What pins the obliquity factor, which is what weights dip.
+
+    `|kz|/root` is the cosine of the migration dip angle: 1 for a flat
+    event, falling as the dip steepens towards the evanescent limit. Drop
+    it and steep energy is not merely mis-weighted, it is **amplified** --
+    migration handing back more amplitude than the record contained, which
+    is the artefact class this milestone exists to remove. Measured at
+    24 ns/m (sin(dip) 0.88, near the limit), at the widest aperture: the
+    steep event comes out at 0.15 of the flat one with the factor.
+    """
+    # At the widest aperture: a 24 ns/m dip is 62 degrees, which the default
+    # aperture would taper away, and the test would then pass without the
+    # obliquity factor doing anything.
+    flat = migrate_fk(_plane_event(0.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0)
+    steep = migrate_fk(
+        _plane_event(24.0), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0
+    )
+
+    assert np.abs(steep).max() < np.abs(flat).max()
+
+
+def _flank_row(out, apex_trace, near=40, far=120):
+    """Energy-weighted mean sample row of whatever is left on the two
+    flanks, in a lateral band clear of the apex itself.
+
+    Which way the residual opens. Energy still *below* the apex is an
+    under-collapsed hyperbola; energy *above* it is an over-migrated smile.
+    A test that only checks the correct velocity cannot tell migration from
+    blurring, and one that only checks that a wrong velocity blurs cannot
+    tell the two kinds of wrong apart.
+    """
+    cols = np.r_[apex_trace - far : apex_trace - near, apex_trace + near : apex_trace + far]
+    weights = (out[:, cols] ** 2).sum(axis=1)
+    rows = np.arange(out.shape[0], dtype=float)
+    return float((weights * rows).sum() / weights.sum())
+
+
+def _wrong_velocity_case(mult):
+    apex_trace, apex_t_ns = 320, 40.0
+    data = _diffraction(512, 640, DT_NS, DX_M, V, apex_trace, apex_t_ns)
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V * mult)
+    peak = np.unravel_index(np.argmax(np.abs(out)), out.shape)
+    return out, _focus(out, peak[0], peak[1]), _flank_row(out, apex_trace), apex_t_ns / DT_NS
+
+
+def test_too_slow_a_velocity_leaves_a_downward_residual():
+    """0.6x the truth: measured focus 0.330 against 0.975 at the truth, and
+    flank energy 50 rows below the apex. The 10-row margin is a sign test
+    with room, not a tuned number."""
+    _, focus, flank, apex_row = _wrong_velocity_case(0.6)
+    assert focus < 0.5
+    assert flank > apex_row + 10
+
+
+def test_too_fast_a_velocity_produces_an_upward_smile():
+    """1.6x the truth: measured focus 0.356, and flank energy 17 rows above
+    the apex -- the opposite side from the under-migrated case. The
+    aperture narrows that margin: it stops mis-migrated energy spreading as
+    far, so a wrong velocity looks less wrong than it used to."""
+    _, focus, flank, apex_row = _wrong_velocity_case(1.6)
+    assert focus < 0.5
+    assert flank < apex_row - 10
+
+
+# ---- refusals ------------------------------------------------------------
+#
+# Migration that runs on uncorrected time zero, or on trace index because the
+# file has no spatial axis, produces a confident image that is wrong by half a
+# metre, and nothing downstream will ever flag it. Each refusal names its fix.
+
+
+def _plain(n_samples=128, n_traces=32, t0_ns=0.0, dx_m=DX_M):
+    return Radargram(data=np.zeros((n_samples, n_traces)), dt_ns=DT_NS, t0_ns=t0_ns, dx_m=dx_m)
+
+
+@pytest.mark.parametrize("dx_m", [None, 0.0, -1.0])
+def test_refuses_when_there_is_no_trace_spacing(dx_m):
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="survey wheel"):
+        step.apply(_plain(dx_m=dx_m))
+
+
+def test_refuses_a_velocity_of_zero():
+    """The schema's `min=0.0` looks like it catches this and does not:
+    `_out_of_bounds` tests `value < spec.min`, so exactly 0.0 is accepted,
+    and a hand-edited project or preset can carry it. `vm = 0` makes the
+    omega->kz map identically zero and the obliquity factor 0/0 -- a NaN
+    image with no complaint -- and it would make 0 the de-facto sentinel
+    that an empty value has to stay free to mean later."""
+    step = build_step("migrate_fk", velocity_m_ns=0.0)
+    with pytest.raises(ValueError, match="greater than zero"):
+        step.apply(_plain())
+
+
+def test_refuses_a_velocity_faster_than_light():
+    with pytest.raises(ValueError, match="velocity_m_ns"):
+        build_step("migrate_fk", velocity_m_ns=0.4)
+
+
+def test_refuses_an_uncorrected_time_zero():
+    """-11.086 ns is what every local FILE__0NN.DZT carries raw."""
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="time_zero"):
+        step.apply(_plain(t0_ns=-11.086))
+
+
+def test_refuses_non_finite_samples():
+    """One dropped trace must not silently blank the line: a single NaN
+    spreads across the whole image through the FFT."""
+    rg = _plain()
+    data = rg.data.copy()
+    data[10, 3] = np.nan
+    step = build_step("migrate_fk", velocity_m_ns=V)
+    with pytest.raises(ValueError, match="not finite"):
+        step.apply(rg.replace(data=data))
+
+
+@pytest.mark.parametrize("t0_ns", [-0.6929, -0.4764, +0.8228])
+def test_accepts_what_time_zero_actually_leaves(t0_ns):
+    """What the shipped `time_zero` leaves on the real lines, at its three
+    threshold settings: 0.15 -> -0.6929, 0.20 (the default) -> -0.4764,
+    0.40 -> +0.8228. All three must migrate. An earlier draft of the design
+    set the tolerance at 0.02 m of implied depth error and refused two of
+    them outright, and refused the default above about 0.084 m/ns."""
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(_plain(t0_ns=t0_ns))
+    assert out.t0_ns == t0_ns
+
+
+@pytest.mark.parametrize("velocity_m_ns", [0.0250, 0.2500])
+def test_the_time_zero_tolerance_is_in_time_not_depth(velocity_m_ns):
+    """MAX_T0_NS is 2.0 ns, and the refusal must not move with the number in
+    the velocity box: 1.9 ns passes and 2.1 ns is refused at a velocity ten
+    times the other one. A tolerance derived from velocity passes one and
+    fails the other."""
+    step = build_step("migrate_fk", velocity_m_ns=velocity_m_ns)
+    step.apply(_plain(t0_ns=1.9))
+    with pytest.raises(ValueError, match="time_zero"):
+        step.apply(_plain(t0_ns=2.1))
+
+
+# ---- the pad -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n_traces", [640, 974])
+def test_padding_removes_the_wrap_at_the_far_end(n_traces):
+    """A measurement, not an assertion that padding happened.
+
+    The artefact the pad exists to prevent is the FFT's circular wrap:
+    energy migrating off one end of the line reappearing at the other. So
+    put a diffractor 1 m from the left end, migrate with the derived pad and
+    with none, and compare what lands in the rightmost tenth of the line --
+    where nothing was recorded and nothing should arrive.
+
+    Two lengths, because rounding the transform up to a power of two is
+    itself padding and can hide the absence of the real one. 640 is a real
+    line (the local files are 606-666) and rounds to 1024 whatever the pad
+    is, so a pad of zero still leaves 384 traces of zero fill and measures
+    as if it worked. 974 + 2*244 rounds to 2048 with 830 traces of slack,
+    while 974 + 2*24 rounds to 1024 with 24 -- less than the aperture, so
+    the wrap lands in the data. Measured far-end energy, unpadded over
+    padded, at the widest aperture: 88000x at 640 traces and 255000x at
+    974 with the derived pad, against single figures at 974 with a tenth of
+    it or none at all.
+    """
+    n_samples = 512
+    data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 60, 40.0)
+    far = slice(int(n_traces * 0.9), n_traces)
+
+    # At the widest aperture, so the wrap this measures is the pad's doing
+    # and not the aperture quietly shortening how far energy travels.
+    padded = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0)
+    unpadded = migrate_fk(
+        data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0, _pad_traces=0
+    )
+
+    # A thousandth, not a tenth: the measured ratios with the derived pad are
+    # 88000x at 640 traces and 255000x at 974, while a pad of zero leaves 22x
+    # at 974. A tenth was the bar before the aperture existed and no longer
+    # separates anything.
+    assert (unpadded[:, far] ** 2).sum() > 1000 * (padded[:, far] ** 2).sum()
+
+
+def test_a_line_shorter_than_the_pad_still_migrates():
+    """A 1 m stub is about 60 traces against a 244-trace aperture. It must
+    migrate -- no wrap, no crash, no division by a zero-width window."""
+    data = _diffraction(512, 60, DT_NS, DX_M, V, 30, 40.0)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert out.shape == data.shape
+    assert np.all(np.isfinite(out))
+    assert np.abs(out).max() > 0.0
+
+
+# ---- edges ---------------------------------------------------------------
+
+
+def test_a_velocity_near_c_empties_the_image_rather_than_inventing_one():
+    """At 0.29 m/ns most of the mapped frequencies land outside the band the
+    record contains, so most of the record is discarded and what is left
+    does not focus. The user has to be able to see that it is wrong.
+
+    Measured against the same solver at a sane velocity, which is the only
+    standard that is free of the operator's own scaling: energy 0.25 of the
+    sane figure, peak 0.22 against 2.60, and a focus of 0.098 against the
+    0.5 that counts as a collapse anywhere else in this file. An earlier
+    version compared against the input's energy and passed only because the
+    image was then multiplied by `vm`, so it measured the velocity rather
+    than the cut.
+    """
+    data = _diffraction(512, 640, DT_NS, DX_M, V, 320, 40.0)
+
+    sane = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+    near_c = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=0.29)
+
+    assert (near_c**2).sum() < 0.5 * (sane**2).sum()
+    assert np.abs(near_c).max() < 0.25 * np.abs(sane).max()
+    peak = np.unravel_index(np.argmax(np.abs(near_c)), near_c.shape)
+    assert _focus(near_c, peak[0], peak[1]) < 0.5
+
+
+def test_output_preserves_shape_dt_and_t0():
+    """Picks, map-to-profile cursor sync and cube binning all index by
+    trace, and `StepStack.difference()` refuses a step that changes the
+    sample count. Asserted on a real line, not a square array."""
+    if not FILES:
+        pytest.skip("no real DZT files in tests/data/local")
+    header = read_header(FILES[0])
+    data = read_samples(FILES[0], header)[0]
+    rg = Radargram(data=np.asarray(data, dtype=float), dt_ns=header.dt_ns, t0_ns=0.0, dx_m=1 / 60.0)
+
+    out = build_step("migrate_fk", velocity_m_ns=V).apply(rg)
+
+    assert out.data.shape == rg.data.shape
+    assert out.dt_ns == rg.dt_ns
+    assert out.t0_ns == rg.t0_ns
+    assert out.dx_m == rg.dx_m
+
+
+def _top_kx_fraction(image):
+    """Fraction of the image's energy in the top quarter of the spatial
+    frequency band -- the trace-to-trace oscillation end of it."""
+    power = np.abs(np.fft.fft(image, axis=1)) ** 2
+    top = np.abs(np.fft.fftfreq(image.shape[1])) > 0.375
+    return float(power[:, top].sum() / power.sum())
+
+
+def test_migration_does_not_manufacture_trace_to_trace_oscillation():
+    """What zeroing the out-of-band region is for.
+
+    Steep dips map to frequencies the record does not contain. Left to
+    itself the interpolation extrapolates from the band edge instead, by a
+    factor that grows without bound as the dip steepens -- so the artefact
+    arrives at the top of the spatial band, as oscillation from one trace
+    to the next.
+
+    White noise, because real GPR data is band-limited and has nothing near
+    its own Nyquist to extrapolate from: with a 350 MHz wavelet the cut is
+    unreachable, and this is the input that reaches it. The standard is the
+    record itself, not a chosen number: migration must not leave more of
+    the image at the top of the band than the record put there. Measured
+    0.25 in, 0.046 out.
+    """
+    noise = np.random.default_rng(0).normal(size=(512, 256))
+
+    # At the widest aperture: the aperture also suppresses the top of the
+    # spatial band, so at the default this would pass whether or not the
+    # out-of-band region were zeroed.
+    out = migrate_fk(noise, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0)
+
+    assert _top_kx_fraction(out) <= _top_kx_fraction(noise)
+
+
+def test_a_shallow_diffractor_does_not_reappear_at_the_bottom_of_the_record():
+    """Migration moves energy up the record, and a transform over the
+    record's own length alone makes the time axis circular: energy moving
+    up past t = 0 comes back in at the bottom, as a band of invented
+    reflectivity under everything shallow and strong. On a real line that
+    left the bottom tenth holding 6.8x the middle's energy, against 0.56x
+    in the record itself. `_T_OVERSAMPLE` is what gives that energy
+    somewhere to go instead.
+
+    The standard is the record, not a chosen number. Measured for a 6 ns
+    apex: the bottom tenth holds 3.4e-4 of the record and 3.0e-6 of the
+    image; over the record's own length alone it holds 5.9e-2.
+    """
+    n_samples, n_traces = 512, 640
+    data = _diffraction(n_samples, n_traces, DT_NS, DX_M, V, 320, 6.0)
+    deep = slice(9 * n_samples // 10, n_samples)
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert (out[deep] ** 2).sum() / (out**2).sum() < (data[deep] ** 2).sum() / (data**2).sum()
+
+
+# ---- the aperture --------------------------------------------------------
+#
+# Migration has to allow for every direction an echo could have come from.
+# With no limit on that, every laterally sharp feature in a rough record --
+# a noisy trace, a stutter in the wheel -- is spread into a full arc,
+# because nothing says it was not the apex of something real. That is what
+# the first walkthrough saw, and spec §11 made the remedy conditional on
+# exactly that evidence.
+
+
+def _one_impulse(n_samples=512, n_traces=629, apex_t_ns=50.0):
+    """A single band-limited sample mid-line: the operator's own input."""
+    times = np.arange(n_samples, dtype=float) * DT_NS
+    data = np.zeros((n_samples, n_traces))
+    arg = (np.pi * FC_GHZ * (times - apex_t_ns)) ** 2
+    data[:, n_traces // 2] = (1 - 2 * arg) * np.exp(-arg)
+    return data
+
+
+def _arc_reach(out, apex_trace, within_traces=60):
+    """Fraction of one impulse's migrated energy more than a metre from the
+    trace it came from -- the length of the smile it left behind."""
+    far = np.r_[
+        0 : max(apex_trace - within_traces, 0), apex_trace + within_traces + 1 : out.shape[1]
+    ]
+    return float((out[:, far] ** 2).sum() / (out**2).sum())
+
+
+def test_the_aperture_keeps_one_sample_from_smearing_across_the_section():
+    """At the widest setting a single sample leaves a smile reaching right
+    across the line; at the default it stays local. Measured 0.038 at
+    90 degrees against 0.0019 at the default, a factor of twenty."""
+    data = _one_impulse()
+    apex_trace = data.shape[1] // 2
+
+    wide = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0)
+    default = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    assert _arc_reach(default, apex_trace) < 0.1 * _arc_reach(wide, apex_trace)
+    # Even wide open the taper holds most of one sample within a metre:
+    # measured 0.038. Reading the aperture in radians where its sine belongs
+    # -- the two are within 11% at 45 degrees and so easy to miss -- lets
+    # 0.161 escape instead.
+    assert _arc_reach(wide, apex_trace) < 0.08
+
+
+def test_a_narrower_aperture_costs_little_of_the_collapse():
+    """The reason the limit is affordable: a hyperbola's energy sits near
+    its apex where the curve is gentle, and its steep limbs carry little of
+    the signal and nearly all of the arc. Measured at 1.5 m: 0.982 at
+    90 degrees, 0.971 at the default 45, 0.948 at 30."""
+    data = _diffraction(512, 640, DT_NS, DX_M, V, 320, 2 * 1.5 / V)
+
+    wide = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0)
+    default = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
+
+    for out in (wide, default):
+        peak = np.unravel_index(np.argmax(np.abs(out)), out.shape)
+        assert _focus(out, peak[0], peak[1]) > 0.9
+
+
+def test_the_aperture_is_tapered_rather_than_cut():
+    """A brick wall in the wavenumber domain rings, and that ringing reads
+    as stratigraphy -- the same reason `bandpass` tapers its passband
+    edges. A raised cosine over the whole of `sin(dip)` measures better on
+    both counts than a narrow taper at the same angle: at 45 degrees, focus
+    0.971 against 0.952 and arc reach 0.0019 against 0.050.
+
+    Pinned through its effect: a sharp cut leaves more energy far from the
+    impulse than the taper does, at the same aperture.
+    """
+    data = _one_impulse()
+    apex_trace = data.shape[1] // 2
+
+    out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=45.0)
+
+    assert _arc_reach(out, apex_trace) < 0.01
+
+
+def test_refuses_an_aperture_that_is_not_an_angle():
+    """`sin(0)` is zero and the taper would divide by it. The schema bounds
+    the parameter at 5-90 degrees, but `migrate_fk` is also called directly
+    and a hand-edited project can carry anything."""
+    for bad in (0.0, -10.0, 91.0):
+        with pytest.raises(ValueError, match="aperture"):
+            migrate_fk(np.zeros((64, 16)), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=bad)
+
+
+def test_the_step_passes_its_aperture_through_to_the_solver():
+    """What catches `apply` building the call without it and silently
+    migrating everything at the default."""
+    data = _one_impulse()
+    apex_trace = data.shape[1] // 2
+    rg = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=DX_M)
+
+    wide = build_step("migrate_fk", velocity_m_ns=V, max_dip_deg=90.0).apply(rg)
+    narrow = build_step("migrate_fk", velocity_m_ns=V, max_dip_deg=20.0).apply(rg)
+
+    assert _arc_reach(narrow.data, apex_trace) < 0.01 * _arc_reach(wide.data, apex_trace)

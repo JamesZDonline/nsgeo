@@ -29,6 +29,7 @@ TITLES = {
     "background_mean": "Background removal (mean)",
     "background_sliding": "Background removal (sliding)",
     "background_svd": "Remove leading components (SVD)",
+    "migrate_fk": "Migration (Stolt f-k)",
     "gain_curve": "Gain curve",
     "gain_agc": "Automatic gain control",
     "gain_parametric": "Parametric gain",
@@ -80,6 +81,7 @@ def test_grouped_steps_is_the_processing_flow():
             "Background",
             ["background_mean", "background_sliding", "background_svd"],
         ),
+        ("Migration", ["migrate_fk"]),
         ("Gain", ["gain_curve", "gain_agc", "gain_parametric"]),
         ("Amplitude", ["amp_abs", "amp_envelope", "amp_square"]),
     ]
