@@ -258,6 +258,8 @@ def test_the_bulk_panel_is_greyed_until_rows_are_selected_and_counts_them(table)
     dialog.select_keys(dialog.keys()[:3])
     assert dialog.bulk.isEnabled()
     assert dialog.bulk.title() == "Change the 3 selected lines"
+    dialog.select_keys(dialog.keys()[:1])
+    assert dialog.bulk.title() == "Change the 1 selected line"
     dialog.select_keys([])
     assert not dialog.bulk.isEnabled()
 
@@ -369,3 +371,90 @@ def test_open_edit_lines_dialog_opens_one_table_per_grid_and_reports_on_ok(
     plugin.unload()
     assert left_open.result() != left_open.DialogCode.Accepted
     assert plugin._edit_lines_dialogs == {}
+
+
+def test_a_header_with_one_line_is_singular(qgis_app, tmp_path):
+    session = _site(tmp_path)
+    dialog = EditLinesDialog(session, "B")
+    assert dialog.header_label.text().endswith("· 0 lines")
+    session.add_lines(_lines(tmp_path / "more", "B")[:1])
+    dialog2 = EditLinesDialog(session, "B")
+    assert dialog2.header_label.text().endswith("· 1 line")
+    dialog.deleteLater()
+    dialog2.deleteLater()
+
+
+@pytest.mark.parametrize(
+    ("col", "text"),
+    [
+        (COL_OFFSET, "nan"),
+        (COL_OFFSET, "abc"),
+        (COL_START, "inf"),
+        (COL_START, "1e999"),
+        (COL_START, "abc"),
+    ],
+)
+def test_a_non_finite_or_non_numeric_number_is_refused(table, col, text):
+    _, dialog = table
+    before = _cell(dialog, 2, col)
+    dialog.table.item(2, col).setText(text)
+    assert dialog.status.text() == f"{text!r} is not a number; unchanged"
+    assert _cell(dialog, 2, col) == before
+    assert dialog.edit_for(dialog.keys()[2]).offset is None
+    assert dialog.edit_for(dialog.keys()[2]).start_along is None
+
+
+def test_a_removed_target_grid_skips_that_row_and_applies_the_rest(table):
+    session, dialog = table
+    k = dialog.keys()
+    dialog.select_keys([k[5]])
+    dialog.move_to("B")
+    session.remove_grid("B")
+    dialog.select_keys([k[0]])
+    dialog.flip()
+    assert "no longer exists" not in dialog.status.text()
+    assert _cell(dialog, 5, COL_NOTE) == "grid 'B' no longer exists"
+    dialog.accept()
+    assert dialog.result() == dialog.DialogCode.Accepted
+    assert [s.label for s in dialog.outcome.skipped] == ["line 6"]
+    assert "B" in dialog.outcome.skipped[0].reason
+    assert session.line_for_key(k[0]).placement.direction == -1
+    assert session.line_for_key(k[5]).placement.grid_id == "Grid5"
+
+
+def test_a_row_can_be_moved_back_from_a_removed_grid_and_says_so(table):
+    session, dialog = table
+    k = dialog.keys()
+    dialog.select_keys([k[5]])
+    dialog.move_to("B")
+    session.remove_grid("B")
+    dialog.move_to("Grid5")
+    assert dialog.status.text() == "grid 'B' no longer exists; line 6 stays on Grid5"
+    assert dialog.table.cellWidget(5, COL_GRID).currentText() == "Grid5"
+    assert not dialog.edit_for(k[5]).changes(session.site.frames)
+
+
+def test_choosing_a_removed_grid_blames_that_grid_not_this_one(table):
+    session, dialog = table
+    k = dialog.keys()
+    dialog.select_keys([k[2]])
+    session.remove_grid("B")
+    dialog.move_to("B")
+    assert dialog.status.text() != "grid 'Grid5' no longer exists"
+    dialog.accept()
+    assert dialog.result() == dialog.DialogCode.Accepted
+    assert [s.label for s in dialog.outcome.skipped] == ["line 3"]
+
+
+def test_a_double_flip_is_not_reported_as_changed_elsewhere(table):
+    import dataclasses
+
+    session, dialog = table
+    k = dialog.keys()
+    dialog.select_keys([k[5]])
+    dialog.flip()
+    dialog.flip()
+    session.replace_grid(dataclasses.replace(GRID5, size_y=14.0))
+    dialog.accept()
+    assert dialog.outcome.skipped == ()
+    assert k[5] not in dialog.outcome.changed

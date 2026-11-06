@@ -25,6 +25,7 @@ of them are reached from a signal, where an uncaught exception is swallowed.
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -218,10 +219,36 @@ class EditLinesDialog(QDialog):
     def edit_for(self, key: str) -> LineEdit:
         return self._edits[key]
 
-    def _unavailable(self) -> str:
+    def _unavailable(self, exc: Exception | None = None) -> str:
+        """Why the grid or frames could not be read: no site, this table's own
+        grid gone, or (a KeyError carrying its id) some other grid."""
         if not self.session.is_open:
             return "no site is open"
+        try:
+            self._grid()
+        except KeyError:
+            return f"grid {self.grid_id!r} no longer exists"
+        if isinstance(exc, KeyError) and exc.args:
+            return f"grid {exc.args[0]!r} no longer exists"
         return f"grid {self.grid_id!r} no longer exists"
+
+    @staticmethod
+    def _target_gone(edit: LineEdit, frames: Mapping[str, Grid]) -> bool:
+        """The grid the row was sent to has since left the site."""
+        return (edit.grid_id or edit.seen.grid_id) not in frames
+
+    def _live(self, edit: LineEdit, frames: Mapping[str, Grid]) -> LineEdit:
+        """`edit` without a move to a grid that no longer exists, so the row
+        can still be read and acted on (moved back, flipped). The Start a move
+        derived goes with it; the rest of the edit stays."""
+        if edit.grid_id is None or not self._target_gone(edit, frames):
+            return edit
+        return dataclasses.replace(edit, grid_id=None, start_along=None)
+
+    def _changes(self, edit: LineEdit, frames: Mapping[str, Grid]) -> bool:
+        """Whether OK has something to do for `edit`. A move to a grid that is
+        gone counts, so `edit_lines` skips it and names it (spec call 14)."""
+        return self._target_gone(edit, frames) and edit.grid_id is not None or edit.changes(frames)
 
     def _frames(self) -> Mapping[str, Grid]:
         """The site's frames. `ProjectError` when no site is open."""
@@ -253,7 +280,7 @@ class EditLinesDialog(QDialog):
     def _selection_changed(self) -> None:
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
-        self.bulk.setTitle(f"Change the {len(sel)} selected lines")
+        self.bulk.setTitle(f"Change the {len(sel)} selected line{'s' if len(sel) != 1 else ''}")
         self.bulk.setEnabled(bool(sel))
         self.up_button.setEnabled(bool(rows) and min(rows) > 0)
         self.down_button.setEnabled(bool(rows) and max(rows) < len(self._order) - 1)
@@ -262,12 +289,20 @@ class EditLinesDialog(QDialog):
     def _apply(self, change: Callable[[LineEdit, Mapping[str, Grid]], LineEdit]) -> None:
         try:
             frames = self._frames()
+            dropped: list[str] = []
             for key in self.selected_keys():
-                self._edits[key] = change(self._edits[key], frames)
-        except (KeyError, ProjectError):
-            self.status.setText(self._unavailable())
+                edit = self._edits[key]
+                if edit.grid_id is not None and self._target_gone(edit, frames):
+                    dropped.append(self._drop_note(key, edit))
+                self._edits[key] = change(self._live(edit, frames), frames)
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
             return
-        self._refresh()
+        self._refresh("; ".join(dropped) if dropped else None)
+
+    def _drop_note(self, key: str, edit: LineEdit) -> str:
+        label = edit.label or edit.seen.label or Path(key).stem
+        return f"grid {edit.grid_id!r} no longer exists; {label} stays on {edit.seen.grid_id}"
 
     def set_start(self, value: float) -> None:
         self._apply(lambda e, f: dataclasses.replace(e, start_along=float(value)))
@@ -304,10 +339,18 @@ class EditLinesDialog(QDialog):
         try:
             grid = self._grid()
             frames = self._frames()
+            for k in self._order:
+                # A row that reads as unchanged (a double flip, a move away
+                # and back) is stored blank, so OK never sends it: its inset
+                # would be worked out against a length changed meanwhile and
+                # reported as a line changed elsewhere (Review Focus 1).
+                e = self._edits[k]
+                if not self._changes(e, frames):
+                    self._edits[k] = LineEdit(k, seen=e.seen)
             self._render(frames, grid)
             n, m = self._counts(frames)
-        except (KeyError, ProjectError):
-            self.status.setText(self._unavailable())
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
             return
         if note is not None:
             self.status.setText(note)
@@ -324,10 +367,10 @@ class EditLinesDialog(QDialog):
             self._selection_changed()
 
     def _counts(self, frames: Mapping[str, Grid]) -> tuple[int, int]:
-        changed = [k for k in self._order if self._edits[k].changes(frames)]
+        changed = [k for k in self._order if self._changes(self._edits[k], frames)]
         moving = 0
         for k in changed:
-            e = self._edits[k]
+            e = self._live(self._edits[k], frames)
             placed = dataclasses.replace(e.placed(frames), label=e.seen.label)
             if not same_placement(placed, e.seen):
                 moving += self._picks[k]
@@ -340,18 +383,20 @@ class EditLinesDialog(QDialog):
             a = next(iter(axes))
             self.header_label.setText(
                 f"{self.grid_id} · {length_along(grid, a):.2f} m along {a} × "
-                f"{width_across(grid, a):.2f} m across · {n} lines"
+                f"{width_across(grid, a):.2f} m across · {n} line{'s' if n != 1 else ''}"
             )
         else:
             self.header_label.setText(
-                f"{self.grid_id} · {grid.size_x:.2f} m × {grid.size_y:.2f} m · {n} lines"
+                f"{self.grid_id} · {grid.size_x:.2f} m × {grid.size_y:.2f} m · "
+                f"{n} line{'s' if n != 1 else ''}"
             )
         self._updating = True
         try:
             for r, key in enumerate(self._order):
                 edit = self._edits[key]
                 seen = edit.seen
-                p = edit.placed(frames)
+                gone = edit.grid_id is not None and self._target_gone(edit, frames)
+                p = self._live(edit, frames).placed(frames)
                 per_metre = self._per_metre[key]
                 length = self._traces[key] / per_metre if per_metre > 0 else 0.0
                 differs = {
@@ -359,19 +404,21 @@ class EditLinesDialog(QDialog):
                     COL_OFFSET: abs(p.offset - seen.offset) > SAME_M,
                     COL_DIR: p.direction != seen.direction,
                     COL_START: abs(p.start_along - seen.start_along) > SAME_M,
-                    COL_GRID: p.grid_id != seen.grid_id,
+                    COL_GRID: gone or p.grid_id != seen.grid_id,
                 }
                 values = {
                     COL_LABEL: p.label or Path(key).stem,
                     COL_OFFSET: f"{p.offset:.2f}",
                     COL_DIR: "+1" if p.direction == 1 else "−1",
                     COL_START: f"{p.start_along:.2f}",
-                    COL_GRID: p.grid_id,
+                    COL_GRID: edit.grid_id if gone else p.grid_id,
                     COL_ALONG: p.axis,
                     COL_TRACES: str(self._traces[key]),
                     COL_LENGTH: f"{length:.2f}" if length > 0 else "",
                     COL_PICKS: str(self._picks[key]),
-                    COL_NOTE: placement_note(p, frames[p.grid_id]),
+                    COL_NOTE: f"grid {edit.grid_id!r} no longer exists"
+                    if gone
+                    else placement_note(p, frames[p.grid_id]),
                 }
                 for col, text in values.items():
                     item = QTableWidgetItem(text)
@@ -382,7 +429,7 @@ class EditLinesDialog(QDialog):
                     self.table.setItem(r, col, item)
                 combo = self._combos[r]
                 combo.blockSignals(True)
-                combo.setCurrentText(p.grid_id)
+                combo.setCurrentText(edit.grid_id if gone else p.grid_id)
                 combo.blockSignals(False)
                 combo.setStyleSheet(
                     f"background-color: {CHANGED.name()};" if differs[COL_GRID] else ""
@@ -396,14 +443,20 @@ class EditLinesDialog(QDialog):
             return
         key = self._order[row]
         try:
+            frames = self._frames()
             edit = self._edits[key]
-            if text == edit.placed(self._frames()).grid_id:
-                return
-            self._edits[key] = edit.moved_to(text, self._frames())
-        except (KeyError, ProjectError):
-            self.status.setText(self._unavailable())
+            note = None
+            if edit.grid_id is not None and self._target_gone(edit, frames):
+                note = self._drop_note(key, edit)
+                edit = self._live(edit, frames)
+            if text == edit.placed(frames).grid_id:
+                self._edits[key] = edit
+            else:
+                self._edits[key] = edit.moved_to(text, frames)
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
             return
-        self._refresh()
+        self._refresh(note)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating:
@@ -416,11 +469,14 @@ class EditLinesDialog(QDialog):
         try:
             edit = self._edits[key]
             frames = self._frames()
+            note = None
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
             elif c in (COL_OFFSET, COL_START):
                 try:
                     value = float(text.replace(",", "."))
+                    if not math.isfinite(value):  # nan, inf and 1e999 parse, but are not offsets
+                        raise ValueError(text)
                 except ValueError:
                     self._refresh(f"{item.text()!r} is not a number; unchanged")
                     return
@@ -445,13 +501,16 @@ class EditLinesDialog(QDialog):
                         )
                         return
                     wanted = 1
+                if edit.grid_id is not None and self._target_gone(edit, frames):
+                    note = self._drop_note(key, edit)
+                    edit = self._live(edit, frames)
                 if wanted != edit.placed(frames).direction:
                     edit = edit.flipped(frames)
             self._edits[key] = edit
-        except (KeyError, ProjectError):
-            self.status.setText(self._unavailable())
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
             return
-        self._refresh()
+        self._refresh(note)
 
     # ---- accept -----------------------------------------------------------------
     def accept(self) -> None:
@@ -474,7 +533,7 @@ class EditLinesDialog(QDialog):
             return
         try:
             frames = self._frames()
-            edits: list[Any] = [e for e in self._edits.values() if e.changes(frames)]
+            edits: list[Any] = [e for e in self._edits.values() if self._changes(e, frames)]
             self.outcome = self.session.edit_lines(edits, grid_id=self.grid_id, order=self.keys())
         except (KeyError, ValueError, ProjectError) as exc:
             self.status.setText(str(exc))
