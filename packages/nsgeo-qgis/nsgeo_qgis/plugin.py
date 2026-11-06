@@ -248,6 +248,8 @@ class NsgeoPlugin:
         self.survey_dock.import_requested.connect(self.open_import_dialog)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
+        self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
+        self.survey_dock.move_lines_requested.connect(self.move_lines)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -1888,6 +1890,25 @@ class NsgeoPlugin:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def move_lines(self, keys: list[str], grid_id: str) -> None:
+        """Move lines to another grid, from the Survey panel's Move to grid.
+
+        A slot: it never raises, and reports on the message bar (line editing
+        spec §3 call 7). Lines already on the grid are left alone."""
+        try:
+            assert self.session is not None
+            outcome = self.session.move_lines(keys, grid_id)
+        except (KeyError, ProjectError) as exc:
+            self.message(f"Move to {grid_id}: {exc}", Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not move the lines: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self.message(
+            f"Move to {grid_id}: {outcome.message()}",
+            Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info,
+        )
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a

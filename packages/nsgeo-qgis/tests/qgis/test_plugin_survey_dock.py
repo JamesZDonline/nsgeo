@@ -590,6 +590,7 @@ def test_the_context_menu_offers_the_right_actions_for_each_kind_of_item(
 
     assert _texts(_right_click(dock, grid_item)) == [
         "Edit grid…",
+        "Edit lines…",
         "Import DZT files…",
         "Set velocity…",
         "Remove grid",
@@ -598,7 +599,9 @@ def test_the_context_menu_offers_the_right_actions_for_each_kind_of_item(
 
     assert _texts(_right_click(dock, line_item)) == [
         "Open",
+        "Edit line…",
         "Set velocity override…",
+        "Move to grid",
         "Remove line from site",
     ]
     assert menu.actions()[-2].isSeparator()
@@ -853,7 +856,7 @@ def test_the_menu_on_a_selection_offers_one_removal_for_all_of_it(dock, answer_m
     _select(dock, first, second)
 
     menu = _right_click(dock, first)
-    assert _texts(menu) == ["Remove 2 lines from site"]
+    assert _texts(menu) == ["Edit 2 lines…", "Move 2 lines to grid", "Remove 2 lines from site"]
 
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
     _action(menu, "Remove 2 lines from site").trigger()
@@ -868,7 +871,9 @@ def test_right_clicking_outside_the_selection_gets_that_items_own_menu(dock, ans
     _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
     assert _texts(_right_click(dock, dock.item_for_key(KEYS[2]))) == [
         "Open",
+        "Edit line…",
         "Set velocity override…",
+        "Move to grid",
         "Remove line from site",
     ]
 
@@ -1019,3 +1024,81 @@ def test_the_removal_prompt_lists_lines_in_tree_order_not_click_order(dock, answ
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
     _press(dock, Qt.Key.Key_Delete)
     assert "\n".join(KEYS) in yes[0][0][2]
+
+
+# ---- Edit lines and Move to grid (line editing spec §3 call 7) -------------
+
+
+def _add_grid_b(session, tmp_path, with_line=False):
+    session.add_grid(Grid("B", (0.0, 0.0), 0.0, 10.0, 10.0, "EPSG:32616", 0.5))
+    if with_line:
+        p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+        session.add_lines([Line.open(p, GridPlacement("B", "y", 1.0, 0.0, 1, p.stem))])
+
+
+def test_edit_lines_is_greyed_on_a_grid_with_no_lines(dock, answer_modal, tmp_path):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _add_grid_b(session, tmp_path)
+    fired = []
+    dock.edit_lines_requested.connect(lambda g, k: fired.append((g, k)))
+    menu = _right_click(dock, _grid_item(dock, "B"))
+    assert not _action(menu, "Edit lines…").isEnabled()
+    menu = _right_click(dock, _grid_item(dock, "A"))
+    _action(menu, "Edit lines…").trigger()
+    assert fired == [("A", [])]
+
+
+def test_edit_line_and_edit_n_lines_ask_for_the_table_with_those_rows(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    fired = []
+    dock.edit_lines_requested.connect(lambda g, k: fired.append((g, k)))
+    _action(_right_click(dock, dock.item_for_key(KEYS[0])), "Edit line…").trigger()
+    assert fired == [("A", [KEYS[0]])]
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _texts(menu)[0] == "Edit 2 lines…"
+    _action(menu, "Edit 2 lines…").trigger()
+    assert fired[-1] == ("A", [KEYS[0], KEYS[1]])
+
+
+def test_a_selection_spanning_grids_offers_move_but_no_edit(dock, answer_modal, tmp_path):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _add_grid_b(session, tmp_path, with_line=True)
+    b_key = session.keys_on_grid("B")[0]
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(b_key))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _texts(menu) == ["Move 2 lines to grid", "Remove 2 lines from site"]
+
+
+def test_the_move_submenu_lists_every_grid_and_greys_the_one_they_are_on(
+    dock, answer_modal, tmp_path
+):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _add_grid_b(session, tmp_path)
+    fired = []
+    dock.move_lines_requested.connect(lambda k, g: fired.append((k, g)))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(menu, "Move to grid").menu() is dock.move_menu
+    assert _texts(dock.move_menu) == ["A", "B"]
+    assert not _action(dock.move_menu, "A").isEnabled()
+    assert _action(dock.move_menu, "B").isEnabled()
+    _action(dock.move_menu, "B").trigger()
+    assert fired == [([KEYS[0]], "B")]
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(menu, "Move 2 lines to grid").menu() is dock.move_menu
+    assert dock.move_menu.title() == "Move 2 lines to grid"
+
+
+def test_the_move_submenu_leaves_nothing_behind(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    n = len(dock.findChildren(QMenu))
+    for _ in range(5):
+        _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert len(dock.findChildren(QMenu)) == n
+    assert dock.context_menu.findChildren(QMenu) == []

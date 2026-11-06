@@ -73,6 +73,10 @@ class SurveyDock(QgsDockWidget):
     import_requested = pyqtSignal(str)
     grid_velocity_requested = pyqtSignal(str)
     line_velocity_requested = pyqtSignal(str)
+    # (grid id, line keys to select); keys may be empty (line editing spec §4.2).
+    edit_lines_requested = pyqtSignal(str, list)
+    # (line keys, target grid id) (line editing spec §3 call 7).
+    move_lines_requested = pyqtSignal(list, str)
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Survey", parent)
@@ -103,9 +107,14 @@ class SurveyDock(QgsDockWidget):
         # QMenu accumulating per right-click: the old local menu was
         # parented to this dock and nothing ever deleted it, so one leaked
         # on every right-click for the dock's whole life. QMenu.clear()
-        # deletes the actions it owns, and there are no submenus here, so
-        # the reuse leaves nothing behind either.
+        # deletes the actions it owns, but it does NOT delete a submenu
+        # added with addMenu(): that stays a child of its parent. So the
+        # one submenu ("Move to grid") is made once, here, parented to the
+        # dock, and refilled on every right-click; clear() only detaches
+        # its action, and the reuse leaves nothing behind (line editing
+        # spec §3 call 7).
         self.context_menu = QMenu(self)
+        self.move_menu = QMenu("Move to grid", self)
         layout.addWidget(self.tree)
         self.status = QLabel(body)
         layout.addWidget(self.status)
@@ -379,6 +388,15 @@ class SurveyDock(QgsDockWidget):
                 # Right-clicking a grid or line inside a selection acts on
                 # the selection. Right-clicking outside one is handled by
                 # Qt before this runs: the press selects just that item.
+                if keys:
+                    grids = {self._grid_of_key(k) for k in keys}
+                    if len(grids) == 1:
+                        grid = grids.pop()
+                        menu.addAction(
+                            f"Edit {self._count_phrase(grid_ids, keys)}…",
+                            lambda: self._request_edit(grid, keys),
+                        )
+                    self._add_move_menu(menu, keys, f"Move {len(keys)} lines to grid")
                 menu.addAction(
                     f"Remove {self._count_phrase(grid_ids, keys)} from site",
                     lambda: self.remove_selected_action(),
@@ -388,6 +406,8 @@ class SurveyDock(QgsDockWidget):
             elif kind == "grid":
                 gid = self.grid_id_of(item) or ""
                 menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
+                edit_lines = menu.addAction("Edit lines…", lambda: self._request_edit(gid, []))
+                edit_lines.setEnabled(bool(self.session.keys_on_grid(gid)))
                 menu.addAction("Import DZT files…", lambda: self.import_requested.emit(gid))
                 menu.addAction("Set velocity…", lambda: self.grid_velocity_requested.emit(gid))
                 menu.addSeparator()
@@ -396,13 +416,48 @@ class SurveyDock(QgsDockWidget):
                 key = self.key_of(item) or ""
                 menu.addAction("Open", lambda: self._open_line(key))
                 menu.addAction(
+                    "Edit line…", lambda: self._request_edit(self._grid_of_key(key), [key])
+                )
+                menu.addAction(
                     "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
                 )
+                self._add_move_menu(menu, [key], "Move to grid")
                 menu.addSeparator()
                 menu.addAction("Remove line from site", lambda: self.remove_line_action(key))
             menu.exec(self.tree.viewport().mapToGlobal(pos))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not build the survey tree context menu: {exc}", Qgis.MessageLevel.Critical)
+
+    def _grid_of_key(self, key: str) -> str:
+        return str(getattr(self.session.line_for_key(key).placement, "grid_id", ""))
+
+    def _request_edit(self, grid_id: str, keys: list[str]) -> None:
+        # A menu action's slot: guarded, as _on_context_menu's comment asks.
+        try:
+            self.edit_lines_requested.emit(grid_id, list(keys))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the Edit lines table: {exc}", Qgis.MessageLevel.Critical)
+
+    def _request_move(self, keys: list[str], grid_id: str) -> None:
+        try:
+            self.move_lines_requested.emit(list(keys), grid_id)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not move the lines: {exc}", Qgis.MessageLevel.Critical)
+
+    def _add_move_menu(self, menu: QMenu, keys: list[str], title: str) -> None:
+        """Refill the one reused submenu with every grid, in site order.
+
+        A grid is greyed when every line in `keys` is already on it.
+        """
+        sub = self.move_menu
+        sub.clear()
+        sub.setTitle(title)
+        on = {k: self._grid_of_key(k) for k in keys}
+        site = self.session.site
+        for grid in site.grids if site is not None else []:
+            action = sub.addAction(grid.id, lambda g=grid.id: self._request_move(keys, g))
+            action.setEnabled(any(g != grid.id for g in on.values()))
+        menu.addMenu(sub)
 
     def remove_line_action(self, key: str, *, confirm: bool = True) -> None:
         self._remove([], [key], confirm=confirm, title="Remove line")
