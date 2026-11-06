@@ -56,9 +56,98 @@ the known issues.
 - **Time and depth slices.** Bin a grid's processed lines into a volume, step
   through slices on the map as a live raster layer, and export them as GeoTIFFs.
 
-Not built yet: migration, fitting a velocity from hyperbolas, and instruments
-other than GPR. Known issues and smaller gaps are tracked in the
+Not built yet: instruments other than GPR. The [roadmap](#roadmap) below shows
+what is coming, and known issues and smaller gaps are tracked in the
 [issues](https://github.com/JamesZDonline/nsgeo/issues).
+
+## Roadmap
+
+*Last updated 2026-11-06.* Large pieces of work are numbered milestones (M0,
+M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
+before it is built. Smaller requests are issues. This list is updated whenever
+a milestone merges or the plan changes.
+
+### Done
+
+| Milestone | What | Released in |
+|---|---|---|
+| M0–M3 | The core library: DZT reader, data model, grid geometry, processing steps | 0.1.0 (2026-10-16) |
+| M4–M6 | The QGIS plugin: sites, grids and import, the profile viewer, the processing stack | 0.1.0 |
+| M7–M9 | The map ↔ profile link, picks, and the first release | 0.1.0 |
+| M10–M11 | Time and depth slices, with GeoTIFF export | 0.1.0 |
+| M12 | Whole-site slices | 0.2.0 (2026-10-31) |
+| M13 | Velocity from diffraction hyperbolas | 0.2.0 |
+| | Time cutoff, display gain, grid corners from the map, zigzag profiles that all read the same way, the Panels menu, and other field requests | 0.2.0 |
+| | Slice interpolation: kriging, IDW and minimum curvature ([#110], [#122]) | next release |
+| | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | next release |
+| M14 | Migration (Stolt f-k) ([#123]) | next release |
+
+### In progress
+
+- **Line editing.** Edit a line's placement after import, move lines between
+  grids, and keep picks on their line when it moves ([#29], [#64], [#35]).
+
+### Next, in order
+
+1. **Whole site at fine cells.** Never refuse a fine cell, and export finer than
+   the preview ([#107], [#108], [#109]).
+2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+   beneath it, with the same hover, cursor and picks as a survey line. Designed.
+3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+   Being designed.
+4. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+   lines by their track ([#134]).
+5. **M18: issue cleanup.** Work through the backlog of open bugs and review
+   follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
+6. **M19: magnetometer data.** The first instrument other than GPR.
+
+### Wishlist, not yet scheduled
+
+Grouped by area. The order within a group is not a priority.
+
+- **Line placement and survey geometry:** stretch or compress lines to fit the
+  grid ([#3]); de-striping, which real grids now need ([#47]); grids that are
+  not rectangles ([#130]); bulk edits on a selection of lines ([#58]).
+- **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
+  in one dialog ([#127]); Save fit also clears the points ([#128]); average or
+  combine fits ([#86]); a modifier-click for velocity points ([#88]).
+- **Processing and the profile:** choose a preset when importing ([#129]); hide
+  the slice band ([#131]); trace stacking ([#114]); a frequency profile
+  ([#34]); configurable axes ([#11]).
+- **Sites and the Survey panel:** more than one site in a QGIS project
+  ([#132]); grids start collapsed ([#133]).
+- **Output:** annotated, publication-quality profile figures ([#83]); a help
+  page for each processing step (the first page is built and waiting for a
+  walkthrough).
+
+[#3]: https://github.com/JamesZDonline/nsgeo/issues/3
+[#11]: https://github.com/JamesZDonline/nsgeo/issues/11
+[#29]: https://github.com/JamesZDonline/nsgeo/issues/29
+[#34]: https://github.com/JamesZDonline/nsgeo/issues/34
+[#35]: https://github.com/JamesZDonline/nsgeo/issues/35
+[#47]: https://github.com/JamesZDonline/nsgeo/issues/47
+[#58]: https://github.com/JamesZDonline/nsgeo/issues/58
+[#64]: https://github.com/JamesZDonline/nsgeo/issues/64
+[#83]: https://github.com/JamesZDonline/nsgeo/issues/83
+[#86]: https://github.com/JamesZDonline/nsgeo/issues/86
+[#88]: https://github.com/JamesZDonline/nsgeo/issues/88
+[#107]: https://github.com/JamesZDonline/nsgeo/issues/107
+[#108]: https://github.com/JamesZDonline/nsgeo/issues/108
+[#109]: https://github.com/JamesZDonline/nsgeo/issues/109
+[#110]: https://github.com/JamesZDonline/nsgeo/pull/110
+[#114]: https://github.com/JamesZDonline/nsgeo/issues/114
+[#115]: https://github.com/JamesZDonline/nsgeo/issues/115
+[#122]: https://github.com/JamesZDonline/nsgeo/pull/122
+[#123]: https://github.com/JamesZDonline/nsgeo/issues/123
+[#126]: https://github.com/JamesZDonline/nsgeo/issues/126
+[#127]: https://github.com/JamesZDonline/nsgeo/issues/127
+[#128]: https://github.com/JamesZDonline/nsgeo/issues/128
+[#129]: https://github.com/JamesZDonline/nsgeo/issues/129
+[#130]: https://github.com/JamesZDonline/nsgeo/issues/130
+[#131]: https://github.com/JamesZDonline/nsgeo/issues/131
+[#132]: https://github.com/JamesZDonline/nsgeo/issues/132
+[#133]: https://github.com/JamesZDonline/nsgeo/issues/133
+[#134]: https://github.com/JamesZDonline/nsgeo/issues/134
 
 ## Why
 
