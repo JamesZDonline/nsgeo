@@ -460,7 +460,9 @@ def test_a_double_flip_is_not_reported_as_changed_elsewhere(table):
     assert k[5] not in dialog.outcome.changed
 
 
-def test_move_lines_moves_them_and_reports_on_the_bar(fake_iface, tmp_path, message_log):
+def test_move_lines_moves_them_and_reports_on_the_bar(
+    fake_iface, tmp_path, message_log, answer_modal
+):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
@@ -470,8 +472,14 @@ def test_move_lines_moves_them_and_reports_on_the_bar(fake_iface, tmp_path, mess
     plugin.session.add_grid(GRID_B)
     plugin.session.add_lines(_lines(tmp_path, "A"))
     k = plugin.session.keys_on_grid("A")[0]
-    plugin.move_lines([k], "B")
-    assert k in plugin.session.keys_on_grid("B")
-    assert "Move to B: changed 1 line(s)" in message_log
-    plugin.move_lines([k], "nowhere")
-    assert any("nowhere" in m for m in message_log[1:])
+    try:
+        plugin.move_lines([k], "B")
+        assert k in plugin.session.keys_on_grid("B")
+        assert "Move to B: changed 1 line(s)" in message_log
+        plugin.move_lines([k], "nowhere")
+        assert any("nowhere" in m for m in message_log[1:])
+    finally:
+        # An open site leaves its map layers in QgsProject.instance(), which
+        # a later layer combo would pick up (as the Task 4 plugin test does).
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
