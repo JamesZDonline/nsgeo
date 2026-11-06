@@ -351,7 +351,7 @@ def test_the_velocity_is_prefilled_from_the_line():
 - [ ] **Step 7: Run to verify it passes, then commit**
 
 ```bash
-git commit -m "feat(plugin): migration's velocity is prefilled from the line (#TBD)"
+git commit -m "feat(plugin): migration's velocity is prefilled from the line (#123)"
 ```
 
 - [ ] **Step 8: Write the failing stale-velocity read-out test**

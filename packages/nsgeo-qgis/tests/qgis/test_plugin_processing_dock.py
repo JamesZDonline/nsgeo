@@ -401,7 +401,7 @@ def test_the_cutoff_spinbox_falls_back_to_the_source_when_an_earlier_step_fails(
     assert any("does not evaluate cleanly" in m for m in message_log)
 
 
-# ---- migration (#TBD) ----------------------------------------------------
+# ---- migration (#123) ----------------------------------------------------
 
 
 def test_migration_is_addable_to_a_stack_that_already_corrects_time_zero(opened):

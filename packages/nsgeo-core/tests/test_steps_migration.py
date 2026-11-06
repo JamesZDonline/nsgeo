@@ -1,4 +1,4 @@
-"""Stolt f-k migration (#TBD).
+"""Stolt f-k migration (#123).
 
 The synthetic point diffractor is the test that catches a sign error in the
 omega->kz map, an fftshift slip and a wrong obliquity factor. It is written
