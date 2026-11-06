@@ -15,6 +15,7 @@ from nsgeo.slices.binning import (
     stream_slice,
 )
 from nsgeo.slices.cube import Provenance, SliceCube
+from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
     limit_over_slices,
@@ -25,8 +26,15 @@ from nsgeo.slices.display import (
     window_label,
     window_times_ns,
 )
-from nsgeo.slices.fill import clear_kernel_cache, disc_kernel, fill
+from nsgeo.slices.finish import FinishSettings, finish_slice
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
+from nsgeo.slices.interpolate import (
+    METHODS,
+    NEIGHBOURS_PER_QUADRANT,
+    FillWeights,
+    SliceFill,
+    plan_fill,
+)
 from nsgeo.slices.site import (
     AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
@@ -50,6 +58,7 @@ from nsgeo.slices.site import (
     snap_azimuth,
     window_on,
 )
+from nsgeo.slices.smooth import smooth
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 
 __all__ = [
@@ -58,9 +67,14 @@ __all__ = [
     "CoverageError",
     "CubeFrame",
     "CubeStoreError",
+    "CurvaturePlan",
+    "FillWeights",
+    "FinishSettings",
     "Footprint",
     "LinePlan",
+    "METHODS",
     "MIN_SEAM_CELLS",
+    "NEIGHBOURS_PER_QUADRANT",
     "NORMALISATION_METHODS",
     "PreparedLine",
     "Provenance",
@@ -68,17 +82,17 @@ __all__ = [
     "Seam",
     "SiteLattice",
     "SliceCube",
+    "SliceFill",
     "SliceWindow",
+    "SolveStopped",
     "ZAxis",
     "background_level",
     "build_cube",
-    "clear_kernel_cache",
     "compose",
     "compose_footprints",
-    "disc_kernel",
     "edge_match_solve",
-    "fill",
     "find_seams",
+    "finish_slice",
     "footprint",
     "grid_axis",
     "lattice_pixel",
@@ -86,6 +100,8 @@ __all__ = [
     "load_cube",
     "normalise",
     "npz_path",
+    "plan_curvature",
+    "plan_fill",
     "plan_line",
     "plan_windows",
     "save_cube",
@@ -93,6 +109,7 @@ __all__ = [
     "shared_limit",
     "site_axis",
     "slice_extent",
+    "smooth",
     "snap_azimuth",
     "stream_slice",
     "to_north_up",

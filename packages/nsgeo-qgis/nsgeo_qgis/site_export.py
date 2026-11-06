@@ -9,7 +9,9 @@ Written band by band, one `slice_at` per band, never a resident cube (spec
 
 What the file records (Ruling 6; the key names are part of the format).
 Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
-`NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_FILL_RADIUS_SPACINGS`,
+`NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_INTERPOLATION` (the method key),
+`NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
+(interpolation spec §8; the coverage companion carries none of the four),
 `NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
 `SiteGridRecord`s), and `NSGEO_SITE_LEFT_OUT` (Ruling F-2: a compact JSON object of
 grid id to `SiteEngine.grid_state`, such as `"no lines"` or `"failed: ..."`, for
@@ -29,7 +31,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -48,7 +50,8 @@ from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsRasterLayer
 
 from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
-from nsgeo_qgis.slice_export import GeoTiffSliceWriter, band_time_range
+from nsgeo_qgis.slice_export import ExportCancelled, GeoTiffSliceWriter, band_time_range
+from nsgeo_qgis.slices_plan import SliceFinish
 
 _SEPARATORS = (",", ":")
 
@@ -86,7 +89,8 @@ class SiteExportPlan:
     transform: str
     method: str
     cell_m: float
-    radius_spacings: float | None
+    #: None on the coverage companion, which was never interpolated or smoothed.
+    finish: SliceFinish | None
     grids: tuple[SiteGridRecord, ...]
     #: Ruling F-2: included grids the file does not hold, grid id to state.
     left_out: dict[str, str] = field(default_factory=dict)
@@ -116,7 +120,7 @@ def plan_site_export(
     *,
     transform: str,
     method: str,
-    radius_spacings: float,
+    finish: SliceFinish,
     gains: Mapping[str, float],
     velocities: Mapping[str, VelocityModel | None],
     left_out: Mapping[str, str] | None = None,
@@ -177,7 +181,7 @@ def plan_site_export(
         transform=transform,
         method=method,
         cell_m=float(cell),
-        radius_spacings=float(radius_spacings),
+        finish=finish,
         grids=tuple(records),
         left_out=dict(left_out or {}),
     )
@@ -232,11 +236,17 @@ class GeoTiffSiteWriter:
                     if plan.left_out:
                         # Ruling F-2: absent, not `{}`, when nothing was left out.
                         dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
-                    if plan.radius_spacings is not None:
-                        # Absent, not zero, on a file that was never filled (as M11's).
-                        dataset.SetMetadataItem(
-                            "NSGEO_SITE_FILL_RADIUS_SPACINGS", str(plan.radius_spacings)
-                        )
+                    if plan.finish is not None:
+                        # Absent, not zero, on a file that was never interpolated.
+                        for key, value in {
+                            "NSGEO_SITE_INTERPOLATION": plan.finish.method,
+                            "NSGEO_SITE_MAX_DISTANCE_SPACINGS": str(
+                                plan.finish.max_distance_spacings
+                            ),
+                            "NSGEO_SITE_SMOOTH_X_M": str(plan.finish.smooth_x_m),
+                            "NSGEO_SITE_SMOOTH_Y_M": str(plan.finish.smooth_y_m),
+                        }.items():
+                            dataset.SetMetadataItem(key, value)
                     written = 0
                     iterator = iter(slices)
                     for index, (band_plan, shown) in enumerate(zip(plan.bands, iterator)):
@@ -290,20 +300,26 @@ def export_site(
     *,
     transform: str,
     method: str,
-    radius_spacings: float,
+    finish: SliceFinish,
     gains: Mapping[str, float],
     velocities: Mapping[str, VelocityModel | None],
     writer: SiteWriter | None = None,
     left_out: Mapping[str, str] | None = None,
+    progress: Callable[[int, int], bool] | None = None,
 ) -> SiteExportPlan:
-    """Plan, then write one band at a time: one `slice_at` per band, no cube held."""
+    """Plan, then write one band at a time: one `slice_at` per band, no cube held.
+
+    `progress(done, total)` is called before each band and once more as
+    `(total, total)`; a False return raises `ExportCancelled` before the next
+    band is computed (`slice_export.export_slices`). `slice_at` is the full
+    result by default, so a band is never a preview (plan call 11)."""
     plan = plan_site_export(
         site_engine,
         thickness_levels,
         step_levels,
         transform=transform,
         method=method,
-        radius_spacings=radius_spacings,
+        finish=finish,
         gains=gains,
         velocities=velocities,
         left_out=left_out,
@@ -311,11 +327,14 @@ def export_site(
     writer = writer if writer is not None else GeoTiffSiteWriter()
 
     def _slices() -> Iterable[SiteSlice]:
-        for band in plan.bands:
+        total = len(plan.bands)
+        for done, band in enumerate(plan.bands):
+            if progress is not None and not progress(done, total):
+                raise ExportCancelled()
             top, thickness = band_window_ns(plan.site_z, band.window)
-            yield site_engine.slice_at(
-                top, thickness, radius_spacings=radius_spacings, method=method, manual=gains
-            )
+            yield site_engine.slice_at(top, thickness, finish=finish, method=method, manual=gains)
+        if progress is not None:
+            progress(total, total)
 
     writer.write(path, plan, _slices())
     return plan
@@ -346,19 +365,19 @@ def write_site_coverage(site_engine: SiteEngine, path: str | Path, plan: SiteExp
     shown = site_engine.slice_at(
         top,
         thickness,
-        radius_spacings=plan.radius_spacings,
+        finish=SliceFinish(),  # coverage mode shows counts; the finish is not read
         method="none",
         manual={},
         coverage=True,
     )
-    # The companion is raw counts: no normalisation, no fill, no manual gain. Its
-    # plan says so (method "none", no fill radius, every recorded gain 1.0) rather
+    # The companion is raw counts: no normalisation, no interpolation, no manual gain. Its
+    # plan says so (method "none", no finish, every recorded gain 1.0) rather
     # than repeating the values file's processing.
     coverage_plan = replace(
         plan,
         bands=(replace(first, description="coverage: traces per cell"),),
         method="none",
-        radius_spacings=None,
+        finish=None,
         grids=tuple(replace(g, gain=1.0) for g in plan.grids),
     )
     GeoTiffSiteWriter().write(out, coverage_plan, [shown])

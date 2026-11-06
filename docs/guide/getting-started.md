@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.1.0, the first release. It is **experimental**, so keep
+This guide covers nsgeo 0.2.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.1.0](#5-known-issues-in-010)
+5. [Known issues in 0.2.0](#5-known-issues-in-020)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.1.0.zip` from the
+1. Download `nsgeo_qgis-0.2.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.1.0 · core 0.1.0 · build`, followed by
+   bar above the map should show `plugin 0.2.0 · core 0.2.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.1.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.2.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -110,9 +110,15 @@ any other QGIS panel.
   **Save site**.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
-  change only how the profile looks, never the data. **Fit** fits the whole line
-  in the panel, and **1:1** shows one trace per screen pixel. The mouse wheel
-  zooms, and dragging with the middle button pans.
+  change only how the profile looks, never the data. Every line on a grid is
+  drawn against the grid's length, with the low end on the left, so a line that
+  was walked the other way is shown mirrored. A line shorter than the grid
+  leaves hatched blank space. Zoom and pan stay on the same stretch of ground
+  when another line on the same grid, parallel to it and walked in either
+  direction, opens or is hovered on the map, and they come back after a glance
+  at a cross-line. **Fit** shows the whole grid length, and **1:1** shows one trace
+  per screen pixel. The arrow under the distance axis shows which way the line
+  was walked. The mouse wheel zooms, and dragging with the middle button pans.
 - **nsgeo Processing** (right) holds the processing steps for the open line:
   **Add step**, **Remove**, **↑** and **↓**, **Difference**, **Apply to grid…** and
   **Presets**.
@@ -352,7 +358,7 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-010) before you do.
+  [Known issues](#5-known-issues-in-020) before you do.
 - Do not drag a pick to a new place on the map. It keeps the trace, time and
   distance it was made at, so the point and its record would no longer agree.
   To move a pick, delete it and pick again on the profile.
@@ -373,16 +379,57 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
    **Step** set the window and how far each step moves it. You can also hold
    Shift and use the mouse wheel over the map to step through the slices.
-3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), the top
-   and bottom of the volume (**z0**, **z1**), and the **Fill radius** for cells
-   no line crossed. Hover over each control for an explanation. A grid starts
-   at a 0.2 m cell, or half the line spacing if that is smaller, and a fill
-   radius of half the line spacing. That radius just closes the gaps between
-   lines. If a line strayed from its spacing and leaves an unfilled stripe,
-   raise the fill radius.
-4. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
+3. **Resolution** sets the **Cell size**, the vertical spacing (**dz**), and the
+   top and bottom of the volume (**z0**, **z1**). Hover over each control for an
+   explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
+   is smaller. Each grid remembers the resolution you set for it, and saving the
+   site saves it.
+4. **Interpolation** decides what is drawn in the cells no line crossed, and
+   whether the slice is smoothed. The same box appears for **Whole site**, with
+   its own settings.
+   - **Method** chooses how blank cells are filled from the cells around them.
+     Pick **Kriging**, the default, for most data. Pick **Inverse distance
+     (IDW)** for a fill that never goes beyond the values around it: nearer
+     cells count more, and a filled cell always lies within the range of the
+     cells it is filled from, where kriging can overshoot a little beside a
+     strong contrast. Pick **Minimum curvature** for the smoothest surface
+     through the lines, the method Surfer users often know. Past the outermost
+     lines it carries on the trend of the data, out to the max distance. So a
+     grid's edges, the sides of a skipped line, and the seams between grids in
+     **Whole site** can show values higher or lower than any line recorded,
+     even below zero on an amplitude slice. It can also overshoot a little
+     beside a strong contrast between lines. It is solved for each slice, so it
+     is slower.
+     At a fine cell you see kriging while the depth moves, and minimum
+     curvature replaces it a moment after the depth rests. A short note on the
+     same line as the depth readout says which: **Kriging preview**,
+     **Refining…**, or **Colour stretch…**. The colour stretch
+     can shift once more when minimum curvature has measured it. An export
+     always uses minimum curvature, shows its progress, and can be cancelled.
+     Pick **None (binned only)** to see only the cells a line crossed.
+   - **Max distance to data** is how far from a line a blank cell may be and
+     still be filled. It is set in line spacings (for a grid its metres are
+     shown beside the box; for the whole site, hover over the box). Cells
+     farther from any line stay blank, so a missing line or the edge of the
+     survey is never filled in. It starts at 0.75. Each line is drawn on the
+     cells it crossed, and those can sit up to half a cell off the line itself,
+     so half a spacing would leave thin blank stripes between lines that never
+     strayed. Three quarters closes every gap between neighbouring lines, with
+     room for a line that wandered a little. Lower it toward 0.5 to fill less,
+     or raise it if a line strayed and left a blank stripe. It does nothing
+     when the method is **None**.
+   - **Smoothing X** and **Smoothing Y** blur the slice along the grid's X or Y
+     axis, by a distance in metres. They start at 0, which is off. Smoothing is
+     the only setting that changes the cells a line crossed.
+
+   Each grid remembers its own settings, and so does the whole site. nsgeo
+   prepares the fill again when you change the cell size, the method or the
+   max distance; at a fine cell that can take a few seconds, and it shows a
+   wait cursor while it does. Stepping through the slices, the smoothing and
+   **dz**, **z0** and **z1** reuse the fill already prepared.
+5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
-5. **Save cube…** keeps the prepared volume in the site folder (click **Save
+6. **Save cube…** keeps the prepared volume in the site folder (click **Save
    site** afterwards so the site remembers it). **Export GeoTIFF…** writes every
    slice as one multi-band GeoTIFF and adds it to the map.
 
@@ -429,7 +476,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.1.0
+## 5. Known issues in 0.2.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -490,8 +537,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.1.0 · core
-   0.1.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.2.0 · core
+   0.2.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open

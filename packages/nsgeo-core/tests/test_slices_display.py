@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
@@ -299,3 +301,67 @@ def test_north_up_of_an_axis_aligned_frame_has_exactly_the_frames_shape():
         out, _ = to_north_up(values, frame)
         assert out.shape == (ny, nx), f"{nx}x{ny} at cell={cell} gained a phantom row/column"
         np.testing.assert_allclose(out, values[::-1])
+
+
+def _frame(azimuth, nx=40, ny=25, cell=0.2):
+    return CubeFrame(
+        origin=(500000.0, 4500000.0), azimuth=azimuth, cell=cell, nx=nx, ny=ny, crs="EPSG:32633"
+    )
+
+
+def test_a_rotated_frame_is_resampled_at_half_the_cell():
+    """Ruling 2 (interpolation spec §8): at pitch = cell a backward
+    nearest-neighbour gather loses 15-18% of a rotated frame's cells."""
+    frame = _frame(10.497)
+    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(0.1)
+    assert gt[5] == pytest.approx(-0.1)
+
+
+@pytest.mark.parametrize("azimuth", [10.497, 33.0, 45.0, 77.3])
+def test_no_cell_is_dropped_on_a_rotated_frame(azimuth):
+    frame = _frame(azimuth)
+    values = np.arange(frame.nx * frame.ny).reshape(frame.ny, frame.nx)
+    out, _ = to_north_up(values, frame)
+    assert set(out[np.isfinite(out)].astype(int)) == set(range(frame.nx * frame.ny))
+
+
+@pytest.mark.parametrize("azimuth", [0.0, 90.0, 180.0])
+def test_an_axis_aligned_frame_keeps_the_full_pitch(azimuth):
+    frame = _frame(azimuth)
+    out, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(frame.cell)
+    if azimuth == 0.0:
+        assert out.shape == (frame.ny, frame.nx)
+
+
+def test_a_hair_off_axis_frame_keeps_the_full_pitch():
+    frame = _frame(1e-7, nx=100, ny=100)  # 20 m
+    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+    assert gt[1] == pytest.approx(frame.cell)
+
+
+def test_the_north_up_gather_is_planned_once_per_frame(monkeypatch):
+    """Which frame cell each pixel reads depends only on the frame, so a
+    slider tick on the same frame reuses it: solving it every tick made a
+    rotated preview tick 60-290 ms. An equal frame (not the same object)
+    shares the plan; another frame gets its own."""
+    from nsgeo.slices import display
+
+    display._north_up_plan.cache_clear()
+    built = []
+    real = display._build_north_up_plan
+    monkeypatch.setattr(display, "_build_north_up_plan", lambda f: built.append(f) or real(f))
+    frame = _frame(10.497)
+    values = np.random.default_rng(0).random((frame.ny, frame.nx))
+    out, gt = to_north_up(values, frame)
+    again, gt_again = to_north_up(2.0 * values, dataclasses.replace(frame))
+    assert len(built) == 1
+    assert gt_again == gt
+    np.testing.assert_array_equal(np.isnan(again), np.isnan(out))
+    np.testing.assert_array_equal(again[np.isfinite(out)], (2.0 * out)[np.isfinite(out)])
+    other = _frame(33.0)
+    _, gt_other = to_north_up(values, other)
+    assert len(built) == 2 and built[-1] == other
+    assert gt_other != gt
+    display._north_up_plan.cache_clear()

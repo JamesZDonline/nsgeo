@@ -135,3 +135,31 @@ def test_closing_the_site_then_select_none_does_not_escape_the_slot(peopled):
     dialog.select_none()
     assert dialog.included_keys() == ()
     assert dialog.table.rowCount() == 0
+
+
+def test_ok_is_greyed_out_while_no_line_is_ticked(peopled):
+    """#74: an empty choice is never a choice -- both scopes read it as every line."""
+    from qgis.PyQt.QtWidgets import QDialogButtonBox
+
+    keys = tuple(peopled.keys())
+    dialog = LineChoiceDialog(peopled, grid_id="A", included=keys)
+    ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert ok.isEnabled()
+    assert ok.toolTip() == ""
+    dialog.select_none()
+    assert not ok.isEnabled()
+    assert ok.toolTip() == "Tick at least one line."
+    dialog.set_included(keys[1], True)
+    assert ok.isEnabled()
+    assert ok.toolTip() == ""
+
+
+def test_ok_is_greyed_out_on_a_grid_with_no_lines(peopled):
+    from qgis.PyQt.QtWidgets import QDialogButtonBox
+
+    peopled.add_grid(Grid("E", (800.0, 900.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    dialog = LineChoiceDialog(peopled, grid_id="E", included=())
+    ok = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert dialog.table.rowCount() == 0
+    assert not ok.isEnabled()
+    assert ok.toolTip() == "Tick at least one line."

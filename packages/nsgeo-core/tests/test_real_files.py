@@ -292,3 +292,26 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     assert np.median(to_index8_unipolar(shown, correct)) > np.median(
         to_index8_unipolar(shown, over_raw_levels)
     )
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_bandpass_late_time_does_not_depend_on_the_direct_wave(path):
+    """Zeroing the top tenth of a real line must leave the bottom 15% of the
+    bandpassed output alone: the two are 75 ns apart, far past the filter's
+    reach. The unpadded FFT failed this by 20-30x the bottom's own RMS,
+    because the direct wave wrapped around the end of the trace."""
+    h = read_header(path)
+    rg = Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    for name in ("time_zero", "background_mean"):
+        rg = build_step(name).apply(rg)
+    bandpass = build_step("bandpass", low_mhz=250.0, high_mhz=750.0)
+
+    n = rg.n_samples
+    no_top = rg.data.copy()
+    no_top[: n // 10] = 0.0
+    bottom = slice(n - (15 * n) // 100, n)
+    out = bandpass.apply(rg).data[bottom]
+    out_no_top = bandpass.apply(rg.replace(data=no_top)).data[bottom]
+
+    rms = np.sqrt((out_no_top**2).mean())
+    assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.05 * rms

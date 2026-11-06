@@ -23,6 +23,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
+from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 
@@ -214,6 +215,66 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
+_RESOLUTION_KEYS = (
+    "cell",
+    "dz_ns",
+    "t0_ns",
+    "t1_ns",
+    "max_distance_spacings",
+    "smooth_x_m",
+    "smooth_y_m",
+)
+
+
+def _finite(value: object) -> float | None:
+    """`value` as a finite float, or None: for a non-number, a bool, NaN, an
+    infinity, or an integer too large for a float. JSON sets no limit on an
+    integer's size and `float()` overflows on one, so without the last a
+    hand-edited value blocked the survey from opening instead of reading as
+    unset (Review Focus 2, #71). Shared by the loader's tolerant cleaners."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError, TypeError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _clean_resolution(value: object) -> dict[str, float | str]:
+    """A remembered resolution (#71), each field kept only if usable.
+
+    Fields are vetted one by one, so a single damaged value reads as unset
+    and the rest still restore: the dock then seeds that field as it would
+    for a grid nobody had tuned. A z range is judged as a pair, because an
+    empty or reversed one is unusable as a whole -- keeping either end alone
+    would pair it with a seed it was never chosen against.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float | str] = {}
+    numbers: dict[str, float] = {}
+    for key in _RESOLUTION_KEYS:
+        number = _finite(value.get(key))
+        if number is not None:
+            numbers[key] = number
+    for key in ("cell", "dz_ns"):
+        if key in numbers and numbers[key] <= 0:
+            del numbers[key]
+    for key in ("max_distance_spacings", "smooth_x_m", "smooth_y_m"):
+        if numbers.get(key, 0.0) < 0:
+            del numbers[key]
+    if "t0_ns" in numbers and "t1_ns" in numbers and numbers["t1_ns"] <= numbers["t0_ns"]:
+        del numbers["t0_ns"], numbers["t1_ns"]
+    out.update(numbers)
+    # The interpolation method is a string, kept only if this build knows it
+    # (interpolation spec §8): an unknown one reads as unset.
+    method = value.get("method")
+    if isinstance(method, str) and method in METHODS:
+        out["method"] = method
+    return out
+
+
 def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if isinstance(entry.get("preset"), str):
@@ -224,14 +285,12 @@ def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
             out["lines"] = None
         elif isinstance(lines, list) and all(isinstance(k, str) for k in lines):
             out["lines"] = list(lines)
-    gain = entry.get("gain")
-    if (
-        isinstance(gain, (int, float))
-        and not isinstance(gain, bool)
-        and math.isfinite(gain)
-        and gain > 0
-    ):
-        out["gain"] = float(gain)
+    gain = _finite(entry.get("gain"))
+    if gain is not None and gain > 0:
+        out["gain"] = gain
+    resolution = _clean_resolution(entry.get("resolution"))
+    if resolution:
+        out["resolution"] = resolution
     return out
 
 
@@ -243,6 +302,9 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     for key in ("transform", "normalisation"):
         if isinstance(view.get(key), str):
             out[key] = view[key]
+    resolution = _clean_resolution(view.get("resolution"))
+    if resolution:
+        out["resolution"] = resolution
     return out
 
 
