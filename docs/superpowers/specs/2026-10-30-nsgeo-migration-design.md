@@ -174,12 +174,14 @@ Stolt f-k, constant velocity, exploding-reflector. With `vm = v / 2`:
    divided by the `vm` that taking the output on the input's own time grid has already absorbed.
    It is dimensionless and equals **1 at zero dip**, so a flat reflector comes through at its own
    amplitude.
-5. Zero where the mapped frequency falls outside the band the record contains. The evanescent
+5. Apply the **aperture**: a raised cosine in `sin(dip) = |kx| / √(kx²+kz²)`, full weight
+   straight down and nothing at `max_dip_deg`. See §5.5.
+6. Zero where the mapped frequency falls outside the band the record contains. The evanescent
    region needs no separate mask: `√(kx²+kz²) ≥ |kx|` holds by construction, so `|ω_map| ≥ vm·|kx|`
    always and energy below that line — which corresponds to no propagating wave — is never read.
    What does need zeroing is the steep-dip energy whose mapped frequency the record does not have,
    which the interpolation would otherwise extrapolate from the band edge without bound.
-6. Inverse transform, take the real part, crop back to the original sample count and trace count.
+7. Inverse transform, take the real part, crop back to the original sample count and trace count.
 
 The output stays in **time**. `VelocityModel` relabels the axis to depth exactly as it does today,
 which is the same decision `ZAxis` took for the cube. Migration does not change what a sample
@@ -266,8 +268,7 @@ transform; that is the opposite concern and does not transfer. **This earns its 
 way** — the test must show the edge artefact present without the pad and absent with it, not assert
 that padding happened.
 
-So the step has exactly one parameter. If the real-data check in §9 shows migration smiles off
-noise, a `max_dip` aperture limit returns to scope; it is designed-for, not built.
+So the pad is not a parameter. The step has two: the velocity, and the aperture of §5.5.
 
 ### 5.4 Refusals
 
@@ -321,6 +322,50 @@ step by applying it to `radargram.data[:, :1]` — one trace — on every keystr
 refused fewer than *N* traces would be permanently un-addable, with a disabled OK button and no
 explanation. A one-trace FFT is mathematically fine. The builder must confirm the probe path is
 fast: skip padding when `n_traces == 1`, or the dialog pays a 512 × 512 transform per keystroke.
+
+### 5.5 The aperture, built after the field said so
+
+The note and §11 both left a `max_dip` aperture limit designed-for and unbuilt, on one condition:
+*"returns to scope only if the real-data check shows smiles."* **The first field walkthrough showed
+smiles**, in quantity — upward-opening arcs across the whole section, which the user reported as
+"a lot of noise in the form of upside down hyperbolas all over the place".
+
+Diagnosed before being fixed. The operator's own impulse response — three band-limited spikes
+rendered through it — is three clean, sharp arcs, one per spike, with no ringing and no
+criss-cross. That is the textbook Stolt response: **one sample migrates to a semicircle of radius
+`vm·t`.** The implementation was not at fault. Two other hypotheses were tested and rejected: a
+raised-cosine taper replacing the brick-wall band cut changed nothing visible, and balancing the
+record's trace-to-trace amplitude (it varies 5.3× on `FILE__003`) removed the few largest arcs and
+left a dense criss-cross of smaller ones — a contributor, and issue **#47**, but not the cause.
+
+With no limit, every laterally sharp feature in a rough record becomes a full-width arc, because
+nothing tells the operator it was not the apex of something real.
+
+- **Parameter `max_dip_deg`**, the steepest angle from vertical migration will move energy along.
+  Bounded 5–90°; 90° is a legal, continuous value meaning effectively no limit, **not** a sentinel.
+- **Tapered over the whole range, not cut at the edge.** A brick wall in the wavenumber domain
+  rings, and that ringing reads as stratigraphy — the reason `bandpass.py`'s docstring gives for
+  tapering its own passband. The taper is deliberately *not* a second knob: a narrower one
+  measures worse on both counts, 0.952 focus and 0.050 arc reach at 45° against the full raised
+  cosine's 0.971 and 0.0019.
+- **Default 45°**, measured. Focus of a synthetic diffractor against aperture, and the energy one
+  sample leaves more than a metre from where it came from:
+
+| | 90° | 60° | 45° | 30° | 20° |
+|---|---|---|---|---|---|
+| focus | 0.982 | 0.979 | **0.971** | 0.948 | 0.86 |
+| arc reach | 0.038 | 0.015 | **0.0019** | 0.0001 | 0.0001 |
+
+  The trade is this one-sided because a hyperbola's energy sits near its apex, where the curve is
+  gentle; its steep limbs carry little of the signal and nearly all of the arc. On the local lines
+  60° still shows arcs and 45° is clean. Note that the full taper at 90° scores **better than no
+  aperture at all on both counts** (0.982/0.038 against 0.981/0.336) — the sharp evanescent
+  boundary was itself a source of ringing.
+
+Two consequences recorded rather than discovered. A wrong velocity now looks *less* wrong, because
+the aperture stops mis-migrated energy spreading as far: the under- and over-migrated focus
+measures rise from 0.17/0.12 to 0.33/0.36. And three tests in the suite now pass `max_dip_deg=90`
+explicitly, because the aperture would otherwise mask the mechanism each of them pins.
 
 ---
 
@@ -412,10 +457,10 @@ Three consequences to record rather than discover:
 - **Provenance is free.** `Provenance.steps` already records every step's parameters, so the
   velocity a cube was migrated at is written into the cube and travels with the export. No new
   field.
-- **The cost is real:** about **10.2 s** added across 24 lines, on top of the existing
+- **The cost is real:** about **11.7 s** added across 24 lines, on top of the existing
   preparation — the derived pad always lands on a 2048-wide transform for these lines (§5.3), and
-  §5.1's time extension doubles the rows again. Measured at 426 ms a line. (An earlier draft of
-  this section said 4.7 s, from before the time extension existed.) Worth stating in the plan so
+  §5.1's time extension doubles the rows again. Measured at 486 ms a line. (Earlier drafts said
+  4.7 s and then 10.2 s, from before the time extension and the aperture existed.) Worth stating in the plan so
   nobody reports it as a regression, and worth a second look if a site ever holds hundreds of
   lines rather than twenty-four.
 
@@ -517,7 +562,7 @@ Named so the plan does not quietly grow:
 - **3-D migration.** This is 2-D, line by line. It collapses along each line and does nothing
   across lines, so a point target becomes a streak perpendicular to the traverses rather than a
   ring. The user was told this and accepted it.
-- **`max_dip` aperture limiting.** Returns to scope only if the real-data check shows smiles.
+- ~~**`max_dip` aperture limiting.**~~ **Built** — the field check showed smiles. See §5.5.
 
 ---
 
