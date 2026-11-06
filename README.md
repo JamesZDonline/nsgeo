@@ -95,6 +95,11 @@ a milestone merges or the plan changes.
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
 3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
+4. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+   lines by their track ([#134]).
+5. **M18: issue cleanup.** Work through the backlog of open bugs and review
+   follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
+6. **M19: magnetometer data.** The first instrument other than GPR.
 
 ### Wishlist, not yet scheduled
 
@@ -102,8 +107,7 @@ Grouped by area. The order within a group is not a priority.
 
 - **Line placement and survey geometry:** stretch or compress lines to fit the
   grid ([#3]); de-striping, which real grids now need ([#47]); grids that are
-  not rectangles ([#130]); GPS tracks from DZG files ([#134]); bulk edits on a
-  selection of lines ([#58]).
+  not rectangles ([#130]); bulk edits on a selection of lines ([#58]).
 - **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
   in one dialog ([#127]); Save fit also clears the points ([#128]); average or
   combine fits ([#86]); a modifier-click for velocity points ([#88]).
