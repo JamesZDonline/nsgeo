@@ -771,6 +771,8 @@ These are the manual checkpoints from spec §10. Track them and report them; nev
 1. **Build and walkthrough.** Deploy to a fresh QGIS profile, then hold the walkthrough on the user's real grids (Sunnyside) as an Artifact with a results db. Cover:
    - minimum curvature at defaults: no holes, and a skipped line blank;
    - the overshoot ring, judged acceptable or not (tension is the first follow-up if not);
+   - grid edges, Whole site seams and the sides of a skipped line (the overshoot): most of it
+     shows there, not between lines (final review I-2);
    - live dragging at 0.2 m;
    - at a fine cell (0.05 m):
      - the kriging preview while dragging;
@@ -778,7 +780,10 @@ These are the manual checkpoints from spec §10. Track them and report them; nev
      - moving on mid-refine;
      - the stretch settling;
    - Whole site, the same at a fine cell;
+   - a multi-grid Whole site drag at 0.1 m;
    - an export with progress and a cancel;
+   - an export at 0.05 m with a cancel: the wait cursor and the dialog up before the first band
+     ends, and the cancel heard at the next band (final review I-1);
    - closing QGIS mid-refine;
    - a saved cube.
 2. **Surfer comparison (spec §10.2).** The user compares nsgeo's kriging and minimum curvature, at defaults, against their Surfer grids. The question is "same ballpark". This gate is required for B.

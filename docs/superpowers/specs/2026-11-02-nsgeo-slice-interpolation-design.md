@@ -234,6 +234,15 @@ return can produce a faint ring of opposite sign between lines. This is the stan
 characteristic of the method and is accepted for this round. Exposing tension is the first
 setting to add if the walkthrough shows it matters.
 
+*Corrected 2026-11-05 (milestone B final review):* most of the overshoot is not between lines.
+With natural conditions, minimum curvature continues the across-line slope past the outermost
+line, out to the max distance, and does the same past line ends and along the sides of a
+skipped-line gap. On the ten real lines (amplitude-envelope preset), up to 1.6% of cells fell
+outside the data range; the lowest value was −0.51 on data ranging 0.03–2.15. Of those cells,
+77–100% lay in the strip past the outermost line, not between lines. So a grid's edges, the sides
+of a skipped line and the seams between grids in Whole site are where it shows; a strong contrast
+between lines can still ring as described above.
+
 ---
 
 ## 6. Smoothing
