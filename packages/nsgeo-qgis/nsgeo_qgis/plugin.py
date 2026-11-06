@@ -49,7 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,7 @@ from nsgeo_qgis.slice_export import (
 from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import LIVE_SOLVE_BUDGET_MS, SliceFinish
+from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
@@ -180,6 +181,7 @@ class NsgeoPlugin:
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
+        self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
         # actually displays -- the same shape ProcessingDock keeps
@@ -520,6 +522,12 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # Same reasoning again: Edit lines tables are modeless too, one per
+        # grid, and reject() (not close()) runs each one's finished-signal
+        # cleanup instead of leaving it dangling with a reference to a
+        # session this method is about to tear down.
+        for edit_dialog in list(self._edit_lines_dialogs.values()):
+            edit_dialog.reject()
         # Same reasoning again: LineChoiceDialog is modeless too, so it
         # can still be open here, and reject() (not close()) is what runs
         # its finished-signal cleanup instead of leaving it dangling with
@@ -1833,6 +1841,50 @@ class NsgeoPlugin:
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
         self._import_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
+        # Modeless, one table per grid -- open_import_dialog()'s shape: a
+        # second request for the same grid raises the open table and selects
+        # the lines asked for (line editing spec §4.1).
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        existing = self._edit_lines_dialogs.get(grid_id)
+        if existing is not None:
+            existing.select_keys(keys)
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = EditLinesDialog(self.session, grid_id, select=keys, parent=self.iface.mainWindow())
+
+        def finished(result: int) -> None:
+            # A pyqtSignal slot: must not raise (module docstring). The write
+            # was done, and re-checked, by EditLinesDialog.accept().
+            try:
+                if result == QDialog.DialogCode.Accepted and dialog.outcome is not None:
+                    self.message(
+                        f"Edit lines · {grid_id}: {dialog.outcome.message()}",
+                        Qgis.MessageLevel.Warning
+                        if dialog.outcome.skipped
+                        else Qgis.MessageLevel.Info,
+                    )
+            finally:
+                dialog.deleteLater()
+                if self._edit_lines_dialogs.get(grid_id) is dialog:
+                    del self._edit_lines_dialogs[grid_id]
+
+        def clear_if_current() -> None:
+            # Identity only, never touching `dialog` (already gone).
+            if self._edit_lines_dialogs.get(grid_id) is dialog:
+                del self._edit_lines_dialogs[grid_id]
+
+        dialog.finished.connect(finished)
+        dialog.destroyed.connect(clear_if_current)
+        self._edit_lines_dialogs[grid_id] = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
