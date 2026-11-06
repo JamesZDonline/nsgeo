@@ -857,6 +857,7 @@ def test_the_menu_on_a_selection_offers_one_removal_for_all_of_it(dock, answer_m
 
     menu = _right_click(dock, first)
     assert _texts(menu) == ["Edit 2 lines…", "Move 2 lines to grid", "Remove 2 lines from site"]
+    assert menu.actions()[-2].isSeparator()  # the destructive one stands apart
 
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
     _action(menu, "Remove 2 lines from site").trigger()
@@ -1102,3 +1103,27 @@ def test_the_move_submenu_leaves_nothing_behind(dock, answer_modal):
         _right_click(dock, dock.item_for_key(KEYS[0]))
     assert len(dock.findChildren(QMenu)) == n
     assert dock.context_menu.findChildren(QMenu) == []
+
+
+def test_a_grid_row_plus_one_line_reads_in_the_singular(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _select(dock, _grid_item(dock, "A"), dock.item_for_key(KEYS[0]))
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _texts(menu) == ["Edit 1 line…", "Move 1 line to grid", "Remove 1 line from site"]
+
+
+def test_a_grid_is_greyed_only_when_every_selected_line_is_already_on_it(
+    dock, answer_modal, tmp_path
+):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    _add_grid_b(session, tmp_path, with_line=True)
+    b_key = session.keys_on_grid("B")[0]
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(b_key))
+    _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _action(dock.move_menu, "A").isEnabled() and _action(dock.move_menu, "B").isEnabled()
+    _select(dock, dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1]))
+    _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert not _action(dock.move_menu, "A").isEnabled()
+    assert _action(dock.move_menu, "B").isEnabled()

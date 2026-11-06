@@ -101,15 +101,16 @@ QGIS docks the four panels around the map. You can drag, float or close them lik
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
-  Click a line to open it. Right-click a grid for **Edit grid…**, **Import DZT
-  files…**, **Set velocity…** and **Remove grid**, which removes the grid along
-  with its lines. **Edit lines…** is greyed out while the grid has no lines.
-  Right-click a line for **Open**, **Edit line…**, **Move to grid** and **Remove
-  line from site**. To change several lines at once, Ctrl-click (⌘-click on a
-  Mac) or Shift-click to select them, then press Delete or right-click the
-  selection. Lines on one grid offer **Edit N lines…**. Any lines offer **Move N
-  lines to grid** and **Remove N lines from site**. Removing never deletes the
-  DZT files, and the site file isn't changed until you choose **Save site**.
+  Click a line to open it. Right-click a grid for **Edit grid…**, **Edit
+  lines…**, **Import DZT files…**, **Set velocity…** and **Remove grid**, which
+  removes the grid along with its lines. **Edit lines…** is greyed out while the
+  grid has no lines. Right-click a line for **Open**, **Edit line…**, **Set
+  velocity override…**, **Move to grid** and **Remove line from site**. To work
+  on several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click to
+  select them. Press Delete to remove them, or right-click the selection. Lines
+  on one grid offer **Edit N lines…**. Any lines offer **Move N lines to grid**
+  and **Remove N lines from site**. Removing never deletes the DZT files, and
+  the site file isn't changed until you choose **Save site**.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. Every line on a grid is
@@ -288,17 +289,19 @@ and its **Import** button name the grid the lines will go into.
 
 #### Fixing lines after import
 
-If a line went in with the wrong Start, offset, direction or grid, right-click
+If a line went in with the wrong start, offset, direction or grid, right-click
 the grid and choose **Edit lines…**. A table opens with every line on the grid,
-in survey order. You can change a line's Label, Offset, Dir, Start and Grid. Use
-**↑** and **↓** to set the order the Survey panel shows.
+in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
+**Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
+panel shows.
 
-The panel under the table changes every selected line at once. Set a **Start**,
-press **Snap to grid edge**, **Shift** the offsets, **Flip** the direction, or
-**Move** the lines to another grid.
+The panel under the table changes every selected line at once. Type a start and
+press **Set**, press **Snap to grid edge**, type an amount and press **Shift**
+to move the offsets, press **Flip** to reverse the direction, or choose a grid
+and press **Move**.
 
-The Note column flags a line that starts off its edge, or that lies outside the
-grid's width. Nothing changes until you click **OK**, and then everything
+The **Note** column flags a line that starts off its edge, or that lies outside
+the grid's width. Nothing changes until you click **OK**, and then everything
 changes as one step. Picks move with their lines.
 
 Changing a grid's length in **Edit grid…** moves its reversed lines with the far

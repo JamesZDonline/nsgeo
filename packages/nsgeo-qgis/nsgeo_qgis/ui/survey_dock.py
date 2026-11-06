@@ -396,7 +396,10 @@ class SurveyDock(QgsDockWidget):
                             f"Edit {self._count_phrase(grid_ids, keys)}…",
                             lambda: self._request_edit(grid, keys),
                         )
-                    self._add_move_menu(menu, keys, f"Move {len(keys)} lines to grid")
+                    self._add_move_menu(
+                        menu, keys, f"Move {self._count_phrase(grid_ids, keys)} to grid"
+                    )
+                menu.addSeparator()
                 menu.addAction(
                     f"Remove {self._count_phrase(grid_ids, keys)} from site",
                     lambda: self.remove_selected_action(),
@@ -415,9 +418,9 @@ class SurveyDock(QgsDockWidget):
             elif kind == "line":
                 key = self.key_of(item) or ""
                 menu.addAction("Open", lambda: self._open_line(key))
-                menu.addAction(
-                    "Edit line…", lambda: self._request_edit(self._grid_of_key(key), [key])
-                )
+                # Worked out here, inside the guard, not when the action fires.
+                grid = self._grid_of_key(key)
+                menu.addAction("Edit line…", lambda: self._request_edit(grid, [key]))
                 menu.addAction(
                     "Set velocity override…", lambda: self.line_velocity_requested.emit(key)
                 )

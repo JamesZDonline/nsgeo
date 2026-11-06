@@ -1848,6 +1848,14 @@ class NsgeoPlugin:
         dialog.activateWindow()
 
     def open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
+        # A slot of the Survey panel's edit_lines_requested: guarded, so a
+        # failure reaches the message bar and never the swallowing signal.
+        try:
+            self._open_edit_lines_dialog(grid_id, keys)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Edit lines: {exc}", Qgis.MessageLevel.Critical)
+
+    def _open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
         # Modeless, one table per grid -- open_import_dialog()'s shape: a
         # second request for the same grid raises the open table and selects
         # the lines asked for (line editing spec §4.1).
