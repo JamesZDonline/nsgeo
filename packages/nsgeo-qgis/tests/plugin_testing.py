@@ -321,6 +321,9 @@ class LayoutProbe:
         self.dock = dock
         self.scroll = dock.findChild(QScrollArea)
         assert self.scroll is not None
+        # A dock in a main window that was never shown never lays out: its
+        # samples would not move whatever the code does.
+        assert dock.isVisible(), "show the dock (float it) before probing its layout"
         self.seen: list[tuple[str, tuple[int, int, int]]] = []
 
     def sample(self) -> tuple[int, int, int]:
@@ -335,13 +338,26 @@ class LayoutProbe:
             slider.height(),
         )
 
+    def settle(self, timeout_s: float = 5.0) -> tuple[int, int, int]:
+        """Sample until two consecutive samples agree: Qt 6.10 lays a new
+        window out a pass late, so the first samples can still be moving."""
+        deadline = time.monotonic() + timeout_s
+        last = self.sample()
+        while time.monotonic() < deadline:
+            time.sleep(0.02)
+            now = self.sample()
+            if now == last:
+                return now
+            last = now
+        raise AssertionError("the layout did not settle")
+
     def record(self) -> tuple[int, int, int]:
         sample = self.sample()
         self.seen.append((self.dock.refine_label.text(), sample))
         return sample
 
 
-def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: float = 0.12) -> None:
+def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: float = 0.04) -> None:
     """Make every solve job `engine`'s `names` methods hand out take `pause`
     seconds longer, so each phase of a refine lasts long enough to be sampled."""
 

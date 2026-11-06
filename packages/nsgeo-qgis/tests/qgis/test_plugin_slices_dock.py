@@ -3122,6 +3122,7 @@ def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_moda
 def _slow_unsolved(dock, monkeypatch):
     """Minimum curvature on a shared stretch with nothing solved yet and every
     solve slow, so a move runs preview, refine slice, measure stretch."""
+    _ready(dock)
     _minimum_curvature(dock, 500.0, stretch="shared across the cube")
     engine = dock.engine
     engine._solved.clear()
@@ -3130,18 +3131,18 @@ def _slow_unsolved(dock, monkeypatch):
     slow_jobs(monkeypatch, engine, ("pending_solve", "stretch_solves"))
 
 
-@pytest.mark.parametrize("width", [260, 400])
+@pytest.mark.parametrize("width", [260, 560])
 def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeypatch, width):
     """W1: the content's height and the slider's place do not change as a slice
     goes normal, preview, refining the slice, measuring the stretch, final. The
     old bottom status line changed height between them (47, 70, 24 px)."""
     dock, _ = docked
+    dock.setFloating(True)
     dock.resize(width, 700)
     dock.show()
-    _ready(dock)
     _slow_unsolved(dock, monkeypatch)
     probe = LayoutProbe(dock)
-    baseline = probe.record()
+    baseline = probe.settle()
     dock.slice_slider.setValue(20)
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
@@ -3192,16 +3193,79 @@ def test_the_indicator_names_each_state_and_the_status_never_does(docked, monkey
 
 def test_the_indicator_never_raises_the_dock_minimum_width(docked):
     """Its text width is not a floor on the main window (the walkthrough's
-    minimum-size trap): the longest text, in a dock narrower than it."""
+    minimum-size trap). The scroll area pins the dock's own minimum, so the
+    claim is on the scrolled content's: the longest text must not raise it."""
     dock, _ = docked
     _ready(dock)
+    dock.setFloating(True)
     dock.show()
-    QCoreApplication.processEvents()
-    before = dock.minimumSizeHint().width()
+    probe = LayoutProbe(dock)
+    probe.settle()
+    content = probe.scroll.widget()
+    before = content.minimumSizeHint().width()
     longest = MEASURING_STRETCH_INDICATOR.format(done=9999, total=9999) + " and then some " * 6
     dock.refine_label.setText(longest)
-    QCoreApplication.processEvents()
-    assert dock.minimumSizeHint().width() == before
-    assert dock.refine_label.minimumSizeHint().width() <= 20
+    probe.settle()
+    assert content.minimumSizeHint().width() == before
     assert dock.refine_label.text() == longest
-    assert dock.refine_label.height() == dock.refine_label.fontMetrics().height() + 2
+    assert dock.refine_label.toolTip() == longest, "an elided text is readable in the tooltip"
+
+
+def test_the_dock_layout_probe_sees_the_width_it_is_given(docked):
+    dock, _ = docked
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    widths = []
+    for width in (260, 560):
+        dock.resize(width, 700)
+        probe.settle()
+        widths.append(probe.scroll.widget().width())
+    assert widths[1] > widths[0], widths
+
+
+def test_the_indicator_follows_a_stylesheet_font_and_clear(qgis_app):
+    from nsgeo_qgis.ui.slices_dock import ElidedLabel
+    from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
+
+    host = QWidget()
+    QVBoxLayout(host).addWidget(label := ElidedLabel("Refining this slice…"))
+    host.setStyleSheet("* { font: 20pt; }")
+    host.show()
+    QCoreApplication.processEvents()
+    QCoreApplication.processEvents()
+    assert label.height() >= label.fontMetrics().height()
+    label.clear()
+    assert label.text() == ""
+    host.close()
+
+
+def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
+    """Moving back to a solved slice while the one left is still solving: the
+    draw on screen is final, so the indicator must not say "Refining this slice"."""
+    dock, _ = docked
+    _ready(dock)
+    _slow_unsolved(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    deadline = time.monotonic() + 30.0
+    while dock.provisional or dock.refiner.busy or dock._grid_refine.rest.isActive():
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+    dock.engine._last_solve_ms = 500.0
+    dock.slice_slider.setValue(26)  # unsolved: a preview, then its refine
+    deadline = time.monotonic() + 30.0
+    while dock.refine_label.text() != REFINING_SLICE_INDICATOR:
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+    dock.slice_slider.setValue(20)  # solved: drawn in full at once
+    QCoreApplication.processEvents()
+    assert not dock.provisional
+    assert dock.refine_label.text() != REFINING_SLICE_INDICATOR
+    assert dock.refine_label.text() == "" or dock.refine_label.text().startswith("Measuring")
+    deadline = time.monotonic() + 30.0
+    while dock.refiner.busy:
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)

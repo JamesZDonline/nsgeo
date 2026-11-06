@@ -105,13 +105,18 @@ class RefineFlow:
         windows only. Never the status line's: that one's height moves the
         panel under the user's wheel."""
         if self.refiner.busy:
-            if self.done < self.slice_jobs:
-                if grids:
+            # A list still solving a slice the panel has left (the user moved
+            # back to a solved one) says nothing of that slice: the draw on
+            # screen is final, so only the stretch windows can be named.
+            if self.provisional and self.done < self.slice_jobs:
+                if grids and self.slice_jobs > 1:
                     return REFINING_GRIDS_INDICATOR.format(done=self.done, total=self.slice_jobs)
                 return REFINING_SLICE_INDICATOR
-            return MEASURING_STRETCH_INDICATOR.format(
-                done=self.done - self.slice_jobs, total=self.total - self.slice_jobs
-            )
+            stretch_total = self.total - self.slice_jobs
+            if stretch_total > 0:
+                return MEASURING_STRETCH_INDICATOR.format(
+                    done=max(0, self.done - self.slice_jobs), total=stretch_total
+                )
         if self.provisional:
             return PREVIEW_INDICATOR
         return ""

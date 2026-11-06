@@ -2894,16 +2894,17 @@ def _slow_site_unsolved(plugin, monkeypatch):
     return dock
 
 
-@pytest.mark.parametrize("width", [260, 400])
+@pytest.mark.parametrize("width", [260, 560])
 def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, monkeypatch, width):
     """W1, in Whole site: the content's height and the slider's place do not
     change from normal through preview, refining the grids and measuring the
     stretch, to final."""
     dock = _slow_site_unsolved(plugin, monkeypatch)
+    dock.setFloating(True)  # the main window is never shown, so a docked one never lays out
     dock.resize(width, 700)
     dock.show()
     probe = LayoutProbe(dock)
-    baseline = probe.record()
+    baseline = probe.settle()
     dock.slice_slider.setValue(30)
     scope = dock._site
     deadline = time.monotonic() + 60.0
@@ -2958,3 +2959,18 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
     assert total >= grids  # (grid, window) jobs, not windows
     assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)
     assert dock.refine_label.text() == ""
+
+
+def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
+    """The two layout widths are different layouts (the content's minimum is
+    between them), so passing at both is two proofs, not one."""
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    widths = []
+    for width in (260, 560):
+        dock.resize(width, 700)
+        probe.settle()
+        widths.append(probe.scroll.widget().width())
+    assert widths[1] > widths[0], widths

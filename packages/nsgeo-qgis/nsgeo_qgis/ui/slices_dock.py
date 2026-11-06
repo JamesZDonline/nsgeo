@@ -125,21 +125,31 @@ class ElidedLabel(QLabel):
 
     A QLabel's text width is its minimum width, and a dock's minimum size is a
     hard floor on the QGIS main window. This one asks for no width (`Ignored`),
-    shows what fits and elides the rest, and keeps its height when empty, so
-    it never appears, vanishes or wraps (walkthrough round 1, W1). The full
-    text is the label's `full_text`, for tests and tooltips."""
+    shows what fits and elides the rest (the full text then goes in the
+    tooltip), and keeps its height when empty, so it never appears, vanishes
+    or wraps (walkthrough round 1, W1). The height follows the font, so a
+    stylesheet font (QGIS's font-size option) is not clipped. `text()` is the
+    full text. `set_hint` is the tooltip shown when nothing is elided."""
 
     def __init__(self, text: str = "") -> None:
         super().__init__("")
         self.full_text = ""
+        self._hint = ""
         self.setWordWrap(False)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(self.fontMetrics().height() + 2)
+        self._fit_height()
         self.setText(text)
+
+    def set_hint(self, hint: str) -> None:
+        self._hint = hint
+        self._elide()
 
     def setText(self, text: str | None) -> None:  # noqa: N802 -- Qt override
         self.full_text = text or ""
         self._elide()
+
+    def clear(self) -> None:
+        self.setText("")
 
     def text(self) -> str:
         return self.full_text
@@ -154,11 +164,23 @@ class ElidedLabel(QLabel):
         super().resizeEvent(event)
         self._elide()
 
+    def changeEvent(self, event: Any) -> None:  # noqa: N802 -- Qt override
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._fit_height()
+            self._elide()
+
+    def _fit_height(self) -> None:
+        height = self.fontMetrics().height() + 2
+        if self.height() != height or self.minimumHeight() != height:
+            self.setFixedHeight(height)
+
     def _elide(self) -> None:
         shown = self.fontMetrics().elidedText(
             self.full_text, Qt.TextElideMode.ElideRight, max(self.width(), 1)
         )
         super().setText(shown)
+        self.setToolTip(self.full_text if shown != self.full_text else self._hint)
 
 
 class SlicesDock(QgsDockWidget):
@@ -402,6 +424,10 @@ class SlicesDock(QgsDockWidget):
         # the scrolled panel out from under the wheel); Ignored width and
         # elided text, so a long text never raises the dock's minimum width.
         self.refine_label = ElidedLabel("")
+        self.refine_label.set_hint(
+            "Minimum curvature is drawn as a kriging preview while the depth moves, "
+            "then solved in the background once it rests."
+        )
         position_layout.addWidget(self.refine_label)
 
         self.velocity_label = QLabel("")
@@ -2408,12 +2434,6 @@ class SlicesDock(QgsDockWidget):
         else:
             text = self._grid_refine.indicator()
         self.refine_label.setText(text)
-        self.refine_label.setToolTip(
-            "Minimum curvature is drawn as a kriging preview while the depth moves, "
-            "then solved in the background once it rests."
-            if text
-            else ""
-        )
 
     def _stretch_key(self, window: SliceWindow, finish: SliceFinish) -> tuple[Any, ...]:
         """What This grid's shared stretch is measured over: `(n_levels,
