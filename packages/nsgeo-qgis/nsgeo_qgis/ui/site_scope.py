@@ -1004,7 +1004,7 @@ class SiteScope:
     # ---- minimum curvature's refine ---------------------------------------------------
     def status_text(self) -> str:
         """The site's status line: memory and redraw time only. Refine states
-        show in the indicator under the readout (walkthrough round 1, W1)."""
+        show in the indicator on the readout's row (walkthrough round 1, W1)."""
         return self.engine.status_text()
 
     def _on_rest(self) -> None:

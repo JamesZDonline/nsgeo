@@ -338,6 +338,26 @@ class LayoutProbe:
             slider.height(),
         )
 
+    def assert_indicator_shares_the_readouts_row(self) -> None:
+        """The refine indicator stands on the depth readout's row (round 2,
+        K2): the same y inside the content, and side by side, not stacked."""
+        from qgis.PyQt.QtCore import QPoint
+
+        content = self.scroll.widget()
+        readout = self.dock.readout.mapTo(content, QPoint(0, 0))
+        indicator = self.dock.refine_label.mapTo(content, QPoint(0, 0))
+        assert self.dock.refine_label.parentWidget() is self.dock.readout.parentWidget()
+        assert (
+            abs(
+                readout.y()
+                + self.dock.readout.height() // 2
+                - indicator.y()
+                - self.dock.refine_label.height() // 2
+            )
+            <= 2
+        )
+        assert indicator.x() >= readout.x() + self.dock.readout.width() - 1
+
     def settle(self, timeout_s: float = 5.0) -> tuple[int, int, int]:
         """Sample until two consecutive samples agree: Qt 6.10 lays a new
         window out a pass late, so the first samples can still be moving."""

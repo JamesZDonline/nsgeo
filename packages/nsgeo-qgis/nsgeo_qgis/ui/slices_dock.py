@@ -420,20 +420,25 @@ class SlicesDock(QgsDockWidget):
         self.slice_slider.setRange(0, 0)
         position_layout.addWidget(self.slice_slider)
 
+        # Walkthrough round 1, W1 and round 2, K2: the minimum-curvature
+        # preview / refine state shares the readout's row, right-aligned in
+        # the room the readout leaves, so no empty line stands under it.
+        # Fixed height, kept when empty, so it never appears, vanishes or wraps
+        # (a changing status line moved the scrolled panel out from under the
+        # wheel); Ignored width and elided text, so a long text never raises
+        # the dock's minimum width, and it is the first to give way.
+        readout_row = QHBoxLayout()
+        readout_row.setContentsMargins(0, 0, 0, 0)
         self.readout = QLabel("not prepared")
-        position_layout.addWidget(self.readout)
-
-        # Walkthrough round 1, W1: the minimum-curvature preview / refine state,
-        # one line directly under the readout. Fixed height, kept when empty,
-        # so it never appears, vanishes or wraps (a changing status line moved
-        # the scrolled panel out from under the wheel); Ignored width and
-        # elided text, so a long text never raises the dock's minimum width.
+        readout_row.addWidget(self.readout, 0)
         self.refine_label = ElidedLabel("")
         self.refine_label.set_hint(
             "Minimum curvature is drawn as a kriging preview while the depth moves, "
             "then solved in the background once it rests."
         )
-        position_layout.addWidget(self.refine_label)
+        self.refine_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        readout_row.addWidget(self.refine_label, 1)
+        position_layout.addLayout(readout_row)
 
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()

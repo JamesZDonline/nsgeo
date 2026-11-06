@@ -2905,6 +2905,7 @@ def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, mo
     dock.show()
     probe = LayoutProbe(dock)
     baseline = probe.settle()
+    probe.assert_indicator_shares_the_readouts_row()
     dock.slice_slider.setValue(30)
     scope = dock._site
     deadline = time.monotonic() + 60.0
@@ -2921,8 +2922,8 @@ def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, mo
     probe.record()
     texts = {text for text, _ in probe.seen}
     assert PREVIEW_INDICATOR in texts
-    assert any(t.startswith("Refining this slice (") for t in texts), texts
-    assert any(t.startswith("Measuring the colour stretch (") for t in texts), texts
+    assert any(t.startswith("Refining (") for t in texts), texts
+    assert any(t.startswith("Colour stretch (") for t in texts), texts
     assert probe.seen[-1][0] == ""
     assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
 
@@ -2953,8 +2954,8 @@ def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
     grids = len(dock.site_engine.ready_grids)
     assert seen[0] == PREVIEW_INDICATOR
     assert seen[1] == REFINING_GRIDS_INDICATOR.format(done=0, total=grids)
-    measuring = [t for t in seen if t.startswith("Measuring")]
-    assert measuring[0].startswith("Measuring the colour stretch (0 of ")
+    measuring = [t for t in seen if t.startswith("Colour stretch")]
+    assert measuring[0].startswith("Colour stretch (0 of ")
     total = int(measuring[0].rsplit(" ", 1)[1].rstrip(")…"))
     assert total >= grids  # (grid, window) jobs, not windows
     assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)

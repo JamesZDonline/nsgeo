@@ -3143,6 +3143,7 @@ def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeyp
     _slow_unsolved(dock, monkeypatch)
     probe = LayoutProbe(dock)
     baseline = probe.settle()
+    probe.assert_indicator_shares_the_readouts_row()
     dock.slice_slider.setValue(20)
     deadline = time.monotonic() + 30.0
     while time.monotonic() < deadline:
@@ -3154,7 +3155,7 @@ def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeyp
     texts = {text for text, _ in probe.seen}
     assert PREVIEW_INDICATOR in texts
     assert REFINING_SLICE_INDICATOR in texts
-    assert any(t.startswith("Measuring the colour stretch (") for t in texts), texts
+    assert any(t.startswith("Colour stretch (") for t in texts), texts
     assert probe.seen[-1][0] == ""
     assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
 
@@ -3182,7 +3183,7 @@ def test_the_indicator_names_each_state_and_the_status_never_does(docked, monkey
         time.sleep(0.002)
     assert counts[0] == PREVIEW_INDICATOR
     assert counts[1] == REFINING_SLICE_INDICATOR
-    measuring = [c for c in counts if c.startswith("Measuring")]
+    measuring = [c for c in counts if c.startswith("Colour stretch")]
     # Counts the stretch windows only: the slice on screen is one of them and
     # is solved already, so the list holds one fewer than were unsolved.
     total = stretch_total - 1
@@ -3229,7 +3230,7 @@ def test_the_indicator_follows_a_stylesheet_font_and_clear(qgis_app):
     from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
 
     host = QWidget()
-    QVBoxLayout(host).addWidget(label := ElidedLabel("Refining this slice…"))
+    QVBoxLayout(host).addWidget(label := ElidedLabel("Refining…"))
     host.setStyleSheet("* { font: 20pt; }")
     host.show()
     QCoreApplication.processEvents()
@@ -3242,7 +3243,7 @@ def test_the_indicator_follows_a_stylesheet_font_and_clear(qgis_app):
 
 def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
     """Moving back to a solved slice while the one left is still solving: the
-    draw on screen is final, so the indicator must not say "Refining this slice"."""
+    draw on screen is final, so the indicator must not say "Refining…"."""
     dock, _ = docked
     _ready(dock)
     _slow_unsolved(dock, monkeypatch)
@@ -3263,7 +3264,7 @@ def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
     QCoreApplication.processEvents()
     assert not dock.provisional
     assert dock.refine_label.text() != REFINING_SLICE_INDICATOR
-    assert dock.refine_label.text() == "" or dock.refine_label.text().startswith("Measuring")
+    assert dock.refine_label.text() == "" or dock.refine_label.text().startswith("Colour stretch")
     deadline = time.monotonic() + 30.0
     while dock.refiner.busy:
         assert time.monotonic() < deadline

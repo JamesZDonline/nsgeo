@@ -95,14 +95,14 @@ SOLVED_SLICES_KEPT = 16
 #: the full result's.
 PREVIEW_METHOD = "kriging"
 
-#: The one-line refine indicator under the depth readout (walkthrough round 1,
-#: W1-W3): while a preview stands, while the slice on screen is solved (with a
+#: The refine indicator, on the depth readout's row (walkthrough rounds 1-2,
+#: W1-W3, K2): while a preview stands, while the slice on screen is solved (with a
 #: grid count in Whole site), and while only stretch windows are. Short, so it
 #: never wraps, and never in the bottom status line, whose height it would move.
 PREVIEW_INDICATOR = "Kriging preview"
-REFINING_SLICE_INDICATOR = "Refining this slice…"
-REFINING_GRIDS_INDICATOR = "Refining this slice ({done} of {total} grids)…"
-MEASURING_STRETCH_INDICATOR = "Measuring the colour stretch ({done} of {total})…"
+REFINING_SLICE_INDICATOR = "Refining…"
+REFINING_GRIDS_INDICATOR = "Refining ({done} of {total})…"
+MEASURING_STRETCH_INDICATOR = "Colour stretch ({done} of {total})…"
 
 #: What the plugin will hold before it stops promoting to a resident cube.
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
