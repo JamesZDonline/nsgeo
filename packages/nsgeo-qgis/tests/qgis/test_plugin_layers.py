@@ -2593,6 +2593,16 @@ def test_a_pick_past_the_end_of_its_line_sits_on_the_last_trace_with_no_distance
     assert f["distance_m"] == NULL
 
 
+def test_a_pick_with_a_negative_trace_sits_on_the_first_trace_with_no_distance(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=-3))
+    layers.follow_lines()
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 0), abs=1e-9)
+    assert f["distance_m"] == NULL
+
+
 def test_a_hand_digitised_row_with_no_trace_is_left_alone_and_the_rest_still_follow(populated):
     session, layers, _ = populated
     _add_row(layers, 1.0, 2.0, line_key="raw/FILE__001.DZT", time_ns=5.0)

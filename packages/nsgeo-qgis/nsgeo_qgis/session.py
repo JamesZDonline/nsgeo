@@ -1173,6 +1173,11 @@ class SiteSession(QObject):
         file rather than an error. Time is the truth here, so a missing
         distance is a null field, not a refused pick.
         """
+        if index < 0:
+            # NumPy would wrap a negative index to the far end of the line;
+            # a hand-edited trace below zero has no distance, like one past
+            # the end.
+            return None
         try:
             return float(line.distance_along()[index])
         except (ValueError, IndexError):
