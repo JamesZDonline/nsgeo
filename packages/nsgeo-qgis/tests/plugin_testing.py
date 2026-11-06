@@ -305,3 +305,65 @@ def drag_in_layers_panel(project: Any, node: Any, parent: Any, row: int) -> None
     if source is parent and row <= source_row:
         source_row += 1  # the copy went in above the original
     assert model.removeRows(source_row, 1, source_index)
+
+
+class LayoutProbe:
+    """What a refine state change must not move (walkthrough round 1, W1): the
+    dock's scrolled content height and the depth slider's place inside it.
+
+    `sample()` pumps events first, so a layout that settles a pass later is
+    seen settled; it returns `(content height, slider y in the content, slider
+    height)`. `record(label)` keeps the sample with the indicator's text."""
+
+    def __init__(self, dock: Any) -> None:
+        from qgis.PyQt.QtWidgets import QScrollArea
+
+        self.dock = dock
+        self.scroll = dock.findChild(QScrollArea)
+        assert self.scroll is not None
+        self.seen: list[tuple[str, tuple[int, int, int]]] = []
+
+    def sample(self) -> tuple[int, int, int]:
+        from qgis.PyQt.QtCore import QCoreApplication, QPoint
+
+        QCoreApplication.processEvents()
+        content = self.scroll.widget()
+        slider = self.dock.slice_slider
+        return (
+            content.height(),
+            slider.mapTo(content, QPoint(0, 0)).y(),
+            slider.height(),
+        )
+
+    def record(self) -> tuple[int, int, int]:
+        sample = self.sample()
+        self.seen.append((self.dock.refine_label.text(), sample))
+        return sample
+
+
+def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: float = 0.12) -> None:
+    """Make every solve job `engine`'s `names` methods hand out take `pause`
+    seconds longer, so each phase of a refine lasts long enough to be sampled."""
+
+    def slowed(job: Any) -> Any:
+        run = job.run
+
+        def slow_run(should_stop: Any) -> Any:
+            time.sleep(pause)
+            return run(should_stop)
+
+        job.run = slow_run
+        return job
+
+    for name in names:
+        real = getattr(engine, name)
+
+        def wrapper(*args: Any, __real: Any = real, **kwargs: Any) -> Any:
+            out = __real(*args, **kwargs)
+            if out is None:
+                return None
+            if isinstance(out, list):
+                return [slowed(j) for j in out]
+            return slowed(out)
+
+        monkeypatch.setattr(engine, name, wrapper)

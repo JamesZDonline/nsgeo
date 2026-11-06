@@ -30,10 +30,11 @@ from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    MEASURING_STRETCH_INDICATOR,
     NO_TRANSFORM,
-    PREVIEW_STATUS,
+    PREVIEW_INDICATOR,
     REFINE_REST_MS,
-    REFINING_STATUS,
+    REFINING_GRIDS_INDICATOR,
     SliceFinish,
     default_cell,
     format_bytes,
@@ -42,7 +43,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
-from plugin_testing import LoadCounter, spin_until
+from plugin_testing import LayoutProbe, LoadCounter, slow_jobs, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
@@ -2129,7 +2130,7 @@ def test_a_slow_site_tick_previews_then_refines(plugin):
     _events()
     assert scope.slice.provisional is True
     assert scope.provisional
-    assert dock.status_label.text() == PREVIEW_STATUS
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
     window = scope.window
     preview = scope.slice.array
     np.testing.assert_array_equal(preview, _site_drawn(dock, preview=True))
@@ -2778,7 +2779,7 @@ def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, 
 
     def hook(done, of):
         if done == 0:
-            seen.append((dock.refiner.busy, dock.status_label.text()))
+            seen.append((dock.refiner.busy, dock.refine_label.text()))
         if done == of:  # every band solved; the current slice is unsolved again
             for grid_id in dock.site_engine.ready_grids:
                 engine = dock.site_engine.engine_for(grid_id)
@@ -2793,7 +2794,7 @@ def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, 
     assert job.stopped_by_request
     busy, text = seen[0]
     assert busy is False
-    assert not text.startswith(REFINING_STATUS.split("{")[0]), text
+    assert not text.startswith("Refining"), text
     _events(3)
     _pump_until(lambda: dock._site.provisional, 5.0)
     assert dock._site.refine.rest.isActive()
@@ -2874,3 +2875,86 @@ def test_a_slow_site_export_shows_its_progress_before_the_first_band(
     dock.export_button.click()
     assert target.exists()
     assert at_band_0 == [(shown, shown)]
+
+
+# ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
+
+
+def _slow_site_unsolved(plugin, monkeypatch):
+    """Whole site on minimum curvature with a shared stretch, nothing solved
+    and every solve slow: a move runs preview, refine grids, measure stretch."""
+    dock = _site_minimum_curvature(plugin, 500.0, stretch=0)
+    site = dock.site_engine
+    for grid_id in site.ready_grids:
+        engine = site.engine_for(grid_id)
+        engine._solved.clear()
+        engine._last_solve_ms = 500.0
+    dock._site.refine.stretch = None
+    slow_jobs(monkeypatch, site, ("pending_solves", "stretch_solves"))
+    return dock
+
+
+@pytest.mark.parametrize("width", [260, 400])
+def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, monkeypatch, width):
+    """W1, in Whole site: the content's height and the slider's place do not
+    change from normal through preview, refining the grids and measuring the
+    stretch, to final."""
+    dock = _slow_site_unsolved(plugin, monkeypatch)
+    dock.resize(width, 700)
+    dock.show()
+    probe = LayoutProbe(dock)
+    baseline = probe.record()
+    dock.slice_slider.setValue(30)
+    scope = dock._site
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        probe.record()
+        if not (
+            scope.provisional
+            or dock.refiner.busy
+            or scope.refine.rest.isActive()
+            or scope.tick.isActive()
+        ):
+            break
+        time.sleep(0.005)
+    probe.record()
+    texts = {text for text, _ in probe.seen}
+    assert PREVIEW_INDICATOR in texts
+    assert any(t.startswith("Refining this slice (") for t in texts), texts
+    assert any(t.startswith("Measuring the colour stretch (") for t in texts), texts
+    assert probe.seen[-1][0] == ""
+    assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
+
+
+def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
+    dock = _slow_site_unsolved(plugin, monkeypatch)
+    scope = dock._site
+    dock.slice_slider.setValue(30)
+    _events()
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    seen: list[str] = []
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        assert "Refin" not in dock.status_label.text()
+        assert "preview" not in dock.status_label.text().lower()
+        text = dock.refine_label.text()
+        if text and (not seen or seen[-1] != text):
+            seen.append(text)
+        if not (
+            dock.refiner.busy
+            or scope.provisional
+            or scope.refine.rest.isActive()
+            or scope.tick.isActive()
+        ):
+            break
+        time.sleep(0.002)
+    grids = len(dock.site_engine.ready_grids)
+    assert seen[0] == PREVIEW_INDICATOR
+    assert seen[1] == REFINING_GRIDS_INDICATOR.format(done=0, total=grids)
+    measuring = [t for t in seen if t.startswith("Measuring")]
+    assert measuring[0].startswith("Measuring the colour stretch (0 of ")
+    total = int(measuring[0].rsplit(" ", 1)[1].rstrip(")…"))
+    assert total >= grids  # (grid, window) jobs, not windows
+    assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)
+    assert dock.refine_label.text() == ""

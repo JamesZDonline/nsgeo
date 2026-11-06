@@ -20,14 +20,23 @@ from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_engine import solve_key
 from nsgeo_qgis.slices_plan import (
     DEFAULT_BUDGET_BYTES,
-    PREVIEW_STATUS,
+    MEASURING_STRETCH_INDICATOR,
+    PREVIEW_INDICATOR,
     REFINE_REST_MS,
+    REFINING_SLICE_INDICATOR,
     SliceFinish,
     limit_windows,
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
-from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
+from plugin_testing import (
+    REAL_DZT,
+    LayoutProbe,
+    connect_message_log,
+    needs_real_data,
+    slow_jobs,
+    synthetic_dzt,
+)
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -2634,7 +2643,7 @@ def test_a_slow_slice_shows_the_preview_then_refines(docked, move):
         dock.step_slice(1)
     window = dock.current_window()
     assert dock.provisional
-    assert dock.status_label.text() == PREVIEW_STATUS
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
     preview = dock.current_values()
     np.testing.assert_array_equal(preview, _drawn_by_the_engine(dock, "preview"))
 
@@ -3105,3 +3114,94 @@ def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_moda
         if not unloaded:
             answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
             plugin.unload()
+
+
+# ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
+
+
+def _slow_unsolved(dock, monkeypatch):
+    """Minimum curvature on a shared stretch with nothing solved yet and every
+    solve slow, so a move runs preview, refine slice, measure stretch."""
+    _minimum_curvature(dock, 500.0, stretch="shared across the cube")
+    engine = dock.engine
+    engine._solved.clear()
+    dock._grid_refine.stretch = None
+    engine._last_solve_ms = 500.0
+    slow_jobs(monkeypatch, engine, ("pending_solve", "stretch_solves"))
+
+
+@pytest.mark.parametrize("width", [260, 400])
+def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeypatch, width):
+    """W1: the content's height and the slider's place do not change as a slice
+    goes normal, preview, refining the slice, measuring the stretch, final. The
+    old bottom status line changed height between them (47, 70, 24 px)."""
+    dock, _ = docked
+    dock.resize(width, 700)
+    dock.show()
+    _ready(dock)
+    _slow_unsolved(dock, monkeypatch)
+    probe = LayoutProbe(dock)
+    baseline = probe.record()
+    dock.slice_slider.setValue(20)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        probe.record()
+        if not (dock.provisional or dock.refiner.busy or dock._grid_refine.rest.isActive()):
+            break
+        time.sleep(0.005)
+    probe.record()
+    texts = {text for text, _ in probe.seen}
+    assert PREVIEW_INDICATOR in texts
+    assert REFINING_SLICE_INDICATOR in texts
+    assert any(t.startswith("Measuring the colour stretch (") for t in texts), texts
+    assert probe.seen[-1][0] == ""
+    assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
+
+
+def test_the_indicator_names_each_state_and_the_status_never_does(docked, monkeypatch):
+    dock, _ = docked
+    _slow_unsolved(dock, monkeypatch)
+    assert dock.refine_label.text() == ""
+    dock.slice_slider.setValue(20)
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    stretch_total = len(
+        dock.engine.stretch_solves(dock.current_window().n_levels, dock.slice_finish())
+    )
+    counts: list[str] = []
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        text = dock.refine_label.text()
+        assert "Refin" not in dock.status_label.text()
+        assert "preview" not in dock.status_label.text().lower()
+        if text and (not counts or counts[-1] != text):
+            counts.append(text)
+        if text == "" and not dock.refiner.busy and not dock.provisional:
+            break
+        time.sleep(0.002)
+    assert counts[0] == PREVIEW_INDICATOR
+    assert counts[1] == REFINING_SLICE_INDICATOR
+    measuring = [c for c in counts if c.startswith("Measuring")]
+    # Counts the stretch windows only: the slice on screen is one of them and
+    # is solved already, so the list holds one fewer than were unsolved.
+    total = stretch_total - 1
+    assert measuring[0] == MEASURING_STRETCH_INDICATOR.format(done=0, total=total)
+    assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)
+    assert dock.refine_label.text() == ""
+
+
+def test_the_indicator_never_raises_the_dock_minimum_width(docked):
+    """Its text width is not a floor on the main window (the walkthrough's
+    minimum-size trap): the longest text, in a dock narrower than it."""
+    dock, _ = docked
+    _ready(dock)
+    dock.show()
+    QCoreApplication.processEvents()
+    before = dock.minimumSizeHint().width()
+    longest = MEASURING_STRETCH_INDICATOR.format(done=9999, total=9999) + " and then some " * 6
+    dock.refine_label.setText(longest)
+    QCoreApplication.processEvents()
+    assert dock.minimumSizeHint().width() == before
+    assert dock.refine_label.minimumSizeHint().width() <= 20
+    assert dock.refine_label.text() == longest
+    assert dock.refine_label.height() == dock.refine_label.fontMetrics().height() + 2

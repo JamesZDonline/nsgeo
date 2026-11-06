@@ -940,6 +940,7 @@ class SiteScope:
                 dock.site_depths_label.setText("")
                 dock.legend_label.setText("")
                 dock.status_label.setText(self.engine.status_text())
+                dock.show_refine()
                 dock.slice_changed.emit()
                 dock.window_cleared.emit()
                 return
@@ -983,11 +984,13 @@ class SiteScope:
             lo_ns, hi_ns = window_times_ns(z, window)
             dock.window_changed.emit(lo_ns, hi_ns)
             dock.status_label.setText(self.status_text())
+            dock.show_refine()
             dock.slice_changed.emit()
         except Exception as exc:  # noqa: BLE001 -- reached from slots and timers
             # No preview stands, so no refine is owed (plan call 5).
-            if self.refine.stop():
-                dock.status_label.setText(self.engine.status_text())
+            self.refine.stop()
+            dock.status_label.setText(self.engine.status_text())
+            dock.show_refine()
             self.slice = None
             self.window = None
             self.drawn_at = None
@@ -1000,9 +1003,9 @@ class SiteScope:
 
     # ---- minimum curvature's refine ---------------------------------------------------
     def status_text(self) -> str:
-        """The site's status line: the refine's progress while the worker runs,
-        the preview's note while one is drawn, and the site's own otherwise."""
-        return self.refine.status(self.engine.status_text())
+        """The site's status line: memory and redraw time only. Refine states
+        show in the indicator under the readout (walkthrough round 1, W1)."""
+        return self.engine.status_text()
 
     def _on_rest(self) -> None:
         """The depth has rested: solve, in the background, the grids the tick
@@ -1047,7 +1050,7 @@ class SiteScope:
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
                 self.schedule_refresh()
             else:
-                dock.status_label.setText(self.status_text())
+                dock.show_refine()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
             dock.error.emit(f"could not start refining the site: {exc}")
 
@@ -1064,7 +1067,7 @@ class SiteScope:
             if redraw:
                 self.schedule_refresh()
             else:
-                self.dock.status_label.setText(self.status_text())
+                self.dock.show_refine()
         except Exception as exc:  # noqa: BLE001 -- from the refine worker's poll timer
             self.dock.error.emit(f"could not draw the refined site: {exc}")
 
@@ -1074,7 +1077,7 @@ class SiteScope:
         try:
             self.dock.error.emit(self.refine.failed(message))
             if self.showing:
-                self.dock.status_label.setText(self.engine.status_text())
+                self.dock.show_refine()
         except Exception:  # noqa: BLE001 -- from the refine worker's poll timer
             _log(f"could not report that minimum curvature failed on the site: {message}")
 

@@ -50,7 +50,7 @@ from nsgeo.slices import (
 from nsgeo.velocity import VelocityModel
 from qgis.gui import QgsDockWidget
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QEvent, QObject, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -63,6 +63,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -117,6 +118,47 @@ def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
     elif not upper and snapped < value:
         snapped += step
     return round(snapped, decimals)
+
+
+class ElidedLabel(QLabel):
+    """A one-line label of fixed height whose text never sets its width.
+
+    A QLabel's text width is its minimum width, and a dock's minimum size is a
+    hard floor on the QGIS main window. This one asks for no width (`Ignored`),
+    shows what fits and elides the rest, and keeps its height when empty, so
+    it never appears, vanishes or wraps (walkthrough round 1, W1). The full
+    text is the label's `full_text`, for tests and tooltips."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__("")
+        self.full_text = ""
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.fontMetrics().height() + 2)
+        self.setText(text)
+
+    def setText(self, text: str | None) -> None:  # noqa: N802 -- Qt override
+        self.full_text = text or ""
+        self._elide()
+
+    def text(self) -> str:
+        return self.full_text
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        return QSize(0, self.height())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        return QSize(0, self.height())
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 -- Qt override
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self.full_text, Qt.TextElideMode.ElideRight, max(self.width(), 1)
+        )
+        super().setText(shown)
 
 
 class SlicesDock(QgsDockWidget):
@@ -353,6 +395,14 @@ class SlicesDock(QgsDockWidget):
 
         self.readout = QLabel("not prepared")
         position_layout.addWidget(self.readout)
+
+        # Walkthrough round 1, W1: the minimum-curvature preview / refine state,
+        # one line directly under the readout. Fixed height, kept when empty,
+        # so it never appears, vanishes or wraps (a changing status line moved
+        # the scrolled panel out from under the wheel); Ignored width and
+        # elided text, so a long text never raises the dock's minimum width.
+        self.refine_label = ElidedLabel("")
+        position_layout.addWidget(self.refine_label)
 
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
@@ -2203,8 +2253,8 @@ class SlicesDock(QgsDockWidget):
         try:
             window = self.current_window()
             if window is None or not self.engine.is_prepared:
-                if self._end_refine():
-                    self.status_label.setText(self._grid_status_text())
+                self._end_refine()
+                self.show_refine()
                 self._values = None
                 # Fix round 1, Important 4: emitted here too. `set_source`
                 # empties the engine's lines SYNCHRONOUSLY, before any
@@ -2230,7 +2280,8 @@ class SlicesDock(QgsDockWidget):
             self._update_readout(window)
             lo_ns, hi_ns = window_times_ns(self.engine.z, window)
             self.window_changed.emit(lo_ns, hi_ns)
-            self.status_label.setText(self._refine_status())
+            self.status_label.setText(self._grid_status_text())
+            self.show_refine()
             # Recorded only once the draw succeeded, and by a coverage draw
             # too (#72): `rebuild_source` redraws when the finish in metres
             # differs from this, so a value left over from an earlier draw
@@ -2258,8 +2309,8 @@ class SlicesDock(QgsDockWidget):
             # "error: ...", the exact same stale-state failure `_values`/
             # `_window`/`readout` are already reset here to avoid. And no
             # preview stands, so no refine is owed (plan call 5).
-            if self._end_refine():
-                self.status_label.setText(self._grid_status_text())
+            self._end_refine()
+            self.show_refine()
             self._values = None
             self._window = None
             self.readout.setText(f"error: {exc}")
@@ -2329,10 +2380,10 @@ class SlicesDock(QgsDockWidget):
         removed as a failure's, and a cancel reported as a Critical.
         """
         if self._scope == "site":
-            if self._site.refine.stop():
-                self.status_label.setText(self._site.status_text())
-        elif self._end_refine():
-            self.status_label.setText(self._grid_status_text())
+            self._site.refine.stop()
+        else:
+            self._end_refine()
+        self.show_refine()
         try:
             yield
         finally:
@@ -2347,11 +2398,22 @@ class SlicesDock(QgsDockWidget):
         the depth rests (plan call 5)."""
         return self._grid_refine.provisional
 
-    def _refine_status(self) -> str:
-        """This grid's status line: the refine's progress while the worker
-        runs, the preview's note while one is drawn, and today's text
-        otherwise (plan call 5)."""
-        return self._grid_refine.status(self._grid_status_text())
+    def show_refine(self) -> None:
+        """Show the active scope's refine state in the indicator under the
+        depth readout (walkthrough round 1, W1): one line of fixed height, so
+        no state change re-lays out the scrolled panel under the user's wheel.
+        Called wherever a flow's state can have changed."""
+        if self._scope == "site":
+            text = self._site.refine.indicator(grids=True)
+        else:
+            text = self._grid_refine.indicator()
+        self.refine_label.setText(text)
+        self.refine_label.setToolTip(
+            "Minimum curvature is drawn as a kriging preview while the depth moves, "
+            "then solved in the background once it rests."
+            if text
+            else ""
+        )
 
     def _stretch_key(self, window: SliceWindow, finish: SliceFinish) -> tuple[Any, ...]:
         """What This grid's shared stretch is measured over: `(n_levels,
@@ -2412,7 +2474,7 @@ class SlicesDock(QgsDockWidget):
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
                 self.refresh_slice()
             else:
-                self.status_label.setText(self._refine_status())
+                self.show_refine()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
             self.error.emit(f"could not start refining the slice: {exc}")
 
@@ -2430,7 +2492,7 @@ class SlicesDock(QgsDockWidget):
             if redraw:
                 self.refresh_slice()
             else:
-                self.status_label.setText(self._refine_status())
+                self.show_refine()
         except Exception as exc:  # noqa: BLE001 -- from the refine worker's poll timer
             self.error.emit(f"could not draw the refined slice: {exc}")
 
@@ -2440,7 +2502,7 @@ class SlicesDock(QgsDockWidget):
         try:
             self.error.emit(self._grid_refine.failed(message))
             if self._scope == "grid":
-                self.status_label.setText(self._grid_status_text())
+                self.show_refine()
         except Exception:  # noqa: BLE001 -- from the refine worker's poll timer
             _log(f"could not report that minimum curvature failed: {message}")
 
@@ -2717,6 +2779,7 @@ class SlicesDock(QgsDockWidget):
             # M11's self re-preparation on a move would start beside it.
             site_scope.show_scope_widgets(self)
             self._resume_grid(top)
+        self.show_refine()
 
     def _on_scope_clicked(self, scope: str) -> None:
         try:

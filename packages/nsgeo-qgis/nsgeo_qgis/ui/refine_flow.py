@@ -45,7 +45,13 @@ from typing import Any
 from qgis.PyQt.QtCore import QObject, QTimer
 
 from nsgeo_qgis.refine import Refiner
-from nsgeo_qgis.slices_plan import PREVIEW_STATUS, REFINE_REST_MS, REFINING_STATUS
+from nsgeo_qgis.slices_plan import (
+    MEASURING_STRETCH_INDICATOR,
+    PREVIEW_INDICATOR,
+    REFINE_REST_MS,
+    REFINING_GRIDS_INDICATOR,
+    REFINING_SLICE_INDICATOR,
+)
 
 #: A solve as a flow tells it apart: the engine it lands in, and its key.
 SolveId = tuple[Any, bytes]
@@ -74,9 +80,11 @@ class RefineFlow:
         #: Whether what the scope draws is a kriging preview, refined once the
         #: depth rests.
         self.provisional = False
-        #: How many of the running list have landed, of how many: the status.
+        #: How many of the running list have landed, of how many, and how many
+        #: of the list are the slice on screen's (they run first): the indicator.
         self.done = 0
         self.total = 0
+        self.slice_jobs = 0
         #: `(key, limit, final)`: the scope's shared stretch and the scope's
         #: own key for what it was measured over. `final` is False for minimum
         #: curvature's provisional stretch, measured over kriging previews
@@ -88,15 +96,25 @@ class RefineFlow:
         #: yet, by `SolveId`. Kept as jobs, so their plans can be checked.
         self._head: dict[SolveId, Any] = {}
 
-    def status(self, normal: str) -> str:
-        """The scope's status line: the refine's progress while the worker
-        runs, the preview's note while one is drawn, and `normal` otherwise
-        (plan call 5)."""
+    def indicator(self, *, grids: bool = False) -> str:
+        """The scope's one-line refine indicator (walkthrough round 1, W1-W3):
+        what the worker is solving while it runs, the preview's note while one
+        is drawn, and empty otherwise. `grids` in Whole site, where several
+        grids are solved for one slice. The slice's solves run first, so the
+        count tells which phase the list is in; stretch counts cover stretch
+        windows only. Never the status line's: that one's height moves the
+        panel under the user's wheel."""
         if self.refiner.busy:
-            return REFINING_STATUS.format(done=self.done, total=self.total)
+            if self.done < self.slice_jobs:
+                if grids:
+                    return REFINING_GRIDS_INDICATOR.format(done=self.done, total=self.slice_jobs)
+                return REFINING_SLICE_INDICATOR
+            return MEASURING_STRETCH_INDICATOR.format(
+                done=self.done - self.slice_jobs, total=self.total - self.slice_jobs
+            )
         if self.provisional:
-            return PREVIEW_STATUS
-        return normal
+            return PREVIEW_INDICATOR
+        return ""
 
     # ---- draws ------------------------------------------------------------
     def before_draw(self, *, rebuilds: bool) -> None:
@@ -180,6 +198,7 @@ class RefineFlow:
         if queued:
             self._head = {solve_id(job): job for job in current}
             self.done, self.total = 0, len(queued)
+            self.slice_jobs = len(self._head)
             self.refiner.start(list(queued.values()), on_landed, on_error)
         elif self.stretch is not None and not self.stretch[2]:
             self.stretch = None  # every window is solved: measure the final one

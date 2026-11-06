@@ -401,7 +401,9 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
      beside a strong contrast between lines. It is solved for each slice, so it
      is slower.
      At a fine cell you see kriging while the depth moves, and minimum
-     curvature replaces it a moment after the depth rests. The colour stretch
+     curvature replaces it a moment after the depth rests. A short line under
+     the depth readout says which: **Kriging preview**, **Refining this
+     slice…**, or **Measuring the colour stretch…**. The colour stretch
      can shift once more when minimum curvature has measured it. An export
      always uses minimum curvature, shows its progress, and can be cancelled.
      Pick **None (binned only)** to see only the cells a line crossed.

@@ -22,7 +22,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo_qgis.slices_plan import PREVIEW_STATUS, REFINING_STATUS
+from nsgeo_qgis.slices_plan import PREVIEW_INDICATOR, REFINING_SLICE_INDICATOR
 from plugin_testing import drag_in_layers_panel, synthetic_dzt
 from qgis.core import Qgis, QgsVectorLayer
 from qgis.PyQt.QtCore import QCoreApplication, Qt
@@ -638,13 +638,13 @@ def test_an_export_cancels_a_running_refine(plugin, tmp_path, answer_modal, monk
     assert dock.provisional
     _pump_until(job.started.is_set)
     assert dock.refiner.busy
-    assert dock.status_label.text().startswith(REFINING_STATUS.split("{")[0])
+    assert dock.refine_label.text() == REFINING_SLICE_INDICATOR
 
     seen: list[tuple[bool, str]] = []
 
     def hook(done, of):
         if done == 0:
-            seen.append((dock.refiner.busy, dock.status_label.text()))
+            seen.append((dock.refiner.busy, dock.refine_label.text()))
         if done == of:  # every band solved: the current slice is not one of them now
             dock.engine._solved.clear()
             dock.engine._last_solve_ms = 500.0
@@ -657,10 +657,11 @@ def test_an_export_cancels_a_running_refine(plugin, tmp_path, answer_modal, monk
     assert job.stopped_by_request
     busy, text = seen[0]
     assert busy is False
-    assert not text.startswith(REFINING_STATUS.split("{")[0]), text
+    assert not text.startswith("Refining"), text
     assert dock.provisional
     assert dock._grid_refine.rest.isActive()
-    assert PREVIEW_STATUS in dock.status_label.text()
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    assert "Refining" not in dock.status_label.text()
     dock.refiner.cancel()
 
 
