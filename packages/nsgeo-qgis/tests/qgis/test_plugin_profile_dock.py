@@ -10,6 +10,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.render import PercentileClip, colormap_names, to_index8
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
@@ -2162,3 +2163,10 @@ def test_the_held_windows_are_forgotten_when_the_site_closes(opened, tmp_path):
     session.open_line(nkey)
     t = dock.view.transform
     assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+
+
+def test_a_line_edit_reaches_the_open_profile_even_when_its_ruler_is_unchanged(opened):
+    session, dock, key, line = opened
+    assert "wall line" not in dock.windowTitle()
+    session.edit_lines([LineEdit(key, line.placement, label="wall line")])
+    assert "wall line" in dock.windowTitle()

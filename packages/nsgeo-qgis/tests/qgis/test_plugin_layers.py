@@ -20,6 +20,7 @@ from nsgeo_qgis.layers import (
     TABLES,
     SiteLayers,
 )
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
@@ -2612,3 +2613,24 @@ def test_a_hand_digitised_row_with_no_trace_is_left_alone_and_the_rest_still_fol
     assert (hand.geometry().asPoint().x(), hand.geometry().asPoint().y()) == (1.0, 2.0)
     pt = _rows(layers)["raw/FILE__002.DZT"].geometry().asPoint()
     assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__002.DZT", 8), abs=1e-9)
+
+
+def test_a_pick_follows_a_line_edit_and_a_move_to_a_grid_with_another_velocity(populated):
+    session, layers, _ = populated
+    key = "raw/FILE__001.DZT"
+    session.add_grid(
+        Grid(
+            "B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5,
+            velocity=VelocityModel.constant(0.08),
+        )
+    )  # fmt: skip
+    layers.write_pick(_a_pick(trace=30))
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, offset=1.75)])
+    pt = _rows(layers)[key].geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    session.move_lines([key], "B")
+    f = _rows(layers)[key]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    assert session.line_for_key(key).placement.grid_id == "B"
+    assert f["velocity_m_ns"] == pytest.approx(0.08)

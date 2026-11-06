@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime
 
@@ -10,7 +11,9 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_fit import StoredFit
 from nsgeo_qgis import session as session_module
+from nsgeo_qgis.line_edit import CHANGED_ELSEWHERE, REMOVED, LineEdit
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
 from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
 from qgis.core import Qgis
@@ -1520,3 +1523,198 @@ def test_remembering_the_same_method_again_does_not_mark_dirty(session):
     session.remember_slice_resolution("A", method="kriging", max_distance_spacings=0.5)
     session.remember_site_resolution(method="kriging", smooth_x_m=0.0)
     assert not session.dirty
+
+
+# --- line editing (line editing spec §4.2-4.3) --------------------------------
+
+
+def _zigzag(session, folder):
+    """Grid A (11 m along y) with four y lines at offsets 0 .. 1.5, forward
+    and reversed alternately, and Grid B (9 m) with two forward lines.
+    Returns the keys on A and on B."""
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 9.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        fwd = i % 2 == 0
+        placement = GridPlacement("A", "y", i * 0.5, 0.0 if fwd else 11.0, 1 if fwd else -1, p.stem)
+        lines.append(Line.open(p, placement))
+    for i in range(2):
+        p = synthetic_dzt(folder / "raw", f"FILE__00{i + 5}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("B", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    return session.keys_on_grid("A"), session.keys_on_grid("B")
+
+
+def _edit(session, key, **kw):
+    return LineEdit(key, session.line_for_key(key).placement, **kw)
+
+
+def test_edit_lines_applies_every_edit_as_one_change(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    lines = Spy(session.lines_changed)
+    outcome = session.edit_lines(
+        [_edit(session, a[0], offset=2.0), _edit(session, a[1], label="wall line")]
+    )
+    assert len(lines.calls) == 1 and session.dirty
+    assert session.line_for_key(a[0]).placement.offset == 2.0
+    assert session.line_for_key(a[1]).placement.label == "wall line"
+    assert outcome.changed == (a[0], a[1])
+
+
+def test_an_edit_that_changes_nothing_emits_nothing(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    lines = Spy(session.lines_changed)
+    own = session.line_for_key(a[0]).placement.offset
+    outcome = session.edit_lines([_edit(session, a[0], offset=own)])
+    assert outcome.changed == () and not outcome.reordered
+    assert lines.calls == [] and not session.dirty
+
+
+def test_a_line_changed_elsewhere_since_the_table_read_it_is_skipped_and_named(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    rev, fwd = a[1], a[0]
+    flips = [
+        _edit(session, rev).flipped(session.site.frames),
+        _edit(session, fwd).flipped(session.site.frames),
+    ]
+    session.replace_grid(dataclasses.replace(session.grid("A"), size_y=12.0))
+    outcome = session.edit_lines(flips)
+    assert [(s.key, s.label, s.reason) for s in outcome.skipped] == [
+        (rev, "FILE__002", CHANGED_ELSEWHERE)
+    ]
+    assert outcome.changed == (fwd,)
+    p = session.line_for_key(fwd).placement
+    assert (p.direction, p.start_along) == (-1, 12.0)  # against today's length
+    assert session.line_for_key(rev).placement.start_along == 12.0  # followed the grid, not edited
+
+
+def test_a_removed_line_is_skipped_not_raised(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    edit = _edit(session, a[0], offset=3.0)
+    session.remove_line(a[0])
+    outcome = session.edit_lines([edit])
+    assert outcome.changed == ()
+    assert [(s.key, s.reason) for s in outcome.skipped] == [(a[0], REMOVED)]
+
+
+def test_moving_a_line_keeps_its_inset_and_joins_the_new_grid_at_the_end(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    key = a[1]  # reversed, starts at 11.0 = its far edge
+    session.append_step(key, build_step("dewow"))
+    session.set_line_velocity(key, VelocityModel.constant(0.07))
+    fit_id = session.add_velocity_fit(
+        key, StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
+    )
+    session.open_line(key)
+    outcome = session.move_lines([key], "B")
+    p = session.line_for_key(key).placement
+    assert (p.grid_id, p.start_along, p.direction) == ("B", 9.0, -1)
+    assert outcome.changed == (key,)
+    assert session.keys_on_grid("B")[-1] == key and session.keys()[-1] == key
+    assert len(session.stack_for(key, insert=False)) == 1
+    assert session.line_for_key(key).velocity == VelocityModel.constant(0.07)
+    assert fit_id in session.line_for_key(key).velocity_fits
+    assert session.current_key == key
+    assert key not in session.keys_on_grid("A")
+    assert set(session.keys_on_grid("B")) == set(b) | {key}
+
+
+def test_a_moved_line_leaves_the_old_grids_remembered_slice_lines(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.remember_slice_source("A", preset="p", lines=(a[0], a[1]))
+    session.move_lines([a[1]], "B")
+    assert session.slice_source("A")["lines"] == [a[0]]
+
+
+def test_order_reorders_only_the_grids_own_slots(session, tmp_path):
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 9.0, "EPSG:32616", 0.5))
+    lines = []
+    for name, grid in [("A1", "A"), ("B1", "B"), ("A2", "A"), ("B2", "B"), ("A3", "A")]:
+        p = synthetic_dzt(tmp_path / "raw", f"{name}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement(grid, "y", 0.0, 0.0, 1, name)))
+    session.add_lines(lines)
+    k = {name: f"raw/{name}.DZT" for name in ("A1", "B1", "A2", "B2", "A3")}
+    outcome = session.edit_lines([], grid_id="A", order=[k["A3"], k["A1"], k["A2"]])
+    assert outcome.reordered
+    assert session.keys() == [k["A3"], k["B1"], k["A1"], k["B2"], k["A2"]]
+    session.save()
+    again = SiteSession()
+    again.open_site(session.json_path)
+    assert again.keys() == session.keys()
+
+
+def test_lines_that_arrived_after_the_table_read_go_after_the_reordered_ones(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    outcome = session.edit_lines([], grid_id="A", order=[a[2], a[0]])
+    assert outcome.reordered
+    assert session.keys_on_grid("A") == [a[2], a[0], a[1], a[3]]
+
+
+def test_order_without_a_grid_and_a_key_edited_twice_are_refused(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    with pytest.raises(ValueError):
+        session.edit_lines([], order=a)
+    with pytest.raises(ValueError):
+        session.edit_lines([_edit(session, a[0], offset=2.0), _edit(session, a[0], offset=3.0)])
+    with pytest.raises(KeyError):
+        session.edit_lines([], grid_id="nope")
+
+
+def test_a_grid_length_change_takes_its_reversed_lines_with_the_far_edge(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    grids, lines = Spy(session.grids_changed), Spy(session.lines_changed)
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_y=10.0))
+    starts = [session.line_for_key(k).placement.start_along for k in a]
+    assert starts == [0.0, 10.0, 0.0, 10.0]
+    assert (
+        report.message()
+        == "A is now 10.00 m along y; its 2 reversed line(s) moved with the far edge."
+    )
+    assert len(grids.calls) == 1 and len(lines.calls) == 1
+
+
+def test_a_width_change_moves_nothing_and_names_lines_left_outside(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    before = [session.line_for_key(k).placement for k in a]
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_x=1.2))
+    assert [session.line_for_key(k).placement for k in a] == before
+    assert report.moved == () and report.outside == ("FILE__004",)
+
+
+def test_a_velocity_only_grid_edit_moves_no_line_and_reports_nothing(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    before = [session.line_for_key(k).placement for k in a]
+    session.set_grid_velocity("A", VelocityModel.constant(0.1))
+    report = session.replace_grid(
+        dataclasses.replace(session.grid("A"), velocity=VelocityModel.constant(0.09))
+    )
+    assert report.message() == "" and report.moved == () and report.outside == ()
+    assert [session.line_for_key(k).placement for k in a] == before
+
+
+def test_both_axes_on_one_grid_follow_only_their_own_length(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "x", 1.0, 5.0, -1, "x 1"))])
+    xkey = session.keys()[-1]
+    before = [session.line_for_key(k).placement for k in a]
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_x=4.0))
+    assert session.line_for_key(xkey).placement.start_along == 4.0
+    assert [session.line_for_key(k).placement for k in a] == before
+    assert report.moved == (("x", 4.0, 1),)
+
+
+def test_move_lines_leaves_lines_already_there_alone(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    lines = Spy(session.lines_changed)
+    outcome = session.move_lines([b[0]], "B")
+    assert outcome.changed == () and lines.calls == []
+    gone = session.move_lines(["raw/GONE.DZT"], "B")
+    assert [(s.key, s.label, s.reason) for s in gone.skipped] == [("raw/GONE.DZT", "GONE", REMOVED)]
+    with pytest.raises(KeyError):
+        session.move_lines([a[0]], "nope")

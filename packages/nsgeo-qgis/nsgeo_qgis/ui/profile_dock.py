@@ -194,6 +194,7 @@ class ProfileDock(QgsDockWidget):
         # (line key, fit id) the velocity dialog has selected, drawn bold.
         self._highlighted_fit: tuple[str, str] | None = None
         self._working_key: str | None = None
+        self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
         # it. A None pair means the whole ruler (metres) or the whole record
@@ -526,7 +527,13 @@ class ProfileDock(QgsDockWidget):
                 line = self.session.line_for_key(key)
             except KeyError:
                 return  # removed in the same change; line_opened follows
-            if self._ruler_for(line, self._safe_distance(line)) != self.view.ruler:
+            # A label or an offset edit leaves the ruler alone but changes
+            # what the title says, so a changed placement shows the line
+            # again too (line editing spec §4.2).
+            if (
+                self._ruler_for(line, self._safe_distance(line)) != self.view.ruler
+                or line.placement != self._shown_placement
+            ):
                 self._show_line(key, is_preview=self._preview_key is not None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
@@ -652,6 +659,7 @@ class ProfileDock(QgsDockWidget):
         saying so directly is the honest version.
         """
         line = self.session.line_for_key(key)
+        self._shown_placement = line.placement
         label = getattr(line.placement, "label", None) or line.path.stem
         shown = f"PREVIEW: {label}" if is_preview else label
         self.setWindowTitle(f"nsgeo Profile · {shown} · {line.n_traces} traces")

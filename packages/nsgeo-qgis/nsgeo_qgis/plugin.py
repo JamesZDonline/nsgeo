@@ -1484,7 +1484,14 @@ class NsgeoPlugin:
                             if grid is None:
                                 self.session.add_grid(new_grid)
                             else:
-                                self.session.replace_grid(new_grid)
+                                report = self.session.replace_grid(new_grid)
+                                if report.message():
+                                    self.message(
+                                        report.message(),
+                                        Qgis.MessageLevel.Warning
+                                        if report.outside
+                                        else Qgis.MessageLevel.Info,
+                                    )
                         except (ValueError, KeyError) as exc:
                             self.message(str(exc), Qgis.MessageLevel.Critical)
             finally:

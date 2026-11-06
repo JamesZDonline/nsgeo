@@ -8,11 +8,19 @@ from typing import Any
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.survey import Line
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.grid_dialog import COL_A, COL_B, COL_FROM, COL_ROLE, GridDialog
-from plugin_testing import feature_id, named_layer, send_map_key, send_map_mouse
+from plugin_testing import (
+    feature_id,
+    named_layer,
+    send_map_key,
+    send_map_mouse,
+    synthetic_dzt,
+)
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -505,6 +513,40 @@ def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, answer_mo
     dialog.accept()
 
     assert plugin.session.grid("A").azimuth == pytest.approx(46.0)
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+
+
+def test_a_grid_length_edit_says_its_reversed_lines_moved(
+    fake_iface, tmp_path, answer_modal, message_log
+):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(
+        Grid(
+            "A",
+            (1.0, 2.0),
+            45.0,
+            3.0,
+            4.0,
+            "EPSG:32616",
+            0.25,
+            velocity=VelocityModel.constant(0.1),
+        )
+    )
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    plugin.session.add_lines([Line.open(p, GridPlacement("A", "y", 1.0, 4.0, -1, "line 1"))])
+    key = plugin.session.keys()[0]
+
+    dialog = _open(plugin, "A")
+    dialog.size_y.setValue(5.0)
+    dialog.accept()
+
+    assert plugin.session.line_for_key(key).placement.start_along == pytest.approx(5.0)
+    assert "A is now 5.00 m along y; its 1 reversed line(s) moved with the far edge." in message_log
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 
