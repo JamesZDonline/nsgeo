@@ -11,6 +11,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import Radargram
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     CoverageError,
@@ -1665,3 +1666,62 @@ def test_set_source_leaves_out_a_key_now_on_another_grid_and_says_so(sourced):
     assert engine.wait_for_preparation(20_000)
     assert [p.key for p in engine.prepared_lines()] == list(keys[:3])
     assert any("now on grid 'B', not 'A'" in msg for _, msg in errors), errors
+
+
+#: Migration in a preset. `sample` mode rather than `first_break` because
+#: the synthetic's flat band sits at row 40, nine samples earlier than a
+#: real first break (k=49 on every local line), which would leave t0 at
+#: -2.43 ns -- outside migration's 2.0 ns tolerance. Sample 51 lands it at
+#: -0.04 ns, which is where a real line's time zero ends up.
+MIGRATING_PRESET = [
+    {"step": "time_zero", "params": {"mode": "sample", "sample": 51}, "enabled": True},
+    {"step": "migrate_fk", "params": {"velocity_m_ns": 0.0733}, "enabled": True},
+]
+
+
+def test_migration_reaches_the_cube_through_the_preset_alone(qgis_app, tmp_path):
+    """Spec section 8: the slices engine needs no change at all.
+
+    Two lines of DIFFERENT trace counts, one preset, one velocity. Each
+    comes back migrated, at its own trace count and its own dx_m, with
+    nothing carried from one `apply` call into the next.
+    """
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    # Different trace counts AND different trace spacings: the aperture pad
+    # migration derives is `vm * t_max / dx_m`, so a shared `dx_m` would let
+    # one spacing stand in for both and the test would not notice.
+    shapes = {"FILE__001.DZT": (60, 60.0), "FILE__002.DZT": (97, 40.0)}
+    lines = []
+    for i, (name, (n_traces, tpm)) in enumerate(shapes.items()):
+        path = synthetic_dzt(tmp_path / "raw", name, n_traces=n_traces, traces_per_metre=tpm)
+        lines.append(Line.open(path, GridPlacement("A", "y", 1.0 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    assert sorted(round(Radargram.from_profile(line.load()[0]).dx_m, 6) for line in lines) == [
+        round(1 / 60.0, 6),
+        round(1 / 40.0, 6),
+    ]
+    session.site.presets["plain"] = [MIGRATING_PRESET[0]]
+    session.site.presets["migrating"] = list(MIGRATING_PRESET)
+
+    errors: list[str] = []
+    engine = SliceEngine(session, on_prepared=lambda: None, on_error=errors.append)
+    try:
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="plain")
+        plain = {line.key: np.array(line.data) for line in engine.prepared_lines()}
+        _prepare(engine, session, transform=NO_TRANSFORM, preset="migrating")
+        migrated = {line.key: np.array(line.data) for line in engine.prepared_lines()}
+    finally:
+        engine.dispose()
+
+    assert errors == []
+    assert len(migrated) == 2
+    for key, before in plain.items():
+        after = migrated[key]
+        assert after.shape == before.shape, "migration must not change the trace count"
+        assert np.all(np.isfinite(after))
+        assert not np.allclose(after, before), f"{key} came back unmigrated"
+    # Each at its own trace count, so one preset really did serve two
+    # differently shaped lines.
+    assert sorted(a.shape[1] for a in migrated.values()) == [60, 97]

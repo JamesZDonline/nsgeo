@@ -95,6 +95,7 @@ _STEP_PARAMS = {
     "background_mean": {},
     "background_sliding": {"window_traces": 20},
     "background_svd": {"n_components": 1},
+    "migrate_fk": {"velocity_m_ns": 0.0733},
     "amp_abs": {},
     "amp_square": {},
     "amp_envelope": {},
@@ -108,7 +109,9 @@ def test_none_of_the_steps_mutate_their_input(name):
     the same Radargram (e.g. an earlier cached stack entry)."""
     assert set(_STEP_PARAMS) == set(available_steps())
     rng = np.random.default_rng(0)
-    rg = Radargram(data=rng.normal(size=(128, 300)), dt_ns=0.2, t0_ns=0.0)
+    # dx_m set, so migration can run here too: the point is that no step
+    # writes into the array it was handed.
+    rg = Radargram(data=rng.normal(size=(128, 300)), dt_ns=0.2, t0_ns=0.0, dx_m=1 / 60.0)
     before = rg.data.copy()
     build_step(name, **_STEP_PARAMS[name]).apply(rg)
     np.testing.assert_array_equal(rg.data, before)
