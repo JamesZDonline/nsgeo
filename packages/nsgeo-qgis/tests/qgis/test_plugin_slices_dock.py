@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+import gc
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -9,14 +13,33 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.render import colormap_names
-from nsgeo.slices import plan_windows, window_depths_m, window_times_ns
+from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
+from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
-from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, transform_names
+from nsgeo_qgis.slices_engine import solve_key
+from nsgeo_qgis.slices_plan import (
+    DEFAULT_BUDGET_BYTES,
+    MEASURING_STRETCH_INDICATOR,
+    PREVIEW_INDICATOR,
+    REFINE_REST_MS,
+    REFINING_SLICE_INDICATOR,
+    SliceFinish,
+    limit_windows,
+    transform_names,
+)
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
-from plugin_testing import REAL_DZT, needs_real_data, synthetic_dzt
-from qgis.PyQt.QtCore import QT_VERSION_STR, QEvent, Qt
+from plugin_testing import (
+    REAL_DZT,
+    LayoutProbe,
+    connect_message_log,
+    layout_width,
+    needs_real_data,
+    slow_jobs,
+    synthetic_dzt,
+)
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -52,7 +75,9 @@ def docked(qgis_app, tmp_path):
     # worker threads inside dewow's `running_mean` at once), not merely a
     # slow teardown. Waiting here, before dispose(), is what keeps every
     # test's background work finished before the next test's fixture ever
-    # starts building a new one.
+    # starts building a new one. The refine worker first: it is joined, so
+    # no solve outlives the test that started it.
+    dock.refiner.shutdown()
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
@@ -628,34 +653,338 @@ def test_moving_the_slider_emits_slice_changed_and_changes_the_values(docked):
     assert not np.allclose(first[both], second[both]), "a different depth must look different"
 
 
-def test_the_fill_radius_is_metres_and_survives_a_cell_size_change(docked):
-    """The default radius is a multiple of the line spacing -- a distance
-    (spec 6.4; #81 made it 0.5 x). The spin box is therefore in metres and
-    the cell conversion happens underneath, so halving the cell size does
-    not silently halve the smoothing.
+def _set_finish(dock, **fields):
+    """Set the Interpolation panel the way a user does (its widgets, so
+    `edited` fires), then apply the debounced redraw immediately."""
+    panel = dock.grid_finish
+    if "method" in fields:
+        panel.method_combo.setCurrentIndex(panel.method_combo.findData(fields["method"]))
+    if "max_distance_spacings" in fields:
+        panel.max_distance_spin.setValue(fields["max_distance_spacings"])
+    if "smooth_x_m" in fields:
+        panel.smooth_x_spin.setValue(fields["smooth_x_m"])
+    if "smooth_y_m" in fields:
+        panel.smooth_y_spin.setValue(fields["smooth_y_m"])
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()
 
-    Strengthened from the brief's own draft: with this fixture's
-    `GRID.default_spacing` of 0.5, the default radius is 0.25 m -- under
-    1 m before ANY conversion -- so `int(self.radius_spin.value())`
-    (metres misread as an already-integer cell count, the exact mutant
-    Step 10 names) truncates to 0 both before and after the cell change,
-    and `before * 2 == 0` too, so the relative-doubling check alone passes
-    even against that mutant (verified: all 37 tests in this file and
-    `test_plugin_slice_layer.py` still passed with that mutant applied).
-    The added absolute check pins the one number the mutant cannot also
-    get right by accident."""
+
+def _finished_by_the_core(dock, window, *, method, max_distance_m, search_radius_m=None):
+    """What the drawn slice must equal, from the core pipeline alone."""
+    from nsgeo.slices import finish_slice
+
+    engine = dock.engine
+    values, coverage = engine.slice_at(window)
+    settings = dataclasses.replace(
+        engine.finish_settings(dock.slice_finish()),
+        method=method,
+        max_distance_m=max_distance_m,
+        search_radius_m=max(search_radius_m or 0.0, 2.0 * 0.5, 2.0 * max_distance_m),
+    )
+    weights = plan_fill(
+        coverage > 0, engine.frame.cell, method, max_distance_m, settings.search_radius_m
+    )
+    return finish_slice(values, weights, engine.frame.cell, settings)
+
+
+def test_the_interpolation_group_replaces_fill_radius(docked_two_grids):
+    """Interpolation spec §8: no "Fill radius" row for This grid, an
+    Interpolation group in its place, visible in This grid and at the
+    defaults after a seed."""
+    dock, _ = docked_two_grids
+    _ready(dock)
+    form = dock._resolution_form
+    labels = [
+        form.itemAt(row, form.ItemRole.LabelRole).widget().text() for row in range(form.rowCount())
+    ]
+    assert "Fill radius" not in labels
+    assert not hasattr(dock, "radius_spacing_spin")
+    assert not hasattr(dock, "grid_radius_spin")
+    assert dock.grid_finish.title() == "Interpolation"
+    assert not dock.grid_finish.isHidden()
+    _set_finish(dock, method="idw", max_distance_spacings=1.5)
+    _switch(dock, "B")
+    assert dock.grid_finish.value() == SliceFinish()
+    assert dock.slice_finish() == SliceFinish()
+
+
+def test_the_max_distance_is_a_distance_and_survives_a_cell_size_change(docked):
+    """The default max distance is a multiple of the line spacing -- a
+    distance (interpolation spec §8). The cell conversion happens underneath
+    (the weights are planned at the frame's own cell), so halving the cell
+    does not move the distance, and the drawn slice is the core pipeline's at
+    the new cell."""
     dock, session = docked
     _ready(dock)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
-    before = dock.radius_cells()
-    assert before == round(0.5 * GRID.default_spacing / 0.25)  # 0.25 m/cell, set by _ready()
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.375)
     dock.cell_spin.setValue(0.125)
     dock.flush_debounce()
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
-    assert dock.radius_cells() == pytest.approx(before * 2, abs=1)
+    assert dock.engine.frame.cell == pytest.approx(0.125)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.375)
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        _finished_by_the_core(dock, dock.current_window(), method="kriging", max_distance_m=0.375),
+    )
 
 
-def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
+def test_this_grid_sets_the_max_distance_in_line_spacings(docked):
+    """#72: This grid's distance reads like Whole site's, in line spacings,
+    with the metres it comes to shown beside the box."""
+    dock, _ = docked
+    _ready(dock)
+    spin = dock.grid_finish.max_distance_spin
+    assert spin.suffix() == " × line spacing"
+    assert spin.value() == pytest.approx(0.75)
+    assert spin.singleStep() == 0.25
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.375 m"
+
+
+def test_the_metres_beside_the_max_distance_follow_the_box(docked):
+    dock, _ = docked
+    _ready(dock)
+    dock.grid_finish.max_distance_spin.setValue(1.5)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+
+
+def test_max_distance_follows_a_line_spacing_edit(docked):
+    """Review Focus 2: the distance is in spacings, so a spacing edit moves
+    the metres and the drawn slice with no grid switch and no change to the
+    box (0.75 spacings of 1.0 m is 0.75 m)."""
+    dock, session = docked
+    _ready(dock)
+    dock.refresh_slice()
+    before = dock.current_values().copy()
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    assert dock.engine.finish_settings(dock.slice_finish()).max_distance_m == pytest.approx(0.75)
+    # The drawn slice follows too, with no other refresh: export reads the
+    # finish live, so the map must not show the old distance.
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        _finished_by_the_core(
+            dock, dock.current_window(), method="kriging", max_distance_m=0.75, search_radius_m=2.0
+        ),
+    )
+    assert np.isfinite(dock.current_values()).sum() > np.isfinite(before).sum()
+
+
+def test_a_line_spacing_of_zero_does_not_abort_the_rebuild(docked):
+    """Only a hand-edited survey holds a spacing <= 0, and `SliceFinish.in_metres`
+    refuses it with ValueError. `_finish_moved` reads that as nothing to compare,
+    as it reads a missing source, so `rebuild_source` runs on to its site
+    follow-ups instead of stopping in its own guard."""
+    dock, session = docked
+    _ready(dock)
+    dock.refresh_slice()
+    messages: list[str] = []
+    disconnect = connect_message_log(lambda msg, tag, level: messages.append(msg))
+    try:
+        session.replace_grid(dataclasses.replace(GRID, default_spacing=0.0))
+        assert dock._finish_moved() is False
+    finally:
+        disconnect()
+    assert not [m for m in messages if "could not rebuild the slice source controls" in m]
+
+
+def test_a_coverage_view_is_not_redrawn_on_every_session_signal(docked):
+    """#72's redraw on a spacing edit compares the finish in metres with the
+    one the last draw used. A coverage draw left that unrecorded, so after a
+    finish edit every session signal redrew the coverage view."""
+    dock, session = docked
+    _ready(dock)
+    dock.coverage_check.setChecked(True)
+    _set_finish(dock, max_distance_spacings=1.5)
+    drawn: list[None] = []
+    dock.slice_changed.connect(lambda: drawn.append(None))
+    for _ in range(3):
+        session.presets_changed.emit()
+    assert drawn == []
+
+
+def test_a_seeded_finish_announces_nothing(docked_two_grids):
+    """The seed is not an edit: the memory hangs on `edited`."""
+    dock, session = docked_two_grids
+    _ready(dock)
+    _set_finish(dock, max_distance_spacings=1.5)
+    seen: list[tuple[str, object]] = []
+    dock.grid_finish.edited.connect(lambda field, value: seen.append((field, value)))
+    dock.grid_combo.setCurrentText("B")
+    assert dock.grid_finish.value() == SliceFinish()
+    assert seen == []
+
+
+def test_with_no_grid_the_max_distance_reads_blank(qgis_app, tmp_path):
+    session = SiteSession()
+    dock = SlicesDock(session)  # no survey open
+    try:
+        assert dock.grid_finish.max_distance_metres.text() == ""
+        assert dock.view_settings().radius_m == 0.0
+        session.new_site(tmp_path)  # open, but no grid yet
+        assert dock.grid_finish.max_distance_metres.text() == ""
+        assert dock.view_settings().radius_m == 0.0
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_finish_edit_redraws_and_is_remembered_for_the_grid(docked_two_grids):
+    dock, session = docked_two_grids
+    _ready(dock)
+    session.save()
+    window = dock.current_window()
+    dock.grid_finish.method_combo.setCurrentIndex(dock.grid_finish.method_combo.findData("idw"))
+    assert dock._finish_debounce.isActive()
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()  # the debounce, flushed
+    np.testing.assert_array_equal(
+        dock.current_values(),
+        dock.engine.finish(*dock.engine.slice_at(window), SliceFinish(method="idw")),
+    )
+    assert session.slice_resolution("A")["method"] == "idw"
+    assert session.slice_resolution("B") == {}
+    assert session.dirty
+
+
+def test_a_finish_edit_redraws_through_its_own_debounce(docked):
+    """The timer, not only the flush: an edit starts `_finish_debounce`, and
+    its timeout alone redraws."""
+    from plugin_testing import spin_until
+
+    dock, _ = docked
+    _ready(dock)
+    drawn: list[None] = []
+    dock.slice_changed.connect(lambda: drawn.append(None))
+    dock.grid_finish.smooth_x_spin.setValue(0.5)
+    assert drawn == [] and dock._finish_debounce.isActive()
+    assert spin_until(lambda: bool(drawn), 2000)
+    assert not dock._finish_debounce.isActive()
+
+
+def test_seeding_a_grid_resets_the_panel_and_remembers_nothing(docked_two_grids):
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _set_finish(dock, method="idw", max_distance_spacings=1.5, smooth_x_m=0.4)
+    session.save()
+    assert not session.dirty
+    _switch(dock, "B")
+    assert dock.slice_finish() == SliceFinish()
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.375 m"  # B's spacing is 0.5 too
+    assert session.slice_resolution("B") == {}
+    assert not session.dirty
+
+
+def test_a_remembered_finish_is_restored_on_a_grid_switch(docked_two_grids):
+    dock, session = docked_two_grids
+    _ready(dock)
+    wanted = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.4, smooth_y_m=0.2)
+    _set_finish(dock, **dataclasses.asdict(wanted))
+    _switch(dock, "B")
+    assert dock.slice_finish() == SliceFinish()
+    _switch(dock, "A")
+    assert dock.slice_finish() == wanted
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    assert dock.current_values() is not None
+    window = dock.current_window()
+    np.testing.assert_array_equal(
+        dock.current_values(), dock.engine.finish(*dock.engine.slice_at(window), wanted)
+    )
+
+
+@pytest.mark.parametrize("radius_spacings", [0.5, 1.5])
+def test_a_0_2_0_remembered_radius_is_ignored(docked_two_grids, radius_spacings):
+    """Review Focus 3: a 0.2.0 survey remembers `radius_spacings` for a
+    grid (0.2.0 seeded 0.5; the max distance's default is 0.75, so either
+    value tells ignoring it from mapping it). This build opens it on the
+    new defaults, with no holes, and does not mark the survey dirty. Put
+    into the record directly: `remember_slice_resolution`
+    no longer takes that keyword."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _set_finish(dock, method="none")
+    _switch(dock, "B")
+    session._update_source("A", resolution={"radius_spacings": radius_spacings})
+    session.save()
+    assert not session.dirty
+    _switch(dock, "A")
+    assert dock.slice_finish() == SliceFinish()
+    assert not session.dirty
+    assert session.slice_resolution("A") == {"radius_spacings": radius_spacings}  # left as found
+    # No holes: the default fills between the lines.
+    window = dock.current_window()
+    values, coverage = dock.engine.slice_at(window)
+    assert np.isfinite(dock.current_values()).sum() > (coverage > 0).sum()
+
+
+def test_saving_a_cube_records_the_finish_and_radius_m(docked):
+    dock, _ = docked
+    _ready(dock)
+    _set_finish(dock, method="idw", max_distance_spacings=1.5, smooth_x_m=0.4, smooth_y_m=0.2)
+    view = dock.view_settings()
+    assert view.finish == SliceFinish("idw", 1.5, 0.4, 0.2)
+    # What 0.2.0 reads as its fill radius (interpolation spec §8): spacings x spacing.
+    assert view.radius_m == pytest.approx(0.75)
+    # Under None nothing is filled, so 0.2.0 is told to fill nothing too: it
+    # shows that cube unfilled, as this build does, whatever the distance box holds.
+    _set_finish(dock, method="none")
+    view = dock.view_settings()
+    assert view.finish == SliceFinish("none", 1.5, 0.4, 0.2)
+    assert view.radius_m == 0.0
+
+
+@pytest.mark.parametrize("radius_m", [0.0, 0.25, 0.5, 0.75])
+def test_restoring_a_0_2_0_cube_record_shows_the_defaults(docked, radius_m):
+    """Review Focus 3: a 0.2.0 cube record's `view` has only the six 0.2.0
+    keys, `radius_m` among them. It opens on the defaults, never mapping the
+    old radius onto the new controls."""
+    dock, session = docked
+    _ready(dock)
+    record = _save_cube(dock, session, "A__r", dock.view_settings())
+    record["view"] = {
+        key: record["view"][key]
+        for key in ("thickness_ns", "step_ns", "radius_m", "palette", "stretch", "coverage")
+    }
+    record["view"]["radius_m"] = radius_m
+    _set_finish(dock, method="none", max_distance_spacings=3.0, smooth_x_m=0.5)
+    dock.cube_combo.setCurrentText("A__r")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.slice_finish() == SliceFinish()
+
+
+def test_restoring_a_cube_restores_the_finish_and_remembers_it(docked):
+    dock, session = docked
+    _ready(dock)
+    wanted = SliceFinish("idw", 1.5, 0.4, 0.2)
+    _set_finish(dock, **dataclasses.asdict(wanted))
+    _save_cube(dock, session, "A__f", dock.view_settings())
+    _set_finish(dock, method="none", max_distance_spacings=0.25, smooth_x_m=0.0, smooth_y_m=0.0)
+    dock.cube_combo.setCurrentText("A__f")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.slice_finish() == wanted
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    remembered = session.slice_resolution("A")
+    assert {k: remembered[k] for k in dataclasses.asdict(wanted)} == dataclasses.asdict(wanted)
+
+
+def test_a_cube_saved_before_a_spacing_edit_follows_the_new_spacing(docked):
+    """A cube records its max distance in line spacings (and the metres only
+    for 0.2.0's sake), so after a spacing edit it restores the same spacings
+    and the metres follow the grid's spacing now."""
+    dock, session = docked
+    _ready(dock)
+    _set_finish(dock, max_distance_spacings=1.0)
+    _save_cube(dock, session, "A__s", dock.view_settings())
+    session.replace_grid(dataclasses.replace(GRID, default_spacing=1.0))
+    dock.restore_cube("A__s")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.0)
+    assert dock.grid_finish.max_distance_metres.text() == "= 1 m"
+
+
+def test_a_grid_starts_from_square_a_0_2_m_cell_and_the_default_interpolation(docked):
     """#81: what a grid's slices start from before anything is remembered
     for it. `GRID`'s spacing is 0.5 m, where 0.2 m is under half the
     spacing, so nothing is clamped here."""
@@ -664,7 +993,7 @@ def test_a_grid_starts_from_square_a_0_2_m_cell_and_half_a_spacing_fill(docked):
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.choice.transform == "amp_square"  # what was prepared, not just shown
     assert dock.cell_spin.value() == pytest.approx(0.2)
-    assert dock.radius_spin.value() == pytest.approx(0.5 * GRID.default_spacing)
+    assert dock.slice_finish() == SliceFinish()  # kriging out to 0.75 x spacing, no smoothing
 
 
 @pytest.mark.parametrize(("spacing", "cell"), [(0.25, 0.125), (1.0, 0.2)])
@@ -673,32 +1002,55 @@ def test_the_default_cell_is_capped_at_half_the_spacing_and_never_grows_with_it(
 ):
     """#81: a fixed 0.2 m, capped at spec 4's half the line spacing -- so
     0.125 m on a 0.25 m-spaced grid, and still 0.2 m (not 0.4) at 1 m. The
-    fill radius is always half the grid's own spacing."""
+    max distance is always half the grid's own spacing."""
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", spacing))
     dock = SlicesDock(session)
     try:
         assert dock.cell_spin.value() == pytest.approx(cell)
-        assert dock.radius_spin.value() == pytest.approx(0.5 * spacing)
+        assert dock.slice_finish() == SliceFinish()
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
 
 
-def test_filling_reaches_between_the_lines_and_zero_radius_does_not(docked):
+def test_filling_reaches_between_the_lines_and_none_does_not(docked):
     """Spec 6.4: at realistic spacing about 80% of cells are empty, so the
     fill is most of the picture rather than a nicety."""
     dock, _ = docked
     _ready(dock)
-    dock.radius_spin.setValue(0.0)
-    dock.flush_debounce()
+    _set_finish(dock, method="none")
     unfilled = np.isfinite(dock.current_values()).sum()
-    dock.radius_spin.setValue(1.0)
-    dock.flush_debounce()
+    _set_finish(dock, method="idw", max_distance_spacings=2.0)  # 1 m on a 0.5 m spacing
     filled = np.isfinite(dock.current_values()).sum()
     assert filled > unfilled
+
+
+def test_the_shared_stretch_follows_a_finish_change(docked):
+    """The shared limit is measured over the finished slices, so a finish
+    that changes them (smoothing flattens peaks) changes the limit: the cache
+    is keyed on the finish in metres, not served stale."""
+    dock, _ = docked
+    _ready(dock)
+    first = dock.display_limit()
+    assert first > 0.0
+    assert dock.display_limit() == first  # cached, unchanged
+    _set_finish(dock, smooth_x_m=1.0, smooth_y_m=1.0)
+    smoothed = dock.display_limit()
+    assert smoothed != pytest.approx(first, rel=1e-6)
+    clip = dock.engine.output_unipolar
+    from nsgeo.render import PercentileClip, UnipolarClip
+
+    expected = dock.engine.shared_limit(
+        dock.current_window().n_levels,
+        UnipolarClip() if clip else PercentileClip(),
+        dock.slice_finish(),
+    )
+    assert smoothed == pytest.approx(expected)
+    _set_finish(dock, smooth_x_m=0.0, smooth_y_m=0.0)
+    assert dock.display_limit() == pytest.approx(first)
 
 
 def test_the_coverage_toggle_shows_trace_counts_not_amplitudes(docked):
@@ -1048,10 +1400,14 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     view = ViewSettings(
         thickness_ns=4.0,
         step_ns=2.0,
-        radius_m=0.5,
+        radius_m=0.75,  # max_distance_spacings x this grid's spacing
         palette=dock.palette_combo.currentText(),
         stretch="this slice",
         coverage=True,
+        method="idw",
+        max_distance_spacings=1.5,
+        smooth_x_m=0.4,
+        smooth_y_m=0.2,
     )
     record = _save_cube(dock, session, "A__test", view)
     assert record["z"]["t1_ns"] == pytest.approx(29.9285)
@@ -1084,7 +1440,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
             palette=dock.palette_combo.currentText(),
             stretch="shared across the cube",
             coverage=False,
-        )
+        ),
+        spacing_m=GRID.default_spacing,
     )
     assert dock.cube_combo.currentText() == "(unsaved)", "perturbing must drop the claim"
 
@@ -1384,11 +1741,6 @@ def test_snap_inside_never_leaves_the_bound_it_describes(value, decimals, upper)
     assert abs(snapped - value) < 10.0**-decimals
 
 
-@pytest.mark.xfail(
-    QT_VERSION_STR.startswith("6."),
-    reason="§3.2e: Qt 6 metrics give 253 px; settled by #50",
-    strict=True,
-)
 def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
     """A dock widget's minimum size is a HARD floor on the main window's:
     QGIS cannot shrink a dock area below it, so a tall dock drags the whole
@@ -1486,13 +1838,13 @@ def test_no_sequence_of_arrow_clicks_can_reach_a_frame_that_cannot_be_drawn(qgis
         dock.deleteLater()
 
 
-def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
+def test_the_resolution_and_max_distance_spins_step_by_a_useful_increment(docked):
     """Walkthrough round 2, W5/W7: "the up/down amount skips by 1 m at a
     time, which is too big an increment."
 
     Qt's `QDoubleSpinBox` defaults `singleStep` to 1.0 whatever the range
     or the decimals, so every one of these shipped with an arrow click
-    that moved a 0.75 m radius to 1.75 m and a 0.2165 ns dz to 1.2165.
+    that moved a 0.75 m radius to 1.75 m (the box is in spacings now) and a 0.2165 ns dz to 1.2165.
     `dz`/`z0`/`z1` step by the file's OWN sample interval -- one sample
     per click is the only increment that means anything on a time axis.
     """
@@ -1500,7 +1852,9 @@ def test_the_resolution_and_radius_spins_step_by_a_useful_increment(docked):
     assert dock.engine.wait_for_preparation(20_000)
     header = dock.session.line_for_key(dock.session.keys()[0]).header
 
-    assert dock.radius_spin.singleStep() <= 0.1
+    assert (
+        dock.grid_finish.max_distance_spin.singleStep() == 0.25
+    )  # a quarter spacing, not Qt's 1.0
     assert dock.cell_spin.singleStep() <= 0.1
     assert dock.dz_spin.singleStep() == pytest.approx(header.dt_ns)
     assert dock.z0_spin.singleStep() == pytest.approx(header.dt_ns)
@@ -1521,7 +1875,7 @@ def test_the_resolution_controls_say_what_they_do(docked):
     """
     dock, _ = docked
     for spin, must_say in (
-        (dock.radius_spin, "no line"),
+        (dock.grid_finish.max_distance_spin, "blank"),
         (dock.dz_spin, "sample"),
         (dock.cell_spin, "spacing"),
         (dock.coverage_check, "traces"),
@@ -1673,6 +2027,23 @@ def _grid_keys(session, grid_id):
     )
 
 
+def test_an_old_cube_record_without_lines_restores_every_line(docked_two_grids):
+    """#74: an old record names no line list; it restores every line, as the
+    remembered record (final review D4) already says."""
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(
+        dock, session, "A__old", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    del session.site.cubes["A__old"]["lines"]
+    dock.cube_combo.setCurrentText("A__old")
+    assert dock.included_keys() == a_keys
+    assert session.slice_source("A")["lines"] is None
+    assert dock.engine.wait_for_preparation(20_000)
+
+
 def test_opening_a_site_does_not_mark_it_dirty(docked_two_grids):
     dock, session = docked_two_grids
     dock.engine.wait_for_preparation(20_000)
@@ -1706,6 +2077,76 @@ def test_a_default_line_choice_picks_up_a_line_imported_later(docked_two_grids, 
     dock.grid_combo.setCurrentText("A")
     assert len(dock.included_keys()) == 4
     assert dock.engine.wait_for_preparation(20_000)
+
+
+def _reopened_with_a_late_import(session, tmp_path):
+    """Save the survey, reopen it in a new session and dock, and import a
+    line for A there (#75: the pick-up must survive save and reopen)."""
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    new_line = _line(tmp_path, "A", "FILE__099", 9.0)
+    reopened.add_lines([new_line])
+    return reopened, dock2
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_default_line_choice_picks_up_an_import_after_save_and_reopen(docked_two_grids, tmp_path):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")  # the round trip records `lines: None`
+    assert session.slice_source("A")["lines"] is None
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        assert reopened.slice_source("A")["lines"] is None  # loaded as stored null
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert new_keys <= set(dock2.included_keys())
+    finally:
+        _dispose(dock2)
+
+
+def test_an_explicit_line_choice_does_not_pick_up_an_import_after_save_and_reopen(
+    docked_two_grids, tmp_path
+):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+    reopened, dock2 = _reopened_with_a_late_import(session, tmp_path)
+    try:
+        new_keys = set(_grid_keys(reopened, "A")) - set(a_keys)
+        assert len(new_keys) == 1
+        assert not new_keys & set(dock2.included_keys())
+        assert dock2.included_keys() == a_keys[:2]
+    finally:
+        _dispose(dock2)
+
+
+def test_opening_a_survey_that_has_saved_cubes_stays_clean(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    _save_cube(dock, session, "A__kept", view)
+    session.save()
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert not reopened.dirty
+        items = [dock2.cube_combo.itemText(i) for i in range(dock2.cube_combo.count())]
+        assert "A__kept" in items
+    finally:
+        _dispose(dock2)
 
 
 def test_choosing_lines_remembers_them_for_that_grid_only(docked_two_grids):
@@ -1806,7 +2247,7 @@ def test_an_empty_remembered_line_set_is_the_default(docked_two_grids, tmp_path,
 def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_grids):
     """Final review D4: an old-format cube record names no line list, so
     picking it remembers `lines=None` ("every line"), not an empty choice.
-    The dock itself still restores its empty inclusion set (M11)."""
+    The dock restores every line too (#74; it used to restore an empty set)."""
     dock, session = docked_two_grids
     assert dock.engine.wait_for_preparation(20_000)
     view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
@@ -1814,5 +2255,1023 @@ def test_a_cube_record_with_no_lines_key_is_remembered_as_every_line(docked_two_
     del record["lines"]  # written before cube records carried their lines
     dock.cube_combo.setCurrentText("A__old")
     assert dock.engine.wait_for_preparation(20_000)
-    assert dock.included_keys() == ()
+    assert dock.included_keys() == _grid_keys(session, "A")
     assert session.slice_source("A")["lines"] is None
+
+
+# ---- #71: each grid remembers its own resolution ----------------------------
+def _switch(dock, grid_id):
+    """Pick `grid_id` in This grid's combo, then let the change land."""
+    dock.grid_combo.setCurrentText(grid_id)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def _settle_sources(dock, session):
+    """A combo pick remembers that grid's preset and lines (M12), which
+    dirties the survey once. Done and saved first, so a later switch writes
+    nothing and only a resolution write could dirty it."""
+    assert dock.engine.wait_for_preparation(20_000)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    session.save()
+
+
+def _snapped_bounds(dock):
+    from nsgeo_qgis.ui.slices_dock import _snap_inside
+
+    low, high = dock.engine.prepared_z_bounds()
+    return (
+        _snap_inside(low, dock.z0_spin.decimals(), upper=False),
+        _snap_inside(high, dock.z1_spin.decimals(), upper=True),
+    )
+
+
+def test_a_resolution_edit_is_remembered_for_that_grid_only(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    assert not session.dirty
+    dock.cell_spin.setValue(0.1)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_resolution("A") == {"cell": 0.1}
+    assert session.slice_resolution("B") == {}
+    assert session.dirty
+
+
+def test_switching_grid_away_and_back_restores_that_grids_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    seed_cell = dock.cell_spin.value()
+    seed_dz = dock.dz_spin.value()
+    dock.cell_spin.setValue(0.1)
+    dock.dz_spin.setValue(seed_dz * 2)
+    dock.grid_finish.max_distance_spin.setValue(1.5)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _switch(dock, "B")
+    assert dock.cell_spin.value() == pytest.approx(seed_cell)
+    assert dock.dz_spin.value() == pytest.approx(seed_dz)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(0.75)
+
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == pytest.approx(0.1)
+    assert dock.dz_spin.value() == pytest.approx(seed_dz * 2)
+    assert dock.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
+    # On the engine too, not only in the boxes, and drawn.
+    assert dock.engine.frame.cell == pytest.approx(0.1)
+    assert dock.engine.z.dz_ns == pytest.approx(seed_dz * 2)
+    assert dock.grid_finish.max_distance_metres.text() == "= 0.75 m"
+    assert dock.current_values() is not None
+
+
+def test_seeding_never_remembers_a_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    # B's own spacing seeds a different cell, so every switch below really
+    # moves the box (and emits) rather than passing for want of a change.
+    session.replace_grid(dataclasses.replace(GRID_B, default_spacing=0.3))
+    _settle_sources(dock, session)
+    seen: list[float] = []
+    dock.cell_spin.valueChanged.connect(seen.append)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert len(seen) >= 2
+    assert session.slice_resolution("A") == {}
+    assert session.slice_resolution("B") == {}
+    assert not session.dirty
+
+
+def test_reopening_a_survey_restores_a_remembered_resolution_without_dirtying_it(
+    docked_two_grids,
+):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.1)
+    dock.dz_spin.setValue(0.5)
+    dock.z0_spin.setValue(2.0)
+    dock.z1_spin.setValue(30.0)
+    dock.grid_finish.max_distance_spin.setValue(1.5)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    stored = session.slice_source("A")
+    assert stored["resolution"] == {
+        "cell": 0.1,
+        "dz_ns": 0.5,
+        "t0_ns": 2.0,
+        "t1_ns": 30.0,
+        "max_distance_spacings": 1.5,
+    }
+
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        assert dock2.grid_combo.currentText() == "A"
+        assert dock2.cell_spin.value() == pytest.approx(0.1)
+        assert dock2.dz_spin.value() == pytest.approx(0.5)
+        assert dock2.z0_spin.value() == pytest.approx(2.0)
+        assert dock2.z1_spin.value() == pytest.approx(30.0)
+        assert dock2.grid_finish.max_distance_spin.value() == pytest.approx(1.5)
+        dock2.flush_debounce()
+        assert dock2.engine.wait_for_preparation(20_000)
+        # The restored values reached the engine and drew a slice.
+        assert dock2.engine.frame.cell == pytest.approx(0.1)
+        assert dock2.engine.z.t0_ns == pytest.approx(2.0)
+        assert dock2.engine.z.dz_ns == pytest.approx(0.5)
+        assert dock2.engine.z.t_end_ns == pytest.approx(30.0)
+        assert dock2.current_values() is not None
+        assert not reopened.dirty
+        assert reopened.slice_source("A") == stored
+    finally:
+        dock2.engine.wait_for_preparation(20_000)
+        dock2.engine.dispose()
+        dock2.deleteLater()
+
+
+def test_a_remembered_z_range_is_clamped_to_the_prepared_lines_but_kept(docked_two_grids):
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    low, high = dock.engine.prepared_z_bounds()
+    wide = {"t0_ns": low - 5.0, "t1_ns": high + 5.0}
+    session.remember_slice_resolution("A", **wide)
+    session.save()
+    dock.grid_combo.setCurrentText("A")
+    # Restored first; the clamp waits for A's lines to be prepared.
+    assert dock.z0_spin.value() == pytest.approx(wide["t0_ns"], abs=1e-3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_bounds(dock)
+    assert session.slice_resolution("A") == wide
+    assert not session.dirty
+    assert dock.current_values() is not None
+
+
+def test_a_remembered_z_range_wholly_outside_the_data_falls_back_to_the_prepared_range(
+    docked_two_grids,
+):
+    """Review Focus 1: clamping each end of a range that lies wholly past the
+    data on its own leaves z1 below z0, and every slice would then fail."""
+    dock, session = docked_two_grids
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    _low, high = dock.engine.prepared_z_bounds()
+    beyond = {"t0_ns": high + 10.0, "t1_ns": high + 50.0}
+    session.remember_slice_resolution("A", **beyond)
+    session.save()
+    dock.grid_combo.setCurrentText("A")
+    assert dock.z0_spin.value() == pytest.approx(beyond["t0_ns"], abs=1e-3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_bounds(dock)
+    assert errors == []
+    assert dock.current_values() is not None
+    # The remembered values stand, for a later crop that frees the range.
+    assert session.slice_resolution("A") == beyond
+    assert not session.dirty
+
+
+def test_a_bound_set_after_the_empty_range_fallback_keeps_the_range_shown(docked_two_grids):
+    """Ruling 15 (#71): after the fallback the user edits against the range
+    shown, not the one remembered. A hand z0, a time cutoff past it, then a
+    hand z1 used to leave t0 > t1 in the record: the next restore snapped z1
+    back to the data's end, and a reopen dropped the reversed pair."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    low, high = dock.engine.prepared_z_bounds()
+    dock.z0_spin.setValue(round(low + 0.6 * (high - low), 3))
+    dock.flush_debounce()
+    cutoff = {"step": "time_cutoff", "params": {"end_ns": round(low + 0.4 * (high - low), 3)}}
+    session.site.presets["cut"] = [*PRESET, {**cutoff, "enabled": True}]
+    session.presets_changed.emit()
+    dock.preset_combo.setCurrentText("cut")
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    shown_z0 = _snapped_bounds(dock)[0]
+    assert dock.z0_spin.value() == shown_z0, "the fallback shows the data's range"
+    z1 = round(low + 0.3 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    dock.flush_debounce()
+
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert (dock.z0_spin.value(), dock.z1_spin.value()) == (shown_z0, z1)
+    assert session.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.json_path)
+    dock2 = SlicesDock(reopened)
+    try:
+        dock2.flush_debounce()
+        assert dock2.engine.wait_for_preparation(20_000)
+        assert reopened.slice_resolution("A") == {"t0_ns": shown_z0, "t1_ns": z1}
+        assert (dock2.z0_spin.value(), dock2.z1_spin.value()) == (shown_z0, z1)
+        assert dock2.engine.z.t0_ns == pytest.approx(shown_z0)
+        assert dock2.current_values() is not None
+        assert not reopened.dirty
+    finally:
+        _dispose(dock2)
+
+
+def test_an_edit_after_a_clamp_that_left_the_range_usable_keeps_the_remembered_end(
+    docked_two_grids,
+):
+    """Ruling 15 remembers the shown end only when the pair would be empty: a
+    remembered z0 that a clamp only pulled up to the data is still the user's."""
+    dock, session = docked_two_grids
+    _settle_sources(dock, session)
+    _switch(dock, "B")
+    low, high = dock.engine.prepared_z_bounds()
+    session.remember_slice_resolution("A", t0_ns=low - 5.0)
+    _switch(dock, "A")
+    assert dock.z0_spin.value() == _snapped_bounds(dock)[0]
+    z1 = round(low + 0.5 * (high - low), 3)
+    dock.z1_spin.setValue(z1)
+    assert session.slice_resolution("A") == {"t0_ns": low - 5.0, "t1_ns": z1}
+
+
+def test_a_hand_resolution_on_an_empty_grid_survives_its_lines_arriving(qgis_app, tmp_path):
+    """#71, the ordinary new-survey flow: a grid picked before it has lines,
+    dz and z1 set by hand, then the lines imported. dz/z0/z1 are seeded only
+    once a line exists, after the grid change, so that late seed must lay
+    what the user chose back over itself (`_seed_dz_z_defaults`' restore)."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        assert dock.grid_combo.currentText() == "A"
+        dock.dz_spin.setValue(0.5)
+        dock.z1_spin.setValue(30.0)
+        remembered = {"dz_ns": 0.5, "t1_ns": 30.0}
+        assert session.slice_resolution("A") == remembered
+        session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+        header = session.line_for_key(session.keys()[0]).header
+        assert dock.z0_spin.value() == pytest.approx(header.position_ns, abs=1e-3), "seeded"
+        assert (dock.dz_spin.value(), dock.z1_spin.value()) == (0.5, 30.0)
+        assert dock.engine.wait_for_preparation(20_000)
+        dock.flush_debounce()
+        assert dock.engine.z.dz_ns == pytest.approx(0.5)
+        assert dock.engine.z.t_end_ns == pytest.approx(30.0, abs=0.5)
+        assert dock.current_values() is not None
+        assert session.slice_resolution("A") == remembered
+    finally:
+        _dispose(dock)
+
+
+def test_a_remembered_cell_below_the_grids_floor_is_clamped_to_it(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    _switch(dock, "B")
+    session.remember_slice_resolution("A", cell=0.001)
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == dock.cell_spin.minimum()
+    assert dock.engine.frame.cell == pytest.approx(dock.cell_spin.minimum())
+    assert session.slice_resolution("A") == {"cell": 0.001}
+
+
+def test_picking_a_saved_cube_remembers_its_resolution(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.1)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _save_cube(dock, session, "A__res", dock.view_settings())
+    dock.cell_spin.setValue(0.3)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_resolution("A")["cell"] == pytest.approx(0.3)
+
+    dock.cube_combo.setCurrentText("A__res")
+    assert dock.engine.wait_for_preparation(20_000)
+    remembered = session.slice_resolution("A")
+    assert set(remembered) == {
+        "cell",
+        "dz_ns",
+        "t0_ns",
+        "t1_ns",
+        "method",
+        "max_distance_spacings",
+        "smooth_x_m",
+        "smooth_y_m",
+    }
+    assert remembered["cell"] == pytest.approx(0.1)
+    _switch(dock, "B")
+    _switch(dock, "A")
+    assert dock.cell_spin.value() == pytest.approx(0.1)
+
+
+# ---- minimum curvature: preview while the depth moves, refine once it rests --
+# Plan calls 5 and 7 (interpolation spec §7). A solve's real duration never
+# decides anything here: `_last_solve_ms` is set by hand, once the plan exists
+# (Ruling R1: building one resets it).
+
+
+def _pump_for(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _pump_until(predicate, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() > deadline:
+            pytest.fail("timed out waiting for the condition")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
+    """Let the depth rest (`REFINE_REST_MS` and a margin), then pump events
+    until the refine worker has landed its list and no rest is pending."""
+    start = time.monotonic()
+    rested = start + (REFINE_REST_MS + 150) / 1000.0
+    while time.monotonic() < rested or dock.refiner.busy or dock._grid_refine.rest.isActive():
+        if time.monotonic() - start > timeout_s:
+            pytest.fail("the refine did not finish")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _minimum_curvature(dock, last_solve_ms, stretch="this slice"):
+    """The dock on minimum curvature at slider 10, that slice refined, and the
+    last solve then said to have taken `last_solve_ms`."""
+    _ready(dock)
+    dock.stretch_combo.setCurrentText(stretch)
+    dock.slice_slider.setValue(10)
+    _set_finish(dock, method="min_curvature")
+    _wait_for_refine(dock)
+    assert not dock.provisional
+    dock.engine._last_solve_ms = last_solve_ms
+
+
+def _drawn_by_the_engine(dock, how):
+    """`engine.preview` or `engine.finish` of the dock's current window."""
+    engine = dock.engine
+    values, coverage = engine.slice_at(dock.current_window())
+    draw = engine.preview if how == "preview" else engine.finish
+    return draw(values, coverage, dock.slice_finish())
+
+
+def _starts(dock, monkeypatch) -> list[float]:
+    """When the refiner was asked to start a list, by the monotonic clock."""
+    times: list[float] = []
+    real = dock.refiner.start
+
+    def recording(*args, **kwargs):
+        times.append(time.monotonic())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dock.refiner, "start", recording)
+    return times
+
+
+@pytest.mark.parametrize("move", ["slider", "step"])
+def test_a_slow_slice_shows_the_preview_then_refines(docked, move):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    if move == "slider":
+        dock.slice_slider.setValue(20)
+    else:
+        dock.step_slice(1)
+    window = dock.current_window()
+    assert dock.provisional
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    preview = dock.current_values()
+    np.testing.assert_array_equal(preview, _drawn_by_the_engine(dock, "preview"))
+
+    _wait_for_refine(dock)
+    assert not dock.provisional
+    assert dock.status_label.text() == dock._grid_status_text()
+    assert dock.current_window() == window
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    assert not np.array_equal(dock.current_values(), preview, equal_nan=True)
+
+
+def test_the_refine_waits_for_the_depth_to_rest(docked, monkeypatch):
+    """Each move restarts the rest, and the refine starts only when it runs
+    out. No events are processed between the moves, so a stalled process can
+    only make the rest look later, never fire it between them."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    moved = 0.0
+    left: int | None = None
+    for value in (15, 20, 25):
+        # Taken before the move: the move starts the rest inside `setValue`,
+        # then draws the preview, so a time taken after it would eat into the
+        # 5% a coarse timer may fire early (final review M-3).
+        moved = time.monotonic()
+        dock.slice_slider.setValue(value)
+        assert dock.provisional
+        assert not dock.refiner.busy
+        assert dock._grid_refine.rest.isActive()
+        if left is not None:
+            assert dock._grid_refine.rest.remainingTime() > left, "a move must restart the rest"
+        time.sleep(0.1)  # the depth still moving: no events, so the rest cannot fire
+        left = dock._grid_refine.rest.remainingTime()
+        assert left < REFINE_REST_MS
+    assert starts == [], "a refine started while the depth was still moving"
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    # A coarse Qt timer may fire up to 5% early.
+    assert starts[0] - moved >= 0.9 * REFINE_REST_MS / 1000.0
+    assert not dock.provisional
+
+
+def test_a_quick_solve_draws_minimum_curvature_at_once(docked, monkeypatch):
+    dock, _ = docked
+    _minimum_curvature(dock, 5.0)
+    starts = _starts(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    assert not dock.provisional
+    assert not dock._grid_refine.rest.isActive()
+    assert dock.status_label.text() == dock._grid_status_text()
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_kriging_never_previews(docked, monkeypatch):
+    dock, _ = docked
+    _ready(dock)
+    starts = _starts(dock, monkeypatch)
+    for stretch, value in (("this slice", 20), ("shared across the cube", 30)):
+        dock.stretch_combo.setCurrentText(stretch)
+        dock.slice_slider.setValue(value)
+        assert not dock.provisional
+        assert not dock._grid_refine.rest.isActive()
+        np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_a_refine_for_a_window_left_behind_never_draws(docked, monkeypatch):
+    """Review Focus 2. Window A's solve is held until the person has moved on
+    to B, and ignores the cancel, so it finishes late on purpose. It must not
+    land, and nothing drawn after the move may be A's."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    gate, finished_late = threading.Event(), threading.Event()
+    held: dict[str, bytes] = {}
+    real = engine.pending_solve
+
+    def gated(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
+        if job is not None and job.key == held.get("a"):
+            run = job.run
+
+            def run_late(should_stop):
+                gate.wait(10)
+                run(lambda: False)  # deaf to the cancel
+                finished_late.set()
+
+            job.run = run_late
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", gated)
+    dock.slice_slider.setValue(20)
+    a_values, a_coverage = engine.slice_at(dock.current_window())
+    held["a"] = solve_key(a_values)
+    _pump_until(lambda: dock.refiner.busy)  # A rested and its solve began
+    drawn: list[np.ndarray] = []
+    dock.slice_changed.connect(lambda: drawn.append(dock.current_values()))
+    dock.slice_slider.setValue(30)
+    b_window = dock.current_window()
+    assert dock.provisional
+    gate.set()
+    _wait_for_refine(dock)
+
+    assert finished_late.is_set()
+    assert solve_key(a_values) not in engine._solved, "A's late result landed"
+    assert dock.current_window() == b_window
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+    a_full = engine.finish(a_values, a_coverage, dock.slice_finish())
+    shown = [values for values in drawn if values is not None]
+    assert len(shown) >= 2  # B's preview, then B
+    assert not any(np.array_equal(values, a_full, equal_nan=True) for values in shown)
+
+
+def test_the_shared_stretch_is_provisional_until_its_windows_are_solved(docked):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    mc = dock.slice_finish()
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(20)
+    n = dock.current_window().n_levels
+    clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
+    assert engine.stretch_solves(n, mc) != []
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc, preview=True))
+    finals: list[Any] = []
+    dock.slice_changed.connect(
+        lambda: finals.append(dock._grid_refine.stretch and dock._grid_refine.stretch[2])
+    )
+    _wait_for_refine(dock)
+    assert engine.stretch_solves(n, mc) == []
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, mc))
+    assert finals and finals[-1] is True, "the slice must be redrawn with the final stretch"
+
+
+def test_a_landed_slice_does_not_cancel_the_stretch_solves(docked):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    dock.slice_slider.setValue(20)
+    states: list[tuple[bool, bool]] = []
+    dock.slice_changed.connect(lambda: states.append((dock.provisional, dock.refiner.busy)))
+    _wait_for_refine(dock)
+    refined = [busy for provisional, busy in states if not provisional]
+    assert refined, "the refined slice was never drawn"
+    assert refined[0] is True, "the stretch windows must still be solving when the slice lands"
+    assert refined[-1] is False
+    n = dock.current_window().n_levels
+    assert dock.engine.stretch_solves(n, dock.slice_finish()) == []
+
+
+def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch):
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    real = engine.pending_solve
+
+    def failing(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
+
+        def run(should_stop):
+            raise ValueError("no convergence")
+
+        job.run = run
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", failing)
+    seen: list[str] = []
+    dock.error.connect(seen.append)
+    dock.slice_slider.setValue(20)
+    preview = dock.current_values()
+    _wait_for_refine(dock)
+    assert seen == ["minimum curvature failed: no convergence"]
+    assert dock.provisional, "the preview stays on screen"
+    assert dock.current_values() is preview
+    assert dock.status_label.text() == dock._grid_status_text()
+
+
+def test_a_preview_solved_during_the_rest_is_drawn_at_the_rest(docked, monkeypatch):
+    """Finding 2a: if the previewed slice is solved while the depth rests (an
+    export solves every band), the rest makes no job, and must still replace
+    the preview, since nothing would arm the rest for it again."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    assert dock.provisional
+    engine = dock.engine
+    engine.finish(*engine.slice_at(dock.current_window()), dock.slice_finish())
+    _wait_for_refine(dock)
+    assert starts == []
+    assert not dock.provisional
+    assert dock.status_label.text() == dock._grid_status_text()
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
+def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_draw(
+    docked, monkeypatch
+):
+    """Finding 2b: a refine that ends in an error leaves the shared stretch
+    provisional with nothing armed; the next draw must arm the rest again."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    real = engine.stretch_solves
+    calls: list[int] = []
+
+    def failing_once(thickness_levels, finish):
+        jobs = real(thickness_levels, finish)
+        calls.append(len(jobs))
+        if len(calls) == 1 and jobs:
+
+            def run(should_stop):
+                raise ValueError("no convergence")
+
+            jobs[-1].run = run  # the others land first
+        return jobs
+
+    monkeypatch.setattr(engine, "stretch_solves", failing_once)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.stretch_combo.setCurrentText("shared across the cube")
+    _wait_for_refine(dock)
+    assert errors == ["minimum curvature failed: no convergence"]
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is False
+    assert not dock.refiner.busy and not dock._grid_refine.rest.isActive()
+
+    dock.refresh_slice()  # the next draw, whatever prompts it
+    assert dock._grid_refine.rest.isActive(), "the provisional stretch must arm the rest again"
+    _wait_for_refine(dock)
+    assert len(calls) == 2 and calls[1] == 1  # only the window that failed
+    n = dock.current_window().n_levels
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
+    clip = UnipolarClip() if engine.output_unipolar else PercentileClip()
+    assert dock.display_limit() == pytest.approx(engine.shared_limit(n, clip, dock.slice_finish()))
+
+
+def test_a_draw_hashes_its_slice_once(docked, monkeypatch):
+    """Finding 1: hashing a slice costs about 7 ms at a million cells, and a
+    draw needs its key two or three times, so it is computed once and passed
+    on, through the rest's job too."""
+    from nsgeo_qgis import slices_engine
+    from nsgeo_qgis.ui import slices_dock
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    hashes: list[int] = []
+
+    def counting(values):
+        hashes.append(1)
+        return solve_key(values)
+
+    monkeypatch.setattr(slices_engine, "solve_key", counting)
+    monkeypatch.setattr(slices_dock, "solve_key", counting)
+    dock.slice_slider.setValue(20)  # slow: the preview
+    assert dock.provisional and len(hashes) == 1
+    hashes.clear()
+    _wait_for_refine(dock)  # the rest's job, then the redraw it lands
+    assert not dock.provisional and len(hashes) == 1
+    hashes.clear()
+    dock.engine._last_solve_ms = 5.0
+    dock.slice_slider.setValue(30)  # quick: solved at once
+    assert not dock.provisional and len(hashes) == 1
+
+
+def test_a_final_stretch_queues_no_stretch_solves_at_rest(docked, monkeypatch):
+    """Ruling R11: a rest asks for the stretch's solves only while the stretch
+    shown is provisional. Asking slices and hashes its twelve windows on the
+    GUI thread (about 84 ms at a million cells), for nothing once it is final."""
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0, stretch="shared across the cube")
+    engine = dock.engine
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
+    asked: list[int] = []
+    real = engine.stretch_solves
+
+    def counted(thickness_levels, finish):
+        asked.append(thickness_levels)
+        return real(thickness_levels, finish)
+
+    monkeypatch.setattr(engine, "stretch_solves", counted)
+    starts = _starts(dock, monkeypatch)
+    # A window off the stretch: the stretch's own were solved with it.
+    n = dock.current_window().n_levels
+    measured = set(limit_windows(engine.z, n))
+    dock.slice_slider.setValue(
+        next(k for k in range(15, engine.z.nz - n) if SliceWindow(k, k + n) not in measured)
+    )
+    assert dock.provisional
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    assert asked == []
+    assert not dock.provisional
+    # A thickness not measured yet is provisional again, and its rest asks.
+    dock.thickness_spin.setValue(dock.thickness_spin.value() * 2)
+    _wait_for_refine(dock)
+    assert asked
+    assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is True
+
+
+def test_a_redraw_keeps_its_own_solve_but_a_new_plan_cancels_it(docked, monkeypatch):
+    """The keep rule (`RefineFlow.previewed`) in This grid. A redraw of the
+    slice still being solved (a palette change) waits for exactly the running
+    list's head, on the plan held, so the solve runs on. A max distance edit
+    rebuilds the plan but leaves the values, and so the solve key, as they
+    were: that solve could never land, so it is cancelled before the new plan
+    is built, and the rest restarts."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    engine = dock.engine
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    held: list = []
+    real = engine.pending_solve
+
+    def gated(values, coverage, finish, **kwargs):
+        job = real(values, coverage, finish, **kwargs)
+        if job is not None and not held:
+            held.append(job)
+            run = job.run
+
+            def run_held(should_stop):
+                gate.wait(10)
+                run(should_stop)
+
+            job.run = run_held
+        return job
+
+    monkeypatch.setattr(engine, "pending_solve", gated)
+    building: list[bool] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(dock.refiner.busy)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    try:
+        dock.slice_slider.setValue(20)
+        _pump_until(lambda: dock.refiner.busy)  # rested; the solve is held
+        combo = dock.palette_combo
+        combo.setCurrentIndex((combo.currentIndex() + 1) % combo.count())
+        assert dock.provisional
+        assert dock.refiner.busy, "a redraw of the slice being solved stopped its solve"
+        assert not dock._grid_refine.rest.isActive()
+        assert building == []
+        _set_finish(dock, max_distance_spacings=dock.grid_finish.max_distance_spin.value() + 0.5)
+        assert dock.provisional
+        assert not dock.refiner.busy, "a solve on the dropped plan ran on"
+        assert dock._grid_refine.rest.isActive()
+        assert building and not any(building), "the old solve ran through the rebuild"
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not dock.provisional
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
+def test_a_rest_during_a_finish_edits_pause_builds_nothing(docked, monkeypatch):
+    """Final review M-1. A finish edit waits out its pause (`_finish_debounce`)
+    before it redraws, but the rest reads the panel live: a rest that ran out
+    inside that pause built the new plan and its preview itself, in the rest's
+    slot, with no wait cursor (about 6 s at 0.05 m). Such a rest does nothing:
+    the edit's redraw rebuilds under the cursor and arms the rest again."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    building: list[int] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(1)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    dock.slice_slider.setValue(20)
+    assert dock.provisional and dock._grid_refine.rest.isActive()
+    spin = dock.grid_finish.max_distance_spin
+    spin.setValue(spin.value() + 0.5)  # the edit's redraw now waits out its pause
+    assert dock._finish_debounce.isActive()
+    dock._grid_refine.rest.stop()
+    dock._on_rest()  # the rest ran out inside that pause
+    assert building == [], "the rest built the new plan itself"
+    assert starts == [] and not dock.refiner.busy
+
+    _wait_for_refine(dock)  # the edit's redraw rebuilds, and its rest refines
+    assert building, "the edit's redraw built nothing"
+    assert len(starts) == 1
+    assert not dock.provisional
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
+class _Looping:
+    """A refine job that runs until it is asked to stop, or 10 s pass."""
+
+    key = b"looping"
+    engine = None
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.stopped_by_request = False
+
+    def run(self, should_stop) -> None:
+        self.thread = threading.current_thread()
+        self.started.set()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if should_stop():
+                self.stopped_by_request = True
+                return
+            time.sleep(0.001)
+
+    def land(self) -> bool:
+        return False
+
+
+def test_unloading_mid_refine_stops_the_worker(fake_iface, tmp_path, answer_modal, monkeypatch):
+    """Review Focus 3: closing QGIS mid-refine stops and joins the worker
+    before any engine is disposed. Nothing may escape to `sys.excepthook` or
+    `sys.unraisablehook` (conftest's autouse guard fails the test if it does)."""
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    unloaded = False
+    try:
+        session = plugin.session
+        session.new_site(tmp_path)
+        session.add_grid(GRID)
+        session.add_lines(
+            [
+                Line.open(
+                    synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+                    GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
+                )
+                for i in range(3)
+            ]
+        )
+        session.site.presets["p"] = list(PRESET)
+        session.presets_changed.emit()
+        dock = plugin.slices_dock
+        _ready(dock)
+        job = _Looping()
+        monkeypatch.setattr(dock.engine, "pending_solve", lambda *args, **kwargs: job)
+        _set_finish(dock, method="min_curvature")  # a new plan's first draw is a preview
+        assert dock.provisional
+        _pump_until(job.started.is_set)
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+        unloaded = True
+        assert job.stopped_by_request, "unload did not ask the solve to stop"
+        # This dock's own worker, as the job saw it: other tests' refiners
+        # may legitimately still have threads of the same name.
+        worker = job.thread
+        assert worker is not None and worker.name.startswith("nsgeo-refine")
+        _pump_until(lambda: not worker.is_alive(), 2.0)
+        gc.collect()
+        _pump_for(0.05)
+    finally:
+        if not unloaded:
+            answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+            plugin.unload()
+
+
+# ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
+
+
+def _slow_unsolved(dock, monkeypatch):
+    """Minimum curvature on a shared stretch with nothing solved yet and every
+    solve slow, so a move runs preview, refine slice, measure stretch."""
+    _ready(dock)
+    _minimum_curvature(dock, 500.0, stretch="shared across the cube")
+    engine = dock.engine
+    engine._solved.clear()
+    dock._grid_refine.stretch = None
+    engine._last_solve_ms = 500.0
+    slow_jobs(monkeypatch, engine, ("pending_solve", "stretch_solves"))
+
+
+@pytest.mark.parametrize("width", ["narrow", "wide"])
+def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeypatch, width):
+    """W1: the content's height and the slider's place do not change as a slice
+    goes normal, preview, refining the slice, measuring the stretch, final. The
+    old bottom status line changed height between them (47, 70, 24 px)."""
+    dock, _ = docked
+    dock.setFloating(True)
+    dock.resize(layout_width(dock, width), 700)
+    dock.show()
+    _slow_unsolved(dock, monkeypatch)
+    probe = LayoutProbe(dock)
+    baseline = probe.settle()
+    probe.assert_indicator_shares_the_readouts_row()
+    dock.slice_slider.setValue(20)
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        probe.record()
+        if not (dock.provisional or dock.refiner.busy or dock._grid_refine.rest.isActive()):
+            break
+        time.sleep(0.005)
+    probe.record()
+    texts = {text for text, _ in probe.seen}
+    assert PREVIEW_INDICATOR in texts
+    assert REFINING_SLICE_INDICATOR in texts
+    assert any(t.startswith("Colour stretch (") for t in texts), texts
+    assert probe.seen[-1][0] == ""
+    assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
+
+
+def test_the_indicator_names_each_state_and_the_status_never_does(docked, monkeypatch):
+    dock, _ = docked
+    _slow_unsolved(dock, monkeypatch)
+    assert dock.refine_label.text() == ""
+    dock.slice_slider.setValue(20)
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    stretch_total = len(
+        dock.engine.stretch_solves(dock.current_window().n_levels, dock.slice_finish())
+    )
+    counts: list[str] = []
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        text = dock.refine_label.text()
+        assert "Refin" not in dock.status_label.text()
+        assert "preview" not in dock.status_label.text().lower()
+        if text and (not counts or counts[-1] != text):
+            counts.append(text)
+        if text == "" and not dock.refiner.busy and not dock.provisional:
+            break
+        time.sleep(0.002)
+    assert counts[0] == PREVIEW_INDICATOR
+    assert counts[1] == REFINING_SLICE_INDICATOR
+    measuring = [c for c in counts if c.startswith("Colour stretch")]
+    # Counts the stretch windows only: the slice on screen is one of them and
+    # is solved already, so the list holds one fewer than were unsolved.
+    total = stretch_total - 1
+    assert measuring[0] == MEASURING_STRETCH_INDICATOR.format(done=0, total=total)
+    assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)
+    assert dock.refine_label.text() == ""
+
+
+def test_the_indicator_never_raises_the_dock_minimum_width(docked):
+    """Its text width is not a floor on the main window (the walkthrough's
+    minimum-size trap). The scroll area pins the dock's own minimum, so the
+    claim is on the scrolled content's: the longest text must not raise it."""
+    dock, _ = docked
+    _ready(dock)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    probe.settle()
+    content = probe.scroll.widget()
+    before = content.minimumSizeHint().width()
+    longest = MEASURING_STRETCH_INDICATOR.format(done=9999, total=9999) + " and then some " * 6
+    dock.refine_label.setText(longest)
+    probe.settle()
+    assert content.minimumSizeHint().width() == before
+    assert dock.refine_label.text() == longest
+    assert dock.refine_label.toolTip() == longest, "an elided text is readable in the tooltip"
+
+
+def test_the_dock_layout_probe_sees_the_width_it_is_given(docked):
+    dock, _ = docked
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    widths = []
+    for width in ("narrow", "wide"):
+        dock.resize(layout_width(dock, width), 700)
+        probe.settle()
+        widths.append(probe.scroll.widget().width())
+    assert widths[1] > widths[0], widths
+
+
+def test_the_indicator_follows_a_stylesheet_font_and_clear(qgis_app):
+    from nsgeo_qgis.ui.slices_dock import ElidedLabel
+    from qgis.PyQt.QtWidgets import QVBoxLayout, QWidget
+
+    host = QWidget()
+    QVBoxLayout(host).addWidget(label := ElidedLabel("Refining…"))
+    host.setStyleSheet("* { font: 20pt; }")
+    host.show()
+    QCoreApplication.processEvents()
+    QCoreApplication.processEvents()
+    assert label.height() >= label.fontMetrics().height()
+    label.clear()
+    assert label.text() == ""
+    host.close()
+
+
+def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
+    """Moving back to a solved slice while the one left is still solving: the
+    draw on screen is final, so the indicator must not say "Refining…"."""
+    dock, _ = docked
+    _ready(dock)
+    _slow_unsolved(dock, monkeypatch)
+    dock.slice_slider.setValue(20)
+    deadline = time.monotonic() + 30.0
+    while dock.provisional or dock.refiner.busy or dock._grid_refine.rest.isActive():
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+    dock.engine._last_solve_ms = 500.0
+    dock.slice_slider.setValue(26)  # unsolved: a preview, then its refine
+    deadline = time.monotonic() + 30.0
+    while dock.refine_label.text() != REFINING_SLICE_INDICATOR:
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+    dock.slice_slider.setValue(20)  # solved: drawn in full at once
+    QCoreApplication.processEvents()
+    assert not dock.provisional
+    assert dock.refine_label.text() != REFINING_SLICE_INDICATOR
+    assert dock.refine_label.text() == "" or dock.refine_label.text().startswith("Colour stretch")
+    deadline = time.monotonic() + 30.0
+    while dock.refiner.busy:
+        assert time.monotonic() < deadline
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+    QCoreApplication.processEvents()
+    # Nothing left to say, so neither the line nor its tooltip says anything.
+    assert dock.refine_label.text() == ""
+    assert dock.refine_label.toolTip() == ""

@@ -2,8 +2,9 @@
 
 Ten grids, 20 m and 50 m on a side, 0.5 m line spacing, at M11's default
 resolution: cell = min(0.5, spacing / 2), dz = the native sample interval,
-the z range the prepared lines share, thickness 5 ns, fill radius 1.5 line
-spacings. Runs offscreen in `.venv-qgis` with no plugin and no iface:
+the z range the prepared lines share, thickness 5 ns, the default interpolation
+(kriging, 0.5 line spacings, no smoothing). Runs offscreen in `.venv-qgis` with
+no plugin and no iface:
 
     QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python \\
         packages/nsgeo-qgis/scripts/bench_site.py [--samples 128] [--tpm 60] \\
@@ -52,7 +53,6 @@ N_GRIDS = 10
 COLUMNS = 5
 THICKNESS_NS = 5.0
 THIN_NS = 1.5
-RADIUS_SPACINGS = 1.5
 N_WINDOWS = 20
 
 
@@ -105,16 +105,16 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
     from nsgeo.geometry.placement import GridPlacement
     from nsgeo.model.survey import Line
     from nsgeo.render import PercentileClip
-    from nsgeo.slices import SliceWindow, fill
+    from nsgeo.slices import SliceWindow
     from nsgeo_qgis.session import SiteSession
     from nsgeo_qgis.site_engine import SiteEngine
     from nsgeo_qgis.slices_plan import (
         NO_TRANSFORM,
         Resolution,
         SiteSource,
+        SliceFinish,
         SourceChoice,
         limit_windows,
-        radius_cells_for,
     )
 
     folder = workdir / f"site_{int(size_m)}m_{azimuth:g}deg"
@@ -165,7 +165,7 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
         geometry_s = time.perf_counter() - started
         z = site.site_z
         tops = np.linspace(z.t0_ns, z.t_end_ns - THICKNESS_NS, N_WINDOWS)
-        tick = {"radius_spacings": RADIUS_SPACINGS, "manual": {}}
+        tick = {"finish": SliceFinish(), "manual": {}}
 
         started = time.perf_counter()
         site.slice_at(float(tops[0]), THICKNESS_NS, method="none", **tick)
@@ -193,16 +193,16 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
             th: len(limit_windows(z, max(1, round(th / z.dz_ns)))) for th in (THICKNESS_NS, THIN_NS)
         }
 
-        # M11's baseline: one grid's own engine, slice_at plus fill, same windows.
+        # M11's baseline: one grid's own engine, slice_at plus finish, same windows.
         engine = site.engine_for(grids[0][0].id)
-        radius = radius_cells_for(SPACING, RADIUS_SPACINGS, cell)
+        finish = SliceFinish()
         baseline, binning = [], []
         for top in tops:
             window = engine.z.level_range(float(top), THICKNESS_NS)
             t = time.perf_counter()
             values, coverage = engine.slice_at(SliceWindow(*window))
             binned_at = time.perf_counter()
-            fill(values, coverage, radius)
+            engine.finish(values, coverage, finish)
             baseline.append(ms(time.perf_counter() - t))
             binning.append(ms(binned_at - t))
 
@@ -287,7 +287,7 @@ def main() -> int:
         f"\n{N_GRIDS} grids per site, {SPACING} m line spacing, {args.tpm:g} traces/m, "
         f"{args.samples} samples/trace (time_zero, dewow, gain_agc; transform none); "
         f"cell {min(0.5, SPACING / 2):g} m, native dz, thickness {THICKNESS_NS:g} ns, "
-        f"radius {RADIUS_SPACINGS:g} spacings; {N_WINDOWS} windows per timing.\n"
+        f"default interpolation; {N_WINDOWS} windows per timing.\n"
     )
     print(
         "| site | bearing | lines | traces/line | lattice (pixel) | engine mode | prepare site (s) "
@@ -314,7 +314,7 @@ def main() -> int:
             f"site axis {r['nz']} levels; "
             f"set_resolution {r['geometry_ms']:.0f} ms; one grid's tick is "
             f"{r['baseline_bin_ms']:.1f} ms binning + "
-            f"{r['baseline_median_ms'] - r['baseline_bin_ms']:.1f} ms fill (medians); "
+            f"{r['baseline_median_ms'] - r['baseline_bin_ms']:.1f} ms finish (medians); "
             f"lines written in {r['written_s']:.0f} s; {r['errors']} errors"
         )
         print(

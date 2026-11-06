@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.processing import (
+    Radargram,
     build_step,
     default_params,
     get_step,
@@ -42,6 +43,18 @@ from nsgeo_qgis.lookup import identity_curve
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.add_step_dialog import AddStepDialog
 from nsgeo_qgis.ui.param_form import ParamForm
+
+#: How far a step's own velocity may sit from the open line's resolved
+#: velocity before the step's row says so, as a fraction of the line's.
+#:
+#: 2% of a typical 0.08 m/ns is 0.0016 m/ns, which is smaller than the
+#: standard error on a single hyperbola fit (M13 measured 0.0701 +/- 0.0018
+#: and 0.0733 +/- 0.0024 on real ground). So anything the row flags is at
+#: least a one-sigma difference, not two readings of the same number.
+#: Deliberately a constant and not derived from either velocity it
+#: compares: a threshold computed from one of its own operands pins
+#: nothing.
+_VELOCITY_MISMATCH_FRACTION = 0.02
 
 
 def dest_index(start: int, row: int) -> int:
@@ -289,7 +302,7 @@ class ProcessingDock(QgsDockWidget):
             self.list.clear()
             if key is not None:
                 for step, enabled in self.session.stack_for(key).entries:
-                    item = QListWidgetItem(step.title)
+                    item = QListWidgetItem(self.row_label(step, key))
                     item.setToolTip(step.name)
                     item.setFlags(
                         Qt.ItemFlag.ItemIsSelectable
@@ -310,6 +323,36 @@ class ProcessingDock(QgsDockWidget):
             w.setEnabled(has_line)
         self._update_row_buttons()
         self.step_selected.emit(self.list.currentRow())
+
+    def row_label(self, step: Any, key: str) -> str:
+        """A step's row text: its title, plus its velocity when it carries
+        one, plus the open line's velocity when the two disagree.
+
+        A prefilled velocity's hazard is not being wrong, it is being
+        silent -- one frozen three lines ago looks exactly like one that
+        belongs to the line on screen. So the row says both numbers and
+        the user decides. No refusal, no auto-correction, no dialog.
+
+        Keyed off the parameter rather than off `migrate_fk`, so a second
+        migration step (phase-shift, for v(z)) gets the same read-out
+        without this method learning its name.
+        """
+        velocity = step.params.get("velocity_m_ns")
+        if velocity is None:
+            return str(step.title)
+        label = f"{step.title} \u2014 {velocity:.4f} m/ns"
+        try:
+            resolved = self.session.resolved_velocity(key).surface_velocity
+        except ValueError as exc:
+            # Raised far from here by a header with a non-positive epsr.
+            # This runs inside `rebuild`, which is a slot: letting it out
+            # would abandon the rebuild after `list.clear()` and leave the
+            # panel showing no steps at all for a line that has them.
+            _log(f"row_label: cannot resolve a velocity for {key} ({exc}); no comparison shown")
+            return str(step.title)
+        if resolved > 0 and abs(velocity - resolved) / resolved > _VELOCITY_MISMATCH_FRACTION:
+            label += f" \u00b7 this line says {resolved:.4f}"
+        return label
 
     def _update_row_buttons(self) -> None:
         row = self.list.currentRow()
@@ -538,12 +581,69 @@ class ProcessingDock(QgsDockWidget):
         assert key is not None
         return self.input_axis(len(self.session.stack_for(key).entries))
 
+    def probe_radargram(self, key: str) -> Radargram | None:
+        """What a step appended right now would actually receive: the
+        stack's own `result()`, so a step already in the stack that changed
+        the record is accounted for, exactly as the new step's own
+        `apply()` will see it.
+
+        The same quantity `time_axis` already describes, and the same
+        fallback for the same reason: `result()` raises `ValueError` when
+        some OTHER step in the stack is misconfigured, which is a problem
+        with that step, not grounds for refusing to open the Add dialog.
+        Logged when it fires, because the probe then validates against the
+        raw source and can disagree with what the step will meet.
+
+        This was `stack.source` -- the raw radargram, `t0 = -11.09` on
+        every real file -- which left `migrate_fk` permanently un-addable
+        with a disabled OK button and a message about a time zero that was
+        already corrected two rows above it.
+        """
+        stack = self.session.stack_for(key)
+        if stack.source is None:
+            return None
+        try:
+            return stack.result()
+        except ValueError as exc:
+            _log(
+                f"probe_radargram: stack does not evaluate cleanly ({exc}); "
+                "validating the new step against the raw source instead"
+            )
+            return stack.source
+
+    def seed_params(self, name: str, key: str) -> dict[str, Any] | None:
+        """What to start `name`'s fields at for this line, or None.
+
+        Migration's velocity starts at whatever `resolve_velocity` says --
+        line override, then the grid, then the header's dielectric -- so
+        the field opens on the same number the depth axis and every pick
+        already use. A seed only: once the step exists the value is its
+        own, and a later velocity change does not reach back into it.
+        """
+        if name != "migrate_fk":
+            return None
+        try:
+            return {"velocity_m_ns": self.session.resolved_velocity(key).surface_velocity}
+        except ValueError as exc:
+            # e.g. a header with a non-positive epsr, which loads fine and
+            # fails when its velocity is resolved. A prefill is a
+            # convenience; failing to make one must not stop the dialog
+            # opening at all, which is the shape `plugin.py` already uses.
+            _log(
+                f"seed_params: cannot resolve a velocity for {key} ({exc}); leaving the field blank"
+            )
+            return None
+
     def build_add_dialog(self, name: str) -> AddStepDialog:
         key = self.key()
         assert key is not None
         line = self.session.line_for_key(key)
         return AddStepDialog(
-            name, header=line.header, radargram=self.session.stack_for(key).source, parent=self
+            name,
+            header=line.header,
+            radargram=self.probe_radargram(key),
+            params=self.seed_params(name, key),
+            parent=self,
         )
 
     def append_from_dialog(self, dialog: AddStepDialog) -> None:

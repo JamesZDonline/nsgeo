@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo_qgis.ui.view_transform import MIN_SAMPLE_SPAN, MIN_TRACE_SPAN, ViewTransform, nice_ticks
@@ -239,3 +241,108 @@ def test_snap_cutoff_clamps_into_the_record():
     t = ViewTransform.fit(100, 200, -4.0, 0.5, 400, 300)
     assert t.snap_cutoff(-100.0) == pytest.approx(-3.5)  # one sample kept
     assert t.snap_cutoff(1e6) == pytest.approx(t.t_end)
+
+
+MIR = ViewTransform.fit(
+    n_traces=608, n_samples=512, t0_ns=-11.09, dt_ns=0.2165, width=800, height=300, mirrored=True
+)
+B = ViewTransform.fit(608, 512, -11.09, 0.2165, 800, 300, bounds=(-100.0, 668.0))
+
+
+def test_a_mirrored_fit_puts_the_last_trace_on_the_left():
+    assert MIR.x_of_trace(608) == 0.0 and MIR.x_of_trace(0) == 800.0
+    assert MIR.trace_index_at(0.0) == 607 and MIR.trace_index_at(799.9) == 0
+    for x in (0.0, 123.4, 799.0):
+        assert MIR.x_of_trace(MIR.trace_of_x(x)) == pytest.approx(x)
+
+
+def test_mirrored_index_lookups_use_the_screen_left_edge():
+    z = MIR.with_window(100.0, 110.0, 0.0, 20.0)  # 80 px per trace, trace 109 leftmost
+    assert [z.trace_index_at(x) for x in (0.0, 41.0, 79.9, 80.0, 80.1)] == [109, 109, 109, 108, 108]
+    assert (
+        z.trace_index_at(z.x_of_trace(106) + 0.1) == 105
+    )  # trace 105 spans x_of_trace(106)..x_of_trace(105)
+
+
+def test_mirrored_zoom_keeps_the_point_under_the_anchor_fixed():
+    before = MIR.trace_of_x(600.0)
+    z = MIR.zoomed(2.0, anchor_x=600.0, anchor_y=100.0)
+    assert z.trace_of_x(600.0) == pytest.approx(before)
+    assert z.trace_hi - z.trace_lo == pytest.approx(304.0)
+
+
+def test_mirrored_pan_moves_the_data_with_the_pointer():
+    z = MIR.with_window(100.0, 300.0, 0.0, 20.0)
+    p = z.panned(-100.0, 0.0)  # drag left 100 px = 25 traces at 4 px/trace
+    assert (p.trace_lo, p.trace_hi) == pytest.approx((75.0, 275.0))
+    assert p.x_of_trace(150.0) == pytest.approx(z.x_of_trace(150.0) - 100.0)
+
+
+def test_the_window_may_cover_the_bounds_not_just_the_data():
+    assert (B.trace_lo, B.trace_hi) == (-100.0, 668.0) and B.trace_bounds == (-100.0, 668.0)
+    assert (B.zoomed(0.5, 400.0, 150.0).trace_lo, B.zoomed(0.5, 400.0, 150.0).trace_hi) == (
+        -100.0,
+        668.0,
+    )
+    far = B.with_window(200.0, 400.0, 0.0, 20.0).panned(100_000.0, 0.0)
+    assert (far.trace_lo, far.trace_hi) == (-100.0, 100.0)
+    assert FIT.trace_bounds == (0.0, 608.0)
+
+
+def test_trace_at_is_none_past_the_data_in_either_direction():
+    for t in (B, dataclasses.replace(B, mirrored=True)):
+        assert t.trace_at(t.x_of_trace(-30.0)) is None
+        assert t.trace_at(t.x_of_trace(0.5)) == 0
+        assert t.trace_at(t.x_of_trace(607.5)) == 607
+        assert t.trace_at(t.x_of_trace(608.5)) is None
+
+
+def test_traces_between_clamps_into_the_data_and_misses_blank_space():
+    for t in (B, dataclasses.replace(B, mirrored=True)):
+        x = t.x_of_trace
+        assert t.traces_between(x(-30.0), x(10.5)) == (0, 10)
+        assert t.traces_between(x(10.5), x(-30.0)) == (0, 10)
+        assert t.traces_between(x(600.5), x(650.0)) == (600, 607)
+        assert t.traces_between(x(-50.0), x(-10.0)) is None
+
+
+def test_source_rect_and_target_span_cover_only_the_data():
+    assert B.source_rect()[0] == 0.0 and B.source_rect()[2] == 608.0
+    assert B.target_span() == pytest.approx((100 / 768 * 800, 708 / 768 * 800))
+    m = dataclasses.replace(B, mirrored=True)
+    assert m.target_span() == pytest.approx((60 / 768 * 800, 668 / 768 * 800))
+    assert FIT.target_span() == (0.0, 800.0)
+
+
+def test_a_window_in_blank_space_has_an_empty_source():
+    z = B.with_window(-100.0, -50.0, 0.0, 20.0)
+    assert z.source_rect()[2] == 0.0
+    assert z.trace_at(400.0) is None and z.traces_between(0.0, 799.0) is None
+
+
+def test_one_to_one_keeps_the_screen_left_edge():
+    w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
+    plain = w.with_window(500.0, 700.0, 0.0, 20.0).one_to_one()
+    assert (plain.trace_lo, plain.trace_hi) == (500.0, 1300.0)
+    m = dataclasses.replace(w, mirrored=True).with_window(1000.0, 1200.0, 0.0, 20.0).one_to_one()
+    assert (m.trace_lo, m.trace_hi) == (400.0, 1200.0)
+
+
+def test_resized_keeps_the_mirror_and_the_bounds():
+    r = dataclasses.replace(B, mirrored=True).resized(400, 150)
+    assert r.mirrored and r.bounds == (-100.0, 668.0)
+
+
+def test_bounds_must_be_finite_and_ordered():
+    for bad in ((5.0, 5.0), (10.0, 0.0), (float("nan"), 10.0), (0.0, float("inf"))):
+        with pytest.raises(ValueError, match="bounds"):
+            ViewTransform.fit(608, 512, -11.09, 0.2165, 800, 300, bounds=bad)
+
+
+def test_traces_between_agrees_with_trace_at_on_column_boundaries():
+    w = ViewTransform.fit(2000, 512, -11.09, 0.2165, 800, 300)
+    for t in (w.one_to_one(), dataclasses.replace(w, mirrored=True).one_to_one()):
+        for px in (0, 10, 11, 799):
+            c = t.trace_at(float(px))
+            assert t.traces_between(float(px), float(px)) == (c, c)
+    assert FIT.traces_between(0.0, FIT.x_of_trace(19)) == (0, 19)

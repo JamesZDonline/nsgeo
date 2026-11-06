@@ -8,13 +8,12 @@ import time
 
 import numpy as np
 import pytest
-from nsgeo.render import UnipolarClip
+from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     NORMALISATION_METHODS,
     SiteLattice,
     SliceWindow,
     compose,
-    fill,
     find_seams,
     limit_over_slices,
     normalise,
@@ -23,16 +22,16 @@ from nsgeo.slices import (
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.site_engine import SiteEngine
-from nsgeo_qgis.slices_engine import SliceEngine
+from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
     Resolution,
     SiteSource,
+    SliceFinish,
     SourceChoice,
     format_bytes,
     limit_windows,
-    radius_cells_for,
 )
 from plugin_testing import LoadCounter, spin_until
 from qgis.core import (
@@ -44,7 +43,13 @@ from qgis.core import (
 
 #: M11's test resolution, with the z range widened to hold the whole site.
 RES = Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=60.0)
-TICK = {"radius_spacings": 1.5, "method": "none", "manual": {}}
+#: What the 1.5-spacing disc fill stood for: IDW reaching 1.5 line spacings.
+FINISH = SliceFinish(method="idw", max_distance_spacings=1.5)
+#: Binned cells as they are, the old radius 0.
+NONE = SliceFinish(method="none")
+TICK = {"finish": FINISH, "method": "none", "manual": {}}
+#: Minimum curvature at the same reach (interpolation spec §5.4).
+MC = SliceFinish(method="min_curvature", max_distance_spacings=1.5)
 
 
 @pytest.fixture
@@ -81,10 +86,12 @@ def grid_pixels(site: SiteEngine, grid_id: str) -> np.ndarray:
     return (ids >= 0).reshape(lattice.height, lattice.width)
 
 
-def expected_shown(site, session, top_ns, thickness_ns, *, radius_spacings, method, manual):
+def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manual, draw="finish"):
     """Each present grid's slice as spec 4.6 says it is shown, from public parts.
 
-    Binned and unfilled for the statistics, then `a * fill(v) + b`.
+    Binned and unfinished for the statistics, then `a * finish(v) + b`, the
+    finish being each grid's own engine's (interpolation spec §8). `draw`
+    "preview" gives each grid's kriging preview instead (plan call 5).
     """
     binned = {}
     for g in site.ready_grids:
@@ -103,10 +110,24 @@ def expected_shown(site, session, top_ns, thickness_ns, *, radius_spacings, meth
     shown = {}
     for g, (values, cov) in binned.items():
         a, b = factors[g]
-        cell = site.engine_for(g).frame.cell
-        radius = radius_cells_for(session.grid(g).default_spacing, radius_spacings, cell)
-        shown[g] = a * fill(values, cov, radius) + b
+        shown[g] = a * getattr(site.engine_for(g), draw)(values, cov, finish) + b
     return shown, factors
+
+
+def composed(site, shown):
+    """`shown` composed on the site lattice from whole-lattice gathers."""
+    lattice = site.lattice
+    return compose(
+        lattice,
+        [(site.engine_for(g).frame.cell_index(lattice.pixel_centres()), shown[g]) for g in shown],
+    )
+
+
+def slow(site, ms: float = 500.0) -> None:
+    """Every ready grid's last solve said to take `ms`. Only once its plan
+    exists (Ruling R1): building a plan resets the timing."""
+    for g in site.ready_grids:
+        site.engine_for(g)._last_solve_ms = ms
 
 
 def current_seams(site, session):
@@ -546,8 +567,8 @@ def test_background_normalisation_evens_out_a_grid_recorded_at_double_gain(
     site, _ = prepared(make_site, site3, source=site3.source(preset="raw"))
     a, b = grid_pixels(site, "A"), grid_pixels(site, "B")
 
-    plain = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="none", manual={})
-    evened = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="background", manual={})
+    plain = site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    evened = site.slice_at(20.0, 5.0, finish=FINISH, method="background", manual={})
 
     plain_ratio = np.nanmean(plain.array[b]) / np.nanmean(plain.array[a])
     evened_ratio = np.nanmean(evened.array[b]) / np.nanmean(evened.array[a])
@@ -559,8 +580,8 @@ def test_the_manual_gain_multiplies_only_that_grids_pixels(site3, make_site):
     site, _ = prepared(make_site, site3)
     a, b, c = (grid_pixels(site, g) for g in "ABC")
     for method in ("none", "background"):
-        plain = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={})
-        gained = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={"B": 2.5})
+        plain = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={})
+        gained = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={"B": 2.5})
         np.testing.assert_allclose(gained.array[b], 2.5 * plain.array[b], rtol=1e-5)
         np.testing.assert_array_equal(gained.array[a], plain.array[a])
         np.testing.assert_array_equal(gained.array[c], plain.array[c])
@@ -571,7 +592,7 @@ def test_the_manual_gain_multiplies_only_that_grids_pixels(site3, make_site):
 def test_normalising_a_signed_site_gives_finite_factors(site3, make_site):
     site, _ = prepared(make_site, site3, source=site3.source(transform=NO_TRANSFORM))
     for method in NORMALISATION_METHODS:
-        drawn = site.slice_at(20.0, 5.0, radius_spacings=1.5, method=method, manual={})
+        drawn = site.slice_at(20.0, 5.0, finish=FINISH, method=method, manual={})
         assert set(drawn.factors) == {"A", "B", "C"}
         for gain, shift in drawn.factors.values():
             assert np.isfinite(gain) and np.isfinite(shift) and gain > 0.0, (method, drawn.factors)
@@ -582,13 +603,13 @@ def test_normalising_a_signed_site_gives_finite_factors(site3, make_site):
 def test_histogram_factors_apply_to_the_filled_slice_as_a_gain_and_a_shift(site3, make_site):
     """Spec 4.6: measured on binned cells, applied to the displayed
     (filled) slice. Histogram match is the one method with a shift, so it
-    pins the composition `a * fill(v) + b` exactly, manual gain included."""
+    pins the composition `a * finish(v) + b` exactly, manual gain included."""
     session = site3.session
     site, _ = prepared(make_site, site3)
     manual = {"C": 1.5}
-    drawn = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="histogram", manual=manual)
+    drawn = site.slice_at(20.0, 5.0, finish=FINISH, method="histogram", manual=manual)
     shown, factors = expected_shown(
-        site, session, 20.0, 5.0, radius_spacings=1.5, method="histogram", manual=manual
+        site, session, 20.0, 5.0, finish=FINISH, method="histogram", manual=manual
     )
     assert any(abs(shift) > 1e-3 for _, shift in factors.values()), factors
     for g in "ABC":
@@ -600,11 +621,254 @@ def test_histogram_factors_apply_to_the_filled_slice_as_a_gain_and_a_shift(site3
     np.testing.assert_allclose(drawn.array, compose(lattice, layers), rtol=1e-6, atol=1e-7)
 
 
+def test_site_slices_are_each_grids_finished_slice_times_its_gain(site3, make_site):
+    """Interpolation spec §8: what a grid shows on the site is its own
+    engine's finished slice (interpolated, smoothed), times the grid's gain."""
+    finish = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.2)
+    site, _ = prepared(make_site, site3)
+    drawn = site.slice_at(20.0, 5.0, finish=finish, method="none", manual={"B": 2.0})
+    engine = site.engine_for("B")
+    values, coverage = engine.slice_at(drawn.windows["B"])
+    finished = engine.finish(values, coverage, finish)
+    assert drawn.factors["B"] == (2.0, 0.0)
+    only_b = grid_pixels(site, "B")
+    for g in "AC":
+        only_b &= ~grid_pixels(site, g)
+    ids = engine.frame.cell_index(drawn.lattice.pixel_centres())[only_b.ravel()]
+    expected = 2.0 * finished.ravel()[ids]
+    assert np.isfinite(expected).sum() > 50
+    np.testing.assert_allclose(drawn.array.ravel()[only_b.ravel()], expected, equal_nan=True)
+    # It is the finish that was applied, not the binned values.
+    assert not np.array_equal(finished, values)
+
+
+@pytest.mark.parametrize("method", ["none", "idw", "kriging", "min_curvature"])
+def test_site_gains_commute_with_every_method(site3, make_site, method):
+    """Interpolation is linear in the data and smoothing a normalised average,
+    so a gain and shift measured on the binned cells may be applied after the
+    finish (spec 4.6). This is what lets the site finish once per grid.
+    Minimum curvature is linear too, but solved iteratively to a relative
+    residual, so it agrees to the solve's tolerance of the data's size."""
+    finish = SliceFinish(method=method, max_distance_spacings=1.5, smooth_y_m=0.15)
+    site, _ = prepared(make_site, site3)
+    a, b = 1.7, -0.3
+    engine = site.engine_for("A")
+    window = window_on(engine.z, 20.0, 5.0)
+    values, coverage = engine.slice_at(window)
+    after = a * engine.finish(values, coverage, finish) + b
+    before = engine.finish(np.where(coverage > 0, a * values + b, values), coverage, finish)
+    atol = 1e-4 * np.nanmax(np.abs(after)) if method == "min_curvature" else 1e-5
+    np.testing.assert_allclose(after, before, rtol=1e-4, atol=atol, equal_nan=True)
+
+
+def test_site_shared_limit_measures_finished_slices(site3, make_site):
+    """The site's stretch is measured over the slices as drawn, finish
+    included (interpolation spec §7), so the settings move it."""
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    smoothed = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=1.0, smooth_y_m=1.0)
+    plain = site.shared_limit(2.0, clip, finish=NONE, method="none", manual={})
+    finished = site.shared_limit(2.0, clip, finish=smoothed, method="none", manual={})
+    z = site.site_z
+    slices = []
+    for w in limit_windows(z, round(2.0 / z.dz_ns)):
+        shown, _ = expected_shown(
+            site,
+            site3.session,
+            z.t0_ns + w.k0 * z.dz_ns,
+            w.n_levels * z.dz_ns,
+            finish=smoothed,
+            method="none",
+            manual={},
+        )
+        slices.extend(shown.values())
+    assert finished == pytest.approx(limit_over_slices(slices, clip), rel=1e-6)
+    assert finished != pytest.approx(plain, rel=1e-3)
+
+
+# ---- minimum curvature: preview, background solves, the stretch ------------
+# Plan calls 5-7 (interpolation spec §7). Real solve timings never decide a
+# result here: where "slow" matters, `_last_solve_ms` is set by hand, once the
+# plans exist (Ruling R1).
+
+
+def test_a_live_site_tick_previews_each_slow_grid_until_its_solve_lands(site3, make_site):
+    """A live tick draws each grid whose solve is slow as its kriging preview,
+    normalised and composed as the full result is, and says which.
+    `pending_solves` hands out exactly those grids' solves, in `ready_grids`
+    order; once they land the same tick is final and the full result."""
+    session = site3.session
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "histogram", "manual": {"C": 1.5}}
+    first = site.slice_at(20.0, 5.0, **tick, preview=True)  # no plan yet, so no solve timed
+    assert first.provisional and set(first.previewed) == set(site.ready_grids)
+    slow(site)
+    drawn = site.slice_at(20.0, 5.0, **tick, preview=True)
+    assert drawn.provisional and list(drawn.previewed) == list(site.ready_grids)
+    previews, _ = expected_shown(site, session, 20.0, 5.0, **tick, draw="preview")
+    np.testing.assert_allclose(drawn.array, composed(site, previews), rtol=1e-6, atol=1e-7)
+
+    jobs = site.pending_solves(20.0, 5.0, MC)
+    assert [job.engine for job in jobs] == [site.engine_for(g) for g in site.ready_grids]
+    for g, job in zip(site.ready_grids, jobs, strict=True):
+        values, _ = site.engine_for(g).slice_at(drawn.windows[g])
+        assert job.key == solve_key(values) == drawn.previewed[g].key
+    # With the tick that previewed them, the same solves, from its slices and keys.
+    again = site.pending_solves(20.0, 5.0, MC, drawn=drawn)
+    assert [(j.engine, j.key) for j in again] == [(j.engine, j.key) for j in jobs]
+    for job in jobs:
+        job.run(lambda: False)
+        assert job.land()
+    assert site.pending_solves(20.0, 5.0, MC) == []
+
+    final = site.slice_at(20.0, 5.0, **tick, preview=True)
+    assert not final.provisional and final.previewed == {}
+    full, _ = expected_shown(site, session, 20.0, 5.0, **tick)
+    np.testing.assert_allclose(final.array, composed(site, full), rtol=1e-6, atol=1e-7)
+    assert not np.allclose(final.array, drawn.array, equal_nan=True)
+    # Without `preview` a tick is the full result; another method never previews.
+    assert not site.slice_at(30.0, 5.0, **tick).provisional
+    assert not site.slice_at(35.0, 5.0, **{**tick, "finish": FINISH}, preview=True).provisional
+    assert site.pending_solves(40.0, 5.0, FINISH) == []
+
+
+@pytest.mark.parametrize(("ms", "previewed"), [(30.0, True), (10.0, False)])
+def test_a_live_site_tick_is_slow_by_its_grids_solves_together(site3, make_site, ms, previewed):
+    """Final review M-2: a tick solves every grid it does not preview on the
+    GUI thread, one after another, so "slow" is the tick's (plan call 5).
+    Three grids at 30 ms each make a 90 ms tick, over the 50 ms budget: each
+    is previewed, though each alone is inside it. At 10 ms each (30 ms) every
+    grid is solved at once."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    slow(site, ms)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert len(site.ready_grids) == 3
+    if previewed:
+        assert drawn.provisional and list(drawn.previewed) == list(site.ready_grids)
+    else:
+        assert not drawn.provisional and drawn.previewed == {}
+        assert site.pending_solves(30.0, 5.0, MC) == []
+
+
+def test_a_live_site_tick_counts_only_the_grids_it_must_solve(site3, make_site):
+    """A grid whose slice is solved already costs a tick nothing, so only the
+    others' last solves are added up: two at 30 ms (60 ms) are previewed, the
+    solved one drawn in full; one alone at 30 ms is solved at once. A grid not
+    timed yet makes the tick slow whatever the others cost."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    first, second, third = site.ready_grids
+    for job in site.pending_solves(30.0, 5.0, MC):
+        if job.engine is site.engine_for(first):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [second, third]
+
+    for job in site.pending_solves(35.0, 5.0, MC):
+        if job.engine is not site.engine_for(third):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(35.0, 5.0, **tick, preview=True)
+    assert drawn.previewed == {}
+    assert site.pending_solves(35.0, 5.0, MC) == []
+
+    slow(site, 1.0)
+    site.engine_for(third)._last_solve_ms = None
+    drawn = site.slice_at(40.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [first, second, third]
+
+
+def test_the_site_stretch_solves_cover_what_its_shared_limit_measures(site3_factory, make_site):
+    """Ruling R3: the minimum-curvature stretch is measured over the SITE
+    axis's `limit_windows`, each mapped onto every grid with `window_on`, as
+    `shared_limit` measures it. Its solves are exactly those grid windows,
+    never a grid's own `limit_windows` (C's axis ends early here, so the two
+    differ); until they land the stretch is the provisional one over their
+    previews, and once they have, the final one, equal to `shared_limit`."""
+    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": MC, "method": "background", "manual": {"A": 1.5}}
+    z = site.site_z
+    windows = limit_windows(z, round(2.0 / z.dz_ns))
+    assert len(windows) == 12
+    wanted = set()
+    for w in windows:
+        top, thickness = z.t0_ns + w.k0 * z.dz_ns, w.n_levels * z.dz_ns
+        for g in site.ready_grids:
+            engine = site.engine_for(g)
+            grid_window = window_on(engine.z, top, thickness)
+            if grid_window is not None:
+                wanted.add((engine, solve_key(engine.slice_at(grid_window)[0])))
+    c = site.engine_for("C")
+    own = {solve_key(c.slice_at(w)[0]) for w in limit_windows(c.z, round(2.0 / c.z.dz_ns))}
+    assert own != {key for engine, key in wanted if engine is c}
+    jobs = site.stretch_solves(2.0, MC)
+    assert {(job.engine, job.key) for job in jobs} == wanted
+    provisional = site.shared_limit(2.0, clip, **tick, preview=True)
+    assert site.stretch_limit(2.0, clip, **tick) == (provisional, False)
+    for job in jobs:
+        job.run(lambda: False)
+        assert job.land()
+    assert site.stretch_solves(2.0, MC) == []
+    final = site.shared_limit(2.0, clip, **tick)
+    assert site.stretch_limit(2.0, clip, **tick) == (final, True)
+    # Any other method has no solves and is always final.
+    kriging = {**tick, "finish": FINISH}
+    assert site.stretch_solves(2.0, FINISH) == []
+    assert site.stretch_limit(2.0, PercentileClip(), **kriging) == (
+        site.shared_limit(2.0, PercentileClip(), **kriging),
+        True,
+    )
+
+
+def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site):
+    """`weights_cached` lets the scope show a wait cursor only when a tick
+    will build weights (interpolation spec §7)."""
+    site, _ = prepared(make_site, site3)
+    assert not site.weights_cached(FINISH)
+    site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    assert site.weights_cached(FINISH)
+    # Smoothing is not part of the weights; a different method or distance is.
+    assert site.weights_cached(dataclasses.replace(FINISH, smooth_x_m=0.4))
+    assert not site.weights_cached(dataclasses.replace(FINISH, method="kriging"))
+
+
+def test_a_grid_with_no_window_at_a_tick_is_not_a_rebuild_there(site3_factory, make_site):
+    """A grid whose axis misses a tick's window is not finished there, so it
+    never builds weights for it. Asked for that window, `weights_cached`
+    leaves it out: counted, it made every tick look like a rebuild, so the
+    wait cursor showed on each and a running refine was cancelled by each."""
+    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    site, _ = prepared(make_site, site3)
+    deep, shallow = (40.0, 5.0), (5.0, 2.0)
+    assert site.slice_at(*deep, **TICK).windows["C"] is None
+    assert site.weights_cached(FINISH, at=deep)
+    assert not site.weights_cached(FINISH, at=shallow)  # C is finished there
+    assert not site.weights_cached(FINISH)  # every grid: C has built nothing
+    site.slice_at(*shallow, **TICK)
+    assert site.weights_cached(FINISH, at=shallow) and site.weights_cached(FINISH)
+
+
+def test_the_sites_held_bytes_count_the_weights_it_built(site3, make_site):
+    """The status line names what is held; the weights are held too."""
+    site, _ = prepared(make_site, site3)
+    before = site.held_bytes
+    site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    assert site.held_bytes > before
+
+
 def test_coverage_mode_shows_the_counts_without_normalising(site3, make_site):
     """Ruling 7: coverage is composed like values; nothing is normalised."""
     site, _ = prepared(make_site, site3)
     drawn = site.slice_at(
-        20.0, 5.0, radius_spacings=1.5, method="background", manual={"B": 3.0}, coverage=True
+        20.0, 5.0, finish=FINISH, method="background", manual={"B": 3.0}, coverage=True
     )
     a = grid_pixels(site, "A")
     _, coverage = site.engine_for("A").slice_at(drawn.windows["A"])
@@ -624,8 +888,8 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
     session = site3.session
     site, _ = prepared(make_site, site3, source=site3.source(preset="raw"))
     clip = UnipolarClip()
-    plain = site.shared_limit(2.0, clip, radius_spacings=1.5, method="none", manual={})
-    evened = site.shared_limit(2.0, clip, radius_spacings=1.5, method="background", manual={})
+    plain = site.shared_limit(2.0, clip, finish=FINISH, method="none", manual={})
+    evened = site.shared_limit(2.0, clip, finish=FINISH, method="background", manual={})
 
     z = site.site_z
     windows = limit_windows(z, round(2.0 / z.dz_ns))
@@ -637,7 +901,7 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
             session,
             z.t0_ns + w.k0 * z.dz_ns,
             w.n_levels * z.dz_ns,
-            radius_spacings=1.5,
+            finish=FINISH,
             method="background",
             manual={},
         )
@@ -645,7 +909,7 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
     assert evened == pytest.approx(limit_over_slices(slices, clip), rel=1e-6)
     assert abs(evened - plain) > 0.05 * plain
 
-    gained = site.shared_limit(2.0, clip, radius_spacings=1.5, method="none", manual={"A": 3.0})
+    gained = site.shared_limit(2.0, clip, finish=FINISH, method="none", manual={"A": 3.0})
     assert gained > plain
 
 
@@ -661,13 +925,13 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     pass. A zone change cannot be skipped."""
     site3 = site3_factory(crs={"B": "EPSG:32615"})
     site, errors = prepared(make_site, site3)
-    drawn = site.slice_at(20.0, 5.0, radius_spacings=0.0, method="none", manual={})
+    drawn = site.slice_at(20.0, 5.0, finish=NONE, method="none", manual={})
     lattice = drawn.lattice
     frame_b = site.engine_for("B").frame
     assert frame_b.crs == "EPSG:32615" and lattice.crs == "EPSG:32616"
 
     values, coverage = site.engine_for("B").slice_at(drawn.windows["B"])
-    shown_b = fill(values, coverage, 0)
+    shown_b = site.engine_for("B").finish(values, coverage, NONE)
     to_b = QgsCoordinateTransform(
         QgsCoordinateReferenceSystem("EPSG:32616"),
         QgsCoordinateReferenceSystem("EPSG:32615"),
@@ -773,7 +1037,7 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     session = site3.session
     site, errors = prepared(make_site, site3)
     assert current_seams(site, session) == [("A", "B"), ("B", "C")]
-    before = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    before = site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert before.lattice.x0 == 500.0
 
     session.replace_grid(dataclasses.replace(session.grid("A"), origin=(490.0, 700.0)))
@@ -781,12 +1045,10 @@ def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):
     assert site.grid_state("A") == "ready"
     assert site.engine_for("A").frame.origin == (490.0, 700.0)
 
-    after = site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    after = site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert (after.lattice.x0, after.lattice.width) == (490.0, 112)
     assert current_seams(site, session) == [("B", "C")]  # A no longer meets B
-    _, factors = expected_shown(
-        site, session, 20.0, 5.0, radius_spacings=1.5, method="edge", manual={}
-    )
+    _, factors = expected_shown(site, session, 20.0, 5.0, finish=FINISH, method="edge", manual={})
     for g in "ABC":
         assert after.factors[g] == pytest.approx(factors[g]), g
     assert errors == [], errors
@@ -840,7 +1102,7 @@ def test_a_velocity_edit_keeps_every_other_grids_cube_and_every_cache(
     site, errors = prepared(make_site, site3)
     for g in "ABC":
         site.engine_for(g).set_always_resident(True)
-    tick = {"radius_spacings": 1.5, "method": "edge", "manual": {}}
+    tick = {"finish": FINISH, "method": "edge", "manual": {}}
     before = site.slice_at(20.0, 5.0, **tick)
     assert all(site.engine_for(g).has_cube for g in "ABC")
     gathers = dict(site._gathers)
@@ -866,13 +1128,13 @@ def test_a_spacing_edit_drops_the_seams_but_no_gather(site3, make_site):
     (Ruling 3), so the seams go; it moves no frame, so every gather stays."""
     session = site3.session
     site, _ = prepared(make_site, site3)
-    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     gathers, seams = dict(site._gathers), site._seams
     session.replace_grid(dataclasses.replace(session.grid("C"), default_spacing=2.0))
     assert site.wait_until_idle(5_000)
     assert site._seams is None
     assert all(site._gathers.get(g) is gathers[g] for g in "ABC")
-    site.slice_at(20.0, 5.0, radius_spacings=1.5, method="edge", manual={})
+    site.slice_at(20.0, 5.0, finish=FINISH, method="edge", manual={})
     assert site._seams is not seams and site._seams is not None
 
 
@@ -881,7 +1143,9 @@ def test_the_status_line_counts_grids_lines_and_memory(site3, make_site):
     assert site.status_text().endswith("slices redraw in —")
     site.slice_at(20.0, 5.0, **TICK)
     text = site.status_text()
+    # The weights each engine built are held too.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
+    held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
     assert all(site.engine_for(g).mode == "streaming" for g in "ABC")
     assert text.startswith(f"3 grids · 12 lines held in memory, {format_bytes(held)} · ")
     assert re.fullmatch(r".* · slices redraw in \d+ ms", text), text

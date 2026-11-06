@@ -18,7 +18,7 @@ from nsgeo_qgis.site_export import (
     write_site_coverage,
 )
 from nsgeo_qgis.slice_export import GeoTiffSliceWriter, band_time_range
-from nsgeo_qgis.slices_plan import Resolution
+from nsgeo_qgis.slices_plan import Resolution, SliceFinish
 from osgeo import gdal
 from qgis.core import QgsRasterLayer
 
@@ -28,7 +28,7 @@ V_B = VelocityModel(layers=((0.0, 0.08), (10.0, 0.12)))
 KW = {
     "transform": "amp_envelope",
     "method": "edge",
-    "radius_spacings": 1.5,
+    "finish": SliceFinish(method="idw", max_distance_spacings=1.5, smooth_x_m=0.2, smooth_y_m=0.3),
     "gains": {"A": 1.0, "B": 2.0, "C": 1.0},
     "velocities": {"A": V_A, "B": V_B, "C": VelocityModel(layers=((0.0, 0.1),))},
 }
@@ -90,7 +90,7 @@ def pull(site, plan, band, **overrides):
     return site.slice_at(
         top,
         thickness,
-        radius_spacings=kw["radius_spacings"],
+        finish=kw["finish"],
         method=kw["method"],
         manual=kw["gains"],
     )
@@ -131,8 +131,20 @@ def test_the_dataset_records_transform_method_and_every_grid(site3, make_site, t
     assert md["NSGEO_SITE_NORMALISATION"] == "edge"
     assert float(md["NSGEO_SITE_CELL_M"]) == 0.25
     assert float(md["NSGEO_SITE_PIXEL_M"]) == site.lattice.pixel
-    assert float(md["NSGEO_SITE_FILL_RADIUS_SPACINGS"]) == 1.5
     assert md["NSGEO_SITE_Z_UNIT"] == "ns"
+
+
+def test_the_site_geotiff_carries_interpolation_metadata(site3, make_site, tmp_path, open_tif):
+    """The file records the finish it was drawn with (interpolation spec §8),
+    the old fill radius key gone."""
+    site, plan, path = exported(make_site, site3, tmp_path)
+    md = open_tif(path).GetMetadata()
+    assert md["NSGEO_SITE_INTERPOLATION"] == "idw"
+    assert float(md["NSGEO_SITE_MAX_DISTANCE_SPACINGS"]) == 1.5
+    assert float(md["NSGEO_SITE_SMOOTH_X_M"]) == 0.2
+    assert float(md["NSGEO_SITE_SMOOTH_Y_M"]) == 0.3
+    assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" not in md
+    assert plan.finish == KW["finish"]
     grids = json.loads(md["NSGEO_SITE_GRIDS"])
     assert [g["grid_id"] for g in grids] == ["A", "B", "C"]
     by_id = {g["grid_id"]: g for g in grids}
@@ -278,7 +290,7 @@ def test_the_coverage_companion_is_written_beside_it(site3, make_site, tmp_path,
     arr = ds.GetRasterBand(1).ReadAsArray()
     top, thickness = band_window_ns(plan.site_z, plan.bands[0].window)
     counts = site.slice_at(
-        top, thickness, radius_spacings=1.5, method="none", manual={}, coverage=True
+        top, thickness, finish=KW["finish"], method="none", manual={}, coverage=True
     ).array
     assert np.array_equal(arr, counts, equal_nan=True)
     finite = arr[np.isfinite(arr)]
@@ -293,14 +305,23 @@ def test_the_coverage_companion_does_not_claim_processing_it_never_had(
     ds = open_tif(write_site_coverage(site, path, plan))
     md = ds.GetMetadata()
     assert md["NSGEO_SITE_NORMALISATION"] == "none"
-    assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" not in md
     assert [g["gain"] for g in json.loads(md["NSGEO_SITE_GRIDS"])] == [1.0, 1.0, 1.0]
     factors = json.loads(ds.GetRasterBand(1).GetMetadata()["NSGEO_GRID_FACTORS"])
     assert all(f == [1.0, 0.0] for f in factors.values())
     # the values file keeps what it did
     main = open_tif(path).GetMetadata()
     assert main["NSGEO_SITE_NORMALISATION"] == "edge"
-    assert "NSGEO_SITE_FILL_RADIUS_SPACINGS" in main
+    assert main["NSGEO_SITE_INTERPOLATION"] == "idw"
+
+
+def test_the_site_coverage_companion_has_no_interpolation_metadata(
+    site3, make_site, tmp_path, open_tif
+):
+    """Raw counts were neither interpolated nor smoothed, so the companion
+    says nothing of either (interpolation spec §8)."""
+    site, plan, path = exported(make_site, site3, tmp_path)
+    md = open_tif(write_site_coverage(site, path, plan)).GetMetadata()
+    assert not [k for k in md if "INTERPOLATION" in k or "MAX_DISTANCE" in k or "SMOOTH" in k]
 
 
 def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path, open_tif):
@@ -370,3 +391,34 @@ def test_an_included_grid_left_out_is_recorded_and_absent_otherwise(
     assert md["NSGEO_SITE_LEFT_OUT"] == '{"D":"no lines","E":"failed: no line could be prepared"}'
     companion = open_tif(write_site_coverage(site, other, plan)).GetMetadata()
     assert json.loads(companion["NSGEO_SITE_LEFT_OUT"]) == left
+
+
+def test_export_reports_progress_for_every_band(site3, make_site, tmp_path):
+    site = make_site(site3)
+    calls: list[tuple[int, int]] = []
+
+    def record(done, total):
+        calls.append((done, total))
+        return True
+
+    plan = export_site(site, tmp_path / "site.tif", 8, 24, **KW, progress=record)
+    n = len(plan.bands)
+    assert n > 1
+    assert calls == [(i, n) for i in range(n + 1)]
+
+
+def test_a_site_export_stops_before_the_next_band_when_progress_says_no(site3, make_site, tmp_path):
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    site = make_site(site3)
+    pulled = []
+    real = site.slice_at
+
+    def counting(*args, **kwargs):
+        pulled.append(args)
+        return real(*args, **kwargs)
+
+    site.slice_at = counting  # type: ignore[method-assign]
+    with pytest.raises(ExportCancelled):
+        export_site(site, tmp_path / "site.tif", 8, 24, **KW, progress=lambda done, n: done < 1)
+    assert len(pulled) == 1

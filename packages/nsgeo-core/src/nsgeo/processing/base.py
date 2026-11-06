@@ -23,6 +23,11 @@ class Radargram:
     data: np.ndarray
     dt_ns: float
     t0_ns: float
+    #: Metres between traces, from the header's `traces_per_metre`. None when
+    #: the file was collected on a timer rather than a survey wheel and so has
+    #: no spatial axis. Optional and last so every existing construction and
+    #: every `replace()` keeps working untouched.
+    dx_m: float | None = None
 
     def __post_init__(self) -> None:
         if np.asarray(self.data).ndim != 2:
@@ -48,11 +53,21 @@ class Radargram:
     @classmethod
     def from_profile(cls, profile: Any) -> Radargram:
         """Build from a model.Profile without importing it, keeping
-        processing independent of the data model."""
+        processing independent of the data model.
+
+        Reads three header fields -- `dt_ns`, `position_ns` and
+        `traces_per_metre` -- and nothing from the model itself, so the
+        independence holds: these are facts about the file, not objects.
+        `traces_per_metre <= 0` means the file was collected on a timer
+        rather than a survey wheel, and leaves `dx_m` None rather than
+        inventing a spacing for a line that has none.
+        """
+        tpm = profile.header.traces_per_metre
         return cls(
             data=np.asarray(profile.data, dtype=float),
             dt_ns=profile.header.dt_ns,
             t0_ns=profile.header.position_ns,
+            dx_m=(1.0 / tpm) if tpm > 0 else None,
         )
 
 
@@ -124,7 +139,7 @@ class ParamSpec:
 
 #: The groups a step menu is laid out in, in the usual processing order.
 #: Every step's `group` names one of these.
-STEP_GROUPS: Final = ("Time", "Filters", "Background", "Gain", "Amplitude")
+STEP_GROUPS: Final = ("Time", "Filters", "Background", "Migration", "Gain", "Amplitude")
 
 
 class Step(Protocol):

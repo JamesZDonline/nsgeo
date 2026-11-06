@@ -1,8 +1,10 @@
 """Trace/time <-> pixel mapping for the profile viewer. No Qt.
 
-The visible window is [trace_lo, trace_hi) in trace-index units and
-[time_lo, time_hi) in two-way time. Widget size is the image area only;
-axis margins are the widget's business.
+The visible window is [trace_lo, trace_hi) in trace-index units, within
+`trace_bounds` (the data, or a wider ruler with blank space past its ends), and
+[time_lo, time_hi) in two-way time. Widget size is the image area only; axis
+margins are the widget's business. A mirrored transform draws `trace_hi` at
+x = 0 and `trace_lo` at the right edge; the trace index stays the recorded one.
 """
 
 from __future__ import annotations
@@ -28,8 +30,18 @@ class ViewTransform:
     trace_hi: float
     time_lo: float
     time_hi: float
+    mirrored: bool = False
+    # None means (0.0, n_traces): the window may not leave the data.
+    bounds: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
+        # Checked before the axes: a bad bounds must always name itself.
+        if self.bounds is not None and not (
+            math.isfinite(self.bounds[0])
+            and math.isfinite(self.bounds[1])
+            and self.bounds[0] < self.bounds[1]
+        ):
+            raise ValueError(f"ViewTransform bounds must be finite and ordered: {self.bounds}")
         # Every construction path -- fit(), a direct call, and the replace()
         # with_window/resized use internally -- runs __init__ and so lands
         # here. This matters specifically because fit() receives t0_ns/dt_ns
@@ -57,7 +69,16 @@ class ViewTransform:
 
     @classmethod
     def fit(
-        cls, n_traces: int, n_samples: int, t0_ns: float, dt_ns: float, width: int, height: int
+        cls,
+        n_traces: int,
+        n_samples: int,
+        t0_ns: float,
+        dt_ns: float,
+        width: int,
+        height: int,
+        *,
+        bounds: tuple[float, float] | None = None,
+        mirrored: bool = False,
     ) -> ViewTransform:
         return cls(
             n_traces=n_traces,
@@ -66,11 +87,17 @@ class ViewTransform:
             dt_ns=dt_ns,
             width=max(1, width),
             height=max(1, height),
-            trace_lo=0.0,
-            trace_hi=float(n_traces),
+            trace_lo=0.0 if bounds is None else bounds[0],
+            trace_hi=float(n_traces) if bounds is None else bounds[1],
             time_lo=t0_ns,
             time_hi=t0_ns + n_samples * dt_ns,
+            mirrored=mirrored,
+            bounds=bounds,
         )
+
+    @property
+    def trace_bounds(self) -> tuple[float, float]:
+        return (0.0, float(self.n_traces)) if self.bounds is None else self.bounds
 
     @property
     def t_end(self) -> float:
@@ -81,10 +108,15 @@ class ViewTransform:
         span = self.trace_hi - self.trace_lo
         if span == 0.0:  # n_traces == 0: a valid, empty-axis ViewTransform (see M6)
             return 0.0
+        if self.mirrored:
+            return (self.trace_hi - i) / span * self.width
         return (i - self.trace_lo) / span * self.width
 
     def trace_of_x(self, x: float) -> float:
-        return self.trace_lo + x / self.width * (self.trace_hi - self.trace_lo)
+        span = self.trace_hi - self.trace_lo
+        if self.mirrored:
+            return self.trace_hi - x / self.width * span
+        return self.trace_lo + x / self.width * span
 
     def y_of_time(self, t: float) -> float:
         span = self.time_hi - self.time_lo
@@ -102,32 +134,68 @@ class ViewTransform:
         m = round((time_ns - self.t0_ns) / self.dt_ns)
         return self.t0_ns + min(max(m, 1), self.n_samples) * self.dt_ns
 
+    def _column_at(self, x: float) -> int:
+        """The trace column holding local pixel `x`, unclamped. Floor of the
+        trace coordinate, or ceil - 1 when mirrored: either way a pixel on a
+        column boundary belongs to the column on its screen-right side."""
+        t = self.trace_of_x(x)
+        return math.ceil(t) - 1 if self.mirrored else math.floor(t)
+
     def trace_index_at(self, x: float) -> int:
         # max(0, ...) on the upper bound first: n_traces == 0 must clamp to 0,
         # never to -1, which would be numpy's "last trace" rather than "no trace".
         upper = max(0, self.n_traces - 1)
-        return int(min(upper, max(0, math.floor(self.trace_of_x(x)))))
+        return int(min(upper, max(0, self._column_at(x))))
+
+    def trace_at(self, x: float) -> int | None:
+        """The trace whose column holds `x`, or None past the data (blank
+        space on the ruler): unlike `trace_index_at` it never snaps."""
+        c = self._column_at(x)
+        return c if 0 <= c < self.n_traces else None
+
+    def traces_between(self, x0: float, x1: float) -> tuple[int, int] | None:
+        """The data traces whose columns the pixel span touches, ascending and
+        clamped into the data; None when the span misses the data."""
+        first, last = sorted((self._column_at(x0), self._column_at(x1)))
+        a, b = max(first, 0), min(last, self.n_traces - 1)
+        return (a, b) if a <= b else None
 
     def sample_index_at(self, y: float) -> int:
         s = math.floor((self.time_of_y(y) - self.t0_ns) / self.dt_ns)
         upper = max(0, self.n_samples - 1)
         return int(min(upper, max(0, s)))
 
+    def _visible_data(self) -> tuple[float, float]:
+        """The part of the window that lies on data, in trace units; empty
+        (lo == hi) when the window is all blank."""
+        lo = max(self.trace_lo, 0.0)
+        hi = min(self.trace_hi, float(self.n_traces))
+        return (lo, hi) if lo < hi else (min(max(self.trace_lo, 0.0), float(self.n_traces)),) * 2
+
     def source_rect(self) -> tuple[float, float, float, float]:
-        """Visible window as (x, y, w, h) in image pixels: traces and samples."""
+        """Visible data as (x, y, w, h) in image pixels: traces and samples.
+        Only the part of the window on data; w is 0 when it is all blank."""
         y0 = (self.time_lo - self.t0_ns) / self.dt_ns
         y1 = (self.time_hi - self.t0_ns) / self.dt_ns
-        return (self.trace_lo, y0, self.trace_hi - self.trace_lo, y1 - y0)
+        lo, hi = self._visible_data()
+        return (lo, y0, hi - lo, y1 - y0)
+
+    def target_span(self) -> tuple[float, float]:
+        """The ascending local x range that `source_rect()` lands on."""
+        lo, hi = self._visible_data()
+        xa, xb = self.x_of_trace(lo), self.x_of_trace(hi)
+        return (min(xa, xb), max(xa, xb))
 
     # ---- window changes -----------------------------------------------------
     def with_window(
         self, trace_lo: float, trace_hi: float, time_lo: float, time_hi: float
     ) -> ViewTransform:
-        t_span = min(max(trace_hi - trace_lo, MIN_TRACE_SPAN), float(self.n_traces))
+        blo, bhi = self.trace_bounds
+        t_span = min(max(trace_hi - trace_lo, MIN_TRACE_SPAN), bhi - blo)
         s_span = min(
             max(time_hi - time_lo, MIN_SAMPLE_SPAN * self.dt_ns), self.n_samples * self.dt_ns
         )
-        lo = min(max(trace_lo, 0.0), self.n_traces - t_span)
+        lo = min(max(trace_lo, blo), bhi - t_span)
         tlo = min(max(time_lo, self.t0_ns), self.t_end - s_span)
         if not all(math.isfinite(v) for v in (lo, t_span, tlo, s_span)):
             # A NaN factor/delta (zoomed/panned) or a NaN argument here poisons
@@ -151,23 +219,39 @@ class ViewTransform:
         s_span = (self.time_hi - self.time_lo) / factor
         fx = anchor_x / self.width
         fy = anchor_y / self.height
+        # Mirrored, the anchor sits fx of the way from the window's high end.
+        t_hi = at + fx * t_span if self.mirrored else at - fx * t_span + t_span
         return self.with_window(
-            at - fx * t_span,
-            at - fx * t_span + t_span,
+            t_hi - t_span,
+            t_hi,
             tt - fy * s_span,
             tt - fy * s_span + s_span,
         )
 
     def panned(self, dx_px: float, dy_px: float) -> ViewTransform:
         """Drag by (dx, dy) pixels: positive dx moves the data right, i.e.
-        the window moves to lower trace indices."""
-        dt = -dx_px / self.width * (self.trace_hi - self.trace_lo)
+        the window moves to lower trace indices (higher ones when mirrored)."""
+        dt = dx_px / self.width * (self.trace_hi - self.trace_lo)
+        if not self.mirrored:
+            dt = -dt
         ds = -dy_px / self.height * (self.time_hi - self.time_lo)
         return self.with_window(
             self.trace_lo + dt, self.trace_hi + dt, self.time_lo + ds, self.time_hi + ds
         )
 
+    def one_to_one(self) -> ViewTransform:
+        """One trace per pixel column, keeping the trace at the screen's left
+        edge where it is: `trace_lo` normally, `trace_hi` when mirrored."""
+        if self.mirrored:
+            return self.with_window(
+                self.trace_hi - self.width, self.trace_hi, self.time_lo, self.time_hi
+            )
+        return self.with_window(
+            self.trace_lo, self.trace_lo + self.width, self.time_lo, self.time_hi
+        )
+
     def resized(self, width: int, height: int) -> ViewTransform:
+        # replace() carries mirrored and bounds along with the window.
         return replace(self, width=max(1, width), height=max(1, height))
 
 

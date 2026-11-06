@@ -1,0 +1,29 @@
+# Task 4 — coordinator carry-ins (binding, in addition to the brief)
+
+These come from the pre-flight scan and from Tasks 1–3's reviews. Each is a requirement of this task.
+
+## A. Tests the brief's list missed
+1. **Ruling 3.** Also update `packages/nsgeo-qgis/tests/qgis/test_plugin_slice_export_dialogs.py` (uses `dock.grid_radius_spin` at ~:169, :243 and `dock.radius_cells()` at ~:171, :245) and `packages/nsgeo-qgis/tests/qgis/test_plugin_site_scope.py` (uses `dock.grid_radius_row` at ~:131, :140, :161 and `dock.grid_radius_spin` at ~:1055, :1077, :1087, :1505) wherever they use This grid's removed names. Keep each test's intent on the new panel (e.g. a remembered per-grid radius becomes a remembered per-grid finish field). The radius-0 warning test in test_plugin_slice_export_dialogs.py (~:237-245) is superseded by `test_exporting_a_rotated_grid_reports_no_fill_warning`: remove it, and say so in your report. Leave the site's `radius_spacing_spin` uses alone — Task 5 owns them.
+2. **Ruling 2.** Write `test_a_0_2_0_remembered_radius_is_ignored` so it survives Task 5 removing the `radius_spacings=` keyword from `remember_slice_resolution`: put a 0.2.0-shaped `{"radius_spacings": 0.5}` resolution into grid A's record without that keyword (through the session's record, e.g. its `_update_source(grid_id, resolution=...)`, or by opening a 0.2.0-shaped survey file), mark the survey clean, then switch to A and assert the panel is at `SliceFinish()` and the survey is still clean.
+3. **Spec §9, owned by no task until now.** Add `test_a_rotated_export_is_at_half_pitch_and_keeps_every_cell` to test_plugin_slice_export.py: export a rotated single grid (e.g. extend the existing rotated test near ~:454-498, whose docstring is stale — see C) with method `"none"` so values are not mixed, using values that give each frame cell a unique id; assert the GeoTIFF's `gt[1]` is half the frame cell and that every cell id appears among the band's finite pixels.
+
+## B. Wiring details from earlier tasks
+4. `FinishPanel.edited` is pinned in `packages/nsgeo-qgis/tests/qgis/test_no_orphan_signals.py`'s SHADOWED as `"edited": {"declared": 2, "connects": 1}`. When the dock connects `grid_finish.edited`, raise `connects` to match (Task 5 raises it again for `site_finish`).
+5. A raising receiver of `FinishPanel.edited` is reported by PyQt's unraisable hook, not caught by the panel's own guard. So the dock's slot for `grid_finish.edited`, and `_finish_debounce`'s timeout slot, must each guard their own body (`try/except Exception` → `_log` / `dock.error`, as the dock's other slots do).
+6. `FinishPanel` lives in `packages/nsgeo-qgis/nsgeo_qgis/ui/finish_panel.py`: `FinishPanel(parent=None, *, metres_label: bool)`, `edited = pyqtSignal(str, object)` (float for numbers, the method key for "method"), `value() -> SliceFinish`, quiet `set_value(SliceFinish)`, `set_spacing(float | None)`, widgets `method_combo`, `max_distance_spin`, `max_distance_metres`, `smooth_x_spin`, `smooth_y_spin`; `busy_cursor()` context manager in the same module.
+7. `slices_plan.py`: `DEFAULT_METHOD`, `DEFAULT_MAX_DISTANCE_SPACINGS`, `SEARCH_RADIUS_SPACINGS`, `METHOD_LABELS`, `WEIGHT_BYTES_PER_CELL`, `FINISH_FIELDS`, `SliceFinish(method, max_distance_spacings, smooth_x_m, smooth_y_m)` with `in_metres(spacing_m) -> FinishSettings` and `updated(fields) -> SliceFinish`; `MemoryEstimate.weights_bytes`, counted in `total_bytes`. Keep `DEFAULT_RADIUS_SPACINGS` and `radius_cells_for` — the site still uses them until Task 5.
+8. `session.remember_slice_resolution(grid_id, *, ..., method=None, max_distance_spacings=None, smooth_x_m=None, smooth_y_m=None)` — the keyword names equal `FINISH_FIELDS`, so `remember_slice_resolution(grid_id, **{field: value})` works. `slice_resolution()` now returns `dict[str, float | str]`.
+9. `ViewSettings` (slice_export.py) has `method`, `max_distance_spacings`, `smooth_x_m`, `smooth_y_m` and `radius_m`, plus a `finish` property; `view_settings()` must set `radius_m = max_distance_spacings × spacing` (the spec §8 compatibility field 0.2.0 reads).
+
+## C. Stale text in regions this task rewrites (Task 2 review)
+10. `slice_export.py` module docstring ~:43-52: the bullet saying reimplementing the resample is "the same duplication cost the pitch decision above already rejects" now points at an argument Task 2 deleted, and its "~1.4 s" export cost is ~4× low on rotated frames (measured: `to_north_up` 0.019 s axis-aligned vs 0.112 s at 10.497° on a 400×300 frame at cell 0.05; ≈4.4 s over 39 bands). Reword the cross-reference and restate the cost.
+11. `slice_export.py` ~:115-117 (`ExportPlan`) and ~:239-241 (`write`): "a lossy resample at any fill radius" — no longer true (half pitch keeps every cell).
+12. `plugin.py` ~:911-920 (Ruling AE bullets in `export_geotiff`'s docstring) — the brief already says rewrite them.
+13. `test_plugin_slice_export.py` ~:455-463: docstring "the ONE azimuth at which to_north_up drops nothing" — false now.
+
+## D. Small fixes in code this task touches
+14. `slices_dock._edited_fields(..., remembered: dict[str, float])` (~:1958) now receives `dict[str, float | str]`; fix the annotation.
+15. `slices_plan.format_status` (~:401-419) — the "held" readout leaves out `weights_bytes` although `total_bytes` counts it. This grid now holds weights, so the readout should count them (the site engine's own held figure, site_engine.py ~:981-983, is Task 5's).
+
+## E. Step 5 timing, extended
+16. Besides the brief's before/after per-window cost, add one case with smoothing on (`SliceFinish(smooth_x_m=0.5, smooth_y_m=0.5)`, weights cached) on the same four real lines, and on the 50 m synthetic grid at cell 0.2 m and 0.1 m if you can build it cheaply through the engine (otherwise time `finish_slice` directly on a FillWeights from `plan_fill`). Report the numbers; smoothing cost is not gated by spec §7, but the final review needs them.
