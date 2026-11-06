@@ -3131,7 +3131,7 @@ def _slow_unsolved(dock, monkeypatch):
     slow_jobs(monkeypatch, engine, ("pending_solve", "stretch_solves"))
 
 
-@pytest.mark.parametrize("width", [260, 560])
+@pytest.mark.parametrize("width", [260, 520])
 def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeypatch, width):
     """W1: the content's height and the slider's place do not change as a slice
     goes normal, preview, refining the slice, measuring the stretch, final. The
@@ -3217,7 +3217,7 @@ def test_the_dock_layout_probe_sees_the_width_it_is_given(docked):
     dock.show()
     probe = LayoutProbe(dock)
     widths = []
-    for width in (260, 560):
+    for width in (260, 520):
         dock.resize(width, 700)
         probe.settle()
         widths.append(probe.scroll.widget().width())
@@ -3269,3 +3269,7 @@ def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
         assert time.monotonic() < deadline
         QCoreApplication.processEvents()
         time.sleep(0.002)
+    QCoreApplication.processEvents()
+    # Nothing left to say, so neither the line nor its tooltip says anything.
+    assert dock.refine_label.text() == ""
+    assert dock.refine_label.toolTip() == ""

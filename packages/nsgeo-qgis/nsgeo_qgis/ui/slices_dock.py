@@ -180,7 +180,12 @@ class ElidedLabel(QLabel):
             self.full_text, Qt.TextElideMode.ElideRight, max(self.width(), 1)
         )
         super().setText(shown)
-        self.setToolTip(self.full_text if shown != self.full_text else self._hint)
+        # The full text when it is cut short; the hint only while there is a
+        # state to explain, so a blank line never carries one (walkthrough round 1).
+        if shown != self.full_text:
+            self.setToolTip(self.full_text)
+        else:
+            self.setToolTip(self._hint if self.full_text else "")
 
 
 class SlicesDock(QgsDockWidget):

@@ -2894,7 +2894,7 @@ def _slow_site_unsolved(plugin, monkeypatch):
     return dock
 
 
-@pytest.mark.parametrize("width", [260, 560])
+@pytest.mark.parametrize("width", [260, 520])
 def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, monkeypatch, width):
     """W1, in Whole site: the content's height and the slider's place do not
     change from normal through preview, refining the grids and measuring the
@@ -2969,7 +2969,7 @@ def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
     dock.show()
     probe = LayoutProbe(dock)
     widths = []
-    for width in (260, 560):
+    for width in (260, 520):
         dock.resize(width, 700)
         probe.settle()
         widths.append(probe.scroll.widget().width())
