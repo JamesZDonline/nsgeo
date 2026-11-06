@@ -207,6 +207,7 @@ def test_the_registry_declares_the_bounds_these_tests_cover():
         "gain_agc.window_ns",
         "gain_agc.target",
         "gain_agc.eps",
+        "migrate_fk.max_dip_deg",
         "migrate_fk.velocity_m_ns",
         "time_zero.sample",
         "time_zero.threshold",

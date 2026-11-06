@@ -55,6 +55,27 @@ MAX_T0_NS = 2.0
 #: transform (110 ms to 354 ms on a 512 x 640 line).
 _T_OVERSAMPLE = 2
 
+#: The widest the aperture may be set to, in degrees: straight sideways.
+MAX_DIP_LIMIT_DEG = 90.0
+
+#: The aperture the step starts at, in degrees from vertical.
+#:
+#: Migration has to allow for every direction an echo could have come from,
+#: and with no limit on that every laterally sharp feature in a rough
+#: record -- a noisy trace, a stutter in the survey wheel -- is spread into
+#: a full arc, because nothing tells the operator it was not the apex of
+#: something real. The first field walkthrough of this step saw exactly
+#: that, which is the evidence spec §11 made the remedy conditional on.
+#:
+#: 45 degrees measured clean on the local lines while keeping almost all of
+#: the collapse. On a synthetic diffractor, focus against aperture:
+#: 0.982 at 90, 0.979 at 60, 0.971 at 45, 0.948 at 30, 0.86 at 20; the
+#: energy one sample leaves more than a metre away: 0.038, 0.015, 0.0019,
+#: 0.0001, 0.0001. A hyperbola's energy sits near its apex, where the curve
+#: is gentle; its steep limbs carry little of the signal and nearly all of
+#: the arc, which is why the trade is so one-sided.
+DEFAULT_MAX_DIP_DEG = 45.0
+
 
 def migrate_fk(
     data: np.ndarray,
@@ -63,6 +84,7 @@ def migrate_fk(
     dx_m: float | None,
     velocity_m_ns: float,
     t0_ns: float = 0.0,
+    max_dip_deg: float = DEFAULT_MAX_DIP_DEG,
     _pad_traces: int | None = None,
 ) -> np.ndarray:
     """Migrate `data` (samples x traces) at a constant `velocity_m_ns`.
@@ -87,6 +109,11 @@ def migrate_fk(
         )
     if not velocity_m_ns > 0:
         raise ValueError(f"migration velocity must be greater than zero, got {velocity_m_ns}")
+    if not 0.0 < max_dip_deg <= MAX_DIP_LIMIT_DEG:
+        raise ValueError(
+            f"the aperture must be between 0 and {MAX_DIP_LIMIT_DEG:.0f} degrees from "
+            f"vertical, got {max_dip_deg}"
+        )
     if abs(t0_ns) > MAX_T0_NS:
         depth_m = velocity_m_ns / 2.0 * abs(t0_ns)
         raise ValueError(
@@ -184,6 +211,20 @@ def migrate_fk(
         obliquity = np.abs(kz)[:, None] / root
     mapped *= np.where(root > 0.0, obliquity, 0.0)
 
+    # The aperture. `|kx| / root` is the sine of the dip the energy came in
+    # at, so this is a raised cosine in that sine, full weight straight
+    # down and nothing at `max_dip_deg`. Tapered over the whole range
+    # rather than cut at the edge: a brick wall in the wavenumber domain
+    # rings, and that ringing reads as stratigraphy -- the same reason
+    # `bandpass` tapers its passband edges. The taper is not a second knob,
+    # because a narrower one measures worse on both counts: at 45 degrees a
+    # 30% taper scores 0.952 focus and 0.050 arc reach against the full
+    # one's 0.971 and 0.0019.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        sin_dip = np.abs(kx)[None, :] / np.where(root > 0.0, root, 1.0)
+    reach = np.clip(1.0 - sin_dip / np.sin(np.radians(max_dip_deg)), 0.0, 1.0)
+    mapped *= 0.5 - 0.5 * np.cos(np.pi * reach)
+
     # Steep dips map to frequencies the record does not contain. Without
     # this they would read the band edge instead and smear it across the
     # image; this is where the evanescent region gets left behind, since
@@ -211,12 +252,15 @@ class MigrateFk:
     group = "Migration"
     order = 1
 
-    def __init__(self, velocity_m_ns: float) -> None:
+    def __init__(
+        self, velocity_m_ns: float, max_dip_deg: float = DEFAULT_MAX_DIP_DEG
+    ) -> None:
         self.velocity_m_ns = velocity_m_ns
+        self.max_dip_deg = max_dip_deg
 
     @property
     def params(self) -> dict[str, Any]:
-        return {"velocity_m_ns": self.velocity_m_ns}
+        return {"velocity_m_ns": self.velocity_m_ns, "max_dip_deg": self.max_dip_deg}
 
     @classmethod
     def schema(cls) -> tuple[ParamSpec, ...]:
@@ -234,6 +278,20 @@ class MigrateFk:
                     "hyperbola; the field starts at whatever this line resolves to."
                 ),
             ),
+            ParamSpec(
+                name="max_dip_deg",
+                kind="float",
+                label="Aperture",
+                default=DEFAULT_MAX_DIP_DEG,
+                unit="deg",
+                min=5.0,
+                max=MAX_DIP_LIMIT_DEG,
+                help=(
+                    "The steepest angle from vertical that migration will move energy "
+                    "along. Lower leaves fewer arcs off noise and collapses a little "
+                    "less of each hyperbola's outer limbs."
+                ),
+            ),
         )
 
     def apply(self, rg: Radargram) -> Radargram:
@@ -243,6 +301,7 @@ class MigrateFk:
             dx_m=rg.dx_m,
             velocity_m_ns=self.velocity_m_ns,
             t0_ns=rg.t0_ns,
+            max_dip_deg=self.max_dip_deg,
         )
         # replace(), not a new Radargram: dx_m and anything else the record
         # carries has to survive the step.
