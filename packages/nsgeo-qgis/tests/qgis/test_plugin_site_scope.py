@@ -6,26 +6,44 @@ C, four lines each; the plugin opens it in its own session, as a user would.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
+import threading
+import time
 
 import numpy as np
 import pytest
-from nsgeo.slices import plan_windows, window_depths_m
+from nsgeo.render import PercentileClip, UnipolarClip
+from nsgeo.slices import (
+    SliceWindow,
+    plan_windows,
+    window_depths_m,
+    window_on,
+    window_times_ns,
+)
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
+from nsgeo_qgis import site_engine as site_engine_module
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
+from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    MEASURING_STRETCH_INDICATOR,
     NO_TRANSFORM,
+    PREVIEW_INDICATOR,
+    REFINE_REST_MS,
+    REFINING_GRIDS_INDICATOR,
     SliceFinish,
     default_cell,
     format_bytes,
+    limit_windows,
 )
+from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
-from plugin_testing import LoadCounter, spin_until
+from plugin_testing import LayoutProbe, LoadCounter, layout_width, slow_jobs, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
@@ -1979,3 +1997,981 @@ def test_unload_with_the_site_scope_open_leaves_nothing_running(
     assert not site_engine.has_live_task and not engine.has_live_task
     assert spin_until(lambda: False, 300) is False  # let anything stray fire; nothing may raise
     assert not site_engine.has_live_task
+
+
+# ---- minimum curvature: preview while the depth moves, refine once it rests ---------------
+# Plan calls 5-7 (interpolation spec §7), for the site. A solve's real duration never
+# decides anything here: every grid engine's `_last_solve_ms` is set by hand, once its
+# plan exists (Ruling R1: building one resets it).
+
+
+def _pump_for(seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _pump_until(predicate, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() > deadline:
+            pytest.fail("timed out waiting for the condition")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _wait_for_refine(dock, timeout_s: float = 30.0) -> None:
+    """Let the depth rest (`REFINE_REST_MS` and a margin), then pump events
+    until the refine worker has landed its list, no rest is pending and the
+    site's coalesced redraw has run. Task 3's helper, copied (Ruling R4), with
+    the site's own timers: its rest, its tick and its Interpolation pause."""
+    scope = dock._site
+    start = time.monotonic()
+    rested = start + (REFINE_REST_MS + 150) / 1000.0
+    while (
+        time.monotonic() < rested
+        or dock.refiner.busy
+        or scope.refine.rest.isActive()
+        or scope.tick.isActive()
+        or scope.finish_debounce.isActive()
+    ):
+        if time.monotonic() - start > timeout_s:
+            pytest.fail("the refine did not finish")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def _choose_method(panel, method: str) -> None:
+    panel.method_combo.setCurrentIndex(panel.method_combo.findData(method))
+
+
+def _site_minimum_curvature(plugin, last_solve_ms: float, stretch: int = 1, at: int = 10):
+    """Whole site on minimum curvature at slider `at`, that tick refined, and
+    every grid's last solve then said to have taken `last_solve_ms`. The
+    stretch is "this slice" (1), so it queues no solves of its own, unless
+    `stretch` is 0 (shared across the site)."""
+    dock = whole_site(plugin)
+    dock.stretch_combo.setCurrentIndex(stretch)
+    dock.slice_slider.setValue(at)
+    _choose_method(dock.site_finish, "min_curvature")
+    _wait_for_refine(dock)
+    assert not dock._site.provisional
+    site = dock.site_engine
+    for grid_id in site.ready_grids:
+        site.engine_for(grid_id)._last_solve_ms = last_solve_ms
+    return dock
+
+
+def _site_drawn(dock, *, preview: bool = False) -> np.ndarray:
+    """The site engine's slice at the window the scope last drew."""
+    top, thickness = dock._site.drawn_at
+    return dock.site_engine.slice_at(
+        top,
+        thickness,
+        finish=dock.site_finish.value(),
+        method=dock.normalisation_panel.method(),
+        manual=dock.site_gains(),
+        preview=preview,
+    ).array
+
+
+def _starts(dock, monkeypatch) -> list[float]:
+    """When the refiner was asked to start a list, by the monotonic clock."""
+    times: list[float] = []
+    real = dock.refiner.start
+
+    def recording(*args, **kwargs):
+        times.append(time.monotonic())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dock.refiner, "start", recording)
+    return times
+
+
+def _held_until(gate: threading.Event, job) -> None:
+    """`job` waits for `gate` before it solves (and still hears a cancel)."""
+    run = job.run
+
+    def held(should_stop):
+        gate.wait(10)
+        run(should_stop)
+
+    job.run = held
+
+
+class _Looping:
+    """A refine job that runs until it is asked to stop, or 10 s pass."""
+
+    key = b"looping"
+    engine = None
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped_by_request = False
+
+    def run(self, should_stop) -> None:
+        self.started.set()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if should_stop():
+                self.stopped_by_request = True
+                return
+            time.sleep(0.001)
+
+    def land(self) -> bool:
+        return False
+
+
+def test_a_slow_site_tick_previews_then_refines(plugin):
+    dock = _site_minimum_curvature(plugin, 500.0)
+    scope = dock._site
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.slice.provisional is True
+    assert scope.provisional
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    window = scope.window
+    preview = scope.slice.array
+    np.testing.assert_array_equal(preview, _site_drawn(dock, preview=True))
+
+    _wait_for_refine(dock)
+    assert scope.slice.provisional is False
+    assert not scope.provisional
+    assert dock.status_label.text() == dock.site_engine.status_text()
+    assert scope.window == window
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+    assert not np.array_equal(scope.slice.array, preview, equal_nan=True)
+
+
+def test_a_quick_site_tick_draws_minimum_curvature_at_once(plugin, monkeypatch):
+    dock = _site_minimum_curvature(plugin, 5.0)
+    scope = dock._site
+    starts = _starts(dock, monkeypatch)
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.slice.provisional is False
+    assert not scope.provisional
+    assert not scope.refine.rest.isActive()
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_a_site_tick_by_another_method_stops_the_refine(plugin, monkeypatch):
+    """Whole site with another method behaves as before minimum curvature
+    came: its tick cancels the worker and the rest, and no refine starts."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    scope = dock._site
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.provisional and scope.refine.rest.isActive()
+    starts = _starts(dock, monkeypatch)
+    _choose_method(dock.site_finish, "kriging")
+    _pump_until(lambda: not scope.provisional and not scope.tick.isActive())
+    assert not scope.refine.rest.isActive()
+    assert not dock.refiner.busy
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+    _pump_for((REFINE_REST_MS + 150) / 1000.0)
+    assert starts == []
+
+
+def test_a_site_refine_for_a_window_left_behind_never_draws(plugin, monkeypatch):
+    """Review Focus 2, for the site. The first grid's solve for window A is
+    held until the person has moved on to B, and ignores the cancel, so it
+    finishes late on purpose. It must not land, and nothing drawn after the
+    move may be A's."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    gate, finished_late = threading.Event(), threading.Event()
+    late: list = []
+    real = site.pending_solves
+
+    def gated(top_ns, thickness_ns, finish, **kwargs):
+        jobs = real(top_ns, thickness_ns, finish, **kwargs)
+        if not late and jobs:
+            job = jobs[0]
+            late.append(job)
+            run = job.run
+
+            def run_late(should_stop):
+                try:
+                    gate.wait(10)
+                    run(lambda: False)  # deaf to the cancel
+                finally:
+                    finished_late.set()
+
+            job.run = run_late
+        return jobs
+
+    monkeypatch.setattr(site, "pending_solves", gated)
+    dock.slice_slider.setValue(20)
+    _events()
+    a_top, a_thickness = scope.drawn_at
+    drawn: list = []
+    try:
+        _pump_until(lambda: dock.refiner.busy)  # A rested and its first solve began
+        dock.slice_changed.connect(lambda: drawn.append(dock.current_site_slice()))
+        dock.slice_slider.setValue(40)
+        _events()
+        assert scope.provisional
+        b_window = scope.window
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+
+    assert finished_late.is_set()
+    job = late[0]
+    assert job.key not in job.engine._solved, "A's late result landed"
+    assert scope.window == b_window
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+    a_full = site.slice_at(
+        a_top,
+        a_thickness,
+        finish=dock.site_finish.value(),
+        method=dock.normalisation_panel.method(),
+        manual=dock.site_gains(),
+    ).array
+    shown = [s.array for s in drawn if s is not None]
+    assert len(shown) >= 2  # B's preview, then B
+    assert not any(np.array_equal(array, a_full, equal_nan=True) for array in shown)
+
+
+def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
+    """Move to slider `at`, every grid present there slow, and hold every
+    solve but the first. The first grid's landing redraw still previews the
+    others and must leave their solves running: one list, no rest restarted,
+    and no wait cursor, since nothing is rebuilt."""
+    site, scope = dock.site_engine, dock._site
+    starts = _starts(dock, monkeypatch)
+    cursors: list[int] = []
+    real_cursor = site_scope_module.busy_cursor
+
+    def counting_cursor():
+        cursors.append(1)
+        return real_cursor()
+
+    monkeypatch.setattr(site_scope_module, "busy_cursor", counting_cursor)
+    gate = threading.Event()
+    real = site.pending_solves
+
+    def gated(top_ns, thickness_ns, finish, **kwargs):
+        jobs = real(top_ns, thickness_ns, finish, **kwargs)
+        for job in jobs[1:]:
+            _held_until(gate, job)
+        return jobs
+
+    monkeypatch.setattr(site, "pending_solves", gated)
+    try:
+        dock.slice_slider.setValue(at)
+        _events()
+        first, *others = list(scope.slice.previewed)
+        assert others
+        _pump_until(lambda: list(scope.slice.previewed) == others and not scope.tick.isActive())
+        assert dock.refiner.busy, "the first grid's redraw stopped the others' solves"
+        assert scope.provisional
+        assert not scope.refine.rest.isActive()
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    assert cursors == [], "a tick that builds nothing showed the wait cursor"
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch):
+    """Each grid's refined slice is drawn as soon as it lands. That redraw
+    still previews the grids not landed yet, but it waits only for solves at
+    the head of the running list, so it must leave the list running: a
+    cancel would lose the solve in progress and start the rest over at every
+    landing."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    assert list(dock.site_engine.ready_grids) == ["A", "B", "C"]
+    _landing_keeps_the_others(dock, monkeypatch, 30)
+
+
+def test_a_grid_missing_the_depth_does_not_stop_the_others_landing(
+    site3_factory, open_plugin, monkeypatch
+):
+    """The same, with C ending above the depth shown. C is never finished
+    there, so it never builds weights for this finish: counted as one still
+    to build, it made every tick a rebuild, which cancelled the running
+    list at every landing and showed the wait cursor on every tick."""
+    plugin = open_plugin(site3_factory(samples={"C": 128}))  # C ends near 16.4 ns
+    site_z = whole_site(plugin).site_engine.site_z
+
+    def at(ns: float) -> int:
+        return int(round((ns - site_z.t0_ns) / site_z.dz_ns))
+
+    dock = _site_minimum_curvature(plugin, 500.0, at=at(60.0))
+    site = dock.site_engine
+    assert dock._site.slice.windows["C"] is None
+    assert not site.engine_for("C").weights_cached(dock.site_finish.value())
+    _landing_keeps_the_others(dock, monkeypatch, at(70.0))
+
+
+@pytest.mark.parametrize("solved", [0, 1])
+def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, solved):
+    """Hashing a slice costs about 7 ms at a million cells, and a tick needs
+    each grid's key two or three times: it is computed once per grid and
+    passed on, and the rest hashes nothing. A grid the tick previewed is
+    solved from the tick's slice and key; one it drew in full (`solved`: its
+    slice there solved already, so drawn from the cache) is solved already,
+    so it is not even sliced. (A grid merely quick to solve is previewed with
+    the others when the tick is slow: final review M-2.)"""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    first, *others = site.ready_grids
+    if solved:
+        z = site.site_z
+        thickness_levels, _ = dock.thickness_step_levels()
+        engine = site.engine_for(first)
+        window = window_on(engine.z, z.t0_ns + 30 * z.dz_ns, thickness_levels * z.dz_ns)
+        job = engine.window_solve(window, dock.site_finish.value())
+        job.run(lambda: False)
+        assert job.land()
+        engine._last_solve_ms = 500.0  # landing timed it
+    where = ["rest"]
+    hashes: list[str] = []
+
+    def counting(values):
+        hashes.append(where[0])
+        return solve_key(values)
+
+    monkeypatch.setattr(slices_engine, "solve_key", counting)
+    monkeypatch.setattr(site_engine_module, "solve_key", counting)
+    real = site.slice_at
+    ticks: list[int] = []
+
+    def counted(*args, **kwargs):
+        before = len(hashes)
+        where[0] = "tick"
+        try:
+            return real(*args, **kwargs)
+        finally:
+            where[0] = "rest"
+            ticks.append(len(hashes) - before)
+
+    monkeypatch.setattr(site, "slice_at", counted)
+    sliced: list[str] = []
+    real_window_solve = SliceEngine.window_solve
+
+    def counted_window_solve(self, window, finish):
+        sliced.append(where[0])
+        return real_window_solve(self, window, finish)
+
+    monkeypatch.setattr(SliceEngine, "window_solve", counted_window_solve)
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.provisional
+    assert list(scope.slice.previewed) == (others if solved else [first, *others])
+    _wait_for_refine(dock)
+    assert not scope.provisional
+    assert len(ticks) >= 2  # the preview, then the refined slice
+    assert ticks == [len(site.ready_grids)] * len(ticks)
+    assert "rest" not in hashes
+    assert sliced == []
+
+
+def _held_first_list(site, gate: threading.Event, monkeypatch) -> None:
+    """The first list's first solve waits for `gate`; later lists run freely."""
+    real = site.pending_solves
+    held: list = []
+
+    def gated(top_ns, thickness_ns, finish, **kwargs):
+        jobs = real(top_ns, thickness_ns, finish, **kwargs)
+        if jobs and not held:
+            held.append(jobs[0])
+            _held_until(gate, jobs[0])
+        return jobs
+
+    monkeypatch.setattr(site, "pending_solves", gated)
+
+
+def test_a_max_distance_edit_cancels_the_site_list_before_rebuilding(plugin, monkeypatch):
+    """A max distance edit rebuilds every grid's plan but leaves the values,
+    and so the solve keys, as they were. The running list was made on the
+    dropped plans, so none of it could land: it is cancelled before the new
+    plans are built, rather than solving on and holding them alive through
+    the rebuild, and the rest restarts for the new ones."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    _held_first_list(site, gate, monkeypatch)
+    building: list[bool] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(dock.refiner.busy)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    try:
+        dock.slice_slider.setValue(30)
+        _events()
+        _pump_until(lambda: dock.refiner.busy)  # rested; the first solve is held
+        assert building == []
+        spin = dock.site_finish.max_distance_spin
+        spin.setValue(spin.value() + 0.5)
+        _pump_until(lambda: not scope.finish_debounce.isActive() and not scope.tick.isActive())
+        assert scope.provisional
+        assert not dock.refiner.busy, "a list for the dropped plans ran on"
+        assert scope.refine.rest.isActive()
+        assert building and not any(building), "the old list ran through the rebuild"
+    finally:
+        gate.set()
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_site_rest_during_a_finish_edits_pause_builds_nothing(plugin, monkeypatch):
+    """Final review M-1, for the site. An Interpolation edit waits out its
+    pause (`finish_debounce`) before the tick, but the rest reads the panel
+    live: a rest that ran out inside that pause built every grid's new plan
+    and preview itself, in the rest's slot, with no wait cursor. Such a rest
+    does nothing: the edit's tick rebuilds under the cursor and arms the rest
+    again."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    scope = dock._site
+    starts = _starts(dock, monkeypatch)
+    building: list[int] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(1)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.provisional and scope.refine.rest.isActive()
+    spin = dock.site_finish.max_distance_spin
+    spin.setValue(spin.value() + 0.5)  # the edit's tick now waits out its pause
+    assert scope.finish_debounce.isActive()
+    scope.refine.rest.stop()
+    scope._on_rest()  # the rest ran out inside that pause
+    assert building == [], "the rest built the new plans itself"
+    assert starts == [] and not dock.refiner.busy
+
+    _wait_for_refine(dock)  # the edit's tick rebuilds, and its rest refines
+    assert building, "the edit's tick built nothing"
+    assert len(starts) == 1
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_leaving_the_site_cancels_the_list(plugin, monkeypatch):
+    """A preview keeps a running list only when it waits for exactly that
+    list's head. Once a grid has left the site, the list solves a grid no
+    longer drawn: it is cancelled, and the rest restarts for the grids left."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    starts = _starts(dock, monkeypatch)
+    gate = threading.Event()
+    _held_first_list(site, gate, monkeypatch)
+    try:
+        dock.slice_slider.setValue(30)
+        _events()
+        _pump_until(lambda: dock.refiner.busy)
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C leaves
+        _pump_until(lambda: not scope.tick.isActive() and "C" not in scope.slice.windows)
+        assert scope.provisional
+        assert not dock.refiner.busy, "the list for a grid that left ran on"
+        assert scope.refine.rest.isActive()
+    finally:
+        gate.set()
+    settle(dock)
+    _wait_for_refine(dock)
+    assert len(starts) == 2
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_leaving_the_site_cancels_a_stretch_list(plugin, monkeypatch):
+    """Final review M-5. With the grids left already solved at this window,
+    the tick after a grid leaves is a full draw, which leaves a running list
+    alone (`RefineFlow.finished`). A list solving the shared stretch's windows
+    then ran on for the grid that left, and for the old site axis. A change of
+    the ready grids cancels it; the stretch is measured afresh, and its rest
+    queues the windows of the grids left."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    gate = threading.Event()
+    real = site.stretch_solves
+    held: list = []
+
+    def gated(thickness_ns, finish):
+        jobs = real(thickness_ns, finish)
+        if jobs and not held:
+            held.append(jobs[0])
+            _held_until(gate, jobs[0])
+        return jobs
+
+    monkeypatch.setattr(site, "stretch_solves", gated)
+    try:
+        dock.stretch_combo.setCurrentIndex(0)  # shared across the site: provisional
+        _pump_until(lambda: dock.refiner.busy)  # rested; its first solve is held
+        assert held and not scope.provisional
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C leaves
+        _pump_until(lambda: not scope.tick.isActive() and "C" not in scope.slice.windows)
+        assert not scope.provisional, "the grids left were solved here: a full draw"
+        assert not dock.refiner.busy, "the stretch list for the old grids ran on"
+    finally:
+        gate.set()
+    settle(dock)
+    _wait_for_refine(dock)
+    assert scope.refine.stretch is not None and scope.refine.stretch[2]
+    assert list(site.ready_grids) == ["A", "B"]
+
+
+def test_the_site_stretch_with_minimum_curvature_uses_twelve_windows(plugin, monkeypatch):
+    """Plan call 7 and Ruling R3: minimum curvature's site stretch finishes
+    at most the twelve `limit_windows` per grid. Until each grid's window of
+    each is solved it is provisional, the same measurement over their kriging
+    previews, and the slice is redrawn with the final one once they are."""
+    dock = whole_site(plugin)
+    site, scope = dock.site_engine, dock._site
+    dock.thickness_spin.setValue(2.0)
+    settle(dock)
+    z = site.site_z
+    thickness, _ = dock.thickness_step_levels()
+    thickness_ns = thickness * z.dz_ns
+    windows = limit_windows(z, thickness)
+    assert len(plan_windows(z, thickness, thickness)) > len(windows) == 12
+    assert dock.stretch_combo.currentIndex() == 0  # shared across the site
+    clip = UnipolarClip() if scope.unipolar() else PercentileClip()
+    finals: list = []
+    dock.slice_changed.connect(
+        lambda: finals.append(scope.refine.stretch and scope.refine.stretch[2])
+    )
+    _choose_method(dock.site_finish, "min_curvature")
+    _pump_until(lambda: scope.provisional and not scope.tick.isActive())
+    mc = dock.site_finish.value()
+    args = {"finish": mc, "method": dock.normalisation_panel.method(), "manual": dock.site_gains()}
+    assert site.stretch_solves(thickness_ns, mc) != []
+    assert dock.display_limit() == pytest.approx(
+        site.shared_limit(thickness_ns, clip, **args, preview=True)
+    )
+
+    _wait_for_refine(dock)
+    assert site.stretch_solves(thickness_ns, mc) == []
+    assert dock.display_limit() == pytest.approx(site.shared_limit(thickness_ns, clip, **args))
+    assert finals and finals[-1] is True, "the slice must be redrawn with the final stretch"
+
+    finishes: dict[int, int] = {}
+    real = SliceEngine.finish
+
+    def counted(self, *a, **kw):
+        finishes[id(self)] = finishes.get(id(self), 0) + 1
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(SliceEngine, "finish", counted)
+    site.shared_limit(thickness_ns, clip, **args)
+    engines = {id(site.engine_for(g)) for g in site.ready_grids}
+    assert set(finishes) == engines
+    assert all(0 < n <= len(windows) for n in finishes.values()), finishes
+
+
+def test_a_final_site_stretch_queues_no_stretch_solves_at_rest(plugin, monkeypatch):
+    """Ruling R11: a rest asks for the stretch's solves only while the
+    stretch shown is provisional. Asking slices and hashes every grid's
+    window of every stretch window on the GUI thread, for nothing once the
+    stretch is final."""
+    dock = _site_minimum_curvature(plugin, 500.0, stretch=0)
+    site, scope = dock.site_engine, dock._site
+    assert scope.refine.stretch is not None and scope.refine.stretch[2] is True
+    asked: list[float] = []
+    real = site.stretch_solves
+
+    def counted(thickness_ns, finish):
+        asked.append(thickness_ns)
+        return real(thickness_ns, finish)
+
+    monkeypatch.setattr(site, "stretch_solves", counted)
+    starts = _starts(dock, monkeypatch)
+    # A window off the stretch: the stretch's own were solved with it.
+    z = site.site_z
+    n, _ = dock.thickness_step_levels()
+    measured = set(limit_windows(z, n))
+    dock.slice_slider.setValue(
+        next(k for k in range(25, z.nz - n) if SliceWindow(k, k + n) not in measured)
+    )
+    _events()
+    assert scope.provisional
+    _wait_for_refine(dock)
+    assert len(starts) == 1
+    assert asked == []
+    assert not scope.provisional
+    # A thickness not measured yet is provisional again, and its rest asks.
+    dock.thickness_spin.setValue(dock.thickness_spin.value() * 2)
+    _wait_for_refine(dock)
+    assert asked
+    assert scope.refine.stretch is not None and scope.refine.stretch[2] is True
+
+
+def test_entering_the_site_cancels_this_grids_refine(plugin, monkeypatch):
+    """Both scopes share the dock's one refiner. This grid's list (up to
+    thirteen solves) must not run on under the site, nor its rest fire there."""
+    dock = plugin.slices_dock
+    job = _Looping()
+    monkeypatch.setattr(dock.engine, "pending_solve", lambda *args, **kwargs: job)
+    dock.stretch_combo.setCurrentText("this slice")
+    _choose_method(dock.grid_finish, "min_curvature")  # a new plan's first draw is a preview
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()
+    assert dock.provisional
+    _pump_until(job.started.is_set)
+    assert dock.refiner.busy
+    dock.site_scope_button.click()  # no event is processed before the asserts
+    assert dock.scope() == "site"
+    assert not dock.refiner.busy
+    assert not dock._grid_refine.rest.isActive()
+    assert not dock.provisional
+    _pump_until(lambda: job.stopped_by_request, 2.0)
+    settle(dock)
+
+
+def test_leaving_the_site_cancels_its_refine(plugin, monkeypatch):
+    """The other direction: the site's list must not run on under This grid.
+    This grid is refined first, so its own redraw on the way back is final
+    and would leave a running list alone."""
+    dock = plugin.slices_dock
+    dock.stretch_combo.setCurrentText("this slice")
+    _choose_method(dock.grid_finish, "min_curvature")
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()
+    _pump_until(lambda: not dock.provisional and not dock.refiner.busy, 30.0)
+    dock = whole_site(plugin)
+    dock.stretch_combo.setCurrentIndex(1)  # this slice
+    job = _Looping()
+    monkeypatch.setattr(dock.site_engine, "pending_solves", lambda *args, **kwargs: [job])
+    _choose_method(dock.site_finish, "min_curvature")  # a new plan's first tick previews
+    _pump_until(job.started.is_set)
+    assert dock.refiner.busy
+    dock.grid_scope_button.click()
+    assert dock.scope() == "grid"
+    assert not dock.refiner.busy
+    assert not dock._site.refine.rest.isActive()
+    assert not dock._site.provisional
+    _pump_until(lambda: job.stopped_by_request, 2.0)
+
+
+def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal, tmp_path):
+    """Every band is the full result, solved: finite on every cell a line
+    crossed, and the site engine's own slice at that window."""
+    dock = whole_site(plugin)
+    _choose_method(dock.site_finish, "min_curvature")
+    _wait_for_refine(dock)
+    target = tmp_path / "curvature.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert "curvature" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
+    assert _metadata(target)["NSGEO_SITE_INTERPOLATION"] == "min_curvature"
+
+    site = dock.site_engine
+    z = site.site_z
+    thickness, step = dock.thickness_step_levels()
+    windows = plan_windows(z, thickness, step)
+    ds = gdal.Open(str(target))
+    try:
+        bands = [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+    finally:
+        ds.Close()
+    assert len(bands) == len(windows) > 1
+    finish = dock.site_finish.value()
+    for index, (band, window) in enumerate(zip(bands, windows, strict=True)):
+        lo, hi = window_times_ns(z, window)
+        top, thickness_ns = z.t0_ns + window.k0 * z.dz_ns, window.n_levels * z.dz_ns
+        covered = site.slice_at(
+            top, thickness_ns, finish=finish, method="none", manual={}, coverage=True
+        ).array
+        data = np.isfinite(covered)
+        assert data.any(), (lo, hi)
+        assert np.isfinite(band[data]).all(), (lo, hi)
+        if index < 2:
+            full = site.slice_at(
+                top,
+                thickness_ns,
+                finish=finish,
+                method=dock.normalisation_panel.method(),
+                manual=dock.site_gains(),
+            ).array
+            np.testing.assert_array_equal(band, full)
+
+
+# ---- exports: progress, cancel and no partial files (plan call 11) -----------------------
+
+
+class _FakeProgressDialog:
+    def close(self) -> None:
+        pass
+
+    def deleteLater(self) -> None:  # noqa: N802 -- Qt's name
+        pass
+
+
+def _progress_calling(hook):
+    def make(title, total, **_options):
+        def callback(done, of):
+            return hook(done, of) is not False
+
+        return callback, _FakeProgressDialog()
+
+    return make
+
+
+def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(plugin, answer_modal, tmp_path):
+    from plugin_testing import connect_message_log
+    from qgis.core import Qgis
+
+    dock = whole_site(plugin)
+    plugin._export_progress = _progress_calling(lambda done, of: done < 1)
+    target = tmp_path / "cancelled.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    before = set(plugin.layers.project.mapLayers())
+    levels: list = []
+    disconnect = connect_message_log(lambda msg, tag, level: levels.append((msg, level)))
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert not target.exists()
+    assert set(plugin.layers.project.mapLayers()) == before
+    assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+
+
+def test_a_cancelled_site_export_never_removes_a_file_it_did_not_reach(
+    plugin, answer_modal, tmp_path, monkeypatch
+):
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    dock = whole_site(plugin)
+    target = tmp_path / "theirs.tif"
+    target.write_bytes(b"the user's own file")
+
+    def cancelled_before_writing(*args, **kwargs):
+        raise ExportCancelled()
+
+    monkeypatch.setattr(plugin_module, "export_site", cancelled_before_writing)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.read_bytes() == b"the user's own file"
+
+
+def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, monkeypatch):
+    """R13: through the site's flow; the status stops saying "Refining" and,
+    once the export ends with the slice unsolved, the preview stands again with
+    its rest armed."""
+    dock = whole_site(plugin)
+    job = _Looping()
+    monkeypatch.setattr(dock.site_engine, "pending_solves", lambda *args, **kwargs: [job])
+    _choose_method(dock.site_finish, "min_curvature")  # a new plan's first tick previews
+    _pump_until(job.started.is_set)
+    assert dock.refiner.busy
+
+    seen: list[tuple[bool, str]] = []
+
+    def hook(done, of):
+        if done == 0:
+            seen.append((dock.refiner.busy, dock.refine_label.text()))
+        if done == of:  # every band solved; the current slice is unsolved again
+            for grid_id in dock.site_engine.ready_grids:
+                engine = dock.site_engine.engine_for(grid_id)
+                engine._solved.clear()
+                engine._last_solve_ms = 500.0
+
+    plugin._export_progress = _progress_calling(hook)
+    target = tmp_path / "running.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert job.stopped_by_request
+    busy, text = seen[0]
+    assert busy is False
+    assert not text.startswith("Refining"), text
+    _events(3)
+    _pump_until(lambda: dock._site.provisional, 5.0)
+    assert dock._site.refine.rest.isActive()
+    dock.refiner.cancel()
+
+
+def test_a_site_export_shows_the_wait_cursor_throughout(
+    plugin, answer_modal, tmp_path, monkeypatch
+):
+    """Final review I-1: every band is solved on the GUI thread, a grid at a time."""
+    dock = whole_site(plugin)
+    busy: list[int] = []
+    real_cursor = plugin_module.busy_cursor
+
+    @contextlib.contextmanager
+    def counting():
+        busy.append(1)
+        with real_cursor():
+            yield
+        busy.append(-1)
+
+    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
+    during: list[int] = []
+    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
+    target = tmp_path / "busy.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert during and all(depth == 1 for depth in during), during
+    assert busy == [1, -1]
+
+
+@pytest.mark.parametrize(("last_solve_ms", "shown"), [(30.0, True), (10.0, False), (None, True)])
+def test_a_slow_site_export_shows_its_progress_before_the_first_band(
+    plugin, answer_modal, tmp_path, monkeypatch, last_solve_ms, shown
+):
+    """Final review I-1: a site band solves every grid, so it is slow when the
+    grids' last solves add up to more than the live budget (30 ms each is 90 ms;
+    10 ms each is 30 ms), or one is not timed yet. The dialog is then shown, and
+    painted, before band 0; otherwise plan call 11's 500 ms rule stands."""
+    from qgis.PyQt.QtCore import QTimer
+
+    dock = whole_site(plugin)
+    _choose_method(dock.site_finish, "min_curvature")
+    _pump_until(
+        lambda: not dock._site.finish_debounce.isActive() and not dock._site.tick.isActive()
+    )
+    site = dock.site_engine
+    assert len(site.ready_grids) == 3
+    for grid_id in site.ready_grids:
+        site.engine_for(grid_id)._last_solve_ms = last_solve_ms  # once the plans exist
+    real = plugin._export_progress
+    made: dict = {"calls": []}
+
+    def spying(title, total, **kwargs):
+        callback, dialog = real(title, total, **kwargs)
+        made["dialog"] = dialog
+        QTimer.singleShot(0, lambda: made.setdefault("pumped", True))  # an expose, say
+
+        def recorded(done, of):
+            made["calls"].append(done)
+            return callback(done, of)
+
+        return recorded, dialog
+
+    monkeypatch.setattr(plugin, "_export_progress", spying)
+    at_band_0: list[tuple[bool, bool]] = []
+    real_slice_at = site.slice_at
+
+    def first_band(*args, **kwargs):
+        if made["calls"] == [0] and not at_band_0:
+            at_band_0.append((made["dialog"].isVisible(), made.get("pumped", False)))
+        return real_slice_at(*args, **kwargs)
+
+    monkeypatch.setattr(site, "slice_at", first_band)
+    target = tmp_path / "slow.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert at_band_0 == [(shown, shown)]
+
+
+# ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
+
+
+def _slow_site_unsolved(plugin, monkeypatch):
+    """Whole site on minimum curvature with a shared stretch, nothing solved
+    and every solve slow: a move runs preview, refine grids, measure stretch."""
+    dock = _site_minimum_curvature(plugin, 500.0, stretch=0)
+    site = dock.site_engine
+    for grid_id in site.ready_grids:
+        engine = site.engine_for(grid_id)
+        engine._solved.clear()
+        engine._last_solve_ms = 500.0
+    dock._site.refine.stretch = None
+    slow_jobs(monkeypatch, site, ("pending_solves", "stretch_solves"))
+    return dock
+
+
+@pytest.mark.parametrize("width", ["narrow", "wide"])
+def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, monkeypatch, width):
+    """W1, in Whole site: the content's height and the slider's place do not
+    change from normal through preview, refining the grids and measuring the
+    stretch, to final."""
+    dock = _slow_site_unsolved(plugin, monkeypatch)
+    dock.setFloating(True)  # the main window is never shown, so a docked one never lays out
+    dock.resize(layout_width(dock, width), 700)
+    dock.show()
+    probe = LayoutProbe(dock)
+    baseline = probe.settle()
+    probe.assert_indicator_shares_the_readouts_row()
+    dock.slice_slider.setValue(30)
+    scope = dock._site
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        probe.record()
+        if not (
+            scope.provisional
+            or dock.refiner.busy
+            or scope.refine.rest.isActive()
+            or scope.tick.isActive()
+        ):
+            break
+        time.sleep(0.005)
+    probe.record()
+    texts = {text for text, _ in probe.seen}
+    assert PREVIEW_INDICATOR in texts
+    assert any(t.startswith("Refining (") for t in texts), texts
+    assert any(t.startswith("Colour stretch (") for t in texts), texts
+    assert probe.seen[-1][0] == ""
+    assert {sample for _, sample in probe.seen} == {baseline}, probe.seen
+
+
+def test_the_site_indicator_counts_grids_then_stretch_jobs(plugin, monkeypatch):
+    dock = _slow_site_unsolved(plugin, monkeypatch)
+    scope = dock._site
+    dock.slice_slider.setValue(30)
+    _events()
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    seen: list[str] = []
+    deadline = time.monotonic() + 60.0
+    while time.monotonic() < deadline:
+        QCoreApplication.processEvents()
+        assert "Refin" not in dock.status_label.text()
+        assert "preview" not in dock.status_label.text().lower()
+        text = dock.refine_label.text()
+        if text and (not seen or seen[-1] != text):
+            seen.append(text)
+        if not (
+            dock.refiner.busy
+            or scope.provisional
+            or scope.refine.rest.isActive()
+            or scope.tick.isActive()
+        ):
+            break
+        time.sleep(0.002)
+    grids = len(dock.site_engine.ready_grids)
+    assert seen[0] == PREVIEW_INDICATOR
+    assert seen[1] == REFINING_GRIDS_INDICATOR.format(done=0, total=grids)
+    measuring = [t for t in seen if t.startswith("Colour stretch")]
+    assert measuring[0].startswith("Colour stretch (0 of ")
+    total = int(measuring[0].rsplit(" ", 1)[1].rstrip(")…"))
+    assert total >= grids  # (grid, window) jobs, not windows
+    assert measuring[-1] == MEASURING_STRETCH_INDICATOR.format(done=total - 1, total=total)
+    assert dock.refine_label.text() == ""
+
+
+def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
+    """The two layout widths are different layouts (the content's minimum is
+    between them), so passing at both is two proofs, not one."""
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    widths = []
+    for width in ("narrow", "wide"):
+        dock.resize(layout_width(dock, width), 700)
+        probe.settle()
+        widths.append(probe.scroll.widget().width())
+    assert widths[1] > widths[0], widths

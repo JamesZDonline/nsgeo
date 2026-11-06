@@ -8,7 +8,12 @@ import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.slices import CubeFrame, FillWeights, interpolate, plan_fill
-from nsgeo.slices.interpolate import DISTANCE_TOL_M, METHODS, NEIGHBOURS_PER_QUADRANT
+from nsgeo.slices.interpolate import (
+    DISTANCE_TOL_M,
+    METHODS,
+    NEIGHBOURS_PER_QUADRANT,
+    reach_mask,
+)
 
 from tests.real_lines import (
     CELL,
@@ -20,6 +25,7 @@ from tests.real_lines import (
 )
 
 BOTH = pytest.mark.parametrize("method", ["idw", "kriging"])
+ALL = pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 STEP = 0.05
 ROWS = (5, 15, 25, 35)
 
@@ -44,7 +50,7 @@ def same(a, b, **kw):
 
 
 def test_methods_are_in_order():
-    assert METHODS == ("none", "idw", "kriging")
+    assert METHODS == ("none", "idw", "kriging", "min_curvature")
 
 
 def test_none_keeps_data_cells_and_blanks_the_rest():
@@ -57,7 +63,7 @@ def test_none_keeps_data_cells_and_blanks_the_rest():
     assert np.isnan(out[~pop]).all()
 
 
-@BOTH
+@ALL
 def test_data_cells_come_back_exactly(method):
     pop = lines()
     v = values(pop)
@@ -65,7 +71,7 @@ def test_data_cells_come_back_exactly(method):
     assert np.array_equal(out[pop], v.astype(np.float32)[pop])
 
 
-@BOTH
+@ALL
 def test_a_constant_field_is_reproduced(method):
     pop = lines()
     out = plan(pop, method).apply(np.full(pop.shape, 3.5))
@@ -74,15 +80,20 @@ def test_a_constant_field_is_reproduced(method):
     np.testing.assert_allclose(fin, 3.5, rtol=1e-6)
 
 
-@BOTH
+@ALL
 def test_interpolation_is_affine_equivariant(method):
     pop = lines()
     fw = plan(pop, method)
     v = values(pop)
-    same(fw.apply(-2.5 * v + 7), -2.5 * fw.apply(v) + 7, rtol=1e-5, atol=1e-5)
+    if method == "min_curvature":
+        # An iterative solve, exact only to its tolerance (interpolation spec §5.4).
+        tol = {"rtol": 0, "atol": 1e-4 * 2.5 * np.ptp(v[pop])}
+    else:
+        tol = {"rtol": 1e-5, "atol": 1e-5}
+    same(fw.apply(-2.5 * v + 7), -2.5 * fw.apply(v) + 7, **tol)
 
 
-@BOTH
+@ALL
 def test_cells_beyond_max_distance_are_blank_and_within_it_are_finite(method):
     pop = np.zeros((21, 21), bool)
     pop[10, 10] = True
@@ -92,7 +103,7 @@ def test_cells_beyond_max_distance_are_blank_and_within_it_are_finite(method):
     assert np.array_equal(np.isfinite(out), expect)
 
 
-@BOTH
+@ALL
 def test_the_limit_is_inclusive_so_the_midpoint_between_lines_fills(method):
     odd = np.zeros((5, 3), bool)
     odd[[0, 4], :] = True
@@ -104,13 +115,13 @@ def test_the_limit_is_inclusive_so_the_midpoint_between_lines_fills(method):
     assert np.isfinite(out[1:5]).all()
 
 
-@BOTH
+@ALL
 def test_no_holes_between_lines_at_nominal_spacing(method):
     out = plan(lines(), method).apply(values(lines()))
     assert np.isfinite(out[5:36]).all()
 
 
-@BOTH
+@ALL
 def test_a_line_that_wanders_leaves_a_stripe_that_a_larger_max_distance_closes(method):
     pop = lines((5, 15, 27, 35))
     v = values(pop)
@@ -118,7 +129,7 @@ def test_a_line_that_wanders_leaves_a_stripe_that_a_larger_max_distance_closes(m
     assert np.isfinite(plan(pop, method, 0.30, 1.0).apply(v)[5:36]).all()
 
 
-@BOTH
+@ALL
 def test_a_skipped_line_leaves_a_blank_stripe(method):
     pop = lines((5, 15, 35))
     v = values(pop)
@@ -147,7 +158,7 @@ def between_lines(pop, out):
     return out[rows[0] : rows[-1] + 1]
 
 
-@BOTH
+@ALL
 @pytest.mark.parametrize(("spacing", "cell"), [(0.75, 0.2), (0.7, 0.2), (0.5, 0.15), (1.5, 0.2)])
 def test_binned_lines_fill_at_three_quarters_of_a_spacing(method, spacing, cell):
     """The plugin's default max distance. When ceil(spacing / cell) is even
@@ -160,7 +171,7 @@ def test_binned_lines_fill_at_three_quarters_of_a_spacing(method, spacing, cell)
     assert np.isfinite(between_lines(pop, out)).all()
 
 
-@BOTH
+@ALL
 def test_half_a_spacing_stripes_binned_lines(method):
     """Why the default is not 0.5 x spacing: with 0.75 m lines at a 0.2 m cell,
     every gap of 4 cells leaves its middle row 0.4 m from data, past 0.375 m."""
@@ -169,7 +180,7 @@ def test_half_a_spacing_stripes_binned_lines(method):
     assert np.isnan(between_lines(pop, out)).all(axis=1).any()
 
 
-@BOTH
+@ALL
 def test_a_skipped_binned_line_leaves_a_blank_stripe_at_three_quarters_of_a_spacing(method):
     """The user's 0.5 m lines at a 0.2 m cell: the skipped line's gap is 5
     cells, so its middle rows are 0.4 m from data, past 0.375 m."""
@@ -191,7 +202,7 @@ def test_every_filled_cell_between_two_lines_draws_on_both(method):
         assert {5, 15} <= got
 
 
-@BOTH
+@ALL
 def test_no_step_from_neighbourhood_switching(method):
     pop = lines(nx=200)
     yy, xx = np.indices(pop.shape)
@@ -207,7 +218,7 @@ def test_no_step_from_neighbourhood_switching(method):
         assert d.max() <= bound
 
 
-@BOTH
+@ALL
 def test_one_line_fills_both_sides_out_to_max_distance_and_no_further(method):
     pop = np.zeros((21, 30), bool)
     pop[10] = True
@@ -221,12 +232,22 @@ def test_one_line_fills_both_sides_out_to_max_distance_and_no_further(method):
     assert np.array_equal(np.isfinite(out), np.hypot(dy, dx) * STEP <= 0.25 + DISTANCE_TOL_M)
 
 
-@BOTH
+@ALL
 def test_a_cross_hatched_grid_fills_without_holes(method):
     pop = lines((5, 15, 25, 35), ny=60, nx=60)
     pop[:, 5:56:10] = True
     out = plan(pop, method).apply(values(pop))
     assert np.isfinite(out[5:56, 5:56]).all()
+
+
+@BOTH
+@pytest.mark.parametrize("rows", [ROWS, (5, 15, 27, 35), (5, 15, 35)])
+def test_the_targets_are_the_reach_less_the_data(method, rows):
+    """One reach rule for every method, so minimum curvature blanks exactly
+    where IDW and kriging do."""
+    pop = lines(rows)
+    fw = plan(pop, method)
+    assert np.array_equal(fw.targets, np.flatnonzero(reach_mask(pop, STEP, 0.25) & ~pop))
 
 
 def test_idw_halfway_between_two_cells_is_their_mean():
@@ -288,19 +309,19 @@ def test_renormalising_over_finite_sources_keeps_a_constant_field(method):
     np.testing.assert_allclose(out.ravel()[fw.targets[hit]], 3.5, rtol=1e-5)
 
 
-@BOTH
+@ALL
 def test_all_blank_input_gives_all_blank_output(method):
     fw = plan(lines(), method)
     assert np.isnan(fw.apply(np.full((40, 60), np.nan))).all()
 
 
-@BOTH
+@ALL
 def test_apply_at_matches_apply(method):
     pop = lines((5, 15, 35))  # rows around 25 are neither data nor targets
     fw = plan(pop, method)
     v = values(pop)
     ids = np.random.default_rng(1).integers(0, pop.size, 200)
-    is_target = np.isin(ids, fw.targets)
+    is_target = np.isin(ids, np.flatnonzero(reach_mask(pop, STEP, 0.25) & ~pop))
     assert pop.ravel()[ids].any() and is_target.any()
     assert (~pop.ravel()[ids] & ~is_target).any()
     same(fw.apply_at(v, ids), fw.apply(v).ravel()[ids], rtol=0, atol=0)
@@ -379,6 +400,7 @@ def test_plan_fill_refuses_bad_input():
         (pop, 0.05, "idw", 0.25, 0.1),
         (pop.ravel(), 0.05, "idw", 0.25, 1.0),
         (pop, 0.0, "idw", 0.25, 1.0),
+        (pop, 0.05, "min_curvature", -0.1, 1.0),
     ):
         with pytest.raises(ValueError):
             plan_fill(*args)
@@ -387,7 +409,7 @@ def test_plan_fill_refuses_bad_input():
 
 
 @needs_real_files
-@BOTH
+@ALL
 def test_real_lines_keep_their_data_and_fill_every_gap(method):
     frame = CubeFrame((0.0, 0.0), 0.0, CELL, 100, 25, "EPSG:32633")
     lns = prepared_lines(range(10), lambda local: local)
