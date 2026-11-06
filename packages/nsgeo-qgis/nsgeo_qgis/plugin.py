@@ -199,16 +199,10 @@ class NsgeoPlugin:
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
         #
-        # M8 walkthrough Finding C: `on_warning` follows `LineLoader.on_error`'s
-        # own precedent just below, verbatim in shape -- a moved-grid
-        # warning used to reach only `QgsMessageLog` (the Log Messages
-        # Panel, closed by default), which the author could not find when
-        # they went looking for it. The log entry stays (see
-        # `_warn_if_a_placed_grid_moved`); this also puts it on the
-        # message bar, where a warning is actually seen.
+        # `on_info` puts the site-open report of followed picks on the message bar.
         self.layers = SiteLayers(
             self.session,
-            on_warning=lambda msg: self.message(msg, Qgis.MessageLevel.Warning),
+            on_info=lambda msg: self.message(msg, Qgis.MessageLevel.Info),
         )
         self.loader = LineLoader(
             self.session,

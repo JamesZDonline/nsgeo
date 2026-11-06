@@ -359,9 +359,9 @@ line, the depth and the velocity.
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
   [Known issues](#5-known-issues-in-020) before you do.
-- Do not drag a pick to a new place on the map. It keeps the trace, time and
-  distance it was made at, so the point and its record would no longer agree.
-  To move a pick, delete it and pick again on the profile.
+- A pick follows its line, so dragging it on the map does not move it: it goes
+  back onto its line when you save the layer's edits. To move a pick along its
+  line, delete it and pick again on the profile.
 
 ### Step 7: Build slices
 
@@ -463,11 +463,8 @@ A few things to know:
 - **Keep DZT files inside the site folder.** If they are elsewhere, **Save site**
   asks whether to record them by their full path, and the site will then open
   only on a computer where that path exists.
-- **A pick's map position is fixed when you make it.** If you later move, resize
-  or rotate its grid with **Edit grid…**, the line is redrawn in its new place but
-  the pick stays where it was. nsgeo shows a warning when this happens. The
-  warning says to see "the Picking section of the README"; this paragraph is
-  what it means. So finish placing a grid before you start picking on its lines.
+- **A pick follows its line.** Editing a grid or a line moves its picks too, and
+  dragging a pick on the map does not move it.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the

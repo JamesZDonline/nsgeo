@@ -1118,18 +1118,14 @@ class SiteSession(QObject):
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
         time = max(lo, min(float(time_ns), hi))
-        model = self.resolved_velocity(key)
-        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
-        # call `np.asarray` on whatever they are handed, so this keeps
-        # numpy out of session.py's imports entirely for one scalar.
-        times = [time]
+        distance_m, depth_m, velocity_m_ns = self.derived_pick_fields(key, index, time)
         pick = Pick(
             line_key=key,
             trace=index,
             time_ns=time,
-            distance_m=self._pick_distance(line, index),
-            depth_m=float(model.depth_at(times)[0]),
-            velocity_m_ns=float(model.velocity_at(times)[0]),
+            distance_m=distance_m,
+            depth_m=depth_m,
+            velocity_m_ns=velocity_m_ns,
             # insert=False: reading the stack to record it must not be
             # what creates one. M7's Finding 4 is the same shape -- a
             # hovered line persisted an empty StepStack purely because
@@ -1141,6 +1137,31 @@ class SiteSession(QObject):
         self._pick_store.write_pick(pick)
         self.picks_changed.emit()
         return pick
+
+    def derived_pick_fields(
+        self, key: str, trace: int, time_ns: float
+    ) -> tuple[float | None, float, float]:
+        """`(distance_m, depth_m, velocity_m_ns)` for a pick at `trace` and
+        `time_ns` on line `key`, from the line's current placement and
+        resolved velocity. `add_pick` records these, and `SiteLayers.
+        follow_lines` re-derives them whenever a line or grid changes, so
+        both read them from one place (line editing spec §4.4).
+
+        `KeyError` for an unknown key. No clamping: `add_pick` clamps the
+        trace and time before calling, and a stored pick is followed with
+        the values it already holds.
+        """
+        line = self.line_for_key(key)
+        model = self.resolved_velocity(key)
+        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
+        # call `np.asarray` on whatever they are handed, so this keeps
+        # numpy out of session.py's imports entirely for one scalar.
+        times = [time_ns]
+        return (
+            self._pick_distance(line, trace),
+            float(model.depth_at(times)[0]),
+            float(model.velocity_at(times)[0]),
+        )
 
     @staticmethod
     def _pick_distance(line: Line, index: int) -> float | None:

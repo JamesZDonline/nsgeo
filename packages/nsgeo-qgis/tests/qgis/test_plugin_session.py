@@ -1141,6 +1141,27 @@ def test_add_pick_writes_the_pick_and_says_so_once(pickable):
     assert seen == [1]
 
 
+def test_derived_pick_fields_are_what_add_pick_records(pickable):
+    session, _, keys = pickable
+    written = []
+
+    class _Store:
+        def write_pick(self, pick):
+            written.append(pick)
+
+    session.set_pick_store(_Store())
+    pick = session.add_pick(keys[0], 7, 12.5)
+
+    assert written == [pick]
+    assert session.derived_pick_fields(keys[0], 7, pick.time_ns) == (
+        pick.distance_m,
+        pick.depth_m,
+        pick.velocity_m_ns,
+    )
+    with pytest.raises(KeyError):
+        session.derived_pick_fields("raw/NOPE.DZT", 7, 12.5)
+
+
 def test_add_pick_refuses_a_line_that_is_not_the_working_line(pickable):
     """Spec §4.3: picking targets the working line, never a preview. The
     guard is here, in the session, for the same reason set_trace's and
