@@ -1198,10 +1198,22 @@ class SiteEngine(QObject):
                     jobs.append(job)
         return jobs
 
-    def weights_cached(self, finish: SliceFinish) -> bool:
-        """Whether a tick at `finish` would build no weights: every ready
-        grid's engine already holds them. For the scope's wait cursor."""
-        return all(self._engines[g].weights_cached(finish) for g in self.ready_grids)
+    def weights_cached(self, finish: SliceFinish, *, at: tuple[float, float] | None = None) -> bool:
+        """Whether finishing at `finish` would build no weights: every grid
+        it would finish already holds them. For the scope's wait cursor and
+        `RefineFlow.before_draw`.
+
+        `at` is a tick's `(top_ns, thickness_ns)`: only the grids with a
+        window there are finished, so only they count. A grid whose axis
+        ends above the depth shown never builds weights for it; counted, it
+        made every tick look like a rebuild, cancelling a running refine at
+        every landing. Without `at`, every ready grid with an axis counts,
+        as for a pass over many windows (the shared stretch)."""
+        if at is None:
+            grids = [g for g in self.ready_grids if self._engines[g].z is not None]
+        else:
+            grids = [g for g in self.ready_grids if self._grid_window(g, *at) is not None]
+        return all(self._engines[g].weights_cached(finish) for g in grids)
 
     @property
     def held_bytes(self) -> int:

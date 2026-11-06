@@ -27,6 +27,7 @@ the rest, as before minimum curvature came. Leaving the site stops them too.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -896,13 +897,9 @@ class SiteScope:
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
                 self.update_export_button()
-            finish = self.dock.site_finish.value()
-            if self.engine.weights_cached(finish):
-                self.refresh_slice()
-            else:
-                # Building the weights takes seconds at a fine cell (interpolation spec §7).
-                with busy_cursor():
-                    self.refresh_slice()
+            # The wait cursor is the tick's own: only it knows which grids it
+            # finishes, and so whether it builds anything (`refresh_slice`).
+            self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not redraw the site: {exc}")
 
@@ -917,10 +914,12 @@ class SiteScope:
         running list alone; any other method's stops it (plan call 5).
 
         Which grids the tick previews is known only once it has drawn them,
-        but whether it builds new weights or plans is known before: a tick
-        that does cancels a running list first, so the old list neither
-        competes with every grid's build nor keeps the plans it drops alive
-        through it (`RefineFlow.before_draw`).
+        but whether it builds new weights or plans is known before, from the
+        grids present at its window alone (`SiteEngine.weights_cached(...,
+        at=)`): a grid whose axis misses it builds nothing here. A tick that
+        builds shows the wait cursor, and cancels a running list first, so
+        the old list neither competes with every grid's build nor keeps the
+        plans it drops alive through it (`RefineFlow.before_draw`).
         """
         dock = self.dock
         try:
@@ -947,17 +946,23 @@ class SiteScope:
             finish = dock.site_finish.value()
             curvature = finish.method == "min_curvature"
             coverage = dock.coverage_check.isChecked()
-            if not coverage:  # a coverage tick finishes nothing, so builds nothing
-                self.refine.before_draw(rebuilds=not self.engine.weights_cached(finish))
-            shown = self.engine.slice_at(
-                top,
-                thickness * z.dz_ns,
-                finish=finish,
-                method=dock.normalisation_panel.method(),
-                manual=self.gains(),
-                coverage=coverage,
-                preview=curvature,
+            # A coverage tick finishes nothing, so builds nothing.
+            builds = not coverage and not self.engine.weights_cached(
+                finish, at=(top, thickness * z.dz_ns)
             )
+            self.refine.before_draw(rebuilds=builds)
+            # Building the weights, or the plans and their previews, takes
+            # seconds at a fine cell: say so (interpolation spec §7).
+            with busy_cursor() if builds else contextlib.nullcontext():
+                shown = self.engine.slice_at(
+                    top,
+                    thickness * z.dz_ns,
+                    finish=finish,
+                    method=dock.normalisation_panel.method(),
+                    manual=self.gains(),
+                    coverage=coverage,
+                    preview=curvature,
+                )
             self.slice = shown
             self.window = window
             self.drawn_at = (top, thickness * z.dz_ns)
@@ -1137,12 +1142,19 @@ class SiteScope:
         gains = self.gains()
         method = dock.normalisation_panel.method()
         finish = dock.site_finish.value()
-        return self.refine.stretch_limit(
-            self.stretch_key(z),
-            lambda: self.engine.stretch_limit(
-                thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
-            ),
-        )
+
+        def measure() -> tuple[float, bool]:
+            # The stretch finishes every grid at up to twelve windows, so it
+            # builds for a grid the tick shown missed: say so too.
+            waiting = (
+                contextlib.nullcontext() if self.engine.weights_cached(finish) else busy_cursor()
+            )
+            with waiting:
+                return self.engine.stretch_limit(
+                    thickness * z.dz_ns, clip, finish=finish, method=method, manual=gains
+                )
+
+        return self.refine.stretch_limit(self.stretch_key(z), measure)
 
     def dispose(self) -> None:
         self.tick.stop()

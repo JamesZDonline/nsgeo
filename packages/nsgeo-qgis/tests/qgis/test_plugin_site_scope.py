@@ -31,6 +31,7 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
 )
+from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
 from plugin_testing import LoadCounter, spin_until
@@ -2036,14 +2037,14 @@ def _choose_method(panel, method: str) -> None:
     panel.method_combo.setCurrentIndex(panel.method_combo.findData(method))
 
 
-def _site_minimum_curvature(plugin, last_solve_ms: float, stretch: int = 1):
-    """Whole site on minimum curvature at slider 10, that tick refined, and
+def _site_minimum_curvature(plugin, last_solve_ms: float, stretch: int = 1, at: int = 10):
+    """Whole site on minimum curvature at slider `at`, that tick refined, and
     every grid's last solve then said to have taken `last_solve_ms`. The
     stretch is "this slice" (1), so it queues no solves of its own, unless
     `stretch` is 0 (shared across the site)."""
     dock = whole_site(plugin)
     dock.stretch_combo.setCurrentIndex(stretch)
-    dock.slice_slider.setValue(10)
+    dock.slice_slider.setValue(at)
     _choose_method(dock.site_finish, "min_curvature")
     _wait_for_refine(dock)
     assert not dock._site.provisional
@@ -2228,15 +2229,21 @@ def test_a_site_refine_for_a_window_left_behind_never_draws(plugin, monkeypatch)
     assert not any(np.array_equal(array, a_full, equal_nan=True) for array in shown)
 
 
-def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch):
-    """Each grid's refined slice is drawn as soon as it lands. That redraw
-    still previews the grids not landed yet, but it waits only for solves at
-    the head of the running list, so it must leave the list running: a
-    cancel would lose the solve in progress and start the rest over at every
-    landing."""
-    dock = _site_minimum_curvature(plugin, 500.0)
+def _landing_keeps_the_others(dock, monkeypatch, at: int) -> None:
+    """Move to slider `at`, every grid present there slow, and hold every
+    solve but the first. The first grid's landing redraw still previews the
+    others and must leave their solves running: one list, no rest restarted,
+    and no wait cursor, since nothing is rebuilt."""
     site, scope = dock.site_engine, dock._site
     starts = _starts(dock, monkeypatch)
+    cursors: list[int] = []
+    real_cursor = site_scope_module.busy_cursor
+
+    def counting_cursor():
+        cursors.append(1)
+        return real_cursor()
+
+    monkeypatch.setattr(site_scope_module, "busy_cursor", counting_cursor)
     gate = threading.Event()
     real = site.pending_solves
 
@@ -2247,11 +2254,11 @@ def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch)
         return jobs
 
     monkeypatch.setattr(site, "pending_solves", gated)
-    first, *others = site.ready_grids
     try:
-        dock.slice_slider.setValue(30)
+        dock.slice_slider.setValue(at)
         _events()
-        assert list(scope.slice.previewed) == [first, *others]
+        first, *others = list(scope.slice.previewed)
+        assert others
         _pump_until(lambda: list(scope.slice.previewed) == others and not scope.tick.isActive())
         assert dock.refiner.busy, "the first grid's redraw stopped the others' solves"
         assert scope.provisional
@@ -2260,8 +2267,40 @@ def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch)
         gate.set()
     _wait_for_refine(dock)
     assert len(starts) == 1
+    assert cursors == [], "a tick that builds nothing showed the wait cursor"
     assert not scope.provisional
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_landing_redraws_without_stopping_the_others(plugin, monkeypatch):
+    """Each grid's refined slice is drawn as soon as it lands. That redraw
+    still previews the grids not landed yet, but it waits only for solves at
+    the head of the running list, so it must leave the list running: a
+    cancel would lose the solve in progress and start the rest over at every
+    landing."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    assert list(dock.site_engine.ready_grids) == ["A", "B", "C"]
+    _landing_keeps_the_others(dock, monkeypatch, 30)
+
+
+def test_a_grid_missing_the_depth_does_not_stop_the_others_landing(
+    site3_factory, open_plugin, monkeypatch
+):
+    """The same, with C ending above the depth shown. C is never finished
+    there, so it never builds weights for this finish: counted as one still
+    to build, it made every tick a rebuild, which cancelled the running
+    list at every landing and showed the wait cursor on every tick."""
+    plugin = open_plugin(site3_factory(samples={"C": 128}))  # C ends near 16.4 ns
+    site_z = whole_site(plugin).site_engine.site_z
+
+    def at(ns: float) -> int:
+        return int(round((ns - site_z.t0_ns) / site_z.dz_ns))
+
+    dock = _site_minimum_curvature(plugin, 500.0, at=at(60.0))
+    site = dock.site_engine
+    assert dock._site.slice.windows["C"] is None
+    assert not site.engine_for("C").weights_cached(dock.site_finish.value())
+    _landing_keeps_the_others(dock, monkeypatch, at(70.0))
 
 
 @pytest.mark.parametrize("quick", [0, 1])

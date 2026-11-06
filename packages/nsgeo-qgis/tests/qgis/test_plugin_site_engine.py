@@ -788,6 +788,22 @@ def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site
     assert not site.weights_cached(dataclasses.replace(FINISH, method="kriging"))
 
 
+def test_a_grid_with_no_window_at_a_tick_is_not_a_rebuild_there(site3_factory, make_site):
+    """A grid whose axis misses a tick's window is not finished there, so it
+    never builds weights for it. Asked for that window, `weights_cached`
+    leaves it out: counted, it made every tick look like a rebuild, so the
+    wait cursor showed on each and a running refine was cancelled by each."""
+    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    site, _ = prepared(make_site, site3)
+    deep, shallow = (40.0, 5.0), (5.0, 2.0)
+    assert site.slice_at(*deep, **TICK).windows["C"] is None
+    assert site.weights_cached(FINISH, at=deep)
+    assert not site.weights_cached(FINISH, at=shallow)  # C is finished there
+    assert not site.weights_cached(FINISH)  # every grid: C has built nothing
+    site.slice_at(*shallow, **TICK)
+    assert site.weights_cached(FINISH, at=shallow) and site.weights_cached(FINISH)
+
+
 def test_the_sites_held_bytes_count_the_weights_it_built(site3, make_site):
     """The status line names what is held; the weights are held too."""
     site, _ = prepared(make_site, site3)
