@@ -304,7 +304,11 @@ def test_padding_removes_the_wrap_at_the_far_end(n_traces):
         data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=90.0, _pad_traces=0
     )
 
-    assert (unpadded[:, far] ** 2).sum() > 10 * (padded[:, far] ** 2).sum()
+    # A thousandth, not a tenth: the measured ratios with the derived pad are
+    # 88000x at 640 traces and 255000x at 974, while a pad of zero leaves 22x
+    # at 974. A tenth was the bar before the aperture existed and no longer
+    # separates anything.
+    assert (unpadded[:, far] ** 2).sum() > 1000 * (padded[:, far] ** 2).sum()
 
 
 def test_a_line_shorter_than_the_pad_still_migrates():
@@ -459,6 +463,11 @@ def test_the_aperture_keeps_one_sample_from_smearing_across_the_section():
     default = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V)
 
     assert _arc_reach(default, apex_trace) < 0.1 * _arc_reach(wide, apex_trace)
+    # Even wide open the taper holds most of one sample within a metre:
+    # measured 0.038. Reading the aperture in radians where its sine belongs
+    # -- the two are within 11% at 45 degrees and so easy to miss -- lets
+    # 0.161 escape instead.
+    assert _arc_reach(wide, apex_trace) < 0.08
 
 
 def test_a_narrower_aperture_costs_little_of_the_collapse():
@@ -492,3 +501,25 @@ def test_the_aperture_is_tapered_rather_than_cut():
     out = migrate_fk(data, dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=45.0)
 
     assert _arc_reach(out, apex_trace) < 0.01
+
+
+def test_refuses_an_aperture_that_is_not_an_angle():
+    """`sin(0)` is zero and the taper would divide by it. The schema bounds
+    the parameter at 5-90 degrees, but `migrate_fk` is also called directly
+    and a hand-edited project can carry anything."""
+    for bad in (0.0, -10.0, 91.0):
+        with pytest.raises(ValueError, match="aperture"):
+            migrate_fk(np.zeros((64, 16)), dt_ns=DT_NS, dx_m=DX_M, velocity_m_ns=V, max_dip_deg=bad)
+
+
+def test_the_step_passes_its_aperture_through_to_the_solver():
+    """What catches `apply` building the call without it and silently
+    migrating everything at the default."""
+    data = _one_impulse()
+    apex_trace = data.shape[1] // 2
+    rg = Radargram(data=data, dt_ns=DT_NS, t0_ns=0.0, dx_m=DX_M)
+
+    wide = build_step("migrate_fk", velocity_m_ns=V, max_dip_deg=90.0).apply(rg)
+    narrow = build_step("migrate_fk", velocity_m_ns=V, max_dip_deg=20.0).apply(rg)
+
+    assert _arc_reach(narrow.data, apex_trace) < 0.01 * _arc_reach(wide.data, apex_trace)
