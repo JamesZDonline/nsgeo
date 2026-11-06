@@ -27,6 +27,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import site_engine as site_engine_module
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -2975,3 +2976,28 @@ def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
         probe.settle()
         widths.append(probe.scroll.widget().width())
     assert widths[1] > widths[0], widths
+
+
+def test_a_placement_edit_re_prepares_only_that_grid_in_the_site_view(plugin, site3):
+    """Line editing spec §4.5: B's engine hands the move over to the site
+    engine, which re-queues B alone; A and C keep what they hold."""
+    dock = whole_site(plugin)
+    session = plugin.session
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    seen: list[dict[str, str]] = []
+    inner = dock.site_engine.on_changed
+
+    def record() -> None:
+        seen.append({g: dock.site_engine.grid_state(g) for g in "ABC"})
+        if inner is not None:
+            inner()
+
+    dock.site_engine.on_changed = record
+    key = site3.keys("B")[0]
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, offset=1.75)])
+    settle(dock)
+
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    assert any(state["B"] == "queued" for state in seen), seen
+    assert all(state["A"] == "ready" and state["C"] == "ready" for state in seen), seen
+    assert seen[-1]["B"] == "ready"

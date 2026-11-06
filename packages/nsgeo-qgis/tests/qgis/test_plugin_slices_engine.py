@@ -25,6 +25,7 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -1549,3 +1550,118 @@ def test_residency_is_chosen_from_the_prepared_trace_count(sourced, monkeypatch)
     monkeypatch.setattr(slices_plan, "STREAM_MS_PER_TRACE", slices_plan.FRAME_BUDGET_MS / 200)
     engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
     assert engine.mode == "resident"
+
+
+# ---- line editing (spec §4.5): a source follows a line that moved ----------
+
+GRID_B = Grid("B", (600.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
+
+
+def _edit(session, key, **changes):
+    return session.edit_lines([LineEdit(key, session.line_for_key(key).placement, **changes)])
+
+
+def test_a_placement_edit_to_a_prepared_line_re_prepares(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    count = len(prepared)
+    key = session.keys()[0]
+
+    _edit(session, key, offset=1.5)
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1
+    line = next(p for p in engine.prepared_lines() if p.key == key)
+    expected = session.line_for_key(key).trace_coords(session.site.frames)
+    assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
+    assert errors == []
+
+
+def test_an_edit_to_a_line_outside_the_source_does_not_re_prepare(sourced):
+    engine, session, errors, prepared = sourced
+    keys = session.keys()
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(keys[:3]))
+    )
+    assert engine.wait_for_preparation(20_000)
+    count = len(prepared)
+
+    _edit(session, keys[3], offset=1.5)
+    assert not engine.is_running
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_label_only_edit_does_not_re_prepare(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    count = len(prepared)
+
+    _edit(session, session.keys()[0], label="the wall")
+    assert not engine.is_running
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_line_moved_to_another_grid_leaves_the_source(sourced):
+    engine, session, errors, prepared = sourced
+    session.add_grid(GRID_B)
+    _prepare(engine, session)
+    k3 = session.keys()[3]
+
+    session.move_lines([k3], "B")
+    assert engine.wait_for_preparation(20_000)
+    assert k3 not in engine.choice.line_keys
+    assert k3 not in [p.key for p in engine.prepared_lines()]
+    assert engine.line_count == 3
+    assert errors == []
+
+
+def test_with_a_grid_moved_hook_a_placement_edit_hands_over(sourced):
+    """Mirrors the grid-move hand-over: a re-preparation started from this
+    slot would sit outside the owner's queue (trap 1, R-P5)."""
+    engine, session, errors, prepared = sourced
+    moved: list[int] = []
+    engine.on_grid_moved = lambda: moved.append(1)
+    _prepare(engine, session)
+    count = len(prepared)
+
+    _edit(session, session.keys()[0], offset=1.5)
+    assert moved == [1]
+    assert not engine.is_running, "the engine dispatched the re-preparation itself"
+    assert not engine.is_prepared, "lines binned at the old placement were kept"
+    assert engine.choice is None
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_grid_length_change_re_prepares_exactly_once(sourced):
+    """`replace_grid` moves the reversed lines, then emits `grids_changed`
+    (the fingerprint moved: one re-preparation) and `lines_changed` (which
+    finds the snapshot already current)."""
+    engine, session, errors, prepared = sourced
+    p = synthetic_dzt(session.root / "raw", "FILE__009.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 5.0, 6.0, -1, p.stem))])
+    _prepare(engine, session)
+    count = len(prepared)
+
+    session.replace_grid(dataclasses.replace(GRID, size_y=7.0))
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1
+    assert errors == []
+
+
+def test_set_source_leaves_out_a_key_now_on_another_grid_and_says_so(sourced):
+    engine, session, errors, prepared = sourced
+    session.add_grid(GRID_B)
+    keys = session.keys()
+    session.move_lines([keys[3]], "B")
+
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(keys))
+    )
+    assert engine.wait_for_preparation(20_000)
+    assert [p.key for p in engine.prepared_lines()] == list(keys[:3])
+    assert any("now on grid 'B', not 'A'" in msg for _, msg in errors), errors
