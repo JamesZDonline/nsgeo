@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 import pytest
-from nsgeo.render import UnipolarClip
+from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     NORMALISATION_METHODS,
     SiteLattice,
@@ -22,7 +22,7 @@ from nsgeo.slices import (
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.site_engine import SiteEngine
-from nsgeo_qgis.slices_engine import SliceEngine
+from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
@@ -48,6 +48,8 @@ FINISH = SliceFinish(method="idw", max_distance_spacings=1.5)
 #: Binned cells as they are, the old radius 0.
 NONE = SliceFinish(method="none")
 TICK = {"finish": FINISH, "method": "none", "manual": {}}
+#: Minimum curvature at the same reach (interpolation spec §5.4).
+MC = SliceFinish(method="min_curvature", max_distance_spacings=1.5)
 
 
 @pytest.fixture
@@ -84,11 +86,12 @@ def grid_pixels(site: SiteEngine, grid_id: str) -> np.ndarray:
     return (ids >= 0).reshape(lattice.height, lattice.width)
 
 
-def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manual):
+def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manual, draw="finish"):
     """Each present grid's slice as spec 4.6 says it is shown, from public parts.
 
     Binned and unfinished for the statistics, then `a * finish(v) + b`, the
-    finish being each grid's own engine's (interpolation spec §8).
+    finish being each grid's own engine's (interpolation spec §8). `draw`
+    "preview" gives each grid's kriging preview instead (plan call 5).
     """
     binned = {}
     for g in site.ready_grids:
@@ -107,8 +110,24 @@ def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manua
     shown = {}
     for g, (values, cov) in binned.items():
         a, b = factors[g]
-        shown[g] = a * site.engine_for(g).finish(values, cov, finish) + b
+        shown[g] = a * getattr(site.engine_for(g), draw)(values, cov, finish) + b
     return shown, factors
+
+
+def composed(site, shown):
+    """`shown` composed on the site lattice from whole-lattice gathers."""
+    lattice = site.lattice
+    return compose(
+        lattice,
+        [(site.engine_for(g).frame.cell_index(lattice.pixel_centres()), shown[g]) for g in shown],
+    )
+
+
+def slow(site, ms: float = 500.0) -> None:
+    """Every ready grid's last solve said to take `ms`. Only once its plan
+    exists (Ruling R1): building a plan resets the timing."""
+    for g in site.ready_grids:
+        site.engine_for(g)._last_solve_ms = ms
 
 
 def current_seams(site, session):
@@ -623,11 +642,13 @@ def test_site_slices_are_each_grids_finished_slice_times_its_gain(site3, make_si
     assert not np.array_equal(finished, values)
 
 
-@pytest.mark.parametrize("method", ["none", "idw", "kriging"])
+@pytest.mark.parametrize("method", ["none", "idw", "kriging", "min_curvature"])
 def test_site_gains_commute_with_every_method(site3, make_site, method):
     """Interpolation is linear in the data and smoothing a normalised average,
     so a gain and shift measured on the binned cells may be applied after the
-    finish (spec 4.6). This is what lets the site finish once per grid."""
+    finish (spec 4.6). This is what lets the site finish once per grid.
+    Minimum curvature is linear too, but solved iteratively to a relative
+    residual, so it agrees to the solve's tolerance of the data's size."""
     finish = SliceFinish(method=method, max_distance_spacings=1.5, smooth_y_m=0.15)
     site, _ = prepared(make_site, site3)
     a, b = 1.7, -0.3
@@ -636,7 +657,8 @@ def test_site_gains_commute_with_every_method(site3, make_site, method):
     values, coverage = engine.slice_at(window)
     after = a * engine.finish(values, coverage, finish) + b
     before = engine.finish(np.where(coverage > 0, a * values + b, values), coverage, finish)
-    np.testing.assert_allclose(after, before, rtol=1e-4, atol=1e-5, equal_nan=True)
+    atol = 1e-4 * np.nanmax(np.abs(after)) if method == "min_curvature" else 1e-5
+    np.testing.assert_allclose(after, before, rtol=1e-4, atol=atol, equal_nan=True)
 
 
 def test_site_shared_limit_measures_finished_slices(site3, make_site):
@@ -664,6 +686,148 @@ def test_site_shared_limit_measures_finished_slices(site3, make_site):
     assert finished != pytest.approx(plain, rel=1e-3)
 
 
+# ---- minimum curvature: preview, background solves, the stretch ------------
+# Plan calls 5-7 (interpolation spec §7). Real solve timings never decide a
+# result here: where "slow" matters, `_last_solve_ms` is set by hand, once the
+# plans exist (Ruling R1).
+
+
+def test_a_live_site_tick_previews_each_slow_grid_until_its_solve_lands(site3, make_site):
+    """A live tick draws each grid whose solve is slow as its kriging preview,
+    normalised and composed as the full result is, and says which.
+    `pending_solves` hands out exactly those grids' solves, in `ready_grids`
+    order; once they land the same tick is final and the full result."""
+    session = site3.session
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "histogram", "manual": {"C": 1.5}}
+    first = site.slice_at(20.0, 5.0, **tick, preview=True)  # no plan yet, so no solve timed
+    assert first.provisional and set(first.previewed) == set(site.ready_grids)
+    slow(site)
+    drawn = site.slice_at(20.0, 5.0, **tick, preview=True)
+    assert drawn.provisional and list(drawn.previewed) == list(site.ready_grids)
+    previews, _ = expected_shown(site, session, 20.0, 5.0, **tick, draw="preview")
+    np.testing.assert_allclose(drawn.array, composed(site, previews), rtol=1e-6, atol=1e-7)
+
+    jobs = site.pending_solves(20.0, 5.0, MC)
+    assert [job.engine for job in jobs] == [site.engine_for(g) for g in site.ready_grids]
+    for g, job in zip(site.ready_grids, jobs, strict=True):
+        values, _ = site.engine_for(g).slice_at(drawn.windows[g])
+        assert job.key == solve_key(values) == drawn.previewed[g].key
+    # With the tick that previewed them, the same solves, from its slices and keys.
+    again = site.pending_solves(20.0, 5.0, MC, drawn=drawn)
+    assert [(j.engine, j.key) for j in again] == [(j.engine, j.key) for j in jobs]
+    for job in jobs:
+        job.run(lambda: False)
+        assert job.land()
+    assert site.pending_solves(20.0, 5.0, MC) == []
+
+    final = site.slice_at(20.0, 5.0, **tick, preview=True)
+    assert not final.provisional and final.previewed == {}
+    full, _ = expected_shown(site, session, 20.0, 5.0, **tick)
+    np.testing.assert_allclose(final.array, composed(site, full), rtol=1e-6, atol=1e-7)
+    assert not np.allclose(final.array, drawn.array, equal_nan=True)
+    # Without `preview` a tick is the full result; another method never previews.
+    assert not site.slice_at(30.0, 5.0, **tick).provisional
+    assert not site.slice_at(35.0, 5.0, **{**tick, "finish": FINISH}, preview=True).provisional
+    assert site.pending_solves(40.0, 5.0, FINISH) == []
+
+
+@pytest.mark.parametrize(("ms", "previewed"), [(30.0, True), (10.0, False)])
+def test_a_live_site_tick_is_slow_by_its_grids_solves_together(site3, make_site, ms, previewed):
+    """Final review M-2: a tick solves every grid it does not preview on the
+    GUI thread, one after another, so "slow" is the tick's (plan call 5).
+    Three grids at 30 ms each make a 90 ms tick, over the 50 ms budget: each
+    is previewed, though each alone is inside it. At 10 ms each (30 ms) every
+    grid is solved at once."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    slow(site, ms)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert len(site.ready_grids) == 3
+    if previewed:
+        assert drawn.provisional and list(drawn.previewed) == list(site.ready_grids)
+    else:
+        assert not drawn.provisional and drawn.previewed == {}
+        assert site.pending_solves(30.0, 5.0, MC) == []
+
+
+def test_a_live_site_tick_counts_only_the_grids_it_must_solve(site3, make_site):
+    """A grid whose slice is solved already costs a tick nothing, so only the
+    others' last solves are added up: two at 30 ms (60 ms) are previewed, the
+    solved one drawn in full; one alone at 30 ms is solved at once. A grid not
+    timed yet makes the tick slow whatever the others cost."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    first, second, third = site.ready_grids
+    for job in site.pending_solves(30.0, 5.0, MC):
+        if job.engine is site.engine_for(first):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [second, third]
+
+    for job in site.pending_solves(35.0, 5.0, MC):
+        if job.engine is not site.engine_for(third):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(35.0, 5.0, **tick, preview=True)
+    assert drawn.previewed == {}
+    assert site.pending_solves(35.0, 5.0, MC) == []
+
+    slow(site, 1.0)
+    site.engine_for(third)._last_solve_ms = None
+    drawn = site.slice_at(40.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [first, second, third]
+
+
+def test_the_site_stretch_solves_cover_what_its_shared_limit_measures(site3_factory, make_site):
+    """Ruling R3: the minimum-curvature stretch is measured over the SITE
+    axis's `limit_windows`, each mapped onto every grid with `window_on`, as
+    `shared_limit` measures it. Its solves are exactly those grid windows,
+    never a grid's own `limit_windows` (C's axis ends early here, so the two
+    differ); until they land the stretch is the provisional one over their
+    previews, and once they have, the final one, equal to `shared_limit`."""
+    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    site, _ = prepared(make_site, site3)
+    clip = UnipolarClip()
+    tick = {"finish": MC, "method": "background", "manual": {"A": 1.5}}
+    z = site.site_z
+    windows = limit_windows(z, round(2.0 / z.dz_ns))
+    assert len(windows) == 12
+    wanted = set()
+    for w in windows:
+        top, thickness = z.t0_ns + w.k0 * z.dz_ns, w.n_levels * z.dz_ns
+        for g in site.ready_grids:
+            engine = site.engine_for(g)
+            grid_window = window_on(engine.z, top, thickness)
+            if grid_window is not None:
+                wanted.add((engine, solve_key(engine.slice_at(grid_window)[0])))
+    c = site.engine_for("C")
+    own = {solve_key(c.slice_at(w)[0]) for w in limit_windows(c.z, round(2.0 / c.z.dz_ns))}
+    assert own != {key for engine, key in wanted if engine is c}
+    jobs = site.stretch_solves(2.0, MC)
+    assert {(job.engine, job.key) for job in jobs} == wanted
+    provisional = site.shared_limit(2.0, clip, **tick, preview=True)
+    assert site.stretch_limit(2.0, clip, **tick) == (provisional, False)
+    for job in jobs:
+        job.run(lambda: False)
+        assert job.land()
+    assert site.stretch_solves(2.0, MC) == []
+    final = site.shared_limit(2.0, clip, **tick)
+    assert site.stretch_limit(2.0, clip, **tick) == (final, True)
+    # Any other method has no solves and is always final.
+    kriging = {**tick, "finish": FINISH}
+    assert site.stretch_solves(2.0, FINISH) == []
+    assert site.stretch_limit(2.0, PercentileClip(), **kriging) == (
+        site.shared_limit(2.0, PercentileClip(), **kriging),
+        True,
+    )
+
+
 def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site):
     """`weights_cached` lets the scope show a wait cursor only when a tick
     will build weights (interpolation spec §7)."""
@@ -674,6 +838,22 @@ def test_the_site_reports_whether_every_grids_weights_are_built(site3, make_site
     # Smoothing is not part of the weights; a different method or distance is.
     assert site.weights_cached(dataclasses.replace(FINISH, smooth_x_m=0.4))
     assert not site.weights_cached(dataclasses.replace(FINISH, method="kriging"))
+
+
+def test_a_grid_with_no_window_at_a_tick_is_not_a_rebuild_there(site3_factory, make_site):
+    """A grid whose axis misses a tick's window is not finished there, so it
+    never builds weights for it. Asked for that window, `weights_cached`
+    leaves it out: counted, it made every tick look like a rebuild, so the
+    wait cursor showed on each and a running refine was cancelled by each."""
+    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    site, _ = prepared(make_site, site3)
+    deep, shallow = (40.0, 5.0), (5.0, 2.0)
+    assert site.slice_at(*deep, **TICK).windows["C"] is None
+    assert site.weights_cached(FINISH, at=deep)
+    assert not site.weights_cached(FINISH, at=shallow)  # C is finished there
+    assert not site.weights_cached(FINISH)  # every grid: C has built nothing
+    site.slice_at(*shallow, **TICK)
+    assert site.weights_cached(FINISH, at=shallow) and site.weights_cached(FINISH)
 
 
 def test_the_sites_held_bytes_count_the_weights_it_built(site3, make_site):

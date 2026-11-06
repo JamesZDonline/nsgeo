@@ -13,13 +13,19 @@ joining `layers.group`.
 
 from __future__ import annotations
 
+import contextlib
+import threading
+import time
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo_qgis.slices_plan import PREVIEW_INDICATOR, REFINING_SLICE_INDICATOR
 from plugin_testing import drag_in_layers_panel, synthetic_dzt
-from qgis.core import QgsVectorLayer
+from qgis.core import Qgis, QgsVectorLayer
+from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
@@ -426,3 +432,438 @@ def test_a_failed_coverage_companion_does_not_report_the_main_export_as_failed(
     assert not any("could not export the GeoTIFF" in m for m in message_log)
     assert any("coverage companion" in m for m in message_log)
     assert any("disk full" in m for m in message_log)
+
+
+# ---- progress, cancel and no partial files (interpolation spec §7, plan call 11) ---------
+
+
+class _FakeDialog:
+    """What `plugin._export_progress` returns as its dialog, when a test replaces it."""
+
+    def close(self) -> None:
+        pass
+
+    def deleteLater(self) -> None:  # noqa: N802 -- Qt's name
+        pass
+
+
+def _progress_calling(hook):
+    """A stand-in for `plugin._export_progress`: its callback runs `hook(done, total)`
+    and carries on, unless the hook returns False."""
+
+    def make(title, total, **_options):
+        def callback(done, of):
+            return hook(done, of) is not False
+
+        return callback, _FakeDialog()
+
+    return make
+
+
+def _set_method(dock, method):
+    panel = dock.grid_finish
+    panel.method_combo.setCurrentIndex(panel.method_combo.findData(method))
+    dock._finish_debounce.stop()
+    dock._on_finish_timeout()
+
+
+def _answer_target(answer_modal, tmp_path, name="cube.tif"):
+    target = tmp_path / "slices" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    return target
+
+
+def _levels_of(messages_into):
+    from plugin_testing import connect_message_log
+
+    return connect_message_log(lambda msg, tag, level: messages_into.append((msg, level)))
+
+
+def test_a_cancelled_export_leaves_no_file_and_adds_no_layer(plugin, tmp_path, answer_modal):
+    from qgis.core import Qgis
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    plugin._export_progress = _progress_calling(lambda done, of: done < 1)
+    target = _answer_target(answer_modal, tmp_path)
+    before = set(plugin.layers.project.mapLayers())
+    levels: list = []
+    disconnect = _levels_of(levels)
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert not target.exists()
+    assert set(plugin.layers.project.mapLayers()) == before
+    assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels], (
+        levels
+    )
+    assert not any(lv == Qgis.MessageLevel.Critical for _m, lv in levels)
+
+
+def test_a_cancelled_export_never_removes_a_file_it_did_not_reach(
+    plugin, tmp_path, answer_modal, monkeypatch
+):
+    """The dialog may choose a file to replace. Until the export has written over
+    it, it is the user's: the mtime rule (Ruling T4-b), shared by both exports."""
+    import nsgeo_qgis.plugin as plugin_module
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    target = _answer_target(answer_modal, tmp_path)
+    target.write_bytes(b"the user's own file")
+
+    def cancelled_before_writing(*args, **kwargs):
+        raise ExportCancelled()
+
+    monkeypatch.setattr(plugin_module, "export_slices", cancelled_before_writing)
+    dock.export_button.click()
+    assert target.read_bytes() == b"the user's own file"
+
+
+def test_a_failed_slice_export_leaves_no_file(
+    plugin, tmp_path, answer_modal, monkeypatch, message_log
+):
+    import nsgeo_qgis.plugin as plugin_module
+    from nsgeo_qgis.slice_export import GeoTiffSliceWriter
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    real_export = plugin_module.export_slices
+
+    class DiesAfterTheFirstBand:
+        def write(self, path, plan, slices):
+            def first_only():
+                for index, band in enumerate(slices):
+                    if index == 1:
+                        raise OSError("disk full")
+                    yield band
+
+            GeoTiffSliceWriter().write(path, plan, first_only())
+
+    def with_failing_writer(*args, **kwargs):
+        return real_export(*args, writer=DiesAfterTheFirstBand(), **kwargs)
+
+    monkeypatch.setattr(plugin_module, "export_slices", with_failing_writer)
+    target = _answer_target(answer_modal, tmp_path)
+    before = set(plugin.layers.project.mapLayers())
+    dock.export_button.click()
+    assert not target.exists()
+    assert set(plugin.layers.project.mapLayers()) == before
+    assert any("could not export the GeoTIFF" in m and "disk full" in m for m in message_log)
+
+
+def test_a_minimum_curvature_export_records_its_method_and_never_writes_a_preview(
+    plugin, tmp_path, answer_modal
+):
+    from nsgeo.slices import plan_windows, to_north_up
+    from osgeo import gdal
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    _set_method(dock, "min_curvature")
+    engine = dock.engine
+    engine._last_solve_ms = 500.0  # a slow solve, set once the plan exists (Ruling R1)
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+    assert target.exists()
+
+    thickness_levels, step_levels = dock.thickness_step_levels()
+    windows = list(plan_windows(engine.z, thickness_levels, step_levels))
+    finish = dock.slice_finish()
+    ds = gdal.Open(str(target))
+    try:
+        assert ds.GetMetadataItem("NSGEO_INTERPOLATION") == "min_curvature"
+        assert ds.RasterCount == len(windows)
+        previews_differ = False
+        for index, window in enumerate(windows, start=1):
+            values, coverage = engine.slice_at(window)
+            full, _gt = to_north_up(engine.finish(values, coverage, finish), engine.frame)
+            drawn, _gt = to_north_up(engine.preview(values, coverage, finish), engine.frame)
+            np.testing.assert_array_equal(ds.GetRasterBand(index).ReadAsArray(), full)
+            previews_differ |= not np.array_equal(full, drawn, equal_nan=True)
+        assert previews_differ, "the preview matched everywhere: this test would not tell"
+    finally:
+        ds.Close()
+
+
+class _Looping:
+    """A refine job that runs until it is asked to stop, or 10 s pass."""
+
+    key = b"looping"
+    engine = None
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.stopped_by_request = False
+
+    def run(self, should_stop) -> None:
+        self.started.set()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if should_stop():
+                self.stopped_by_request = True
+                return
+            time.sleep(0.001)
+
+    def land(self) -> bool:
+        return False
+
+
+def _pump_until(predicate, timeout_s: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        if time.monotonic() > deadline:
+            pytest.fail("timed out waiting for the condition")
+        QCoreApplication.processEvents()
+        time.sleep(0.002)
+
+
+def test_an_export_cancels_a_running_refine(plugin, tmp_path, answer_modal, monkeypatch):
+    """R13: through the scope's flow, so the status line stops saying "Refining"
+    and the flow stops believing a list runs; afterwards the panel redraws, so a
+    preview that still stands re-arms its rest."""
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    job = _Looping()
+    monkeypatch.setattr(dock.engine, "pending_solve", lambda *args, **kwargs: job)
+    _set_method(dock, "min_curvature")  # a new plan's first draw is a preview
+    assert dock.provisional
+    _pump_until(job.started.is_set)
+    assert dock.refiner.busy
+    assert dock.refine_label.text() == REFINING_SLICE_INDICATOR
+
+    seen: list[tuple[bool, str]] = []
+
+    def hook(done, of):
+        if done == 0:
+            seen.append((dock.refiner.busy, dock.refine_label.text()))
+        if done == of:  # every band solved: the current slice is not one of them now
+            dock.engine._solved.clear()
+            dock.engine._last_solve_ms = 500.0
+
+    plugin._export_progress = _progress_calling(hook)
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+
+    assert target.exists()
+    assert job.stopped_by_request
+    busy, text = seen[0]
+    assert busy is False
+    assert not text.startswith("Refining"), text
+    assert dock.provisional
+    assert dock._grid_refine.rest.isActive()
+    assert dock.refine_label.text() == PREVIEW_INDICATOR
+    assert "Refining" not in dock.status_label.text()
+    dock.refiner.cancel()
+
+
+def test_the_progress_dialog_is_cancellable_and_window_modal(plugin):
+    plugin, s = plugin
+    callback, dialog = plugin._export_progress("Export GeoTIFF", 5)
+    try:
+        assert dialog.windowModality() == Qt.WindowModality.WindowModal
+        assert dialog.minimumDuration() == 500
+        assert dialog.maximum() == 5
+        assert callback(0, 5) is True
+        assert callback(3, 5) is True
+        dialog.cancel()
+        assert callback(4, 5) is False
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+# ---- feedback during a slow export (final review I-1) ------------------------------------
+
+
+def _spying_progress(plugin, monkeypatch):
+    """`plugin._export_progress`, the real one, with its dialog kept and each
+    `done` its callback is given recorded, in order."""
+    real = plugin._export_progress
+    made: dict = {"calls": []}
+
+    def spying(title, total, **kwargs):
+        callback, dialog = real(title, total, **kwargs)
+        made["dialog"] = dialog
+
+        def recorded(done, of):
+            made["calls"].append(done)
+            return callback(done, of)
+
+        return recorded, dialog
+
+    monkeypatch.setattr(plugin, "_export_progress", spying)
+    return made
+
+
+def test_a_cancel_during_a_slow_first_band_is_heard_before_the_second(
+    plugin, tmp_path, answer_modal, monkeypatch
+):
+    """`QProgressDialog.setValue` processes events only once the dialog has
+    been shown: the band-0 call starts a show timer that cannot fire while a
+    band solves on the GUI thread, and the band-1 call shows the dialog but
+    processes nothing. So a Cancel clicked during a slow first band went
+    unheard, and nothing painted, until the band-2 call. The callback
+    processes events once the dialog is visible: by the band-1 callback it is
+    up, the Cancel is heard, and band 1 is never computed."""
+    from qgis.PyQt.QtCore import QTimer
+    from qgis.PyQt.QtWidgets import QPushButton
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    made = _spying_progress(plugin, monkeypatch)
+    queued: list[int] = []
+    heard: list[tuple[int, bool]] = []  # (the callback's `done`, the dialog visible)
+    real_finish = dock.engine.finish
+
+    def slow_first_band(*args, **kwargs):
+        if made["calls"] == [0] and not queued:
+            queued.append(1)
+            time.sleep(0.6)  # band 0 solving: no events are processed meanwhile
+            dialog = made["dialog"]
+            button = dialog.findChild(QPushButton)
+
+            def click() -> None:
+                heard.append((made["calls"][-1], dialog.isVisible()))
+                button.click()
+
+            QTimer.singleShot(0, click)  # the user's click, queued during band 0
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(dock.engine, "finish", slow_first_band)
+    target = _answer_target(answer_modal, tmp_path)
+    levels: list = []
+    disconnect = _levels_of(levels)
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert queued == [1]
+    assert heard == [(1, True)], "the Cancel was not heard, visible, at the band-1 callback"
+    assert made["calls"] == [0, 1], "band 1 was computed after the Cancel"
+    assert not target.exists()
+    assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+
+
+@pytest.mark.parametrize(
+    ("method", "last_solve_ms", "shown"),
+    [
+        ("min_curvature", 500.0, True),
+        ("min_curvature", None, True),
+        ("min_curvature", 5.0, False),
+        ("kriging", None, False),
+    ],
+)
+def test_a_slow_export_shows_its_progress_before_the_first_band(
+    plugin, tmp_path, answer_modal, monkeypatch, method, last_solve_ms, shown
+):
+    """A slow first band would otherwise keep the dialog hidden for its whole
+    solve. With minimum curvature over the live budget, or not timed yet, the
+    dialog is shown, and painted, before band 0 is computed. A quick solve keeps
+    plan call 11's rule: nothing shows for an export under 500 ms."""
+    from qgis.PyQt.QtCore import QTimer
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    _set_method(dock, method)
+    dock.engine._last_solve_ms = last_solve_ms  # once the plan exists (Ruling R1)
+    made = _spying_progress(plugin, monkeypatch)
+    pumped: list[int] = []
+    at_band_0: list[tuple[bool, list[int]]] = []
+    real_finish = dock.engine.finish
+
+    def first_band(*args, **kwargs):
+        if made["calls"] == [0] and not at_band_0:
+            at_band_0.append((made["dialog"].isVisible(), list(pumped)))
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(dock.engine, "finish", first_band)
+    real_paused = dock.refining_paused
+
+    @contextlib.contextmanager
+    def queueing():
+        with real_paused():
+            QTimer.singleShot(0, lambda: pumped.append(1))  # an expose, say
+            yield
+
+    monkeypatch.setattr(dock, "refining_paused", queueing)
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+    assert target.exists()
+    assert at_band_0 == [(shown, [1] if shown else [])]
+
+
+def test_an_export_shows_the_wait_cursor_throughout(plugin, tmp_path, answer_modal, monkeypatch):
+    """Every band is solved on the GUI thread, so the export says it is busy."""
+    import nsgeo_qgis.plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    busy: list[int] = []
+    real_cursor = plugin_module.busy_cursor
+
+    @contextlib.contextmanager
+    def counting():
+        busy.append(1)
+        with real_cursor():
+            yield
+        busy.append(-1)
+
+    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
+    during: list[int] = []
+    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+    assert target.exists()
+    assert during and all(depth == 1 for depth in during), during
+    assert busy == [1, -1]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_a_failed_redraw_after_an_export_changes_nothing_it_reported(
+    plugin, tmp_path, answer_modal, monkeypatch, cancel
+):
+    """`refining_paused` redraws once the export ends. A redraw that fails then
+    is logged, never raised: it must not turn a good export into a deleted
+    file, nor a cancel into a Critical."""
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    failed: list[int] = []
+    real_refresh = dock.refresh_slice
+
+    def failing_once() -> None:
+        if failed:
+            real_refresh()  # any redraw after the first is real
+            return
+        failed.append(1)
+        raise RuntimeError("the redraw failed")
+
+    monkeypatch.setattr(dock, "refresh_slice", failing_once)
+    plugin._export_progress = _progress_calling(lambda done, of: not (cancel and done == 1))
+    target = _answer_target(answer_modal, tmp_path)
+    levels: list = []
+    disconnect = _levels_of(levels)
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert failed == [1]
+    assert not any(lv == Qgis.MessageLevel.Critical for _m, lv in levels), levels
+    if cancel:
+        assert not target.exists()
+        assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+    else:
+        assert target.exists()
+        assert any("exported" in m and str(target) in m for m, _lv in levels), levels

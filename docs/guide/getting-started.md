@@ -392,8 +392,21 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
      (IDW)** for a fill that never goes beyond the values around it: nearer
      cells count more, and a filled cell always lies within the range of the
      cells it is filled from, where kriging can overshoot a little beside a
-     strong contrast. Pick **None (binned only)** to see only the cells a line
-     crossed.
+     strong contrast. Pick **Minimum curvature** for the smoothest surface
+     through the lines, the method Surfer users often know. Past the outermost
+     lines it carries on the trend of the data, out to the max distance. So a
+     grid's edges, the sides of a skipped line, and the seams between grids in
+     **Whole site** can show values higher or lower than any line recorded,
+     even below zero on an amplitude slice. It can also overshoot a little
+     beside a strong contrast between lines. It is solved for each slice, so it
+     is slower.
+     At a fine cell you see kriging while the depth moves, and minimum
+     curvature replaces it a moment after the depth rests. A short note on the
+     same line as the depth readout says which: **Kriging preview**,
+     **Refining…**, or **Colour stretch…**. The colour stretch
+     can shift once more when minimum curvature has measured it. An export
+     always uses minimum curvature, shows its progress, and can be cancelled.
+     Pick **None (binned only)** to see only the cells a line crossed.
    - **Max distance to data** is how far from a line a blank cell may be and
      still be filled. It is set in line spacings (for a grid its metres are
      shown beside the box; for the whole site, hover over the box). Cells

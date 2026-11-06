@@ -10,6 +10,8 @@ only on where data is, never on its values (interpolation spec §7). So the work
 `plan_fill` builds a sparse weights table once per grid, method and distance,
 and `FillWeights.apply` turns it into a slice with one gather and one sum.
 That is why scrubbing through slices stays cheap although kriging is dear.
+Minimum curvature has no weights to plan; it plans a solve instead, in
+`curvature.py`, over the same cells (`reach_mask`).
 
 Neighbours are the 3 nearest data cells in each of four quadrants (interpolation spec §5.3).
 Plain nearest-N would pick all its cells from one side of a single line and
@@ -34,10 +36,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
-METHODS: tuple[str, ...] = ("none", "idw", "kriging")
+if TYPE_CHECKING:
+    from nsgeo.slices.curvature import CurvaturePlan
+
+METHODS: tuple[str, ...] = ("none", "idw", "kriging", "min_curvature")
 NEIGHBOURS_PER_QUADRANT: int = 3
 # The limit is inclusive: a cell exactly halfway between lines must fill. The
 # tolerance keeps hypot(...) * cell on the right side of the comparison.
@@ -59,6 +65,26 @@ _PRUNE_EVERY = 32  # offsets between dropping targets whose quadrants are all fu
 _PLAN_CHUNK = 8192
 _SOLVE_CHUNK = 2048
 _EMPTY = np.iinfo(np.int32).min  # offset sentinel for an empty slot in pattern keys
+
+
+class SliceFill(Protocol):
+    """A planned fill, whichever method built it: what `finish_slice` and the
+    plugin need. `FillWeights` and `CurvaturePlan` both are one. Properties,
+    not attributes, because mypy reads a frozen dataclass's fields as
+    read-only."""
+
+    @property
+    def shape(self) -> tuple[int, int]: ...
+
+    @property
+    def populated(self) -> np.ndarray: ...  # (ny*nx,) bool: cells that hold data
+
+    def apply(self, values: np.ndarray) -> np.ndarray: ...
+
+    def apply_at(self, values: np.ndarray, cells: np.ndarray) -> np.ndarray: ...
+
+    @property
+    def nbytes(self) -> int: ...
 
 
 @dataclass(frozen=True, eq=False)
@@ -160,6 +186,17 @@ def _reach(pop2: np.ndarray, dy: np.ndarray, dx: np.ndarray) -> np.ndarray:
     return reach
 
 
+def reach_mask(populated: np.ndarray, cell: float, max_distance_m: float) -> np.ndarray:
+    """(ny, nx) bool: data cells, and every cell within `max_distance_m` of one.
+
+    The one reach rule: the cells IDW and kriging fill and the cells minimum
+    curvature shows are the same, so every method blanks in the same place
+    (interpolation spec §5.2).
+    """
+    ry, rx, _ = _disc_offsets(max_distance_m, cell)
+    return _reach(np.asarray(populated, dtype=bool), ry, rx)
+
+
 def _neighbourhoods(
     pop2: np.ndarray, targets: np.ndarray, dy: np.ndarray, dx: np.ndarray
 ) -> np.ndarray:
@@ -240,12 +277,13 @@ def _kriging_weights(rel: np.ndarray, valid: np.ndarray, cell: float) -> np.ndar
 
 def plan_fill(
     populated: np.ndarray, cell: float, method: str, max_distance_m: float, search_radius_m: float
-) -> FillWeights:
+) -> FillWeights | CurvaturePlan:
     """Plan which empty cells get filled and from which neighbours with which weights.
 
     `populated` is the (ny, nx) mask of cells holding data. An empty cell is a
     target when a data cell lies within `max_distance_m`; its sources are drawn
-    from within `search_radius_m`.
+    from within `search_radius_m`. Minimum curvature has no sources: it plans
+    a solve instead, over the same targets (interpolation spec §5.4).
     """
     pop2 = np.asarray(populated)
     if pop2.ndim != 2:
@@ -259,6 +297,11 @@ def plan_fill(
     if search_radius_m < max_distance_m:
         raise ValueError("search_radius_m must be >= max_distance_m")
     pop2 = pop2.astype(bool)
+    if method == "min_curvature":
+        # Here, not at the top: curvature imports this module.
+        from nsgeo.slices.curvature import plan_curvature
+
+        return plan_curvature(pop2, cell, max_distance_m)
     shape = (int(pop2.shape[0]), int(pop2.shape[1]))
     nx = shape[1]
     flat_pop = pop2.ravel().copy()
@@ -271,8 +314,7 @@ def plan_fill(
     )
     if method == "none":
         return empty
-    ry, rx, _ = _disc_offsets(max_distance_m, cell)
-    targets = np.flatnonzero((_reach(pop2, ry, rx) & ~pop2).ravel())
+    targets = np.flatnonzero((reach_mask(pop2, cell, max_distance_m) & ~pop2).ravel())
     if not targets.size:
         return empty
     sy, sx, _ = _disc_offsets(search_radius_m, cell)

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from nsgeo.slices.interpolate import METHODS, FillWeights
+from nsgeo.slices.interpolate import METHODS, SliceFill
 from nsgeo.slices.smooth import smooth
 
 
@@ -45,7 +45,7 @@ class FinishSettings:
 
 
 def finish_slice(
-    values: np.ndarray, weights: FillWeights, cell: float, settings: FinishSettings
+    values: np.ndarray, weights: SliceFill, cell: float, settings: FinishSettings
 ) -> np.ndarray:
     """`smooth(weights.apply(values), ...)`: float32 `(ny, nx)`, NaN where still blank."""
     return smooth(weights.apply(values), cell, settings.smooth_x_m, settings.smooth_y_m)

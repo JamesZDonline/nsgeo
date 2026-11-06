@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import warnings
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -50,7 +50,7 @@ from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsRasterLayer
 
 from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
-from nsgeo_qgis.slice_export import GeoTiffSliceWriter, band_time_range
+from nsgeo_qgis.slice_export import ExportCancelled, GeoTiffSliceWriter, band_time_range
 from nsgeo_qgis.slices_plan import SliceFinish
 
 _SEPARATORS = (",", ":")
@@ -305,8 +305,14 @@ def export_site(
     velocities: Mapping[str, VelocityModel | None],
     writer: SiteWriter | None = None,
     left_out: Mapping[str, str] | None = None,
+    progress: Callable[[int, int], bool] | None = None,
 ) -> SiteExportPlan:
-    """Plan, then write one band at a time: one `slice_at` per band, no cube held."""
+    """Plan, then write one band at a time: one `slice_at` per band, no cube held.
+
+    `progress(done, total)` is called before each band and once more as
+    `(total, total)`; a False return raises `ExportCancelled` before the next
+    band is computed (`slice_export.export_slices`). `slice_at` is the full
+    result by default, so a band is never a preview (plan call 11)."""
     plan = plan_site_export(
         site_engine,
         thickness_levels,
@@ -321,9 +327,14 @@ def export_site(
     writer = writer if writer is not None else GeoTiffSiteWriter()
 
     def _slices() -> Iterable[SiteSlice]:
-        for band in plan.bands:
+        total = len(plan.bands)
+        for done, band in enumerate(plan.bands):
+            if progress is not None and not progress(done, total):
+                raise ExportCancelled()
             top, thickness = band_window_ns(plan.site_z, band.window)
             yield site_engine.slice_at(top, thickness, finish=finish, method=method, manual=gains)
+        if progress is not None:
+            progress(total, total)
 
     writer.write(path, plan, _slices())
     return plan

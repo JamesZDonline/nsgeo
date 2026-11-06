@@ -15,6 +15,7 @@ from nsgeo.slices.binning import (
     stream_slice,
 )
 from nsgeo.slices.cube import Provenance, SliceCube
+from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
     limit_over_slices,
@@ -27,7 +28,13 @@ from nsgeo.slices.display import (
 )
 from nsgeo.slices.finish import FinishSettings, finish_slice
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
-from nsgeo.slices.interpolate import METHODS, NEIGHBOURS_PER_QUADRANT, FillWeights, plan_fill
+from nsgeo.slices.interpolate import (
+    METHODS,
+    NEIGHBOURS_PER_QUADRANT,
+    FillWeights,
+    SliceFill,
+    plan_fill,
+)
 from nsgeo.slices.site import (
     AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
@@ -60,6 +67,7 @@ __all__ = [
     "CoverageError",
     "CubeFrame",
     "CubeStoreError",
+    "CurvaturePlan",
     "FillWeights",
     "FinishSettings",
     "Footprint",
@@ -74,7 +82,9 @@ __all__ = [
     "Seam",
     "SiteLattice",
     "SliceCube",
+    "SliceFill",
     "SliceWindow",
+    "SolveStopped",
     "ZAxis",
     "background_level",
     "build_cube",
@@ -90,6 +100,7 @@ __all__ = [
     "load_cube",
     "normalise",
     "npz_path",
+    "plan_curvature",
     "plan_fill",
     "plan_line",
     "plan_windows",

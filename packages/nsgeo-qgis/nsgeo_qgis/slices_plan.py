@@ -71,6 +71,39 @@ STREAM_MS_PER_TRACE = STREAM_MS_PER_LINE / MEASURED_TRACES_PER_LINE
 #: One 60 Hz frame. Below this, streaming is imperceptible.
 FRAME_BUDGET_MS = 16.0
 
+#: How often the GUI thread looks for a finished background solve (plan
+#: call 6). Short enough that a result appears within a frame or two of
+#: landing, long enough that an idle poll costs nothing.
+REFINE_POLL_MS = 20
+
+#: The longest a minimum-curvature solve may take and still follow the depth
+#: live (plan call 5, interpolation spec §7). A slice whose last solve took
+#: longer is drawn as its kriging preview and refined once the depth rests.
+LIVE_SOLVE_BUDGET_MS = 50.0
+
+#: How long the depth must rest before the background refine starts (plan
+#: call 5). Every preview draw restarts it, so dragging, the wheel, the arrow
+#: keys and edits all wait the same way.
+REFINE_REST_MS = 300
+
+#: The most solved, unsmoothed slices an engine keeps (plan call 8): the
+#: twelve stretch windows (`SITE_LIMIT_WINDOWS`) and a few recently viewed.
+SOLVED_SLICES_KEPT = 16
+
+#: The method a slow minimum-curvature slice is previewed with (plan call 5),
+#: at the same max distance, search radius and smoothing, so its blanks are
+#: the full result's.
+PREVIEW_METHOD = "kriging"
+
+#: The refine indicator, on the depth readout's row (walkthrough rounds 1-2,
+#: W1-W3, K2): while a preview stands, while the slice on screen is solved (with a
+#: grid count in Whole site), and while only stretch windows are. Short, so it
+#: never wraps, and never in the bottom status line, whose height it would move.
+PREVIEW_INDICATOR = "Kriging preview"
+REFINING_SLICE_INDICATOR = "Refining…"
+REFINING_GRIDS_INDICATOR = "Refining ({done} of {total})…"
+MEASURING_STRETCH_INDICATOR = "Colour stretch ({done} of {total})…"
+
 #: What the plugin will hold before it stops promoting to a resident cube.
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
 DEFAULT_BUDGET_BYTES = 1_500_000_000
@@ -165,6 +198,7 @@ METHOD_LABELS: dict[str, str] = {
     "none": "None (binned only)",
     "idw": "Inverse distance (IDW)",
     "kriging": "Kriging",
+    "min_curvature": "Minimum curvature",
 }
 
 #: Per cell, the fill weights' int32 source index and float32 weight for each

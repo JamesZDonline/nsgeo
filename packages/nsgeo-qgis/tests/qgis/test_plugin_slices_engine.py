@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
@@ -13,17 +14,29 @@ from nsgeo.model.survey import Line
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     CoverageError,
+    CurvaturePlan,
     SliceWindow,
     finish_slice,
     limit_over_slices,
+    plan_curvature,
     plan_fill,
     plan_windows,
+    smooth,
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SliceFinish, SourceChoice
+from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
+from nsgeo_qgis.slices_plan import (
+    LIVE_SOLVE_BUDGET_MS,
+    NO_TRANSFORM,
+    SITE_LIMIT_WINDOWS,
+    SOLVED_SLICES_KEPT,
+    Resolution,
+    SliceFinish,
+    SourceChoice,
+    limit_windows,
+)
 from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QCoreApplication, QEventLoop, QThread, QTimer
@@ -481,6 +494,271 @@ def test_shared_limit_measures_the_finished_slices(sourced):
         engine.set_always_resident(resident)
         assert engine.shared_limit(10, clip, finish) == pytest.approx(correct, rel=1e-6)
     assert unfinished != pytest.approx(correct, rel=1e-3), "the finish must change the limit here"
+
+
+# ---- minimum curvature: the plan and preview, the solved-slice cache --------
+# Plan calls 5-9 (interpolation spec §7). Real solve timings never decide a
+# result here: where "slow" matters, `_last_solve_ms` is set by hand, after
+# the plan exists (Ruling R1: building one resets it).
+
+MC = SliceFinish(method="min_curvature")
+
+
+@pytest.fixture
+def solves(monkeypatch):
+    """Every `CurvaturePlan.solve`, counted on whichever thread runs it."""
+    calls: list[int] = []
+    real = CurvaturePlan.solve
+
+    def counting(self, values, should_stop=None):
+        calls.append(1)
+        return real(self, values, should_stop)
+
+    monkeypatch.setattr(CurvaturePlan, "solve", counting)
+    return calls
+
+
+def _curvature_finish(engine, values, coverage, finish):
+    """Minimum curvature from the core alone, then the same smoothing."""
+    settings = engine.finish_settings(finish)
+    cell = engine.frame.cell
+    solved = plan_curvature(coverage > 0, cell, settings.max_distance_m).apply(values)
+    return smooth(solved, cell, settings.smooth_x_m, settings.smooth_y_m)
+
+
+def test_minimum_curvature_finishes_through_the_engine(sourced):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    for finish in (MC, dataclasses.replace(MC, smooth_x_m=0.3, smooth_y_m=0.2)):
+        got = engine.finish(values, coverage, finish)
+        np.testing.assert_array_equal(got, _curvature_finish(engine, values, coverage, finish))
+        np.testing.assert_array_equal(got, _core_finish(engine, values, coverage, finish))
+    # It really fills something here, or the comparison proves little.
+    assert np.isfinite(engine.finish(values, coverage, MC)).sum() > (coverage > 0).sum()
+
+
+def test_the_preview_is_kriging_at_the_same_max_distance(sourced):
+    """The preview's blanks are the full result's, so the picture does not
+    change shape when the refine lands (plan call 5)."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    mc = SliceFinish("min_curvature", 1.0, 0.3, 0.2)
+    preview = engine.preview(values, coverage, mc)
+    full = engine.finish(values, coverage, mc)
+    kriging = engine.finish(values, coverage, dataclasses.replace(mc, method="kriging"))
+    np.testing.assert_array_equal(preview, kriging)
+    np.testing.assert_array_equal(np.isnan(preview), np.isnan(full))
+    assert not np.array_equal(preview, full, equal_nan=True), "the two must differ here"
+    idw = SliceFinish(method="idw")
+    np.testing.assert_array_equal(
+        engine.preview(values, coverage, idw), engine.finish(values, coverage, idw)
+    )
+
+
+def test_a_repeated_solve_is_served_from_the_cache(sourced, solves):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    first = engine.finish(values, coverage, MC)
+    again = engine.finish(values.copy(), coverage, MC)  # equal values, another array
+    assert len(solves) == 1
+    np.testing.assert_array_equal(again, first)
+    # Smoothing is applied after the solve, so the cache holds the solve.
+    smoothed = dataclasses.replace(MC, smooth_x_m=0.5, smooth_y_m=0.25)
+    got = engine.finish(values, coverage, smoothed)
+    assert len(solves) == 1, "a smoothing edit must not solve again"
+    np.testing.assert_array_equal(got, _curvature_finish(engine, values, coverage, smoothed))
+
+
+def test_the_solved_slice_cache_never_serves_other_values(sourced):
+    """Review Focus 4: another preset or line set at the same window gives
+    other values on the same plan, and they must be solved for themselves."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    # The same blanks, so the same plan; different values.
+    other = np.where(coverage > 0, values * 2.0 + 1.0, np.nan).astype(np.float32)
+    first = engine.finish(values, coverage, MC)
+    second = engine.finish(other, coverage, MC)
+    assert not np.array_equal(first, second, equal_nan=True)
+    np.testing.assert_array_equal(first, _curvature_finish(engine, values, coverage, MC))
+    np.testing.assert_array_equal(second, _curvature_finish(engine, other, coverage, MC))
+    # The key is the values' bytes, shape and dtype: the same bytes read as
+    # another shape or another dtype are other values.
+    assert solve_key(values) == solve_key(values.copy())
+    assert solve_key(values) != solve_key(other)
+    assert solve_key(values) != solve_key(values.reshape(values.shape[0] // 2, -1))
+    assert solve_key(values) != solve_key(values.view(np.uint32))
+
+
+def test_the_cache_keeps_at_most_sixteen_and_drops_with_the_plan(sourced, solves):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    slices = [engine.slice_at(SliceWindow(k, k + 1)) for k in range(SOLVED_SLICES_KEPT + 1)]
+    assert len({solve_key(values) for values, _ in slices}) == len(slices)
+    for values, coverage in slices:
+        engine.finish(values, coverage, MC)
+    assert len(solves) == SOLVED_SLICES_KEPT + 1
+    assert len(engine._solved) == SOLVED_SLICES_KEPT
+    engine.finish(*slices[-1], MC)  # the newest is still held
+    assert len(solves) == SOLVED_SLICES_KEPT + 1
+    engine.finish(*slices[0], MC)  # the oldest went first
+    assert len(solves) == SOLVED_SLICES_KEPT + 2
+    # A z-only edit keeps the plan, so it keeps what was solved on it.
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=28.0))
+    assert len(engine._solved) == SOLVED_SLICES_KEPT
+    assert engine.last_solve_ms is not None
+    # A new cell is a new plan: nothing solved on the old one is kept.
+    engine.set_resolution(Resolution(cell=0.2, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    assert len(engine._solved) == 0
+    assert engine.last_solve_ms is None
+    engine.finish(*engine.slice_at(SliceWindow(4, 14)), MC)
+    assert len(engine._solved) == 1
+    assert engine.last_solve_ms is not None
+    engine.set_source(engine.choice)
+    assert len(engine._solved) == 0
+    assert engine.last_solve_ms is None
+    assert engine.wait_for_preparation(20_000)
+
+
+def test_finish_is_slow_follows_the_last_solve(sourced):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    cached = engine.slice_at(SliceWindow(4, 14))
+    fresh = engine.slice_at(SliceWindow(20, 30))
+    assert engine.finish_is_slow(*fresh, MC), "no plan yet, so no solve is timed on it"
+    engine.finish(*cached, MC)  # builds the plan (which resets the timing), then solves
+    assert engine.last_solve_ms is not None
+    for ms, slow in ((None, True), (10.0, False), (80.0, True)):
+        engine._last_solve_ms = ms
+        assert engine.finish_is_slow(*fresh, MC) is slow, ms
+        assert engine.finish_is_slow(*cached, MC) is False, ms
+    engine._last_solve_ms = LIVE_SOLVE_BUDGET_MS  # slow means over the budget
+    assert engine.finish_is_slow(*fresh, MC) is False
+    engine._last_solve_ms = 80.0
+    assert engine.finish_is_slow(*fresh, SliceFinish(method="kriging")) is False
+    assert engine.finish_is_slow(*fresh, SliceFinish(method="none")) is False
+
+
+def test_a_pending_solve_lands_in_the_cache(sourced, solves):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    want = _curvature_finish(engine, values, coverage, MC)
+    solves.clear()
+    mine = values.copy()
+    job = engine.pending_solve(mine, coverage, MC)
+    assert isinstance(job, PendingSolve)
+    assert job.key == solve_key(values)
+    assert job.solved is None and job.ms is None
+    mine[np.isfinite(mine)] = 0.0  # the job solves its own copy
+    job.run(lambda: False)
+    assert len(solves) == 1
+    assert job.ms is not None
+    np.testing.assert_array_equal(job.solved, want)
+    assert job.land() is True
+    drawn = engine.finish(values, coverage, MC)
+    assert len(solves) == 1, "a landed solve must be served from the cache"
+    assert engine.last_solve_ms == job.ms
+    np.testing.assert_array_equal(drawn, job.solved)
+    assert engine.pending_solve(values, coverage, MC) is None
+    assert engine.pending_solve(values, coverage, SliceFinish(method="kriging")) is None
+    assert engine.weights_cached(MC), "asking for another method's job built nothing"
+
+
+@pytest.mark.parametrize("change", ["source", "cell"])
+def test_a_solve_for_a_dropped_plan_does_not_land(sourced, change):
+    """Review Focus 3: a solve that finishes after the plan it was made from
+    was dropped must not land, even for the very same values."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    job = engine.pending_solve(values, coverage, MC)
+    if change == "source":
+        engine.set_source(engine.choice)
+        assert engine.wait_for_preparation(20_000)
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    else:
+        engine.set_resolution(Resolution(cell=0.2, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    engine.preview(*engine.slice_at(SliceWindow(4, 14)), MC)  # the new plan, nothing solved
+    assert engine.weights_cached(MC)
+    job.run(lambda: False)
+    assert job.solved is not None
+    assert job.land() is False
+    assert len(engine._solved) == 0
+    assert engine.last_solve_ms is None
+
+
+def test_the_minimum_curvature_stretch_is_measured_over_twelve_windows_at_most(sourced, solves):
+    """Plan call 7: at most twelve windows, each solved in the background;
+    until they are, the same measurement over their previews stands in."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session, transform=NO_TRANSFORM)
+    z = engine.z
+    windows = limit_windows(z, 1)
+    assert z.nz > SITE_LIMIT_WINDOWS
+    assert len(windows) == SITE_LIMIT_WINDOWS
+    clip = PercentileClip()
+    jobs = engine.stretch_solves(1, MC)
+    assert len(jobs) == len(windows)
+    assert len(solves) == 0, "handing out jobs solves nothing"
+    previews = [engine.preview(*engine._slice(w), MC) for w in windows]
+    provisional = engine.shared_limit(1, clip, MC, preview=True)
+    assert provisional == pytest.approx(limit_over_slices(previews, clip))
+    assert engine.stretch_limit(1, clip, MC) == (provisional, False)
+    assert len(solves) == 0
+    for job in jobs:
+        job.run(lambda: False)
+        assert job.land()
+    ran = len(solves)
+    assert engine.stretch_solves(1, MC) == []
+    final = engine.shared_limit(1, clip, MC)
+    assert len(solves) == ran, "the stretch must be measured over the landed solves"
+    assert engine.stretch_limit(1, clip, MC) == (final, True)
+    assert len(solves) == ran
+    finished = [engine.finish(*engine._slice(w), MC) for w in windows]
+    assert final == pytest.approx(limit_over_slices(finished, clip))
+    assert engine.stretch_solves(1, SliceFinish()) == []
+    kriging = SliceFinish()
+    assert engine.stretch_limit(1, clip, kriging) == (engine.shared_limit(1, clip, kriging), True)
+
+
+def test_a_rebuild_drops_the_old_plan_before_building_the_new(sourced, monkeypatch):
+    """Holding the old plan, preview and solved slices while the new ones
+    are built would double the peak: about 0.9 GB more at the cell cap."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    assert engine.weights_nbytes > 0
+    held_while_building: list[int] = []
+    real = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        held_while_building.append(engine.weights_nbytes)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    engine.finish(values, coverage, dataclasses.replace(MC, max_distance_spacings=1.0))
+    assert held_while_building == [0, 0], "the plan, then its preview, built over nothing"
+
+
+def test_weights_nbytes_counts_the_plan_the_preview_and_the_cache(sourced):
+    """Plan call 9: what the status line names as held."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    settings = engine.finish_settings(MC)
+    cell, md, sr = engine.frame.cell, settings.max_distance_m, settings.search_radius_m
+    plan = plan_fill(coverage > 0, cell, "min_curvature", md, sr)
+    preview = plan_fill(coverage > 0, cell, "kriging", md, sr)
+    solved = plan.apply(values)
+    assert engine.weights_nbytes == plan.nbytes + preview.nbytes + solved.nbytes
+    engine.finish(values, coverage, SliceFinish())  # kriging holds its weights alone
+    assert engine.weights_nbytes == preview.nbytes
 
 
 def test_provenance_names_the_lines_that_were_actually_prepared(sourced):
