@@ -106,8 +106,16 @@ class RefineFlow:
         dropped, so it neither competes with the build nor keeps that plan
         alive through it. The rest is the draw's to decide."""
         if rebuilds:
-            self.refiner.cancel()
-            self._head = {}
+            self.cancel()
+
+    def cancel(self) -> None:
+        """Cancel the running list, whatever it holds: it was queued for what
+        is no longer drawn (a plan about to be dropped, or a set of grids that
+        has changed). The rest and the preview are the next draw's to decide,
+        and a full draw leaves a list alone, so a list it should not keep is
+        cancelled here, before it."""
+        self.refiner.cancel()
+        self._head = {}
 
     def previewed(self, awaited: Iterable[SolveId]) -> None:
         """The scope drew a preview waiting for the solves `awaited`. A list

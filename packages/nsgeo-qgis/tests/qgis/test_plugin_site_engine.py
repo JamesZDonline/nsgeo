@@ -732,6 +732,58 @@ def test_a_live_site_tick_previews_each_slow_grid_until_its_solve_lands(site3, m
     assert site.pending_solves(40.0, 5.0, FINISH) == []
 
 
+@pytest.mark.parametrize(("ms", "previewed"), [(30.0, True), (10.0, False)])
+def test_a_live_site_tick_is_slow_by_its_grids_solves_together(site3, make_site, ms, previewed):
+    """Final review M-2: a tick solves every grid it does not preview on the
+    GUI thread, one after another, so "slow" is the tick's (plan call 5).
+    Three grids at 30 ms each make a 90 ms tick, over the 50 ms budget: each
+    is previewed, though each alone is inside it. At 10 ms each (30 ms) every
+    grid is solved at once."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    slow(site, ms)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert len(site.ready_grids) == 3
+    if previewed:
+        assert drawn.provisional and list(drawn.previewed) == list(site.ready_grids)
+    else:
+        assert not drawn.provisional and drawn.previewed == {}
+        assert site.pending_solves(30.0, 5.0, MC) == []
+
+
+def test_a_live_site_tick_counts_only_the_grids_it_must_solve(site3, make_site):
+    """A grid whose slice is solved already costs a tick nothing, so only the
+    others' last solves are added up: two at 30 ms (60 ms) are previewed, the
+    solved one drawn in full; one alone at 30 ms is solved at once. A grid not
+    timed yet makes the tick slow whatever the others cost."""
+    site, _ = prepared(make_site, site3)
+    tick = {"finish": MC, "method": "none", "manual": {}}
+    site.slice_at(20.0, 5.0, **tick, preview=True)  # builds every plan
+    first, second, third = site.ready_grids
+    for job in site.pending_solves(30.0, 5.0, MC):
+        if job.engine is site.engine_for(first):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(30.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [second, third]
+
+    for job in site.pending_solves(35.0, 5.0, MC):
+        if job.engine is not site.engine_for(third):
+            job.run(lambda: False)
+            assert job.land()
+    slow(site, 30.0)
+    drawn = site.slice_at(35.0, 5.0, **tick, preview=True)
+    assert drawn.previewed == {}
+    assert site.pending_solves(35.0, 5.0, MC) == []
+
+    slow(site, 1.0)
+    site.engine_for(third)._last_solve_ms = None
+    drawn = site.slice_at(40.0, 5.0, **tick, preview=True)
+    assert list(drawn.previewed) == [first, second, third]
+
+
 def test_the_site_stretch_solves_cover_what_its_shared_limit_measures(site3_factory, make_site):
     """Ruling R3: the minimum-curvature stretch is measured over the SITE
     axis's `limit_windows`, each mapped onto every grid with `window_on`, as

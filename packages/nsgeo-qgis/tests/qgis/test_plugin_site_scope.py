@@ -16,7 +16,13 @@ import time
 import numpy as np
 import pytest
 from nsgeo.render import PercentileClip, UnipolarClip
-from nsgeo.slices import SliceWindow, plan_windows, window_depths_m, window_times_ns
+from nsgeo.slices import (
+    SliceWindow,
+    plan_windows,
+    window_depths_m,
+    window_on,
+    window_times_ns,
+)
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import site_engine as site_engine_module
@@ -2305,18 +2311,27 @@ def test_a_grid_missing_the_depth_does_not_stop_the_others_landing(
     _landing_keeps_the_others(dock, monkeypatch, at(70.0))
 
 
-@pytest.mark.parametrize("quick", [0, 1])
-def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, quick):
+@pytest.mark.parametrize("solved", [0, 1])
+def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, solved):
     """Hashing a slice costs about 7 ms at a million cells, and a tick needs
     each grid's key two or three times: it is computed once per grid and
     passed on, and the rest hashes nothing. A grid the tick previewed is
-    solved from the tick's slice and key; one it drew in full (`quick`: its
-    solve inside the budget) is solved already, so it is not even sliced."""
+    solved from the tick's slice and key; one it drew in full (`solved`: its
+    slice there solved already, so drawn from the cache) is solved already,
+    so it is not even sliced. (A grid merely quick to solve is previewed with
+    the others when the tick is slow: final review M-2.)"""
     dock = _site_minimum_curvature(plugin, 500.0)
     site, scope = dock.site_engine, dock._site
     first, *others = site.ready_grids
-    if quick:
-        site.engine_for(first)._last_solve_ms = 5.0
+    if solved:
+        z = site.site_z
+        thickness_levels, _ = dock.thickness_step_levels()
+        engine = site.engine_for(first)
+        window = window_on(engine.z, z.t0_ns + 30 * z.dz_ns, thickness_levels * z.dz_ns)
+        job = engine.window_solve(window, dock.site_finish.value())
+        job.run(lambda: False)
+        assert job.land()
+        engine._last_solve_ms = 500.0  # landing timed it
     where = ["rest"]
     hashes: list[str] = []
 
@@ -2350,7 +2365,7 @@ def test_a_site_tick_hashes_each_grids_slice_once(plugin, monkeypatch, quick):
     dock.slice_slider.setValue(30)
     _events()
     assert scope.provisional
-    assert list(scope.slice.previewed) == (others if quick else [first, *others])
+    assert list(scope.slice.previewed) == (others if solved else [first, *others])
     _wait_for_refine(dock)
     assert not scope.provisional
     assert len(ticks) >= 2  # the preview, then the refined slice
@@ -2413,6 +2428,42 @@ def test_a_max_distance_edit_cancels_the_site_list_before_rebuilding(plugin, mon
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
 
 
+def test_a_site_rest_during_a_finish_edits_pause_builds_nothing(plugin, monkeypatch):
+    """Final review M-1, for the site. An Interpolation edit waits out its
+    pause (`finish_debounce`) before the tick, but the rest reads the panel
+    live: a rest that ran out inside that pause built every grid's new plan
+    and preview itself, in the rest's slot, with no wait cursor. Such a rest
+    does nothing: the edit's tick rebuilds under the cursor and arms the rest
+    again."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    scope = dock._site
+    starts = _starts(dock, monkeypatch)
+    building: list[int] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(1)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    dock.slice_slider.setValue(30)
+    _events()
+    assert scope.provisional and scope.refine.rest.isActive()
+    spin = dock.site_finish.max_distance_spin
+    spin.setValue(spin.value() + 0.5)  # the edit's tick now waits out its pause
+    assert scope.finish_debounce.isActive()
+    scope.refine.rest.stop()
+    scope._on_rest()  # the rest ran out inside that pause
+    assert building == [], "the rest built the new plans itself"
+    assert starts == [] and not dock.refiner.busy
+
+    _wait_for_refine(dock)  # the edit's tick rebuilds, and its rest refines
+    assert building, "the edit's tick built nothing"
+    assert len(starts) == 1
+    assert not scope.provisional
+    np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
 def test_a_grid_leaving_the_site_cancels_the_list(plugin, monkeypatch):
     """A preview keeps a running list only when it waits for exactly that
     list's head. Once a grid has left the site, the list solves a grid no
@@ -2438,6 +2489,43 @@ def test_a_grid_leaving_the_site_cancels_the_list(plugin, monkeypatch):
     assert len(starts) == 2
     assert not scope.provisional
     np.testing.assert_array_equal(scope.slice.array, _site_drawn(dock))
+
+
+def test_a_grid_leaving_the_site_cancels_a_stretch_list(plugin, monkeypatch):
+    """Final review M-5. With the grids left already solved at this window,
+    the tick after a grid leaves is a full draw, which leaves a running list
+    alone (`RefineFlow.finished`). A list solving the shared stretch's windows
+    then ran on for the grid that left, and for the old site axis. A change of
+    the ready grids cancels it; the stretch is measured afresh, and its rest
+    queues the windows of the grids left."""
+    dock = _site_minimum_curvature(plugin, 500.0)
+    site, scope = dock.site_engine, dock._site
+    gate = threading.Event()
+    real = site.stretch_solves
+    held: list = []
+
+    def gated(thickness_ns, finish):
+        jobs = real(thickness_ns, finish)
+        if jobs and not held:
+            held.append(jobs[0])
+            _held_until(gate, jobs[0])
+        return jobs
+
+    monkeypatch.setattr(site, "stretch_solves", gated)
+    try:
+        dock.stretch_combo.setCurrentIndex(0)  # shared across the site: provisional
+        _pump_until(lambda: dock.refiner.busy)  # rested; its first solve is held
+        assert held and not scope.provisional
+        dock.site_panel.table.item(2, 0).setCheckState(Qt.CheckState.Unchecked)  # C leaves
+        _pump_until(lambda: not scope.tick.isActive() and "C" not in scope.slice.windows)
+        assert not scope.provisional, "the grids left were solved here: a full draw"
+        assert not dock.refiner.busy, "the stretch list for the old grids ran on"
+    finally:
+        gate.set()
+    settle(dock)
+    _wait_for_refine(dock)
+    assert scope.refine.stretch is not None and scope.refine.stretch[2]
+    assert list(site.ready_grids) == ["A", "B"]
 
 
 def test_the_site_stretch_with_minimum_curvature_uses_twelve_windows(plugin, monkeypatch):

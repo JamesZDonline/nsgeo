@@ -114,6 +114,25 @@ def test_a_draw_that_rebuilds_cancels_the_list_first(flow):
     assert flow.rest.isActive()
 
 
+def test_cancel_stops_the_list_and_leaves_the_rest_to_the_next_draw(flow):
+    """Final review M-5: a list queued for grids that have changed is cancelled
+    before the draw, even one the draw would keep: a full draw leaves a list
+    alone. The rest and the preview stay the draw's to decide."""
+    flow, refiner = flow
+    a = _Engine()
+    _running(flow, refiner, [_Job(a, b"a")])
+    flow.rest.start()
+    flow.cancel()
+    assert not refiner.busy
+    assert flow.provisional and flow.rest.isActive()
+    flow.finished(stop=False)
+    assert not refiner.busy and not flow.provisional
+    # The head is gone too: a preview of the same slice no longer keeps a list.
+    flow.rest.stop()
+    flow.previewed([(a, b"a")])
+    assert flow.rest.isActive()
+
+
 def test_a_rest_queues_each_solve_once_telling_grids_apart_by_engine(flow):
     """Two grids can hold equal values: the same key on two engines is two
     solves, and the same solve queued as the slice's and a stretch window's

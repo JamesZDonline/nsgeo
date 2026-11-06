@@ -2379,6 +2379,12 @@ class SlicesDock(QgsDockWidget):
         R11): asking slices and hashes its twelve windows here, on the GUI
         thread. Nothing left to solve is a state to leave too, never one to
         keep (`RefineFlow.rested`).
+
+        The panel is read live, so a finish edit still waiting out its pause
+        (`_finish_debounce`) is already in `finish`. Its plan is not built
+        yet, and building it here would cost seconds in this slot, with no
+        wait cursor (final review M-1). Such a rest does nothing: the edit's
+        redraw builds under the cursor and arms the rest again.
         """
         try:
             window = self._window
@@ -2391,6 +2397,8 @@ class SlicesDock(QgsDockWidget):
                 return
             refine = self._grid_refine
             finish = self.grid_finish.value()
+            if not self.engine.weights_cached(finish):
+                return
             current: list[PendingSolve] = []
             if refine.provisional and self._refine_slice is not None:
                 job = self.engine.pending_solve(*self._refine_slice, finish, key=self._refine_key)

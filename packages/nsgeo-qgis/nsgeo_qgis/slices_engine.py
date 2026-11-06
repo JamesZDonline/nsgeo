@@ -1250,7 +1250,9 @@ class SliceEngine(QObject):
         `key` is `solve_key(values)` when the caller has it already. A draw
         hashes its slice once and passes the key on (`finish_is_slow`,
         `pending_solve`): a hash costs about 7 ms at a million cells. It is
-        trusted, so it must be of these values.
+        trusted, never checked: it must be `solve_key` of this very `values`
+        array, or another slice's solve is served, or this one is cached under
+        another slice's key. Every caller hashes the array it passes.
 
         The cell is the frame's, never a widget's: a refused resolution edit
         leaves the spin ahead of the frame, and the weights must describe the
@@ -1281,6 +1283,29 @@ class SliceEngine(QObject):
         assert preview is not None  # built with the plan
         return finish_slice(values, preview, frame.cell, settings)
 
+    def solve_cost_ms(
+        self,
+        values: np.ndarray,
+        coverage: np.ndarray,
+        finish: SliceFinish,
+        *,
+        key: bytes | None = None,
+    ) -> float | None:
+        """What `finish` would spend solving `values`, as far as is known (plan
+        call 5): 0.0 when nothing is to be solved (another method, or these
+        values solved on the plan held), the last solve's time on the plan
+        held otherwise, and None when none is timed on it yet. A plan not
+        built yet has none. Builds nothing. `key` as for `finish`: `solve_key`
+        of this very `values` array."""
+        if finish.method != "min_curvature":
+            return 0.0
+        frame, _ = self._require_geometry()
+        if self._held_fill(coverage > 0, frame, self.finish_settings(finish)) is None:
+            return None
+        if (solve_key(values) if key is None else key) in self._solved:
+            return 0.0
+        return self._last_solve_ms
+
     def finish_is_slow(
         self,
         values: np.ndarray,
@@ -1291,17 +1316,12 @@ class SliceEngine(QObject):
     ) -> bool:
         """Plan call 5's "slow": minimum curvature, these values not solved
         on the plan held, and the last solve on it over `LIVE_SOLVE_BUDGET_MS`
-        or none timed on it yet. A plan not built yet has none, so the first
-        draw on a new plan is always a preview. False for any other method.
-        Builds nothing. `key` as for `finish`."""
-        if finish.method != "min_curvature":
-            return False
-        frame, _ = self._require_geometry()
-        if self._held_fill(coverage > 0, frame, self.finish_settings(finish)) is None:
-            return True
-        if (solve_key(values) if key is None else key) in self._solved:
-            return False
-        return self._last_solve_ms is None or self._last_solve_ms > LIVE_SOLVE_BUDGET_MS
+        or none timed on it yet (`solve_cost_ms`). A plan not built yet has
+        none, so the first draw on a new plan is always a preview. False for
+        any other method. Builds nothing. `key` as for `finish`: `solve_key`
+        of this very `values` array."""
+        cost = self.solve_cost_ms(values, coverage, finish, key=key)
+        return cost is None or cost > LIVE_SOLVE_BUDGET_MS
 
     def is_solved(
         self,
@@ -1314,7 +1334,8 @@ class SliceEngine(QObject):
         """Whether `finish` would serve `values` from the solved-slice cache:
         minimum curvature, the plan for these settings and cells held, and
         these values solved on it (plan call 8). Builds and solves nothing.
-        `key` as for `finish`."""
+        `key` as for `finish`: trusted, so it must be `solve_key` of this very
+        `values` array; every caller hashes the array it passes."""
         if finish.method != "min_curvature":
             return False
         frame, _ = self._require_geometry()
@@ -1332,7 +1353,10 @@ class SliceEngine(QObject):
     ) -> PendingSolve | None:
         """A job that solves `values` in the background (plan call 6), or None
         when the method is not minimum curvature or they are solved already.
-        Builds the plan if it is not held. `key` as for `finish`."""
+        Builds the plan if it is not held. `key` as for `finish`: trusted, so
+        it must be `solve_key` of this very `values` array, or the job lands
+        its solve under another slice's key; every caller hashes the array it
+        passes."""
         if finish.method != "min_curvature":
             return None
         return self._job_for(values, coverage, finish, key=key, copy=True)

@@ -121,6 +121,7 @@ from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    LIVE_SOLVE_BUDGET_MS,
     MAX_FRAME_CELLS,
     Resolution,
     SiteSource,
@@ -146,6 +147,10 @@ def _ignore() -> None:
 #: How `_shown` draws one present grid: `(grid id, its window, binned
 #: values, coverage)` to its finished slice, grid-local, before the factors.
 _Draw = Callable[[str, SliceWindow, np.ndarray, np.ndarray], np.ndarray]
+
+#: Each ready grid's window at a site time (None where it is absent), and the
+#: binned `(values, coverage)` of each present grid (`SiteEngine._sliced`).
+_Sliced = tuple[dict[str, "SliceWindow | None"], dict[str, tuple[np.ndarray, np.ndarray]]]
 
 
 class _NotSolved(Exception):
@@ -898,6 +903,18 @@ class SiteEngine(QObject):
         z = self._engines[grid_id].z
         return window_on(z, top_ns, thickness_ns) if z is not None else None
 
+    def _sliced(self, top_ns: float, thickness_ns: float) -> _Sliced:
+        """Each ready grid's window at this site time, and each present grid's
+        binned slice there (spec 4.3)."""
+        windows: dict[str, SliceWindow | None] = {}
+        binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for grid_id in self.ready_grids:
+            window = self._grid_window(grid_id, top_ns, thickness_ns)
+            windows[grid_id] = window
+            if window is not None:
+                binned[grid_id] = self._engines[grid_id].slice_at(window)
+        return windows, binned
+
     def _shown(
         self,
         top_ns: float,
@@ -906,6 +923,8 @@ class SiteEngine(QObject):
         manual: Mapping[str, float],
         coverage: bool,
         draw: _Draw,
+        *,
+        sliced: _Sliced | None = None,
     ) -> tuple[
         dict[str, SliceWindow | None], dict[str, np.ndarray], dict[str, tuple[float, float]]
     ]:
@@ -920,15 +939,21 @@ class SiteEngine(QObject):
         live tick decides, or from the solved-slice cache alone (`_draw_full`,
         `_draw_preview`, `_draw_live`, `_draw_solved`). Coverage mode shows
         the counts, 0 as NaN, and normalises nothing (Ruling 7).
+
+        A live tick judges "slow" for the tick, not grid by grid (plan call
+        5, final review M-2): every grid it does not preview is solved here,
+        on the GUI thread, one after another, so six grids at 40 ms each
+        would make a 240 ms tick though each alone is inside the budget. So
+        when the grids whose slices are not solved yet would take more than
+        `LIVE_SOLVE_BUDGET_MS` together, by their last solves, or one has
+        none timed, each of them is drawn as its preview; otherwise all are
+        solved here, as before. A grid already solved is drawn from the
+        cache either way. `_draw_live` decides, from the tick's slices taken
+        first (`sliced`, from `_sliced`), since it must see every grid before
+        it draws the first.
         """
         self._require_lattice()
-        windows: dict[str, SliceWindow | None] = {}
-        binned: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-        for grid_id in self.ready_grids:
-            window = self._grid_window(grid_id, top_ns, thickness_ns)
-            windows[grid_id] = window
-            if window is not None:
-                binned[grid_id] = self._engines[grid_id].slice_at(window)
+        windows, binned = self._sliced(top_ns, thickness_ns) if sliced is None else sliced
         if coverage:
             counts = {
                 g: np.where(cov > 0, cov, np.nan).astype(np.float32)
@@ -966,20 +991,36 @@ class SiteEngine(QObject):
 
         return draw
 
-    def _draw_live(self, finish: SliceFinish, previewed: dict[str, PreviewedGrid]) -> _Draw:
-        """A live tick's draw (plan call 5): a grid whose solve is slow as its
-        preview, recorded in `previewed`, any other in full. Each grid's
-        slice is hashed once and the key passed on: a hash costs about 7 ms
-        at a million cells, and the tick needs it two or three times."""
+    def _draw_live(
+        self,
+        finish: SliceFinish,
+        binned: Mapping[str, tuple[np.ndarray, np.ndarray]],
+        previewed: dict[str, PreviewedGrid],
+    ) -> _Draw:
+        """A live tick's draw (plan call 5), for the tick's `binned` slices:
+        when the tick is slow (`_shown`), each grid with something to solve
+        as its preview, recorded in `previewed`; any other grid, and every
+        grid of a tick that is not slow, in full. Each grid's slice is hashed
+        once, here, and the key passed on: a hash costs about 7 ms at a
+        million cells, and the tick needs it two or three times."""
+        if finish.method != "min_curvature":
+            return self._draw_full(finish)
+        keys = {grid_id: solve_key(values) for grid_id, (values, _) in binned.items()}
+        costs = {
+            grid_id: self._engines[grid_id].solve_cost_ms(values, cov, finish, key=keys[grid_id])
+            for grid_id, (values, cov) in binned.items()
+        }
+        timed = [ms for ms in costs.values() if ms is not None]
+        slow = len(timed) < len(costs) or sum(timed) > LIVE_SOLVE_BUDGET_MS
+        # 0.0 is nothing to solve: drawn from the cache, never previewed.
+        previews = {grid_id for grid_id, ms in costs.items() if slow and ms != 0.0}
 
         def draw(
             grid_id: str, window: SliceWindow, values: np.ndarray, cov: np.ndarray
         ) -> np.ndarray:
             engine = self._engines[grid_id]
-            if finish.method != "min_curvature":
-                return engine.finish(values, cov, finish)
-            key = solve_key(values)
-            if engine.finish_is_slow(values, cov, finish, key=key):
+            key = keys[grid_id]
+            if grid_id in previews:
                 previewed[grid_id] = PreviewedGrid(engine, window, values, cov, key)
                 return engine.preview(values, cov, finish)
             return engine.finish(values, cov, finish, key=key)
@@ -1017,12 +1058,12 @@ class SiteEngine(QObject):
         Spec 4.3: the same time window in every grid (`window_on`); a grid
         whose range misses it is absent (`windows[g] is None`) and nodata.
 
-        `preview=True` is a live tick's (plan call 5): each grid whose
-        minimum-curvature solve is slow (`SliceEngine.finish_is_slow`) is
-        drawn as its kriging preview, normalised and composed as the full
-        result is, and named in `previewed`. Without it every grid is the
-        full result, solved here if need be: an export never writes a
-        preview.
+        `preview=True` is a live tick's (plan call 5): when the tick's
+        minimum-curvature solves are slow together (`_shown`), each grid with
+        one to make is drawn as its kriging preview, normalised and composed
+        as the full result is, and named in `previewed`. Without it every
+        grid is the full result, solved here if need be: an export never
+        writes a preview.
         """
         lattice, _ = self._require_lattice()
         # Per-geometry caches are built outside the timer: they are not a redraw.
@@ -1032,9 +1073,14 @@ class SiteEngine(QObject):
         if method == "edge" and not coverage:
             self._site_seams()
         previewed: dict[str, PreviewedGrid] = {}
-        draw = self._draw_live(finish, previewed) if preview else self._draw_full(finish)
         started = time.perf_counter()
-        windows, shown, factors = self._shown(top_ns, thickness_ns, method, manual, coverage, draw)
+        sliced = self._sliced(top_ns, thickness_ns)
+        # A coverage tick finishes nothing, so it hashes nothing either.
+        live = preview and not coverage
+        draw = self._draw_live(finish, sliced[1], previewed) if live else self._draw_full(finish)
+        windows, shown, factors = self._shown(
+            top_ns, thickness_ns, method, manual, coverage, draw, sliced=sliced
+        )
         array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
         self._record_redraw((time.perf_counter() - started) * 1000.0)
         return SiteSlice(

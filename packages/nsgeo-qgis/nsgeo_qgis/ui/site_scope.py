@@ -890,9 +890,14 @@ class SiteScope:
                 return
             ready = self.engine.ready_grids
             if ready != self.ready_handled:
-                # Grids became ready, or left: the axis may have changed.
+                # Grids became ready, or left: the axis may have changed, so
+                # the stretch is measured afresh. A running list was queued
+                # for the old grids and axis: cancelled here, since the tick
+                # below may be a full draw, which leaves a list alone (final
+                # review M-5).
                 self.ready_handled = ready
                 self.refine.stretch = None
+                self.refine.cancel()
                 if self.seed_z():
                     self.apply_resolution(refresh=False)
                 self.sync_slider()
@@ -1008,6 +1013,12 @@ class SiteScope:
         reused rather than taken again. A stretch already final for what is
         drawn asks for no solves (Ruling R11): asking slices and hashes every
         grid's window of every stretch window here, on the GUI thread.
+
+        The panel is read live, so an Interpolation edit still waiting out its
+        pause (`finish_debounce`) is already in `finish`. Its plans are not
+        built yet, and building them here would cost seconds in this slot,
+        with no wait cursor (final review M-1). Such a rest does nothing: the
+        edit's tick builds under the cursor and arms the rest again.
         """
         dock = self.dock
         try:
@@ -1022,6 +1033,8 @@ class SiteScope:
                 return
             refine = self.refine
             finish = dock.site_finish.value()
+            if not self.engine.weights_cached(finish, at=at):
+                return
             top, thickness_ns = at
             current: list[PendingSolve] = []
             if refine.provisional:

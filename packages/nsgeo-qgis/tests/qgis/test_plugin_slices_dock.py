@@ -2656,8 +2656,11 @@ def test_the_refine_waits_for_the_depth_to_rest(docked, monkeypatch):
     moved = 0.0
     left: int | None = None
     for value in (15, 20, 25):
-        dock.slice_slider.setValue(value)
+        # Taken before the move: the move starts the rest inside `setValue`,
+        # then draws the preview, so a time taken after it would eat into the
+        # 5% a coarse timer may fire early (final review M-3).
         moved = time.monotonic()
+        dock.slice_slider.setValue(value)
         assert dock.provisional
         assert not dock.refiner.busy
         assert dock._grid_refine.rest.isActive()
@@ -2991,6 +2994,42 @@ def test_a_redraw_keeps_its_own_solve_but_a_new_plan_cancels_it(docked, monkeypa
         gate.set()
     _wait_for_refine(dock)
     assert len(starts) == 2
+    assert not dock.provisional
+    np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
+
+
+def test_a_rest_during_a_finish_edits_pause_builds_nothing(docked, monkeypatch):
+    """Final review M-1. A finish edit waits out its pause (`_finish_debounce`)
+    before it redraws, but the rest reads the panel live: a rest that ran out
+    inside that pause built the new plan and its preview itself, in the rest's
+    slot, with no wait cursor (about 6 s at 0.05 m). Such a rest does nothing:
+    the edit's redraw rebuilds under the cursor and arms the rest again."""
+    from nsgeo_qgis import slices_engine
+
+    dock, _ = docked
+    _minimum_curvature(dock, 500.0)
+    starts = _starts(dock, monkeypatch)
+    building: list[int] = []
+    real_fill = slices_engine.plan_fill
+
+    def watching(*args, **kwargs):
+        building.append(1)
+        return real_fill(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", watching)
+    dock.slice_slider.setValue(20)
+    assert dock.provisional and dock._grid_refine.rest.isActive()
+    spin = dock.grid_finish.max_distance_spin
+    spin.setValue(spin.value() + 0.5)  # the edit's redraw now waits out its pause
+    assert dock._finish_debounce.isActive()
+    dock._grid_refine.rest.stop()
+    dock._on_rest()  # the rest ran out inside that pause
+    assert building == [], "the rest built the new plan itself"
+    assert starts == [] and not dock.refiner.busy
+
+    _wait_for_refine(dock)  # the edit's redraw rebuilds, and its rest refines
+    assert building, "the edit's redraw built nothing"
+    assert len(starts) == 1
     assert not dock.provisional
     np.testing.assert_array_equal(dock.current_values(), _drawn_by_the_engine(dock, "finish"))
 
