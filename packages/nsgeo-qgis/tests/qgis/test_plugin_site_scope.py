@@ -43,7 +43,7 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
-from plugin_testing import LayoutProbe, LoadCounter, slow_jobs, spin_until
+from plugin_testing import LayoutProbe, LoadCounter, layout_width, slow_jobs, spin_until
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
@@ -2894,14 +2894,14 @@ def _slow_site_unsolved(plugin, monkeypatch):
     return dock
 
 
-@pytest.mark.parametrize("width", [260, 520])
+@pytest.mark.parametrize("width", ["narrow", "wide"])
 def test_the_site_refine_states_do_not_move_the_panel_under_the_wheel(plugin, monkeypatch, width):
     """W1, in Whole site: the content's height and the slider's place do not
     change from normal through preview, refining the grids and measuring the
     stretch, to final."""
     dock = _slow_site_unsolved(plugin, monkeypatch)
     dock.setFloating(True)  # the main window is never shown, so a docked one never lays out
-    dock.resize(width, 700)
+    dock.resize(layout_width(dock, width), 700)
     dock.show()
     probe = LayoutProbe(dock)
     baseline = probe.settle()
@@ -2970,8 +2970,8 @@ def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
     dock.show()
     probe = LayoutProbe(dock)
     widths = []
-    for width in (260, 520):
-        dock.resize(width, 700)
+    for width in ("narrow", "wide"):
+        dock.resize(layout_width(dock, width), 700)
         probe.settle()
         widths.append(probe.scroll.widget().width())
     assert widths[1] > widths[0], widths

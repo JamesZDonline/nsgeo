@@ -33,6 +33,7 @@ from plugin_testing import (
     REAL_DZT,
     LayoutProbe,
     connect_message_log,
+    layout_width,
     needs_real_data,
     slow_jobs,
     synthetic_dzt,
@@ -3131,14 +3132,14 @@ def _slow_unsolved(dock, monkeypatch):
     slow_jobs(monkeypatch, engine, ("pending_solve", "stretch_solves"))
 
 
-@pytest.mark.parametrize("width", [260, 520])
+@pytest.mark.parametrize("width", ["narrow", "wide"])
 def test_the_refine_states_do_not_move_the_panel_under_the_wheel(docked, monkeypatch, width):
     """W1: the content's height and the slider's place do not change as a slice
     goes normal, preview, refining the slice, measuring the stretch, final. The
     old bottom status line changed height between them (47, 70, 24 px)."""
     dock, _ = docked
     dock.setFloating(True)
-    dock.resize(width, 700)
+    dock.resize(layout_width(dock, width), 700)
     dock.show()
     _slow_unsolved(dock, monkeypatch)
     probe = LayoutProbe(dock)
@@ -3218,8 +3219,8 @@ def test_the_dock_layout_probe_sees_the_width_it_is_given(docked):
     dock.show()
     probe = LayoutProbe(dock)
     widths = []
-    for width in (260, 520):
-        dock.resize(width, 700)
+    for width in ("narrow", "wide"):
+        dock.resize(layout_width(dock, width), 700)
         probe.settle()
         widths.append(probe.scroll.widget().width())
     assert widths[1] > widths[0], widths
