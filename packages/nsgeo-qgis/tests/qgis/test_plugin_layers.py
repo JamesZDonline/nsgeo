@@ -2454,16 +2454,26 @@ def test_a_pick_on_a_key_that_is_not_a_site_line_is_left_exactly_as_it_is(popula
     assert (cut["distance_m"], cut["depth_m"], cut["velocity_m_ns"]) == (9.0, 0.7, 0.1)
 
 
-def test_a_pick_on_a_line_with_no_distance_axis_is_left_as_it_is(populated):
+def test_a_pick_on_a_line_with_no_distance_axis_keeps_its_place_but_follows_the_velocity(populated):
     session, layers, _ = populated
+    bad_key = "raw/FILE__099.DZT"
     bad = synthetic_dzt(session.root / "raw", "FILE__099.DZT", n_traces=40, traces_per_metre=0.0)
     session.add_lines([Line.open(bad, GridPlacement("A", "y", 10.0, 0.0, 1, "FILE__099"))])
-    layers.write_pick(_a_pick(key="raw/FILE__099.DZT", trace=3))
+    layers.write_pick(_a_pick(key=bad_key, trace=3))
     layers.write_pick(_a_pick(trace=5))
     session.replace_grid(_MOVED_GRID)
     rows = _rows(layers)
-    assert rows["raw/FILE__099.DZT"].geometry().isEmpty()
-    assert rows["raw/FILE__099.DZT"]["depth_m"] == 0.25
+    assert rows[bad_key].geometry().isEmpty()
+    # Decision 7 outranks the "untouched" wording, which was about position.
+    for _ in range(2):  # after the grid move, then after a velocity change
+        depth, velocity = session.derived_pick_fields(bad_key, 3, 12.5)[1:]
+        row = _rows(layers)[bad_key]
+        assert row.geometry().isEmpty()
+        assert row["depth_m"] == pytest.approx(depth, abs=1e-12)
+        assert row["velocity_m_ns"] == pytest.approx(velocity, abs=1e-12)
+        session.set_line_velocity(bad_key, VelocityModel.constant(0.07))
+    assert _rows(layers)[bad_key]["velocity_m_ns"] == pytest.approx(0.07)
+    assert layers.follow_lines() == 0
     pt = rows["raw/FILE__001.DZT"].geometry().asPoint()
     assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 5), abs=1e-9)
 
@@ -2634,3 +2644,65 @@ def test_a_pick_follows_a_line_edit_and_a_move_to_a_grid_with_another_velocity(p
     assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
     assert session.line_for_key(key).placement.grid_id == "B"
     assert f["velocity_m_ns"] == pytest.approx(0.08)
+
+
+@needs_real_data
+def test_real_lines_carry_their_picks_through_a_grid_move_a_flip_and_a_move_to_another_grid(
+    qgis_app, tmp_path
+):
+    """Real DZT files at a UTM-sized origin: every point is computed from
+    coordinates near 4.3e6, where a 1e-9 comparison would be about one ulp
+    and rewrite rows on every refresh (line editing spec §4.4)."""
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        crs = "EPSG:32616"
+        session.add_grid(Grid("A", (530000.0, 4300000.0), 0.0, 5.0, 12.0, crs, 0.5))
+        session.add_grid(Grid("B", (530020.0, 4300010.0), 30.0, 5.0, 12.0, crs, 0.5))
+        lines = []
+        for i, path in enumerate(REAL_DZT[:4]):
+            fwd = i % 2 == 0
+            placement = GridPlacement("A", "y", i * 0.5, 0.0 if fwd else 12.0, 1 if fwd else -1)
+            lines.append(Line.open(path, placement))
+        session.add_lines(lines)
+        key = session.keys_on_grid("A")[1]  # a reversed line
+        trace = session.line_for_key(key).n_traces // 2
+        distance, depth, velocity = session.derived_pick_fields(key, trace, 20.0)
+        layers.write_pick(
+            _a_pick(
+                key=key,
+                trace=trace,
+                time_ns=20.0,
+                distance_m=distance,
+                depth_m=depth,
+                velocity_m_ns=velocity,
+            )
+        )
+
+        def check(step):
+            row = _rows(layers)[key]
+            pt = row.geometry().asPoint()
+            want = _line_point(session, key, trace)
+            assert (pt.x(), pt.y()) == pytest.approx(want, abs=1e-6), step
+            depth, velocity = session.derived_pick_fields(key, trace, 20.0)[1:]
+            assert row["depth_m"] == pytest.approx(depth, abs=1e-9), step
+            assert layers.follow_lines() == 0, step
+
+        check("placed")
+        before = _rows(layers)[key].geometry().asPoint()
+        session.replace_grid(Grid("A", (530001.5, 4300002.0), 15.0, 5.0, 13.0, crs, 0.5))
+        check("grid moved")
+        assert _rows(layers)[key].geometry().asPoint() != before
+        session.edit_lines(
+            [LineEdit(key, session.line_for_key(key).placement).flipped(session.site.frames)]
+        )
+        check("flipped")
+        session.move_lines([key], "B")
+        assert session.line_for_key(key).placement.grid_id == "B"
+        check("moved to B")
+    finally:
+        layers.detach()
+        project.clear()

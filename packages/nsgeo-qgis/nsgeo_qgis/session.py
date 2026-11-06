@@ -520,7 +520,8 @@ class SiteSession(QObject):
         """Swap in an edited grid. A reversed line starts at the far edge,
         so when the grid's length along an axis changes, every reversed line
         on that axis moves with the edge, keeping its inset (line editing
-        spec §3 call 6). Lines whose offset now lies outside a changed width
+        spec §3 call 6 for the message; the rule itself is decision 4 and
+        §4.3). Lines whose offset now lies outside a changed width
         are reported, not moved. All of it happens before anything is
         emitted, then one `grids_changed` and one `lines_changed`."""
         site = self._require_site()
@@ -719,6 +720,11 @@ class SiteSession(QObject):
         keys = [e.key for e in edits]
         if len(set(keys)) != len(keys):
             raise ValueError("a line may be edited only once per change")
+        # A repeated key would fill two slots with one line and drop another
+        # from the survey file, and the strict zip below only notices after
+        # the slots are written (line editing spec §3 call 14).
+        if order is not None and len(set(order)) != len(order):
+            raise ValueError("an order may name a line only once")
         if grid_id is not None:
             self.grid(grid_id)
         frames = site.frames
@@ -793,7 +799,7 @@ class SiteSession(QObject):
 
     def move_lines(self, keys: Iterable[str], grid_id: str) -> EditOutcome:
         """Move lines to another grid, keeping each one's inset from the edge
-        it starts at (line editing spec §3 call 8). Lines already on
+        it starts at (line editing spec §3 calls 7 and 1). Lines already on
         `grid_id` are left out; a key that is gone is skipped and named."""
         self._require_site()
         self.grid(grid_id)

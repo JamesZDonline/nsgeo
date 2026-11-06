@@ -1863,6 +1863,13 @@ class NsgeoPlugin:
         if not self.session.is_open:
             return
         existing = self._edit_lines_dialogs.get(grid_id)
+        if existing is not None and existing.opened_against != self.session.json_path:
+            # Tables are keyed by grid id, and "A" or "Grid1" recur from site
+            # to site: a table opened against the old site would only be
+            # refused at OK and lose its edits (line editing spec §3 call 14).
+            # reject() runs `finished`, which drops it from the dict.
+            existing.reject()
+            existing = self._edit_lines_dialogs.get(grid_id)
         if existing is not None:
             existing.select_keys(keys)
             existing.show()
@@ -1908,7 +1915,9 @@ class NsgeoPlugin:
             assert self.session is not None
             outcome = self.session.move_lines(keys, grid_id)
         except (KeyError, ProjectError) as exc:
-            self.message(f"Move to {grid_id}: {exc}", Qgis.MessageLevel.Critical)
+            # str(KeyError) is repr(arg): quotes inside the bar's own quotes.
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"Move to {grid_id}: {what}", Qgis.MessageLevel.Critical)
             return
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not move the lines: {exc}", Qgis.MessageLevel.Critical)

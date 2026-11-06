@@ -478,8 +478,79 @@ def test_move_lines_moves_them_and_reports_on_the_bar(
         assert "Move to B: changed 1 line(s)" in message_log
         plugin.move_lines([k], "nowhere")
         assert any("nowhere" in m for m in message_log[1:])
+        # A KeyError's str() is its repr: the bar must not show it quoted.
+        assert "Move to nowhere: no grid with id 'nowhere'" in "\n".join(message_log)
+        assert not any('"no grid' in m or "'no grid" in m for m in message_log)
     finally:
         # An open site leaves its map layers in QgsProject.instance(), which
         # a later layer combo would pick up (as the Task 4 plugin test does).
         answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
         plugin.unload()
+
+
+def test_a_table_opened_on_another_site_is_replaced_not_raised(
+    fake_iface, tmp_path, answer_modal, message_log
+):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two" / "raw").mkdir(parents=True)
+    try:
+        plugin.session.new_site(tmp_path / "one")
+        plugin.session.add_grid(Grid("A", (500.0, 700.0), 0.0, 15.0, 15.0, "EPSG:32616", 0.5))
+        plugin.session.add_lines(_lines(tmp_path / "one", "A"))
+        plugin.open_edit_lines_dialog("A", [])
+        old = plugin._edit_lines_dialogs["A"]
+        assert old.table.rowCount() == len(SHAPE)
+
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.session.new_site(tmp_path / "two")
+        plugin.session.add_grid(Grid("A", (800.0, 700.0), 0.0, 15.0, 15.0, "EPSG:32616", 0.5))
+        p = synthetic_dzt(tmp_path / "two" / "raw", "FILE__500.DZT", n_traces=60)
+        plugin.session.add_lines([Line.open(p, GridPlacement("A", "y", 1.0, 0.0, 1, "only"))])
+        plugin.open_edit_lines_dialog("A", [])
+
+        fresh = plugin._edit_lines_dialogs["A"]
+        assert fresh is not old
+        assert old.result() != old.DialogCode.Accepted
+        assert fresh.table.rowCount() == 1
+        assert fresh.keys() == plugin.session.keys_on_grid("A")
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
+@pytest.mark.parametrize("slot", ["move", "selection", "cell", "grid", "apply", "accept"])
+def test_every_slot_reports_an_unexpected_failure_and_does_not_raise(
+    table, monkeypatch, message_log, slot
+):
+    session, dialog = table
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    if slot == "selection":
+        monkeypatch.setattr(dialog, "selected_keys", boom)
+        dialog._selection_changed()
+    elif slot == "move":
+        dialog.select_keys([dialog.keys()[1]])
+        monkeypatch.setattr(dialog, "_render", boom)
+        dialog.move_selected(-1)
+    elif slot == "cell":
+        monkeypatch.setattr(dialog, "_frames", boom)
+        dialog._on_item_changed(dialog.table.item(0, COL_OFFSET))
+    elif slot == "grid":
+        monkeypatch.setattr(dialog, "_frames", boom)
+        dialog._on_grid_picked(0, "B")
+    elif slot == "apply":
+        dialog.select_keys([dialog.keys()[0]])
+        monkeypatch.setattr(dialog, "_frames", boom)
+        dialog.flip()
+    else:
+        monkeypatch.setattr(session, "edit_lines", boom)
+        dialog.accept()
+    assert "kaboom" in dialog.status.text()
+    assert any("kaboom" in m for m in message_log)
+    dialog.deleteLater()

@@ -75,7 +75,7 @@ def same_placement(a: GridPlacement, b: GridPlacement) -> bool:
 
 def placement_note(placement: GridPlacement, grid: Grid) -> str:
     """What looks off about a placement on `grid`, or "". Judges only the
-    Start and the offset (line editing spec §4.3)."""
+    Start and the offset (line editing spec §3 call 8)."""
     length = length_along(grid, placement.axis)
     width = width_across(grid, placement.axis)
     d = edge_inset(placement, length)

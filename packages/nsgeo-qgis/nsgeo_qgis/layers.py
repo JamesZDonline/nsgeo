@@ -200,6 +200,12 @@ _PICKS_EDIT_SIGNALS = (
 # tolerance `follow_lines` compares stored picks against re-derived ones with,
 # so a refresh that moves nothing writes nothing.
 _SAME = 1e-9
+# The same for a map position, in CRS units. At a UTM northing (about 4.3e6) one
+# ulp is already 1e-9, so a point recomputed from the line's origin can differ
+# from the one stored by a few ulps and would be rewritten on every refresh at
+# 1e-9; a micrometre is far below anything a pick can mean and far above that
+# noise. Attributes (metres, a few hundred at most) keep `_SAME`.
+_SAME_COORD = 1e-6
 
 # Sentinel returned by `_table_schema` in place of a CRS when a table by
 # that name is present in the GeoPackage but `QgsVectorLayer` could not
@@ -604,10 +610,15 @@ class SiteLayers(QObject):
         written, so a refresh that changes nothing writes nothing.
 
         Left exactly as they are: a row whose `line_key` is no site line (a
-        removed line's picks wait for it to come back), a row with no trace
-        or time (digitised by hand), and a row on a line with no grid or no
-        distance axis. A trace past the end of its line sits on the last
-        trace with no distance, as `_pick_point` places it.
+        removed line's picks wait for it to come back) and a row with no trace
+        or time (digitised by hand). A row on a line with no grid or no
+        distance axis keeps its geometry and `distance_m`, but its depth and
+        velocity still follow the line's velocity: the user's decision 7 says
+        whenever a line's resolved velocity changes, its picks' depth and
+        velocity are worked out again from their time, and that outranks
+        §4.4's "untouched", which was about position (line editing spec §3
+        decision 7). A trace past the end of its line sits on the last trace
+        with no distance, as `_pick_point` places it.
         """
         layer = self._picks_layer()
         site = self.session.site
@@ -626,8 +637,10 @@ class SiteLayers(QObject):
         provider = layer.dataProvider()
         keys = set(self.session.keys())
         # One computation per line, however many picks it carries. None
-        # marks a line whose picks are skipped.
+        # marks a line with no points to put a pick on (no grid, or no
+        # distance axis): its picks still follow its velocity.
         placed: dict[str, list[QgsPointXY] | None] = {}
+        failed: set[str] = set()
         geometry_changes: dict[int, QgsGeometry] = {}
         attribute_changes: dict[int, dict[int, Any]] = {}
         for feature in provider.getFeatures():
@@ -640,7 +653,7 @@ class SiteLayers(QObject):
                 grid = self.session.grid_for_line(line)
                 placed[key] = None if grid is None else self._line_points(line, grid, site.frames)
             coords = placed[key]
-            if coords is None:
+            if key in failed:
                 continue
             try:
                 distance, depth, velocity = self.session.derived_pick_fields(
@@ -648,19 +661,22 @@ class SiteLayers(QObject):
                 )
             except Exception as exc:  # noqa: BLE001 -- one bad line must not stop the rest
                 _log(f"could not re-derive the picks on {key}: {exc}", Qgis.MessageLevel.Critical)
-                placed[key] = None
+                failed.add(key)
                 continue
-            point = _clamped(coords, int(trace))
-            stored = feature.geometry()
-            if stored.isNull() or stored.isEmpty() or not point.compare(stored.asPoint(), _SAME):
-                geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+            derived = [("depth_m", depth), ("velocity_m_ns", velocity)]
+            if coords is not None:
+                point = _clamped(coords, int(trace))
+                stored = feature.geometry()
+                if (
+                    stored.isNull()
+                    or stored.isEmpty()
+                    or not point.compare(stored.asPoint(), _SAME_COORD)
+                ):
+                    geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+                derived.insert(0, ("distance_m", distance))
             changed = {
                 provider.fieldNameIndex(name): NULL if value is None else value
-                for name, value in (
-                    ("distance_m", distance),
-                    ("depth_m", depth),
-                    ("velocity_m_ns", velocity),
-                )
+                for name, value in derived
                 if not _same_number(_attr(feature, name), value)
             }
             if changed:

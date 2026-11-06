@@ -20,10 +20,14 @@ grid, and each line's placement against the one the table saw, which
 reads the grid or the frames catches KeyError (a grid gone) and ProjectError
 (no site open) and says so on the status line instead of raising, because most
 of them are reached from a signal, where an uncaught exception is swallowed.
+Each of those slots also ends in a broad `except Exception` that reports
+through `_failed` (status line and message log), so nothing else can escape
+either (line editing spec §3 call 14).
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -32,6 +36,7 @@ from typing import Any
 
 from nsgeo.geometry import Grid
 from nsgeo.project import ProjectError
+from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
@@ -213,6 +218,12 @@ class EditLinesDialog(QDialog):
         self.select_keys(select)
 
     # ---- reading --------------------------------------------------------------
+    @property
+    def opened_against(self) -> Any:
+        """The site's json path this table read its lines from; the opener
+        replaces a table whose site is no longer the open one."""
+        return self._opened_against
+
     def keys(self) -> list[str]:
         return list(self._order)
 
@@ -277,7 +288,21 @@ class EditLinesDialog(QDialog):
                 )
         self._selection_changed()
 
+    def _failed(self, exc: Exception) -> None:
+        """The last-resort report of a slot: the specific handlers give the
+        good messages, this one makes sure nothing is swallowed silently."""
+        message = f"unexpected error in Edit lines: {exc}"
+        QgsMessageLog.logMessage(message, "nsgeo", Qgis.MessageLevel.Critical)
+        with contextlib.suppress(Exception):  # a dying widget must not raise from here
+            self.status.setText(message)
+
     def _selection_changed(self) -> None:
+        try:
+            self._update_panel()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _update_panel(self) -> None:
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
         self.bulk.setTitle(f"Change the {len(sel)} selected line{'s' if len(sel) != 1 else ''}")
@@ -297,6 +322,9 @@ class EditLinesDialog(QDialog):
                 self._edits[key] = change(self._live(edit, frames), frames)
         except (KeyError, ProjectError) as exc:
             self.status.setText(self._unavailable(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
             return
         self._refresh("; ".join(dropped) if dropped else None)
 
@@ -322,6 +350,12 @@ class EditLinesDialog(QDialog):
     def move_selected(self, delta: int) -> None:
         """Move every selected row one place, keeping their order; nothing
         when one would leave the table (the survey order, spec §4.1)."""
+        try:
+            self._move_selected(delta)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _move_selected(self, delta: int) -> None:
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
         if not rows or not min(rows) + delta >= 0 or max(rows) + delta >= len(self._order):
@@ -335,6 +369,12 @@ class EditLinesDialog(QDialog):
     def _refresh(self, note: str | None = None) -> None:
         """Redraw every row and the status line from the edits. `note`, when
         given, replaces the status (a refused cell edit)."""
+        try:
+            self._redraw(note)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _redraw(self, note: str | None) -> None:
         sel = self.selected_keys()
         try:
             grid = self._grid()
@@ -456,9 +496,18 @@ class EditLinesDialog(QDialog):
         except (KeyError, ProjectError) as exc:
             self.status.setText(self._unavailable(exc))
             return
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+            return
         self._refresh(note)
 
     def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        try:
+            self._item_changed(item)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _item_changed(self, item: QTableWidgetItem) -> None:
         if self._updating:
             return
         r, c = item.row(), item.column()
@@ -510,6 +559,9 @@ class EditLinesDialog(QDialog):
         except (KeyError, ProjectError) as exc:
             self.status.setText(self._unavailable(exc))
             return
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+            return
         self._refresh(note)
 
     # ---- accept -----------------------------------------------------------------
@@ -518,6 +570,12 @@ class EditLinesDialog(QDialog):
         # failure reports through `status` and returns, never raises (see the
         # module docstring). Re-checks the site, then the grid, then lets
         # SiteSession.edit_lines re-check every line (spec call 14).
+        try:
+            self._accept()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _accept(self) -> None:
         if not self.session.is_open:
             self.status.setText("no site is open; nothing was changed")
             return

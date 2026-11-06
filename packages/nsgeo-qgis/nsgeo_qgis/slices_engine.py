@@ -1061,7 +1061,7 @@ class SliceEngine(QObject):
     @staticmethod
     def _without_label(placement: Any) -> Any:
         """A placement as geometry only: the label names a line and never
-        moves it, so a label-only edit must not re-prepare (spec §4.5)."""
+        moves it, so a label-only edit must not re-prepare (line editing spec §4.5)."""
         if isinstance(placement, GridPlacement):
             return dataclasses.replace(placement, label=None)
         return placement

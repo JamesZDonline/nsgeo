@@ -1665,6 +1665,23 @@ def test_order_without_a_grid_and_a_key_edited_twice_are_refused(session, tmp_pa
         session.edit_lines([], grid_id="nope")
 
 
+def test_an_order_naming_a_line_twice_is_refused_before_anything_changes(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    before_lines = list(session.site.lines)
+    before_keys = session.keys()
+    before_places = [session.line_for_key(k).placement for k in before_keys]
+    changed = Spy(session.lines_changed)
+    with pytest.raises(ValueError):
+        session.edit_lines([], grid_id="A", order=[a[0], a[0], a[2]])
+    assert session.site.lines == before_lines
+    assert all(x is y for x, y in zip(session.site.lines, before_lines, strict=True))
+    assert session.keys() == before_keys
+    assert [session.line_for_key(k).placement for k in before_keys] == before_places
+    assert session.dirty is False
+    assert changed.calls == []
+
+
 def test_a_grid_length_change_takes_its_reversed_lines_with_the_far_edge(session, tmp_path):
     a, _ = _zigzag(session, tmp_path)
     grids, lines = Spy(session.grids_changed), Spy(session.lines_changed)

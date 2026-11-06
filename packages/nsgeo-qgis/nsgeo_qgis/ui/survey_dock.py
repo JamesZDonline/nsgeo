@@ -73,7 +73,7 @@ class SurveyDock(QgsDockWidget):
     import_requested = pyqtSignal(str)
     grid_velocity_requested = pyqtSignal(str)
     line_velocity_requested = pyqtSignal(str)
-    # (grid id, line keys to select); keys may be empty (line editing spec §4.2).
+    # (grid id, line keys to select); keys may be empty (line editing spec §3 call 7).
     edit_lines_requested = pyqtSignal(str, list)
     # (line keys, target grid id) (line editing spec §3 call 7).
     move_lines_requested = pyqtSignal(list, str)

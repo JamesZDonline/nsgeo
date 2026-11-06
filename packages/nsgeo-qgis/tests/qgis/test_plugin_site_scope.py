@@ -3001,3 +3001,60 @@ def test_a_placement_edit_re_prepares_only_that_grid_in_the_site_view(plugin, si
     assert any(state["B"] == "queued" for state in seen), seen
     assert all(state["A"] == "ready" and state["C"] == "ready" for state in seen), seen
     assert seen[-1]["B"] == "ready"
+
+
+def _capture_site_errors(dock) -> list[str]:
+    errors: list[str] = []
+    inner = dock.site_engine.on_error
+
+    def record(message: str) -> None:
+        errors.append(message)
+        if inner is not None:
+            inner(message)
+
+    dock.site_engine.on_error = record
+    return errors
+
+
+def _every_engine_holds_only_its_own_lines(dock, session) -> None:
+    for grid_id in "ABC":
+        engine = dock.site_engine.engine_for(grid_id)
+        held = {line.key for line in engine.prepared_lines()}
+        on_grid = {
+            session.line_key(line)
+            for line in session.site.lines
+            if getattr(line.placement, "grid_id", None) == grid_id
+        }
+        assert held == on_grid, grid_id
+
+
+def test_a_line_moved_while_the_site_view_is_prepared_and_idle_ends_on_its_new_grid(plugin, site3):
+    """Line editing spec §7, "a line moved while it is in a prepared source
+    on each grid": the site is idle, every grid ready."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    moved = site3.keys("B")[0]
+    plugin.move_lines([moved], "C")
+    settle(dock)
+    assert plugin.session.line_for_key(moved).placement.grid_id == "C"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, plugin.session)
+
+
+def test_a_line_moved_while_the_site_is_still_preparing_ends_on_its_new_grid(plugin, site3):
+    """The same, with a preparation in flight: B was just queued by an edit
+    and not yet settled when another of its lines moves to A."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    session = plugin.session
+    b = site3.keys("B")
+    session.edit_lines([LineEdit(b[0], session.line_for_key(b[0]).placement, offset=1.75)])
+    assert dock.site_engine.grid_state("B") != "ready"  # the preparation has not finished
+    plugin.move_lines([b[1]], "A")
+    settle(dock)
+    assert session.line_for_key(b[1]).placement.grid_id == "A"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, session)
