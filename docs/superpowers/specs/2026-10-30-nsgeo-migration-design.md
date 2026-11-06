@@ -530,16 +530,18 @@ never in the tree the branch is committed from.
 
 ## 10. Manual checkpoints
 
-These are human gates. They are tracked and reported, never silently passed.
+These are human gates. They are tracked and reported, never silently passed. Named rather than
+numbered: an earlier draft called them M1/M2/M3, which reads as milestone numbers next to M14.
 
-- **M1.** On a real line, at a measured velocity: the hyperbola collapses, and the user judges it.
-- **M2.** The anti-goal, checked deliberately rather than assumed: toggle the step off and on and
-  look for anything that was not there before — smiles off noise, ringing, an edge discontinuity.
-  This is half of the stated success criterion and no automated test covers it.
-- **M3.** A grid of lines migrated into a cube, and the slices compared against the same cube
-  unmigrated. Not a pass/fail gate — the user has said the profile is the test — but it is the
-  reason the milestone exists, and it is the first time anyone will see whether the tails actually
-  stop reaching the slices.
+- **The collapse.** On a real line, at a measured velocity: the hyperbola collapses, and the user
+  judges it.
+- **Nothing new.** The anti-goal, checked deliberately rather than assumed: toggle the step off
+  and on and look for anything that was not there before — smiles off noise, ringing, an edge
+  discontinuity. This is half of the stated success criterion and no automated test covers it.
+- **The slices.** A grid of lines migrated into a cube, and the slices compared against the same
+  cube unmigrated. Not a pass/fail gate — the user has said the profile is the test — but it is
+  the reason the milestone exists, and it is the first time anyone will see whether the tails
+  actually stop reaching the slices.
 
 ---
 
