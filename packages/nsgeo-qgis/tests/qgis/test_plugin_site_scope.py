@@ -6,6 +6,7 @@ C, four lines each; the plugin opens it in its own session, as a user would.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import re
@@ -2627,7 +2628,7 @@ class _FakeProgressDialog:
 
 
 def _progress_calling(hook):
-    def make(title, total):
+    def make(title, total, **_options):
         def callback(done, of):
             return hook(done, of) is not False
 
@@ -2709,3 +2710,79 @@ def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, 
     _pump_until(lambda: dock._site.provisional, 5.0)
     assert dock._site.refine.rest.isActive()
     dock.refiner.cancel()
+
+
+def test_a_site_export_shows_the_wait_cursor_throughout(
+    plugin, answer_modal, tmp_path, monkeypatch
+):
+    """Final review I-1: every band is solved on the GUI thread, a grid at a time."""
+    dock = whole_site(plugin)
+    busy: list[int] = []
+    real_cursor = plugin_module.busy_cursor
+
+    @contextlib.contextmanager
+    def counting():
+        busy.append(1)
+        with real_cursor():
+            yield
+        busy.append(-1)
+
+    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
+    during: list[int] = []
+    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
+    target = tmp_path / "busy.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert during and all(depth == 1 for depth in during), during
+    assert busy == [1, -1]
+
+
+@pytest.mark.parametrize(("last_solve_ms", "shown"), [(30.0, True), (10.0, False), (None, True)])
+def test_a_slow_site_export_shows_its_progress_before_the_first_band(
+    plugin, answer_modal, tmp_path, monkeypatch, last_solve_ms, shown
+):
+    """Final review I-1: a site band solves every grid, so it is slow when the
+    grids' last solves add up to more than the live budget (30 ms each is 90 ms;
+    10 ms each is 30 ms), or one is not timed yet. The dialog is then shown, and
+    painted, before band 0; otherwise plan call 11's 500 ms rule stands."""
+    from qgis.PyQt.QtCore import QTimer
+
+    dock = whole_site(plugin)
+    _choose_method(dock.site_finish, "min_curvature")
+    _pump_until(
+        lambda: not dock._site.finish_debounce.isActive() and not dock._site.tick.isActive()
+    )
+    site = dock.site_engine
+    assert len(site.ready_grids) == 3
+    for grid_id in site.ready_grids:
+        site.engine_for(grid_id)._last_solve_ms = last_solve_ms  # once the plans exist
+    real = plugin._export_progress
+    made: dict = {"calls": []}
+
+    def spying(title, total, **kwargs):
+        callback, dialog = real(title, total, **kwargs)
+        made["dialog"] = dialog
+        QTimer.singleShot(0, lambda: made.setdefault("pumped", True))  # an expose, say
+
+        def recorded(done, of):
+            made["calls"].append(done)
+            return callback(done, of)
+
+        return recorded, dialog
+
+    monkeypatch.setattr(plugin, "_export_progress", spying)
+    at_band_0: list[tuple[bool, bool]] = []
+    real_slice_at = site.slice_at
+
+    def first_band(*args, **kwargs):
+        if made["calls"] == [0] and not at_band_0:
+            at_band_0.append((made["dialog"].isVisible(), made.get("pumped", False)))
+        return real_slice_at(*args, **kwargs)
+
+    monkeypatch.setattr(site, "slice_at", first_band)
+    target = tmp_path / "slow.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert at_band_0 == [(shown, shown)]

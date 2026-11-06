@@ -13,6 +13,7 @@ joining `layers.group`.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 
@@ -23,7 +24,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo_qgis.slices_plan import PREVIEW_STATUS, REFINING_STATUS
 from plugin_testing import drag_in_layers_panel, synthetic_dzt
-from qgis.core import QgsVectorLayer
+from qgis.core import Qgis, QgsVectorLayer
 from qgis.PyQt.QtCore import QCoreApplication, Qt
 from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
 
@@ -450,7 +451,7 @@ def _progress_calling(hook):
     """A stand-in for `plugin._export_progress`: its callback runs `hook(done, total)`
     and carries on, unless the hook returns False."""
 
-    def make(title, total):
+    def make(title, total, **_options):
         def callback(done, of):
             return hook(done, of) is not False
 
@@ -677,3 +678,191 @@ def test_the_progress_dialog_is_cancellable_and_window_modal(plugin):
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+# ---- feedback during a slow export (final review I-1) ------------------------------------
+
+
+def _spying_progress(plugin, monkeypatch):
+    """`plugin._export_progress`, the real one, with its dialog kept and each
+    `done` its callback is given recorded, in order."""
+    real = plugin._export_progress
+    made: dict = {"calls": []}
+
+    def spying(title, total, **kwargs):
+        callback, dialog = real(title, total, **kwargs)
+        made["dialog"] = dialog
+
+        def recorded(done, of):
+            made["calls"].append(done)
+            return callback(done, of)
+
+        return recorded, dialog
+
+    monkeypatch.setattr(plugin, "_export_progress", spying)
+    return made
+
+
+def test_a_cancel_during_a_slow_first_band_is_heard_before_the_second(
+    plugin, tmp_path, answer_modal, monkeypatch
+):
+    """`QProgressDialog.setValue` processes events only once the dialog has
+    been shown: the band-0 call starts a show timer that cannot fire while a
+    band solves on the GUI thread, and the band-1 call shows the dialog but
+    processes nothing. So a Cancel clicked during a slow first band went
+    unheard, and nothing painted, until the band-2 call. The callback
+    processes events once the dialog is visible: by the band-1 callback it is
+    up, the Cancel is heard, and band 1 is never computed."""
+    from qgis.PyQt.QtCore import QTimer
+    from qgis.PyQt.QtWidgets import QPushButton
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    made = _spying_progress(plugin, monkeypatch)
+    queued: list[int] = []
+    heard: list[tuple[int, bool]] = []  # (the callback's `done`, the dialog visible)
+    real_finish = dock.engine.finish
+
+    def slow_first_band(*args, **kwargs):
+        if made["calls"] == [0] and not queued:
+            queued.append(1)
+            time.sleep(0.6)  # band 0 solving: no events are processed meanwhile
+            dialog = made["dialog"]
+            button = dialog.findChild(QPushButton)
+
+            def click() -> None:
+                heard.append((made["calls"][-1], dialog.isVisible()))
+                button.click()
+
+            QTimer.singleShot(0, click)  # the user's click, queued during band 0
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(dock.engine, "finish", slow_first_band)
+    target = _answer_target(answer_modal, tmp_path)
+    levels: list = []
+    disconnect = _levels_of(levels)
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert queued == [1]
+    assert heard == [(1, True)], "the Cancel was not heard, visible, at the band-1 callback"
+    assert made["calls"] == [0, 1], "band 1 was computed after the Cancel"
+    assert not target.exists()
+    assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+
+
+@pytest.mark.parametrize(
+    ("method", "last_solve_ms", "shown"),
+    [
+        ("min_curvature", 500.0, True),
+        ("min_curvature", None, True),
+        ("min_curvature", 5.0, False),
+        ("kriging", None, False),
+    ],
+)
+def test_a_slow_export_shows_its_progress_before_the_first_band(
+    plugin, tmp_path, answer_modal, monkeypatch, method, last_solve_ms, shown
+):
+    """A slow first band would otherwise keep the dialog hidden for its whole
+    solve. With minimum curvature over the live budget, or not timed yet, the
+    dialog is shown, and painted, before band 0 is computed. A quick solve keeps
+    plan call 11's rule: nothing shows for an export under 500 ms."""
+    from qgis.PyQt.QtCore import QTimer
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    _set_method(dock, method)
+    dock.engine._last_solve_ms = last_solve_ms  # once the plan exists (Ruling R1)
+    made = _spying_progress(plugin, monkeypatch)
+    pumped: list[int] = []
+    at_band_0: list[tuple[bool, list[int]]] = []
+    real_finish = dock.engine.finish
+
+    def first_band(*args, **kwargs):
+        if made["calls"] == [0] and not at_band_0:
+            at_band_0.append((made["dialog"].isVisible(), list(pumped)))
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(dock.engine, "finish", first_band)
+    real_paused = dock.refining_paused
+
+    @contextlib.contextmanager
+    def queueing():
+        with real_paused():
+            QTimer.singleShot(0, lambda: pumped.append(1))  # an expose, say
+            yield
+
+    monkeypatch.setattr(dock, "refining_paused", queueing)
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+    assert target.exists()
+    assert at_band_0 == [(shown, [1] if shown else [])]
+
+
+def test_an_export_shows_the_wait_cursor_throughout(plugin, tmp_path, answer_modal, monkeypatch):
+    """Every band is solved on the GUI thread, so the export says it is busy."""
+    import nsgeo_qgis.plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    busy: list[int] = []
+    real_cursor = plugin_module.busy_cursor
+
+    @contextlib.contextmanager
+    def counting():
+        busy.append(1)
+        with real_cursor():
+            yield
+        busy.append(-1)
+
+    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
+    during: list[int] = []
+    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
+    target = _answer_target(answer_modal, tmp_path)
+    dock.export_button.click()
+    assert target.exists()
+    assert during and all(depth == 1 for depth in during), during
+    assert busy == [1, -1]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_a_failed_redraw_after_an_export_changes_nothing_it_reported(
+    plugin, tmp_path, answer_modal, monkeypatch, cancel
+):
+    """`refining_paused` redraws once the export ends. A redraw that fails then
+    is logged, never raised: it must not turn a good export into a deleted
+    file, nor a cancel into a Critical."""
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    failed: list[int] = []
+    real_refresh = dock.refresh_slice
+
+    def failing_once() -> None:
+        if failed:
+            real_refresh()  # any redraw after the first is real
+            return
+        failed.append(1)
+        raise RuntimeError("the redraw failed")
+
+    monkeypatch.setattr(dock, "refresh_slice", failing_once)
+    plugin._export_progress = _progress_calling(lambda done, of: not (cancel and done == 1))
+    target = _answer_target(answer_modal, tmp_path)
+    levels: list = []
+    disconnect = _levels_of(levels)
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert failed == [1]
+    assert not any(lv == Qgis.MessageLevel.Critical for _m, lv in levels), levels
+    if cancel:
+        assert not target.exists()
+        assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+    else:
+        assert target.exists()
+        assert any("exported" in m and str(target) in m for m, _lv in levels), levels

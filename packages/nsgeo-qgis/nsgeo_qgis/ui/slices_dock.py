@@ -2324,6 +2324,9 @@ class SlicesDock(QgsDockWidget):
         a status line still saying "Refining...", would outlive the cancel.
         Afterwards, whatever the outcome (done, cancelled, failed), the scope
         is redrawn once, so a preview that still stands arms its rest again.
+        That redraw is logged if it fails, never raised: raised here, it would
+        replace the export's own outcome, so a good export's file would be
+        removed as a failure's, and a cancel reported as a Critical.
         """
         if self._scope == "site":
             if self._site.refine.stop():
@@ -2333,7 +2336,10 @@ class SlicesDock(QgsDockWidget):
         try:
             yield
         finally:
-            self.refresh_slice()
+            try:
+                self.refresh_slice()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring
+                _log(f"could not redraw the slice after the export: {exc}")
 
     @property
     def provisional(self) -> bool:
