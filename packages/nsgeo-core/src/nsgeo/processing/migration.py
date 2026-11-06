@@ -252,9 +252,7 @@ class MigrateFk:
     group = "Migration"
     order = 1
 
-    def __init__(
-        self, velocity_m_ns: float, max_dip_deg: float = DEFAULT_MAX_DIP_DEG
-    ) -> None:
+    def __init__(self, velocity_m_ns: float, max_dip_deg: float = DEFAULT_MAX_DIP_DEG) -> None:
         self.velocity_m_ns = velocity_m_ns
         self.max_dip_deg = max_dip_deg
 
