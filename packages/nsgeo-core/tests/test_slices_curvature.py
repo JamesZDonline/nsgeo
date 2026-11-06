@@ -268,6 +268,24 @@ def test_a_solve_stops_when_asked():
     assert np.array_equal(plan.coefficients, kept_coefficients)
 
 
+def test_a_plan_is_read_only():
+    """A worker thread solves on a plan while the GUI thread reads it (plan
+    call 6), which is safe only while nothing writes to it: its arrays refuse
+    writes, so the contract is enforced, not just stated. The caller's mask is
+    copied, never frozen, and a non-finite datum is solved on a plan of its own."""
+    pop = lines()
+    plan = plan_curvature(pop, STEP, 0.25)
+    with pytest.raises(ValueError):
+        plan.coefficients[0, 0, 0] = 1.0
+    for array in (plan.populated, plan.reach, plan.domain, plan.coefficients):
+        assert not array.flags.writeable
+    pop[0, 0] = True  # the caller's own array stays theirs
+    assert not plan.populated[0]
+    v = values(pop)
+    v[15, 30] = np.nan
+    assert np.isnan(plan.apply(v)[15, 30])
+
+
 def test_nbytes_counts_the_arrays():
     plan = plan_fill(lines(), STEP, "min_curvature", 0.25, 1.0)
     assert isinstance(plan, CurvaturePlan)

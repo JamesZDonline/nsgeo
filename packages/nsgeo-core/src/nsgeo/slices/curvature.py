@@ -115,6 +115,13 @@ class CurvaturePlan:
     cell: float
     max_distance_m: float
 
+    def __post_init__(self) -> None:
+        # Frozen in fact, not only in name: the worker thread's safety rests on
+        # nothing writing to a plan once it is built (plan call 6), so its
+        # arrays refuse writes. A non-finite datum is solved on a new plan.
+        for array in (self.populated, self.reach, self.domain, self.coefficients):
+            array.flags.writeable = False
+
     def solve(
         self, values: np.ndarray, should_stop: Callable[[], bool] | None = None
     ) -> tuple[np.ndarray, int]:
