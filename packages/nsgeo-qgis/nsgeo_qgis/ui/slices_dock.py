@@ -32,6 +32,7 @@ the scope left.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from functools import partial
 from typing import Any
 
@@ -2312,6 +2313,27 @@ class SlicesDock(QgsDockWidget):
         self._refine_slice = None
         self._refine_key = None
         return self._grid_refine.stop()
+
+    @contextlib.contextmanager
+    def refining_paused(self) -> Iterator[None]:
+        """An export's cover: no refine runs inside it, and the scope redraws after.
+
+        The export solves every band itself on the GUI thread (plan call 11),
+        so the worker is stopped first, through the active scope's flow, not
+        a bare `refiner.cancel()`: a flow that still believed a list ran, and
+        a status line still saying "Refining...", would outlive the cancel.
+        Afterwards, whatever the outcome (done, cancelled, failed), the scope
+        is redrawn once, so a preview that still stands arms its rest again.
+        """
+        if self._scope == "site":
+            if self._site.refine.stop():
+                self.status_label.setText(self._site.status_text())
+        elif self._end_refine():
+            self.status_label.setText(self._grid_status_text())
+        try:
+            yield
+        finally:
+            self.refresh_slice()
 
     @property
     def provisional(self) -> bool:

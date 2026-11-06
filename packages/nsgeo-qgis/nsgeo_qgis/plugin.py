@@ -56,12 +56,21 @@ from typing import Any
 import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
+from nsgeo.slices import plan_windows
 from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtWidgets import QAction, QDialog, QFileDialog, QMenu, QMessageBox, QToolButton
+from qgis.PyQt.QtWidgets import (
+    QAction,
+    QDialog,
+    QFileDialog,
+    QMenu,
+    QMessageBox,
+    QProgressDialog,
+    QToolButton,
+)
 
 from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.layers import SiteLayers
@@ -72,6 +81,7 @@ from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
 from nsgeo_qgis.slice_export import (
+    ExportCancelled,
     apply_temporal_properties,
     cube_record,
     export_slices,
@@ -953,11 +963,33 @@ class NsgeoPlugin:
             )
             if not path:
                 return
+            target = Path(path)
             thickness_levels, step_levels = dock.thickness_step_levels()
             _key, velocity = dock._resolved_velocity()
-            plan = export_slices(
-                engine, Path(path), thickness_levels, step_levels, velocity, dock.slice_finish()
-            )
+            total = len(plan_windows(engine.z, thickness_levels, step_levels))
+            before = self._mtime_ns(target)
+            progress, dialog = self._export_progress("Export GeoTIFF", total)
+            try:
+                with dock.refining_paused():
+                    plan = export_slices(
+                        engine,
+                        target,
+                        thickness_levels,
+                        step_levels,
+                        velocity,
+                        dock.slice_finish(),
+                        progress=progress,
+                    )
+            except ExportCancelled:
+                self._remove_partial(target, before)
+                self.message("export cancelled")
+                return
+            except Exception:
+                self._remove_partial(target, before)
+                raise
+            finally:
+                dialog.close()
+                dialog.deleteLater()
             layer = QgsRasterLayer(path, Path(path).stem, "gdal")
             if not layer.isValid():
                 self.message(
@@ -993,6 +1025,48 @@ class NsgeoPlugin:
             self.message(", ".join(parts))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
+
+    def _export_progress(self, title: str, total: int) -> tuple[Callable[[int, int], bool], Any]:
+        """A cancellable progress dialog and the callback an exporter calls.
+
+        Window-modal, so the map stays alive but the dock cannot be driven
+        mid-export, and shown only after 500 ms, so a quick export flashes
+        nothing (plan call 11). It is shown, never `exec()`'d: the export runs
+        on the GUI thread and the callback's `setValue` pumps events. The
+        callback returns False once the user has cancelled. The caller closes
+        the dialog, in a `finally`.
+        """
+        dialog = QProgressDialog(title, "Cancel", 0, total, self.iface.mainWindow())
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(500)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+
+        def callback(done: int, of: int) -> bool:
+            if of != dialog.maximum():
+                dialog.setMaximum(of)
+            dialog.setValue(done)  # also pumps events, so Cancel is heard
+            return not dialog.wasCanceled()
+
+        return callback, dialog
+
+    @staticmethod
+    def _mtime_ns(target: Path) -> int | None:
+        """`target`'s modification time, or None when it does not exist yet."""
+        return target.stat().st_mtime_ns if target.exists() else None
+
+    @staticmethod
+    def _remove_partial(target: Path, before: int | None) -> None:
+        """Ruling T4-b, shared by both exports: a half-written GeoTIFF reads as
+        valid zeros, so a cancelled or failed export removes what it wrote.
+
+        A file the dialog chose to replace is the user's until the export has
+        written over it (`before` is its mtime when the export began); only
+        then is what is left ours."""
+        with contextlib.suppress(OSError):
+            if target.exists() and target.stat().st_mtime_ns != before:
+                target.unlink()
 
     def export_site_geotiff(self) -> None:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.
@@ -1033,28 +1107,34 @@ class NsgeoPlugin:
             target = Path(path)
             target.parent.mkdir(parents=True, exist_ok=True)
             thickness_levels, step_levels = dock.thickness_step_levels()
-            # A file the dialog chose to replace is the user's until this
-            # export has written over it; only then is a failure's leftover ours.
-            before = target.stat().st_mtime_ns if target.exists() else None
+            total = len(plan_windows(site.site_z, thickness_levels, step_levels))
+            before = self._mtime_ns(target)
+            progress, dialog = self._export_progress("Export site GeoTIFF", total)
             try:
-                plan = export_site(
-                    site,
-                    target,
-                    thickness_levels,
-                    step_levels,
-                    transform=dock.site_panel.transform(),
-                    method=dock.normalisation_panel.method(),
-                    finish=dock.site_finish.value(),
-                    gains=dock.site_gains(),
-                    velocities=dock.site_velocities(),
-                    left_out=dock.site_left_out_states(),
-                )
+                with dock.refining_paused():
+                    plan = export_site(
+                        site,
+                        target,
+                        thickness_levels,
+                        step_levels,
+                        transform=dock.site_panel.transform(),
+                        method=dock.normalisation_panel.method(),
+                        finish=dock.site_finish.value(),
+                        gains=dock.site_gains(),
+                        velocities=dock.site_velocities(),
+                        left_out=dock.site_left_out_states(),
+                        progress=progress,
+                    )
+            except ExportCancelled:
+                self._remove_partial(target, before)
+                self.message("export cancelled")
+                return
             except Exception:
-                # Ruling T4-b: a half-written file would read as valid zeros.
-                with contextlib.suppress(OSError):
-                    if target.exists() and target.stat().st_mtime_ns != before:
-                        target.unlink()
+                self._remove_partial(target, before)
                 raise
+            finally:
+                dialog.close()
+                dialog.deleteLater()
             layer = QgsRasterLayer(path, target.stem, "gdal")
             if not layer.isValid():
                 self.message(

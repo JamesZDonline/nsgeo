@@ -26,6 +26,7 @@ from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
     PREVIEW_STATUS,
     REFINE_REST_MS,
+    REFINING_STATUS,
     SliceFinish,
     default_cell,
     format_bytes,
@@ -2612,3 +2613,99 @@ def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal,
                 manual=dock.site_gains(),
             ).array
             np.testing.assert_array_equal(band, full)
+
+
+# ---- exports: progress, cancel and no partial files (plan call 11) -----------------------
+
+
+class _FakeProgressDialog:
+    def close(self) -> None:
+        pass
+
+    def deleteLater(self) -> None:  # noqa: N802 -- Qt's name
+        pass
+
+
+def _progress_calling(hook):
+    def make(title, total):
+        def callback(done, of):
+            return hook(done, of) is not False
+
+        return callback, _FakeProgressDialog()
+
+    return make
+
+
+def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(plugin, answer_modal, tmp_path):
+    from plugin_testing import connect_message_log
+    from qgis.core import Qgis
+
+    dock = whole_site(plugin)
+    plugin._export_progress = _progress_calling(lambda done, of: done < 1)
+    target = tmp_path / "cancelled.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    before = set(plugin.layers.project.mapLayers())
+    levels: list = []
+    disconnect = connect_message_log(lambda msg, tag, level: levels.append((msg, level)))
+    try:
+        dock.export_button.click()
+    finally:
+        disconnect()
+    assert not target.exists()
+    assert set(plugin.layers.project.mapLayers()) == before
+    assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
+
+
+def test_a_cancelled_site_export_never_removes_a_file_it_did_not_reach(
+    plugin, answer_modal, tmp_path, monkeypatch
+):
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    dock = whole_site(plugin)
+    target = tmp_path / "theirs.tif"
+    target.write_bytes(b"the user's own file")
+
+    def cancelled_before_writing(*args, **kwargs):
+        raise ExportCancelled()
+
+    monkeypatch.setattr(plugin_module, "export_site", cancelled_before_writing)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.read_bytes() == b"the user's own file"
+
+
+def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, monkeypatch):
+    """R13: through the site's flow; the status stops saying "Refining" and,
+    once the export ends with the slice unsolved, the preview stands again with
+    its rest armed."""
+    dock = whole_site(plugin)
+    job = _Looping()
+    monkeypatch.setattr(dock.site_engine, "pending_solves", lambda *args, **kwargs: [job])
+    _choose_method(dock.site_finish, "min_curvature")  # a new plan's first tick previews
+    _pump_until(job.started.is_set)
+    assert dock.refiner.busy
+
+    seen: list[tuple[bool, str]] = []
+
+    def hook(done, of):
+        if done == 0:
+            seen.append((dock.refiner.busy, dock.status_label.text()))
+        if done == of:  # every band solved; the current slice is unsolved again
+            for grid_id in dock.site_engine.ready_grids:
+                engine = dock.site_engine.engine_for(grid_id)
+                engine._solved.clear()
+                engine._last_solve_ms = 500.0
+
+    plugin._export_progress = _progress_calling(hook)
+    target = tmp_path / "running.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    assert job.stopped_by_request
+    busy, text = seen[0]
+    assert busy is False
+    assert not text.startswith(REFINING_STATUS.split("{")[0]), text
+    _events(3)
+    _pump_until(lambda: dock._site.provisional, 5.0)
+    assert dock._site.refine.rest.isActive()
+    dock.refiner.cancel()

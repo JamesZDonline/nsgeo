@@ -391,3 +391,34 @@ def test_an_included_grid_left_out_is_recorded_and_absent_otherwise(
     assert md["NSGEO_SITE_LEFT_OUT"] == '{"D":"no lines","E":"failed: no line could be prepared"}'
     companion = open_tif(write_site_coverage(site, other, plan)).GetMetadata()
     assert json.loads(companion["NSGEO_SITE_LEFT_OUT"]) == left
+
+
+def test_export_reports_progress_for_every_band(site3, make_site, tmp_path):
+    site = make_site(site3)
+    calls: list[tuple[int, int]] = []
+
+    def record(done, total):
+        calls.append((done, total))
+        return True
+
+    plan = export_site(site, tmp_path / "site.tif", 8, 24, **KW, progress=record)
+    n = len(plan.bands)
+    assert n > 1
+    assert calls == [(i, n) for i in range(n + 1)]
+
+
+def test_a_site_export_stops_before_the_next_band_when_progress_says_no(site3, make_site, tmp_path):
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    site = make_site(site3)
+    pulled = []
+    real = site.slice_at
+
+    def counting(*args, **kwargs):
+        pulled.append(args)
+        return real(*args, **kwargs)
+
+    site.slice_at = counting  # type: ignore[method-assign]
+    with pytest.raises(ExportCancelled):
+        export_site(site, tmp_path / "site.tif", 8, 24, **KW, progress=lambda done, n: done < 1)
+    assert len(pulled) == 1

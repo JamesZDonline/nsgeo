@@ -54,7 +54,7 @@ reviewer of this task does:
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -332,6 +332,14 @@ class GeoTiffSliceWriter:
                     dataset = None
 
 
+class ExportCancelled(Exception):
+    """The user cancelled an export between two bands (plan call 11).
+
+    Raised by the exporters when their `progress` callback returns False, so a
+    caller can tell a cancel from a failure and report each in its own words.
+    """
+
+
 def export_slices(
     engine: SliceEngine,
     path: str | Path,
@@ -341,8 +349,15 @@ def export_slices(
     finish: SliceFinish,
     *,
     writer: SliceWriter | None = None,
+    progress: Callable[[int, int], bool] | None = None,
 ) -> ExportPlan:
     """Plan, then write, one band at a time -- never a resident cube.
+
+    `progress(done, total)`, when given, is called before each band with the
+    bands written so far, and once more as `(total, total)` at the end. A False
+    return raises `ExportCancelled` before the next band is computed: the call
+    sits in the band generator, so the writers stay as they are. Every band is
+    `engine.finish`, the full result, never a preview (plan call 11).
 
     Spec 9.4 and 7.4 together (see the module docstring): the generator
     below pulls exactly one `engine.slice_at(window)` at a time, in
@@ -364,8 +379,13 @@ def export_slices(
     writer = writer if writer is not None else GeoTiffSliceWriter()
 
     def _finished_slices() -> Iterable[np.ndarray]:
-        for band in plan.bands:
+        total = len(plan.bands)
+        for done, band in enumerate(plan.bands):
+            if progress is not None and not progress(done, total):
+                raise ExportCancelled()
             yield engine.finish(*engine.slice_at(band.window), finish)
+        if progress is not None:
+            progress(total, total)
 
     writer.write(path, plan, _finished_slices())
     return plan

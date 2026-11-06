@@ -906,3 +906,43 @@ def test_a_record_from_this_build_still_loads_in_0_2_0(method):
     view = ViewSettings(**_OLD_KEYS, method=method, max_distance_spacings=1.0)
     got = _ViewSettings020.from_dict(view.to_dict())
     assert got == _ViewSettings020(**_OLD_KEYS)
+
+
+def test_export_reports_progress_for_every_band(exportable, tmp_path):
+    """`(0, n)` before the first band, then one call per band written, and `(n, n)`."""
+    engine = exportable
+    calls: list[tuple[int, int]] = []
+
+    def record(done, total):
+        calls.append((done, total))
+        return True
+
+    plan = export_slices(engine, tmp_path / "cube.tif", 10, 5, None, SliceFinish(), progress=record)
+    n = len(plan.bands)
+    assert n > 2
+    assert calls == [(i, n) for i in range(n + 1)]
+
+
+def test_an_export_stops_before_the_next_band_when_progress_says_no(exportable, tmp_path):
+    from nsgeo_qgis.slice_export import ExportCancelled
+
+    engine = exportable
+    pulled: list[int] = []
+    real = engine.slice_at
+
+    def counting(window):
+        pulled.append(window.k0)
+        return real(window)
+
+    engine.slice_at = counting  # type: ignore[method-assign]
+    with pytest.raises(ExportCancelled):
+        export_slices(
+            engine,
+            tmp_path / "cube.tif",
+            10,
+            5,
+            None,
+            SliceFinish(),
+            progress=lambda done, n: done < 2,
+        )
+    assert len(pulled) == 2  # bands 0 and 1; the third was never computed
