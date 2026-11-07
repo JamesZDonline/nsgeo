@@ -68,7 +68,8 @@ jobs:
             packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py \
             packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py \
             packages/nsgeo-qgis/nsgeo_qgis/ui/ruler.py \
-            packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py
+            packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py \
+            packages/nsgeo-qgis/nsgeo_qgis/line_edit.py
 
   build-zip:
     runs-on: ubuntu-24.04

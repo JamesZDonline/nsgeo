@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -839,6 +840,23 @@ class SlicesDock(QgsDockWidget):
                 self.prepare()
             elif (
                 self._scope == "grid"
+                and self._included_is_default
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and any(
+                    self.engine.had_line(k)
+                    for k in self._included
+                    if k not in self.engine.choice.line_keys
+                )
+            ):
+                # A line moved onto a grid whose source takes every line: the
+                # default now holds a line the source was never built from,
+                # and an edit is no `Prepare` button to wait for. One that
+                # was imported was never in the engine's snapshot, so it
+                # keeps today's "stale" status (line editing spec §4.5).
+                self.prepare()
+            elif (
+                self._scope == "grid"
                 and not self._resolution_owed
                 and self.engine.is_prepared
                 and self.engine.choice is not None
@@ -973,7 +991,10 @@ class SlicesDock(QgsDockWidget):
             self._included = self._default_included(grid_id)
             self._seed_dz_z_defaults(grid_id)
             return
-        valid = set(self.session.keys()) if self.session.is_open else set()
+        # Only this grid's own lines: a line moved to another grid keeps its
+        # key, so "still in the site" would leave it in the choice (line
+        # editing spec §4.5).
+        valid = set(self._default_included(grid_id))
         pruned = tuple(k for k in self._included if k in valid)
         if self._included and not pruned:
             # #74: removal took every line the user had chosen. An empty set
@@ -1281,7 +1302,7 @@ class SlicesDock(QgsDockWidget):
         choice = self.source_choice()
         if (
             choice is not None
-            and choice == self.engine.choice
+            and choice.same_source(self.engine.choice)
             and self._prepared_steps_match(choice.preset)
         ):
             return
@@ -1397,7 +1418,7 @@ class SlicesDock(QgsDockWidget):
         if current.transform != choice.transform:
             self.source_status.setText("stale · the transform changed since this was prepared")
             return
-        if current.line_keys != choice.line_keys:
+        if set(current.line_keys) != set(choice.line_keys):  # a reorder is no change
             self.source_status.setText("stale · the lines changed since this was prepared")
             return
         if not self._prepared_steps_match(choice.preset):
@@ -1794,9 +1815,22 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
-                self._included = recipe.choice.line_keys
+                # A line moved to another grid since the cube was saved is left
+                # out: its key still names a line, but it is no longer this
+                # grid's, and `set_source` would refuse it anyway (line
+                # editing spec §4.5). A key no longer in the site stays, for
+                # `set_source` to name.
+                moved = [
+                    k
+                    for k in recipe.choice.line_keys
+                    if k in self.session.keys()  # noqa: SIM118 -- SiteSession.keys()
+                    and getattr(self.session.line_for_key(k).placement, "grid_id", None)
+                    not in (None, recipe.choice.grid_id)
+                ]
+                kept_keys = tuple(k for k in recipe.choice.line_keys if k not in moved)
+                self._included = kept_keys
                 self._included_is_default = False
-                if not recipe.choice.line_keys:
+                if not kept_keys:
                     self._included = self._default_included(recipe.choice.grid_id)
                     self._included_is_default = True
                 self._last_grid_id = recipe.choice.grid_id
@@ -1858,6 +1892,14 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
+            if moved:
+                labels = ", ".join(
+                    self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
+                )
+                self.error.emit(
+                    f"cube {cube_id!r}: {len(moved)} line(s) moved to another grid "
+                    f"since it was saved and were left out: {labels}"
+                )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)

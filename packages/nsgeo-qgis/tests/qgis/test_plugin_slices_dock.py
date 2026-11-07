@@ -3275,3 +3275,100 @@ def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
     # Nothing left to say, so neither the line nor its tooltip says anything.
     assert dock.refine_label.text() == ""
     assert dock.refine_label.toolTip() == ""
+
+
+# ---- line editing (spec §4.5) ------------------------------------------------
+
+
+def test_a_line_moved_off_the_grid_leaves_an_explicit_choice(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+
+    session.move_lines([a_keys[1]], "B")
+    assert dock.included_keys() == (a_keys[0],)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.source_status.text() == "prepared \u00b7 1 lines"
+
+
+def test_a_line_moved_onto_a_default_grid_re_prepares_it(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    b_key = _grid_keys(session, "B")[0]
+
+    session.move_lines([b_key], "A")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert b_key in dock.engine.choice.line_keys
+    assert dock.engine.line_count == 4
+    assert dock.source_status.text().startswith("prepared")
+
+
+def test_a_line_imported_onto_a_default_grid_still_shows_stale(docked_two_grids, tmp_path):
+    """Today's behaviour, pinned: an imported line was never in the engine's
+    snapshot, so nothing re-prepares for it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    assert not dock.engine.is_running
+    assert dock.source_status.text().startswith("stale")
+
+
+def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    _save_cube(
+        dock, session, "A__m", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    session.move_lines([a_keys[2]], "B")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__m")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert a_keys[2] not in dock.included_keys()
+    assert any("moved to another grid since it was saved" in e for e in errors), errors
+
+
+def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
+    """Line editing spec §4.5: a cube is a sum over lines, so the survey
+    order is not part of what it was built from. No re-preparation, and no
+    false "stale" with no Prepare button to clear it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    before = dock.engine.choice
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines([], grid_id="A", order=list(reversed(a_keys)))
+    assert dock.included_keys() == tuple(reversed(a_keys))
+    assert not dock.engine.is_running
+    assert dock.engine.wait_for_preparation(2_000)
+    assert count == []
+    assert dock.engine.choice == before
+    assert dock.source_status.text() == "prepared · 3 lines"
+
+
+def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docked_two_grids):
+    from nsgeo_qgis.line_edit import LineEdit
+
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines(
+        [LineEdit(a_keys[0], session.line_for_key(a_keys[0]).placement, offset=1.5)],
+        grid_id="A",
+        order=list(reversed(a_keys)),
+    )
+    assert dock.engine.wait_for_preparation(20_000)
+    assert count == [1]
+    assert dock.engine.choice.line_keys == tuple(reversed(a_keys))
+    assert dock.source_status.text() == "prepared · 3 lines"

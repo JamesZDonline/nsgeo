@@ -4,9 +4,17 @@ qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Near-surface geophysics: GPR profiles in map context
-about=Process GPR surveys in their map context. Import GSSI DZT files into grids placed from corners typed, picked on the map or read from a polygon. Hover a line on the map to see its profile, with the profile cursor drawn back onto the map. Process each profile with steps you choose (time-zero, dewow, background removal, bandpass, gains); nothing runs unless you add it. Pick reflections into a point layer, and build time and depth slices across a grid, shown on the map and exportable as a GeoTIFF. The plugin is GPL-2.0-or-later; the bundled nsgeo core library is MIT.
-version=0.2.0
-changelog=0.2.0 - experimental
+about=Process GPR surveys in their map context. Import GSSI DZT files into grids placed from corners typed, picked on the map or read from a polygon, and fix a line's placement afterwards. Hover a line on the map to see its profile, with the profile cursor drawn back onto the map. Process each profile with steps you choose (time-zero, dewow, background removal, bandpass, gains, migration); nothing runs unless you add it. Pick reflections into a point layer, and build time and depth slices across a grid, shown on the map and exportable as a GeoTIFF. The plugin is GPL-2.0-or-later; the bundled nsgeo core library is MIT.
+version=0.3.0
+changelog=0.3.0 - experimental
+    - Edit lines: fix a line's label, offset, direction, start or grid after import, one line or several at once, and move lines to another grid
+    - Picks follow their line when a grid or line is edited, and their depth follows the line's velocity
+    - A grid that gets shorter or longer takes its reversed lines with the far edge
+    - Migration (Stolt f-k): a new processing step that collapses diffraction hyperbolas, using the line's velocity
+    - Slices: kriging, inverse distance or minimum curvature between lines, with a max distance and X/Y smoothing, replace Fill radius
+    - Bandpass no longer wraps the direct wave into the bottom of the trace; grids start collapsed in the Survey panel
+    - Release notes: https://github.com/JamesZDonline/nsgeo/blob/v0.3.0/docs/releases/0.3.0.md
+    0.2.0 - experimental
     - Whole site: every grid's slice together on one map layer, with one depth slider and colour scale, and one GeoTIFF export
     - Slices remember the resolution you set for each grid and for the whole site; This grid's fill radius is set in line spacings
     - Velocity: measure a velocity by clicking a diffraction hyperbola; fits are saved with the survey and can be deleted
