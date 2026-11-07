@@ -142,12 +142,12 @@ def _open(plugin: Any, grid_id: str | None = None) -> GridDialog:
     return dialog
 
 
-def test_ok_is_blocked_until_id_and_velocity_are_set(session):
+def test_ok_needs_an_id_and_a_crs_but_no_velocity(session):
+    # #4: a grid's velocity is optional. Unset, each of its lines falls back
+    # on its own header dielectric -- resolve_velocity's last tier.
     d = GridDialog(session)
     assert not d.ok_button.isEnabled()
     d.id_edit.setText("A")
-    assert not d.ok_button.isEnabled()  # velocity still 0 = required
-    d.velocity.setValue(0.08)
     # Round 3, Finding 1: no fallback CRS any more (the fallback tried in
     # rounds 1 and 2 was itself always going to be a CRS chosen only
     # because it passed the guard -- EPSG:3857 turned out to be exactly
@@ -156,7 +156,91 @@ def test_ok_is_blocked_until_id_and_velocity_are_set(session):
     # stays blocked until a CRS is actually picked.
     assert not d.ok_button.isEnabled()
     d.crs_widget.setCrs(QgsCoordinateReferenceSystem("EPSG:32616"))
+    assert d.velocity.value() == 0.0
     assert d.ok_button.isEnabled()
+    assert d.crs_hint.text() == ""
+
+
+def test_an_unset_velocity_reads_from_line_headers_and_gives_none(session):
+    d = GridDialog(session)
+    d.id_edit.setText("A")
+    d.crs_widget.setCrs(UTM16)
+    assert d.velocity.text() == "from line headers"
+    assert d.result_grid().velocity is None
+
+
+def test_a_grid_velocity_can_be_cleared_back_to_unset(session):
+    session.add_grid(dataclasses.replace(SITE, velocity=VelocityModel.constant(0.1)))
+    d = GridDialog(session, grid=session.grid("S"))
+    d.velocity.setValue(0.0)
+    assert d.ok_button.isEnabled()
+    assert d.result_grid().velocity is None
+
+
+def test_a_typed_velocity_replaces_the_grid_model(session):
+    session.add_grid(dataclasses.replace(SITE, velocity=VelocityModel.constant(0.1)))
+    d = GridDialog(session, grid=session.grid("S"))
+    d.velocity.setValue(0.09)
+    assert d.result_grid().velocity == VelocityModel.constant(0.09)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        VelocityModel.constant(0.08012345678),
+        VelocityModel(((0.0, 0.1), (20.0, 0.07))),
+    ],
+    ids=["full-precision", "layered"],
+)
+def test_an_untouched_velocity_keeps_the_grid_model_exactly(session, model):
+    # The box shows four decimals of the top layer. Editing anything else on
+    # a grid must not round a fit's full-precision velocity to that, nor
+    # flatten a layered model to its top layer.
+    session.add_grid(dataclasses.replace(SITE, velocity=model))
+    d = GridDialog(session, grid=session.grid("S"))
+    d.azimuth.setValue(11.0)
+    assert d.result_grid().velocity == model
+
+
+def _add_line(session: SiteSession, folder: Any, name: str, grid_id: str, epsr: float) -> None:
+    path = synthetic_dzt(folder, name, epsr=epsr)
+    session.add_lines([Line.open(path, GridPlacement(grid_id, "y", 0.0, 0.0, 1, path.stem))])
+
+
+def test_the_hint_names_the_header_velocity_without_entering_it(session, tmp_path):
+    # #4: the old seed copied the header's velocity INTO a new grid, where it
+    # then outranked every line's own header for good -- a frozen snapshot
+    # that looked as if it tracked the header. The value is shown beside the
+    # box instead, and the box stays unset.
+    _add_line(session, tmp_path / "raw", "FILE__001.DZT", "S", 14.0)
+    d = GridDialog(session)
+    v = VelocityModel.from_dielectric(14.0).surface_velocity
+    assert d.velocity.value() == 0.0
+    assert d.velocity_hint.text() == f"header ε 14 ≈ {v:.4f} m/ns"
+
+
+def test_the_hint_gives_the_range_when_headers_differ(session, tmp_path):
+    _add_line(session, tmp_path / "raw", "FILE__001.DZT", "S", 14.0)
+    _add_line(session, tmp_path / "raw", "FILE__002.DZT", "S", 9.0)
+    assert GridDialog(session).velocity_hint.text() == "headers ε 9–14"
+
+
+def test_the_hint_reads_only_the_grids_own_lines_when_editing(session, tmp_path):
+    session.add_grid(SITE)
+    _add_line(session, tmp_path / "raw", "FILE__001.DZT", "S", 9.0)
+    _add_line(session, tmp_path / "raw", "FILE__002.DZT", "other", 14.0)
+    v = VelocityModel.from_dielectric(9.0).surface_velocity
+    hint = GridDialog(session, grid=session.grid("S")).velocity_hint.text()
+    assert hint == f"header ε 9 ≈ {v:.4f} m/ns"
+
+
+def test_the_hint_says_so_when_the_header_gives_no_velocity(session, tmp_path):
+    _add_line(session, tmp_path / "raw", "FILE__001.DZT", "S", 0.0)
+    assert GridDialog(session).velocity_hint.text() == "header ε 0 gives no velocity"
+
+
+def test_the_hint_is_empty_with_no_lines(session):
+    assert GridDialog(session).velocity_hint.text() == ""
 
 
 def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
@@ -165,7 +249,7 @@ def test_crs_guard_blocks_every_route_to_a_bad_crs(session):
     # CRS. Several such paths, all caught by the same guard (round 3,
     # Finding 1 replaced the geographic check with units + local scale,
     # and removed the fallback route entirely -- see
-    # test_ok_is_blocked_until_id_and_velocity_are_set and
+    # test_ok_needs_an_id_and_a_crs_but_no_velocity and
     # test_crs_scale_guard_accepts_correct_uses_and_refuses_mismatches
     # for those):
 
@@ -431,7 +515,7 @@ def test_open_grid_dialog_accepts_and_adds_a_new_grid(fake_iface, tmp_path, answ
     # crs_widget starts unset in this bare test harness (no project
     # CRS either), so a real user's OK button would stay disabled here
     # too until they pick one, exactly like
-    # test_ok_is_blocked_until_id_and_velocity_are_set. accept()
+    # test_ok_needs_an_id_and_a_crs_but_no_velocity. accept()
     # bypasses that gating (nothing stops calling it directly, the way
     # this test does), so pick one explicitly to reflect what a real
     # user's flow requires, not incidentally re-prove Finding 2 (crs="").
@@ -629,33 +713,29 @@ def test_open_grid_dialog_recovers_from_a_dialog_destroyed_outside_finished(fake
     plugin.unload()  # must not raise
 
 
-def test_open_grid_dialog_seeds_velocity_from_the_header_dielectric(
-    fake_iface, tmp_path, answer_modal
-):
-    # Fix round 1, Finding 6: one of the brief's two headline
-    # requirements -- velocity is seeded from the first line's header
-    # dielectric when the site already has lines -- had no test.
+def test_open_grid_dialog_leaves_a_new_grids_velocity_unset(fake_iface, tmp_path, answer_modal):
+    # #4: the plugin used to seed a new grid's velocity from the first line's
+    # header; that copy then outranked the header for good. Now the box
+    # starts unset, OK saves no velocity, and the header value is only named.
     import nsgeo_qgis
-    from nsgeo.geometry.placement import GridPlacement
-    from nsgeo.model.survey import Line
-    from plugin_testing import synthetic_dzt
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
     plugin.initGui()
     plugin.session.new_site(tmp_path)
     path = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")  # epsr 14.0
     plugin.session.add_lines([Line.open(path, GridPlacement("A", "y", 0.0, 0.0, 1, path.stem))])
-    expected = VelocityModel.from_dielectric(14.0).surface_velocity
 
-    # grid_id=None and no grids yet: open_grid_dialog's "new grid" path,
-    # which is the one that seeds the suggestion.
     dialog = _open(plugin)
-    # velocity is a 4-decimal QDoubleSpinBox, so setValue() itself
-    # rounds -- compare at that precision, not the raw float's.
-    assert dialog.velocity.value() == pytest.approx(expected, abs=5e-5)
-    assert "dielectric" in dialog.velocity_hint.text().lower()
+    assert dialog.velocity.value() == 0.0
+    assert dialog.velocity_hint.text().startswith("header ε 14")
+    dialog.id_edit.setText("A")
+    dialog.crs_widget.setCrs(UTM16)
+    assert dialog.ok_button.isEnabled()
+    dialog.accept()
 
-    dialog.reject()
+    assert plugin.session.grid("A").velocity is None
+    key = plugin.session.line_key(plugin.session.site.lines[0])
+    assert plugin.session.resolved_velocity(key) == VelocityModel.from_dielectric(14.0)
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
     plugin.unload()
 

@@ -57,7 +57,6 @@ import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
-from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
@@ -1424,25 +1423,9 @@ class NsgeoPlugin:
             # slot (see the module docstring), so this must not raise.
             self.message(str(exc), Qgis.MessageLevel.Critical)
             return
-        suggestion = None
-        if grid is None:
-            lines = self.session.site.lines if self.session.site else []
-            if lines:
-                try:
-                    suggestion = VelocityModel.from_dielectric(
-                        lines[0].header.epsr
-                    ).surface_velocity
-                except ValueError as exc:
-                    # Cosmetic only -- a bad header must not block the
-                    # dialog from opening at all, just leave it unseeded.
-                    self.message(
-                        f"could not suggest a velocity from the header: {exc}",
-                        Qgis.MessageLevel.Warning,
-                    )
         dialog = GridDialog(
             self.session,
             grid=grid,
-            suggested_velocity=suggestion,
             parent=self.iface.mainWindow(),
             canvas=self.iface.mapCanvas(),
         )

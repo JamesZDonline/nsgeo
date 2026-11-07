@@ -37,8 +37,8 @@ the known issues.
 
 - **Sites, grids and lines.** Grids are placed from corners typed, picked on the
   map or read from a polygon. Then import GSSI DZT files into a grid,
-  single- or multi-channel, with their DZX marks. Each grid carries a velocity,
-  which sets the depth scale. After import, a line's label, offset, direction,
+  single- or multi-channel, with their DZX marks. Depths use a line's own
+  velocity, else its grid's, else the dielectric in the file header. After import, a line's label, offset, direction,
   start and grid can be edited, one line at a time or several together, and
   lines can be moved to another grid.
 - **The map and the profile, linked both ways.** Hover a line on the map to
@@ -89,6 +89,7 @@ a milestone merges or the plan changes.
 | M14 | Migration (Stolt f-k) ([#123]) | 0.3.0 |
 | | Survey panel grids start collapsed ([#133]) | 0.3.0 |
 | | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
+| | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | next release |
 
 ### In progress
 
@@ -129,6 +130,7 @@ Grouped by area. The order within a group is not a priority.
   walkthrough).
 
 [#3]: https://github.com/JamesZDonline/nsgeo/issues/3
+[#4]: https://github.com/JamesZDonline/nsgeo/issues/4
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
 [#29]: https://github.com/JamesZDonline/nsgeo/issues/29
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
