@@ -180,10 +180,13 @@ class SurveyDock(QgsDockWidget):
             g_item.setData(0, ROLE_KIND, "grid")
             g_item.setData(0, ROLE_ID, grid.id)
             root.addChild(g_item)
-            # Brand-new grids (not seen on the previous build) default to
-            # expanded; a grid the user explicitly collapsed stays collapsed
-            # across an unrelated rebuild instead of snapping back open.
-            g_item.setExpanded(known_grids.get(grid.id, True))
+            # A grid not seen on the previous build -- every grid, when a
+            # site opens -- starts collapsed (#133), so a site with many
+            # grids opens as a short list of grids, not one long list of
+            # lines. A grid the user opened stays open across an unrelated
+            # rebuild instead of snapping shut. Opening a line unfolds its
+            # grid (_follow_current).
+            g_item.setExpanded(known_grids.get(grid.id, False))
             for key, line in lines:
                 g_item.addChild(self._line_item(key, line))
         for key, line in loose:
