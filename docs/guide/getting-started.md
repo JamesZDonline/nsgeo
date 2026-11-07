@@ -148,7 +148,9 @@ works too. The toolbar is under **View → Toolbars → nsgeo**.
 **Set velocity override…** on a line's right-click menu sets or clears that line's
 own velocity. It also lists the velocity fits you have measured on the line, and
 you can apply one of them as the override. Without an override, the line uses its
-grid's velocity (right-click the grid, then **Set velocity…**).
+grid's velocity (right-click the grid, then **Set velocity…**). If the grid has
+none either, it uses the dielectric in its file header. The profile names the
+source next to the velocity, for example `v = 0.080 m/ns (header ε 14)`.
 
 ---
 
@@ -227,11 +229,13 @@ far (see [What the map shows](#what-the-map-shows)).
    says so, for example `the corners measure 20.41 × 19.87 m · your size is kept`.
    Click **Use these** to take the measured size instead. Check **Default spacing
    (m)** too. The azimuth is measured clockwise from north to the grid's +Y axis.
-6. Enter **Velocity (m/ns)**. It is required, and it sets the depth scale for the
-   grid's profiles and slices. A working estimate is fine, because you can change
-   it later with **Set velocity…**.
-7. Click **OK**. It stays greyed out until the Id, CRS, size and velocity are all
-   usable.
+6. **Velocity (m/ns)** is optional. Left at **from line headers**, each line
+   uses the dielectric in its own file header for depths. The note beside the
+   box shows what the headers give, for example `header ε 14 ≈ 0.0801 m/ns`.
+   The header value is only the instrument's setting, not a measurement, so
+   enter a velocity when you have a better one, for example from a fit. You can
+   change it, or set it back to 0 to clear it, later with **Set velocity…**.
+7. Click **OK**. It stays greyed out until the Id, CRS and size are all usable.
 
 **The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until
 you choose one yourself, nsgeo uses the first of these that suits the map's
@@ -284,7 +288,9 @@ and its **Import** button name the grid the lines will go into.
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
    **Offset (m)** or **Dir**. Use **↑** and **↓** to fix the order. Leaving out
    a redone line moves the later files up into its place, unless you have edited
-   them by hand.
+   them by hand. The **Note** column flags a file whose header dielectric is
+   outside 1–81, which no soil has. Such a line still imports, but its depths
+   need a grid or line velocity.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
    Survey**. They are drawn as thin dashed lines in the grid's colour, and are
    hidden when you zoom out far enough that they would run together (beyond
