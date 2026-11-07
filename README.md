@@ -8,9 +8,10 @@ plugin on top. Today it reads GSSI DZT files. The core is laid out so that other
 instruments, such as magnetometry, conductivity and resistivity, can be added later
 without touching the plugin.
 
-> **Status: 0.2.0, experimental.** The QGIS plugin imports DZT files into grids
-> placed on the map, links the map and the profile both ways, processes
-> profiles, records picks, measures velocities from diffraction hyperbolas, and
+> **Status: 0.3.0, experimental.** The QGIS plugin imports DZT files into grids
+> placed on the map, lets you fix a line's placement after import, links the
+> map and the profile both ways, processes and migrates profiles, records picks
+> that stay on their line, measures velocities from diffraction hyperbolas, and
 > builds time and depth slices for one grid or the whole site. It
 > installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x, and each release's
 > zip is checked by installing it into QGIS 3.40, 3.44 and 4.2. macOS is
@@ -37,7 +38,9 @@ the known issues.
 - **Sites, grids and lines.** Grids are placed from corners typed, picked on the
   map or read from a polygon. Then import GSSI DZT files into a grid,
   single- or multi-channel, with their DZX marks. Each grid carries a velocity,
-  which sets the depth scale.
+  which sets the depth scale. After import, a line's label, offset, direction,
+  start and grid can be edited, one line at a time or several together, and
+  lines can be moved to another grid.
 - **The map and the profile, linked both ways.** Hover a line on the map to
   preview its radargram. Moving along the profile moves a marker along the line
   on the map, and a range selected on the profile lights up on the map.
@@ -46,14 +49,17 @@ the known issues.
   three gains (AGC, parametric, and a manual gain curve you drag on the profile),
   background removal (full-line mean, sliding window, or SVD), and amplitude
   transforms (absolute value, square, envelope), plus a time cutoff you drag on
-  the profile. Stacks can be saved as presets and applied to a whole grid. A
+  the profile and migration (Stolt f-k), which collapses diffraction hyperbolas.
+  Stacks can be saved as presets and applied to a whole grid. A
   difference view shows what a step removed.
 - **Display.** Display gain and colour tables change only how the profile looks,
   never the data.
 - **Picks.** Click the profile to record a pick at a trace and two-way time. Picks
   are stored in the site's GeoPackage as a QGIS point layer, with the distance
-  along the line and the depth.
-- **Time and depth slices.** Bin a grid's processed lines into a volume, step
+  along the line and the depth. A pick stays on its line when the grid or the
+  line is edited, and its depth follows the line's velocity.
+- **Time and depth slices.** Bin a grid's processed lines into a volume, fill
+  between the lines by kriging, inverse distance or minimum curvature, step
   through slices on the map as a live raster layer, and export them as GeoTIFFs.
 
 Not built yet: instruments other than GPR. The [roadmap](#roadmap) below shows
@@ -78,15 +84,15 @@ a milestone merges or the plan changes.
 | M12 | Whole-site slices | 0.2.0 (2026-10-31) |
 | M13 | Velocity from diffraction hyperbolas | 0.2.0 |
 | | Time cutoff, display gain, grid corners from the map, zigzag profiles that all read the same way, the Panels menu, and other field requests | 0.2.0 |
-| | Slice interpolation: kriging, IDW and minimum curvature ([#110], [#122]) | next release |
-| | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | next release |
-| M14 | Migration (Stolt f-k) ([#123]) | next release |
-| | Survey panel grids start collapsed ([#133]) | next release |
+| | Slice interpolation: kriging, IDW and minimum curvature ([#110], [#122]) | 0.3.0 (2026-11-06) |
+| | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | 0.3.0 |
+| M14 | Migration (Stolt f-k) ([#123]) | 0.3.0 |
+| | Survey panel grids start collapsed ([#133]) | 0.3.0 |
+| | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
 
 ### In progress
 
-- **Line editing.** Edit a line's placement after import, move lines between
-  grids, and keep picks on their line when it moves ([#29], [#64], [#35]).
+Nothing at the moment. The first item under *Next* starts next.
 
 ### Next, in order
 
@@ -108,7 +114,8 @@ Grouped by area. The order within a group is not a priority.
 
 - **Line placement and survey geometry:** stretch or compress lines to fit the
   grid ([#3]); de-striping, which real grids now need ([#47]); grids that are
-  not rectangles ([#130]); bulk edits on a selection of lines ([#58]).
+  not rectangles ([#130]); a preset or velocity override for a selection of
+  lines at once ([#58]; editing their placement together is done).
 - **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
   in one dialog ([#127]); Save fit also clears the points ([#128]); average or
   combine fits ([#86]); a modifier-click for velocity points ([#88]).
