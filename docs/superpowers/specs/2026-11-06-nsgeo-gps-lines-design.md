@@ -76,7 +76,8 @@ were throwaway; every number here can be re-derived from the files.
 - **Walked lines leave real gaps.** Neighbouring lines are a median 0.49 m apart but 0.86 m at the
   95th percentile and up to 1.58 m; 12% of samples are more than 0.75 m apart, and lines sometimes
   touch. At the slices' default max distance (0.75× spacing = 0.375 m) a GPS-placed slice of this
-  area is 3.5% holes inside the area, against 0.09% for the same lines placed by tape. (Open, §14.)
+  area is 3.5% holes inside the area, against 0.09% for the same lines placed by tape. They stay
+  visible (decision 12).
 
 **What we do not have:** a DZG with float or plain fixes, other NMEA talkers (`$GPGGA`) or
 sentences, a multi-channel DZT with a DZG, or a time-triggered (no wheel) line with a DZG.
@@ -143,6 +144,10 @@ These are the user's, in the order they were made.
     trace's true distance, and a lift shows as a gap. Estimated medium (2–3 tasks), so it is M17b
     and the areas become M17c (§9).
 
+12. **GPS slices show their gaps** (the user, 2026-11-06). An area keeps the slices' usual default
+    max distance (0.75× its spacing), so the slivers where walked lines drifted apart stay blank:
+    they are real thin coverage, and a tape placement only hides them by assuming even spacing. To
+    fill them for a figure, the user raises max distance for that grid, as today.
 ---
 
 ## 4. Claude's calls
@@ -475,20 +480,9 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 
 ---
 
-## 14. Open questions for the user
+## 14. Questions raised after brainstorming
 
-From the delay spike and the builder check. The answers go into §3 and the sections named.
-
-1. ~~The along-track correction~~ — answered: decision 10.
-2. ~~Profiles and trace spacing for GPS lines~~ — answered: decision 11.
-   Was: **Profiles and trace spacing for GPS lines.** The profile view draws one equal-width column per
-   trace, and migration and the velocity fit take their spacing from the wheel. On a GPS line the
-   traces are not evenly spaced along the ground: lifts and slips squeeze metres into a few traces,
-   and the wheel reads 1.5–3% short (15% on `FILE__011`). Either keep one column per trace with the
-   wheel's spacing (zigzag profiles line up except near lifts and slips), or resample GPS lines to
-   even spacing along the walked path so that the profile, migration and velocity fit all see true
-   metres.
-3. **Holes in GPS slices (§2).** Walked lines leave real gaps up to 1.58 m. At the default max
-   distance a GPS area's slice is 3.5% holes. Either keep the default and show them as real gaps, or
-   give areas a different default.
-
+The delay spike and the builder check raised three questions; the user answered all three on
+2026-11-06: the along-track correction (decision 10), true-distance profiles (decision 11) and
+gaps in GPS slices (decision 12). The builder check's other two questions became Claude's calls
+C12 (a site-level CRS) and C13 (the outline is #130's perimeter, on any grid).
