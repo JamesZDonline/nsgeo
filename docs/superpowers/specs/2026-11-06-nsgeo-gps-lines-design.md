@@ -100,7 +100,7 @@ These are the user's, in the order they were made.
    practice (§2).
 6. **No antenna-offset setting:** the mount is centred. *Reopened by the delay measurement (§7):
    the data shows a ~24 cm along-track shift regardless, so some along-track correction is needed;
-   its form is open (§14).*
+   settled in decision 10.*
 7. **When the RTK fix drops** (the user had no plan of their own and accepted this proposal):
    - only RTK-fixed positions (quality 4) are used; float and plain fixes are ignored;
    - the wheel bridges the gap: traces between two good fixes are spaced by trace count along a
