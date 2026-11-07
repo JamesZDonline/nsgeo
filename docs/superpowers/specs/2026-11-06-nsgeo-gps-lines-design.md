@@ -127,6 +127,17 @@ These are the user's, in the order they were made.
      lines…** action;
    - two milestones (§9). M17 stays where the roadmap puts it, after M15 and M16, unless the user
      says otherwise.
+10. **The along-track correction is destagger's job (#47), for tape and GPS lines alike** (after the
+    delay spike, §7). The shift's cause is unknown and the mount may sit differently from one survey
+    to the next, so it is measured per survey, not remembered as a constant. The user may build
+    destagger earlier, as an add-on to another milestone, because it fixes tape grids too.
+    - The correction is an along-track shift applied along each line's direction of travel, stored
+      separately from what the line recorded (#47's design), one model for both kinds of line.
+    - M17 lets the user type that shift for GPS lines: set for a whole import, editable per line.
+      If destagger lands first, M17's GPS lines plug into its shift; if M17 lands first, destagger
+      extends M17's.
+    - A delay term (seconds, scaled by walking speed) is measurable only on GPS lines. It is worth
+      4–11 cm here; whether nsgeo carries it is for destagger to decide.
 
 ---
 
@@ -219,6 +230,8 @@ the fixes it uses in a projected CRS (metres), `grid_id` (C2), and `label`.
   spec (`2026-09-10-nsgeo-gpr-qgis-design.md`, Placement) always said.
 - JSON round trip in `nsgeo/project.py` as a new placement type (today `_placement_to_dict` raises
   for anything but `GridPlacement`). Stores the fixes (C10).
+- An along-track shift (decision 10), applied along the line's direction of travel to every
+  trace position, stored apart from the fixes. Zero by default.
 - Exposes the bridged stretches (trace ranges and metres) and whether either end ran past the
   extrapolation limit, for the import summary and the map.
 
@@ -312,11 +325,14 @@ other.
 - Opposite-direction neighbours are offset by **−48 cm** (bootstrap 95% −50 to −47 cm): each line's
   features sit about **24 cm behind** where they belong, relative to its direction of travel.
   Neighbour correlation is −0.56 as logged against +15 for same-direction pairs.
-- Consistent everywhere: every time window and both halves of the area give the same answer, and
-  southbound and northbound lines agree within 1 cm.
-- **Mostly a fixed offset, partly a delay.** Fitting against speed changes within lines splits it
-  into about 15 cm (10–19) of fixed along-track offset plus about 0.11 s (0.05–0.17) of delay. The
-  total is pinned to about ±1.5 cm; the split is much less certain.
+- Steady across the area, within limits: across time windows and parts of the area the estimate
+  ranges from −44 to −59 cm, so a fair figure is **−48 ± ~6 cm** between neighbours (21–27 cm per
+  line). The bootstrap above only resamples lines. Equal shares per direction are *assumed*: a
+  comparison between opposite-direction lines cannot apportion the disagreement between them.
+- **Mostly a fixed offset, partly a delay.** Walking speed varied from about 0.35 to 1.1 m/s. The
+  one-way shift grows only from ~21 cm on the slowest stretches to ~28 cm on the fastest. Fitting
+  against speed within lines gives about 15 cm (10–19) of fixed along-track offset plus about 0.11 s
+  (0.05–0.17) of delay. The total is well determined; the split is not.
 - A 0.35 s delay alone, a 23.5 cm offset alone, or 15 cm + 0.11 s together all bring the mean shift
   within 3 cm, and neighbour correlation rises to about 18. On the strongest compact feature
   (22–28 ns) the logged placement draws a sawtooth between alternate lines; corrected, a compact
@@ -329,8 +345,15 @@ centred over the radar, so the fixed part may come from the radar side (where th
 a trace from) rather than the mount. Either way it is a shift along the direction of travel, and a
 zigzag survey can measure it.
 
-**Open (the user's call, §14):** the form of the setting, its default, and whether nsgeo estimates
-it from a zigzag.
+**Mast tilt is a separate, smaller error** (user, 2026-11-06: the GPS is fixed to the cart about
+1 m above the radar, so it leans with the slope). It leans downhill whichever way the cart travels,
+so it moves both directions' positions the same way: it causes **no stagger**, only an absolute
+shift of `h · sin(slope)`. From the GGA altitudes this site slopes ~1.6° overall, ~2° (median) and
+~5° (p90) over 3 m stretches: 3.5 cm typical, 8.5 cm on the steeper stretches, ~17 cm per 10° on a
+steep site. It is correctable later from the altitude record and the mast height (§12).
+
+**Decided (decision 10).** The full measurement, its method and what it means for destaggering
+are in `docs/superpowers/notes/2026-11-06-stagger-spike.md`.
 
 ---
 
@@ -364,8 +387,9 @@ it from a zigzag.
 Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS profile.
 
 - **M17a — GPS lines.** DZG reader; `TrackPlacement` with bridges, ends and its JSON round trip;
-  Import GPS lines… with its summary; map paths with bridged stretches; Survey panel; profiles with
-  distance walked; picks, processing and velocity on GPS lines as on any line. Useful on its own:
+  Import GPS lines… with its summary; the typed along-track shift (decision 10), set for an import
+  and editable per line; map paths with bridged stretches; Survey panel; profiles with distance
+  walked; picks, processing and velocity on GPS lines as on any line. Useful on its own:
   free transects and supplemental lines.
 - **M17b — GPS areas.** Grid outline and its mask; Fit to these tracks; drawing and reshaping;
   Move to grid ▸ for GPS lines (C3); shared rulers (decision 8, C8); slices of areas. Needs line
@@ -407,6 +431,8 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 - #134's use 2 (a GPS track drawn beside a tape placement as a check).
 - Direction balancing between lines walked in different directions (#47).
 - Topographic correction (altitude is stored for it).
+- Mast-tilt correction (§7): the GPS sits ~1 m above the radar and leans downhill on slopes. Needs
+  the mast height and the slope from the altitude record; belongs with topographic correction.
 - #130's placing of tape lines from where they cross the perimeter (the outline and its mask are in,
   C13).
 - Slices of unattached lines (C5).
@@ -429,8 +455,7 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 
 From the delay spike and the builder check. The answers go into §3 and the sections named.
 
-1. **The along-track correction (§7).** Its form (one shift in metres, or a fixed offset plus a
-   delay), its default, and whether nsgeo estimates it from a zigzag area.
+1. ~~The along-track correction~~ — answered: decision 10.
 2. **Profiles and trace spacing for GPS lines.** The profile view draws one equal-width column per
    trace, and migration and the velocity fit take their spacing from the wheel. On a GPS line the
    traces are not evenly spaced along the ground: lifts and slips squeeze metres into a few traces,
