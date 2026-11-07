@@ -1289,12 +1289,12 @@ class _WheelStub:
     """The minimal `QWheelEvent`-shaped surface `eventFilter` reads.
 
     Not a real `QWheelEvent`: its constructor signature differs between
-    Qt 5 and Qt 6 (the same reason `depth_scroll_delta` itself is a plain
+    Qt 5 and Qt 6 (the same reason `depth_scroll_steps` itself is a plain
     function tested without one), but `eventFilter`'s own body only ever
     calls `.type()`, `.modifiers()` and `.angleDelta().y()` on the event
     it is handed -- so a stub exposing exactly those three is a Qt-version-
     independent way to exercise the filter directly, the same way
-    `depth_scroll_delta`'s own pure test needs no event at all.
+    `depth_scroll_steps`'s own pure test needs no event at all.
     """
 
     def __init__(self, angle_delta_y: int, shift: bool) -> None:
@@ -1324,13 +1324,13 @@ class _NonWheelStub:
 
 
 def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(fake_iface, docked):
-    """Minor 3 (Task 5 review): `depth_scroll_delta` was pinned as a pure
+    """Minor 3 (Task 5 review): `depth_scroll_steps` was pinned as a pure
     function, but nothing pinned `CanvasDepthScroll.eventFilter` itself --
     the thing that actually decides whether an event is consumed. A
     mutant that returns `True` before the `delta == 0` check would take
     the map's zoom away entirely (every wheel event on the canvas
     swallowed, shift or not) and would survive the whole suite without
-    this test: `depth_scroll_delta`'s own test never touches the filter,
+    this test: `depth_scroll_steps`'s own test never touches the filter,
     and nothing else calls `eventFilter` at all.
     """
     dock, _ = docked
@@ -1351,6 +1351,26 @@ def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(
         consumed = filt.eventFilter(None, _NonWheelStub())
         assert consumed is False
         assert dock.slice_slider.value() == moved_to
+    finally:
+        filt.dispose()
+
+
+def test_canvas_depth_scroll_moves_one_step_per_notch_of_a_hi_res_wheel(fake_iface, docked):
+    """#109: one notch of the user's wheel arrives as two events of 60.
+    The depth moves one Step for the notch, not one per event, and the
+    first half is still consumed so that the map does not zoom by half a
+    notch in between."""
+    dock, _ = docked
+    _ready(dock)
+    filt = CanvasDepthScroll(fake_iface.mapCanvas(), dock)
+    try:
+        start = dock.slice_slider.value()
+        step_levels = dock.thickness_step_levels()[1]
+
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start, "half a notch must not move the depth"
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start + step_levels
     finally:
         filt.dispose()
 

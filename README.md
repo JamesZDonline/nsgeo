@@ -82,6 +82,7 @@ a milestone merges or the plan changes.
 | | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | next release |
 | M14 | Migration (Stolt f-k) ([#123]) | next release |
 | | Survey panel grids start collapsed ([#133]) | next release |
+| | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | next release |
 
 ### In progress
 
@@ -91,7 +92,7 @@ a milestone merges or the plan changes.
 ### Next, in order
 
 1. **Whole site at fine cells.** Never refuse a fine cell, and export finer than
-   the preview ([#107], [#108], [#109]).
+   the preview ([#107], [#108]).
 2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
 3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
