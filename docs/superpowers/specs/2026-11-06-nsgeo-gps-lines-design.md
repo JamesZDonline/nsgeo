@@ -7,7 +7,7 @@ grid ▸**. The area can be any shape.
 
 Answers #134's "to decide" list: use 1 (free GPS lines) and use 3 (lines placed by GPS inside a
 slice area) are in; use 2 (a GPS track drawn beside a tape placement as a check) is dropped. Two
-milestones, M17a and M17b (§9). Builds on the line-editing bundle (#35, #64, #29; branch
+milestones, M17a, M17b and M17c (§9). Builds on the line-editing bundle (#35, #64, #29; branch
 `nsgeo-line-editing`), which was not yet merged when this was written.
 
 ---
@@ -125,7 +125,7 @@ These are the user's, in the order they were made.
    - the existing tape import is unchanged: importing into a tape grid still places by the tapes,
      even when a DZG sits beside the DZT. GPS placement comes through its own **Import GPS
      lines…** action;
-   - two milestones (§9). M17 stays where the roadmap puts it, after M15 and M16, unless the user
+   - milestones (§9; three since decision 11). M17 stays where the roadmap puts it, after M15 and M16, unless the user
      says otherwise.
 10. **The along-track correction is destagger's job (#47), for tape and GPS lines alike** (after the
     delay spike, §7). The shift's cause is unknown and the mount may sit differently from one survey
@@ -138,6 +138,10 @@ These are the user's, in the order they were made.
       extends M17's.
     - A delay term (seconds, scaled by walking speed) is measurable only on GPS lines. It is worth
       4–11 cm here; whether nsgeo carries it is for destagger to decide.
+11. **True-distance profiles are in M17, as their own middle chunk** (after the builder check
+    raised it; the user, 2026-11-06). A GPS line's profile, migration and velocity fit use each
+    trace's true distance, and a lift shows as a gap. Estimated medium (2–3 tasks), so it is M17b
+    and the areas become M17c (§9).
 
 ---
 
@@ -176,7 +180,8 @@ Made without the user; each is open to veto.
 - **C11. Time-triggered lines with a DZG place by GPS too.** Tape placement refuses them (no
   traces per metre); GPS placement needs only trace numbers, and bridging by trace count is bridging
   by time. Placing them comes free. Anything that needs a trace spacing (migration) still refuses
-  them, as it does today, unless §14's question 2 changes that.
+  them today; once M17b gives migration true spacing (decision 11), a GPS line needs no wheel
+  for it either.
 - **C12. A site has one CRS of its own** (from the builder check). Today a site borrows the first
   grid's (`grids[0].crs`, in `layers.py`, `site_engine._site_crs` and the grid dialog's
   `_choose_crs`), so a site holding only GPS lines would have none, and the map draws nothing while
@@ -283,6 +288,9 @@ Where the action lives (toolbar, Survey panel, or both) is the builder's call.
 - **Profiles:** decision 8 and C8. The ruler code (`ui/ruler.py`, `ProfileDock._ruler_for`) keys a
   ruler by `(grid_id, axis)` and reads `placement.axis`; GPS lines need an axis derived from their
   direction within the area, and distances projected onto that axis rather than walked.
+  From M17b the view draws each trace at its true distance on whichever ruler the line uses
+  (decision 11). A projected distance can step backwards where the operator did; the builder must
+  keep it monotonic.
 - **Edit lines…** (line editing's table): GPS lines appear with their grid, and their tape-only
   fields read-only or blank. Move to grid ▸ follows C3.
 
@@ -378,7 +386,14 @@ are in `docs/superpowers/notes/2026-11-06-stagger-spike.md`.
   the header's dielectric, so an unattached line gets depths without change.
 - **Line editing** (unmerged when written): Move to grid ▸, Edit lines…, picks that follow their
   line through any move and through remove-and-re-import (#35), and the slices engine re-preparing
-  when a line's placement changes. M17b needs it merged.
+  when a line's placement changes. M17c needs it merged.
+- **Profiles assume one equal column per trace** (`ui/view_transform.py`: `x_of_trace` /
+  `trace_of_x` are linear in trace index; `ui/profile_view.py` calls them in ~15 places). The
+  ruler side already maps trace to metres through each line's own distance array
+  (`ui/ruler.py`: `trace_to_metres` / `metres_to_trace`), so it handles uneven spacing.
+- **Trace spacing for processing** is one number, `Radargram.dx_m`, from the header's traces per
+  metre (`nsgeo/processing/base.py`); migration is its only user. The velocity fit takes metres per
+  trace as `distance[1] - distance[0]` (`ProfileDock._velocity_axis`).
 
 ---
 
@@ -388,12 +403,18 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 
 - **M17a — GPS lines.** DZG reader; `TrackPlacement` with bridges, ends and its JSON round trip;
   Import GPS lines… with its summary; the typed along-track shift (decision 10), set for an import
-  and editable per line; map paths with bridged stretches; Survey panel; profiles with distance
-  walked; picks, processing and velocity on GPS lines as on any line. Useful on its own:
-  free transects and supplemental lines.
-- **M17b — GPS areas.** Grid outline and its mask; Fit to these tracks; drawing and reshaping;
-  Move to grid ▸ for GPS lines (C3); shared rulers (decision 8, C8); slices of areas. Needs line
-  editing merged.
+  and editable per line; map paths with bridged stretches; Survey panel; profiles labelled in
+  distance walked (still one column per trace); picks, processing and velocity on GPS lines as on
+  any line. Useful on its own: free transects and supplemental lines.
+- **M17b — True-distance profiles** (decision 11). The profile view draws every trace at its true
+  distance, with a visible gap where the cart was lifted; picks, the velocity-fit curve, hover,
+  mirroring, the gain strip and the Difference view follow. The velocity fit uses each trace's true
+  distance; migration re-samples a GPS line to even spacing, migrates and maps back. Tape lines,
+  being evenly spaced, look exactly as before. Expect a fix round after the walkthrough: the profile
+  view is where walkthroughs have found the most (#67, the time cutoff, the gain strip).
+- **M17c — GPS areas.** Grid outline and its mask; Fit to these tracks; drawing and reshaping;
+  Move to grid ▸ for GPS lines (C3); shared rulers (decision 8, C8), exact for zigzag lines once
+  M17b is in; slices of areas. Needs line editing merged.
 
 ---
 
@@ -418,9 +439,12 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 
 - **M17a walkthrough** on the 60 lines: import without a grid; every line on the map along its path;
   `FILE__011` drawn at its full ~30 m (not the wheel's 26 m); `FILE__016` and `FILE__028` stretched
-  across their obstacle lifts; profiles in distance walked; the summary's wording. The dropout
+  across their obstacle lifts; profiles labelled in distance walked; the summary's wording. The dropout
   display can only be walked on a locally degraded copy, since no real dropout exists.
-- **M17b walkthrough:** Fit to these tracks on the 60 lines; reshape the outline; move the lines in
+- **M17b walkthrough:** `FILE__016` and `FILE__028` show their lifts as gaps; a feature lines up on
+  neighbouring profiles across a lift; picks, a velocity fit and mirroring on a GPS line; a tape
+  line looks unchanged; a velocity fitted on a GPS line vs the same diffraction by wheel spacing.
+- **M17c walkthrough:** Fit to these tracks on the 60 lines; reshape the outline; move the lines in
   and one back out; zigzag profiles line up on one ruler; slices of the area with nothing outside
   the outline; Whole site with an area beside an existing tape grid.
 
@@ -456,7 +480,8 @@ Each gets its own plan (3–6 tasks), build and walkthrough on its own QGIS prof
 From the delay spike and the builder check. The answers go into §3 and the sections named.
 
 1. ~~The along-track correction~~ — answered: decision 10.
-2. **Profiles and trace spacing for GPS lines.** The profile view draws one equal-width column per
+2. ~~Profiles and trace spacing for GPS lines~~ — answered: decision 11.
+   Was: **Profiles and trace spacing for GPS lines.** The profile view draws one equal-width column per
    trace, and migration and the velocity fit take their spacing from the wheel. On a GPS line the
    traces are not evenly spaced along the ground: lifts and slips squeeze metres into a few traces,
    and the wheel reads 1.5–3% short (15% on `FILE__011`). Either keep one column per trace with the
