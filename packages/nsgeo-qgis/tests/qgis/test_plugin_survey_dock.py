@@ -71,6 +71,16 @@ def test_tree_follows_session_changes(dock):
     assert "empty" in dock.tree.topLevelItem(0).child(1).text(0)
 
 
+def _unfold(item):
+    """Open every grid above `item`, as a user must before clicking a line
+    in it: grids start collapsed (#133), and a folded row has an empty
+    visualItemRect, so a click aimed at it would land on another row."""
+    parent = item.parent()
+    while parent is not None:
+        parent.setExpanded(True)
+        parent = parent.parent()
+
+
 def _click(dock, item, modifier=Qt.KeyboardModifier.NoModifier):
     """A real left click on `item`, through the tree's own mouse handling,
     so the selection it makes is the one a user's click would make.
@@ -81,6 +91,7 @@ def _click(dock, item, modifier=Qt.KeyboardModifier.NoModifier):
     if not dock.isVisible():
         dock.resize(400, 600)
         dock.show()
+    _unfold(item)
     pos = dock.tree.visualItemRect(item).center()
     QTest.mouseClick(dock.tree.viewport(), Qt.MouseButton.LeftButton, modifier, pos)
 
@@ -569,6 +580,8 @@ def _right_click(dock, item):
     have installed `answer_modal(QMenu, "exec", None)` first, since this
     tier forbids the real `QMenu.exec` (it would block forever offscreen).
     """
+    if item is not None:
+        _unfold(item)
     pos = dock.tree.visualItemRect(item).center() if item is not None else QPoint(0, 10_000)
     dock.tree.customContextMenuRequested.emit(pos)
     return dock.context_menu
@@ -1019,3 +1032,64 @@ def test_the_removal_prompt_lists_lines_in_tree_order_not_click_order(dock, answ
     yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
     _press(dock, Qt.Key.Key_Delete)
     assert "\n".join(KEYS) in yes[0][0][2]
+
+
+# ---- #133: grids start collapsed -------------------------------------------
+def _row_is_showing(dock, item):
+    """Every ancestor open, so the row is drawn rather than folded away."""
+    parent = item.parent()
+    while parent is not None:
+        if not parent.isExpanded():
+            return False
+        parent = parent.parent()
+    return True
+
+
+def test_a_grid_starts_collapsed(dock):
+    session, dock = dock
+    assert dock.tree.topLevelItem(0).isExpanded()
+    assert not _grid_item(dock, "A").isExpanded()
+
+
+def test_a_reopened_site_starts_with_its_grids_collapsed(dock):
+    session, dock = dock
+    _grid_item(dock, "A").setExpanded(True)
+    session.save()
+    path = session.json_path
+    session.close_site()
+    session.open_site(path)
+    assert not _grid_item(dock, "A").isExpanded()
+
+
+def test_a_grid_the_user_opened_stays_open_across_a_rebuild(dock, tmp_path):
+    session, dock = dock
+    _grid_item(dock, "A").setExpanded(True)
+    _add_grid_b_with_a_line(session, tmp_path)
+    assert _grid_item(dock, "A").isExpanded()
+    assert not _grid_item(dock, "B").isExpanded()
+
+
+def test_opening_a_line_in_a_collapsed_grid_shows_its_row(dock, message_log):
+    session, dock = dock
+    dock.resize(400, 600)
+    dock.show()
+    assert not _grid_item(dock, "A").isExpanded()
+    session.open_line(KEYS[1])
+    item = dock.item_for_key(KEYS[1])
+    assert _row_is_showing(dock, item)
+    assert dock.tree.currentItem() is item
+    assert message_log == []
+
+
+def test_a_line_opened_while_the_panel_is_hidden_is_showing_when_it_is_shown(dock, message_log):
+    # The Survey panel is often a tab behind QGIS's Layers panel when a
+    # line is opened from the map. Qt only scrolls to (and so expands
+    # the grid of) a new current row while the view is visible, so a
+    # hidden panel would come back with the open line folded away.
+    session, dock = dock
+    assert not dock.isVisible()
+    session.open_line(KEYS[1])
+    dock.resize(400, 600)
+    dock.show()
+    assert _row_is_showing(dock, dock.item_for_key(KEYS[1]))
+    assert message_log == []

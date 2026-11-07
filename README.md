@@ -81,6 +81,7 @@ a milestone merges or the plan changes.
 | | Slice interpolation: kriging, IDW and minimum curvature ([#110], [#122]) | next release |
 | | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | next release |
 | M14 | Migration (Stolt f-k) ([#123]) | next release |
+| | Survey panel grids start collapsed ([#133]) | next release |
 
 ### In progress
 
@@ -115,7 +116,7 @@ Grouped by area. The order within a group is not a priority.
   the slice band ([#131]); trace stacking ([#114]); a frequency profile
   ([#34]); configurable axes ([#11]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
-  ([#132]); grids start collapsed ([#133]).
+  ([#132]).
 - **Output:** annotated, publication-quality profile figures ([#83]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
