@@ -96,26 +96,57 @@ Nothing at the moment. The first item under *Next* starts next.
 
 ### Next, in order
 
-1. **Whole site at fine cells.** Never refuse a fine cell, and export finer than
-   the preview ([#107], [#108], [#109]).
-2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+The first seven items come before M15 because the next milestones build on
+them: doing them now is cheaper than reworking M15–M17 afterwards.
+
+1. **Real-data tests that read the wrong survey** ([#141]). The GPS lines added
+   for M17 break the local real-file tests, and every later step is checked on
+   real files.
+2. **Grid velocity optional** ([#4], pull request open). A cut's depth comes
+   from its grid's velocity, falling back to its lines' velocity.
+3. **Fine cells.** Store only the covered cells in a resident cube ([#113]);
+   never refuse a fine cell in Whole site ([#107]); a faster minimum-curvature
+   solver ([#111]); export finer than the preview ([#108]); one slice per wheel
+   notch ([#109]). M15 and M16 read the cube, so its layout changes first.
+4. **The background solver** (the worker items in [#120]). M15 solves its cuts
+   on the same worker.
+5. **This grid and Whole site agree** on a grid's lines and preset ([#100],
+   [#101], [#106], [#103]). A cut shows the cube of whichever scope is on
+   screen.
+6. **Fixes to two processing steps** that slice cubes are built from ([#116],
+   [#117]).
+7. **Decide the time base** ([#97]): whether samples will ever be shifted so the
+   first break is at 0 ns. Changing it after M15 and M16 means converting every
+   stored time.
+8. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+9. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-4. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
-   lines by their track ([#134]).
-5. **M18: issue cleanup.** Work through the backlog of open bugs and review
-   follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-6. **M19: magnetometer data.** The first instrument other than GPR.
+10. **Line placement corrections:** a destagger shift ([#47]) and stretching or
+    compressing lines to fit the grid ([#3]). Real grids need them now, and
+    M17's GPS lines use the same shift.
+11. **How a line is identified** ([#89]), settled before M17 stores GPS
+    coordinates in it.
+12. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
+    profiles at true distance, and GPS areas.
+13. **M18: issue cleanup.** Work through the backlog of open bugs and review
+    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
+14. **M19: magnetometer data.** The first instrument other than GPR.
+
+Also worth doing early: edit or delete a pick from the profile ([#36]), before
+M15 brings picking to cuts; and the migration real-data test ([#125]), before
+M16 builds on migrated cubes.
 
 ### Wishlist, not yet scheduled
 
 Grouped by area. The order within a group is not a priority.
 
-- **Line placement and survey geometry:** stretch or compress lines to fit the
-  grid ([#3]); de-striping, which real grids now need ([#47]); grids that are
-  not rectangles ([#130]); a preset or velocity override for a selection of
-  lines at once ([#58]; editing their placement together is done).
+- **Line placement and survey geometry:** grids that are not rectangles
+  ([#130]; the outline and its slice mask come with M17's GPS areas); balancing
+  lines walked in different directions (the second half of [#47]); a preset or
+  velocity override for a selection of lines at once ([#58]; editing their
+  placement together is done).
 - **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
   in one dialog ([#127]); Save fit also clears the points ([#128]); average or
   combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
@@ -124,30 +155,45 @@ Grouped by area. The order within a group is not a priority.
   the slice band ([#131]); trace stacking ([#114]); a frequency profile
   ([#34]); configurable axes ([#11]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
-  ([#132]).
+  ([#132]). Whether several sites will ever be open at once is worth deciding
+  before M16, which adds more code that assumes one.
 - **Output:** annotated, publication-quality profile figures ([#83]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
 
 [#3]: https://github.com/JamesZDonline/nsgeo/issues/3
+[#4]: https://github.com/JamesZDonline/nsgeo/issues/4
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
 [#29]: https://github.com/JamesZDonline/nsgeo/issues/29
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
 [#35]: https://github.com/JamesZDonline/nsgeo/issues/35
+[#36]: https://github.com/JamesZDonline/nsgeo/issues/36
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
 [#64]: https://github.com/JamesZDonline/nsgeo/issues/64
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
 [#88]: https://github.com/JamesZDonline/nsgeo/issues/88
+[#89]: https://github.com/JamesZDonline/nsgeo/issues/89
+[#97]: https://github.com/JamesZDonline/nsgeo/issues/97
+[#100]: https://github.com/JamesZDonline/nsgeo/issues/100
+[#101]: https://github.com/JamesZDonline/nsgeo/issues/101
+[#103]: https://github.com/JamesZDonline/nsgeo/issues/103
+[#106]: https://github.com/JamesZDonline/nsgeo/issues/106
 [#107]: https://github.com/JamesZDonline/nsgeo/issues/107
 [#108]: https://github.com/JamesZDonline/nsgeo/issues/108
 [#109]: https://github.com/JamesZDonline/nsgeo/issues/109
 [#110]: https://github.com/JamesZDonline/nsgeo/pull/110
+[#111]: https://github.com/JamesZDonline/nsgeo/issues/111
+[#113]: https://github.com/JamesZDonline/nsgeo/issues/113
 [#114]: https://github.com/JamesZDonline/nsgeo/issues/114
 [#115]: https://github.com/JamesZDonline/nsgeo/issues/115
+[#116]: https://github.com/JamesZDonline/nsgeo/issues/116
+[#117]: https://github.com/JamesZDonline/nsgeo/issues/117
+[#120]: https://github.com/JamesZDonline/nsgeo/issues/120
 [#122]: https://github.com/JamesZDonline/nsgeo/pull/122
 [#123]: https://github.com/JamesZDonline/nsgeo/issues/123
+[#125]: https://github.com/JamesZDonline/nsgeo/issues/125
 [#126]: https://github.com/JamesZDonline/nsgeo/issues/126
 [#127]: https://github.com/JamesZDonline/nsgeo/issues/127
 [#128]: https://github.com/JamesZDonline/nsgeo/issues/128
@@ -158,6 +204,7 @@ Grouped by area. The order within a group is not a priority.
 [#133]: https://github.com/JamesZDonline/nsgeo/issues/133
 [#134]: https://github.com/JamesZDonline/nsgeo/issues/134
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
+[#141]: https://github.com/JamesZDonline/nsgeo/issues/141
 
 ## Why
 
