@@ -68,7 +68,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-06.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-07.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -118,7 +118,8 @@ Grouped by area. The order within a group is not a priority.
   lines at once ([#58]; editing their placement together is done).
 - **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
   in one dialog ([#127]); Save fit also clears the points ([#128]); average or
-  combine fits ([#86]); a modifier-click for velocity points ([#88]).
+  combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
+  box around a hyperbola and let the plugin mark it ([#140]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); trace stacking ([#114]); a frequency profile
   ([#34]); configurable axes ([#11]).
@@ -156,6 +157,7 @@ Grouped by area. The order within a group is not a priority.
 [#132]: https://github.com/JamesZDonline/nsgeo/issues/132
 [#133]: https://github.com/JamesZDonline/nsgeo/issues/133
 [#134]: https://github.com/JamesZDonline/nsgeo/issues/134
+[#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 
 ## Why
 
