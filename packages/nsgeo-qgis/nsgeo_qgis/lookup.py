@@ -82,6 +82,24 @@ def _read_sidecar(path: Path) -> tuple[DzxInfo | None, str]:
         return None, f"sidecar unreadable: {exc}"
 
 
+# Relative permittivity from air (1) to water (about 81): any soil sits
+# between. Outside it the header's value is not a measurement of anything.
+EPSR_RANGE = (1.0, 81.0)
+
+
+def _dielectric_note(epsr: float) -> str:
+    """A note for a header dielectric no soil has, else "".
+
+    The header's dielectric is the last tier `resolve_velocity` falls back
+    on, used whenever neither the line nor its grid has a velocity (#4). A
+    bad one does not fail here; it fails, or gives wrong depths, when a
+    depth is first drawn. NaN fails both comparisons, so it is noted too."""
+    lo, hi = EPSR_RANGE
+    if lo <= epsr <= hi:
+        return ""
+    return f"header ε {epsr:g} is outside {lo:g}–{hi:g}: set a grid or line velocity"
+
+
 def plan_import(paths: Sequence[str | Path], options: ImportOptions) -> list[ImportRow]:
     rows: list[ImportRow] = []
     for path in sort_files(paths):
@@ -91,6 +109,7 @@ def plan_import(paths: Sequence[str | Path], options: ImportOptions) -> list[Imp
             header = read_header(path)
             n = trace_count(path, header)
             spm = float(header.traces_per_metre)
+            note = "; ".join(filter(None, [note, _dielectric_note(float(header.epsr))]))
         except (DztError, OSError) as exc:
             # A single unreadable/non-DZT file must not take the whole batch
             # down with it -- same principle as the traces_per_metre=0 case

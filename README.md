@@ -37,8 +37,8 @@ the known issues.
 
 - **Sites, grids and lines.** Grids are placed from corners typed, picked on the
   map or read from a polygon. Then import GSSI DZT files into a grid,
-  single- or multi-channel, with their DZX marks. Each grid carries a velocity,
-  which sets the depth scale. After import, a line's label, offset, direction,
+  single- or multi-channel, with their DZX marks. Depths use a line's own
+  velocity, else its grid's, else the dielectric in the file header. After import, a line's label, offset, direction,
   start and grid can be edited, one line at a time or several together, and
   lines can be moved to another grid.
 - **The map and the profile, linked both ways.** Hover a line on the map to
@@ -68,7 +68,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-07.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-10.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -89,6 +89,7 @@ a milestone merges or the plan changes.
 | M14 | Migration (Stolt f-k) ([#123]) | 0.3.0 |
 | | Survey panel grids start collapsed ([#133]) | 0.3.0 |
 | | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
+| | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | next release |
 
 ### In progress
 
@@ -96,43 +97,41 @@ Nothing at the moment. The first item under *Next* starts next.
 
 ### Next, in order
 
-The first seven items come before M15 because the next milestones build on
+The first six items come before M15 because the next milestones build on
 them: doing them now is cheaper than reworking M15–M17 afterwards.
 
 1. **Real-data tests that read the wrong survey** ([#141]). The GPS lines added
    for M17 break the local real-file tests, and every later step is checked on
    real files.
-2. **Grid velocity optional** ([#4], pull request open). A cut's depth comes
-   from its grid's velocity, falling back to its lines' velocity.
-3. **Fine cells.** Store only the covered cells in a resident cube ([#113]);
+2. **Fine cells.** Store only the covered cells in a resident cube ([#113]);
    never refuse a fine cell in Whole site ([#107]); a faster minimum-curvature
    solver ([#111]); export finer than the preview ([#108]); one slice per wheel
    notch ([#109]). M15 and M16 read the cube, so its layout changes first.
-4. **The background solver** (the worker items in [#120]). M15 solves its cuts
+3. **The background solver** (the worker items in [#120]). M15 solves its cuts
    on the same worker.
-5. **This grid and Whole site agree** on a grid's lines and preset ([#100],
+4. **This grid and Whole site agree** on a grid's lines and preset ([#100],
    [#101], [#106], [#103]). A cut shows the cube of whichever scope is on
    screen.
-6. **Fixes to two processing steps** that slice cubes are built from ([#116],
+5. **Fixes to two processing steps** that slice cubes are built from ([#116],
    [#117]).
-7. **Decide the time base** ([#97]): whether samples will ever be shifted so the
+6. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-8. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+7. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-9. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+8. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-10. **Line placement corrections:** a destagger shift ([#47]) and stretching or
-    compressing lines to fit the grid ([#3]). Real grids need them now, and
-    M17's GPS lines use the same shift.
-11. **How a line is identified** ([#89]), settled before M17 stores GPS
+9. **Line placement corrections:** a destagger shift ([#47]) and stretching or
+   compressing lines to fit the grid ([#3]). Real grids need them now, and
+   M17's GPS lines use the same shift.
+10. **How a line is identified** ([#89]), settled before M17 stores GPS
     coordinates in it.
-12. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+11. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
     lines by their track ([#134]). Design drafted, in three parts: GPS lines,
     profiles at true distance, and GPS areas.
-13. **M18: issue cleanup.** Work through the backlog of open bugs and review
+12. **M18: issue cleanup.** Work through the backlog of open bugs and review
     follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-14. **M19: magnetometer data.** The first instrument other than GPR.
+13. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
 M15 brings picking to cuts; and the migration real-data test ([#125]), before
