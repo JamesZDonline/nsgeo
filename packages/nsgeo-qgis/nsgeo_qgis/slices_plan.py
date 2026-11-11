@@ -351,24 +351,43 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: than spec 4's own "no smaller than the trace spacing" would allow.
 MAX_FRAME_CELLS = 4_000_000
 
-#: The most pixels the whole-site picture is drawn at before the site draws a
-#: coarser preview instead (and refuses to export). The site lattice is not
-#: a frame: its cost is the compose, one bilinear blend per grid footprint,
-#: not the interpolation `MAX_FRAME_CELLS` guards. Measured with
-#: `scripts/bench_site.py --lattice-scale` (ten 20 m grids, kriging, no
-#: smoothing, 0.25 m cell, 64 samples, one idle workstation, 15.9 GB RAM):
+#: Two limits decide whether the whole-site picture is drawn at the cell or as
+#: a coarser preview (which also refuses to export). The site lattice is not
+#: a frame: its cost is the compose, not the interpolation `MAX_FRAME_CELLS`
+#: guards. Measured with `scripts/bench_site.py` (idle workstation, 15.9 GB),
+#: against compose <= 250 ms and transient <= 400 MB:
 #:
-#:     pixels   compose (median)   transient (tracemalloc)   gathers held
-#:      4 M          12 ms               40 MB                  3 MB
-#:      8 M          19 ms               80 MB                  3 MB
-#:     12 M          23 ms              120 MB                  3 MB
-#:     16 M          29 ms              160 MB                  3 MB
-#:     24 M          39 ms              240 MB                  3 MB
+#: `SITE_MAX_PIXELS` bounds the lattice itself, the 10 B a pixel the compose
+#: accumulates. `--lattice-scale`: ten 20 m grids spaced apart, kriging, no
+#: smoothing, 0.25 m cell, so only ~0.64 M pixels are covered by grids:
 #:
-#: Every size meets compose <= 250 ms and transient <= 400 MB, so the limit
-#: is the 16 M cap. Gathers scale with the grids' area, not the lattice, and
-#: are counted in `SiteEngine.held_bytes`.
+#:     lattice   compose (median)   transient
+#:      4 M          12 ms            40 MB
+#:      8 M          19 ms            80 MB
+#:     12 M          23 ms           120 MB
+#:     16 M          29 ms           160 MB
+#:     24 M          39 ms           240 MB
+#:
+#: All meet the criterion, so the limit is the 16 M cap.
 SITE_MAX_PIXELS = 16_000_000
+
+#: `SITE_MAX_COVERED_PIXELS` bounds the grids' windows summed at the drawn
+#: pitch: the compose samples each covered pixel (about 46 ns rotated) and the
+#: gathers hold about 52 B of taps for it, so a dense site at a fine cell
+#: costs far more than the same lattice mostly empty. `--dense`: two grids at
+#: 30 degrees, 0.05 m cell, filling the lattice:
+#:
+#:     covered   compose (median)   transient   gathers held
+#:      2 M          81 ms            69 MB        104 MB
+#:      4 M         167 ms           138 MB        208 MB
+#:      5 M        ~240 ms           173 MB        260 MB
+#:      6 M       241-283 ms         207 MB        312 MB
+#:      8 M         353 ms           277 MB        416 MB
+#:
+#: 6 M passed once and failed twice on the 250 ms bar (timing noise at the
+#: edge), so the limit is 5 M. The gathers are counted in
+#: `SiteEngine.held_bytes`.
+SITE_MAX_COVERED_PIXELS = 5_000_000
 
 
 def name_list(names: Sequence[str]) -> str:
@@ -384,8 +403,8 @@ def preview_note(
 ) -> str:
     """Why the site is drawn coarser than its grids."""
     note = (
-        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the area around "
-        f"them ({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail."
+        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
+        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail."
     )
     if stretching:
         note += f" Leaving out {name_list(stretching)} would shrink it most."
@@ -397,7 +416,7 @@ def site_export_refusal(
 ) -> str:
     """Why the site cannot be written at full detail."""
     text = (
-        f"The site can't be exported at full detail yet: the area around the included grids "
+        f"The site can't be exported at full detail yet: the site "
         f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
         "Choose a coarser cell"
     )

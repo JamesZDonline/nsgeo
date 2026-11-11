@@ -112,21 +112,46 @@ class SiteLattice:
         )
 
 
+def covered_pixels(extents: Sequence[tuple[float, float, float, float]], pixel: float) -> int:
+    """About how many lattice pixels the grids' windows hold together at `pixel`.
+
+    The sum over extents of `ceil(width / pixel) * ceil(height / pixel)`: what
+    the gathers hold taps for, and what a compose samples.
+    """
+    total = 0
+    for xmin, ymin, xmax, ymax in extents:
+        total += max(1, math.ceil((xmax - xmin) / pixel)) * max(1, math.ceil((ymax - ymin) / pixel))
+    return total
+
+
 def fitting_lattice(
     extents: Sequence[tuple[float, float, float, float]],
     cell: float,
     crs: str,
     max_pixels: int,
+    max_covered: int,
 ) -> SiteLattice:
     """`SiteLattice.covering` at `cell * 2**k`, for the smallest `k >= 0` that fits.
 
-    Doubling keeps each coarser pixel a whole number of cells, so the
-    preview's lattice nests on the full one.
+    Fits means the lattice has at most `max_pixels` pixels (what the compose
+    accumulates) and the grids' windows hold at most `max_covered` together
+    (`covered_pixels`: what the gathers and the sampling cost). Doubling
+    keeps each coarser pixel a whole number of cells, so the preview's
+    lattice nests on the full one.
+
+    Raises ValueError for limits no pitch can meet: a lattice anchored on
+    multiples of its pixel is up to 2 x 2 pixels even for a point, and each
+    extent covers at least one.
     """
+    if max_pixels < 4 or max_covered < len(extents):
+        raise ValueError(
+            f"limits that can never fit: max_pixels={max_pixels}, "
+            f"max_covered={max_covered} for {len(extents)} extents"
+        )
     pixel = cell
     while True:
         lattice = SiteLattice.covering(extents, pixel, crs)
-        if lattice.n_pixels <= max_pixels:
+        if lattice.n_pixels <= max_pixels and covered_pixels(extents, pixel) <= max_covered:
             return lattice
         pixel *= 2.0
 

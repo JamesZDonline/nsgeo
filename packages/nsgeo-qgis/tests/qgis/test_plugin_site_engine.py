@@ -1028,6 +1028,7 @@ def far_site(site3, make_site, max_pixels):
     errors: list[str] = []
     site = make_site(session, on_error=errors.append)
     site.max_pixels = max_pixels
+    site.max_covered = 10**9
     site.set_source(site3.source())
     assert site.wait_until_idle(60_000)
     return site, errors
@@ -1053,6 +1054,21 @@ def test_grids_too_far_apart_draw_a_coarser_preview_and_say_why(site3, make_site
     assert drawn.lattice == site.lattice
     assert drawn.array.shape == (site.lattice.height, site.lattice.width)
     assert errors == []
+
+
+def test_covered_pixels_alone_force_the_preview(site3, make_site):
+    """The lattice is small; the grids' windows together are over `max_covered`."""
+    site, _ = prepared(make_site, site3)
+    site.max_pixels = 10**9
+    site.max_covered = 1_000  # three 6 x 6 m grids at 0.25 m hold 3 x 576
+    site.set_resolution(RES)
+    assert site.full_lattice.n_pixels <= site.max_pixels
+    assert site.is_preview
+    assert site.lattice.pixel >= 2 * RES.cell
+    assert site.export_refusal is not None
+    site.max_covered = 10**9
+    site.set_resolution(RES)
+    assert not site.is_preview and site.lattice.pixel == RES.cell
 
 
 def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):

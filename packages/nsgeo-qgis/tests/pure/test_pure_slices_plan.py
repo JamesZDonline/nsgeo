@@ -555,7 +555,7 @@ def test_name_list_reads_as_a_sentence():
 
 def test_preview_note_is_exact_copy():
     assert preview_note(0.4, 0.05, 1234.4, 567.6, []) == (
-        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the area around them "
+        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
         "(1234 \u00d7 568 m) is too big to draw at full detail."
     )
     assert preview_note(0.4, 0.05, 1234.4, 567.6, ["C", "D"]).endswith(
@@ -565,7 +565,7 @@ def test_preview_note_is_exact_copy():
 
 def test_site_export_refusal_is_exact_copy():
     assert site_export_refusal(0.05, 1234.4, 567.6, []) == (
-        "The site can't be exported at full detail yet: the area around the included grids "
+        "The site can't be exported at full detail yet: the site "
         "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a coarser cell."
     )
     assert site_export_refusal(0.05, 1234.4, 567.6, ["C"]).endswith(

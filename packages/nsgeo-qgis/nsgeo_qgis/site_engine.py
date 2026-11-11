@@ -112,6 +112,7 @@ from nsgeo.slices import (
     stretching_grids,
     window_on,
 )
+from nsgeo.slices.site import covered_pixels
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -123,6 +124,7 @@ from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
+    SITE_MAX_COVERED_PIXELS,
     SITE_MAX_PIXELS,
     Resolution,
     SiteSource,
@@ -248,6 +250,8 @@ class SiteEngine(QObject):
         self._export_refusal: str | None = None
         #: The most pixels the site is drawn at; past it, a coarser preview.
         self.max_pixels: int = SITE_MAX_PIXELS
+        #: The most pixels the grids' windows hold together at the drawn pitch.
+        self.max_covered: int = SITE_MAX_COVERED_PIXELS
         self._gathers: dict[str, Footprint] = {}
         self._seams: tuple[Seam, ...] | None = None
         #: Each site grid's (registration, line spacing) as of the last
@@ -680,16 +684,17 @@ class SiteEngine(QObject):
             return
         site_crs = self._site_crs()
         extents = self._grid_extents(ready, res.cell)
-        full = SiteLattice.covering(list(extents.values()), res.cell, site_crs)
+        boxes = list(extents.values())
+        full = SiteLattice.covering(boxes, res.cell, site_crs)
         lattice = full
-        if full.n_pixels > self.max_pixels:
-            lattice = fitting_lattice(list(extents.values()), res.cell, site_crs, self.max_pixels)
+        note: str | None = None
+        refusal: str | None = None
+        if full.n_pixels > self.max_pixels or covered_pixels(boxes, res.cell) > self.max_covered:
+            lattice = fitting_lattice(boxes, res.cell, site_crs, self.max_pixels, self.max_covered)
             width_m, height_m = full.width * full.pixel, full.height * full.pixel
             stretching = stretching_grids(extents, res.cell, site_crs)
-            self._preview_note = preview_note(
-                lattice.pixel, res.cell, width_m, height_m, stretching
-            )
-            self._export_refusal = site_export_refusal(res.cell, width_m, height_m, stretching)
+            note = preview_note(lattice.pixel, res.cell, width_m, height_m, stretching)
+            refusal = site_export_refusal(res.cell, width_m, height_m, stretching)
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
             [b for b in bounds.values() if b is not None], res.t0_ns, res.t1_ns, res.dz_ns
@@ -705,9 +710,12 @@ class SiteEngine(QObject):
                 self._apply_resolution(
                     grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
                 )
+        # Together, last: a raise above never leaves a preview with no lattice.
         self._site_z = site_z
         self._lattice = lattice
         self._full_lattice = full
+        self._preview_note = note
+        self._export_refusal = refusal
 
     def _apply_resolution(self, grid_id: str, want: Resolution | None) -> None:
         """Give an engine its resolution, unless it is already binned at exactly it.
@@ -1269,7 +1277,8 @@ class SiteEngine(QObject):
         """What the site holds in memory, as M11's `format_status` counts it.
 
         The prepared lines, plus a cube only where an engine keeps one
-        resident, plus the interpolation weights each engine has built.
+        resident, plus the interpolation weights each engine has built, plus
+        the taps of the site gathers (about 52 B a covered pixel).
         Counted from the weights themselves, not the estimate's
         `weights_bytes`: that is a worst case at the chosen cell, and the
         weights held are what the status line should name. Still held after

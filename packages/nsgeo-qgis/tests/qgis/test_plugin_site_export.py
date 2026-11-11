@@ -427,6 +427,7 @@ def test_a_site_export_stops_before_the_next_band_when_progress_says_no(site3, m
 def test_exporting_a_preview_site_refuses_and_writes_nothing(site3, make_site, tmp_path):
     site = make_site(site3)
     site.max_pixels = 100  # the 0.25 m site is far over it: a preview
+    site.max_covered = 10**9
     site.set_resolution(RES)
     assert site.is_preview
     path = tmp_path / "site.tif"

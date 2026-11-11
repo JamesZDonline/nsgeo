@@ -56,13 +56,13 @@ def test_lattice_is_anchored_on_whole_multiples_of_the_pixel():
 
 
 def test_fitting_lattice_doubles_the_pitch_until_it_fits():
-    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 300)
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 300, 10**9)
     assert lat.pixel == pytest.approx(0.2)  # 0.1 -> 900, 0.2 -> 225
     assert lat.n_pixels <= 300
 
 
 def test_fitting_lattice_keeps_the_cell_when_it_fits():
-    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 900)
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 900, 900)
     assert lat.pixel == 0.1
     assert lat == SiteLattice.covering([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS)
 
@@ -75,6 +75,36 @@ def test_stretching_grids_names_the_outlier_first():
         "D": (200.0, 0.0, 206.0, 6.0),
     }
     assert stretching_grids(ext, 0.5, CRS) == ["D"]
+
+
+def test_fitting_lattice_doubles_for_covered_pixels_alone():
+    """A dense site: the lattice is under max_pixels but the grids' windows are not."""
+    ext = [(0.0, 0.0, 3.0, 3.0), (3.0, 0.0, 6.0, 3.0)]  # 2 x 900 covered at 0.1 m
+    assert SiteLattice.covering(ext, 0.1, CRS).n_pixels <= 2000
+    lat = fitting_lattice(ext, 0.1, CRS, 2000, 1000)
+    assert lat.pixel == pytest.approx(0.2)  # 2 x 225 covered
+    assert fitting_lattice(ext, 0.1, CRS, 2000, 1800).pixel == 0.1
+
+
+def test_fitting_lattice_refuses_limits_that_can_never_fit():
+    ext = [(0.0, 0.0, 3.0, 3.0), (3.0, 0.0, 6.0, 3.0)]
+    with pytest.raises(ValueError, match="never fit"):
+        fitting_lattice(ext, 0.1, CRS, 3, 10**9)
+    with pytest.raises(ValueError, match="never fit"):
+        fitting_lattice(ext, 0.1, CRS, 10**9, 1)
+    assert fitting_lattice(ext, 0.1, CRS, 4, 2).n_pixels <= 4  # the smallest limits do fit
+
+
+def test_stretching_grids_orders_by_cut_and_honours_most():
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "FAR": (400.0, 0.0, 406.0, 6.0),
+        "NEAR": (0.0, 60.0, 6.0, 66.0),
+    }
+    # Dropping FAR cuts most, NEAR (off to the north) a little less, A/B under 10%.
+    assert stretching_grids(ext, 0.5, CRS) == ["FAR", "NEAR"]
+    assert stretching_grids(ext, 0.5, CRS, most=1) == ["FAR"]
 
 
 def test_stretching_grids_is_empty_for_one_grid():

@@ -17,6 +17,11 @@ compose (`compose_footprints`), the peak transient memory of one such call
 under `tracemalloc`, and the bytes the site's gathers hold -- the numbers
 behind `SITE_MAX_PIXELS`. The site limit is lifted for it.
 
+`--dense C...` measures the other regime, in core only (no QGIS): two grids
+laid at 30 degrees at a 0.05 m cell, sized so their windows hold about C
+million pixels together (`SITE_MAX_COVERED_PIXELS`): compose median, peak
+transient memory under `tracemalloc`, and the gathers' bytes.
+
 Each site is timed north-up and laid at each further bearing (final review
 I1): the lattice pixel is the cell at any bearing, but a rotated grid samples
 bilinearly, so a tick at 30 degrees costs more than the same site north-up.
@@ -327,6 +332,68 @@ def lattice_row(site, scale: float, tops, tick: dict, plain: list[float]) -> dic
     }
 
 
+def dense_rows(targets_m: list[float]) -> list[dict]:
+    """Compose cost with the grids filling the lattice, at 30 degrees, 0.05 m."""
+    import math
+    import tracemalloc
+
+    from nsgeo.slices import (
+        CubeFrame,
+        SiteLattice,
+        bilinear_taps,
+        compose_footprints,
+        footprint,
+        slice_extent,
+    )
+
+    crs, cell = "EPSG:32616", 0.05
+    rows = []
+    for target in targets_m:
+        side = math.sqrt(target * 1e6 / 3.73)  # two squares, each ~1.87 n^2 once turned
+        n = int(side)
+        first = CubeFrame((500_000.0, 4_000_000.0), 30.0, cell, n, n, crs)
+        x_hat, _ = first.axes()
+        second_origin = tuple(np.asarray(first.origin) + n * cell * x_hat)
+        frames = [first, CubeFrame(second_origin, 30.0, cell, n, n, crs)]
+        extents = [slice_extent(f) for f in frames]
+        lat = SiteLattice.covering(extents, cell, crs)
+        fps = []
+        for f, (x0, y0, x1, y1) in zip(frames, extents):
+            c0 = max(0, math.floor((x0 - lat.x0) / cell) - 1)
+            c1 = min(lat.width, math.ceil((x1 - lat.x0) / cell) + 1)
+            r0 = max(0, math.floor((lat.y1 - y1) / cell) - 1)
+            r1 = min(lat.height, math.ceil((lat.y1 - y0) / cell) + 1)
+            xs = lat.x0 + (np.arange(c0, c1) + 0.5) * cell
+            ys = lat.y1 - (np.arange(r0, r1) + 0.5) * cell
+            gx, gy = np.meshgrid(xs, ys)
+            taps = bilinear_taps(f, np.column_stack([gx.ravel(), gy.ravel()]))
+            fps.append(footprint(taps, r1 - r0, c1 - c0, r0, c0))
+        rng = np.random.default_rng(0)
+        layers = [
+            (fp, rng.normal(size=(f.ny, f.nx)).astype(np.float32)) for fp, f in zip(fps, frames)
+        ]
+        times = []
+        for _ in range(5):
+            t = time.perf_counter()
+            compose_footprints(lat, layers)
+            times.append(ms(time.perf_counter() - t))
+        tracemalloc.start()
+        compose_footprints(lat, layers)
+        peak = tracemalloc.get_traced_memory()[1] / 1e6
+        tracemalloc.stop()
+        rows.append(
+            {
+                "covered": sum(fp.n_pixels for fp in fps),
+                "pixels": lat.n_pixels,
+                "compose_ms": statistics.median(times),
+                "transient_mb": peak,
+                "gathers_mb": sum(fp.taps.nbytes for fp in fps) / 1e6,
+            }
+        )
+        print(f"done: dense {target:g} M", file=sys.stderr, flush=True)
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--samples", type=int, default=128, help="samples per trace (default 128)")
@@ -342,8 +409,25 @@ def main() -> int:
         default=None,
         help="grid step multipliers: measure compose time and memory at each lattice size",
     )
+    ap.add_argument(
+        "--dense",
+        type=float,
+        nargs="+",
+        default=None,
+        help="covered pixels (millions): compose cost with grids filling the lattice at 30 deg",
+    )
     ap.add_argument("--workdir", type=Path, default=None, help="where to write the lines")
     args = ap.parse_args()
+
+    if args.dense:
+        print("| covered (M) | lattice (M) | compose (ms) | transient (MB) | gathers (MB) |")
+        print("|---|---|---|---|---|")
+        for r in dense_rows(args.dense):
+            print(
+                f"| {r['covered'] / 1e6:.1f} | {r['pixels'] / 1e6:.1f} | {r['compose_ms']:.0f} "
+                f"| {r['transient_mb']:.0f} | {r['gathers_mb']:.0f} |"
+            )
+        return 0
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from qgis.core import QgsApplication
