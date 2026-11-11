@@ -5,6 +5,7 @@ the slices engine; the responsiveness test uses a real solve."""
 from __future__ import annotations
 
 import gc
+import queue
 import threading
 import time
 import weakref
@@ -317,20 +318,40 @@ def _released(ref):
     return ref() is None
 
 
+class GatedPut:
+    """The worker's queue with a `put` held until `gate` opens: a stop that
+    lands after the worker's own stop check and before its put. The worker
+    skips the put for a stop it sees, so only this race leaves a late
+    entry, and the poll and `shutdown` must still let go of it."""
+
+    def __init__(self, hold=lambda item: True):
+        self.queue = queue.SimpleQueue()
+        self.gate = threading.Event()
+        self.entered = threading.Event()
+        self.hold = hold
+
+    def put(self, item):
+        if self.hold(item):
+            self.entered.set()
+            self.gate.wait(5)
+        self.queue.put(item)
+
+    def get_nowait(self):
+        return self.queue.get_nowait()
+
+
 def test_a_job_that_finishes_as_it_is_cancelled_is_let_go(refiner):
     """It can never land, and a real job holds its values and plan (about
     220 MB at the frame cap): it must not wait in the queue for the next
     list."""
-    gate = threading.Event()
-    job = Job("late", gate=gate)  # ignores should_stop: it finishes, not raises
-    ref, returned = weakref.ref(job), job.returned
-    refiner.start([job], lambda j: None, lambda m: None)
-    assert job.started.wait(2)
-    del job
+    refiner._done = gated = GatedPut()
+    held = [Job("late")]
+    ref = weakref.ref(held[0])
+    refiner.start([held.pop()], lambda j: None, lambda m: None)
+    assert gated.entered.wait(2)  # past its stop check
     refiner.cancel()
-    _pump_for(0.1)  # the poll drains while the job still runs
-    gate.set()
-    assert returned.wait(2)
+    _pump_for(0.1)  # the poll ticks while the put is held
+    gated.gate.set()
     _pump_until(lambda: _released(ref), 2)
     assert not refiner.busy
 
@@ -339,10 +360,12 @@ def test_a_list_started_from_a_landing_still_lets_go_of_its_late_job(refiner):
     """The poll's "worker idle" is read for one list; a landing that starts
     another in the same drain must not let that reading stop the poll
     while the new list still runs (#120 review)."""
-    gate = threading.Event()
+    held = [Job("late")]
+    ref = weakref.ref(held[0])
+    refiner._done = gated = GatedPut(
+        hold=lambda item: item[1] is not None and item[1].name == "late"
+    )
     first, quick = Job("first"), Job("quick")
-    held = [Job("late", gate=gate)]  # ignores should_stop: it finishes, not raises
-    ref, returned = weakref.ref(held[0]), held[0].returned
     landed = []
 
     def on_quick(job):
@@ -351,15 +374,14 @@ def test_a_list_started_from_a_landing_still_lets_go_of_its_late_job(refiner):
 
     def on_first(job):
         refiner.start([quick, held.pop()], on_quick, lambda m: None)
-        quick.returned.wait(2)
-        time.sleep(0.05)  # `quick` is queued, so it lands in this same drain
+        gated.entered.wait(2)  # `quick` is queued, so it lands in this same drain
 
     refiner.start([first], on_first, lambda m: None)
+    time.sleep(0.05)  # `first`'s list has ended before the first drain
     _pump_until(lambda: landed)
     assert landed == [quick]
     _pump_for(0.1)
-    gate.set()
-    assert returned.wait(2)
+    gated.gate.set()
     _pump_until(lambda: _released(ref), 2)
     assert not refiner.busy
 
@@ -386,11 +408,12 @@ def test_a_job_stopped_with_its_panel_deleted_is_let_go(qgis_app):
 
 
 def test_shutdown_lets_go_of_what_the_stopped_list_queued(refiner):
-    looping = Job("loop", loop=True)  # stops when asked by returning, not raising
-    ref = weakref.ref(looping)
-    refiner.start([looping], lambda j: None, lambda m: None)
-    assert looping.started.wait(2)
-    del looping
+    refiner._done = gated = GatedPut()
+    held = [Job("late")]
+    ref = weakref.ref(held[0])
+    refiner.start([held.pop()], lambda j: None, lambda m: None)
+    assert gated.entered.wait(2)  # past its stop check
+    threading.Timer(0.05, gated.gate.set).start()  # shutdown joins the worker
     refiner.shutdown()
     assert _released(ref)
 
