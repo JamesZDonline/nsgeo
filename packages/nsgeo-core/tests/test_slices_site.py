@@ -99,8 +99,8 @@ def test_stretching_grids_orders_by_cut_and_honours_most():
     ext = {
         "A": (0.0, 0.0, 6.0, 6.0),
         "B": (6.0, 0.0, 12.0, 6.0),
-        "FAR": (400.0, 0.0, 406.0, 6.0),
         "NEAR": (0.0, 60.0, 6.0, 66.0),
+        "FAR": (400.0, 0.0, 406.0, 6.0),
     }
     # Dropping FAR cuts most, NEAR (off to the north) a little less, A/B under 10%.
     assert stretching_grids(ext, 0.5, CRS) == ["FAR", "NEAR"]

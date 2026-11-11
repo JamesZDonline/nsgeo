@@ -386,7 +386,12 @@ SITE_MAX_PIXELS = 16_000_000
 #:
 #: 6 M passed once and failed twice on the 250 ms bar (timing noise at the
 #: edge), so the limit is 5 M. The gathers are counted in
-#: `SiteEngine.held_bytes`.
+#: `SiteEngine.held_bytes`. Both limits at once (a 16 M lattice with 5 M
+#: covered) composed in 244-245 ms with 225 MB transient: inside both bars,
+#: with about 5 ms of headroom. The 250 ms bar is for value ticks; coverage
+#: ticks (`counts=True`) run about 1.8x slower (~420 ms at the 5 M covered
+#: limit) and are accepted, since coverage is a check view, not the one
+#: scrubbed.
 SITE_MAX_COVERED_PIXELS = 5_000_000
 
 

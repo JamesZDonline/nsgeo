@@ -117,7 +117,7 @@ several grids' slices into one site view.
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
-| `fitting_lattice` | The site lattice at the cell, doubled until it fits a pixel limit. |
+| `fitting_lattice` | The site lattice at the cell, doubled until it fits both a lattice-pixel limit and a covered-pixel limit. |
 | `footprint` | The tight window around the inside points of a block of taps. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
