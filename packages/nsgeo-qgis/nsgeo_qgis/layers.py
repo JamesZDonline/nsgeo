@@ -34,7 +34,7 @@ import numpy as np
 from nsgeo.geometry import Grid
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Line
-from nsgeo.processing.base import retime_ns
+from nsgeo.processing import retime_ns
 from qgis.core import (
     NULL,
     Qgis,

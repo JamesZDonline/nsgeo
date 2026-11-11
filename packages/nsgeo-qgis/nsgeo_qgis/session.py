@@ -25,8 +25,7 @@ from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.model import Line, Profile, Site
-from nsgeo.processing import Radargram, StepStack
-from nsgeo.processing.base import retime_ns
+from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity

@@ -54,8 +54,7 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
-from nsgeo.processing import build_step
-from nsgeo.processing.base import retime_ns
+from nsgeo.processing import build_step, retime_ns
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings

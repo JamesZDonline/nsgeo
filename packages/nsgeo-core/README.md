@@ -69,15 +69,21 @@ User-ordered processing steps. Nothing runs automatically.
 | `STEP_GROUPS` | The groups a step menu is laid out in, in processing order. |
 | `Step` | A pure function of (parameters, radargram). |
 | `StepStack` | An ordered list of steps applied to a radargram. |
+| `TIME_BASE_RADAR` | `"radar"`: times are on the radar's own clock. |
+| `TIME_BASE_TIME_ZERO` | `"time_zero"`: times are measured from each line's first break. |
 | `available_steps` | The names of the registered steps. |
 | `build_step` | The one way to construct a step; validates its parameters. |
 | `default_params` | Constructor parameters that have a real default. |
+| `first_break_ns` | The radar-clock time of a radargram's first break, by the Time zero step's own rule. |
 | `get_step` | Look a step class up by name. |
 | `grouped_steps` | The registered steps by group, in menu order. |
 | `is_unipolar` | Whether a step's output has no negative side. |
 | `nyquist_mhz` | Nyquist frequency in MHz for a sample interval in ns. |
 | `required_params` | Parameters that must be collected before a step can be built. |
+| `retime_ns` | A time on one clock, read on another: `t + (from_zero_ns - to_zero_ns)`. The one conversion rule between clocks. |
+| `sets_time_zero` | Whether a list of step dicts has an enabled Time zero step. |
 | `step_title` | The human title a front end shows for a step. |
+| `time_base_of` | `TIME_BASE_TIME_ZERO` when a list of step dicts sets a time zero, else `TIME_BASE_RADAR`. |
 
 ### `nsgeo.slices`
 
