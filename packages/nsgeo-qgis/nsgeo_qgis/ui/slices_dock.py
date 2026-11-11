@@ -1065,9 +1065,12 @@ class SlicesDock(QgsDockWidget):
 
         The one place the before-preparing count lives: the included label
         and, until the engine holds lines, the residency checkbox both read
-        it. They agree whenever the engine holds no lines. Between a grid
-        change and `_on_prepared` the count is made against the frame on
-        screen, which is the old grid's until preparation finishes (#113)."""
+        it. Each refreshes on its own triggers, though: `_apply_resolution`
+        refreshes only the checkbox, so after a cell-size change the label
+        can show the old size's figure until the next inclusion change or
+        `_on_prepared`. Between a grid change and `_on_prepared` the count
+        is made against the frame on screen, which is the old grid's until
+        preparation finishes (#113)."""
         samples = 0
         coords: list[np.ndarray] = []
         frame = self.engine.frame
@@ -1128,9 +1131,11 @@ class SlicesDock(QgsDockWidget):
         turning it on actually adds -- the prepared lines are already held
         in memory in EITHER mode, so the whole-volume checkbox's own cost
         is the cube alone, not the total. Called from `_update_included_
-        label` (every place that estimate could have changed) and from
+        label` (every place that estimate could have changed), from
         `_apply_resolution` (a resolution change moves `frame`/`z`, and so
-        `engine.estimate`, without necessarily touching `_included`)."""
+        `engine.estimate`, without necessarily touching `_included`), from
+        `prepare` (`set_source` empties the engine's lines, so the figure
+        falls back to the before-preparing one) and once at construction."""
         # Until the engine holds lines its own estimate counts no covered
         # cells; the before-preparing figure the included label shows is the
         # honest one then (#113). `before` saves a second count when the
