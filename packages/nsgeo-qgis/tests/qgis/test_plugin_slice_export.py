@@ -618,6 +618,21 @@ def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path
             assert set(np.unique(band[np.isfinite(band)])) == {1.0}
         finally:
             ds.Close()
+        # A varying field with negative values: the writer blends it (counts
+        # off for a data export) exactly as `to_north_up` does.
+        rng = np.random.default_rng(11)
+        field = rng.normal(size=(frame.ny, frame.nx)).astype(np.float32)
+        engine.slice_at = lambda _window: (field, everywhere)  # type: ignore[method-assign]
+        path = tmp_path / "field.tif"
+        export_slices(engine, path, 10, 5, None, NONE)
+        ds = gdal.Open(str(path))
+        try:
+            written = ds.GetRasterBand(1).ReadAsArray()
+        finally:
+            ds.Close()
+        expected, _ = to_north_up(field, frame)
+        np.testing.assert_allclose(written, expected, equal_nan=True)
+        assert (written[np.isfinite(written)] < 0).any()
         for index in range(frame.ny * frame.nx):
             probe = np.zeros(frame.ny * frame.nx, dtype=np.float32)
             probe[index] = 1.0

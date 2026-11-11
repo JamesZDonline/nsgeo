@@ -131,15 +131,21 @@ def sample(values: np.ndarray, taps: Taps) -> np.ndarray:
         # inf in a nearest cell is blank, as on the slow path.
         nearest_value[blank] = np.nan
         return nearest_value
-    # One gather; blank neighbours are dropped by weighting.
+    # One gather; blank neighbours are dropped by weighting. The blend is of
+    # offsets from the nearest value, added back at the end: in float32 a
+    # plain num/den is an ulp off, so a constant field would not resample to
+    # itself and a plateau at the maximum could leave the input's range.
+    base = np.where(blank, np.float32(0.0), nearest_value)
     v = flat[taps.ids]
     finite = np.isfinite(v)
+    v -= base
     v[~finite] = 0.0
     num = np.einsum("kn,kn->n", taps.weights, v)
     den = np.einsum("kn,kn->n", taps.weights, finite.astype(np.float32))
     blank |= ~(den > 0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
         np.divide(num, den, out=num)
+    num += base
     num[blank] = np.nan
     return num
 

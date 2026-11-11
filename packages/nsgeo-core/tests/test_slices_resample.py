@@ -111,3 +111,22 @@ def test_an_infinite_nearest_cell_is_blank_on_the_exact_path():
     values[2, 3] = np.inf
     got = sample(values, bilinear_taps(f, centres(f, f.cell)))
     assert not np.isinf(got).any() and np.isnan(got).sum() == 1
+
+
+@pytest.mark.parametrize("c", [7.3, 0.1, 1234.567])
+@pytest.mark.parametrize("azimuth", [10.497, 30.0, 45.0])
+def test_a_constant_field_resamples_to_itself_exactly(c, azimuth):
+    f = frame(azimuth=azimuth, nx=40, ny=25)
+    got = sample(np.full((f.ny, f.nx), c), bilinear_taps(f, centres(f, f.cell)))
+    finite = got[np.isfinite(got)]
+    assert finite.size > 0
+    np.testing.assert_array_equal(finite, np.float32(c))
+
+
+def test_a_plateau_at_the_maximum_never_blends_above_it():
+    f = frame(azimuth=30.0, nx=40, ny=25)
+    values = np.random.default_rng(5).random((f.ny, f.nx))
+    values[5:15, 8:30] = 0.9  # a plateau above everything else
+    values = values.astype(np.float32)
+    got = sample(values, bilinear_taps(f, centres(f, f.cell)))
+    assert np.nanmax(got) <= values.max() and np.nanmin(got) >= values.min()

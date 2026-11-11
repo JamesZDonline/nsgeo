@@ -496,3 +496,30 @@ def test_a_user_rename_survives_site_ticks_but_a_scope_switch_renames(mapped):
     assert sl.layer.name() == LAYER_NAME, "leaving the site renames"
     _site_tick(sl, 5.0)
     assert sl.layer.name() == SITE_LAYER_NAME, "entering the site renames"
+
+
+def _drawn(sl):
+    provider = sl.layer.dataProvider()
+    block = provider.block(1, sl.layer.extent(), sl.layer.width(), sl.layer.height())
+    return np.array(
+        [[block.value(r, c) for c in range(block.width())] for r in range(block.height())]
+    )
+
+
+def test_a_rotated_coverage_view_draws_only_whole_counts(mapped):
+    """`counts=True` takes the smallest corner count, never a blend; the
+    same input drawn with counts=False is blended, which is what this pins
+    against (a hard-coded False would blend the counts)."""
+    sl, _, _, _ = mapped
+    frame = CubeFrame(origin=(500.0, 700.0), azimuth=30.0, cell=0.5, nx=16, ny=12, crs="EPSG:32616")
+    counts = np.random.default_rng(2).integers(1, 5, size=(frame.ny, frame.nx)).astype(np.float32)
+    kwargs = {"limit": 5.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update(counts, frame, counts=True, **kwargs)
+    whole = _drawn(sl)
+    finite = whole[np.isfinite(whole) & (whole > -1e30)]
+    assert finite.size > 0
+    np.testing.assert_array_equal(finite, np.round(finite))
+    sl.update(counts, frame, counts=False, **kwargs)
+    blended = _drawn(sl)
+    blended = blended[np.isfinite(blended) & (blended > -1e30)]
+    assert (blended != np.round(blended)).any()

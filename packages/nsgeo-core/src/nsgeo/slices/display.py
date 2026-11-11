@@ -237,9 +237,10 @@ def to_north_up(
     once per frame (`_north_up_plan`) and each call after the first is one
     sample. Solving it every call made a slider tick on a rotated frame 4-5 x
     dearer. Ticks on a 50 x 40 m frame at 0.05 m (1000 x 800 cells), plan
-    cached, median of 20: 5.4 ms at azimuth 0 and 30 ms at 10.497 degrees
-    (the first sampler took 139 ms there; before bilinear: 2 ms at 0.2 m and
-    8 ms at 0.1 m, nearest cell at half the cell). The first call on a frame
+    cached, median of 20: 4.6 ms at azimuth 0 and 36 ms at 10.497 degrees
+    (the first sampler took 139 ms there, and a 30 ms one was not exact on
+    constants; before bilinear: 2 ms at 0.2 m and 8 ms at 0.1 m, nearest cell
+    at half the cell). The first call on a frame
     still costs the planning, about 0.4 s here.
     """
     values = np.asarray(values)
