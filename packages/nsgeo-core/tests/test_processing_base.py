@@ -302,3 +302,12 @@ def test_every_other_step_passes_the_clock_through(name, params):
     out = build_step(name, **params).apply(rg)
     assert out.zero_ns == -1.25
     assert out.zero_set is True
+
+
+def test_radar_clock_conversions_are_asymmetric_and_round_trip():
+    rg = Radargram(data=np.zeros((4, 2)), dt_ns=0.2, t0_ns=0.0, zero_ns=-1.25)
+    assert rg.to_radar_ns(1.0) == pytest.approx(-0.25)
+    assert rg.from_radar_ns(-0.25) == pytest.approx(1.0)
+    t = np.array([0.0, 1.0, 2.5])
+    np.testing.assert_allclose(rg.from_radar_ns(rg.to_radar_ns(t)), t)
+    np.testing.assert_allclose(rg.to_radar_ns(t), t - 1.25)

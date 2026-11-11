@@ -243,14 +243,12 @@ def test_refuses_non_finite_samples():
 
 
 @pytest.mark.parametrize("t0_ns", [-0.6929, -0.4764, +0.8228])
-def test_accepts_what_time_zero_actually_leaves(t0_ns):
-    """What the old crop-only `time_zero` left as `t0_ns` on the real lines
-    (now `time_zero` leaves exactly 0, so these are records that kept a small
-    residual), at its three
-    threshold settings: 0.15 -> -0.6929, 0.20 (the default) -> -0.4764,
-    0.40 -> +0.8228. All three must migrate. An earlier draft of the design
-    set the tolerance at 0.02 m of implied depth error and refused two of
-    them outright, and refused the default above about 0.084 m/ns."""
+def test_accepts_a_small_start_offset(t0_ns):
+    """Small header start offsets (-0.69 to +0.82 ns) must migrate. A Time zero
+    step leaves t0 exactly 0; these are records with no such step whose offset
+    is small. An earlier draft of the design set the tolerance at 0.02 m of
+    implied depth error and refused two of them, and the default above about
+    0.084 m/ns."""
     out = build_step("migrate_fk", velocity_m_ns=V).apply(_plain(t0_ns=t0_ns))
     assert out.t0_ns == t0_ns
 

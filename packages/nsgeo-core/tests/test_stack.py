@@ -374,6 +374,17 @@ def test_zero_ns_runs_only_up_to_the_last_enabled_time_zero(monkeypatch):
     assert st.zero_ns() == pytest.approx(src.t0_ns + 5 * src.dt_ns)
 
 
+def test_zero_ns_is_the_last_enabled_time_zeros():
+    st = stack_of(
+        ("time_zero", {"mode": "sample", "sample": 5}),
+        ("time_zero", {"mode": "sample", "sample": 3}),
+    )
+    st.source = st.source.replace(t0_ns=-2.0, dt_ns=0.5)
+    src = st.source
+    assert st.zero_ns() == st.result().zero_ns
+    assert st.zero_ns() == pytest.approx(src.t0_ns + 8 * src.dt_ns)
+
+
 def test_zero_ns_is_the_sources_without_an_enabled_time_zero():
     st = stack_of(("time_zero", {"mode": "sample", "sample": 5}))
     st.set_enabled(0, False)

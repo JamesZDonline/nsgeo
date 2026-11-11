@@ -13,7 +13,6 @@ from __future__ import annotations
 from typing import Any
 
 from nsgeo.processing.base import Radargram, build_step, is_unipolar
-from nsgeo.processing.timezero import sets_time_zero as _entries_set_time_zero
 
 _BYPASS_MEMO_SIZE = 2
 
@@ -130,9 +129,7 @@ class StepStack:
 
     def sets_time_zero(self) -> bool:
         """Whether an enabled `time_zero` is in the stack."""
-        return _entries_set_time_zero(
-            {"step": step.name, "enabled": on} for step, on in self._entries
-        )
+        return bool(self._time_zero_indices())
 
     def zero_ns(self) -> float:
         """The radar-clock time `result()` calls 0.

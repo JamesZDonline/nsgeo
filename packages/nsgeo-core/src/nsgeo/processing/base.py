@@ -58,11 +58,11 @@ class Radargram:
 
     def to_radar_ns(self, t: Any) -> Any:
         """Convert time on this axis to the radar's own clock (float or array)."""
-        return t + self.zero_ns
+        return retime_ns(t, self.zero_ns, 0.0)
 
     def from_radar_ns(self, r: Any) -> Any:
         """Convert radar-clock time to this axis (float or array)."""
-        return r - self.zero_ns
+        return retime_ns(r, 0.0, self.zero_ns)
 
     def replace(self, **changes: Any) -> Radargram:
         return _dc_replace(self, **changes)

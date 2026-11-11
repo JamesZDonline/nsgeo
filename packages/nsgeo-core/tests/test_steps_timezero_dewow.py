@@ -58,7 +58,7 @@ def test_time_zero_at_sample_zero_still_sets_the_clock():
 
 
 def test_every_kept_row_keeps_its_radar_time():
-    rg = make(n_samples=100, dt_ns=0.25, t0_ns=-3.0).replace(zero_ns=1.5)
+    rg = make(n_samples=100, dt_ns=0.25, t0_ns=-2.0).replace(zero_ns=1.5)
     out = build_step("time_zero", mode="sample", sample=12).apply(rg)
     np.testing.assert_allclose(out.to_radar_ns(out.times_ns()), rg.to_radar_ns(rg.times_ns())[12:])
 

@@ -102,7 +102,6 @@ class TimeZero:
             raise ValueError(
                 f"time_zero at sample {k} would leave no samples (radargram has {rg.n_samples})"
             )
-        k = max(k, 0)
         return rg.replace(
             data=rg.data[k:, :].copy(),
             t0_ns=0.0,
