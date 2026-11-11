@@ -415,6 +415,23 @@ def old_cube_note(shift_ns: float) -> str:
     )
 
 
+def mixed_clock_note(radar_grids: Sequence[str]) -> str:
+    """The warning for a site whose grids are on different clocks, naming the
+    grids with no Time zero step; empty when there are none."""
+    grids = list(radar_grids)
+    if not grids:
+        return ""
+    if len(grids) == 1:
+        return (
+            f"Grid {grids[0]} has no Time zero step, so its times are from the radar's own "
+            "zero and will not line up with the other grids."
+        )
+    return (
+        f"Grids {', '.join(grids)} have no Time zero step, so their times are from the "
+        "radar's own zero and will not line up with the other grids."
+    )
+
+
 def name_list(names: Sequence[str]) -> str:
     """`A`, `A and B`, `A, B and C`."""
     names = list(names)

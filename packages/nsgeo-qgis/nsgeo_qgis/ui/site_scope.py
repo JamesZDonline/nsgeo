@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import TIME_BASE_RADAR, time_base_of
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     SliceWindow,
@@ -56,6 +57,7 @@ from nsgeo_qgis.slices_plan import (
     SliceFinish,
     SourceChoice,
     default_cell,
+    mixed_clock_note,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP, busy_cursor
@@ -175,6 +177,14 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
             )
         )
     return SiteSource(transform=transform, grids=tuple(grids))
+
+
+def grid_time_bases(session: Any, source: SiteSource) -> dict[str, str]:
+    """Each grid's clock, from its chosen preset's steps (#97)."""
+    return {
+        choice.grid_id: time_base_of(session.site.presets.get(choice.preset, []))
+        for choice in source.grids
+    }
 
 
 def state_text(site_engine: Any, grid_id: str) -> str:
@@ -1027,6 +1037,14 @@ class SiteScope:
             hint = f"{text} {engine.export_refusal or ''}".strip()
         elif not drawn and self.problem:
             text = hint = f"Not drawn: {self.problem}"
+        source = self.source_sent or self.source()
+        if source is not None:
+            bases = grid_time_bases(self.session, source)
+            radar = [g for g, base in bases.items() if base == TIME_BASE_RADAR]
+            if radar and len(radar) < len(bases):
+                mixed = mixed_clock_note(radar)
+                text = f"{text} {mixed}".strip()
+                hint = f"{hint} {mixed}".strip()
         note.set_hint(hint, whole=True)
         note.setText(text)
 

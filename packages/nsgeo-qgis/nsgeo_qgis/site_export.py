@@ -12,7 +12,9 @@ Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
 `NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_INTERPOLATION` (the method key),
 `NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
 (interpolation spec §8; the coverage companion carries none of the four),
-`NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
+`NSGEO_SITE_Z_UNIT` (always `ns`), `NSGEO_SITE_TIME_BASE` (`time_zero`, `radar` or
+`mixed`: the clock the grids' times are on, #97; each `SiteGridRecord` carries its own
+`time_base`) and `NSGEO_SITE_GRIDS` (compact JSON list of
 `SiteGridRecord`s), and `NSGEO_SITE_LEFT_OUT` (Ruling F-2: a compact JSON object of
 grid id to `SiteEngine.grid_state`, such as `"no lines"` or `"failed: ..."`, for
 each included grid the file does not hold; present only when there is one). Band
@@ -36,6 +38,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, time_base_of
 from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
@@ -67,6 +70,8 @@ class SiteGridRecord:
     line_spacing_m: float
     azimuth_deg: float
     crs: str
+    #: `time_zero` or `radar`: the clock this grid's times are on (#97).
+    time_base: str
 
 
 @dataclass(frozen=True)
@@ -154,6 +159,7 @@ def plan_site_export(
                 line_spacing_m=float(grid.default_spacing),
                 azimuth_deg=float(grid.azimuth),
                 crs=grid.crs,
+                time_base=time_base_of(engine.provenance().steps),
             )
         )
     if cell is None:
@@ -195,6 +201,16 @@ class SiteWriter(Protocol):
     ) -> None: ...
 
 
+def site_time_base(grids: Iterable[SiteGridRecord]) -> str:
+    """`time_zero` or `radar` when every grid is on that clock, else `mixed`."""
+    bases = {g.time_base for g in grids}
+    if bases == {TIME_BASE_TIME_ZERO}:
+        return TIME_BASE_TIME_ZERO
+    if bases == {TIME_BASE_RADAR}:
+        return TIME_BASE_RADAR
+    return "mixed"
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, separators=_SEPARATORS)
 
@@ -232,6 +248,7 @@ class GeoTiffSiteWriter:
                         "NSGEO_SITE_CELL_M": str(plan.cell_m),
                         "NSGEO_SITE_PIXEL_M": str(lattice.pixel),
                         "NSGEO_SITE_Z_UNIT": "ns",
+                        "NSGEO_SITE_TIME_BASE": site_time_base(plan.grids),
                         "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
                     }.items():
                         dataset.SetMetadataItem(key, value)

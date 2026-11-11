@@ -40,6 +40,7 @@ from nsgeo_qgis.slices_plan import (
     default_cell,
     format_bytes,
     limit_windows,
+    mixed_clock_note,
 )
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
@@ -3496,3 +3497,41 @@ def test_a_line_zero_is_read_from_the_scope_on_screen(plugin):
     assert zero is not None
     assert zero == dock.site_engine.line_zero(key)
     assert dock.site_engine.line_zero("no-such-line.dzt") is None
+
+
+# ---- mixed clocks (#97) ------------------------------------------------------------------
+
+
+def _preset_per_grid(session, **presets) -> None:
+    for grid_id in "ABC":
+        session.remember_slice_source(grid_id, preset=presets.get(grid_id, "p"), lines=None)
+
+
+def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, A="radar", B="radar", C="radar")
+    dock = whole_site(plugin)
+    assert "Time zero" not in dock.site_note.text()
+    assert "Time zero" not in dock.site_note.toolTip()
+
+
+def test_grid_time_bases_reads_each_grids_preset(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, C="radar")
+    source = site_scope_module.site_source(session, "ABC", "amp_square")
+    assert site_scope_module.grid_time_bases(session, source) == {
+        "A": "time_zero",
+        "B": "time_zero",
+        "C": "radar",
+    }

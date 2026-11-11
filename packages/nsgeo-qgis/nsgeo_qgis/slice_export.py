@@ -62,7 +62,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
-from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, time_base_of
 from nsgeo.project import line_key
 from nsgeo.slices import (
     CubeFrame,
@@ -293,6 +293,9 @@ class GeoTiffSliceWriter:
                                     dataset.SetMetadataItem(key, value)
                             dataset.SetMetadataItem(
                                 "NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)
+                            )
+                            dataset.SetMetadataItem(
+                                "NSGEO_TIME_BASE", time_base_of(plan.provenance.steps)
                             )
                         elif array.shape != shape:
                             raise ValueError(
