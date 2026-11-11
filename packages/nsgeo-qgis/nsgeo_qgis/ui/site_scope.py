@@ -121,8 +121,8 @@ def source_keys(
     session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
     """The grid's remembered lines, still on it and in survey order; every line
-    if none is remembered or they have all left the grid (#74: the reading
-    `SlicesDock._restore_remembered_source` gives This grid, so both scopes agree)."""
+    if none is remembered or they have all left the grid (#74, #100: the reading
+    `SlicesDock._read_remembered_lines` gives This grid, so both scopes agree)."""
     every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:
@@ -640,11 +640,15 @@ class SiteScope:
         return left_out_states(self.engine, self.included())
 
     def set_lines(self, grid_id: str, keys: tuple[str, ...]) -> None:
-        """A line choice for one grid: its remembered source; only it re-prepares."""
+        """A line choice for one grid: its remembered source; only it re-prepares.
+        Every line ticked is every line, now and later (#101, the user's
+        ruling): remembered as `lines=None`, as This grid's `set_included` does."""
         preset = default_preset(self.session, grid_id)
         if preset is None:
             raise ValueError("the survey has no preset to prepare the grid with")
-        self.session.remember_slice_source(grid_id, preset=preset, lines=tuple(keys))
+        every = set(grid_keys(self.session, grid_id))
+        lines = None if set(keys) == every else tuple(keys)
+        self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
         self.send_source()
 
     def on_session_changed(self) -> None:
