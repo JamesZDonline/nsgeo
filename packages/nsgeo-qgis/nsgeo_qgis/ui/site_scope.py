@@ -121,8 +121,8 @@ def source_keys(
     session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
     """The grid's remembered lines, still on it and in survey order; every line
-    if none is remembered or they have all left the grid (#74: the reading
-    `SlicesDock._restore_remembered_source` gives This grid, so both scopes agree)."""
+    if none is remembered or they have all left the grid (#74, #100: the reading
+    `SlicesDock._read_remembered_lines` gives This grid, so both scopes agree)."""
     every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:
@@ -252,7 +252,8 @@ def seed_cell(session: Any, included: Iterable[str]) -> tuple[float, float] | No
 
     The floor is the largest of the grids' `smallest_safe_cell`, so no grid's
     own frame can be made undrawable from the arrows (walkthrough W7). The
-    lattice over all of them is checked by `SiteEngine.set_resolution`.
+    lattice over all of them can be larger than is drawn at this cell; the
+    engine then draws a coarser preview and says so (`SiteEngine.preview_note`).
     """
     grids = [session.grid(g) for g in included]
     if not grids:
@@ -390,6 +391,7 @@ def show_scope_widgets(dock: Any) -> None:
     dock.normalisation_panel.setVisible(site)
     dock.velocity_label.setVisible(not site)
     dock.site_depths_label.setVisible(site)
+    dock.site_note.setVisible(site)
     dock.grid_finish.setVisible(not site)
     dock.site_finish.setVisible(site)
     # Residency stays per grid and automatic in the site (spec 4.8).
@@ -472,6 +474,8 @@ class SiteScope:
         self.pending_top: float | None = None
         self.source_sent: SiteSource | None = None
         self.res_applied: Resolution | None = None
+        #: Why the last resolution was refused (None when it was applied).
+        self.problem: str | None = None
         #: The ready grids the last tick was set up for.
         self.ready_handled: tuple[str, ...] | None = None
         #: `(top_ns, thickness_ns)` of the last tick, as `slice_at` took them:
@@ -587,6 +591,7 @@ class SiteScope:
         self.cell_seeded_for = None
         self.source_sent = None
         self.res_applied = None
+        self.problem = None
         self.refine.stretch = None
         self.dock.site_finish.set_value(SliceFinish())
 
@@ -635,11 +640,15 @@ class SiteScope:
         return left_out_states(self.engine, self.included())
 
     def set_lines(self, grid_id: str, keys: tuple[str, ...]) -> None:
-        """A line choice for one grid: its remembered source; only it re-prepares."""
+        """A line choice for one grid: its remembered source; only it re-prepares.
+        Every line ticked is every line, now and later (#101, the user's
+        ruling): remembered as `lines=None`, as This grid's `set_included` does."""
         preset = default_preset(self.session, grid_id)
         if preset is None:
             raise ValueError("the survey has no preset to prepare the grid with")
-        self.session.remember_slice_source(grid_id, preset=preset, lines=tuple(keys))
+        every = set(grid_keys(self.session, grid_id))
+        lines = None if set(keys) == every else tuple(keys)
+        self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
         self.send_source()
 
     def on_session_changed(self) -> None:
@@ -849,7 +858,11 @@ class SiteScope:
                 self.refine.stretch = None
                 self.engine.set_resolution(resolution)
                 self.res_applied = resolution
-        except Exception as exc:  # noqa: BLE001 -- e.g. a lattice too large to draw
+            self.problem = None
+        except Exception as exc:  # noqa: BLE001 -- e.g. a resolution or transform the engine
+            # refuses; a size never is one (a big site is drawn as a preview). The
+            # reason is kept for the panel, where it outlasts the toast.
+            self.problem = str(exc)
             dock.error.emit(str(exc))
         try:
             self.sync_slider()
@@ -929,6 +942,7 @@ class SiteScope:
         dock = self.dock
         try:
             z = self.engine.site_z
+            self.show_note(drawn=self.showing and z is not None and self.engine.lattice is not None)
             if not self.showing or z is None or self.engine.lattice is None:
                 self.refine.stop()  # nothing drawn: no refine is owed
                 self.slice = None
@@ -1000,6 +1014,21 @@ class SiteScope:
             dock.slice_changed.emit()
             dock.window_cleared.emit()
             dock.error.emit(str(exc))
+
+    def show_note(self, *, drawn: bool) -> None:
+        """The site note: the preview note while drawn, the reason when nothing
+        is drawn and one is known, else empty. The tooltip carries the full
+        text, and a preview's export refusal, so it is read before Export."""
+        note = self.dock.site_note
+        engine = self.engine
+        text = hint = ""
+        if drawn and engine.preview_note:
+            text = engine.preview_note
+            hint = f"{text} {engine.export_refusal or ''}".strip()
+        elif not drawn and self.problem:
+            text = hint = f"Not drawn: {self.problem}"
+        note.set_hint(hint, whole=True)
+        note.setText(text)
 
     # ---- minimum curvature's refine ---------------------------------------------------
     def status_text(self) -> str:

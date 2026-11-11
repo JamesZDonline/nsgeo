@@ -87,7 +87,7 @@ from nsgeo_qgis.slice_export import (
     save_cube_npz,
     write_coverage,
 )
-from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer
+from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import LIVE_SOLVE_BUDGET_MS, SliceFinish
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
@@ -828,6 +828,7 @@ class NsgeoPlugin:
                 colormap_name=dock.palette_combo.currentText(),
                 unipolar=dock.display_unipolar(),
                 subtitle=dock.readout.text(),
+                counts=dock.coverage_check.isChecked(),
             )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
@@ -1010,7 +1011,10 @@ class NsgeoPlugin:
             apply_temporal_properties(layer, plan)
             self._add_exported_layer(layer)
 
-            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            parts = [
+                f"exported {len(plan.bands)} bands to {path} "
+                f"({plan.frame.cell:g} m cell, {plan.frame.cell:g} m pixels)"
+            ]
             if dock.coverage_check.isChecked():
                 coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
                 try:
@@ -1134,6 +1138,9 @@ class NsgeoPlugin:
                     "prepare the site's grids before exporting.", Qgis.MessageLevel.Warning
                 )
                 return
+            if site.export_refusal:
+                self.message(site.export_refusal, Qgis.MessageLevel.Warning)
+                return
             default_path = self.session.root / "slices" / "site.tif"
             path, _ = QFileDialog.getSaveFileName(
                 self.iface.mainWindow(),
@@ -1190,7 +1197,10 @@ class NsgeoPlugin:
             apply_site_temporal_properties(layer, plan)
             self._add_exported_layer(layer)
 
-            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            parts = [
+                f"exported {len(plan.bands)} bands to {path} "
+                f"({plan.cell_m:g} m cell, {plan.lattice.pixel:g} m pixels)"
+            ]
             if dock.coverage_check.isChecked():
                 coverage_path = target.with_name(f"{target.stem}_coverage.tif")
                 try:
@@ -1766,6 +1776,7 @@ class NsgeoPlugin:
         """Show an exported GeoTIFF in the site's group, below its tables.
         With the group deleted by the user, on top of the Layers panel
         instead: never in the project with no place in the panel (#68)."""
+        apply_smooth_resampling(layer)
         self.layers.project.addMapLayer(layer, False)
         group = self.layers.group
         if group is not None:

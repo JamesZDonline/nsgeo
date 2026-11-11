@@ -344,6 +344,12 @@ the same features on lines walked the other way, increase it. Set it on every
 line first (select all, type an amount, press **Set**), then adjust single
 lines. Start is not changed: it stays where the line was recorded to begin.
 
+Fit a grid's lines before you destagger them. Fitting removes the squeeze a
+wheel that reads short or long puts on each line, and that squeeze looks like
+stagger itself, so the destagger a grid needs can change sign once its lines
+are fitted. On one real grid, unfitted lines looked best at +0.15 m and the
+same lines fitted at −0.15 m.
+
 ### Step 4: Open a line and use the map
 
 Click a line in **nsgeo Survey**, or select it on the map with QGIS's select tool
@@ -433,7 +439,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    slices, or **None** for the signed mean. These transforms are only offered
    here, not in **Add step**. Preparing starts by itself, and the status line
    reads *prepared* when it is done.
-   **Choose…** sets which of the grid's lines are included.
+   **Choose…** sets which of the grid's lines are included. With every line
+   ticked, lines you import onto the grid later are included too.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
@@ -487,6 +494,12 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    max distance; at a fine cell that can take a few seconds, and it shows a
    wait cursor while it does. Stepping through the slices, the smoothing and
    **dz**, **z0** and **z1** reuse the fill already prepared.
+
+   Each picture blends the cells around every pixel, so it is drawn smooth when
+   you zoom in. **Whole site** can cover more ground than a fine cell allows at
+   full detail. Past a size it draws a preview at a coarser pixel and says so in
+   the panel. An export needs full detail, and refuses to go ahead at a cell
+   that would not fit.
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save
