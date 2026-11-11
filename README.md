@@ -101,6 +101,10 @@ a milestone merges or the plan changes.
 - **Whole site at fine cells** ([#107], [#108]): Whole site never refuses a
   fine cell, and the export can be finer than the preview. Being designed on
   `nsgeo-whole-site-fine-cells`.
+- **Line placement corrections** ([#3], [#47]): stretch or compress a line to
+  fit its grid, and a destagger shift along each line's direction of travel,
+  in Edit lines and at import. Being built on `nsgeo-placement-corrections`;
+  measuring the shift for you comes next.
 
 ### Next, in order
 
