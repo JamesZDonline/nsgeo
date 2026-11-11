@@ -103,11 +103,11 @@ class UnipolarClip:
     For slice display, the shared stretch is a property of (cube,
     thickness), not of the cube alone: `limit()` must be computed over
     slices actually taken at the display thickness, never over
-    `cube.mean` (the raw, per-level array). A window mean has far lower
+    every raw level (the per-level arrays). A window mean has far lower
     variance than the individual levels it averages, so a limit taken
     over raw levels is systematically too high for a multi-level window --
-    on one realistic cube, `UnipolarClip().limit(cube.mean)` returned 2.59
-    where the correct limit for the displayed 10-level slice was 0.87.
+    on one realistic cube, `UnipolarClip().limit` over every raw level
+    returned 2.59 where the correct limit for the displayed 10-level slice was 0.87.
     Because that bias is uniform across depth, it does not look like a
     bug: every slice renders at roughly a third of its intended
     brightness, identically at every depth, so it reads as "the data is

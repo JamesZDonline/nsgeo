@@ -92,22 +92,22 @@ a milestone merges or the plan changes.
 | | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | next release |
 | | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | next release |
 | | Local real-data tests read one survey at a time, so the GPS lines for M17 no longer break them ([#141]) | tests only |
+| | A cube held in memory stores only the cells its lines cross: 3–8× less memory at fine cells, the same slices. Saved cubes use the compact format, and older saved cubes still load ([#113]) | next release |
+| | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
+| | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | next release |
 
 ### In progress
 
-- **Whole site at fine cells.** Being designed: Whole site never refuses a fine
-  cell, every slice blends the cells around each pixel, and the export can be
-  finer than the preview ([#107], [#108]).
+- **Whole site at fine cells: the export** ([#108]): an export finer than the
+  preview, streamed to disk in the background. Designed; the plan is next.
 
 ### Next, in order
 
 The first six items come before M15. Most are things the next milestones
 build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
-1. **Fine cells.** Store only the covered cells in a resident cube ([#113]);
-   never refuse a fine cell in Whole site ([#107]); a faster minimum-curvature
-   solver ([#111]); export finer than the preview ([#108]). M15 and M16 read
-   the cube, so its layout changes first.
+1. **Fine cells.** A memory warning that counts what minimum curvature really
+   holds ([#148]).
 2. **The background solver** (the worker items in [#120]). M15 solves its cuts
    on the same worker.
 3. **This grid and Whole site agree** on a grid's lines and preset ([#100],
@@ -158,6 +158,8 @@ Grouped by area. The order within a group is not a priority.
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
+- **Slices:** minimum curvature accurate beyond float32 where a line stands
+  alone or the max distance is large ([#147]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -187,6 +189,7 @@ Grouped by area. The order within a group is not a priority.
 [#109]: https://github.com/JamesZDonline/nsgeo/issues/109
 [#110]: https://github.com/JamesZDonline/nsgeo/pull/110
 [#111]: https://github.com/JamesZDonline/nsgeo/issues/111
+[#112]: https://github.com/JamesZDonline/nsgeo/issues/112
 [#113]: https://github.com/JamesZDonline/nsgeo/issues/113
 [#114]: https://github.com/JamesZDonline/nsgeo/issues/114
 [#115]: https://github.com/JamesZDonline/nsgeo/issues/115
@@ -209,6 +212,8 @@ Grouped by area. The order within a group is not a priority.
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 [#141]: https://github.com/JamesZDonline/nsgeo/issues/141
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
+[#147]: https://github.com/JamesZDonline/nsgeo/issues/147
+[#148]: https://github.com/JamesZDonline/nsgeo/issues/148
 
 ## Why
 

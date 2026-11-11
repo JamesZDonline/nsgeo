@@ -88,6 +88,7 @@ several grids' slices into one site view.
 |---|---|
 | `BACKGROUND_FRACTION` | The weakest fraction of populated cells that `background_level` averages. |
 | `CoverageError` | A line cannot contribute to the requested cube. |
+| `CubeBlock` | The covered cells of one travel direction, packed: cell ids, means and counts. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
@@ -114,6 +115,7 @@ several grids' slices into one site view.
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
+| `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |

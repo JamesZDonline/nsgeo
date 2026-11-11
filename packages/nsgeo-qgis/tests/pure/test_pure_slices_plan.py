@@ -90,9 +90,10 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     """Spec 7.4's inversion: by 120 lines the cached LINES cost more than
     the cube. A policy that only attacks the cube does nothing for a large
     site, so the two are reported apart."""
-    est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230)
+    est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230, n_covered=18_000)
     assert est.lines_bytes == 10_000_000 * 4
-    assert est.cube_bytes == 230 * 90_000 * 4 + 90_000 * 4
+    assert est.cube_bytes == 230 * 18_000 * 4 + 18_000 * 4 + 18_000 * 8
+    assert est.weights_bytes == 90_000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
 
 
@@ -159,7 +160,11 @@ def test_the_ten_real_lines_still_stream():
     lines = [Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem)) for p in REAL_DZT[:10]]
     n_traces = sum(line.n_traces for line in lines)
     assert 6000 < n_traces < 6700
-    est = estimate_memory(sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230)
+    # n_covered is a deliberate upper bound: the trace-count branch of
+    # choose_residency answers before it reads the estimate.
+    est = estimate_memory(
+        sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230, 120 * 120
+    )
     assert choose_residency(est, n_traces) == "streaming"
     assert n_traces * STREAM_MS_PER_TRACE < 2.0
 
@@ -501,9 +506,9 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     working set. Small chunks here, so their fixed few megabytes do not swamp a
     grid this size.
 
-    Minimum curvature's plan is only about 55 B a cell, but its solve needs
+    Minimum curvature's plan is only about 95-100 B a cell (with its hierarchy), but its solve needs
     buffers of its own, so it is measured over the plan and one `apply`
-    together (plan call 9): about 103 B a cell. IDW's and kriging's `apply` is
+    together (plan call 9): about 138 B a cell. IDW's and kriging's `apply` is
     a slice's transient, the 55 B a cell `MAX_FRAME_CELLS` already counts, so
     they are measured over building alone, as before."""
     from nsgeo.slices import interpolate
@@ -542,7 +547,7 @@ def test_method_labels_follow_methods():
 
 
 def test_the_estimate_counts_the_fill_weights():
-    est = estimate_memory(0, 1000, 10)
+    est = estimate_memory(0, 1000, 10, 100)
     assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
 
@@ -572,3 +577,47 @@ def test_site_export_refusal_is_exact_copy():
     )
     assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, []) == base + "."
     assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, ["C"]) == base + ", or leave out C."
+
+
+def test_the_estimate_matches_the_cube_it_describes():
+    """The figure the checkbox shows is the cube's real size (#113)."""
+    from nsgeo.slices import (
+        CubeFrame,
+        PreparedLine,
+        Provenance,
+        ZAxis,
+        build_cube,
+        covered_cells,
+        plan_line,
+    )
+
+    rng = np.random.default_rng(0)
+    lines = []
+    for i in range(8):
+        t = np.linspace(0.05, 9.9, 60)
+        across = np.full(60, 0.25 + 0.5 * (i % 4))
+        xy = [t, across] if i < 4 else [across, t]
+        lines.append(
+            PreparedLine(
+                key=f"l{i}",
+                data=(rng.random((30, 60)) + 0.5).astype(np.float32),
+                dt_ns=1.0,
+                t0_ns=0.0,
+                coords=np.column_stack(xy),
+            )
+        )
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=0.0, cell=0.5, nx=20, ny=20, crs="EPSG:32633")
+    z = ZAxis(t0_ns=0.0, dz_ns=1.0, nz=24)
+    prov = Provenance(
+        line_keys=("a",),
+        preset_name="p",
+        steps=(),
+        transform="amp_abs",
+        velocity=None,
+        built_utc="2026-11-10T00:00:00Z",
+        core_version="0.1.0.dev0",
+    )
+    cube = build_cube(lines, [plan_line(ln, frame, z) for ln in lines], frame, z, prov)
+    n_covered = covered_cells(frame, (ln.coords for ln in lines))
+    assert n_covered < frame.n_cells
+    assert estimate_memory(0, frame.n_cells, z.nz, n_covered).cube_bytes == cube.nbytes

@@ -86,7 +86,8 @@ def test_two_distinct_traces_in_one_cell_average_within_the_line():
     cube = build_cube([ln], [plan_line(ln, f, z)], f, z, prov())
     assert cube.coverage()[0, 0] == 2
     np.testing.assert_allclose(cube.slice_levels(0, 5)[0, 0], 5.0)
-    np.testing.assert_allclose(cube.mean[0, 0] * cube.count[0], 10.0)
+    (block,) = cube.blocks
+    np.testing.assert_allclose(block.mean[0, 0] * block.count[0], 10.0)
 
 
 def test_traces_outside_the_frame_are_dropped_not_clipped():
@@ -215,7 +216,7 @@ def test_resampling_interpolates_between_source_samples():
     f = frame()
     z = ZAxis(t0_ns=0.0, dz_ns=0.5, nz=7)
     cube = build_cube([ln], [plan_line(ln, f, z)], f, z, prov())
-    column = cube.mean[:, 0]
+    column = cube.blocks[0].mean[:, 0]
     np.testing.assert_allclose(column, [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0], rtol=1e-6)
 
 
@@ -244,12 +245,12 @@ def test_slice_levels_shape_is_ny_by_nx():
 
 def test_cube_rejects_a_mean_of_the_wrong_shape():
     with pytest.raises(ValueError, match="mean must be"):
-        SliceCube(
-            frame=frame(),
-            z=axis(),
-            mean=np.zeros((2, 2), dtype=np.float32),
-            count=np.zeros(12, dtype=np.int32),
-            provenance=prov(),
+        SliceCube.from_dense(
+            frame(),
+            axis(),
+            np.zeros((2, 2), dtype=np.float32),
+            np.zeros(12, dtype=np.int32),
+            prov(),
         )
 
 
