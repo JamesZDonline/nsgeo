@@ -102,7 +102,7 @@ class Pick:
     @property
     def radar_ns(self) -> float:
         """The pick's time on the radar clock, the one that never moves."""
-        return self.time_ns + (self.zero_ns or 0.0)
+        return retime_ns(self.time_ns, self.zero_ns or 0.0, 0.0)
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -1339,14 +1339,14 @@ class SiteSession(QObject):
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
         radar = max(lo, min(retime_ns(float(time_ns), float(zero_ns), 0.0), hi))
-        line_zero = self.line_zero(key)
-        time = radar if line_zero is None else retime_ns(radar, 0.0, line_zero)
+        zero = self.line_zero(key)
+        time = radar if zero is None else retime_ns(radar, 0.0, zero)
         distance_m, depth_m, velocity_m_ns = self.derived_pick_fields(key, index, time)
         pick = Pick(
             line_key=key,
             trace=index,
             time_ns=time,
-            zero_ns=line_zero,
+            zero_ns=zero,
             distance_m=distance_m,
             depth_m=depth_m,
             velocity_m_ns=velocity_m_ns,

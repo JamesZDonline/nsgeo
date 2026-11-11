@@ -2170,7 +2170,12 @@ def test_a_pre_time_zero_picks_table_migrates_with_its_rows_intact(qgis_app, tmp
     assert [p.zero_ns for p in again.picks_for("raw/FILE__001.DZT")] == [None, None]
     assert [p.time_ns for p in again.picks_for("raw/FILE__001.DZT")] == [11.0, 26.5]
     assert not again.dirty
+    assert not _criticals(message_log)
     layers2.detach()
+
+
+def _criticals(message_log):
+    return [m for m in message_log if "could not move the picks" in str(m)]
 
 
 KEY1 = "raw/FILE__001.DZT"
@@ -2244,6 +2249,56 @@ def test_a_hover_load_never_rewrites_picks(populated):
     ]
     assert after == before
     assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    # a stale hover load: the pointer left (preview cleared) before it landed
+    session.set_preview(KEY2, 5)
+    session.clear_preview()
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())
+    assert [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ] == before
+
+
+def test_promoting_a_hover_loaded_line_follows_its_zero(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.append_step(KEY2, build_step("time_zero", mode="sample", sample=51))
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())  # the hover load
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    session.open_line(KEY2)  # samples cached: no second load
+    zero = session.line_zero(KEY2)
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_applying_a_stack_to_a_previewed_line_moves_its_picks(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(session.line_zero(KEY2, load=True))
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_a_time_typed_in_edit_mode_is_not_shifted_by_a_new_zero(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, picks.fields().indexOf("time_ns"), 25.0)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert picks.commitChanges()
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] == 25.0
+    assert row["zero_ns"] == pytest.approx(0.0)  # still measured from its stored zero
 
 
 def test_a_channel_switch_moves_picks_to_the_new_channels_zero(populated):
@@ -2273,13 +2328,17 @@ def test_a_line_that_cannot_be_read_leaves_its_picks_alone(populated, message_lo
     session.apply_stack_to_grid(KEY1, "A")  # must not raise
     row = _rows(layers)[KEY2]
     assert (row["time_ns"], row["zero_ns"]) == (15.0, NULL)
+    assert not _criticals(message_log)
 
 
 def test_follow_zero_skips_rows_with_no_trace_or_time(populated):
     session, layers, _ = populated
     _add_row(layers, 1.0, 2.0, line_key=KEY1, time_ns=5.0)  # no trace
+    _add_row(layers, 1.0, 2.0, line_key=KEY1, trace=3)  # no time
     assert layers.follow_zero(KEY1, -0.5) == 0
-    assert _rows(layers)[KEY1]["time_ns"] == 5.0
+    rows = list(layers.layers["picks"].getFeatures())
+    assert sorted(str(f["time_ns"]) for f in rows) == sorted([str(NULL), "5.0"])
+    assert all(f["zero_ns"] == NULL for f in rows)
 
 
 @needs_real_data

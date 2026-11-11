@@ -321,8 +321,9 @@ class SiteLayers(QObject):
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
         # #97: a pick keeps its sample when its line's time zero moves.
-        session.stack_changed.connect(self._on_line_clock_changed)
-        session.line_loaded.connect(self._on_line_clock_changed)
+        session.stack_changed.connect(self._on_stack_changed)
+        session.line_opened.connect(self._on_line_opened)
+        session.line_loaded.connect(self._on_line_loaded)
         # A layer removed from the legend by hand (or any other code) is
         # gone from QGIS but not from the GeoPackage: drop it from our
         # registry so the next refresh reopens it, rather than holding a
@@ -704,20 +705,36 @@ class SiteLayers(QObject):
             layer.triggerRepaint()
         return written
 
-    def _on_line_clock_changed(self, key: str) -> None:
-        """A line's stack changed or its data loaded: move its picks onto
-        the line's current time zero (#97). Never for a hover preview, and
-        never when the zero cannot be found."""
+    def _on_stack_changed(self, key: str) -> None:
+        """A stack change on any line, previewed or not (a stack change is
+        never a hover): move that line's picks onto its zero, reading the
+        line from disk if no samples are attached. Does nothing when the key
+        has no pick rows or its zero cannot be found."""
+        self._follow_key(key, load=True)
+
+    def _on_line_opened(self, key: str) -> None:
+        """A line became the working line: if it is the current line, move
+        its picks onto its zero when that is known without reading (samples
+        already cached by a hover). When it is not yet known, `line_loaded`
+        follows once the load lands."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _on_line_loaded(self, key: str) -> None:
+        """Samples arrived for `key`: follow only when it is the working
+        line. A preview-only or stale hover load never writes `picks`."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _follow_key(self, key: str, *, load: bool) -> None:
+        """Shared body of the three slots above; guarded, never raises."""
         try:
-            session = self.session
-            if key == session.preview_key and key != session.current_key:
-                return
             layer = self._picks_layer()
             if layer is None or not any(
                 _as_str(_attr(f, "line_key")) == key for f in layer.dataProvider().getFeatures()
             ):
                 return
-            zero = session.line_zero(key, load=True)
+            zero = self.session.line_zero(key, load=load)
             if zero is None:
                 return
             self.follow_zero(key, zero)
@@ -742,9 +759,18 @@ class SiteLayers(QObject):
         if layer is None or self.session.site is None:
             return 0
         provider = layer.dataProvider()
+        # A time or zero waiting in the edit buffer was typed against the
+        # old zero; it must not be re-read against the new one. Read only.
+        pending: set[int] = set()
+        buffer = layer.editBuffer()
+        if buffer is not None:
+            names = ("time_ns", "zero_ns")
+            for fid, edits in buffer.changedAttributeValues().items():
+                if any(layer.fields().at(i).name() in names for i in edits):
+                    pending.add(fid)
         changes: dict[int, dict[int, Any]] = {}
         for feature in provider.getFeatures():
-            if _as_str(_attr(feature, "line_key")) != key:
+            if _as_str(_attr(feature, "line_key")) != key or feature.id() in pending:
                 continue
             trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
             if trace == NULL or time_ns == NULL:
