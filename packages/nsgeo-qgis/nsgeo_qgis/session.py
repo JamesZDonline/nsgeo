@@ -942,16 +942,17 @@ class SiteSession(QObject):
 
     def cut_velocity(self, grid_id: str) -> VelocityModel:
         """The velocity every cut on `grid_id` uses (cut spec call 16): the
-        grid's own, else the first line's resolved model in survey order. A cut
-        is not a line, so it has no override of its own. `KeyError` when the
-        grid has neither."""
+        grid's own, else the HEADER velocity of the grid's first line in
+        survey order. That line's own override is ignored: a line override
+        must never move a cut pick. A cut is not a line, so it has none of
+        its own. `KeyError` when the grid has neither."""
         grid = self.grid(grid_id)
         if grid.velocity is not None:
             return grid.velocity
         keys = self.keys_on_grid(grid_id)
         if not keys:
             raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
-        return self.resolved_velocity(keys[0])
+        return VelocityModel.from_dielectric(self.line_for_key(keys[0]).header.epsr)
 
     # ---- stacks -----------------------------------------------------------
     def stack_for(self, key: str, *, insert: bool = True) -> StepStack:

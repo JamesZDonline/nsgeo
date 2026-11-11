@@ -5,9 +5,12 @@ from __future__ import annotations
 import dataclasses
 
 import pytest
+from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model import is_cut_key
+from nsgeo.model.survey import Line
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SiteSession
+from plugin_testing import synthetic_dzt
 from test_plugin_session import GRID, GRID_B, Spy, _lines, _two_grids
 
 V = [(1.0, 1.0), (6.0, 1.0)]
@@ -80,7 +83,7 @@ def test_remove_grid_drops_its_cuts_and_keeps_the_others(session):
     session.save()  # validates: a cut on a removed grid would refuse it
 
 
-def test_cut_velocity_is_the_grids_then_the_first_lines(session, tmp_path):
+def test_cut_velocity_is_the_grids_then_the_first_lines_header(session, tmp_path):
     session.add_grid(GRID)
     model = VelocityModel.constant(0.09)
     session.set_grid_velocity("A", model)
@@ -90,15 +93,26 @@ def test_cut_velocity_is_the_grids_then_the_first_lines(session, tmp_path):
         session.cut_velocity("A")
     session.add_lines(_lines(tmp_path, 3))
     keys = session.keys_on_grid("A")
-    first = session.resolved_velocity(keys[0])
-    assert session.cut_velocity("A") == first
+    header = VelocityModel.from_dielectric(14.0)  # synthetic_dzt's rhf_epsr
+    assert session.cut_velocity("A") == header
+    # A line override never moves a cut (spec call 16): not the second line's,
+    # and not the first's either.
     session.set_line_velocity(keys[1], VelocityModel.constant(0.05))
-    assert session.cut_velocity("A") == first
-    override = VelocityModel.constant(0.07)
-    session.set_line_velocity(keys[0], override)
-    assert session.cut_velocity("A") == override
+    session.set_line_velocity(keys[0], VelocityModel.constant(0.07))
+    assert session.cut_velocity("A") == header
     with pytest.raises(KeyError):
         session.cut_velocity("nope")
+
+
+def test_cut_velocity_takes_the_first_lines_header_when_dielectrics_differ(session, tmp_path):
+    session.add_grid(GRID)
+    lines = []
+    for i, epsr in enumerate((9.0, 25.0)):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", epsr=epsr)
+        lines.append(Line.open(p, GridPlacement("A", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    assert session.cut_velocity("A") == VelocityModel.from_dielectric(9.0)
+    assert session.cut_velocity("A") != VelocityModel.from_dielectric(25.0)
 
 
 def test_cuts_survive_save_and_reopen(session, tmp_path):

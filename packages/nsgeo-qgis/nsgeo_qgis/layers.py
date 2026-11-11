@@ -454,7 +454,7 @@ class SiteLayers(QObject):
         deletable, whereas a discarded one is gone.
 
         Every held layer, not just `picks`, so a future writable table
-        gets this for free. The derived three are `setReadOnly(True)`, so
+        gets this for free. The derived tables are `setReadOnly(True)`, so
         in practice they can never be in this state.
 
         If the commit fails there is nothing further to do -- the site is
@@ -810,7 +810,7 @@ class SiteLayers(QObject):
         `picks` has no other source of truth, so its rebuild
         (`_rebuild_picks`) never destroys the original until a verified
         copy exists elsewhere. The derived tables are about to be fully
-        refilled by refill_grids/lines/marks right after this returns, so
+        refilled by the derived refills right after this returns, so
         a plain overwrite is safe for them.
 
         Final review, Important 1b: `_table_schema` can now come back

@@ -58,6 +58,17 @@ _CHORD_MODIFIERS = (
     Qt.KeyboardModifier.MetaModifier,
     Qt.KeyboardModifier.ShiftModifier,
 )
+# The cut prompts (cut spec §4.8). One constant each, so the tests quote them.
+DELETE_CUT_TEXT = "Delete {name}?"
+CUT_ONE_PICK_TEXT = " Its 1 pick stays on the map."
+CUT_PICKS_TEXT = " Its {n} picks stay on the map."
+CUTS_ONLY_PICKS_TEXT = "Picks on a cut stay on the map."
+# Grid removal: `{its}` is "Its" for one grid and "Their" for several; the tail
+# says what becomes of the cuts' picks (`{they}` is "its" for one cut, else "their").
+GRID_CUTS_ONE_TEXT = "{its} 1 cut is deleted too"
+GRID_CUTS_TEXT = "{its} {n} cuts are deleted too"
+GRID_CUT_PICK_TAIL = "; {they} 1 pick stays on the map."
+GRID_CUT_PICKS_TAIL = "; {they} {m} picks stay on the map."
 # How many line keys a removal prompt lists before it summarises the rest.
 _LISTED_KEYS = 10
 # Moving the current item to a line must select just that line. A bare
@@ -557,15 +568,16 @@ class SurveyDock(QgsDockWidget):
                 raise
 
     def _selected_targets(self) -> tuple[list[str], list[str]]:
-        """(grid ids, line keys) to remove for the current selection, in
-        tree order.
+        """(grid ids, line or cut keys) to remove for the current selection,
+        in tree order.
 
         A selection holding any line removes lines only, every selected
-        line whatever its grid. Grids go -- each with all its lines -- only
-        when nothing but grids is selected. A Shift-range across grids
-        sweeps up the grid rows it passes, and removing a grid deletes its
-        geometry as well as its lines, so a grid row caught in a range of
-        lines must not turn "remove these lines" into "remove that grid".
+        line whatever its grid. Cuts go only when no line is selected, and
+        grids -- each with all its lines and cuts -- only when nothing but
+        grids is selected. A Shift-range across grids sweeps up the grid
+        and Cuts rows it passes, and removing a grid deletes its geometry as
+        well as its lines, so a grid or cut row caught in a range of lines
+        must not turn "remove these lines" into "remove that grid or cut".
         """
         # Walked in tree order: selectedItems() is in the order the items
         # were selected, and the prompt lists what goes in tree order.
@@ -575,20 +587,23 @@ class SurveyDock(QgsDockWidget):
             items.append(it.value())
             it += 1
         keys = []
+        cut_keys = []
         for item in items:
-            key = self.key_of(item) or self.cut_key_of(item)
-            if key is None:
-                continue
+            key = self.key_of(item)
+            cut_key = self.cut_key_of(item)
             try:
-                if is_cut_key(key):
-                    self.session.cut_for_key(key)
-                else:
+                if key is not None:
                     self.session.line_for_key(key)
+                    keys.append(key)
+                elif cut_key is not None:
+                    self.session.cut_for_key(cut_key)
+                    cut_keys.append(cut_key)
             except KeyError:
                 continue  # already gone from the session: nothing left to remove
-            keys.append(key)
         if keys:
             return [], keys
+        if cut_keys:
+            return [], cut_keys
         return [g for g in (self.grid_id_of(i) for i in items) if g is not None], []
 
     @staticmethod
@@ -608,17 +623,40 @@ class SurveyDock(QgsDockWidget):
 
     def _cut_removal_text(self, key: str) -> str:
         """`Delete {name}?`, then what happens to the cut's picks: they stay."""
-        text = f"Delete {self.session.cut_for_key(key).name}?"
+        text = DELETE_CUT_TEXT.format(name=self.session.cut_for_key(key).name)
         try:
             n = len(self.session.picks_for(key))
         except Exception as exc:  # noqa: BLE001 -- the count is only a courtesy
             _log(f"could not count the cut's picks: {exc}", Qgis.MessageLevel.Warning)
             n = 0
         if n == 1:
-            text += " Its 1 pick stays on the map."
+            text += CUT_ONE_PICK_TEXT
         elif n:
-            text += f" Its {n} picks stay on the map."
+            text += CUT_PICKS_TEXT.format(n=n)
         return text
+
+    def _grid_cuts_text(self, cut_keys: list[str], *, several: bool) -> str:
+        """What a grid removal says about the cuts it takes: how many, and how
+        many picks on them stay (cut spec §4.8). Leads with a space, or is
+        empty when there are no cuts."""
+        n = len(cut_keys)
+        if not n:
+            return ""
+        its = "Their" if several else "Its"
+        text = " " + (
+            GRID_CUTS_ONE_TEXT.format(its=its) if n == 1 else GRID_CUTS_TEXT.format(its=its, n=n)
+        )
+        try:
+            m = sum(len(self.session.picks_for(k)) for k in cut_keys)
+        except Exception as exc:  # noqa: BLE001 -- the count is only a courtesy
+            _log(f"could not count the cuts' picks: {exc}", Qgis.MessageLevel.Warning)
+            m = 0
+        they = "its" if n == 1 else "their"
+        if m == 0:
+            return text + "."
+        if m == 1:
+            return text + GRID_CUT_PICK_TAIL.format(they=they)
+        return text + GRID_CUT_PICKS_TAIL.format(they=they, m=m)
 
     def _removal_text(self, grid_ids: list[str], keys: list[str]) -> str:
         """The confirmation for a removal: exactly what goes, and what
@@ -629,9 +667,9 @@ class SurveyDock(QgsDockWidget):
             return self._cut_removal_text(cut_keys[0])
         things = []
         n_lines = len(keys)
-        n_grid_cuts = 0
+        grid_cut_keys: list[str] = []
         for grid_id in grid_ids:
-            n_grid_cuts += len(self.session.cut_keys_on_grid(grid_id))
+            grid_cut_keys += self.session.cut_keys_on_grid(grid_id)
             n = len(self.session.keys_on_grid(grid_id))
             n_lines += n
             if n:
@@ -646,8 +684,11 @@ class SurveyDock(QgsDockWidget):
             things.append(self.session.cut_for_key(cut_keys[0]).name)
         elif cut_keys:
             things.append(f"{len(cut_keys)} cuts")
+        grid_cuts_text = self._grid_cuts_text(grid_cut_keys, several=len(grid_ids) > 1)
         if len(things) == 1:
-            parts = [f"Remove {things[0]} from the site?"]
+            # Appended to the question itself, so "Its" is the grid's.
+            parts = [f"Remove {things[0]} from the site?{grid_cuts_text}"]
+            grid_cuts_text = ""
         else:
             parts = ["Remove these from the site?\n" + "\n".join(f"• {t}" for t in things)]
         if len(keys) > 1:
@@ -665,15 +706,10 @@ class SurveyDock(QgsDockWidget):
                 "The DZT files on disk are not touched, and picks on these lines "
                 "stay in the picks layer."
             )
-        if n_grid_cuts:
-            if n_grid_cuts == 1:
-                parts.append("Its 1 cut is deleted too; its picks stay on the map.")
-            else:
-                parts.append(
-                    f"Its {n_grid_cuts} cuts are deleted too; their picks stay on the map."
-                )
+        if grid_cuts_text:
+            parts.append(grid_cuts_text.strip())
         elif cut_keys:
-            parts.append("Picks on a cut stay on the map.")
+            parts.append(CUTS_ONLY_PICKS_TEXT)
         parts.append("Nothing is saved to the site file until you choose Save site.")
         return "\n\n".join(parts)
 
