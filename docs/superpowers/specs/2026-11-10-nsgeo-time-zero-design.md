@@ -184,12 +184,26 @@ whatever clock they need via §4.3.
   by it.
 - **The radar-clock time of a pick** is `time_ns + zero_ns`. It never changes unless the user
   edits the row. That keeps the pick on its reflection.
-- **When a line's zero changes,** its pick rows are rewritten: new `time_ns`, `zero_ns` and
-  `depth_m`, with the same radar-clock time. The requirement is that **once any action that
-  changes a line's stack completes** (an edit in the Processing panel, applying a stack to a
-  grid, a preset), that line's rows show times and depths from its new zero. Applying a stack to
-  a grid may therefore have to load the lines that carry picks to find their zeros. That cost is
-  acceptable on an explicit user action.
+- **Rows follow the line's current zero whenever that zero is known (Claude's call, after the
+  builder check).** The rule is about state, not about particular events. Any of a line's rows
+  whose `zero_ns` differs from the line's current zero is rewritten: new `time_ns`, `zero_ns` and
+  `depth_m`, with the same radar-clock time. A line's zero is known:
+  - when it becomes the working line and its samples load. A hover preview never writes, as with
+    every other write (`session.add_pick`'s guard).
+  - once any action that changes its stack or its source completes: an edit in the Processing
+    panel, a channel switch (`set_channel`), applying a stack to a grid, a preset. Applying to a
+    grid may therefore load the lines that carry picks to find their zeros. That cost is
+    acceptable on an explicit user action.
+
+  This is the same kind of write `follow_lines` already makes when a site opens: it rewrites
+  convenience columns without the user acting. A line nobody has opened since the upgrade keeps
+  its old rows. They are still correct, on the radar's clock with an empty zero, until the line is
+  opened.
+- **Cut picks (M15).** The zero column applies to line picks only. A cut pick's `time_ns` is on
+  its cube's clock, and the cube's preset steps, which M15 already writes into the pick's
+  `stack_json`, say which clock that is. M15 should also write this design's time-base marker
+  (§5.4) into that provenance. A cut pick leaves the zero column empty, and readers must not take
+  that as "radar clock" for a row whose key is a cut.
 - `follow_lines` keeps its job (position, distance, depth from the current velocity), and computes
   depth from `time_ns`, which is already time from zero.
 - Drawing picks on the profile converts through §4.3. This covers the header-only axis shown
@@ -209,9 +223,10 @@ whatever clock they need via §4.3.
 
   It is a handful of points, so it is cheap. Before this change, the result equals the stored
   values whenever the zero has not moved, and a test pins that.
-- **The stored record is not rewritten on open.** Its `v`, `t0`, σ and rms remain what was
-  measured at its own zero, which is the evidence. Recording a new zero happens only when the user
-  re-saves the fit. Opening a site never dirties it.
+- **The stored record is never rewritten.** Its `v`, `t0`, σ and rms remain what was measured at
+  its own zero, which is the evidence, and its zero stays with it for good. Opening a site never
+  dirties it. No "re-save" action is added: Save fit makes a new fit at the current zero, as it
+  makes a new fit today.
 - **The Apply provenance match** compares points on the radar clock, not as raw tuples.
 - **Applied velocities (decision 6).** When a line's applied velocity came from a fit
   (`velocity_from_fit`) whose velocity at the current zero is now different, by more than a
@@ -348,8 +363,10 @@ GPS survey's −1.3 to −1.6 ns.
   - refitted at an unchanged zero, it equals the stored values;
   - refitted at a moved zero, it equals a fresh fit of the shifted points;
   - an old fit with no zero reads as the radar's clock.
-- A survey file and picks table written before this change open with every value unchanged and
-  nothing dirty.
+- A survey file and picks table written before this change open with no value converted and
+  the survey not dirty. Every pick is drawn on its reflection and every fit on its points. A
+  line's rows move to its zero only once that zero is known (§5.1), and a hover preview never
+  moves them.
 - Dragging a cutoff that sits before `time_zero` writes the value on the step's input clock.
 - A cube built with the step starts at 0. An old recipe restores within one sample of its old
   slices.
@@ -378,6 +395,8 @@ The walkthrough covers:
 6. A grid cube built with the step starts at 0.
 7. A site with one grid without the step warns.
 8. An existing project from before the change opens with picks, fits and cubes where they were.
+   Opening a line whose stack has the step moves that line's table times and depths to match the
+   profile.
 
 ---
 
@@ -415,7 +434,8 @@ The walkthrough covers:
 
 ## 13. Hand-offs
 
-- **M15** (spec approved, plan on `nsgeo-m15-cut-anywhere`): cut picks write `time_ns` on the
-  cube's time-zero clock and leave the picks table's zero column empty. Its plan needs a check
-  after this merges, because it was written against today's clock.
+- **M15** (spec approved, plan on `nsgeo-m15-cut-anywhere`):
+  - Cut picks write `time_ns` on the cube's clock and leave the picks table's zero column empty.
+  - Their `stack_json` provenance carries the cube's time-base marker (§5.1).
+  - M15's plan needs a check after this merges, because it was written against today's clock.
 - **README roadmap:** item 5 changes from "decide" to this work.
