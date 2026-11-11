@@ -22,7 +22,7 @@ import traceback
 from collections.abc import Mapping
 
 from nsgeo.velocity import VelocityModel
-from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -128,9 +128,12 @@ class VelocityDialog(QDialog):
 
     def _fill_table(self) -> None:
         """(Re)build the rows from the line's stored fits, shallowest first."""
-        self._fits = dict(self.session.line_for_key(self.key).velocity_fits)
+        line = self.session.line_for_key(self.key)
+        stored = dict(line.velocity_fits)
+        self._fits, failed = self._fits_at_line_zero(stored)
         self._ids = sorted(self._fits, key=lambda i: self._fits[i].t0_ns)
         self._flagged = disagreeing_fit_ids(self._fits)
+        applied = line.velocity_from_fit
         # The current index too, not just the selection: removing the current
         # row otherwise selects its neighbour, arming Delete on a fit nobody
         # chose.
@@ -138,15 +141,49 @@ class VelocityDialog(QDialog):
         self.table.setRowCount(len(self._ids))
         for row, fit_id in enumerate(self._ids):
             fit = self._fits[fit_id]
+            flags = []
+            if fit_id in self._flagged:
+                flags.append("disagrees with another fit")
+            if fit_id in failed:
+                flags.append(f"cannot be fitted at this time zero: {failed[fit_id]}")
+            elif fit_id == applied and line.velocity is not None:
+                note = applied_fit_note(line.velocity.surface_velocity, fit.v_m_ns)
+                if note:
+                    flags.append(note)
             cells = (
                 f"{fit.t0_ns:.1f}",
                 f"{fit.v_m_ns:.4f} ± {fit.v_stderr_m_ns:.4f}",
                 f"{fit.rms_ns:.2f}",
                 str(len(fit.points)),
-                "disagrees with another fit" if fit_id in self._flagged else "",
+                "; ".join(flags),
             )
             for col, text in enumerate(cells):
                 self.table.setItem(row, col, QTableWidgetItem(text))
+
+    def _fits_at_line_zero(
+        self, stored: dict[str, StoredFit]
+    ) -> tuple[dict[str, StoredFit], dict[str, str]]:
+        """Each stored fit measured from the line's current time zero, and the
+        reasons any could not be. Without a known zero or a distance
+        calibration, the stored fits as they are."""
+        if not stored:
+            return {}, {}
+        zero = self.session.line_zero(self.key, load=True)
+        if zero is None:
+            return stored, {}
+        try:
+            distance = self.session.line_for_key(self.key).distance_along()
+        except ValueError:
+            return stored, {}
+        fits: dict[str, StoredFit] = {}
+        failed: dict[str, str] = {}
+        for fit_id, fit in stored.items():
+            try:
+                fits[fit_id] = fit_at_zero(fit, distance, zero)
+            except ValueError as exc:
+                fits[fit_id] = fit
+                failed[fit_id] = str(exc)
+        return fits, failed
 
     # ---- reading the dialog ------------------------------------------------
     def fit_id_at_row(self, row: int) -> str:

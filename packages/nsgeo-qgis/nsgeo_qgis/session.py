@@ -894,6 +894,30 @@ class SiteSession(QObject):
             self._attach_source(key, stack)
         return stack
 
+    def line_zero(self, key: str, *, load: bool = False) -> float | None:
+        """The radar-clock time the line's own stack calls 0.
+
+        0.0 with no enabled time_zero step (nothing is loaded for that). The
+        source's answer once one is attached. With no source, None, unless
+        `load` reads the line and runs a copy of the stack. None on any
+        failure, which is logged: this never raises, and never plants a stack.
+        """
+        try:
+            stack = self.stack_for(key, insert=False)
+            if not stack.sets_time_zero():
+                return 0.0
+            if stack.source is not None:
+                return float(stack.zero_ns())
+            if not load:
+                return None
+            profiles = self.line_for_key(key).load()
+            probe = StepStack.from_dicts(stack.to_dicts())
+            probe.source = Radargram.from_profile(profiles[self.channel(key)])
+            return float(probe.zero_ns())
+        except Exception as exc:  # noqa: BLE001 -- a read must not raise; the caller falls back
+            _log(f"could not find where line {key} has its time zero: {exc}")
+            return None
+
     def _attach_source(self, key: str, stack: StepStack) -> None:
         profiles = self._profiles.get(key)
         if not profiles:

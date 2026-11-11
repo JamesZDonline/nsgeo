@@ -200,4 +200,8 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `HyperbolaFit` | A fitted hyperbola: apex position, apex time, velocity, velocity standard error, RMS residual and point count. |
 | `fit_hyperbola` | Least-squares hyperbola through points in metres and nanoseconds; scans the apex near a guess. Raises `ValueError` when no physical fit exists. |
 | `hyperbola_time` | Two-way time in nanoseconds of a fitted hyperbola at given positions in metres; the one statement of the model outside the solver, for drawing a fit. |
-| `StoredFit` | A fit as persisted on a `Line`: trace indices not metres, with the clicked points and a UTC timestamp, so several fits can later feed a Dix conversion. `to_dict` and `from_dict` give the survey-JSON form. |
+| `StoredFit` | A fit as persisted on a `Line`: trace indices not metres, with the clicked points (radar-clock times), the zero its numbers were measured from, and a UTC timestamp, so several fits can later feed a Dix conversion. `to_dict` and `from_dict` give the survey-JSON form. |
+| `refit` | A stored fit's clicked points fitted again with times measured from a given radar-clock zero. Raises `ValueError` as `fit_hyperbola` does. |
+| `fit_at_zero` | A stored fit measured from a given zero: the fit itself when that is its own zero, else its points refitted. |
+| `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
+| `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |

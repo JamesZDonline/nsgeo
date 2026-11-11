@@ -453,6 +453,16 @@ def test_velocity_fits_survive_a_save_and_load(tmp_path, site):
     assert loaded.velocity_fits["f1"].points == ((389, 21.2), (412, 18.6), (437, 21.9))
 
 
+def test_a_fits_time_zero_survives_a_save_and_load(tmp_path, site):
+    fit = dataclasses.replace(_a_fit(), zero_ns=-0.4775)
+    site.lines[0] = dataclasses.replace(
+        site.lines[0], velocity_fits={"f1": fit}, velocity_from_fit="f1"
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert load_site(out).lines[0].velocity_fits["f1"].zero_ns == -0.4775
+
+
 def test_a_line_entry_without_fits_loads(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)

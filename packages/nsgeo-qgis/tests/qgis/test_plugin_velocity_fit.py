@@ -334,40 +334,29 @@ def _time_zero_to(plugin, sample):
     return _velocity_on(plugin)
 
 
-def test_a_radargram_not_at_time_zero_warns_and_names_the_step(plugin):
+def test_without_time_zero_the_note_names_the_first_break(plugin):
     dock = _velocity_on(plugin)
-    assert "time_zero" in dock.velocity_note.text()
+    assert "radar's own zero" in dock.velocity_note.text()
 
 
-# The fixture header puts sample 0 at -11.086 ns with dt = 0.2165 ns, so
-# time_zero at sample k leaves t0 = -11.086 + k * 0.2165: k=51 -> -0.043 ns,
-# k=50 -> -0.260, k=52 -> +0.173. Half a sample (0.108 ns) is the best a
-# whole-sample crop can promise, so only k=51 is "at time zero".
-def test_time_zero_at_the_nearest_sample_is_quiet(plugin):
-    dock = _time_zero_to(plugin, 51)
-    assert dock.velocity_note.text() == ""
-
-
-@pytest.mark.parametrize("sample", [50, 52, 49])
-def test_a_time_zero_more_than_half_a_sample_out_still_warns(plugin, sample):
+@pytest.mark.parametrize("sample", [49, 50, 51, 52])
+def test_with_a_time_zero_step_the_note_is_quiet(plugin, sample):
     dock = _time_zero_to(plugin, sample)
-    assert "time_zero" in dock.velocity_note.text()
-
-
-def test_the_tolerance_scales_with_the_sample_interval(plugin, tmp_path):
-    # 1000 ns over 512 samples: dt = 1.953 ns, so the closest crop (sample 6)
-    # leaves t0 = +0.63 ns. That is the best this file can do, so no warning.
-    s = plugin.session
-    path = synthetic_dzt(tmp_path / "raw", "DEEP.DZT", n_traces=60, range_ns=1000.0)
-    line = Line.open(path, GridPlacement("A", "y", 5.0, 0.0))
-    s.add_lines([line])
-    key = s.line_key(line)
-    s.set_profiles(key, line.load())
-    s.open_line(key)
-    s.append_step(key, build_step("time_zero", mode="sample", sample=6))
-    dock = _velocity_on(plugin)
-    assert 0.5 < abs(dock.view.transform.t0_ns) < 0.5 * dock.view.transform.dt_ns
     assert dock.velocity_note.text() == ""
+
+
+def test_a_disabled_time_zero_brings_the_note_back(plugin):
+    dock = _time_zero_to(plugin, 51)
+    plugin.session.set_step_enabled(plugin.session.keys()[0], 0, False)
+    assert "radar's own zero" in dock.velocity_note.text()
+
+
+def test_the_note_gives_the_velocity_measured_from_the_first_break(plugin):
+    dock = _velocity_on(plugin)
+    _click_hyperbola(plugin)
+    text = dock.velocity_note.text()
+    assert "Measured from the first break, this fit would be" in text
+    assert text.endswith("Add a Time zero step to measure from it.")
 
 
 def test_apply_to_line_sets_the_line_velocity(plugin):
@@ -536,33 +525,52 @@ def test_apply_names_a_stored_fit_with_the_same_points_saved_before_another(plug
     assert s.line_for_key(key).velocity_from_fit == first
 
 
-def test_time_zero_added_after_a_save_leaves_the_fit_on_its_feature_and_apply_still_names_it(
-    plugin,
-):
-    """Issue #90 rested on time_zero moving the time axis. It does not: it
-    crops rows and each surviving sample keeps its time, so a saved fit's
-    (trace, ns) points still land on the hyperbola they were clicked on. The
-    radargram assertions are the pin: a step that rebased the axis would
-    strand every saved fit, and fail them. Apply naming the fit afterwards
-    is the consequence #90 doubted, recorded rather than independently
-    tested, since Apply compares points alone."""
+def test_adding_time_zero_moves_a_saved_fit_exactly_as_shifting_its_points(plugin):
     s, dock = plugin.session, _velocity_on(plugin)
     key = s.keys()[0]
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
     (fit_id,) = s.line_for_key(key).velocity_fits
-    before = dock.current_radargram()
-
+    stored = s.line_for_key(key).velocity_fits[fit_id]
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
-
-    after = dock.current_radargram()
-    assert after.n_samples == before.n_samples - 51  # rows really were cropped
-    assert after.times_ns()[0] == pytest.approx(-0.04, abs=0.01)  # -11.086 + 51 * 0.2165
-    np.testing.assert_array_equal(after.data[0], before.data[51])  # that row kept its time
-
+    zero = s.line_zero(key)
+    distance = s.line_for_key(key).distance_along()
+    x = np.array([distance[tr] for tr, _ in stored.points])
+    expected = fit_hyperbola(x, np.array([t for _, t in stored.points]) - zero, x[0])
+    assert dock.velocity_fit_result().v_m_ns == pytest.approx(expected.v_m_ns, rel=1e-9)
     dock.apply_line_button.click()
+    assert s.line_for_key(key).velocity_from_fit == fit_id  # points are compared on the radar clock
 
-    assert s.line_for_key(key).velocity_from_fit == fit_id
+
+def test_a_saved_fit_records_the_zero_it_was_measured_from(plugin):
+    s, dock = plugin.session, _time_zero_to(plugin, 51)
+    key = s.keys()[0]
+    _click_hyperbola(plugin, tuple(range(0, 60, 6)))
+    fit_points = dock.velocity_points()
+    assert all(t == pytest.approx(_hyperbola_ns(tr) + dock.shown_zero_ns()) for tr, t in fit_points)
+    dock.save_fit_button.click()
+    (stored,) = s.line_for_key(key).velocity_fits.values()
+    assert stored.zero_ns == pytest.approx(s.line_zero(key))
+    assert stored.points == tuple(fit_points)
+
+
+def test_working_points_stay_on_their_reflection_across_a_time_zero_change(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin, (APEX_TRACE, 15, 45))
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    shown_zero = dock.shown_zero_ns()
+    assert shown_zero == pytest.approx(-0.0433, abs=1e-3)
+    v = _view(plugin)
+    for tr in (5, 55):
+        v.velocity_point_requested.emit(tr, _hyperbola_ns(tr) - shown_zero)
+
+    radar_t = [t for _, t in dock.velocity_points()]
+    assert radar_t == pytest.approx([_hyperbola_ns(tr) for tr in (APEX_TRACE, 15, 45, 5, 55)])
+    distance = s.line_for_key(key).distance_along()
+    x = np.array([distance[tr] for tr in (APEX_TRACE, 15, 45, 5, 55)])
+    expected = fit_hyperbola(x, np.array(radar_t) - s.line_zero(key), x[0])
+    assert dock.velocity_fit_result().v_m_ns == pytest.approx(expected.v_m_ns, rel=1e-9)
 
 
 def test_save_fit_twice_keeps_both_under_distinct_ids(plugin):

@@ -13,14 +13,25 @@ the error says the velocity is unconstrained.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from nsgeo.processing.base import retime_ns
 from nsgeo.velocity import C_M_PER_NS
 
-__all__ = ["HyperbolaFit", "StoredFit", "fit_hyperbola", "hyperbola_time"]
+__all__ = [
+    "HyperbolaFit",
+    "StoredFit",
+    "applied_fit_note",
+    "fit_at_zero",
+    "fit_hyperbola",
+    "hyperbola_time",
+    "radar_clock_note",
+    "refit",
+]
 
 _SEARCH_STEPS = 101
 
@@ -49,8 +60,12 @@ class StoredFit:
     v_stderr_m_ns: float
     rms_ns: float
     apex_trace: int
-    points: tuple[tuple[int, float], ...]  # (trace index, two-way time ns)
+    points: tuple[tuple[int, float], ...]  # (trace index, radar-clock time ns)
     fitted_at: str  # ISO-8601 UTC
+    # The radar-clock time `t0_ns`, `v_m_ns`, `v_stderr_m_ns` and `rms_ns` were
+    # measured from. `points` are always on the radar clock, so a fit made
+    # before time zero relabelled the axis (zero_ns 0.0) needs no conversion.
+    zero_ns: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +76,7 @@ class StoredFit:
             "apex_trace": self.apex_trace,
             "points": [[trace, t_ns] for trace, t_ns in self.points],
             "fitted_at": self.fitted_at,
+            "zero_ns": self.zero_ns,
         }
 
     @classmethod
@@ -73,6 +89,7 @@ class StoredFit:
             apex_trace=int(doc["apex_trace"]),
             points=tuple((int(trace), float(t_ns)) for trace, t_ns in doc["points"]),
             fitted_at=str(doc["fitted_at"]),
+            zero_ns=float(doc.get("zero_ns", 0.0)),
         )
 
 
@@ -187,3 +204,62 @@ def fit_hyperbola(
             "too flat to be a diffraction hyperbola."
         )
     return best
+
+
+def refit(fit: StoredFit, distance_m: np.ndarray, zero_ns: float) -> HyperbolaFit:
+    """Fit `fit`'s clicked points again, measuring time from `zero_ns`.
+
+    Each point's x is the line's distance at its trace (clamped to the line);
+    its t is its radar-clock time minus `zero_ns`. The apex guess is the first
+    click. Raises `ValueError` as `fit_hyperbola` does.
+    """
+    distance_m = np.asarray(distance_m, dtype=float)
+    last = len(distance_m) - 1
+    x = np.array([distance_m[min(max(trace, 0), last)] for trace, _ in fit.points], dtype=float)
+    t = np.array([float(retime_ns(t_ns, 0.0, zero_ns)) for _, t_ns in fit.points], dtype=float)
+    if x.size == 0:
+        raise ValueError("The fit has no points to measure again.")
+    return fit_hyperbola(x, t, float(x[0]))
+
+
+def fit_at_zero(fit: StoredFit, distance_m: np.ndarray, zero_ns: float) -> StoredFit:
+    """`fit` measured from `zero_ns`: `fit` itself when that is its own zero,
+    else its points fitted again. Raises `ValueError` when the refit fails."""
+    if zero_ns == fit.zero_ns:
+        return fit
+    again = refit(fit, distance_m, zero_ns)
+    distance_m = np.asarray(distance_m, dtype=float)
+    return dataclasses.replace(
+        fit,
+        t0_ns=again.t0_ns,
+        v_m_ns=again.v_m_ns,
+        v_stderr_m_ns=again.v_stderr_m_ns,
+        rms_ns=again.rms_ns,
+        apex_trace=int(np.argmin(np.abs(distance_m - again.apex_x_m))),
+        zero_ns=zero_ns,
+    )
+
+
+def radar_clock_note(
+    first_break_ns: float, dt_ns: float, v_now: float | None, v_from_break: float | None
+) -> str:
+    """The strip's note when times run from the radar's own zero and the first
+    break is more than half a sample away from it; "" otherwise."""
+    if abs(first_break_ns) <= dt_ns / 2.0:
+        return ""
+    text = f"Times are from the radar's own zero; the first break is at {first_break_ns:.1f} ns."
+    if v_now is not None and v_from_break is not None:
+        percent = (v_from_break / v_now - 1.0) * 100.0
+        text += (
+            f" Measured from the first break, this fit would be {v_from_break:.4f} m/ns"
+            f" ({percent:+.1f}%)."
+        )
+    return text + " Add a Time zero step to measure from it."
+
+
+def applied_fit_note(applied_v: float, current_v: float) -> str:
+    """Says so when the velocity applied from a fit is not what the fit now
+    measures; "" when the two agree at 4 dp."""
+    if round(applied_v, 4) == round(current_v, 4):
+        return ""
+    return f"applied {applied_v:.4f}; measured from the current time zero {current_v:.4f}"

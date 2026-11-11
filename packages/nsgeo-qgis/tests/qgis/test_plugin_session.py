@@ -1735,3 +1735,47 @@ def test_move_lines_leaves_lines_already_there_alone(session, tmp_path):
     assert [(s.key, s.label, s.reason) for s in gone.skipped] == [("raw/GONE.DZT", "GONE", REMOVED)]
     with pytest.raises(KeyError):
         session.move_lines([a[0]], "nope")
+
+
+def test_line_zero_is_zero_without_a_time_zero_step_and_loads_nothing(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    assert key not in session.site.stacks
+
+    assert session.line_zero(key) == 0.0
+    assert session.line_zero(key, load=True) == 0.0
+    assert key not in session.site.stacks  # reading planted no stack
+
+
+def test_line_zero_loads_the_line_only_when_asked(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) is None
+    assert session.line_zero(key, load=True) == pytest.approx(-0.0433, abs=1e-3)
+    assert session.stack_for(key).source is None  # the probe ran on a copy
+
+
+def test_line_zero_follows_the_attached_source(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.set_profiles(key, lines[0].load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) == pytest.approx(-0.0433, abs=1e-3)
+
+
+def test_line_zero_is_none_not_an_error_when_the_line_cannot_be_read(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))
+
+    assert session.line_zero(key, load=True) is None
