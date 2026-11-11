@@ -731,3 +731,19 @@ def test_retarget_to_an_unknown_grid_keeps_the_dialogs_own_grid(session):
     d.retarget("no-such-grid")
     assert d.grid_combo.currentData() == "B"
     assert d.windowTitle() == "Import DZT files into B"
+
+
+@needs_real_data
+def test_the_fit_checkbox_imports_fitted_lines_and_is_off_by_default(session):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(REAL_DZT)
+    assert not d.fit_to_grid.isChecked()
+    assert "exceeds" in d.table.item(7, COL_NOTE).text()
+    d.fit_to_grid.setChecked(True)
+    assert d.options().fit_to_grid
+    assert "fitted to the grid's 11.00 m" in d.table.item(7, COL_NOTE).text()
+    d.accept()
+    keys = session.keys()
+    scales = [session.line_for_key(k).placement.scale for k in keys]
+    assert [round(r.scale, 6) for r in d.rows] == [round(s, 6) for s in scales]
+    assert all(s != 1.0 for s in scales)

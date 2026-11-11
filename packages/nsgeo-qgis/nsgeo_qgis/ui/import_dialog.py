@@ -35,6 +35,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -150,6 +151,13 @@ class ImportDialog(QDialog):
         form.addRow("Spacing across", self.spacing)
         form.addRow("First line at", self.first_offset)
         form.addRow("Start along", self.start_along)
+        self.fit_to_grid = QCheckBox("Stretch or compress each line to the grid's length")
+        self.fit_to_grid.setToolTip(
+            "For lines walked edge to edge whose wheel read long or short "
+            "(terrain, calibration). Leave it off for lines run long or short "
+            "on purpose. Edit lines… can fit or unfit any line later."
+        )
+        form.addRow("Line length", self.fit_to_grid)
 
         direction_row = QHBoxLayout()
         self.direction_alternate = QRadioButton("alternate (zigzag)")
@@ -228,6 +236,7 @@ class ImportDialog(QDialog):
             self.label_number,
         ):
             b.toggled.connect(self._replan)
+        self.fit_to_grid.toggled.connect(self._replan)
         self._follow_spacing()
         self._grid_changed()
 
@@ -327,6 +336,7 @@ class ImportDialog(QDialog):
             direction_mode=mode,
             label_source="number" if self.label_number.isChecked() else "stem",
             grid_size_along=along,
+            fit_to_grid=self.fit_to_grid.isChecked(),
         )
 
     # ---- rows -----------------------------------------------------------------

@@ -281,7 +281,10 @@ and its **Import** button name the grid the lines will go into.
    begins), and the **Direction**: **alternate (zigzag)**, **all +1** or
    **all -1**. **First line at** starts at half the spacing, so the first line
    sits in the middle of its strip like the others, and follows **Spacing
-   across** until you type a value of your own.
+   across** until you type a value of your own. Tick **Stretch or compress each
+   line to the grid's length** if your lines were walked edge to edge but the
+   wheel read long or short; it is off by default, so lines run long or short on
+   purpose stay as recorded.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at
@@ -315,6 +318,23 @@ changes as one step. Picks move with their lines.
 
 Changing a grid's length in **Edit grid…** moves its reversed lines with the far
 edge. The message bar tells you how many moved.
+
+A wheel on rough ground, or one that is slightly out of calibration, makes a
+line read longer or shorter than the grid. **Scale** is the number that corrects
+it: the grid metres for each metre the wheel recorded. Type a value in a row, or
+select lines and press **Fit to grid edges** to put each line's first and last
+trace on the grid's two edges. The recorded file is not touched, so setting
+**Scale** back to 1 undoes it. A fitted line stays fitted when you change the
+grid's length in **Edit grid…**. The **Note** column flags a scale more than 20%
+from 1, so a deliberately short line caught in a selection stands out before you
+click **OK**.
+
+Stagger shows as a feature that jumps back and forth between lines walked out
+and back. **Destagger (m)** moves every trace of a line forward along that
+line's own direction of travel. If features on lines walked one way sit behind
+the same features on lines walked the other way, increase it. Set it on every
+line first (select all, type an amount, press **Set**), then adjust single
+lines. Start is not changed: it stays where the line was recorded to begin.
 
 ### Step 4: Open a line and use the map
 

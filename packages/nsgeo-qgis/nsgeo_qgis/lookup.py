@@ -19,6 +19,8 @@ from nsgeo.geometry import GridPlacement
 from nsgeo.io import DztError, DzxError, DzxInfo, read_dzx, read_header, trace_count
 from nsgeo.model import Line
 
+from nsgeo_qgis.line_edit import fit_scale, span_m
+
 _TRAILING = re.compile(r"(\d+)\s*$")
 _T = TypeVar("_T")
 
@@ -48,6 +50,9 @@ class ImportOptions:
     direction_mode: str = "alternate"  # alternate | forward | reverse
     label_source: str = "stem"  # stem | number
     grid_size_along: float | None = None  # for the over-length warning
+    # Stretch or compress each line so its first and last traces sit on the
+    # grid's two edges (placement corrections plan, calls 5, 6 and 11).
+    fit_to_grid: bool = False
 
 
 @dataclass
@@ -66,6 +71,7 @@ class ImportRow:
     label_edited: bool = False
     direction_edited: bool = False
     note: str = ""
+    scale: float = 1.0
 
     @property
     def placeable(self) -> bool:
@@ -164,7 +170,7 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
     the slot index, so excluding a redone line pulls the next file into its
     place.
 
-    Also (re)derives three placement-dependent note components -- the
+    Also (re)derives four placement-dependent note components -- the
     unplaceable-row exclusion, the reversed-direction start point, and the
     over-length warning -- without touching any other note already on the
     row.
@@ -222,7 +228,23 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
         row.note = _merge_note(row.note, "reversed direction", reversed_note)
 
         exceeds: str | None = None
-        if (
+        fitted: str | None = None
+        unfittable: str | None = None
+        row.scale = 1.0
+        if options.fit_to_grid:
+            # Fitting replaces the over-length warning: a fitted line no
+            # longer exceeds anything. A comma, not "; " -- see _merge_note.
+            if options.grid_size_along is None:
+                unfittable = "cannot be fitted without a known grid length"
+            else:
+                span = span_m(row.n_traces or 0, row.traces_per_metre)
+                if span > 0:  # not `<= 0`: a corrupt header's NaN must not pass
+                    row.scale = fit_scale(span, options.grid_size_along)
+                    fitted = (
+                        f"fitted to the grid's {options.grid_size_along:.2f} m "
+                        f"(scale ×{row.scale:.4f})"
+                    )
+        elif (
             options.grid_size_along is not None
             and row.length_m is not None
             and row.length_m > options.grid_size_along + 1e-9
@@ -232,6 +254,8 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
                 f"by {row.length_m - options.grid_size_along:.2f} m"
             )
         row.note = _merge_note(row.note, "exceeds grid size along", exceeds)
+        row.note = _merge_note(row.note, "fitted to the grid's", fitted)
+        row.note = _merge_note(row.note, "cannot be fitted", unfittable)
         slot += 1
 
 
@@ -246,6 +270,7 @@ def rows_to_lines(rows: Sequence[ImportRow], options: ImportOptions) -> list[Lin
                 start_along=float(row.start_along),
                 direction=int(row.direction),
                 label=row.label,
+                scale=float(row.scale),
             ),
         )
         for row in rows
