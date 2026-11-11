@@ -1,8 +1,12 @@
 """Edit a grid's lines in one table, with a panel for changing many at once
 (line editing spec §4.1).
 
-Label, Offset, Dir, Start and Grid are editable; Traces, Length, Along, Picks
-and Note come from the line. Start is editable here although it is not in
+Label, Offset, Dir, Start, Scale, Destagger and Grid are editable; Traces, Length, Along, Picks
+and Note come from the line. Scale and Destagger (m) are the placement
+corrections (placement corrections plan, call 9): a bulk row sets either on
+the selection, and "Fit to grid edges" puts each selected line's first and
+last traces on the grid's two edges (a line with no recorded length is named
+on the status line and left alone). Start is editable here although it is not in
 ImportDialog: an import derives every Start from the direction and the grid's
 length, so a hand-typed one would be lost on the next replan, while this table
 holds each row's edit as a `LineEdit` against the placement it saw, so a typed
@@ -62,6 +66,7 @@ from nsgeo_qgis.line_edit import (
     length_along,
     placement_note,
     same_placement,
+    span_m,
     width_across,
 )
 from nsgeo_qgis.session import SiteSession
@@ -71,18 +76,22 @@ from nsgeo_qgis.session import SiteSession
     COL_OFFSET,
     COL_DIR,
     COL_START,
+    COL_SCALE,
+    COL_DESTAGGER,
     COL_GRID,
     COL_ALONG,
     COL_TRACES,
     COL_LENGTH,
     COL_PICKS,
     COL_NOTE,
-) = range(10)
+) = range(12)
 HEADERS = [
     "Label",
     "Offset (m)",
     "Dir",
     "Start (m)",
+    "Scale",
+    "Destagger (m)",
     "Grid",
     "Along",
     "Traces",
@@ -91,7 +100,17 @@ HEADERS = [
     "Note",
 ]
 # Grid is a combo box in its cell, not an editable item.
-EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START}
+EDITABLE = {COL_LABEL, COL_OFFSET, COL_DIR, COL_START, COL_SCALE, COL_DESTAGGER}
+SCALE_TIP = (
+    "Grid metres per metre the wheel recorded. Fit to grid edges sets it so the "
+    "line's first and last traces sit on the grid's two edges. 1 leaves the line "
+    "as recorded."
+)
+DESTAGGER_TIP = (
+    "Moves every trace of the line this far forward along its direction of "
+    "travel, kept apart from Start. If features on lines walked one way sit "
+    "behind the same features on lines walked the other way, increase it."
+)
 # The background of every cell whose field differs from the placement the
 # table saw, so a change is visible before OK.
 CHANGED = QColor(255, 236, 179)
@@ -132,7 +151,7 @@ class EditLinesDialog(QDialog):
             pass  # an empty table; _refresh says why
 
         self.setWindowTitle(f"Edit lines · {grid_id}")
-        self.resize(980, 560)
+        self.resize(1100, 560)
         layout = QVBoxLayout(self)
         self.header_label = QLabel("")
         layout.addWidget(self.header_label)
@@ -149,6 +168,8 @@ class EditLinesDialog(QDialog):
 
         self.table = QTableWidget(len(self._order), len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
+        self.table.horizontalHeaderItem(COL_SCALE).setToolTip(SCALE_TIP)
+        self.table.horizontalHeaderItem(COL_DESTAGGER).setToolTip(DESTAGGER_TIP)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
@@ -178,6 +199,44 @@ class EditLinesDialog(QDialog):
         start_row.addWidget(self.snap_button)
         start_row.addStretch(1)
         bulk.addLayout(start_row)
+        scale_row = QHBoxLayout()
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.5, 2.0)
+        self.scale_spin.setDecimals(4)
+        self.scale_spin.setSingleStep(0.001)
+        self.scale_spin.setValue(1.0)
+        self.set_scale_button = QPushButton("Set")
+        self.set_scale_button.clicked.connect(lambda: self.set_scale(self.scale_spin.value()))
+        self.fit_button = QPushButton("Fit to grid edges")
+        self.fit_button.clicked.connect(self.fit_to_edges)
+        scale_label = QLabel("Scale")
+        for w in (scale_label, self.scale_spin):
+            w.setToolTip(SCALE_TIP)
+        self.fit_button.setToolTip(SCALE_TIP)
+        scale_row.addWidget(scale_label)
+        scale_row.addWidget(self.scale_spin)
+        scale_row.addWidget(self.set_scale_button)
+        scale_row.addWidget(self.fit_button)
+        scale_row.addStretch(1)
+        bulk.addLayout(scale_row)
+        destagger_row = QHBoxLayout()
+        self.destagger_spin = QDoubleSpinBox()
+        self.destagger_spin.setRange(-5.0, 5.0)
+        self.destagger_spin.setDecimals(3)
+        self.destagger_spin.setSingleStep(0.01)
+        self.destagger_spin.setValue(0.0)
+        self.set_destagger_button = QPushButton("Set")
+        self.set_destagger_button.clicked.connect(
+            lambda: self.set_destagger(self.destagger_spin.value())
+        )
+        destagger_label = QLabel("Destagger (m)")
+        for w in (destagger_label, self.destagger_spin):
+            w.setToolTip(DESTAGGER_TIP)
+        destagger_row.addWidget(destagger_label)
+        destagger_row.addWidget(self.destagger_spin)
+        destagger_row.addWidget(self.set_destagger_button)
+        destagger_row.addStretch(1)
+        bulk.addLayout(destagger_row)
         offset_row = QHBoxLayout()
         self.offset_spin = QDoubleSpinBox()
         self.offset_spin.setRange(-1e4, 1e4)
@@ -335,6 +394,41 @@ class EditLinesDialog(QDialog):
     def set_start(self, value: float) -> None:
         self._apply(lambda e, f: dataclasses.replace(e, start_along=float(value)))
 
+    def set_scale(self, value: float) -> None:
+        self._apply(lambda e, f: dataclasses.replace(e, scale=float(value)))
+
+    def set_destagger(self, value: float) -> None:
+        self._apply(lambda e, f: dataclasses.replace(e, travel_shift=float(value)))
+
+    def fit_to_edges(self) -> None:
+        """Fit every selected line that has a recorded length; name and leave
+        the rest (placement corrections plan, call 5). Like `_apply`, but a
+        row's span comes from the dialog's own trace counts."""
+        try:
+            frames = self._frames()
+            dropped: list[str] = []
+            skipped: list[str] = []
+            for key in self.selected_keys():
+                edit = self._edits[key]
+                span = span_m(self._traces[key], self._per_metre[key])
+                if not span > 0:  # also catches a NaN from a corrupt header
+                    skipped.append(
+                        f"{edit.label or edit.seen.label or Path(key).stem} has no "
+                        "recorded length to fit, so it was left as it is"
+                    )
+                    continue
+                if edit.grid_id is not None and self._target_gone(edit, frames):
+                    dropped.append(self._drop_note(key, edit))
+                self._edits[key] = self._live(edit, frames).fitted(span)
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+            return
+        notes = dropped + skipped
+        self._refresh("; ".join(notes) if notes else None)
+
     def snap_to_edge(self) -> None:
         self._apply(lambda e, f: e.snapped())
 
@@ -444,6 +538,8 @@ class EditLinesDialog(QDialog):
                     COL_OFFSET: abs(p.offset - seen.offset) > SAME_M,
                     COL_DIR: p.direction != seen.direction,
                     COL_START: abs(p.start_along - seen.start_along) > SAME_M,
+                    COL_SCALE: abs(p.scale - seen.scale) > SAME_M,
+                    COL_DESTAGGER: abs(p.travel_shift - seen.travel_shift) > SAME_M,
                     COL_GRID: gone or p.grid_id != seen.grid_id,
                 }
                 values = {
@@ -451,6 +547,8 @@ class EditLinesDialog(QDialog):
                     COL_OFFSET: f"{p.offset:.2f}",
                     COL_DIR: "+1" if p.direction == 1 else "−1",
                     COL_START: f"{p.start_along:.2f}",
+                    COL_SCALE: f"{p.scale:.4f}",
+                    COL_DESTAGGER: f"{p.travel_shift:.2f}",
                     COL_GRID: edit.grid_id if gone else p.grid_id,
                     COL_ALONG: p.axis,
                     COL_TRACES: str(self._traces[key]),
@@ -521,7 +619,16 @@ class EditLinesDialog(QDialog):
             note = None
             if c == COL_LABEL:
                 edit = dataclasses.replace(edit, label=text or Path(key).stem)
-            elif c in (COL_OFFSET, COL_START):
+            elif c == COL_SCALE:
+                try:
+                    scale = float(text.replace(",", "."))
+                    if not math.isfinite(scale) or scale <= 0:
+                        raise ValueError(text)
+                except ValueError:
+                    self._refresh(f"{item.text()!r} is not a scale above 0; unchanged")
+                    return
+                edit = dataclasses.replace(edit, scale=scale)
+            elif c in (COL_OFFSET, COL_START, COL_DESTAGGER):
                 try:
                     value = float(text.replace(",", "."))
                     if not math.isfinite(value):  # nan, inf and 1e999 parse, but are not offsets
@@ -529,11 +636,12 @@ class EditLinesDialog(QDialog):
                 except ValueError:
                     self._refresh(f"{item.text()!r} is not a number; unchanged")
                     return
-                edit = (
-                    dataclasses.replace(edit, offset=value)
-                    if c == COL_OFFSET
-                    else dataclasses.replace(edit, start_along=value)
-                )
+                if c == COL_OFFSET:
+                    edit = dataclasses.replace(edit, offset=value)
+                elif c == COL_START:
+                    edit = dataclasses.replace(edit, start_along=value)
+                else:
+                    edit = dataclasses.replace(edit, travel_shift=value)
             else:
                 # Parsed like ImportDialog: a leading minus (either glyph)
                 # means reversed; anything else must be a positive number.

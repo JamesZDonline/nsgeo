@@ -8,12 +8,14 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.edit_lines_dialog import (
     CHANGED,
     COL_ALONG,
+    COL_DESTAGGER,
     COL_DIR,
     COL_GRID,
     COL_LABEL,
     COL_LENGTH,
     COL_NOTE,
     COL_OFFSET,
+    COL_SCALE,
     COL_START,
     COL_TRACES,
     EditLinesDialog,
@@ -522,7 +524,7 @@ def test_a_table_opened_on_another_site_is_replaced_not_raised(
         plugin.unload()
 
 
-@pytest.mark.parametrize("slot", ["move", "selection", "cell", "grid", "apply", "accept"])
+@pytest.mark.parametrize("slot", ["move", "selection", "cell", "grid", "apply", "fit", "accept"])
 def test_every_slot_reports_an_unexpected_failure_and_does_not_raise(
     table, monkeypatch, message_log, slot
 ):
@@ -544,6 +546,10 @@ def test_every_slot_reports_an_unexpected_failure_and_does_not_raise(
     elif slot == "grid":
         monkeypatch.setattr(dialog, "_frames", boom)
         dialog._on_grid_picked(0, "B")
+    elif slot == "fit":
+        dialog.select_keys([dialog.keys()[0]])
+        monkeypatch.setattr(dialog, "_frames", boom)
+        dialog.fit_to_edges()
     elif slot == "apply":
         dialog.select_keys([dialog.keys()[0]])
         monkeypatch.setattr(dialog, "_frames", boom)
@@ -554,3 +560,86 @@ def test_every_slot_reports_an_unexpected_failure_and_does_not_raise(
     assert "kaboom" in dialog.status.text()
     assert any("kaboom" in m for m in message_log)
     dialog.deleteLater()
+
+
+def test_fit_to_grid_edges_puts_both_ends_of_every_selected_line_on_the_edges(table):
+    session, dialog = table
+    dialog.table.selectAll()
+    dialog.fit_to_edges()
+    want = f"{15.0 / (59 / 60):.4f}"
+    for r in range(6):
+        assert _cell(dialog, r, COL_SCALE) == want
+        assert _cell(dialog, r, COL_START) == ("0.00" if SHAPE[r][1] == 1 else "15.00")
+        assert "stretches it by" in _cell(dialog, r, COL_NOTE)
+    assert all(_changed(dialog, COL_SCALE))
+    keys = dialog.keys()
+    dialog.accept()
+    for k in keys:
+        along = session.line_for_key(k).distance_along()
+        assert sorted((along.min(), along.max())) == pytest.approx([0.0, 15.0], abs=1e-9)
+
+
+def test_fit_skips_a_line_that_cannot_be_fitted_and_says_so(qgis_app, tmp_path):
+    session = _site(tmp_path)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__099.DZT", n_traces=40, traces_per_metre=0.0)
+    session.add_lines([Line.open(p, GridPlacement("Grid5", "y", 5.0, 0.0, 1, "timed"))])
+    dialog = EditLinesDialog(session, "Grid5")
+    dialog.select_keys([dialog.keys()[0], dialog.keys()[6]])
+    dialog.fit_to_edges()
+    assert "has no recorded length to fit, so it was left as it is" in dialog.status.text()
+    assert "timed" in dialog.status.text()
+    assert _cell(dialog, 0, COL_SCALE) != "1.0000"
+    assert _cell(dialog, 6, COL_SCALE) == "1.0000"
+    assert _changed(dialog, COL_SCALE)[0] and not _changed(dialog, COL_SCALE)[6]
+    dialog.deleteLater()
+
+
+def test_typing_a_scale_and_a_destagger_edits_only_that_row(table):
+    _, dialog = table
+    keys = dialog.keys()
+    dialog.table.item(2, COL_SCALE).setText("0.95")
+    dialog.table.item(2, COL_DESTAGGER).setText("0.24")
+    for col in (COL_SCALE, COL_DESTAGGER):
+        assert _changed(dialog, col) == [False, False, True, False, False, False]
+    assert _cell(dialog, 2, COL_SCALE) == "0.9500"
+    assert _cell(dialog, 2, COL_DESTAGGER) == "0.24"
+    dialog.accept()
+    p = dialog.session.line_for_key(keys[2]).placement
+    assert (p.scale, p.travel_shift) == (0.95, 0.24)
+
+
+@pytest.mark.parametrize("text", ["0", "-1", "abc", "nan"])
+def test_a_scale_that_is_not_above_zero_is_refused(table, text):
+    _, dialog = table
+    keys = dialog.keys()
+    dialog.table.item(1, COL_SCALE).setText(text)
+    assert dialog.status.text() == f"{text!r} is not a scale above 0; unchanged"
+    assert _cell(dialog, 1, COL_SCALE) == "1.0000"
+    assert dialog.edit_for(keys[1]).scale is None
+
+
+def test_set_scale_and_set_destagger_change_every_selected_row(table):
+    _, dialog = table
+    dialog.select_keys(dialog.keys()[:2])
+    dialog.scale_spin.setValue(0.97)
+    dialog.set_scale_button.click()
+    dialog.destagger_spin.setValue(0.3)
+    dialog.set_destagger_button.click()
+    for r in range(6):
+        want = r < 2
+        assert (_cell(dialog, r, COL_SCALE) == "0.9700") == want
+        assert (_cell(dialog, r, COL_DESTAGGER) == "0.30") == want
+    assert dialog.status.text().startswith("2 lines changed")
+
+
+def test_a_pending_fit_uses_the_grid_length_at_ok(table):
+    from dataclasses import replace
+
+    session, dialog = table
+    dialog.select_keys([dialog.keys()[i] for i in (0, 2, 4)])
+    dialog.fit_to_edges()
+    session.replace_grid(replace(GRID5, size_y=14.0))
+    keys = dialog.keys()
+    dialog.accept()
+    for i in (0, 2, 4):
+        assert session.line_for_key(keys[i]).distance_along()[-1] == pytest.approx(14.0, abs=1e-9)

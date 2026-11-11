@@ -41,6 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.line_edit import SAME_M
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
 
@@ -208,6 +209,12 @@ class SurveyDock(QgsDockWidget):
             # is the one place it must still show up, clearly marked, since
             # a user has no other way to discover it is even in the site.
             text += " · ⚠ unplaced (time-triggered)"
+        scale = getattr(p, "scale", 1.0)
+        shift = getattr(p, "travel_shift", 0.0)
+        if abs(scale - 1) > SAME_M:
+            text += f" · ×{scale:.3f}"
+        if abs(shift) > SAME_M:
+            text += f" · destagger {shift:+.2f} m"
         if line.velocity is not None:
             text += f" · v {line.velocity.surface_velocity:.3f}*"
         item = QTreeWidgetItem([text])
