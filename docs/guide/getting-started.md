@@ -281,7 +281,11 @@ and its **Import** button name the grid the lines will go into.
    begins), and the **Direction**: **alternate (zigzag)**, **all +1** or
    **all -1**. **First line at** starts at half the spacing, so the first line
    sits in the middle of its strip like the others, and follows **Spacing
-   across** until you type a value of your own.
+   across** until you type a value of your own. Tick **Stretch or compress each
+   line to the grid's length** if your lines were walked edge to edge but the
+   wheel read long or short; it greys out **Start along**, because a fitted line starts
+   on the grid's edge. It is off by default, so lines run long or short on
+   purpose stay as recorded.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at
@@ -315,6 +319,36 @@ changes as one step. Picks move with their lines.
 
 Changing a grid's length in **Edit grid…** moves its reversed lines with the far
 edge. The message bar tells you how many moved.
+
+A wheel on rough ground, or one that is slightly out of calibration, makes a
+line read longer or shorter than the grid. **Scale** is the number that corrects
+it: the grid metres for each metre the wheel recorded. Type a value in a row, or
+select lines and press **Fit to grid edges** to put each line's first and last
+trace on the grid's two edges. The recorded file is not touched, so setting
+**Scale** back to 1 undoes the stretch (after **Fit to grid edges**, **Start**
+has moved too, so reset that as well). A fitted line stays fitted when you
+change the grid's length in **Edit grid…**. The **Note** column flags a scale
+more than 20% from 1, so a deliberately short line caught in a selection stands
+out before you click **OK**.
+
+Fit lines before you measure velocity. A velocity fitted on a line before its
+scale changes keeps the value measured at the old spacing, so refit it
+afterwards. Migration still uses the trace spacing recorded in the file, not the
+fitted one. A site with corrections opened in nsgeo 0.3.0 draws the lines
+uncorrected, and drops the corrections if that version saves it.
+
+Stagger shows as a feature that jumps back and forth between lines walked out
+and back. **Destagger (m)** moves every trace of a line forward along that
+line's own direction of travel. If features on lines walked one way sit behind
+the same features on lines walked the other way, increase it. Set it on every
+line first (select all, type an amount, press **Set**), then adjust single
+lines. Start is not changed: it stays where the line was recorded to begin.
+
+Fit a grid's lines before you destagger them. Fitting removes the squeeze a
+wheel that reads short or long puts on each line, and that squeeze looks like
+stagger itself, so the destagger a grid needs can change sign once its lines
+are fitted. On one real grid, unfitted lines looked best at +0.15 m and the
+same lines fitted at −0.15 m.
 
 ### Step 4: Open a line and use the map
 
@@ -405,7 +439,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    slices, or **None** for the signed mean. These transforms are only offered
    here, not in **Add step**. Preparing starts by itself, and the status line
    reads *prepared* when it is done.
-   **Choose…** sets which of the grid's lines are included.
+   **Choose…** sets which of the grid's lines are included. With every line
+   ticked, lines you import onto the grid later are included too.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
@@ -459,6 +494,12 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    max distance; at a fine cell that can take a few seconds, and it shows a
    wait cursor while it does. Stepping through the slices, the smoothing and
    **dz**, **z0** and **z1** reuse the fill already prepared.
+
+   Each picture blends the cells around every pixel, so it is drawn smooth when
+   you zoom in. **Whole site** can cover more ground than a fine cell allows at
+   full detail. Past a size it draws a preview at a coarser pixel and says so in
+   the panel. An export needs full detail, and refuses to go ahead at a cell
+   that would not fit.
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save

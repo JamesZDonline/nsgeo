@@ -28,34 +28,56 @@ method's is.
 
 D and the operator depend only on where data is, never on its values
 (interpolation spec §7), so `plan_curvature` builds them once per grid and
-distance. `CurvaturePlan.solve` then runs conjugate gradients per slice
-(plan call 3): matrix-free in float32 with float64 dot products, Jacobi
-preconditioned, started from linear interpolation along columns and rows
-weighted by span (`_start`), and stopped at `CURVATURE_TOL` of the
-right-hand side. Against a float64 solve to 1e-12 on the full 50 m grids
-below, its largest error inside the max distance was 6.2e-6 of the data
-range at 0.2 m, 4.8e-5 at 0.1 m and 4.0e-4 at 0.05 m, where 99% of cells were
-within 2.2e-5. A multigrid solver would be faster (#111).
+distance, with a multigrid hierarchy on the operator (`multigrid.py`, #111;
+design and measurements in docs/superpowers/notes/2026-11-10-multigrid-spike.md).
+`CurvaturePlan.solve` then runs conjugate gradients per slice (plan call 3):
+matrix-free in float32 with float64 dot products, started from linear
+interpolation along columns and rows weighted by span (`_start`), and stopped
+at `CURVATURE_TOL` of the right-hand side. Each iteration is preconditioned by
+one V-cycle: degree-2 Chebyshev smoothing, Galerkin coarse operators on
+cell-doubled grids, and a dense solve once a level has few unknowns. Jacobi
+took about 3.5x the iterations for each halving of the cell (41, 155, 492 at
+0.2, 0.1 and 0.05 m on a 50 m grid); the V-cycle holds them near 6 to 15.
+Against a float64 solve to 1e-10 on the ten real lines at 0.05 m, the largest
+error inside the max distance was 3.0e-5 to 3.6e-5 of the data range (two
+windows), against 4.1e-5 to 6.9e-5 for Jacobi (the spike note). On the 50 m
+grids, against a float64 solve, the largest error was 3.5e-6, 1.4e-5 and
+1.1e-4 of the data range at 0.2, 0.1 and 0.05 m (99th percentile 1.3e-5 at
+0.05 m), within milestone B's 6.2e-6, 4.8e-5 and 4.0e-4.
 
 numpy only, no scipy. Measured medians per slice, at max distance 0.375 m
-(0.75 x the 0.5 m line spacing): on the ten real lines (25 x 100 cells at
-0.2 m), on 50 m x 50 m of wandering lines 0.5 m apart along X, and on the
-same lines over the lower 40% of the frame with one skipped:
+(0.75 x the 0.5 m line spacing) with `bench.py` from the spike note: on the ten
+real lines (25 x 100 cells at 0.2 m, 100 x 400 at 0.05 m), on 50 m x 50 m of
+wandering lines 0.5 m apart along X, and on the same lines over the lower 40%
+of the frame with one skipped. Before is Jacobi at e701f82 (load average about
+2.6); after is the hierarchy (load average about 2.0, one run per case, the
+plan column included):
 
-    case                             plan      solve    iterations
-    real lines, 0.2 m                0.001 s   4 ms      38
-    50 m grid, 0.2 m                 0.004 s   49 ms     42
-    50 m grid, 0.1 m                 0.02 s    0.79 s   158
-    50 m grid, 0.05 m (one slice)    0.11 s    12.2 s   459
-    50 m, 40% covered, line skipped  0.003 s   0.16 s   141
+    case                             before: plan  solve    its   after: plan  solve    its
+    real lines, 0.2 m                0.001 s       0.004 s   38   0.019 s      0.009 s    7
+    real lines, 0.05 m               0.005 s       0.410 s  540   0.060 s      0.105 s   15
+    50 m grid, 0.2 m                 0.004 s       0.054 s   41   0.080 s      0.071 s    6
+    50 m grid, 0.1 m                 0.023 s       0.892 s  155   0.270 s      0.442 s   11
+    50 m grid, 0.05 m                0.132 s       14.3 s   492   1.39 s       3.29 s    15
+    50 m, 40% covered, line skipped  0.003 s       0.157 s  136   0.582 s *    0.088 s    7
 
-An iteration costs about what it did in the spike (27 ms at 0.05 m against
-25), but the finer grids take more of them than its 0.55 s and 10 s did.
-Its start ran along columns only: 39 and 131 iterations at 0.2 and 0.1 m
-here, but 61 and 207 on the same lines turned along Y, where the span
-weighting's 42 and 158 do not change. An equal average of the two
-directions needed 56 and 184. The kriging preview's figures are in
-`interpolate.py`.
+* A single noisy sample: re-measured at 0.10-0.22 s (0.12-0.16 s at load 3.3),
+  as `eigh` on the 448-unknown coarsest level varies under BLAS thread
+  contention.
+
+The plan costs more, since it builds the hierarchy once per grid and distance.
+At the frame cap (`MAX_FRAME_CELLS`, 2000 x 2000 cells at 0.05 m) building the
+plan takes about 6.0 s against 0.54 s before, the plan holds about 95 B a
+cell, and a solve takes about 13 s in 14 iterations.
+
+The coarse grids are not worth it at 0.2 m, where the solve is slower: 1.4 to
+2x on regular lines (median of 7, wandering 0.5 m lines: 5 x 20 m 4.8 to
+9.6 ms; 30 x 30 m 20 to 31 ms; 40 x 40 m 34 to 51 ms; 50 x 50 m 51 to 72 ms;
+the ten real lines 4 to 9 ms). It breaks even on the spike's irregular real
+20 x 16 m grid, where Jacobi needed 144-171 iterations. Whole site adds its
+grids' last solve times against the 50 ms live budget, so several mid-size
+grids at 0.2 m can now show the kriging preview where they followed the depth
+live before. The kriging preview's figures are in `interpolate.py`.
 """
 
 from __future__ import annotations
@@ -67,6 +89,7 @@ from typing import Callable
 import numpy as np
 
 from nsgeo.slices.interpolate import reach_mask
+from nsgeo.slices.multigrid import Hierarchy, build_hierarchy
 
 CURVATURE_TOL: float = 1e-6  # ‖r‖ ≤ tol · ‖b‖ ends the solve (plan call 3)
 CURVATURE_EPS: float = 1e-6  # the slope term's weight, in cell units (plan call 1)
@@ -111,6 +134,7 @@ class CurvaturePlan:
     reach: np.ndarray  # (ny*nx,) bool: finite in the output
     domain: np.ndarray  # (ny, nx) bool: the solve area D (plan call 2)
     coefficients: np.ndarray  # (13, ny, nx) float32: A's row at each unknown, by offset
+    hierarchy: Hierarchy  # the multigrid preconditioner built on `coefficients` (#111)
     # Kept to re-plan around a non-finite datum (plan call 10).
     cell: float
     max_distance_m: float
@@ -118,7 +142,8 @@ class CurvaturePlan:
     def __post_init__(self) -> None:
         # Frozen in fact, not only in name: the worker thread's safety rests on
         # nothing writing to a plan once it is built (plan call 6), so its
-        # arrays refuse writes. A non-finite datum is solved on a new plan.
+        # arrays refuse writes (the hierarchy froze its own). A non-finite
+        # datum is solved on a new plan.
         for array in (self.populated, self.reach, self.domain, self.coefficients):
             array.flags.writeable = False
 
@@ -128,23 +153,24 @@ class CurvaturePlan:
         """(The slice, CG iterations run). Data cells as they are, the rest of
         the reach solved, NaN elsewhere.
 
-        `should_stop`, when given, is asked before every iteration; True
-        raises `SolveStopped`. Neither the plan nor `values` is written.
+        `should_stop`, when given, is asked once before the first V-cycle and
+        then before every iteration; True raises `SolveStopped`. Neither the plan
+        nor `values` is written.
         """
         values = np.asarray(values)
         if values.shape != self.shape:
             raise ValueError(f"values shape {values.shape} != plan shape {self.shape}")
-        data = values.astype(np.float32)
         pop = self.populated.reshape(self.shape)
-        finite = np.isfinite(data[pop])
+        finite = np.isfinite(values[pop].astype(np.float32))
         if not finite.all():
             # A non-finite datum shows as it is and is solved around, on a plan
             # for the finite data alone (plan call 10). Binned data never come here.
+            # The re-plan builds a hierarchy too (Grid 1 size: 0.25 to 0.43 s a solve).
             usable = pop.copy()
             usable[pop] = finite
             plan = plan_curvature(usable, self.cell, self.max_distance_m)
-            out, iterations = plan.solve(data, should_stop)
-            out[pop] = data[pop]
+            out, iterations = plan.solve(values, should_stop)
+            out[pop] = values[pop]
             return out, iterations
         out = np.zeros(self.shape, dtype=np.float32)
         iterations = 0
@@ -152,9 +178,8 @@ class CurvaturePlan:
             # Solved about the data mean, which changes nothing exactly
             # (A·1 = 0) but keeps float32's digits for the data's variation:
             # a constant field comes back exactly, and an offset costs nothing.
-            mean = np.float32(np.mean(data[pop], dtype=np.float64))
-            data -= mean
-            iterations = self._solve_into(out, data, pop, should_stop)
+            mean = np.float32(np.mean(values[pop].astype(np.float32), dtype=np.float64))
+            iterations = self._solve_into(out, values, mean, pop, should_stop)
             out += mean
         out[~self.reach.reshape(self.shape)] = np.nan
         out[pop] = values[pop]
@@ -163,16 +188,21 @@ class CurvaturePlan:
     def _solve_into(
         self,
         x: np.ndarray,
-        data: np.ndarray,
+        values: np.ndarray,
+        mean: np.float32,
         pop: np.ndarray,
         should_stop: Callable[[], bool] | None,
     ) -> int:
-        """Jacobi-preconditioned CG for A·x = b on the unknowns, b = −A·d with d
+        """Multigrid-preconditioned CG for A·x = b on the unknowns, b = −A·d with d
         the data on data cells and 0 elsewhere (plan call 3). `x` comes in as
         zeros and leaves holding the unknowns."""
         unknown = self.domain & ~pop
         # The start first: its scratch is freed before the solve's own
         # buffers exist, which keeps the peak near the plan (ruling R2).
+        # The data about their mean, a copy this function frees as soon as it
+        # has been used: it need not stay through the iterations.
+        data = values.astype(np.float32)
+        data -= mean
         np.copyto(x, _start(data, pop), where=unknown)
         # p lives inside a zero frame `_PAD` cells wide, and is 0 off the
         # unknowns, so A·p is 13 shifted multiply-adds with no edge cases.
@@ -181,6 +211,7 @@ class CurvaturePlan:
         q = np.empty(self.shape, np.float32)
         work = np.empty(self.shape, np.float32)
         np.copyto(p, data, where=pop)
+        del data
         self._times(padded, q, work)
         b_norm = math.sqrt(_dot(q, q))
         if b_norm == 0.0:
@@ -189,11 +220,12 @@ class CurvaturePlan:
         np.copyto(p, x, where=unknown)
         self._times(padded, q, work)
         r = np.negative(q)  # r = b − A·x = −A·(d + x)
-        inverse = np.zeros(self.shape, np.float32)
-        np.divide(1.0, self.coefficients[_CENTRE], out=inverse, where=unknown)
-        z = r * inverse
+        if should_stop is not None and should_stop():
+            raise SolveStopped  # before the first V-cycle, which is long at the frame cap
+        z = self.hierarchy.precondition(r, (q, work))
         p[...] = z
         rz = _dot(r, z)
+        del z
         iterations = 0
         while (
             iterations < CURVATURE_MAX_ITERATIONS and math.sqrt(_dot(r, r)) > CURVATURE_TOL * b_norm
@@ -209,11 +241,12 @@ class CurvaturePlan:
             x += work
             np.multiply(q, alpha, out=work)
             r -= work
-            np.multiply(r, inverse, out=z)
+            z = self.hierarchy.precondition(r, (q, work))
             rz_next = _dot(r, z)
             p *= rz_next / rz
             p += z
             rz = rz_next
+            del z  # not held across the next V-cycle
             iterations += 1
         return iterations
 
@@ -245,6 +278,7 @@ class CurvaturePlan:
             + self.reach.nbytes
             + self.domain.nbytes
             + self.coefficients.nbytes
+            + self.hierarchy.nbytes
         )
 
 
@@ -307,30 +341,53 @@ def _stencil(domain: np.ndarray, unknown: np.ndarray) -> np.ndarray:
     return out
 
 
-def _along_columns(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _along_block(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per column, an estimate and its weight. The estimate is linear between
     the nearest data cells above and below, the one that exists where only
     one does, and NaN where the column has none. The weight is 1 / the span
     between the two in cells where both exist, else 0."""
     ny, nx = pop.shape
     rows = np.arange(ny, dtype=np.int32)[:, None]
-    above = np.maximum.accumulate(np.where(pop, rows, np.int32(-1)), axis=0)
-    below = np.minimum.accumulate(np.where(pop, rows, np.int32(ny))[::-1], axis=0)[::-1]
     cols = np.arange(nx)
-    has_above, has_below = above >= 0, below < ny
+    above = np.maximum.accumulate(np.where(pop, rows, np.int32(-1)), axis=0)
+    has_above = above >= 0
     lo = data[np.maximum(above, 0), cols]
+    below = np.minimum.accumulate(np.where(pop, rows, np.int32(ny))[::-1], axis=0)[::-1]
+    has_below = below < ny
     hi = data[np.minimum(below, ny - 1), cols]
     np.copyto(lo, hi, where=~has_above)
     np.copyto(hi, lo, where=~has_below)
+    span = np.subtract(below, above, out=below)  # in place: `below` is not needed again
+    del below
     weight = np.zeros(pop.shape, np.float32)
-    np.divide(1.0, below - above, out=weight, where=has_above & has_below & (below > above))
+    both = has_above & has_below
+    both &= span > 0
+    np.divide(1.0, span, out=weight, where=both)
+    del span, both
     # lo + (hi − lo) · (row − above) / span; 0 · anything where one side is missing.
     hi -= lo
-    hi *= rows - above
+    np.subtract(rows, above, out=above)
+    hi *= above
+    del above
     hi *= weight
     hi += lo
     hi[~has_above & ~has_below] = np.nan
     return hi, weight
+
+
+def _along_columns(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`_along_block` over blocks of columns, which are independent: its int32
+    planes, index arrays and masks would otherwise be a dozen bytes a cell on
+    top of the two outputs, and this runs twice inside `_start` at the solve's
+    peak (ruling R2)."""
+    ny, nx = pop.shape
+    estimate = np.empty(pop.shape, np.float32)
+    weight = np.empty(pop.shape, np.float32)
+    step = max(1, 8192 // ny)
+    for c0 in range(0, nx, step):
+        block = slice(c0, min(nx, c0 + step))
+        estimate[:, block], weight[:, block] = _along_block(data[:, block], pop[:, block])
+    return estimate, weight
 
 
 def _start(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
@@ -381,12 +438,15 @@ def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) ->
     pop2 = pop2.astype(bool)
     reach = reach_mask(pop2, cell, max_distance_m)
     domain = _grow(reach, SOLVE_MARGIN_CELLS)
+    unknown = domain & ~pop2
+    coefficients = _stencil(domain, unknown)
     return CurvaturePlan(
         shape=(int(pop2.shape[0]), int(pop2.shape[1])),
         populated=pop2.ravel(),
         reach=reach.ravel(),
         domain=domain,
-        coefficients=_stencil(domain, domain & ~pop2),
+        coefficients=coefficients,
+        hierarchy=build_hierarchy(_OFFSETS, coefficients, unknown),
         cell=float(cell),
         max_distance_m=float(max_distance_m),
     )

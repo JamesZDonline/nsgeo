@@ -133,11 +133,11 @@ def _spy_on_the_estimate(monkeypatch):
     import nsgeo_qgis.ui.slices_dock as dock_module
 
     real = dock_module.estimate_memory
-    calls: list[tuple[int, int, int, int]] = []
+    calls: list[tuple[int, int, int, int, str]] = []
 
-    def spy(prepared_samples, n_cells, nz, n_covered):
-        calls.append((prepared_samples, n_cells, nz, n_covered))
-        return real(prepared_samples, n_cells, nz, n_covered)
+    def spy(prepared_samples, n_cells, nz, n_covered, *, method):
+        calls.append((prepared_samples, n_cells, nz, n_covered, method))
+        return real(prepared_samples, n_cells, nz, n_covered, method=method)
 
     monkeypatch.setattr(dock_module, "estimate_memory", spy)
     return calls
@@ -163,6 +163,20 @@ def test_the_included_label_counts_only_covered_cells(docked, monkeypatch):
     assert 0 < covered < frame.n_cells
     assert calls and calls[0][3] == covered
     assert dock.included_label.text().startswith("3 of 3 included")
+
+
+def test_the_included_label_counts_the_method_chosen(docked, monkeypatch):
+    """#148: minimum curvature holds its plan beside a kriging preview, so the
+    over-budget warning counts the method the Interpolation panel shows, and
+    choosing another method counts again."""
+    dock, _ = docked
+    calls = _spy_on_the_estimate(monkeypatch)
+    combo = dock.grid_finish.method_combo
+    combo.setCurrentIndex(combo.findData("min_curvature"))
+    assert calls and calls[-1][4] == "min_curvature"
+    del calls[:]
+    combo.setCurrentIndex(combo.findData("idw"))
+    assert calls and calls[-1][4] == "idw"
 
 
 def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeypatch):
@@ -2975,7 +2989,7 @@ def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch)
     dock.slice_slider.setValue(20)
     preview = dock.current_values()
     _wait_for_refine(dock)
-    assert seen == ["minimum curvature failed: no convergence"]
+    assert seen == ["minimum curvature failed: ValueError: no convergence"]
     assert dock.provisional, "the preview stays on screen"
     assert dock.current_values() is preview
     assert dock.status_label.text() == dock._grid_status_text()
@@ -3026,7 +3040,7 @@ def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_dr
     dock.error.connect(errors.append)
     dock.stretch_combo.setCurrentText("shared across the cube")
     _wait_for_refine(dock)
-    assert errors == ["minimum curvature failed: no convergence"]
+    assert errors == ["minimum curvature failed: ValueError: no convergence"]
     assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is False
     assert not dock.refiner.busy and not dock._grid_refine.rest.isActive()
 

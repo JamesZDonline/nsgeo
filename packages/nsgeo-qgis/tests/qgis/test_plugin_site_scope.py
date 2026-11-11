@@ -325,6 +325,9 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     # Lines, and the weights each engine has built for the drawn slice.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
     held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
+    # And the taps of the gathers the drawn slice built on the site lattice.
+    held += sum(f.taps.nbytes for f in site._gathers.values())
+    assert site._gathers
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
@@ -602,6 +605,283 @@ def test_a_source_edit_after_emptying_does_not_change_what_the_site_prepares(plu
     dock = whole_site(plugin)
     assert before == 4
     assert dock.site_engine.engine_for("A").line_count == before
+
+
+# ---- #100 #101: both scopes read a grid's line record the same way --------------------
+
+
+def _lines_for(session, keys):
+    return [session.line_for_key(k) for k in keys]
+
+
+def _reimport(session, lines):
+    """Import the same files again: the same keys, at the end of the survey."""
+    from nsgeo.model.survey import Line
+
+    session.add_lines([Line.open(line.path, line.placement) for line in lines])
+
+
+def test_a_reimported_line_brings_back_an_emptied_choice_in_both_scopes(plugin, site3):
+    """#100: removing every chosen line falls back to every line, but the
+    record still names the choice. A re-imported line it names is the choice
+    again, in both scopes, and after a This grid round trip too."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    assert dock.grid_combo.currentText() == "A"
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first, second))
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (first,)
+    assert dock.included_keys() == (first,)
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")
+    assert dock.included_keys() == (first,)
+    assert site_scope.source_keys(session, "A") == (first,)
+
+
+def test_a_reimported_line_rejoins_a_choice_it_was_removed_from_in_both_scopes(plugin, site3):
+    """#100, after any import: removing one chosen line of two and importing it
+    again brings it back in both scopes, in survey order (it is imported last)."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    assert dock.included_keys() == (second,)
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (second, first)
+    assert dock.included_keys() == (second, first)
+
+
+def test_accepting_the_chooser_unchanged_after_a_reimport_writes_nothing(plugin, site3):
+    """#101: the record names the same lines in another order (the re-imported
+    one is last in the survey); OK on the unchanged chooser leaves it and the
+    survey's saved state alone."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    _reimport(session, gone)
+    session.save()
+    record = session.slice_source("A")
+    plugin.open_line_choice_dialog()
+    plugin._line_choice_dialog.accept()
+    assert session.slice_source("A") == record
+    assert not session.dirty
+
+
+def test_a_choice_made_before_any_preset_survives_a_record_that_names_no_lines(plugin, site3):
+    """#100's reading takes only a record that names lines. With no preset a
+    line choice cannot be remembered, and a record holding only a resolution
+    says nothing about lines: the live choice stands."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    saved = dict(session.site.presets)
+    session.site.presets.clear()
+    session.presets_changed.emit()
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    assert session.slice_source("A") is None, "nothing could be remembered"
+    session.remember_slice_resolution("A", cell=0.1)
+    session.site.presets.update(saved)
+    session.presets_changed.emit()
+    assert dock.included_keys() == (first, second)
+
+
+def test_a_line_moved_onto_a_choice_that_names_it_re_prepares(plugin, site3):
+    """#100 with line editing (spec §4.5): A's record still names 001 after its
+    removal. Imported again onto B and the survey reopened, 001 is a site line
+    the engine has seen; moved to A, it is in the choice again, and This grid
+    re-prepares with it, as it does for a line moved onto a default source."""
+    from nsgeo.model.survey import Line
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    line = session.line_for_key(first)
+    session.remove_lines((first,))
+    session.add_lines([Line.open(line.path, dataclasses.replace(line.placement, grid_id="B"))])
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    session.open_site(session.json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.line_keys == (second,)
+    session.edit_lines([LineEdit(first, session.line_for_key(first).placement, grid_id="A")])
+    assert dock.included_keys() == (second, first)
+    assert spin_until(
+        lambda: dock.engine.is_prepared and first in dock.engine.choice.line_keys, 30_000
+    )
+
+
+def test_a_reimported_line_brings_back_an_emptied_choice_on_a_grid_opened_from_the_site(
+    plugin, site3
+):
+    """#100, final review D4's path: This grid opens A from the site list, which
+    remembers nothing, with every chosen line gone; then one comes back."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=(first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first, second))
+    whole_site(plugin)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (first,)
+    assert dock.included_keys() == (first,)
+
+
+def test_accepting_the_line_chooser_unchanged_keeps_every_line_in_both_scopes(plugin, site3):
+    """#101: OK on an unchanged chooser is no narrower choice. A line removed
+    and imported again is in both scopes."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    plugin.open_line_choice_dialog()
+    plugin._line_choice_dialog.accept()
+    assert not session.dirty, "an unchanged OK writes nothing"
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+def test_ticking_every_line_again_takes_in_lines_imported_later(plugin, site3):
+    """#101, the user's ruling: every line ticked is every line, now and later,
+    however the chooser got there."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    dock.set_included_for("A", every[:2])
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    dock.set_included_for("A", every[:3])  # every line still on A
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+def test_ticking_every_line_in_the_site_takes_in_lines_imported_later(plugin, site3):
+    from nsgeo_qgis.ui import site_scope
+
+    session = plugin.session
+    every = site3.keys("B")
+    session.remember_slice_source("B", preset="p", lines=every[:2])
+    dock = whole_site(plugin)
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    dock.set_included_for("B", every[:3])  # every line still on B
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "B") == every
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.included_keys() == every
+
+
+def test_accepting_every_line_rewrites_an_old_full_list_as_every_line(plugin, site3):
+    """#101: a record naming every line (written before the ruling) restores
+    as an explicit choice; accepting it unchanged now means every line."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=every)
+    dock.grid_combo.setCurrentText("A")
+    dock.set_included_for("A", every)
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+# ---- #106 #103: the switch from the site opens the grid the site drew -----------------
+
+
+def test_this_grid_opens_an_unremembered_grid_on_the_preset_the_site_drew_it_with(plugin):
+    """#106: B has no record, so the site draws it with the first preset, "p".
+    This grid showed "raw" on A; opening B from the site list shows "p", and
+    the switch remembers nothing."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    dock.preset_combo.setCurrentText("raw")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("B") is None
+    whole_site(plugin)
+    assert dock.site_engine.engine_for("B").choice.preset == "p"
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.preset == "p"
+    assert session.slice_source("B") is None
+
+
+def _add_refused_preset(session) -> None:
+    """A preset carrying an amplitude step: every preparation with it is
+    refused. Named to sort last, so it is no grid's default (`default_preset`)."""
+    session.site.presets["zz_bad"] = [{"step": "amp_abs", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+
+def test_a_refused_preparation_on_the_switch_takes_the_site_picture_off_the_map(plugin):
+    """#103: B's remembered preset is refused. Opening B from the site list
+    shows the refusal, and the site's picture leaves the map: This grid has
+    nothing to draw."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    _add_refused_preset(session)
+    session.remember_slice_source("B", preset="zz_bad", lines=None)
+    whole_site(plugin)
+    layer = plugin.slice_layer.layer
+    assert layer is not None and layer.name() == SITE_LAYER_NAME
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.grid_combo.currentText() == "B"
+    assert any("Absolute value" in e for e in errors), errors
+    assert dock.engine.choice is None
+    assert plugin.slice_layer.layer is None
+
+
+def test_a_refused_preset_in_this_grid_takes_its_slice_off_the_map(plugin):
+    """#103's check on This grid alone: choosing a refused preset leaves no
+    slice of the old preset on the map."""
+    dock = plugin.slices_dock
+    _add_refused_preset(plugin.session)
+    _events()
+    layer = plugin.slice_layer.layer
+    assert layer is not None and layer.name() == LAYER_NAME
+    dock.preset_combo.setCurrentText("zz_bad")
+    _events()
+    assert dock.engine.choice is None
+    assert plugin.slice_layer.layer is None
 
 
 # ---- normalisation and gain -------------------------------------------------------
@@ -3058,3 +3338,139 @@ def test_a_line_moved_while_the_site_is_still_preparing_ends_on_its_new_grid(plu
     assert not [e for e in errors if "now on grid" in e], errors
     assert dock.site_engine.ready_grids == ("A", "B", "C")
     _every_engine_holds_only_its_own_lines(dock, session)
+
+
+# ---- the panel says why: preview note, not-drawn reason, export pixel size ----------------
+
+
+def _nudge_cell(dock) -> None:
+    """Change the cell so the site re-applies its resolution, then let it draw."""
+    dock.cell_spin.setValue(dock.cell_spin.value() + 0.05)
+    dock.flush_debounce()
+    settle(dock)
+
+
+def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_note.text() == ""
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    engine = dock.site_engine
+    assert engine.is_preview and engine.preview_note
+    assert dock.site_note.text() == engine.preview_note
+    assert dock.site_note.isVisibleTo(dock)
+    # The refusal is in the panel before anyone clicks Export (spec 5.5).
+    assert "can't be exported at full detail" in dock.site_note.toolTip()
+    assert engine.preview_note in dock.site_note.toolTip()
+
+
+def test_the_note_clears_when_the_site_fits_again(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.text()
+    dock.site_engine.max_pixels = 10**9
+    _nudge_cell(dock)
+    assert not dock.site_engine.is_preview
+    assert dock.site_note.text() == ""
+    assert dock.site_note.toolTip() == ""
+
+
+def test_the_note_clears_on_switching_to_this_grid(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.isVisibleTo(dock)
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.scope() == "grid"
+    assert not dock.site_note.isVisibleTo(dock)
+
+
+def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    def refuse(self, resolution):
+        raise RuntimeError("the lattice could not be built")
+
+    monkeypatch.setattr(site_engine_module.SiteEngine, "set_resolution", refuse)
+    dock.site_scope_button.click()
+    settle(dock)
+    scope = dock._site
+    assert dock.site_engine.lattice is None, "nothing is drawn"
+    scope.refresh_slice()
+    assert scope.problem == "the lattice could not be built"
+    assert any("the lattice could not be built" in e for e in errors), "the toast stays"
+    assert dock.site_note.text().startswith("Not drawn: ")
+    assert "the lattice could not be built" in dock.site_note.toolTip()
+
+
+def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    scope = dock._site
+    scope.problem = "stale"
+    _nudge_cell(dock)
+    assert scope.problem is None
+    assert not dock.site_note.text().startswith("Not drawn")
+
+
+def test_the_site_note_never_widens_the_dock(plugin):
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    probe.settle()
+    content = probe.scroll.widget()
+    before = content.minimumSizeHint().width()
+    height = dock.site_note.height()
+    longest = "a very long preview note " * 12
+    assert len(longest) >= 300
+    dock.site_note.setText(longest)
+    probe.settle()
+    assert content.minimumSizeHint().width() == before
+    assert dock.site_note.height() == height, "empty or full, the line keeps its height"
+    assert dock.site_note.text() == longest
+
+
+def test_export_messages_name_the_cell_and_the_pixel(plugin, answer_modal, tmp_path):
+    dock = whole_site(plugin)
+    target = tmp_path / "site.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    cell = dock.cell_spin.value()
+    pixel = dock.site_engine.lattice.pixel
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({cell:g} m cell, {pixel:g} m pixels)" in text, text
+
+    dock.grid_scope_button.click()
+    _events()
+    if not dock.engine.is_prepared:
+        dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    grid_target = tmp_path / "grid.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(grid_target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert grid_target.exists()
+    gcell = dock.engine.frame.cell
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({gcell:g} m cell, {gcell:g} m pixels)" in text, text
+
+
+def test_a_preview_site_export_is_refused_before_any_dialog(plugin, answer_modal, fake_iface):
+    from qgis.core import Qgis
+
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    refusal = dock.site_engine.export_refusal
+    assert refusal
+    calls = answer_modal(QFileDialog, "getSaveFileName", ("", ""))
+    dock.export_button.click()
+    assert calls == [], "no save dialog opens for a site that cannot be exported"
+    item = fake_iface.messageBar().currentItem()
+    assert item.text() == refusal
+    assert item.level() == Qgis.MessageLevel.Warning

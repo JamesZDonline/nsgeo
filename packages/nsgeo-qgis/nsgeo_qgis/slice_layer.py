@@ -44,6 +44,8 @@ from nsgeo.render import colormap
 from nsgeo.slices import CubeFrame, to_north_up
 from osgeo import gdal
 from qgis.core import (
+    Qgis,
+    QgsBilinearRasterResampler,
     QgsColorRampShader,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
@@ -94,6 +96,15 @@ def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShad
     return shader
 
 
+def apply_smooth_resampling(layer: QgsRasterLayer) -> None:
+    """Draw `layer` smooth when zoomed in: QGIS otherwise shows each pixel as
+    a hard block. Zoomed-out drawing is left as QGIS has it."""
+    layer.resampleFilter().setZoomedInResampler(QgsBilinearRasterResampler())
+    # Pinned so a provider-level ("early") resampling setting cannot bypass
+    # the filter above.
+    layer.setResamplingStage(Qgis.RasterResamplingStage.ResampleFilter)
+
+
 class SliceLayer(QObject):
     """The one live raster layer showing the dock's current slice.
 
@@ -135,10 +146,12 @@ class SliceLayer(QObject):
         colormap_name: str,
         unipolar: bool,
         subtitle: str,
+        counts: bool = False,
     ) -> None:
-        """One grid's slice: resampled north-up, then drawn by `update_north_up`."""
+        """One grid's slice: resampled north-up, then drawn by `update_north_up`.
+        `counts=True` is for the coverage view: counts are taken, never blended."""
         try:
-            array, geotransform = to_north_up(values, frame)
+            array, geotransform = to_north_up(values, frame, counts=counts)
             self.update_north_up(
                 array,
                 geotransform,
@@ -308,6 +321,10 @@ class SliceLayer(QObject):
         )
         if not self.layer.isValid():
             raise RuntimeError(f"could not open {path}: {self.layer.error().summary()}")
+        # The renderer survives the repoint, but `_apply_renderer` only runs
+        # when the stretch changes. QGIS 3.44 restores the resampler from the
+        # saved style on `setDataSource`, so this per-tick call is a guard.
+        apply_smooth_resampling(self.layer)
         self.path = path
 
     def _write(
@@ -400,6 +417,9 @@ class SliceLayer(QObject):
         renderer.setClassificationMin(lo)
         renderer.setClassificationMax(float(limit))
         self.layer.setRenderer(renderer)
+        # A fresh layer's first draw, and any new renderer. Each tick's
+        # repoint sets it again in `_repoint`.
+        apply_smooth_resampling(self.layer)
 
     # ---- lifecycle ------------------------------------------------------
     def clear(self) -> None:
