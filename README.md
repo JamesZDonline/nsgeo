@@ -94,7 +94,9 @@ a milestone merges or the plan changes.
 
 ### In progress
 
-Nothing at the moment. The first item under *Next* starts next.
+- **Whole site at fine cells.** Being designed: Whole site never refuses a fine
+  cell, every slice blends the cells around each pixel, and the export can be
+  finer than the preview ([#107], [#108]).
 
 ### Next, in order
 
