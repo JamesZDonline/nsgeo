@@ -76,25 +76,39 @@ def apply_stencil(
 
 def _prolong_axis(c: np.ndarray, n_fine: int, axis: int) -> np.ndarray:
     # fine[2I] = ¾c[I] + ¼c[I-1], fine[2I+1] = ¾c[I] + ¼c[I+1], clamped at the
-    # ends; the last row goes when the fine length is odd.
+    # ends; the last row goes when the fine length is odd. One output and one
+    # coarse-sized temporary.
     c = np.moveaxis(c, axis, 0)
-    before = np.concatenate([c[:1], c[:-1]])
-    after = np.concatenate([c[1:], c[-1:]])
     out = np.empty((2 * c.shape[0],) + c.shape[1:], c.dtype)
-    out[0::2] = 0.75 * c + 0.25 * before
-    out[1::2] = 0.75 * c + 0.25 * after
+    quarter = np.empty_like(c)
+    even, odd = out[0::2], out[1::2]
+    np.multiply(c, 0.75, out=even)
+    np.multiply(c[:1], 0.25, out=quarter[:1])  # before, clamped
+    np.multiply(c[:-1], 0.25, out=quarter[1:])
+    even += quarter
+    np.multiply(c, 0.75, out=odd)
+    np.multiply(c[1:], 0.25, out=quarter[:-1])  # after
+    np.multiply(c[-1:], 0.25, out=quarter[-1:])  # clamped
+    odd += quarter
     return np.moveaxis(out[:n_fine], 0, axis)
 
 
 def _restrict_axis(f: np.ndarray, n_coarse: int, axis: int) -> np.ndarray:
     f = np.moveaxis(f, axis, 0)
-    padded = np.zeros((2 * n_coarse,) + f.shape[1:], f.dtype)
-    padded[: f.shape[0]] = f
+    if f.shape[0] == 2 * n_coarse:
+        padded = f  # read only: no copy
+    else:
+        padded = np.zeros((2 * n_coarse,) + f.shape[1:], f.dtype)
+        padded[: f.shape[0]] = f
     even, odd = padded[0::2], padded[1::2]
-    out = 0.75 * (even + odd)
-    out[:-1] += 0.25 * even[1:]
+    out = even + odd
+    out *= 0.75
+    quarter = np.empty_like(out)
+    np.multiply(even[1:], 0.25, out=quarter[1:])
+    out[:-1] += quarter[1:]
     out[0] += 0.25 * even[0]
-    out[1:] += 0.25 * odd[:-1]
+    np.multiply(odd[:-1], 0.25, out=quarter[:-1])
+    out[1:] += quarter[:-1]
     out[-1] += 0.25 * odd[-1]
     return np.moveaxis(out, 0, axis)
 
@@ -173,7 +187,35 @@ def _coarsen(level: Level) -> Level:
     return _level(COARSE_OFFSETS, coef, active)
 
 
-def _chebyshev(level: Level, b: np.ndarray, x: np.ndarray | None) -> np.ndarray:
+class _Scratch:
+    """One level's call-local work arrays: a zero-framed copy of the vector
+    being multiplied, the product, and a plane for the stencil's terms."""
+
+    def __init__(
+        self, shape: tuple[int, int], spare: tuple[np.ndarray, np.ndarray] | None = None
+    ) -> None:
+        self.pad = np.zeros((shape[0] + 2 * _REACH, shape[1] + 2 * _REACH), np.float32)
+        self.inner = self.pad[_REACH:-_REACH, _REACH:-_REACH]
+        # `spare`: the caller's own idle planes, lent to the finest level.
+        self.out, self.work = spare or (np.empty(shape, np.float32), np.empty(shape, np.float32))
+
+    def times(self, level: Level, v: np.ndarray | None = None) -> np.ndarray:
+        """A·v, in `self.out`: `apply_stencil` with no temporaries. `v` is
+        copied into `self.inner` first, or None when it is already there. It
+        is not masked: every vector passed is 0 off the active cells (the
+        scale is, and so are the residuals and corrections built from it)."""
+        ny, nx = self.out.shape
+        if v is not None:
+            self.inner[...] = v
+        self.out.fill(0.0)
+        for k, (dy, dx) in enumerate(level.offsets):
+            y0, x0 = _REACH + dy, _REACH + dx
+            np.multiply(level.coefficients[k], self.pad[y0 : y0 + ny, x0 : x0 + nx], out=self.work)
+            self.out += self.work
+        return self.out
+
+
+def _chebyshev(level: Level, b: np.ndarray, x: np.ndarray | None, scratch: _Scratch) -> np.ndarray:
     """SMOOTHING_DEGREE Chebyshev steps on scale·A over [1/ratio, 1], from x
     (zero if None). Returns x, advanced in place (a new array when x is None)."""
     hi = 1.0
@@ -185,15 +227,21 @@ def _chebyshev(level: Level, b: np.ndarray, x: np.ndarray | None) -> np.ndarray:
         x = np.zeros(b.shape, np.float32)
         r = b * level.scale
     else:
-        r = (b - apply_stencil(level.offsets, level.coefficients, x * level.active)) * level.scale
-    d = r / np.float32(theta)
+        r = np.subtract(b, scratch.times(level, x))
+        r *= level.scale
+    d = scratch.inner  # the direction lives in the padded buffer, for `times`
+    np.divide(r, np.float32(theta), out=d)
     for step in range(SMOOTHING_DEGREE):
         x += d
         if step == SMOOTHING_DEGREE - 1:
             break  # the residual and direction below would go unused
-        r -= apply_stencil(level.offsets, level.coefficients, d * level.active) * level.scale
+        product = scratch.times(level)
+        product *= level.scale
+        r -= product
         rho_next = 1.0 / (2.0 * sigma - rho)
-        d = np.float32(rho_next * rho) * d + np.float32(2.0 * rho_next / delta) * r
+        d *= np.float32(rho_next * rho)
+        np.multiply(r, np.float32(2.0 * rho_next / delta), out=product)
+        d += product
         rho = rho_next
     return x
 
@@ -223,23 +271,38 @@ class Hierarchy:
             total += level.coefficients.nbytes + level.active.nbytes + level.scale.nbytes
         return total - self.levels[0].coefficients.nbytes
 
-    def precondition(self, r: np.ndarray) -> np.ndarray:
+    def precondition(
+        self, r: np.ndarray, spare: tuple[np.ndarray, np.ndarray] | None = None
+    ) -> np.ndarray:
         """One V-cycle from zero: float32 (ny, nx), zero off the finest
-        unknowns. `r` is not written; the scratch is this call's own."""
-        return self._cycle(0, r)
+        unknowns. `r` is not written; the scratch is this call's own.
 
-    def _cycle(self, k: int, b: np.ndarray) -> np.ndarray:
+        `spare` may lend two float32 (ny, nx) planes the caller has no use for
+        meanwhile, which the finest level overwrites instead of allocating its
+        own: a caller's scratch, so a thread-safe call stays one."""
+        return self._cycle(0, r, spare)
+
+    def _cycle(
+        self, k: int, b: np.ndarray, spare: tuple[np.ndarray, np.ndarray] | None = None
+    ) -> np.ndarray:
         level = self.levels[k]
         if k == len(self.levels) - 1:
             out = np.zeros(b.shape, np.float32)
             out.flat[self.coarse_cells] = self.coarse_inverse @ b.flat[self.coarse_cells]
             return out
-        x = _chebyshev(level, b, None)
-        residual = b - apply_stencil(level.offsets, level.coefficients, x * level.active)
+        x = _chebyshev(level, b, None, _Scratch(b.shape, spare))
+        scratch = _Scratch(b.shape, spare)
+        residual = np.subtract(b, scratch.times(level, x), out=scratch.out)
+        residual *= level.active
         shape = self.levels[k + 1].active.shape
-        e = self._cycle(k + 1, restrict(residual * level.active, shape))
-        x += prolong(e, b.shape) * level.active
-        return _chebyshev(level, b, x)
+        rhs = restrict(residual, shape)
+        del scratch, residual  # freed before the coarse levels allocate
+        e = self._cycle(k + 1, rhs)
+        correction = prolong(e, b.shape)
+        correction *= level.active
+        x += correction
+        del correction
+        return _chebyshev(level, b, x, _Scratch(b.shape, spare))
 
 
 def _coarsest_inverse(level: Level) -> tuple[np.ndarray, np.ndarray]:

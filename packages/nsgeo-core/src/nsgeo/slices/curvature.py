@@ -144,17 +144,16 @@ class CurvaturePlan:
         values = np.asarray(values)
         if values.shape != self.shape:
             raise ValueError(f"values shape {values.shape} != plan shape {self.shape}")
-        data = values.astype(np.float32)
         pop = self.populated.reshape(self.shape)
-        finite = np.isfinite(data[pop])
+        finite = np.isfinite(values[pop].astype(np.float32))
         if not finite.all():
             # A non-finite datum shows as it is and is solved around, on a plan
             # for the finite data alone (plan call 10). Binned data never come here.
             usable = pop.copy()
             usable[pop] = finite
             plan = plan_curvature(usable, self.cell, self.max_distance_m)
-            out, iterations = plan.solve(data, should_stop)
-            out[pop] = data[pop]
+            out, iterations = plan.solve(values, should_stop)
+            out[pop] = values[pop]
             return out, iterations
         out = np.zeros(self.shape, dtype=np.float32)
         iterations = 0
@@ -162,9 +161,8 @@ class CurvaturePlan:
             # Solved about the data mean, which changes nothing exactly
             # (A·1 = 0) but keeps float32's digits for the data's variation:
             # a constant field comes back exactly, and an offset costs nothing.
-            mean = np.float32(np.mean(data[pop], dtype=np.float64))
-            data -= mean
-            iterations = self._solve_into(out, data, pop, should_stop)
+            mean = np.float32(np.mean(values[pop].astype(np.float32), dtype=np.float64))
+            iterations = self._solve_into(out, values, mean, pop, should_stop)
             out += mean
         out[~self.reach.reshape(self.shape)] = np.nan
         out[pop] = values[pop]
@@ -173,7 +171,8 @@ class CurvaturePlan:
     def _solve_into(
         self,
         x: np.ndarray,
-        data: np.ndarray,
+        values: np.ndarray,
+        mean: np.float32,
         pop: np.ndarray,
         should_stop: Callable[[], bool] | None,
     ) -> int:
@@ -183,6 +182,10 @@ class CurvaturePlan:
         unknown = self.domain & ~pop
         # The start first: its scratch is freed before the solve's own
         # buffers exist, which keeps the peak near the plan (ruling R2).
+        # The data about their mean, a copy this function frees as soon as it
+        # has been used: it need not stay through the iterations.
+        data = values.astype(np.float32)
+        data -= mean
         np.copyto(x, _start(data, pop), where=unknown)
         # p lives inside a zero frame `_PAD` cells wide, and is 0 off the
         # unknowns, so A·p is 13 shifted multiply-adds with no edge cases.
@@ -191,6 +194,7 @@ class CurvaturePlan:
         q = np.empty(self.shape, np.float32)
         work = np.empty(self.shape, np.float32)
         np.copyto(p, data, where=pop)
+        del data
         self._times(padded, q, work)
         b_norm = math.sqrt(_dot(q, q))
         if b_norm == 0.0:
@@ -199,9 +203,10 @@ class CurvaturePlan:
         np.copyto(p, x, where=unknown)
         self._times(padded, q, work)
         r = np.negative(q)  # r = b − A·x = −A·(d + x)
-        z = self.hierarchy.precondition(r)
+        z = self.hierarchy.precondition(r, (q, work))
         p[...] = z
         rz = _dot(r, z)
+        del z
         iterations = 0
         while (
             iterations < CURVATURE_MAX_ITERATIONS and math.sqrt(_dot(r, r)) > CURVATURE_TOL * b_norm
@@ -217,11 +222,12 @@ class CurvaturePlan:
             x += work
             np.multiply(q, alpha, out=work)
             r -= work
-            z = self.hierarchy.precondition(r)
+            z = self.hierarchy.precondition(r, (q, work))
             rz_next = _dot(r, z)
             p *= rz_next / rz
             p += z
             rz = rz_next
+            del z  # not held across the next V-cycle
             iterations += 1
         return iterations
 
@@ -316,30 +322,53 @@ def _stencil(domain: np.ndarray, unknown: np.ndarray) -> np.ndarray:
     return out
 
 
-def _along_columns(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _along_block(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Per column, an estimate and its weight. The estimate is linear between
     the nearest data cells above and below, the one that exists where only
     one does, and NaN where the column has none. The weight is 1 / the span
     between the two in cells where both exist, else 0."""
     ny, nx = pop.shape
     rows = np.arange(ny, dtype=np.int32)[:, None]
-    above = np.maximum.accumulate(np.where(pop, rows, np.int32(-1)), axis=0)
-    below = np.minimum.accumulate(np.where(pop, rows, np.int32(ny))[::-1], axis=0)[::-1]
     cols = np.arange(nx)
-    has_above, has_below = above >= 0, below < ny
+    above = np.maximum.accumulate(np.where(pop, rows, np.int32(-1)), axis=0)
+    has_above = above >= 0
     lo = data[np.maximum(above, 0), cols]
+    below = np.minimum.accumulate(np.where(pop, rows, np.int32(ny))[::-1], axis=0)[::-1]
+    has_below = below < ny
     hi = data[np.minimum(below, ny - 1), cols]
     np.copyto(lo, hi, where=~has_above)
     np.copyto(hi, lo, where=~has_below)
+    span = np.subtract(below, above, out=below)  # in place: `below` is not needed again
+    del below
     weight = np.zeros(pop.shape, np.float32)
-    np.divide(1.0, below - above, out=weight, where=has_above & has_below & (below > above))
+    both = has_above & has_below
+    both &= span > 0
+    np.divide(1.0, span, out=weight, where=both)
+    del span, both
     # lo + (hi − lo) · (row − above) / span; 0 · anything where one side is missing.
     hi -= lo
-    hi *= rows - above
+    np.subtract(rows, above, out=above)
+    hi *= above
+    del above
     hi *= weight
     hi += lo
     hi[~has_above & ~has_below] = np.nan
     return hi, weight
+
+
+def _along_columns(data: np.ndarray, pop: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`_along_block` over blocks of columns, which are independent: its int32
+    planes, index arrays and masks would otherwise be a dozen bytes a cell on
+    top of the two outputs, and this runs twice inside `_start` at the solve's
+    peak (ruling R2)."""
+    ny, nx = pop.shape
+    estimate = np.empty(pop.shape, np.float32)
+    weight = np.empty(pop.shape, np.float32)
+    step = max(1, 8192 // ny)
+    for c0 in range(0, nx, step):
+        block = slice(c0, min(nx, c0 + step))
+        estimate[:, block], weight[:, block] = _along_block(data[:, block], pop[:, block])
+    return estimate, weight
 
 
 def _start(data: np.ndarray, pop: np.ndarray) -> np.ndarray:
