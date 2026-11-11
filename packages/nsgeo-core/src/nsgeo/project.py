@@ -79,7 +79,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
 
 def _placement_to_dict(placement: Any) -> dict[str, Any]:
     if isinstance(placement, GridPlacement):
-        return {
+        doc: dict[str, Any] = {
             "type": "grid",
             "grid_id": placement.grid_id,
             "axis": placement.axis,
@@ -88,6 +88,13 @@ def _placement_to_dict(placement: Any) -> dict[str, Any]:
             "direction": placement.direction,
             "label": placement.label,
         }
+        # Written only when corrected, so an uncorrected site saves as it
+        # always did (placement corrections plan, call 13).
+        if placement.scale != 1.0:
+            doc["scale"] = placement.scale
+        if placement.travel_shift != 0.0:
+            doc["travel_shift"] = placement.travel_shift
+        return doc
     raise ProjectError(f"cannot serialise placement of type {type(placement).__name__}")
 
 
@@ -102,6 +109,8 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
         start_along=float(doc.get("start_along", 0.0)),
         direction=int(doc.get("direction", 1)),
         label=doc.get("label"),
+        scale=float(doc.get("scale", 1.0)),
+        travel_shift=float(doc.get("travel_shift", 0.0)),
     )
 
 
@@ -360,7 +369,11 @@ def load_site(path: str | Path) -> Site:
         from_fit = entry.get("velocity_from_fit")
         if not isinstance(from_fit, str) or from_fit not in fits:
             from_fit = None
-        line = Line.open(dzt, _placement_from_dict(entry["placement"]), velocity=velocity)
+        try:
+            placement = _placement_from_dict(entry["placement"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(f"invalid placement for line {entry['path']!r}: {exc}") from exc
+        line = Line.open(dzt, placement, velocity=velocity)
         lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))
         if "stack" in entry:
             try:

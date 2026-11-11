@@ -710,3 +710,33 @@ def test_an_old_radius_spacings_is_dropped_on_load(tmp_path):
     # maps it onto the new controls (interpolation spec §8).
     loaded = _load_with_resolution(tmp_path, {"cell": 0.2, "radius_spacings": 0.5})
     assert loaded.site_view["resolution"] == {"cell": 0.2}
+
+
+def test_scale_and_travel_shift_round_trip(tmp_path, site):
+    site.lines[1] = dataclasses.replace(
+        site.lines[1],
+        placement=dataclasses.replace(site.lines[1].placement, scale=0.9542, travel_shift=0.24),
+    )
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    back = load_site(out)
+    assert back.lines[1].placement == site.lines[1].placement
+    assert back.lines[0].placement.scale == 1.0 and back.lines[0].placement.travel_shift == 0.0
+
+
+def test_a_line_without_corrections_writes_neither_key(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    for entry in json.loads(out.read_text())["lines"]:
+        assert "scale" not in entry["placement"] and "travel_shift" not in entry["placement"]
+
+
+@pytest.mark.parametrize("field,value", [("scale", 0), ("scale", "x"), ("travel_shift", None)])
+def test_a_bad_scale_in_the_file_is_a_project_error_naming_the_line(tmp_path, site, field, value):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["placement"][field] = value
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="L0.DZT"):
+        load_site(out)
