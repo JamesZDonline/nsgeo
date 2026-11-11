@@ -1229,10 +1229,11 @@ class NsgeoPlugin:
             what=task_name,
         )
         if not start_export(task):
-            self._restore_layers(removed)
+            back, lost = self._restore_layers(removed)
+            note = self._restore_note(back, lost)
             self.message(
                 "an export is already running; wait for it to finish, "
-                "or cancel it in the task list.",
+                "or cancel it in the task list." + (f" {note}." if note else ""),
                 Qgis.MessageLevel.Warning,
             )
             return
@@ -1280,17 +1281,20 @@ class NsgeoPlugin:
         """
         try:
             if result.cancelled:
-                back = self._restore_layers(removed, epoch)
-                self.message("export cancelled" + (f"; {back}" if back else ""))
+                note = self._restore_note(*self._restore_layers(removed, epoch))
+                self.message(
+                    "export cancelled" + (f"; {note}" if note else ""),
+                    Qgis.MessageLevel.Warning if "could not" in note else Qgis.MessageLevel.Info,
+                )
                 return
             if not result.ok:
                 QgsMessageLog.logMessage(
                     f"export failed: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
                 )
-                back = self._restore_layers(removed, epoch)
+                note = self._restore_note(*self._restore_layers(removed, epoch))
                 self.message(
                     f"could not export the GeoTIFF: {plain_export_error(result.error)}"
-                    + (f"; {back}" if back else ""),
+                    + (f"; {note}" if note else ""),
                     Qgis.MessageLevel.Critical,
                 )
                 return
@@ -1353,12 +1357,16 @@ class NsgeoPlugin:
                 Qgis.MessageLevel.Critical,
             )
 
-    def _restore_layers(self, removed: Sequence[tuple[str, Path]], epoch: int | None = None) -> str:
-        """Add back the layers an export removed to replace, from their unchanged files.
+    def _restore_layers(
+        self, removed: Sequence[tuple[str, Path]], epoch: int | None = None
+    ) -> tuple[list[str], list[str]]:
+        """Add back the layers an export removed to replace, from their files.
 
-        Same name; a style file beside the file applies as its default style. Returns a
-        sentence for the message, or "" when nothing was put back (nothing removed, the
-        site has closed since, or the file is gone).
+        Each re-add is on its own `try`, so one failure never stops the rest. Same name; a
+        style file beside the file applies as its default style, but the temporal
+        properties and the layer's place in the group are not reapplied. Returns the names
+        put back and the names that could not be (a file gone or unreadable, or an error,
+        logged raw). Both are empty when nothing was removed or the site has closed since.
         """
         if (
             not removed
@@ -1366,18 +1374,34 @@ class NsgeoPlugin:
             or self.session is None
             or not self.session.is_open
         ):
-            return ""
-        names = []
+            return [], []
+        back: list[str] = []
+        lost: list[str] = []
         for name, path in removed:
-            if not path.exists():
-                continue
-            layer = QgsRasterLayer(str(path), name, "gdal")
-            if layer.isValid():
+            try:
+                layer = QgsRasterLayer(str(path), name, "gdal") if path.exists() else None
+                if layer is None or not layer.isValid():
+                    raise OSError(f"{path} is missing or cannot be read as a layer")
                 self._add_exported_layer(layer)
-                names.append(name)
-        if not names:
-            return ""
-        return f"{name_list(names)} {'was' if len(names) == 1 else 'were'} put back as before"
+                back.append(name)
+            except Exception as exc:  # noqa: BLE001 -- the others still go back
+                QgsMessageLog.logMessage(
+                    f"could not put the layer {name} back from {path}: {exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+                lost.append(name)
+        return back, lost
+
+    @staticmethod
+    def _restore_note(back: Sequence[str], lost: Sequence[str]) -> str:
+        """The words for a cancel or failure that removed layers: what is back, and what is not."""
+        parts = []
+        if back:
+            parts.append(f"{name_list(back)} {'was' if len(back) == 1 else 'were'} put back")
+        if lost:
+            parts.append(f"{name_list(lost)} could not be put back; add it again from its file")
+        return "; ".join(parts)
 
     def _add_export_layer(
         self,

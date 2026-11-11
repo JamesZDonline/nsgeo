@@ -525,7 +525,69 @@ def _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tm
         assert plugin.layers.group.findLayer(layer.id()) is not None
     now = {lyr.name() for lyr in plugin.layers.project.mapLayers().values()}
     assert names <= now
-    assert any("put back as before" in m for m, _lv in levels), levels
+    assert any("put back" in m for m, _lv in levels), levels
+
+
+def _held_replace(plugin, drive_dialog, monkeypatch, tmp_path):
+    """Export with a companion, then start a replace and hold it; returns what the cancel needs."""
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    _export(plugin, drive_dialog, target)
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=target, replace=True)
+    dock.export_button.click()
+    gate.wait_entered()
+    return plugin, target, coverage
+
+
+def test_a_cancelled_replace_names_a_layer_whose_file_vanished(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    plugin, target, coverage = _held_replace(plugin, drive_dialog, monkeypatch, tmp_path)
+    coverage.unlink()  # gone mid-export
+    levels, disconnect = _levels()
+    try:
+        running_export().cancel()
+        wait_for_export()
+    finally:
+        disconnect()
+    assert _layer_for(plugin, target) is not None, "the one that could be put back is back"
+    assert _layer_for(plugin, coverage) is None
+    said = [(m, lv) for m, lv in levels if m.startswith("export cancelled")]
+    assert said and said[0][1] == Qgis.MessageLevel.Warning
+    assert "cube was put back" in said[0][0]
+    assert "cube_coverage could not be put back" in said[0][0]
+    assert not any("could not be added to the map" in m for m, _lv in levels)
+
+
+def test_a_re_add_that_raises_still_restores_the_other_layer(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    plugin, target, coverage = _held_replace(plugin, drive_dialog, monkeypatch, tmp_path)
+    real = plugin._add_exported_layer
+
+    def picky(layer):
+        if layer.name() == "cube":
+            raise RuntimeError("the group is gone")
+        return real(layer)
+
+    monkeypatch.setattr(plugin, "_add_exported_layer", picky)
+    levels, disconnect = _levels()
+    try:
+        running_export().cancel()
+        wait_for_export()
+    finally:
+        disconnect()
+    assert _layer_for(plugin, coverage) is not None
+    said = [m for m, _lv in levels if m.startswith("export cancelled")]
+    assert said and "cube could not be put back" in said[0]
+    assert "cube_coverage was put back" in said[0]
+    assert any("the group is gone" in m for m, _lv in levels), "the raw error is logged"
+    assert not any("could not be added to the map" in m for m, _lv in levels)
 
 
 def test_a_cancelled_replace_puts_the_old_layers_back(plugin, tmp_path, drive_dialog, monkeypatch):
