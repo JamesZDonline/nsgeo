@@ -524,9 +524,9 @@ from the side.
    point, and Esc cancels. The cut goes on the grid you first clicked in. It
    appears in the **cuts** layer on the map, and under its grid in **nsgeo
    Survey**, where a right-click renames or deletes it.
-3. The profile opens it. Its title starts **cut:**, followed by the name, the
-   grid and the length. The distance along the cut runs left to right from where
-   you started. The depth axis is the grid's. The pale blue band shows the slice
+3. The profile opens it. Its title reads **nsgeo Profile · cut:**, followed by
+   the name, the grid and the length. The distance along the cut runs left to
+   right from where you started. The depth axis is the grid's. The pale blue band shows the slice
    you are looking at in **nsgeo Slices**, so you can see which reflection a
    slice is made from. Blank stretches are places the cut passes outside the
    grid, or farther than the **Max distance to data** from any line.
@@ -534,9 +534,9 @@ from the side.
 With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first, and
 the title says so: *Kriging preview · minimum curvature 12 of 211 depths*. The
 finished section replaces it a depth at a time, starting at the slice you are
-looking at, and the title then reads *Minimum curvature*. It takes some
-seconds, and longer for a long cut at a fine cell. Change a setting while it
-works and it starts again. Only the cut you have opened is finished: hovering
+looking at, and the title then reads *Minimum curvature*. It can take up to a
+minute or two for a long cut at a fine cell. Change a setting while it works
+and it starts again; changing the palette or renaming the cut does not. Only the cut you have opened is finished: hovering
 another one shows its kriging preview.
 
 The map works on cuts while the **cuts** layer is the current layer, and on
@@ -571,8 +571,8 @@ Everything for a site lives in its site folder:
 | your DZT files | Read by nsgeo, never changed. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,
-cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files whenever it
-needs to, so those layers are read-only. The **picks** layer is your own work,
+cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
+whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
 

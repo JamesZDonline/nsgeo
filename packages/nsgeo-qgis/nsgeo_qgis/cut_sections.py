@@ -127,6 +127,22 @@ class CutSection:
     provenance_json: str
 
 
+@dataclass
+class _Entry:
+    """A cached section and what it was made from.
+
+    `stamp` is everything that changes its ROWS; `shown` is what only changes
+    how it is labelled or coloured (the palette, the cut's name). A solve and
+    its solved depths belong to the stamp, so a recolour or a rename keeps them
+    (cut spec §4.7: a solved section stays while the source and settings hold).
+    """
+
+    stamp: tuple[Any, ...]
+    shown: tuple[Any, ...]
+    section: CutSection
+    levels: set[int]
+
+
 class _SolveInputs:
     """What every depth of one solve shares: the cube, the crops and their plans.
 
@@ -135,8 +151,16 @@ class _SolveInputs:
     """
 
     def __init__(
-        self, cube: Any, columns: SectionColumns, settings: FinishSettings, spacing: float
+        self,
+        key: str,
+        stamp: tuple[Any, ...],
+        cube: Any,
+        columns: SectionColumns,
+        settings: FinishSettings,
+        spacing: float,
     ):
+        self.key = key  # what the solve is for, so a landing can be checked against it
+        self.stamp = stamp
         self.cube = cube
         self.columns = columns
         self.settings = settings
@@ -163,6 +187,8 @@ class CutLevelJob:
         self.level = level
         self.result: np.ndarray | None = None
         self._inputs = inputs
+        self.key = inputs.key
+        self.stamp = inputs.stamp
 
     def run(self, should_stop: Callable[[], bool]) -> None:
         inputs = self._inputs
@@ -190,18 +216,16 @@ class CutSections(QObject):
         super().__init__(parent)
         self.session = session
         self.slices_dock = slices_dock
-        self._cache: dict[str, tuple[tuple[Any, ...], CutSection]] = {}
+        self._cache: dict[str, _Entry] = {}
         #: Cuts last answered with a message, and what they wait for: "source"
         #: (no engine shows their grid) or "cube" (a preview with none built).
         #: A cut with nothing cached would never be announced otherwise.
         self._waiting: dict[str, str] = {}
         #: The working cut's minimum curvature (cut spec §4.7). `_working` is
         #: the key waiting out its rest or being solved, `_stamp` the cached
-        #: section's fingerprint it was armed for; `_levels` is each cached
-        #: standing-in section's solved depths, under that same stamp.
+        #: section's values stamp it was armed for.
         self._working: str | None = None
         self._stamp: tuple[Any, ...] | None = None
-        self._levels: dict[str, tuple[tuple[Any, ...], set[int]]] = {}
         self._band: tuple[float, float] | None = None
         self._refiner = Refiner(self, thread_name_prefix=CUT_THREAD_NAME_PREFIX)
         self._rest = QTimer(self)
@@ -271,12 +295,12 @@ class CutSections(QObject):
         """
         cut = self._cut(key)
         if cut is None:
-            self._cache.pop(key, None)
+            self._drop(key)
             self._waiting.pop(key, None)
             return ""
         source = self.source_for(cut.grid_id)
         if source is None:
-            self._cache.pop(key, None)
+            self._drop(key)
             self._waiting[key] = "source"
             return NO_SOURCE_TEXT.format(name=cut.name, grid=cut.grid_id)
         engine = source.engine
@@ -294,17 +318,48 @@ class CutSections(QObject):
             finally:
                 QApplication.restoreOverrideCursor()
         self._waiting.pop(key, None)
-        stamp = self._fingerprint(cut, source)
-        cached = self._cache.get(key)
-        if cached is not None and cached[0] == stamp:
-            section = cached[1]
+        stamp, shown = self._fingerprint(cut, source)
+        entry = self._cache.get(key)
+        if entry is not None and entry.stamp != stamp:
+            entry = None
+        if entry is None:
+            entry = _Entry(stamp, shown, self._build(key, cut, source), set())
+            self._cache[key] = entry
         else:
-            section = self._build(key, cut, source)
-            self._cache[key] = (stamp, section)
-            self._levels[key] = (stamp, set())
+            self._relabel(entry, cut, source, shown)
+            self._sync_count(entry)
+        section = entry.section
         if build_cube and section.standing_in:
             self._arm(key, stamp)
         return section
+
+    def _drop(self, key: str) -> None:
+        """Forget a cached section; a solve for it stops with it."""
+        self._cache.pop(key, None)
+        if self._working == key:
+            self._cancel()
+
+    @staticmethod
+    def _relabel(entry: _Entry, cut: Cut, source: CutSource, shown: tuple[Any, ...]) -> bool:
+        """Bring a section's labels up to date without touching its rows: a
+        new palette, or a new name in its provenance. True when it changed."""
+        if entry.shown == shown:
+            return False
+        doc = json.loads(entry.section.provenance_json)
+        doc["cut_name"] = cut.name
+        entry.section = dataclasses.replace(
+            entry.section, source=source, provenance_json=json.dumps(doc)
+        )
+        entry.shown = shown
+        return True
+
+    @staticmethod
+    def _sync_count(entry: _Entry) -> None:
+        """Say how many depths are really solved (a cancelled or resumed solve
+        leaves a count that is behind its rows)."""
+        section = entry.section
+        if section.standing_in and section.solved[0] != len(entry.levels):
+            entry.section = dataclasses.replace(section, solved=(len(entry.levels), section.z.nz))
 
     def column_at(self, key: str, distance_m: float) -> int | None:
         """The index of the column nearest `distance_m` along the cut (cut spec call 14).
@@ -349,6 +404,9 @@ class CutSections(QObject):
         self._rest.stop()
         self._redraw.stop()
         self._refiner.cancel()
+        entry = None if self._working is None else self._cache.get(self._working)
+        if entry is not None:
+            self._sync_count(entry)  # rows that landed since the last redraw count
         self._working = None
         self._stamp = None
 
@@ -371,8 +429,12 @@ class CutSections(QObject):
         """The depth the slice band sits on, or the middle of the axis."""
         if self._band is None:
             return z.nz // 2
+        # `window_changed` carries (first level's time, last level's time), so
+        # rounding gives the levels and the window is one level wider than it
+        # is long; `floor` on a float time would land a level low.
         lo, hi = self._band
-        k0, k1 = z.level_range(lo, max(hi - lo, z.dz_ns * 0.5))
+        k0 = min(max(round((lo - z.t0_ns) / z.dz_ns), 0), z.nz - 1)
+        k1 = min(max(round((hi - z.t0_ns) / z.dz_ns) + 1, k0 + 1), z.nz)
         return (k0 + k1 - 1) // 2
 
     def _start_solve(self) -> None:
@@ -383,16 +445,16 @@ class CutSections(QObject):
                 return
             cut = self._cut(key)
             source = None if cut is None else self.source_for(cut.grid_id)
-            cached = self._cache.get(key)
-            if cut is None or source is None or cached is None or cached[0] != stamp:
+            entry = self._cache.get(key)
+            if cut is None or source is None or entry is None or entry.stamp != stamp:
                 self._cancel()
                 return
-            section = cached[1]
+            section = entry.section
             engine = source.engine
             if not section.standing_in or not engine.has_cube:
                 self._cancel()
                 return
-            done = self._levels[key][1]
+            done = entry.levels
             nz = section.z.nz
             centre = self._centre_level(section.z)
             owed = sorted(
@@ -403,7 +465,7 @@ class CutSections(QObject):
                 return
             grid = self.session.grid(cut.grid_id)
             inputs = _SolveInputs(
-                engine.cube(), section.columns, source.settings, grid.default_spacing
+                key, stamp, engine.cube(), section.columns, source.settings, grid.default_spacing
             )
             jobs = [CutLevelJob(k, inputs) for k in owed]
             self._refiner.start(jobs, self._on_landed, self._on_failed)
@@ -415,16 +477,19 @@ class CutSections(QObject):
         """A depth is solved: its row replaces the kriging row, if the section
         it was made for is still the one cached."""
         try:
-            key, stamp = self._working, self._stamp
-            cached = None if key is None else self._cache.get(key)
-            if key is None or cached is None or cached[0] != stamp or job.result is None:
+            entry = self._cache.get(job.key)
+            if (
+                entry is None
+                or job.key != self._working
+                or entry.stamp != job.stamp
+                or job.result is None
+            ):
                 return
-            section = cached[1]
+            section = entry.section
             section.values[job.level] = job.result
-            levels = self._levels[key][1]
-            levels.add(job.level)
-            if len(levels) >= section.z.nz:
-                self._finish(key)
+            entry.levels.add(job.level)
+            if len(entry.levels) >= section.z.nz:
+                self._finish(job.key)
             elif not self._redraw.isActive():
                 self._redraw.start(CUT_REDRAW_MS)
         except Exception as exc:  # noqa: BLE001 -- a refine callback
@@ -440,7 +505,7 @@ class CutSections(QObject):
     def _flush_redraw(self) -> None:
         try:
             key = self._working
-            if key is not None:
+            if key is not None and key in self._cache:
                 self._publish(key, finished=False)
         except Exception as exc:  # noqa: BLE001 -- a slot on a timer
             _log(f"could not redraw a cut's section: {exc}", Qgis.MessageLevel.Critical)
@@ -454,9 +519,10 @@ class CutSections(QObject):
     def _publish(self, key: str, *, finished: bool) -> None:
         """Replace the cached section by one that says how far the solve is, and
         tell the profile. The rows are shared, so nothing is copied."""
-        stamp, section = self._cache[key]
+        entry = self._cache[key]
+        section = entry.section
         nz = section.z.nz
-        done = nz if finished else len(self._levels[key][1])
+        done = nz if finished else len(entry.levels)
         if finished:
             doc = json.loads(section.provenance_json)
             doc["finish"]["method"] = "min_curvature"
@@ -470,14 +536,22 @@ class CutSections(QObject):
             )
         else:
             section = dataclasses.replace(section, solved=(done, nz))
-        self._cache[key] = (stamp, section)
+        entry.section = section
         self.section_changed.emit(key)
 
     # ---- building -----------------------------------------------------------
-    def _fingerprint(self, cut: Cut, source: CutSource) -> tuple[Any, ...]:
-        """Everything a section is made from. Cheap: it builds nothing."""
+    def _fingerprint(self, cut: Cut, source: CutSource) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
+        """(what the rows are made from, what only labels them). Cheap: it builds nothing.
+
+        The rows follow cut spec §4.4's list: the source (preset, transform,
+        lines, cell: the engine and its cube), the method, max distance,
+        smoothing and scope, and the cut's path on the grid. The palette and
+        the cut's name are not on it, so a recolour or a rename leaves a
+        solved section, and a solve under way, alone.
+        """
         engine = source.engine
-        return (
+        grid = self.session.grid(cut.grid_id)
+        rows = (
             id(engine),
             engine.choice,
             engine.frame,
@@ -485,11 +559,11 @@ class CutSections(QObject):
             engine.cube_generation,
             source.settings,
             source.scope,
-            source.palette,
-            source.unipolar,
-            cut,
-            self.session.grid(cut.grid_id),
+            tuple(tuple(v) for v in cut.vertices),
+            cut.grid_id,
+            (grid.origin, grid.azimuth, grid.size_x, grid.size_y, grid.crs, grid.default_spacing),
         )
+        return rows, (source.palette, source.unipolar, cut.name)
 
     def _build(self, key: str, cut: Cut, source: CutSource) -> CutSection:
         engine = source.engine
@@ -556,15 +630,16 @@ class CutSections(QObject):
                 self._cancel()
                 self._cache.clear()
                 self._waiting.clear()
-                self._levels.clear()
                 return
             for key in list(self._cache):
                 if self._cut(key) is None:
-                    del self._cache[key]
-                    self._levels.pop(key, None)
-                elif not self._still_current(key):
-                    del self._cache[key]
-                    self._levels.pop(key, None)
+                    self._drop(key)
+                    continue
+                state = self._current(key)
+                if state is None:
+                    self._drop(key)
+                    self.section_changed.emit(key)
+                elif state:  # only its labels moved: redraw once, rows and solve kept
                     self.section_changed.emit(key)
             for key, reason in list(self._waiting.items()):
                 cut = self._cut(key)
@@ -581,18 +656,24 @@ class CutSections(QObject):
             # What moved may have been what the solve was for; one that was
             # re-armed above for the rebuilt section is left alone.
             if self._working is not None:
-                cached = self._cache.get(self._working)
-                if cached is None or cached[0] != self._stamp:
+                entry = self._cache.get(self._working)
+                if entry is None or entry.stamp != self._stamp:
                     self._cancel()
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             _log(f"could not refresh a cut's section: {exc}", Qgis.MessageLevel.Warning)
 
-    def _still_current(self, key: str) -> bool:
+    def _current(self, key: str) -> bool | None:
+        """None when the cached section's rows no longer hold; else whether only
+        its labels moved (and are now refreshed)."""
         cut = self.session.cut_for_key(key)
         source = self.source_for(cut.grid_id)
         if source is None:
-            return False
-        return bool(self._fingerprint(cut, source) == self._cache[key][0])
+            return None
+        stamp, shown = self._fingerprint(cut, source)
+        entry = self._cache[key]
+        if stamp != entry.stamp:
+            return None
+        return self._relabel(entry, cut, source, shown)
 
     def dispose(self) -> None:
         """Disconnect and forget. Called from `unload`; safe twice."""
@@ -604,4 +685,3 @@ class CutSections(QObject):
         self._refiner.shutdown()
         self._cache.clear()
         self._waiting.clear()
-        self._levels.clear()

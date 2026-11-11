@@ -394,19 +394,26 @@ def test_column_distances_are_defined_once_for_the_section_and_its_callers():
 
 @needs_real_files
 @pytest.mark.parametrize("cell", [0.05, 0.2])
-def test_window_mean_of_level_solves_equals_the_solve_of_the_window_mean(cell):
+def test_window_mean_of_level_solves_equals_the_slice_view_of_the_window(cell):
     """Minimum curvature is linear for a fixed coverage (cut spec test 11): the
-    mean of the per-level crop solves is the crop solve of the mean slice."""
-    cube, columns, settings, crops, plans, _, cell = _curvature_case("diagonal", 0.1, cell)
+    mean of the per-level crop solves is the crop solve of the mean slice, and
+    both are what the slice view shows for the window (whole-frame solve of
+    `slice_levels`, smoothed, read at the columns)."""
+    cube, columns, settings, crops, plans, whole, cell = _curvature_case("diagonal", 0.1, cell)
     for k0, k1 in WINDOWS[:3]:
         levels = [
             solve_section_level(cube.level(k), columns, crops, plans, settings, cell)
             for k in range(k0, k1)
         ]
-        window = solve_section_level(
-            cube.slice_levels(k0, k1), columns, crops, plans, settings, cell
+        mean_slice = cube.slice_levels(k0, k1)
+        window = solve_section_level(mean_slice, columns, crops, plans, settings, cell)
+        view = sample(
+            smooth(whole.solve(mean_slice)[0], cell, settings.smooth_x_m, settings.smooth_y_m),
+            columns.taps,
         )
         mean = np.nanmean(np.stack(levels), axis=0)
         assert np.array_equal(np.isnan(mean), np.isnan(window))
-        scale = float(np.nanmax(window) - np.nanmin(window))
+        assert np.array_equal(np.isnan(view), np.isnan(window))
+        scale = float(np.nanmax(view) - np.nanmin(view))
         assert float(np.nanmax(np.abs(mean - window))) <= 1e-3 * scale
+        assert float(np.nanmax(np.abs(mean - view))) <= 1e-3 * scale
