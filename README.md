@@ -93,7 +93,9 @@ a milestone merges or the plan changes.
 
 ### In progress
 
-Nothing at the moment. The first item under *Next* starts next.
+- **A resident cube stores only its covered cells** ([#113]), the first of the
+  fine-cell items: 3–8× less memory at fine cells, the same slices. Plan written,
+  on `nsgeo-packed-cube`.
 
 ### Next, in order
 
