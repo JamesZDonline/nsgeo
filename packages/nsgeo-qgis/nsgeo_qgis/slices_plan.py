@@ -429,24 +429,6 @@ def preview_note(
     return note
 
 
-def site_export_refusal(
-    cell: float,
-    width_m: float,
-    height_m: float,
-    finest: float,
-    stretching: Sequence[str],
-) -> str:
-    """Why the site cannot be written at full detail."""
-    text = (
-        f"The site can't be exported at full detail yet: the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
-        f"Choose a cell of {finest:g} m or coarser"
-    )
-    if stretching:
-        text += f", or leave out {name_list(stretching)}"
-    return text + "."
-
-
 def export_refusal(
     held_bytes: int, budget: int, finest_cell: float | None, finest_pixel: float | None
 ) -> str:
@@ -460,6 +442,47 @@ def export_refusal(
     if finest_pixel is not None:
         text += f" A {finest_pixel:g} m export pixel would fit."
     return text
+
+
+_METHOD_WORDS = {
+    "none": "no interpolation",
+    "idw": "inverse distance",
+    "kriging": "kriging",
+    "min_curvature": "minimum curvature",
+}
+
+
+def slices_text(finish: SliceFinish) -> str:
+    """How the slices are made, for the export summary: `kriging, max distance
+    0.75 × spacing, no smoothing`."""
+    parts = [_METHOD_WORDS.get(finish.method, finish.method)]
+    if finish.method != "none":
+        parts.append(f"max distance {finish.max_distance_spacings:g} \u00d7 spacing")
+    if finish.smooth_x_m or finish.smooth_y_m:
+        parts.append(f"smoothing {finish.smooth_x_m:g} \u00d7 {finish.smooth_y_m:g} m")
+    else:
+        parts.append("no smoothing")
+    return ", ".join(parts)
+
+
+def _ns(value: float) -> str:
+    return f"{round(value, 2):g}".replace("-", "\u2212")
+
+
+def bands_detail(windows: Sequence[tuple[float, float]]) -> str:
+    """The bands, for the export summary: `every 2.5 ns from −1.8 to 45 ns, 5 ns thick`.
+
+    `windows` are each band's `(top_ns, thickness_ns)`. One band has no step.
+    """
+    if not windows:
+        return ""
+    first_top, thickness = windows[0]
+    last_top, last_thickness = windows[-1]
+    span = f"from {_ns(first_top)} to {_ns(last_top + last_thickness)} ns"
+    if len(windows) == 1:
+        return f"{span}, {_ns(thickness)} ns thick"
+    step = windows[1][0] - first_top
+    return f"every {_ns(step)} ns {span}, {_ns(thickness)} ns thick"
 
 
 @dataclass(frozen=True)

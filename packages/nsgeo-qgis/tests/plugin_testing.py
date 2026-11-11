@@ -431,3 +431,93 @@ SUNNYSIDE = LOCAL_DATA / "sunnyside.nsgeo.json"
 needs_sunnyside = pytest.mark.skipif(
     not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
 )
+
+
+# ---- the export dialog and the background export task -------------------------------
+
+
+def drive_export_dialog(
+    drive_dialog: Any,
+    *,
+    path: Any = None,
+    cell: float | None = None,
+    pixel: float | None = None,
+    replace: bool = False,
+    accept: bool = True,
+) -> list[Any]:
+    """Answer the next `ExportDialog.exec()` as a user would: type the path and the
+    cell and pixel, press Export (and Replace when asked). Returns the dialogs shown.
+
+    A dialog that stays refused (Export disabled, or Replace not pressed) is
+    rejected, so `exec()` always returns.
+    """
+    from nsgeo_qgis.ui.export_dialog import ExportDialog
+    from qgis.PyQt.QtWidgets import QDialog
+
+    def driver(dialog: Any) -> None:
+        if path is not None:
+            dialog.path_edit.setText(str(path))
+        if cell is not None:
+            dialog.cell_spin.setValue(cell)
+        if pixel is not None:
+            dialog.pixel_spin.setValue(pixel)
+        dialog.refresh_now()
+        if accept:
+            dialog.export_button.click()
+            if replace and dialog.confirm_strip.isVisibleTo(dialog):
+                dialog.replace_button.click()
+        if dialog.result() != QDialog.DialogCode.Accepted:
+            dialog.reject()
+
+    return drive_dialog(ExportDialog, "exec", driver)
+
+
+def wait_for_export(timeout_s: float = 60.0) -> None:
+    """Pump events until no export is held (its `on_done` has then run)."""
+    from nsgeo_qgis.export_task import running_export
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    deadline = time.monotonic() + timeout_s
+    while running_export() is not None:
+        if time.monotonic() > deadline:
+            raise AssertionError("the export did not finish")
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+
+
+class ExportGate:
+    """Holds the next export inside its worker thread until `release` is set.
+
+    Replaces `export_task.run_export` by a generator that waits, polling the task's
+    `should_stop` (so a cancel still lands), then carries on with the real pipeline.
+    """
+
+    def __init__(self, monkeypatch: Any) -> None:
+        from nsgeo_qgis import export_task
+
+        self.real = export_task.run_export
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.threads: list[str] = []
+        monkeypatch.setattr(export_task, "run_export", self)
+
+    def __call__(self, spec: Any, *, should_stop: Any, progress: Any) -> Any:
+        from nsgeo_qgis.export_pipeline import ExportCancelled
+
+        self.threads.append(threading.current_thread().name)
+        self.entered.set()
+        while not self.release.is_set():
+            if should_stop():
+                raise ExportCancelled()
+            time.sleep(0.005)
+        yield from self.real(spec, should_stop=should_stop, progress=progress)
+
+    def wait_entered(self, timeout_s: float = 20.0) -> None:
+        from qgis.PyQt.QtCore import QCoreApplication
+
+        deadline = time.monotonic() + timeout_s
+        while not self.entered.is_set():
+            if time.monotonic() > deadline:
+                raise AssertionError("the export task never started")
+            QCoreApplication.processEvents()
+            time.sleep(0.005)

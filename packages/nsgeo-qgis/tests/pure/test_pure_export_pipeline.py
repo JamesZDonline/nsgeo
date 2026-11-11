@@ -9,6 +9,7 @@ window, so the two cannot share a mistake in the window.
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -331,6 +332,39 @@ def test_the_estimate_counts_weights_taps_and_one_band():
     parts = ("weights", "taps", "gather", "cubes", "band", "solve")
     assert est.held_bytes == sum(est.per_band[k] for k in parts)  # not the lines: already held
     assert est.file_bytes == pytest.approx(spec.lattice.n_pixels * 4 * 2 * 4 / 3, rel=0.01)
+
+
+def test_a_cache_counts_each_grid_once_per_cell_and_changes_no_figure(monkeypatch):
+    """The dialog asks for many pixels at one cell; the covered-cell count walks every
+    trace, so it is memoised per (grid, frame, lines) and the estimate is unchanged."""
+    from nsgeo_qgis import export_pipeline
+
+    counted: list[str] = []
+    real = export_pipeline.covered_cells
+
+    def counting(frame, coords):
+        counted.append("walk")
+        return real(frame, coords)
+
+    monkeypatch.setattr(export_pipeline, "covered_cells", counting)
+    spec = _site(0.1, "edge")
+    plain = estimate_export(spec)
+    assert len(counted) == 2
+    cache: dict = {}
+    first = estimate_export(spec, cache)
+    again = estimate_export(
+        replace(
+            spec,
+            lattice=SiteLattice.covering([slice_extent(g.frame) for g in spec.grids], 0.05, CRS),
+        ),
+        cache,
+    )
+    assert len(counted) == 4, "two grids walked once for the first call, none for the second"
+    assert first == plain
+    assert again.per_band["taps"] > first.per_band["taps"]  # a finer pixel, the same cells
+    other = _site(0.2, "edge")
+    estimate_export(other, cache)
+    assert len(counted) == 6, "another cell is another count"
 
 
 def test_the_estimate_counts_a_resident_cube_by_its_covered_cells():

@@ -8,9 +8,9 @@ new implementation rather than a refactor.
 
 Written BAND BY BAND. Spec 9.4 and 7.4 together: a resident cube is a
 latency optimisation and never a capability, and export is the operation
-most tempted to forget that. `export_slices` pulls one window at a time
-from the engine in whatever residency it is already in, and never
-promotes it.
+most tempted to forget that. The bands come from `export_pipeline.run_export`
+on a snapshot of the engine (`grid_export_spec`), one window at a time, and
+the live engine is never touched or promoted.
 
 Two things here are not incidental, and both were measured:
 
@@ -59,9 +59,9 @@ import math
 import os
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import numpy as np
 from nsgeo.project import line_key
@@ -73,10 +73,10 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
+    frame_lattice,
     npz_path,
     plan_windows,
     save_cube,
-    to_north_up,
     window_label,
     window_times_ns,
 )
@@ -85,7 +85,7 @@ from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
-from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled
+from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled, ExportGrid, ExportSpec
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_MAX_DISTANCE_SPACINGS,
@@ -327,9 +327,9 @@ class ExportPlan:
     itself, the way `save_cube_npz` already does for the `.npz`.
 
     `finish` is `None` for a plan that carries no interpolation at all
-    (`write_coverage`'s companion raster is never finished -- coverage
+    (the coverage companion raster is never finished -- coverage
     counts are exact, and smearing a count is not a display decision the
-    way smearing an amplitude is). `GeoTiffSliceWriter.write` records it,
+    way smearing an amplitude is). `GeoTiffSliceWriter.write_bands` records it,
     in metres, and the frame's azimuth, as dataset-level metadata -- see
     Ruling AE (Task 6 fix round 1) for why: a reader five years from now
     with only the `.tif` in hand needs to see how the values were made
@@ -357,6 +357,9 @@ def plan_export(
     step_levels: int,
     velocity: VelocityModel | None,
     finish: FinishSettings | None = None,
+    *,
+    cell: float | None = None,
+    pixel: float | None = None,
 ) -> ExportPlan:
     """The band list a GeoTIFF export would write, without writing anything.
 
@@ -364,15 +367,18 @@ def plan_export(
     its own docstring), so `len(plan.bands)` and the dock's slice count
     are never two agreeing implementations, only one.
 
-    `finish` is carried through onto the plan only -- it changes no band
-    here and does not choose between amplitude and counts (`coverage` does);
-    it is only what `GeoTiffSliceWriter.write` later records as metadata.
-    Optional and keyword-compatible with every existing caller
-    (`export_slices` is the only one that has a real value to pass).
+    `cell` and `pixel` are the export's own and default to the engine's live
+    cell (pixel = cell). The plan's frame and lattice are the export's:
+    `frame_lattice(frame, pixel)`, never the live frame's. `finish` is only
+    what `GeoTiffSliceWriter.write_bands` records as metadata. GUI thread:
+    it reads the engine and the session.
     """
-    frame, z = engine.frame, engine.z
-    if frame is None or z is None:
+    live, z = engine.frame, engine.z
+    if live is None or z is None:
         raise RuntimeError("no slice geometry: choose a source and a resolution first")
+    cell = live.cell if cell is None else cell
+    pixel = cell if pixel is None else pixel
+    frame = export_frame(engine, cell)
     windows = plan_windows(z, thickness_levels, step_levels)
     bands = tuple(SliceBand(window=w, description=window_label(z, w, velocity)) for w in windows)
     return ExportPlan(
@@ -382,23 +388,121 @@ def plan_export(
         bands=bands,
         provenance=engine.provenance(),
         finish=finish,
+        lattice=frame_lattice(frame, pixel),
+        cell=cell,
+        pixel=pixel,
     )
 
 
-class SliceWriter(Protocol):
-    """What `export_slices`/`write_coverage` need from a writer (spec 9.6).
+def coverage_plan_of(plan: ExportPlan) -> ExportPlan:
+    """The counts companion's plan: the first band's window, no finish, counts."""
+    first = plan.bands[0]
+    return replace(
+        plan,
+        bands=(replace(first, description="coverage: traces per cell"),),
+        finish=None,
+        coverage=True,
+    )
 
-    A structural interface, not a base class: `GeoTiffSliceWriter` below
-    satisfies it with no inheritance, and a future netCDF writer (the
-    module docstring's own example of why this exists at all) would too.
-    Declaring the seam here -- rather than only in prose -- is what makes
-    substituting one an addition instead of a refactor to two call sites
-    (Ruling AG, Task 6 fix round 1): before this, `export_slices` and
-    `write_coverage` each named `GeoTiffSliceWriter` directly, so a second
-    implementation would have had to edit both.
+
+def export_frame(engine: SliceEngine, cell: float) -> CubeFrame:
+    """The engine's grid framed at the export `cell`. GUI thread: reads the session."""
+    if engine.choice is None:
+        raise RuntimeError("no source is chosen")
+    return CubeFrame.for_grid(engine.session.grid(engine.choice.grid_id), cell)
+
+
+def grid_export_spec(
+    engine: SliceEngine,
+    cell: float,
+    pixel: float,
+    windows: tuple[tuple[float, float], ...],
+    finish: SliceFinish,
+    *,
+    coverage: bool = False,
+) -> ExportSpec:
+    """This grid's export at `cell` and `pixel`, snapshotted on the GUI thread.
+
+    One grid, normalisation `"none"` and gain 1.0: the engine's OWN prepared
+    lines (not copies), the frame at `cell`, its own time axis and the finish in
+    the grid's metres, on `frame_lattice(frame, pixel)`. Nothing in the result
+    refers back to the engine. `windows` are `(top_ns, thickness_ns)` on the
+    grid's own axis.
     """
+    z = engine.z
+    if z is None:
+        raise RuntimeError("no slice geometry: choose a source and a resolution first")
+    frame = export_frame(engine, cell)
+    spacing = float(engine.session.grid(frame_grid_id(engine)).default_spacing)
+    grid = ExportGrid(
+        grid_id=frame_grid_id(engine),
+        lines=engine.prepared_lines(),
+        frame=frame,
+        z=z,
+        finish=finish.in_metres(spacing),
+        spacing_m=spacing,
+        gain=1.0,
+    )
+    return ExportSpec(
+        grids=(grid,),
+        lattice=frame_lattice(frame, pixel),
+        windows=tuple(windows),
+        method="none",
+        coverage=coverage,
+    )
 
-    def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None: ...
+
+@dataclass(frozen=True, eq=False)
+class GridJob:
+    """What one This-grid export hands the task: the snapshot and the plans, for the
+    values file and, when asked, the counts companion. Built on the GUI thread."""
+
+    spec: ExportSpec
+    plan: ExportPlan
+    coverage_spec: ExportSpec | None
+    coverage_plan: ExportPlan | None
+
+
+def grid_export_job(
+    engine: SliceEngine,
+    thickness_levels: int,
+    step_levels: int,
+    velocity: VelocityModel | None,
+    finish: SliceFinish,
+    cell: float,
+    pixel: float,
+    *,
+    coverage: bool = False,
+) -> GridJob:
+    """Plan and snapshot a This-grid export at `cell` and `pixel` (GUI thread)."""
+    plan = plan_export(
+        engine,
+        thickness_levels,
+        step_levels,
+        velocity,
+        engine.finish_settings(finish),
+        cell=cell,
+        pixel=pixel,
+    )
+    z = engine.z
+    assert z is not None  # plan_export raised otherwise
+    windows = tuple(window_ns(z, band.window) for band in plan.bands)
+    spec = grid_export_spec(engine, cell, pixel, windows, finish)
+    if not coverage:
+        return GridJob(spec, plan, None, None)
+    counts = grid_export_spec(engine, cell, pixel, windows[:1], finish, coverage=True)
+    return GridJob(spec, plan, counts, coverage_plan_of(plan))
+
+
+def frame_grid_id(engine: SliceEngine) -> str:
+    if engine.choice is None:
+        raise RuntimeError("no source is chosen")
+    return engine.choice.grid_id
+
+
+def window_ns(z: ZAxis, window: SliceWindow) -> tuple[float, float]:
+    """`(top_ns, thickness_ns)` of a window on `z`, as `window_on` reads it back."""
+    return (z.t0_ns + window.k0 * z.dz_ns, window.n_levels * z.dz_ns)
 
 
 class GeoTiffSliceWriter:
@@ -408,7 +512,6 @@ class GeoTiffSliceWriter:
     (plan Ruling 3): that file is an uncompressed scratch preview rewritten
     every tick; this one is the durable artefact a reader keeps, so it pays
     compression's write cost once for a much smaller file forever after.
-    Satisfies `SliceWriter` structurally.
     """
 
     def write_bands(
@@ -460,183 +563,6 @@ class GeoTiffSliceWriter:
             progress_band=progress_band,
         )
 
-    def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None:
-        """Create `path` from `plan.bands[0]`'s north-up shape, then fill it in.
-
-        Every array is resampled through `to_north_up` here, never
-        earlier: `slices` carries grid-local arrays (whatever residency
-        `export_slices` pulled them in), and this is the one place they
-        become the raster grid the file is actually written on. Every
-        band must land on that same grid -- raised, not merely asserted,
-        because `assert` can be compiled away and a silently truncated
-        band is exactly the failure this guards against (spec 9.4: a
-        rotated frame's bounding box can differ, in principle, from one
-        slice to the next only if the frame itself changed mid-export,
-        which would itself be a bug worth surfacing loudly).
-
-        `zip(plan.bands, slices)` is deliberately NOT `strict=True` (Task
-        6 fix round 1, Important 3): `strict=` needs Python 3.10+, and
-        this package's floor is `>=3.9` -- a QGIS 3.40 build running
-        Python 3.9 would raise `TypeError: zip() takes no keyword
-        arguments` the first time this ran, and nothing in either venv or
-        in CI would have caught it (both venvs here are 3.12; the 3.9 CI
-        job never imports this module). The `written != len(plan.bands)`
-        check plus the explicit `next(iterator, None)` probe after the
-        loop together keep the same guarantee `strict=True` bought, in
-        plain Python -- BOTH directions of it (Task 6 fix round 2,
-        Minor 1): `zip` stops at the shorter iterable, so `written` alone
-        can only ever detect too FEW slices (it never exceeds
-        `len(plan.bands)`); a `slices` iterable with a surplus past
-        `plan.bands` would otherwise have that surplus silently dropped,
-        the exact case `strict=True` used to raise
-        `ValueError: zip() argument 2 is longer than argument 1` for. The
-        probe is what makes an iterator (not a list) the right type for
-        this parameter: consuming one further item from `slices` after
-        the loop is answering "is there more?", which a plain `len()`
-        check could not do without the caller pre-materialising it.
-
-        `plan.finish`/`plan.frame.azimuth` are written as dataset metadata
-        once the dataset exists (Ruling AE, same fix round): a reader with
-        only the `.tif` needs a way to see how the values were finished,
-        and that a rotated frame was resampled, without this module's
-        source in hand (see `ExportPlan`'s own docstring).
-        """
-        if not plan.bands:
-            raise ValueError("an export plan needs at least one band")
-        with warnings.catch_warnings():
-            # See slice_layer.py's `_write` for the full account of why
-            # both halves are needed: `ExceptionMgr` makes a failed
-            # Create()/WriteArray() raise, scoped to this block only, and
-            # this filter separately silences GDAL's one-time "neither
-            # UseExceptions() nor DontUseExceptions() has been called"
-            # FutureWarning, which `ExceptionMgr` does not touch.
-            warnings.simplefilter("ignore", FutureWarning)
-            with gdal.ExceptionMgr(useExceptions=True):
-                driver = gdal.GetDriverByName("GTiff")
-                dataset = None
-                try:
-                    shape: tuple[int, int] | None = None
-                    written = 0
-                    iterator = iter(slices)
-                    for index, (band_plan, values) in enumerate(zip(plan.bands, iterator)):
-                        array, geotransform = to_north_up(values, plan.frame, counts=plan.coverage)
-                        if dataset is None:
-                            height, width = array.shape
-                            shape = array.shape
-                            dataset = driver.Create(
-                                str(path),
-                                width,
-                                height,
-                                len(plan.bands),
-                                gdal.GDT_Float32,
-                                options=creation_options(width, height),
-                            )
-                            dataset.SetGeoTransform(geotransform)
-                            dataset.SetProjection(QgsCoordinateReferenceSystem(plan.crs).toWkt())
-                            if plan.finish is not None:
-                                for key, value in (
-                                    ("NSGEO_INTERPOLATION", plan.finish.method),
-                                    ("NSGEO_MAX_DISTANCE_M", str(plan.finish.max_distance_m)),
-                                    ("NSGEO_SMOOTH_X_M", str(plan.finish.smooth_x_m)),
-                                    ("NSGEO_SMOOTH_Y_M", str(plan.finish.smooth_y_m)),
-                                ):
-                                    dataset.SetMetadataItem(key, value)
-                            dataset.SetMetadataItem(
-                                "NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)
-                            )
-                        elif array.shape != shape:
-                            raise ValueError(
-                                f"band {index + 1} resampled to {array.shape}, but the first "
-                                f"band resampled to {shape}; every band must land on the same "
-                                f"grid, or this band would be written truncated"
-                            )
-                        band = dataset.GetRasterBand(index + 1)
-                        band.SetNoDataValue(float("nan"))
-                        band.SetDescription(band_plan.description)
-                        band.WriteArray(array)
-                        written += 1
-                    if written != len(plan.bands):
-                        # Covers an empty `slices` too: `plan.bands` is
-                        # non-empty (checked above), so `written == 0`
-                        # trips this before `dataset` (never created)
-                        # could be tested separately.
-                        raise ValueError(
-                            f"expected {len(plan.bands)} slices (one per planned band), got "
-                            f"{written}"
-                        )
-                    if next(iterator, None) is not None:
-                        # The other direction `strict=True` used to catch:
-                        # `zip` above stopped consuming `iterator` the
-                        # moment `plan.bands` was exhausted, so a surplus
-                        # item is still sitting unread here -- `written`
-                        # alone cannot see it, since it can never exceed
-                        # `len(plan.bands)`.
-                        raise ValueError(f"more slices than the plan's {len(plan.bands)} bands")
-                finally:
-                    # Hold the dataset in a local and set it to None
-                    # explicitly (see slice_layer.py's own `_write` for the
-                    # spike this bit): a dataset collected mid-expression
-                    # is a real trap. `Close()` -- an improvement over that
-                    # file's shape, available here at GDAL >= 3.7 (this
-                    # build is 3.8.4) -- surfaces a write error that would
-                    # otherwise only materialise at garbage collection,
-                    # where a SWIG destructor cannot raise and the failure
-                    # would be silent.
-                    if dataset is not None:
-                        dataset.Close()
-                    dataset = None
-
-
-def export_slices(
-    engine: SliceEngine,
-    path: str | Path,
-    thickness_levels: int,
-    step_levels: int,
-    velocity: VelocityModel | None,
-    finish: SliceFinish,
-    *,
-    writer: SliceWriter | None = None,
-    progress: Callable[[int, int], bool] | None = None,
-) -> ExportPlan:
-    """Plan, then write, one band at a time -- never a resident cube.
-
-    `progress(done, total)`, when given, is called before each band with the
-    bands written so far, and once more as `(total, total)` at the end. A False
-    return raises `ExportCancelled` before the next band is computed: the call
-    sits in the band generator, so the writers stay as they are. Every band is
-    `engine.finish`, the full result, never a preview (plan call 11).
-
-    Spec 9.4 and 7.4 together (see the module docstring): the generator
-    below pulls exactly one `engine.slice_at(window)` at a time, in
-    whatever mode the engine is already in, and hands it straight to the
-    writer. A caller with `engine.mode == "streaming"` never sees this
-    function build a cube behind their back.
-
-    `writer` defaults to a fresh `GeoTiffSliceWriter()` -- NOT a mutable
-    default argument (Ruling AG, Task 6 fix round 1): a `None` sentinel
-    with the real default constructed inside the body, so every call gets
-    its own writer instance rather than one shared (and, worse, capable
-    of accumulating state) across every call this process ever makes. A
-    test substitutes a stub here to observe the streaming property
-    without touching GDAL at all.
-    """
-    plan = plan_export(
-        engine, thickness_levels, step_levels, velocity, finish=engine.finish_settings(finish)
-    )
-    writer = writer if writer is not None else GeoTiffSliceWriter()
-
-    def _finished_slices() -> Iterable[np.ndarray]:
-        total = len(plan.bands)
-        for done, band in enumerate(plan.bands):
-            if progress is not None and not progress(done, total):
-                raise ExportCancelled()
-            yield engine.finish(*engine.slice_at(band.window), finish)
-        if progress is not None:
-            progress(total, total)
-
-    writer.write(path, plan, _finished_slices())
-    return plan
-
 
 def band_time_range(lo_ns: float, hi_ns: float) -> QgsDateTimeRange:
     """One band's temporal range: `1 ns -> 1 s`, from the Unix epoch.
@@ -670,60 +596,6 @@ def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
     props.setFixedRangePerBand(ranges)
     props.setMode(Qgis.RasterTemporalMode.FixedRangePerBand)
     props.setIsActive(True)
-
-
-def write_coverage(
-    engine: SliceEngine, path: str | Path, *, writer: SliceWriter | None = None
-) -> None:
-    """A single-band, north-up raster of traces-per-cell over the full axis.
-
-    `SliceCube.coverage()`'s own invariant (a cell is covered at every
-    level or none) makes any window's coverage the whole cube's coverage,
-    so the full axis is used here only to have a window to ask for -- not
-    because coverage varies with depth.
-
-    `finish=None` on the plan: a coverage raster is never finished
-    (see `ExportPlan`'s own docstring) -- smearing a count is not a
-    display decision the way smearing an amplitude is, so there is no
-    interpolation to record here. `writer` mirrors `export_slices`'s own
-    substitution seam (Ruling AG).
-
-    Final review, Minor 7: `engine._slice(window)`, not `engine.slice_at
-    (window)` -- `slice_at` is the TIMED entry point, and `_REDRAW_SMOOTHING
-    = 0.7` means one full-axis pass through it (this call spans the whole
-    z axis, not one displayed window) then inflates the status line's
-    reported redraw time for many subsequent ticks. `_slice` is the
-    untimed entry point that exists for exactly this -- see its own
-    docstring ("used where a redraw timing would be a lie").
-
-    Final review, Minor 8: the written array is `NaN`, not `0`, wherever
-    `coverage` is zero -- the same "count == 0 -> NaN" the dock's own
-    coverage VIEW already applies (`refresh_slice`). Spec 3's "a zero
-    that means no data reading as no reflection" applies to this file
-    just as much as to the screen: an uncovered in-frame cell written as
-    a literal `0.0` sits against this band's own `NaN` nodata tag, so a
-    reader has no way to tell "surveyed, zero count" (impossible -- count
-    is never negative, and 0 always means uncovered) from "surveyed,
-    zero amplitude" without already knowing this is a coverage band.
-    """
-    frame, z = engine.frame, engine.z
-    if frame is None or z is None:
-        raise RuntimeError("no slice geometry: choose a source and a resolution first")
-    window = SliceWindow(0, z.nz)
-    _, coverage = engine._slice(window)  # the untimed entry point; see the docstring above
-    shown = coverage.astype(np.float32)
-    shown[coverage == 0] = np.nan
-    plan = ExportPlan(
-        frame=frame,
-        z=z,
-        crs=frame.crs,
-        bands=(SliceBand(window=window, description="coverage: traces per cell"),),
-        provenance=engine.provenance(),
-        finish=None,
-        coverage=True,
-    )
-    writer = writer if writer is not None else GeoTiffSliceWriter()
-    writer.write(path, plan, [shown])
 
 
 def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:

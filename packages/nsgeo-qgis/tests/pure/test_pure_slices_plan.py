@@ -19,6 +19,7 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    bands_detail,
     choose_residency,
     estimate_memory,
     format_bytes,
@@ -26,7 +27,6 @@ from nsgeo_qgis.slices_plan import (
     name_list,
     preset_transform_conflict,
     preview_note,
-    site_export_refusal,
     transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data
@@ -570,15 +570,6 @@ def test_preview_note_is_exact_copy():
     )
 
 
-def test_site_export_refusal_is_exact_copy():
-    base = (
-        "The site can't be exported at full detail yet: the site "
-        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a cell of 0.12 m or coarser"
-    )
-    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, []) == base + "."
-    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, ["C"]) == base + ", or leave out C."
-
-
 def test_the_estimate_matches_the_cube_it_describes():
     """The figure the checkbox shows is the cube's real size (#113)."""
     from nsgeo.slices import (
@@ -741,3 +732,25 @@ def test_finest_cell_is_still_offered_when_the_current_cell_does_not_fit():
     held_at, _ = _counting(lambda c, p: 0 if c >= 0.03 - 1e-9 else 10**12)
     cell, _ = finest_fits(held_at, 0.025, 0.0125, 10**9)
     assert cell == pytest.approx(0.03)
+
+
+def test_the_bands_line_of_the_export_summary():
+    windows = [(-1.8 + 2.5 * k, 5.0) for k in range(18)]
+    assert bands_detail(windows) == "every 2.5 ns from \u22121.8 to 45.7 ns, 5 ns thick"
+    assert bands_detail([(10.0, 5.0)]) == "from 10 to 15 ns, 5 ns thick"
+    assert bands_detail([]) == ""
+
+
+def test_the_slices_line_of_the_export_summary():
+    from nsgeo_qgis.slices_plan import SliceFinish, slices_text
+
+    assert slices_text(SliceFinish()) == "kriging, max distance 0.75 \u00d7 spacing, no smoothing"
+    assert slices_text(SliceFinish(method="none")) == "no interpolation, no smoothing"
+    assert (
+        slices_text(
+            SliceFinish(
+                method="min_curvature", max_distance_spacings=1.5, smooth_x_m=0.2, smooth_y_m=0.3
+            )
+        )
+        == "minimum curvature, max distance 1.5 \u00d7 spacing, smoothing 0.2 \u00d7 0.3 m"
+    )

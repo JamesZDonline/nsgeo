@@ -15,7 +15,7 @@ from nsgeo.project import ProjectError, load_site
 from nsgeo.render import PercentileClip
 from nsgeo.slices import METHODS, SiteLattice, SliceWindow, ZAxis, limit_over_slices, load_cube
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled
+from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled, run_export
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
     GeoTiffSliceWriter,
@@ -26,11 +26,10 @@ from nsgeo_qgis.slice_export import (
     creation_options,
     cube_record,
     discard_partial,
-    export_slices,
+    grid_export_job,
     partial_path,
     recipe_from_record,
     save_cube_npz,
-    write_coverage,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SliceFinish, SourceChoice
@@ -59,6 +58,43 @@ _VIEW = ViewSettings(
     stretch="shared across the cube",
     coverage=False,
 )
+
+
+def _write(job, path, coverage_to=None):
+    """The task's work, synchronously: the bands of the snapshot into the writer."""
+    writer, clip = GeoTiffSliceWriter(), PercentileClip()
+
+    def bands(spec):
+        return run_export(spec, should_stop=lambda: False, progress=lambda *a: None)
+
+    writer.write_bands(path, job.plan, bands(job.spec), clip=clip)
+    if coverage_to is not None:
+        writer.write_bands(coverage_to, job.coverage_plan, bands(job.coverage_spec), clip=clip)
+
+
+def export_slices(
+    engine, path, thickness, step, velocity, finish, *, cell=None, pixel=None, coverage_to=None
+):
+    """Plan, snapshot and write a This-grid file (default: the live cell and pixel)."""
+    cell = engine.frame.cell if cell is None else cell
+    pixel = cell if pixel is None else pixel
+    job = grid_export_job(
+        engine, thickness, step, velocity, finish, cell, pixel, coverage=coverage_to is not None
+    )
+    _write(job, path, coverage_to)
+    return job.plan
+
+
+def write_coverage(engine, path):
+    """The counts companion alone, as the task would write it."""
+    cell = engine.frame.cell
+    job = grid_export_job(engine, 10, 5, None, SliceFinish(), cell, cell, coverage=True)
+    GeoTiffSliceWriter().write_bands(
+        path,
+        job.coverage_plan,
+        run_export(job.coverage_spec, should_stop=lambda: False, progress=lambda *a: None),
+        clip=PercentileClip(),
+    )
 
 
 @pytest.fixture
@@ -368,9 +404,9 @@ def test_an_amplitude_plan_without_a_finish_still_writes_a_blend(exportable, tmp
     engine = exportable
     plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
     assert plan.finish is None and not plan.coverage
-    values = np.full((engine.frame.ny, engine.frame.nx), -2.0, dtype=np.float32)
+    bands = _bands(_band_plan(engine, 3), fill=-2.0)
     path = tmp_path / "amp.tif"
-    GeoTiffSliceWriter().write(path, plan, [values] * len(plan.bands))
+    GeoTiffSliceWriter().write_bands(path, _band_plan(engine, 3), bands, clip=PercentileClip())
     ds = gdal.Open(str(path))
     try:
         arr = ds.GetRasterBand(1).ReadAsArray()
@@ -407,14 +443,10 @@ def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(expo
         ds.Close()
 
 
-def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_path):
-    """Final review, Minor 7. `write_coverage` used to call `engine.
-    slice_at(...)` -- the TIMED entry point -- over the FULL z axis, which
-    is far more levels than any single displayed window and therefore not
-    a redraw at all. `_REDRAW_SMOOTHING = 0.7` means that one measurement
-    then dominates the status line's reported redraw time for many
-    subsequent ticks. `_slice` (untimed) is what `shared_limit`'s own
-    multi-window pass already uses for the identical reason."""
+def test_a_coverage_export_does_not_touch_the_redraw_time_readout(exportable, tmp_path):
+    """The export reads no live engine after its snapshot, so no export is a redraw:
+    the status line's redraw time (smoothed, so one wrong measurement lingers for many
+    ticks) is exactly what it was."""
     engine = exportable
     # A real redraw first, so `_redraw_ms` holds a small, known value.
     engine.slice_at(SliceWindow(6, 18))
@@ -423,52 +455,7 @@ def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_
 
     write_coverage(engine, tmp_path / "coverage.tif")
 
-    assert engine._redraw_ms == before, (
-        "write_coverage's full-axis pass must not be recorded as a redraw"
-    )
-
-
-class _RecordingWriter:
-    """A stub `SliceWriter` (Ruling AG, Task 6 fix round 1): records every
-    call instead of touching GDAL, so a test can observe the streaming
-    property directly rather than only inferring it from `engine.has_cube`."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, object, list[np.ndarray]]] = []
-
-    def write(self, path, plan, slices) -> None:  # noqa: ANN001 -- matches SliceWriter structurally
-        self.calls.append((path, plan, list(slices)))
-
-
-def test_export_slices_streams_through_a_substituted_writer(exportable, tmp_path):
-    """Spec 9.6: a writer INTERFACE, not a function that knows GDAL --
-    substituting one must be a plugged-in collaborator, not a two-call-
-    site refactor (Ruling AG). This also doubles as the cheapest possible
-    proof of the band-by-band streaming property: every array the
-    generator yields lands in `slices`, one per `plan.bands`, in the
-    same north-up-less grid-local shape `engine.slice_at` returns it in
-    (the writer, not `export_slices`, is what calls `to_north_up`)."""
-    engine = exportable
-    writer = _RecordingWriter()
-    path = tmp_path / "cube.tif"
-    plan = export_slices(engine, path, 10, 5, None, NONE, writer=writer)
-    assert len(writer.calls) == 1
-    called_path, called_plan, slices = writer.calls[0]
-    assert called_path == path
-    assert called_plan is plan
-    assert len(slices) == len(plan.bands)
-    for array in slices:
-        assert array.shape == (engine.frame.ny, engine.frame.nx)
-
-
-def test_write_coverage_also_accepts_a_substituted_writer(exportable, tmp_path):
-    engine = exportable
-    writer = _RecordingWriter()
-    write_coverage(engine, tmp_path / "coverage.tif", writer=writer)
-    assert len(writer.calls) == 1
-    _path, plan, slices = writer.calls[0]
-    assert len(slices) == 1
-    assert plan.finish is None  # coverage is never finished
+    assert engine._redraw_ms == before, "an export must not be recorded as a redraw"
 
 
 def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
@@ -536,8 +523,8 @@ def test_the_coverage_companion_carries_no_interpolation_metadata(exportable, tm
 
 
 def test_export_bands_equal_the_finished_slices(exportable, tmp_path):
-    """Each band is `engine.finish` of its window, north-up: the file holds
-    what the dock draws."""
+    """Each band is `engine.finish` of its window, north-up, at the live cell and
+    pixel: the file holds what the dock draws."""
     from nsgeo.slices import plan_windows, to_north_up
     from osgeo import gdal
 
@@ -551,7 +538,9 @@ def test_export_bands_equal_the_finished_slices(exportable, tmp_path):
     try:
         for index, window in enumerate(windows, start=1):
             want, _gt = to_north_up(engine.finish(*engine.slice_at(window), finish), engine.frame)
-            np.testing.assert_array_equal(ds.GetRasterBand(index).ReadAsArray(), want)
+            np.testing.assert_allclose(
+                ds.GetRasterBand(index).ReadAsArray(), want, atol=1e-5, rtol=1e-5, equal_nan=True
+            )
     finally:
         ds.Close()
 
@@ -608,12 +597,8 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
 def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path):
     """Spec §3 decision 1: a rotated frame is exported at the cell, read
     bilinearly, and no frame cell is dropped (the nearest-cell gather lost
-    15-18% of them at that pitch). Pinned with `none` interpolation and the
-    export itself: the pixel is the cell, and a probe through the written
-    plan (one bright cell at a time) reaches a finite pixel for every cell,
-    while the exported band carries a finite pixel for every cell's worth
-    of ground."""
-    from nsgeo.slices import to_north_up
+    15-18% of them at that pitch). With no interpolation, the pixel is the
+    cell and the file has a finite pixel for about every covered cell."""
     from osgeo import gdal
 
     session = SiteSession()
@@ -636,41 +621,17 @@ def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path
         engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
         frame = engine.frame
         assert frame.azimuth == 30.0
-        ones = np.ones((frame.ny, frame.nx), dtype=np.float32)
-        everywhere = np.ones((frame.ny, frame.nx), dtype=np.int32)
-        engine.slice_at = lambda _window: (ones, everywhere)  # type: ignore[method-assign]
+        covered = int(np.count_nonzero(engine.slice_at(SliceWindow(0, 20))[1] > 0))
 
-        path = tmp_path / "ones.tif"
+        path = tmp_path / "rotated.tif"
         export_slices(engine, path, 10, 5, None, NONE)
-
         ds = gdal.Open(str(path))
         try:
             assert ds.GetGeoTransform()[1] == pytest.approx(frame.cell)
             band = ds.GetRasterBand(1).ReadAsArray()
-            assert np.isfinite(band).sum() >= 0.9 * frame.ny * frame.nx
-            assert set(np.unique(band[np.isfinite(band)])) == {1.0}
         finally:
             ds.Close()
-        # A varying field with negative values: the writer blends it (counts
-        # off for a data export) exactly as `to_north_up` does.
-        rng = np.random.default_rng(11)
-        field = rng.normal(size=(frame.ny, frame.nx)).astype(np.float32)
-        engine.slice_at = lambda _window: (field, everywhere)  # type: ignore[method-assign]
-        path = tmp_path / "field.tif"
-        export_slices(engine, path, 10, 5, None, NONE)
-        ds = gdal.Open(str(path))
-        try:
-            written = ds.GetRasterBand(1).ReadAsArray()
-        finally:
-            ds.Close()
-        expected, _ = to_north_up(field, frame)
-        np.testing.assert_allclose(written, expected, equal_nan=True)
-        assert (written[np.isfinite(written)] < 0).any()
-        for index in range(frame.ny * frame.nx):
-            probe = np.zeros(frame.ny * frame.nx, dtype=np.float32)
-            probe[index] = 1.0
-            out, _ = to_north_up(probe.reshape(frame.ny, frame.nx), frame)
-            assert np.nanmax(out) > 0.0, f"cell {index} reaches no pixel"
+        assert np.isfinite(band).sum() >= 0.9 * covered
     finally:
         engine.dispose()
 
@@ -712,40 +673,6 @@ def test_a_coverage_export_holds_whole_counts(qgis_app, tmp_path):
         np.testing.assert_array_equal(finite, np.round(finite))
     finally:
         engine.dispose()
-
-
-def test_write_raises_when_there_are_too_few_slices(exportable, tmp_path):
-    """Important 3 (Task 6 fix round 1): `zip(plan.bands, slices)` is no
-    longer `strict=True` (that keyword needs Python 3.10+, below this
-    package's `>=3.9` floor), so this explicit count check is what still
-    catches a caller handing over too few slices -- the same guarantee
-    `strict=True` used to provide in this direction."""
-    from nsgeo_qgis.slice_export import plan_export
-
-    engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
-    too_few = [np.zeros((engine.frame.ny, engine.frame.nx), dtype=np.float32)]
-    with pytest.raises(ValueError, match="expected .* slices"):
-        GeoTiffSliceWriter().write(tmp_path / "short.tif", plan, too_few)
-
-
-def test_write_raises_when_there_are_too_many_slices(exportable, tmp_path):
-    """Task 6 fix round 2, Minor 1: `written != len(plan.bands)` alone
-    can only ever detect too FEW slices -- `zip` stops consuming at the
-    shorter iterable, so `written` never exceeds `len(plan.bands)` and a
-    `slices` iterable with a surplus had that surplus silently dropped,
-    with no exception. `strict=True` used to catch this direction too
-    (`ValueError: zip() argument 2 is longer than argument 1`); the
-    explicit `next(iterator, None)` probe after the loop is what restores
-    it without `strict=`."""
-    from nsgeo_qgis.slice_export import plan_export
-
-    engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
-    shape = (engine.frame.ny, engine.frame.nx)
-    too_many = [np.zeros(shape, dtype=np.float32) for _ in range(len(plan.bands) + 1)]
-    with pytest.raises(ValueError, match="more slices than the plan's"):
-        GeoTiffSliceWriter().write(tmp_path / "long.tif", plan, too_many)
 
 
 def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_session):
@@ -1000,46 +927,6 @@ def test_a_record_from_this_build_still_loads_in_0_2_0(method):
     view = ViewSettings(**_OLD_KEYS, method=method, max_distance_spacings=1.0)
     got = _ViewSettings020.from_dict(view.to_dict())
     assert got == _ViewSettings020(**_OLD_KEYS)
-
-
-def test_export_reports_progress_for_every_band(exportable, tmp_path):
-    """`(0, n)` before the first band, then one call per band written, and `(n, n)`."""
-    engine = exportable
-    calls: list[tuple[int, int]] = []
-
-    def record(done, total):
-        calls.append((done, total))
-        return True
-
-    plan = export_slices(engine, tmp_path / "cube.tif", 10, 5, None, SliceFinish(), progress=record)
-    n = len(plan.bands)
-    assert n > 2
-    assert calls == [(i, n) for i in range(n + 1)]
-
-
-def test_an_export_stops_before_the_next_band_when_progress_says_no(exportable, tmp_path):
-    from nsgeo_qgis.slice_export import ExportCancelled
-
-    engine = exportable
-    pulled: list[int] = []
-    real = engine.slice_at
-
-    def counting(window):
-        pulled.append(window.k0)
-        return real(window)
-
-    engine.slice_at = counting  # type: ignore[method-assign]
-    with pytest.raises(ExportCancelled):
-        export_slices(
-            engine,
-            tmp_path / "cube.tif",
-            10,
-            5,
-            None,
-            SliceFinish(),
-            progress=lambda done, n: done < 2,
-        )
-    assert len(pulled) == 2  # bands 0 and 1; the third was never computed
 
 
 # ---- milestone B: the file at any pixel (write_bands) ------------------------

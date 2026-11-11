@@ -199,8 +199,23 @@ def _grid_estimate(grid: ExportGrid, n_covered: int) -> MemoryEstimate:
     return estimate_memory(samples, grid.frame.n_cells, grid.z.nz, n_covered)
 
 
-def _covered(grid: ExportGrid) -> int:
-    return covered_cells(grid.frame, (line.coords for line in grid.lines))
+#: A memo of covered-cell counts for `estimate_export`, owned by whoever calls it repeatedly.
+CoveredCache = dict[tuple[object, ...], tuple[tuple[PreparedLine, ...], int]]
+
+
+def _covered(grid: ExportGrid, cache: CoveredCache | None = None) -> int:
+    """The cells any trace of `grid` falls in at its frame. With a `cache`, each
+    (grid, frame, lines) is counted once: the count walks every trace (about 100 ms
+    on ten grids of 400 lines), and the dialog asks for many pixels at one cell.
+    The cache keeps a reference to the lines it keyed on, so their ids stay theirs."""
+    if cache is None:
+        return covered_cells(grid.frame, (line.coords for line in grid.lines))
+    key = (grid.grid_id, grid.frame, tuple(id(line) for line in grid.lines))
+    hit = cache.get(key)
+    if hit is None:
+        count = covered_cells(grid.frame, (line.coords for line in grid.lines))
+        hit = cache[key] = (grid.lines, count)
+    return hit[1]
 
 
 def _fixed_bytes(spec: ExportSpec, covered: Sequence[int]) -> dict[str, int]:
@@ -253,15 +268,16 @@ def _residencies(spec: ExportSpec, covered: Sequence[int]) -> dict[str, str]:
     return out
 
 
-def estimate_export(spec: ExportSpec) -> ExportEstimate:
+def estimate_export(spec: ExportSpec, cache: CoveredCache | None = None) -> ExportEstimate:
     """The memory `run_export` holds and the file it feeds, before anything runs.
 
     Through `estimate_memory` and `covered_cells` for the cubes and the fill
     weights, `TAP_BYTES_PER_PIXEL` per covered output pixel for the taps, and
     one band's accumulators. A grid keeps a cube only where `choose_residency`
-    says so (`_residencies`); the rest stream.
+    says so (`_residencies`); the rest stream. `cache` memoises the covered-cell counts
+    across calls (`CoveredCache`); None counts afresh.
     """
-    covered = [_covered(g) for g in spec.grids]
+    covered = [_covered(g, cache) for g in spec.grids]
     parts = _fixed_bytes(spec, covered)
     modes = _residencies(spec, covered)
     parts["cubes"] = sum(
