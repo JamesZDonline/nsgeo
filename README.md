@@ -102,6 +102,10 @@ a milestone merges or the plan changes.
 - **Whole site at fine cells** ([#107], [#108]): Whole site never refuses a
   fine cell, and the export can be finer than the preview. Being designed on
   `nsgeo-whole-site-fine-cells`.
+- **This grid and Whole site agree** on a grid's lines and preset ([#100],
+  [#101], [#106], [#103]). Ticking every line in the line chooser now means
+  every line, including lines imported later. Being built on
+  `nsgeo-scopes-agree`.
 
 ### Next, in order
 

@@ -405,7 +405,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    slices, or **None** for the signed mean. These transforms are only offered
    here, not in **Add step**. Preparing starts by itself, and the status line
    reads *prepared* when it is done.
-   **Choose…** sets which of the grid's lines are included.
+   **Choose…** sets which of the grid's lines are included. With every line
+   ticked, lines you import onto the grid later are included too.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
