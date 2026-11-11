@@ -55,6 +55,8 @@ reviewer of this task does:
 
 from __future__ import annotations
 
+import math
+import os
 import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -63,12 +65,15 @@ from typing import Any, Protocol
 
 import numpy as np
 from nsgeo.project import line_key
+from nsgeo.render import Normalizer
 from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
     Provenance,
+    SiteLattice,
     SliceWindow,
     ZAxis,
+    frame_lattice,
     npz_path,
     plan_windows,
     save_cube,
@@ -77,11 +82,11 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from osgeo import gdal
+from osgeo import gdal, osr
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
-from nsgeo_qgis.export_pipeline import ExportCancelled
+from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_MAX_DISTANCE_SPACINGS,
@@ -90,6 +95,198 @@ from nsgeo_qgis.slices_plan import (
     SliceFinish,
     SourceChoice,
 )
+
+# GDAL 3.8 warns once, on the first call, that neither UseExceptions() nor
+# DontUseExceptions() has been called. The export writers run on a worker
+# thread, where `warnings.catch_warnings()` (process-global) is unsafe, so the
+# one message is silenced here, once, at import (GUI thread).
+warnings.filterwarnings("ignore", message=r".*UseExceptions.*", category=FutureWarning)
+
+#: Tile only when both sides are at least this many pixels (measured: 512-pixel
+#: tiles on a frame barely larger than one tile wasted 2.9x).
+TILE_THRESHOLD = 1024
+TILE_SIZE = 256
+#: Total finite values kept for the stretch, split evenly across the bands. A
+#: fine site is gigabytes; the percentile needs a sample, not every value.
+STRETCH_SAMPLE_CAP = 2_000_000
+#: An overview is built while its longer side is at least this many pixels.
+OVERVIEW_MIN_SIDE = 256
+
+
+def creation_options(width: int, height: int) -> list[str]:
+    """GeoTIFF creation options for a `width` x `height` export (spec 6.3).
+
+    float32 DEFLATE with PREDICTOR=3, band-interleaved (pixel interleaving makes
+    stepping through depths read every band). Tiled 256 x 256 only when both
+    sides reach `TILE_THRESHOLD`; below that, strips.
+    """
+    options = ["INTERLEAVE=BAND"]
+    if width >= TILE_THRESHOLD and height >= TILE_THRESHOLD:
+        options += ["TILED=YES", f"BLOCKXSIZE={TILE_SIZE}", f"BLOCKYSIZE={TILE_SIZE}"]
+    else:
+        options.append("TILED=NO")
+    return options + ["COMPRESS=DEFLATE", "PREDICTOR=3", "BIGTIFF=IF_SAFER"]
+
+
+def overview_factors(width: int, height: int) -> list[int]:
+    """2, 4, 8 ... while the overview's longer side stays at least `OVERVIEW_MIN_SIDE`."""
+    factors: list[int] = []
+    factor = 2
+    while math.ceil(max(width, height) / factor) >= OVERVIEW_MIN_SIDE:
+        factors.append(factor)
+        factor *= 2
+    return factors
+
+
+def build_overviews(path: str | Path) -> None:
+    """Internal overviews, nodata-aware AVERAGE, for a tiled file; a stripped one gets none.
+
+    Worker-thread safe. The factors sum to about a third of the full size, which
+    is what `export_pipeline.OVERVIEW_FACTOR` budgets.
+    """
+    options = {
+        "COMPRESS_OVERVIEW": "DEFLATE",
+        "PREDICTOR_OVERVIEW": "3",
+        "INTERLEAVE_OVERVIEW": "BAND",
+        "BIGTIFF_OVERVIEW": "IF_SAFER",
+    }
+    with gdal.ExceptionMgr(useExceptions=True), gdal.config_options(options, thread_local=True):
+        dataset = gdal.Open(str(path), gdal.GA_Update)
+        try:
+            if dataset.GetRasterBand(1).GetBlockSize() != [TILE_SIZE, TILE_SIZE]:
+                return
+            factors = overview_factors(dataset.RasterXSize, dataset.RasterYSize)
+            if factors:
+                dataset.BuildOverviews("AVERAGE", factors)
+        finally:
+            dataset.Close()
+            dataset = None
+
+
+def partial_path(target: str | Path) -> Path:
+    """`<stem>.partial<suffix>` in the target's directory: where a write lands first."""
+    target = Path(target)
+    return target.with_name(f"{target.stem}.partial{target.suffix}")
+
+
+def commit_partial(partial: str | Path, target: str | Path) -> None:
+    """Put a finished partial file on the target name, replacing what was there."""
+    os.replace(partial, target)
+
+
+def discard_partial(partial: str | Path) -> None:
+    """Remove a partial file if it is there."""
+    Path(partial).unlink(missing_ok=True)
+
+
+class StretchSample:
+    """A bounded, strided subsample of each band's finite values, for the stretch.
+
+    Each band keeps at most `STRETCH_SAMPLE_CAP // n_bands` values (at least one
+    stride's worth), so a fine export never holds more than the cap. Under the
+    cap every finite value is kept, and `limit` then equals `limit_over_slices`.
+    """
+
+    def __init__(self, n_bands: int) -> None:
+        self._budget = max(1, STRETCH_SAMPLE_CAP // max(1, n_bands))
+        self._parts: list[np.ndarray] = []
+
+    @property
+    def count(self) -> int:
+        return sum(part.size for part in self._parts)
+
+    def add(self, array: np.ndarray) -> None:
+        flat = np.asarray(array).ravel()
+        finite = flat[np.isfinite(flat)]
+        if finite.size > self._budget:
+            finite = finite[:: math.ceil(finite.size / self._budget)]
+        self._parts.append(finite.astype(float))
+
+    def limit(self, clip: Normalizer) -> float:
+        kept = np.concatenate(self._parts) if self._parts else np.array([], dtype=float)
+        return clip.limit(kept)
+
+
+def projection_wkt(crs: str, wkt: str | None) -> str:
+    """The WKT for a lattice's CRS, with no QGIS object (worker threads).
+
+    `wkt`, taken from `QgsCoordinateReferenceSystem.toWkt()` on the GUI thread
+    when the plan is built, wins; otherwise GDAL resolves the authority id.
+    """
+    if wkt:
+        return wkt
+    reference = osr.SpatialReference()
+    if reference.SetFromUserInput(crs) != 0:
+        raise ValueError(f"cannot describe the coordinate system {crs!r} to GDAL")
+    reference.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    return reference.ExportToWkt()
+
+
+def write_north_up(
+    path: str | Path,
+    lattice: SiteLattice,
+    descriptions: Sequence[str],
+    bands: Iterable[ExportBand],
+    *,
+    crs_wkt: str | None,
+    clip: Normalizer,
+    tag_dataset: Callable[[Any], None],
+    tag_band: Callable[[Any, int, ExportBand], None],
+    progress_band: Callable[[int], None] | None = None,
+) -> float:
+    """Write north-up bands on `lattice` one at a time; return the measured stretch limit.
+
+    Shared by both GeoTIFF writers. The dataset is released in a `finally`, so a
+    band iterator that raises (a cancel) leaves a file the caller can delete.
+    `progress_band(done)` is called after each band is written. Worker-thread
+    safe: no Qt object, no process-global warning state.
+    """
+    n_bands = len(descriptions)
+    if not n_bands:
+        raise ValueError("an export plan needs at least one band")
+    sample = StretchSample(n_bands)
+    expected = (lattice.height, lattice.width)
+    with gdal.ExceptionMgr(useExceptions=True):
+        dataset = None
+        try:
+            dataset = gdal.GetDriverByName("GTiff").Create(
+                str(path),
+                lattice.width,
+                lattice.height,
+                n_bands,
+                gdal.GDT_Float32,
+                options=creation_options(lattice.width, lattice.height),
+            )
+            dataset.SetGeoTransform(lattice.geotransform)
+            dataset.SetProjection(projection_wkt(lattice.crs, crs_wkt))
+            tag_dataset(dataset)
+            written = 0
+            iterator = iter(bands)
+            for index, (description, shown) in enumerate(zip(descriptions, iterator)):
+                if shown.array.shape != expected:
+                    raise ValueError(
+                        f"band {index + 1} is {shown.array.shape}, not the lattice's {expected}"
+                    )
+                band = dataset.GetRasterBand(index + 1)
+                band.SetNoDataValue(float("nan"))
+                band.SetDescription(description)
+                tag_band(band, index, shown)
+                band.WriteArray(shown.array)
+                sample.add(shown.array)
+                written += 1
+                if progress_band is not None:
+                    progress_band(written)
+            if written != n_bands:
+                raise ValueError(f"expected {n_bands} slices (one per planned band), got {written}")
+            if next(iterator, None) is not None:
+                raise ValueError(f"more slices than the plan's {n_bands} bands")
+        finally:
+            # Close() surfaces a write error garbage collection would swallow, and
+            # releases the file (Windows will not delete an open one).
+            if dataset is not None:
+                dataset.Close()
+            dataset = None
+    return sample.limit(clip)
 
 
 @dataclass(frozen=True)
@@ -133,6 +330,13 @@ class ExportPlan:
     provenance: Provenance
     finish: FinishSettings | None = None
     coverage: bool = False  # a counts raster: written as counts, never blended
+    #: The raster `write_bands` writes on; None means the frame's own, at its cell.
+    lattice: SiteLattice | None = None
+    #: The export cell and pixel in metres; None means the frame's cell / the lattice's pixel.
+    cell: float | None = None
+    pixel: float | None = None
+    #: The CRS as WKT, taken on the GUI thread; None lets the writer resolve `crs` itself.
+    crs_wkt: str | None = None
 
 
 def plan_export(
@@ -182,33 +386,67 @@ class SliceWriter(Protocol):
     implementation would have had to edit both.
     """
 
-    # Cheap cluster (final review): `Sequence[str]`, not `list[str]` -- a
-    # `Protocol` attribute typed as a mutable container is INVARIANT, so a
-    # writer declaring `OPTIONS` as a `tuple[str, ...]` (or any other
-    # `Sequence`) would fail a static conformance check it need not; this
-    # is read only, via `self.OPTIONS` inside `write`, never written.
-    OPTIONS: Sequence[str]
-
     def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None: ...
 
 
 class GeoTiffSliceWriter:
     """Writes an `ExportPlan`'s slices to a multi-band GeoTIFF, band by band.
 
-    `OPTIONS` is spec 9.5's set, verbatim, and deliberately NOT
-    `slice_layer.py`'s (plan Ruling 3): that file is an uncompressed
-    scratch preview rewritten every tick; this one is the durable
-    artefact a reader keeps, so it pays compression's write cost once for
-    a much smaller file forever after. Satisfies `SliceWriter` structurally.
+    `creation_options` is spec 9.5's set, deliberately NOT `slice_layer.py`'s
+    (plan Ruling 3): that file is an uncompressed scratch preview rewritten
+    every tick; this one is the durable artefact a reader keeps, so it pays
+    compression's write cost once for a much smaller file forever after.
+    Satisfies `SliceWriter` structurally.
     """
 
-    OPTIONS = [
-        "INTERLEAVE=BAND",
-        "TILED=NO",
-        "COMPRESS=DEFLATE",
-        "PREDICTOR=3",
-        "BIGTIFF=IF_SAFER",
-    ]
+    def write_bands(
+        self,
+        path: str | Path,
+        plan: ExportPlan,
+        bands: Iterable[ExportBand],
+        *,
+        clip: Normalizer,
+        progress_band: Callable[[int], None] | None = None,
+    ) -> float:
+        """Write `bands` (north-up, on the plan's lattice) and return the stretch limit.
+
+        The lattice is `plan.lattice`, else the frame's own at its cell. The file
+        records the export cell, the pixel and `bilinear` resampling as well as
+        the finish. Worker-thread safe (see `write_north_up`); the caller writes
+        to `partial_path(target)` and commits or discards it.
+        """
+        lattice = plan.lattice or frame_lattice(plan.frame, plan.frame.cell)
+        cell = plan.cell if plan.cell is not None else plan.frame.cell
+        pixel = plan.pixel if plan.pixel is not None else lattice.pixel
+
+        def tag_dataset(dataset: Any) -> None:
+            if plan.finish is not None:
+                for key, value in (
+                    ("NSGEO_INTERPOLATION", plan.finish.method),
+                    ("NSGEO_MAX_DISTANCE_M", str(plan.finish.max_distance_m)),
+                    ("NSGEO_SMOOTH_X_M", str(plan.finish.smooth_x_m)),
+                    ("NSGEO_SMOOTH_Y_M", str(plan.finish.smooth_y_m)),
+                ):
+                    dataset.SetMetadataItem(key, value)
+            for key, value in (
+                ("NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)),
+                ("NSGEO_CELL_M", str(cell)),
+                ("NSGEO_PIXEL_M", str(pixel)),
+                ("NSGEO_RESAMPLING", "bilinear"),
+            ):
+                dataset.SetMetadataItem(key, value)
+
+        return write_north_up(
+            path,
+            lattice,
+            [band.description for band in plan.bands],
+            bands,
+            crs_wkt=plan.crs_wkt,
+            clip=clip,
+            tag_dataset=tag_dataset,
+            tag_band=lambda band, index, shown: None,
+            progress_band=progress_band,
+        )
 
     def write(self, path: str | Path, plan: ExportPlan, slices: Iterable[np.ndarray]) -> None:
         """Create `path` from `plan.bands[0]`'s north-up shape, then fill it in.
@@ -279,7 +517,7 @@ class GeoTiffSliceWriter:
                                 height,
                                 len(plan.bands),
                                 gdal.GDT_Float32,
-                                options=self.OPTIONS,
+                                options=creation_options(width, height),
                             )
                             dataset.SetGeoTransform(geotransform)
                             dataset.SetProjection(QgsCoordinateReferenceSystem(plan.crs).toWkt())

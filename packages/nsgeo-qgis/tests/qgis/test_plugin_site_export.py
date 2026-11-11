@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
-from nsgeo.slices import window_depths_m, window_on, window_times_ns
+from nsgeo.render import PercentileClip
+from nsgeo.slices import (
+    SiteLattice,
+    limit_over_slices,
+    window_depths_m,
+    window_on,
+    window_times_ns,
+)
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled
 from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.site_export import (
     GeoTiffSiteWriter,
@@ -17,7 +26,13 @@ from nsgeo_qgis.site_export import (
     plan_site_export,
     write_site_coverage,
 )
-from nsgeo_qgis.slice_export import GeoTiffSliceWriter, band_time_range
+from nsgeo_qgis.slice_export import (
+    band_time_range,
+    build_overviews,
+    commit_partial,
+    discard_partial,
+    partial_path,
+)
 from nsgeo_qgis.slices_plan import Resolution, SliceFinish
 from osgeo import gdal
 from qgis.core import QgsRasterLayer
@@ -361,8 +376,10 @@ def test_a_ready_grid_with_no_site_axis_exports_as_absent(
         site.dispose()
 
 
-def test_the_writer_reuses_m11s_creation_options():
-    assert GeoTiffSiteWriter.OPTIONS is GeoTiffSliceWriter.OPTIONS
+def test_the_writer_reuses_the_slice_writers_creation_options():
+    from nsgeo_qgis import site_export, slice_export
+
+    assert site_export.creation_options is slice_export.creation_options
 
 
 def test_the_writer_refuses_a_wrong_number_of_slices(site3, make_site, tmp_path):
@@ -434,3 +451,131 @@ def test_exporting_a_preview_site_refuses_and_writes_nothing(site3, make_site, t
     with pytest.raises(RuntimeError, match="can't be exported at full detail"):
         export_site(site, path, 8, 24, **KW)
     assert not path.exists()
+
+
+# ---- milestone B: write_bands -----------------------------------------------
+def _site_bands(plan, grids=("A", "B", "C"), fill=None):
+    rng = np.random.default_rng(5)
+    shape = (plan.lattice.height, plan.lattice.width)
+    out = []
+    for i in range(len(plan.bands)):
+        a = (
+            rng.normal(size=shape).astype(np.float32)
+            if fill is None
+            else np.full(shape, fill, np.float32)
+        )
+        a[:1, :] = np.nan
+        out.append(ExportBand(a, {g: (1.0 + i, 0.5) for g in grids if g != "C"}))
+    return out
+
+
+def test_write_bands_records_the_export_cell_pixel_resampling_and_its_own_factors(
+    site3, make_site, tmp_path, open_tif
+):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    plan = replace(plan, cell_m=0.5)
+    bands = _site_bands(plan)
+    path = tmp_path / "w.tif"
+    GeoTiffSiteWriter().write_bands(path, plan, bands, clip=PercentileClip())
+    ds = open_tif(path)
+    md = ds.GetMetadata()
+    assert md["NSGEO_SITE_RESAMPLING"] == "bilinear"
+    assert float(md["NSGEO_SITE_CELL_M"]) == 0.5
+    assert float(md["NSGEO_SITE_PIXEL_M"]) == plan.lattice.pixel
+    assert md["NSGEO_SITE_TRANSFORM"] == "amp_envelope"
+    assert ds.GetGeoTransform() == pytest.approx(plan.lattice.geotransform)
+    for i, band in enumerate(bands):
+        rb = ds.GetRasterBand(i + 1)
+        assert np.array_equal(rb.ReadAsArray(), band.array, equal_nan=True)
+        factors = json.loads(rb.GetMetadata()["NSGEO_GRID_FACTORS"])
+        assert factors == {"A": [1.0 + i, 0.5], "B": [1.0 + i, 0.5], "C": None}
+        assert rb.GetMetadata()["NSGEO_WINDOW_NS"]
+        assert rb.GetDescription() == plan.bands[i].description
+
+
+def test_the_site_stretch_is_the_limit_over_the_written_bands(site3, make_site, tmp_path):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    bands = _site_bands(plan)
+    clip = PercentileClip()
+    got = GeoTiffSiteWriter().write_bands(tmp_path / "l.tif", plan, bands, clip=clip)
+    assert got == limit_over_slices((b.array for b in bands), clip)
+
+
+def test_a_large_site_file_is_tiled_and_gets_overviews(site3, make_site, tmp_path, open_tif):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    plan = replace(
+        plan,
+        bands=plan.bands[:1],
+        lattice=SiteLattice(0.0, 2000.0, 1.0, 1100, 1100, plan.lattice.crs),
+    )
+    path = tmp_path / "big.tif"
+    GeoTiffSiteWriter().write_bands(path, plan, _site_bands(plan), clip=PercentileClip())
+    build_overviews(path)
+    rb = open_tif(path).GetRasterBand(1)
+    assert rb.GetBlockSize() == [256, 256]
+    assert rb.GetOverviewCount() == 2
+
+
+def test_the_site_counts_companion_writes_through_the_same_writer(
+    site3, make_site, tmp_path, open_tif
+):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    counts = replace(
+        plan,
+        bands=plan.bands[:1],
+        method="none",
+        finish=None,
+        grids=tuple(replace(g, gain=1.0) for g in plan.grids),
+    )
+    bands = _site_bands(counts, fill=2.0)
+    limit = GeoTiffSiteWriter().write_bands(
+        tmp_path / "c.tif", counts, bands, clip=PercentileClip()
+    )
+    assert limit == pytest.approx(2.0)
+    md = open_tif(tmp_path / "c.tif").GetMetadata()
+    assert md["NSGEO_SITE_NORMALISATION"] == "none" and "NSGEO_SITE_INTERPOLATION" not in md
+
+
+def test_an_interrupted_site_write_leaves_no_partial_and_an_old_target_alone(
+    site3, make_site, tmp_path
+):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    bands = _site_bands(plan)
+    target = tmp_path / "site.tif"
+    target.write_bytes(b"previous")
+    partial = partial_path(target)
+
+    def interrupted():
+        yield bands[0]
+        raise ExportCancelled()
+
+    with pytest.raises(ExportCancelled):
+        try:
+            GeoTiffSiteWriter().write_bands(partial, plan, interrupted(), clip=PercentileClip())
+            commit_partial(partial, target)
+        except BaseException:
+            discard_partial(partial)
+            raise
+    assert target.read_bytes() == b"previous" and not partial.exists()
+
+
+def test_the_site_writer_reports_each_band_and_refuses_a_wrong_count(site3, make_site, tmp_path):
+    site = make_site(site3)
+    plan = plan_site_export(site, 8, 24, **KW)
+    bands = _site_bands(plan)
+    seen: list[int] = []
+    GeoTiffSiteWriter().write_bands(
+        tmp_path / "p.tif", plan, bands, clip=PercentileClip(), progress_band=seen.append
+    )
+    assert seen == list(range(1, len(bands) + 1))
+    with pytest.raises(ValueError, match="slices"):
+        GeoTiffSiteWriter().write_bands(tmp_path / "q.tif", plan, bands[:-1], clip=PercentileClip())
+    with pytest.raises(ValueError, match="more slices"):
+        GeoTiffSiteWriter().write_bands(
+            tmp_path / "r.tif", plan, bands + bands[:1], clip=PercentileClip()
+        )

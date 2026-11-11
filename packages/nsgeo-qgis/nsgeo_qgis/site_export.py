@@ -9,7 +9,8 @@ Written band by band, one `slice_at` per band, never a resident cube (spec
 
 What the file records (Ruling 6; the key names are part of the format).
 Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
-`NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_INTERPOLATION` (the method key),
+`NSGEO_SITE_CELL_M` (the export cell), `NSGEO_SITE_PIXEL_M` (the export pixel),
+`NSGEO_SITE_RESAMPLING` (always `bilinear`), `NSGEO_SITE_INTERPOLATION` (the method key),
 `NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
 (interpolation spec §8; the coverage companion carries none of the four),
 `NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
@@ -36,6 +37,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from nsgeo.render import Normalizer
 from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
@@ -49,8 +51,14 @@ from nsgeo.velocity import VelocityModel
 from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsRasterLayer
 
+from nsgeo_qgis.export_pipeline import ExportBand
 from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
-from nsgeo_qgis.slice_export import ExportCancelled, GeoTiffSliceWriter, band_time_range
+from nsgeo_qgis.slice_export import (
+    ExportCancelled,
+    band_time_range,
+    creation_options,
+    write_north_up,
+)
 from nsgeo_qgis.slices_plan import SliceFinish
 
 _SEPARATORS = (",", ":")
@@ -94,6 +102,8 @@ class SiteExportPlan:
     grids: tuple[SiteGridRecord, ...]
     #: Ruling F-2: included grids the file does not hold, grid id to state.
     left_out: dict[str, str] = field(default_factory=dict)
+    #: The CRS as WKT, taken on the GUI thread; None lets the writer resolve it itself.
+    crs_wkt: str | None = None
 
 
 def band_window_ns(site_z: ZAxis, window: SliceWindow) -> tuple[float, float]:
@@ -202,8 +212,42 @@ def _json(value: Any) -> str:
 class GeoTiffSiteWriter:
     """Writes a `SiteExportPlan`'s slices to a multi-band GeoTIFF, band by band."""
 
-    #: M11's measured set, reused so the two files cannot drift apart.
-    OPTIONS = GeoTiffSliceWriter.OPTIONS
+    def write_bands(
+        self,
+        path: str | Path,
+        plan: SiteExportPlan,
+        bands: Iterable[ExportBand],
+        *,
+        clip: Normalizer,
+        progress_band: Callable[[int], None] | None = None,
+    ) -> float:
+        """Write `bands` (already on `plan.lattice`) and return the stretch limit.
+
+        `NSGEO_GRID_FACTORS` are each band's own factors, those the export
+        measured. Worker-thread safe (see `slice_export.write_north_up`).
+        """
+
+        def tag_dataset(dataset: Any) -> None:
+            _tag_dataset(dataset, plan)
+
+        def tag_band(band: Any, index: int, shown: ExportBand) -> None:
+            band_plan = plan.bands[index]
+            lo, hi = window_times_ns(plan.site_z, band_plan.window)
+            band.SetMetadataItem("NSGEO_WINDOW_NS", f"{lo},{hi}")
+            band.SetMetadataItem("NSGEO_GRID_DEPTHS_M", _json(_depths(band_plan)))
+            band.SetMetadataItem("NSGEO_GRID_FACTORS", _json(_factors(plan, shown.factors)))
+
+        return write_north_up(
+            path,
+            plan.lattice,
+            [band.description for band in plan.bands],
+            bands,
+            crs_wkt=plan.crs_wkt,
+            clip=clip,
+            tag_dataset=tag_dataset,
+            tag_band=tag_band,
+            progress_band=progress_band,
+        )
 
     def write(self, path: str | Path, plan: SiteExportPlan, slices: Iterable[SiteSlice]) -> None:
         if not plan.bands:
@@ -222,33 +266,11 @@ class GeoTiffSiteWriter:
                         lattice.height,
                         len(plan.bands),
                         gdal.GDT_Float32,
-                        options=self.OPTIONS,
+                        options=creation_options(lattice.width, lattice.height),
                     )
                     dataset.SetGeoTransform(lattice.geotransform)
                     dataset.SetProjection(QgsCoordinateReferenceSystem(lattice.crs).toWkt())
-                    for key, value in {
-                        "NSGEO_SITE_TRANSFORM": plan.transform,
-                        "NSGEO_SITE_NORMALISATION": plan.method,
-                        "NSGEO_SITE_CELL_M": str(plan.cell_m),
-                        "NSGEO_SITE_PIXEL_M": str(lattice.pixel),
-                        "NSGEO_SITE_Z_UNIT": "ns",
-                        "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
-                    }.items():
-                        dataset.SetMetadataItem(key, value)
-                    if plan.left_out:
-                        # Ruling F-2: absent, not `{}`, when nothing was left out.
-                        dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
-                    if plan.finish is not None:
-                        # Absent, not zero, on a file that was never interpolated.
-                        for key, value in {
-                            "NSGEO_SITE_INTERPOLATION": plan.finish.method,
-                            "NSGEO_SITE_MAX_DISTANCE_SPACINGS": str(
-                                plan.finish.max_distance_spacings
-                            ),
-                            "NSGEO_SITE_SMOOTH_X_M": str(plan.finish.smooth_x_m),
-                            "NSGEO_SITE_SMOOTH_Y_M": str(plan.finish.smooth_y_m),
-                        }.items():
-                            dataset.SetMetadataItem(key, value)
+                    _tag_dataset(dataset, plan)
                     written = 0
                     iterator = iter(slices)
                     for index, (band_plan, shown) in enumerate(zip(plan.bands, iterator)):
@@ -264,15 +286,7 @@ class GeoTiffSiteWriter:
                         band.SetMetadataItem("NSGEO_WINDOW_NS", f"{lo},{hi}")
                         band.SetMetadataItem("NSGEO_GRID_DEPTHS_M", _json(_depths(band_plan)))
                         band.SetMetadataItem(
-                            "NSGEO_GRID_FACTORS",
-                            _json(
-                                {
-                                    g.grid_id: list(shown.factors[g.grid_id])
-                                    if g.grid_id in shown.factors
-                                    else None
-                                    for g in plan.grids
-                                }
-                            ),
+                            "NSGEO_GRID_FACTORS", _json(_factors(plan, shown.factors))
                         )
                         band.WriteArray(shown.array)
                         written += 1
@@ -288,6 +302,40 @@ class GeoTiffSiteWriter:
                     if dataset is not None:
                         dataset.Close()
                     dataset = None
+
+
+def _tag_dataset(dataset: Any, plan: SiteExportPlan) -> None:
+    """The dataset-level keys: what was done, the export cell and pixel, the resampling."""
+    for key, value in {
+        "NSGEO_SITE_TRANSFORM": plan.transform,
+        "NSGEO_SITE_NORMALISATION": plan.method,
+        "NSGEO_SITE_CELL_M": str(plan.cell_m),
+        "NSGEO_SITE_PIXEL_M": str(plan.lattice.pixel),
+        "NSGEO_SITE_RESAMPLING": "bilinear",
+        "NSGEO_SITE_Z_UNIT": "ns",
+        "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
+    }.items():
+        dataset.SetMetadataItem(key, value)
+    if plan.left_out:
+        # Ruling F-2: absent, not `{}`, when nothing was left out.
+        dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
+    if plan.finish is not None:
+        # Absent, not zero, on a file that was never interpolated.
+        for key, value in {
+            "NSGEO_SITE_INTERPOLATION": plan.finish.method,
+            "NSGEO_SITE_MAX_DISTANCE_SPACINGS": str(plan.finish.max_distance_spacings),
+            "NSGEO_SITE_SMOOTH_X_M": str(plan.finish.smooth_x_m),
+            "NSGEO_SITE_SMOOTH_Y_M": str(plan.finish.smooth_y_m),
+        }.items():
+            dataset.SetMetadataItem(key, value)
+
+
+def _factors(
+    plan: SiteExportPlan, factors: Mapping[str, tuple[float, float]]
+) -> dict[str, list[float] | None]:
+    return {
+        g.grid_id: list(factors[g.grid_id]) if g.grid_id in factors else None for g in plan.grids
+    }
 
 
 def _depths(band: SiteBand) -> dict[str, list[float] | None]:
