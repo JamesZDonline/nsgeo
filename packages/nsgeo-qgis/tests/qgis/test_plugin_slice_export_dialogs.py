@@ -259,7 +259,7 @@ def _export_levels(dock, tmp_path, answer_modal):
 
 def test_exporting_a_rotated_grid_reports_no_fill_warning(plugin, tmp_path, answer_modal):
     """Ruling AE, reworked (interpolation spec §8): a rotated frame is
-    resampled at half the cell, so it drops no cell and the success message
+    resampled bilinearly at the cell, so it drops no cell and the success message
     is plain Info -- whatever the interpolation, `none` included. This
     replaces the radius-0 warning, which no longer has a condition."""
     from qgis.core import Qgis
@@ -867,3 +867,54 @@ def test_a_failed_redraw_after_an_export_changes_nothing_it_reported(
     else:
         assert target.exists()
         assert any("exported" in m and str(target) in m for m, _lv in levels), levels
+
+
+def _drawn_values(layer):
+    """The finite pixel values the slice layer's provider holds."""
+    block = layer.dataProvider().block(1, layer.extent(), layer.width(), layer.height())
+    values = np.array(
+        [[block.value(r, c) for c in range(block.width())] for r in range(block.height())]
+    )
+    return values[np.isfinite(values) & (values > -1e30)]
+
+
+def test_the_plugin_draws_a_rotated_coverage_view_as_whole_counts(plugin, qgis_app):
+    """The plugin passes the coverage check to the layer as `counts=`: the
+    drawn counts are whole numbers, and the same view with coverage off is
+    blended, not largest-count sampled. A hard-coded False at that call site would
+    blend the counts; a hard-coded True would largest-count sample the amplitudes."""
+    plugin, s = plugin
+    s.replace_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    assert dock.engine.frame.azimuth == 30.0
+
+    dock.coverage_check.setChecked(True)
+    qgis_app.processEvents()
+    counts = _drawn_values(plugin.slice_layer.layer)
+    assert counts.size > 0 and (counts >= 1).all()
+    np.testing.assert_array_equal(counts, np.round(counts))
+
+    dock.coverage_check.setChecked(False)
+    qgis_app.processEvents()
+    amplitudes = _drawn_values(plugin.slice_layer.layer)
+    # Largest count among the in-frame positive-weight corners only ever
+    # returns cell values; a blend does not only return cell values.
+    cells = np.asarray(dock.current_values(), dtype=np.float32)
+    assert not np.isin(amplitudes.astype(np.float32), cells).all()
+
+
+def test_an_exported_layer_and_its_coverage_are_drawn_smooth(plugin, tmp_path, answer_modal):
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    sources = {str(target), str(tmp_path / "slices" / "cube_coverage.tif")}
+    found = [v for v in plugin.layers.project.mapLayers().values() if v.source() in sources]
+    assert len(found) == 2
+    for layer in found:
+        assert layer.resampleFilter().zoomedInResampler().type() == "bilinear"

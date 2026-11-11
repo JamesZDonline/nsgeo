@@ -351,6 +351,94 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: than spec 4's own "no smaller than the trace spacing" would allow.
 MAX_FRAME_CELLS = 4_000_000
 
+#: Two limits decide whether the whole-site picture is drawn at the cell or as
+#: a coarser preview (which also refuses to export). The site lattice is not
+#: a frame: its cost is the compose, not the interpolation `MAX_FRAME_CELLS`
+#: guards. Measured with `scripts/bench_site.py` (idle workstation, 15.9 GB),
+#: against compose <= 250 ms and transient <= 400 MB:
+#:
+#: `SITE_MAX_PIXELS` bounds the lattice itself, the 10 B a pixel the compose
+#: accumulates. `--lattice-scale`: ten 20 m grids spaced apart, kriging, no
+#: smoothing, 0.25 m cell, so only ~0.64 M pixels are covered by grids:
+#:
+#:     lattice   compose (median)   transient
+#:      4 M          12 ms            40 MB
+#:      8 M          19 ms            80 MB
+#:     12 M          23 ms           120 MB
+#:     16 M          29 ms           160 MB
+#:     24 M          39 ms           240 MB
+#:
+#: All meet the criterion, so the limit is the 16 M cap.
+SITE_MAX_PIXELS = 16_000_000
+
+#: `SITE_MAX_COVERED_PIXELS` bounds the grids' windows summed at the drawn
+#: pitch: the compose samples each covered pixel (about 46 ns rotated) and the
+#: gathers hold about 52 B of taps for it, so a dense site at a fine cell
+#: costs far more than the same lattice mostly empty. `--dense`: two grids at
+#: 30 degrees, 0.05 m cell, filling the lattice:
+#:
+#:     covered   compose (median)   transient   gathers held
+#:      2 M          81 ms            69 MB        104 MB
+#:      4 M         167 ms           138 MB        208 MB
+#:      5 M        ~240 ms           173 MB        260 MB
+#:      6 M       241-283 ms         207 MB        312 MB
+#:      8 M         353 ms           277 MB        416 MB
+#:
+#: 6 M passed once and failed twice on the 250 ms bar (timing noise at the
+#: edge), so the limit is 5 M. The gathers are counted in
+#: `SiteEngine.held_bytes`. Both limits at once (a 16 M lattice with 5 M
+#: covered) composed in 244-245 ms with 225 MB transient: inside both bars,
+#: with about 5 ms of headroom. The 250 ms bar is for value ticks; coverage
+#: ticks (`counts=True`) run about 1.8x slower (~420 ms at the 5 M covered
+#: limit) and are accepted, since coverage is a check view, not the one
+#: scrubbed.
+SITE_MAX_COVERED_PIXELS = 5_000_000
+
+
+def name_list(names: Sequence[str]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    names = list(names)
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def preview_note(
+    pitch: float,
+    cell: float,
+    width_m: float,
+    height_m: float,
+    finest: float,
+    stretching: Sequence[str],
+) -> str:
+    """Why the site is drawn coarser than its grids, and what would draw it in full."""
+    note = (
+        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
+        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail. "
+        f"It draws in full at a {finest:g} m cell or coarser."
+    )
+    if stretching:
+        note += f" Leaving out {name_list(stretching)} would also let it draw in full."
+    return note
+
+
+def site_export_refusal(
+    cell: float,
+    width_m: float,
+    height_m: float,
+    finest: float,
+    stretching: Sequence[str],
+) -> str:
+    """Why the site cannot be written at full detail."""
+    text = (
+        f"The site can't be exported at full detail yet: the site "
+        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
+        f"Choose a cell of {finest:g} m or coarser"
+    )
+    if stretching:
+        text += f", or leave out {name_list(stretching)}"
+    return text + "."
+
 
 def frame_cells(size_x: float, size_y: float, cell: float) -> int:
     """How many cells `CubeFrame.for_grid` would build for this geometry.
