@@ -140,7 +140,7 @@ several grids' slices into one site view.
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
 | `snap_azimuth` | The nearest right angle, when a frame is axis-aligned in effect. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
-| `to_north_up` | Resample a grid-local slice into a north-up raster. |
+| `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |

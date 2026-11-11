@@ -259,7 +259,7 @@ def _export_levels(dock, tmp_path, answer_modal):
 
 def test_exporting_a_rotated_grid_reports_no_fill_warning(plugin, tmp_path, answer_modal):
     """Ruling AE, reworked (interpolation spec §8): a rotated frame is
-    resampled at half the cell, so it drops no cell and the success message
+    resampled bilinearly at the cell, so it drops no cell and the success message
     is plain Info -- whatever the interpolation, `none` included. This
     replaces the radius-0 warning, which no longer has a condition."""
     from qgis.core import Qgis

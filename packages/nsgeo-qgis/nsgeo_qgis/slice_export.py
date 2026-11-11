@@ -34,12 +34,14 @@ Two decisions this task owns, recorded here rather than only in the task
 report because a future reader of this file needs them as much as a
 reviewer of this task does:
 
-* **North-up pitch follows Ruling 2: the cell, or half of it on a rotated
-  frame (interpolation spec §8).** `to_north_up` now samples a rotated
-  frame at half the cell, so no frame cell is dropped, and this writer
-  just takes the pitch from the geotransform it returns. History: Ruling
-  AE once wrote the frame's own cell size and recorded a 15-18% loss at
-  rotated azimuths, which is what this replaces.
+* **North-up pitch is the cell, read bilinearly (whole-site fine-cells
+  spec §3).** `to_north_up` samples every frame at its own cell, so no
+  frame cell is dropped, and this writer just takes the pitch from the
+  geotransform it returns. A coverage plan (`finish=None`) passes
+  `counts=True`, so a count is never blended. History: Ruling AE wrote
+  the frame's own cell size with a nearest-cell gather and recorded a
+  15-18% loss at rotated azimuths; half the cell replaced it until the
+  bilinear rule.
 * **The per-band `cell_index` solve is planned once per frame.**
   `to_north_up`'s resample grid does not depend on the values being
   resampled, so the core keeps it per frame (`display._north_up_plan`) and
@@ -264,7 +266,9 @@ class GeoTiffSliceWriter:
                     written = 0
                     iterator = iter(slices)
                     for index, (band_plan, values) in enumerate(zip(plan.bands, iterator)):
-                        array, geotransform = to_north_up(values, plan.frame)
+                        array, geotransform = to_north_up(
+                            values, plan.frame, counts=plan.finish is None
+                        )
                         if dataset is None:
                             height, width = array.shape
                             shape = array.shape

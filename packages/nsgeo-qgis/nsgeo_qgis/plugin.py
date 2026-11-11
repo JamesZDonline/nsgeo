@@ -828,6 +828,7 @@ class NsgeoPlugin:
                 colormap_name=dock.palette_combo.currentText(),
                 unipolar=dock.display_unipolar(),
                 subtitle=dock.readout.text(),
+                counts=dock.coverage_check.isChecked(),
             )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)

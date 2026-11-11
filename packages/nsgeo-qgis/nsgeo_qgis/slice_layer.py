@@ -135,10 +135,12 @@ class SliceLayer(QObject):
         colormap_name: str,
         unipolar: bool,
         subtitle: str,
+        counts: bool = False,
     ) -> None:
-        """One grid's slice: resampled north-up, then drawn by `update_north_up`."""
+        """One grid's slice: resampled north-up, then drawn by `update_north_up`.
+        `counts=True` is for the coverage view: counts are taken, never blended."""
         try:
-            array, geotransform = to_north_up(values, frame)
+            array, geotransform = to_north_up(values, frame, counts=counts)
             self.update_north_up(
                 array,
                 geotransform,
