@@ -22,7 +22,7 @@ import traceback
 from collections.abc import Mapping
 
 from nsgeo.velocity import VelocityModel
-from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero
+from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, unusable_fit_note
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -79,6 +79,11 @@ class VelocityDialog(QDialog):
         self._fits: dict[str, StoredFit] = {}
         self._ids: list[str] = []
         self._flagged: frozenset[str] = frozenset()
+        # Each fit at the line's zero as the dialog opened, and why any could
+        # not be: read once, so a delete does not read the line again.
+        self._at_zero, self._unusable = self._fits_at_line_zero(
+            dict(session.line_for_key(key).velocity_fits)
+        )
         self._cleared = False
         self._selected: str | None = None
 
@@ -130,7 +135,8 @@ class VelocityDialog(QDialog):
         """(Re)build the rows from the line's stored fits, shallowest first."""
         line = self.session.line_for_key(self.key)
         stored = dict(line.velocity_fits)
-        self._fits, failed = self._fits_at_line_zero(stored)
+        failed = self._unusable
+        self._fits = {i: self._at_zero.get(i, f) for i, f in stored.items()}
         self._ids = sorted(self._fits, key=lambda i: self._fits[i].t0_ns)
         self._flagged = disagreeing_fit_ids(self._fits)
         applied = line.velocity_from_fit
@@ -145,7 +151,7 @@ class VelocityDialog(QDialog):
             if fit_id in self._flagged:
                 flags.append("disagrees with another fit")
             if fit_id in failed:
-                flags.append(f"cannot be fitted at this time zero: {failed[fit_id]}")
+                flags.append(unusable_fit_note(failed[fit_id]))
             elif fit_id == applied and line.velocity is not None:
                 note = applied_fit_note(line.velocity.surface_velocity, fit.v_m_ns)
                 if note:
@@ -204,7 +210,8 @@ class VelocityDialog(QDialog):
         """The selected fit, unless the spin box has since been moved off its
         velocity -- then the number is the user's own."""
         fit_id = self._selected
-        if fit_id is None or self._cleared:
+        if fit_id is None or self._cleared or fit_id in self._unusable:
+            # An unusable fit's numbers belong to another time zero: never applied.
             return None
         if round(self.spin.value(), 4) != round(self._fits[fit_id].v_m_ns, 4):
             return None
@@ -245,7 +252,7 @@ class VelocityDialog(QDialog):
             self.delete_button.setEnabled(bool(rows))
             self._selected = self._ids[rows[0].row()] if rows else None
             self.fit_highlighted.emit(self._selected)
-            if self._selected is not None:
+            if self._selected is not None and self._selected not in self._unusable:
                 self.spin.setValue(self._fits[self._selected].v_m_ns)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)

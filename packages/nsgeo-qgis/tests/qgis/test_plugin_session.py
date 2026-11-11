@@ -1739,9 +1739,11 @@ def test_move_lines_leaves_lines_already_there_alone(session, tmp_path):
 
 def test_line_zero_is_zero_without_a_time_zero_step_and_loads_nothing(session, tmp_path):
     session.add_grid(GRID)
-    session.add_lines(_lines(tmp_path, 1))
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
     key = session.keys()[0]
     assert key not in session.site.stacks
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))  # nothing could be loaded
 
     assert session.line_zero(key) == 0.0
     assert session.line_zero(key, load=True) == 0.0

@@ -205,3 +205,4 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `fit_at_zero` | A stored fit measured from a given zero: the fit itself when that is its own zero, else its points refitted. |
 | `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
 | `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |
+| `unusable_fit_note` | The text for a stored fit that cannot be fitted again at the line's current time zero, with the reason. |

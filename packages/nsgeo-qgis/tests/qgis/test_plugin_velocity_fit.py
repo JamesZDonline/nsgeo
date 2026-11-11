@@ -130,7 +130,7 @@ def test_a_click_in_velocity_mode_adds_a_point(plugin):
     assert len(pts) == 2
     assert pts[0][0] == v.transform.trace_index_at(40)  # the first click is the apex
     assert pts[0][1] == pytest.approx(v.transform.time_of_y(30))
-    assert v._velocity_points == pts  # and the view was handed the same list
+    assert v._velocity_points == pts  # the shown zero is 0 here, so the view gets the same list
 
 
 def test_a_velocity_click_on_the_axis_margin_adds_no_point(plugin):
@@ -352,10 +352,20 @@ def test_a_disabled_time_zero_brings_the_note_back(plugin):
 
 
 def test_the_note_gives_the_velocity_measured_from_the_first_break(plugin):
-    dock = _velocity_on(plugin)
+    from nsgeo.processing.timezero import first_break_ns
+
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
     _click_hyperbola(plugin)
     text = dock.velocity_note.text()
     assert "Measured from the first break, this fit would be" in text
+    first_break = first_break_ns(s.stack_for(key, insert=False).source)
+    distance = s.line_for_key(key).distance_along()
+    x = np.array([distance[tr] for tr, _ in dock.velocity_points()])
+    t = np.array([t for _, t in dock.velocity_points()])
+    v_break = fit_hyperbola(x, t - first_break, x[0]).v_m_ns
+    v_now = dock.velocity_fit_result().v_m_ns
+    assert f"{v_break:.4f} m/ns ({(v_break / v_now - 1) * 100:+.1f}%)" in text
     assert text.endswith("Add a Time zero step to measure from it.")
 
 
@@ -552,6 +562,56 @@ def test_a_saved_fit_records_the_zero_it_was_measured_from(plugin):
     (stored,) = s.line_for_key(key).velocity_fits.values()
     assert stored.zero_ns == pytest.approx(s.line_zero(key))
     assert stored.points == tuple(fit_points)
+
+
+def test_the_drawn_points_and_saved_curve_follow_the_shown_clock_after_a_time_zero(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (stored,) = s.line_for_key(key).velocity_fits.values()
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    shown = dock.shown_zero_ns()
+    zero = s.line_zero(key)
+    assert shown == pytest.approx(zero)
+
+    drawn = _view(plugin)._velocity_points
+    assert [tr for tr, _ in drawn] == [tr for tr, _ in dock.velocity_points()]
+    for (_, t_drawn), (_, t_radar) in zip(drawn, dock.velocity_points(), strict=True):
+        assert t_drawn == pytest.approx(t_radar - shown, abs=1e-9)
+
+    from nsgeo.velocity_fit import fit_at_zero
+
+    distance = s.line_for_key(key).distance_along()
+    refit_t0 = fit_at_zero(stored, distance, zero).t0_ns
+    (curve,) = _view(plugin)._saved_velocity_curves
+    # The apex time on the shown clock, which here is the line's clock.
+    assert min(t for _, t in curve) == pytest.approx(refit_t0, abs=0.01)
+    assert abs(refit_t0 - stored.t0_ns) > 0.03  # so the stored t0 would be caught
+
+
+def test_the_fit_label_uses_the_refit_t0_after_a_zero_change(plugin):
+    from nsgeo.velocity_fit import fit_at_zero
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (fit_id,) = s.line_for_key(key).velocity_fits
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+    s.set_line_velocity(key, VelocityModel.constant(stored.v_m_ns))
+    s.set_velocity_from_fit(key, fit_id)
+    # Sample 52 puts the zero 0.17 ns after the radar's: enough to change the
+    # label's one decimal.
+    s.append_step(key, build_step("time_zero", mode="sample", sample=52))
+    distance = s.line_for_key(key).distance_along()
+    refit_t0 = fit_at_zero(stored, distance, s.line_zero(key)).t0_ns
+    assert f"{refit_t0:.1f}" != f"{stored.t0_ns:.1f}"
+
+    label = velocity_source(s, key)
+
+    assert label == f"line override (fit at {refit_t0:.1f} ns)"
 
 
 def test_working_points_stay_on_their_reflection_across_a_time_zero_change(plugin):

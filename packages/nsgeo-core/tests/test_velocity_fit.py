@@ -7,6 +7,7 @@ from nsgeo.velocity_fit import (
     fit_hyperbola,
     radar_clock_note,
     refit,
+    unusable_fit_note,
 )
 
 
@@ -256,3 +257,7 @@ def test_applied_fit_note_is_quiet_when_the_velocities_agree_at_4dp():
     assert applied_fit_note(0.0703, 0.0712) == (
         "applied 0.0703; measured from the current time zero 0.0712"
     )
+
+
+def test_unusable_fit_note_carries_the_reason():
+    assert unusable_fit_note("too flat") == "cannot be fitted at this time zero: too flat"

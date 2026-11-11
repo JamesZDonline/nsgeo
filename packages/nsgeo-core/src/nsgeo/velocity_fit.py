@@ -31,6 +31,7 @@ __all__ = [
     "hyperbola_time",
     "radar_clock_note",
     "refit",
+    "unusable_fit_note",
 ]
 
 _SEARCH_STEPS = 101
@@ -263,3 +264,8 @@ def applied_fit_note(applied_v: float, current_v: float) -> str:
     if round(applied_v, 4) == round(current_v, 4):
         return ""
     return f"applied {applied_v:.4f}; measured from the current time zero {current_v:.4f}"
+
+
+def unusable_fit_note(reason: str) -> str:
+    """Why a stored fit cannot be used at the line's current time zero."""
+    return f"cannot be fitted at this time zero: {reason}"

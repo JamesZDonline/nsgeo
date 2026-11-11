@@ -813,3 +813,49 @@ def test_the_dialog_shows_stored_values_when_the_line_cannot_be_read(plugin):
 
     assert dialog.table.item(0, 1).text().startswith(f"{stored.v_m_ns:.4f}")
     assert not [m for m, level in logged if level == Qgis.MessageLevel.Critical]
+
+
+def test_a_line_with_no_cached_profiles_is_read_for_the_refit(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    s.add_velocity_fit(key, stored)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    distance = s.line_for_key(key).distance_along()
+    moved = fit_at_zero(stored, distance, s.line_zero(key))
+    s.set_profiles(key, [])  # nothing cached: the dialog loads the file itself
+    assert s.line_zero(key) is None
+
+    dialog = _dialog(plugin)
+
+    assert dialog.table.item(0, 1).text().startswith(f"{moved.v_m_ns:.4f}")
+
+
+def test_an_unrefittable_fit_is_listed_but_never_applied(plugin, drive_dialog):
+    import dataclasses
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    good = _hyperbola_fit(plugin)
+    # Times so early that the zero at sample 51 leaves them non-positive.
+    bad = dataclasses.replace(
+        good, points=tuple((tr, 0.1 + 0.01 * i) for i, (tr, _) in enumerate(good.points))
+    )
+    fit_id = s.add_velocity_fit(key, bad)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    dialog = _dialog(plugin)
+    seeded = dialog.spin.value()
+    dialog.select_fit(fit_id)
+
+    assert "cannot be fitted at this time zero" in dialog.flag_text(0)
+    assert dialog.table.item(0, 1).text().startswith(f"{bad.v_m_ns:.4f}")  # stored values shown
+    assert dialog.delete_button.isEnabled()
+    assert dialog.highlighted_fit_id() == fit_id
+    assert dialog.selected_fit_id() is None
+    assert dialog.spin.value() == seeded  # its stored v was not loaded
+
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    drive_dialog(QDialog, "exec", lambda d: (d.select_fit(fit_id), d.accept()))
+    plugin.open_velocity_dialog(key)
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09)
+    assert line.velocity_from_fit is None

@@ -31,6 +31,12 @@ def first_break_row(rg: Radargram, threshold: float = 0.2) -> int:
     return int(above[0]) if above.size else 0
 
 
+def first_break_ns(rg: Radargram, threshold: float = 0.2) -> float:
+    """Radar-clock time of the first arrival (the row `first_break_row` picks),
+    as the axis of `rg` labels it."""
+    return float(rg.t0_ns + first_break_row(rg, threshold) * rg.dt_ns)
+
+
 def sets_time_zero(steps: Iterable[Mapping[str, Any]]) -> bool:
     """Whether any entry is an enabled `time_zero` (a missing `enabled` counts
     as enabled)."""

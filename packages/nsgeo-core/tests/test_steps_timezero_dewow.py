@@ -5,7 +5,7 @@ import nsgeo.processing.timezero  # noqa: F401
 import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, build_step
-from nsgeo.processing.timezero import first_break_row, sets_time_zero, time_base_of
+from nsgeo.processing.timezero import first_break_ns, first_break_row, sets_time_zero, time_base_of
 
 
 def make(n_samples=100, n_traces=20, dt_ns=0.2, t0_ns=0.0, fill=0.0):
@@ -143,3 +143,11 @@ def test_dewow_rejects_window_shorter_than_one_sample():
 def test_step_params_are_declared_for_the_ui():
     step = build_step("dewow", window_ns=6.0)
     assert step.params == {"window_ns": 6.0}
+
+
+def test_first_break_ns_is_the_picked_rows_time_on_the_axis():
+    data = np.zeros((200, 20))
+    data[40:, :] = 100.0
+    rg = make(n_samples=200).replace(data=data)
+    assert first_break_ns(rg, 0.5) == pytest.approx(rg.t0_ns + 40 * rg.dt_ns)
+    assert first_break_ns(rg, 0.5) == pytest.approx(rg.times_ns()[40])
