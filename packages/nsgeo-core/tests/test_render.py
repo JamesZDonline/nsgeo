@@ -4,7 +4,6 @@ functions change how numbers become pixels, never the numbers."""
 from __future__ import annotations
 
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -22,8 +21,7 @@ from nsgeo.render import (
     to_rgb8,
 )
 
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
+from tests.real_data import CAMPUS_LINES
 
 
 def test_zero_maps_to_mid_grey_and_extremes_to_black_and_white():
@@ -214,11 +212,11 @@ def test_decimate_columns_matches_the_reference_nan_padded_mean():
     np.testing.assert_allclose(fast, naive)
 
 
-@pytest.mark.skipif(not FILES, reason="no real DZT files in tests/data/local")
+@pytest.mark.skipif(not CAMPUS_LINES, reason="no real DZT files in tests/data/local")
 def test_real_file_renders_with_both_extremes_present():
     """The direct wave clips at 99 %, so a real raw render must reach both
     ends of the table; a render that does not is a broken normaliser."""
-    data = read_samples(FILES[0])[0].astype(float)
+    data = read_samples(CAMPUS_LINES[0])[0].astype(float)
     idx = to_index8(data, PercentileClip().limit(data))
     assert idx.shape == data.shape
     assert idx.min() == 0 and idx.max() == 255

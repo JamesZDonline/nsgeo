@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from nsgeo.io.dzx import DzxError, DzxInfo, DzxMark, read_dzx, sidecar_for
 
-DATA = Path(__file__).parent / "data" / "local"
-REAL = {p.stem: p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt"} if DATA.exists() else {}
+from tests.real_data import CAMPUS_LINES, DATA
+
+# By path within the campus survey: the GPS survey reuses these names (#141).
+CAMPUS_001, CAMPUS_007, CAMPUS_010 = (DATA / f"FILE__{n:03d}.DZT" for n in (1, 7, 10))
 
 XML = """<?xml version="1.0" encoding="UTF-8"?>
 <DZX xmlns="www.geophysical.com/DZX/1.02">
@@ -250,9 +250,9 @@ def test_reader_tolerates_no_namespace_at_all(tmp_path):
     assert info.system == "UtilityScanHS"
 
 
-@pytest.mark.skipif("FILE__001" not in REAL, reason="no real files")
+@pytest.mark.skipif(CAMPUS_001 not in CAMPUS_LINES, reason="no real files")
 def test_real_sidecar_without_marks():
-    info = read_dzx(REAL["FILE__001"])
+    info = read_dzx(CAMPUS_001)
     assert info is not None
     assert info.name == "FILE__001.DZT"
     assert info.scan_range == (0, 607)
@@ -261,13 +261,13 @@ def test_real_sidecar_without_marks():
     assert info.marks == ()
 
 
-@pytest.mark.skipif("FILE__007" not in REAL, reason="no real files")
+@pytest.mark.skipif(CAMPUS_007 not in CAMPUS_LINES, reason="no real files")
 def test_real_sidecar_with_one_user_mark():
-    info = read_dzx(REAL["FILE__007"])
+    info = read_dzx(CAMPUS_007)
     assert info is not None
     assert info.marks == (DzxMark(scan=634, kind="User", name="Mark1"),)
 
 
-@pytest.mark.skipif("FILE__010" not in REAL, reason="no real files")
+@pytest.mark.skipif(CAMPUS_010 not in CAMPUS_LINES, reason="no real files")
 def test_real_file_without_sidecar():
-    assert read_dzx(REAL["FILE__010"]) is None
+    assert read_dzx(CAMPUS_010) is None
