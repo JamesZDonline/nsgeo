@@ -122,7 +122,7 @@ class ExportPlan:
     Ruling AE (Task 6 fix round 1) for why: a reader five years from now
     with only the `.tif` in hand needs to see how the values were made
     (interpolated and smoothed) and on which frame (a rotated frame is
-    resampled to north-up, at half the cell) from the file itself.
+    resampled to north-up at the cell, bilinear) from the file itself.
     """
 
     frame: CubeFrame

@@ -14,7 +14,7 @@ from nsgeo_qgis import slice_layer
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME, SliceLayer, build_shader
-from qgis.core import QgsProject, QgsSingleBandPseudoColorRenderer
+from qgis.core import Qgis, QgsProject, QgsSingleBandPseudoColorRenderer
 from qgis.PyQt.QtGui import qAlpha, qRed
 
 FRAME = CubeFrame(origin=(500.0, 700.0), azimuth=0.0, cell=0.5, nx=12, ny=12, crs="EPSG:32616")
@@ -541,8 +541,10 @@ def test_the_slice_layer_is_drawn_smooth_after_every_repoint(mapped):
     assert not _smooth(sl.layer)
     sl.update(_values(6.0), FRAME, **kwargs)
     assert _smooth(sl.layer)
+    sl.layer.setResamplingStage(Qgis.RasterResamplingStage.Provider)
     sl.update(_values(7.0), FRAME, **kwargs)
     assert _smooth(sl.layer)
+    assert sl.layer.resamplingStage() == Qgis.RasterResamplingStage.ResampleFilter
 
 
 def test_the_site_layer_is_drawn_smooth_after_every_repoint(mapped):

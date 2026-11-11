@@ -459,6 +459,7 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    max distance; at a fine cell that can take a few seconds, and it shows a
    wait cursor while it does. Stepping through the slices, the smoothing and
    **dz**, **z0** and **z1** reuse the fill already prepared.
+
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
    full detail. Past a size it draws a preview at a coarser pixel and says so in

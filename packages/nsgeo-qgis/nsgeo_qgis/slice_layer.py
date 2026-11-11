@@ -44,6 +44,7 @@ from nsgeo.render import colormap
 from nsgeo.slices import CubeFrame, to_north_up
 from osgeo import gdal
 from qgis.core import (
+    Qgis,
     QgsBilinearRasterResampler,
     QgsColorRampShader,
     QgsCoordinateReferenceSystem,
@@ -99,6 +100,9 @@ def apply_smooth_resampling(layer: QgsRasterLayer) -> None:
     """Draw `layer` smooth when zoomed in: QGIS otherwise shows each pixel as
     a hard block. Zoomed-out drawing is left as QGIS has it."""
     layer.resampleFilter().setZoomedInResampler(QgsBilinearRasterResampler())
+    # Pinned so a provider-level ("early") resampling setting cannot bypass
+    # the filter above.
+    layer.setResamplingStage(Qgis.RasterResamplingStage.ResampleFilter)
 
 
 class SliceLayer(QObject):
@@ -318,7 +322,8 @@ class SliceLayer(QObject):
         if not self.layer.isValid():
             raise RuntimeError(f"could not open {path}: {self.layer.error().summary()}")
         # The renderer survives the repoint, but `_apply_renderer` only runs
-        # when the stretch changes, so the resampler is set here, every tick.
+        # when the stretch changes. QGIS 3.44 restores the resampler from the
+        # saved style on `setDataSource`, so this per-tick call is a guard.
         apply_smooth_resampling(self.layer)
         self.path = path
 
@@ -412,7 +417,8 @@ class SliceLayer(QObject):
         renderer.setClassificationMin(lo)
         renderer.setClassificationMax(float(limit))
         self.layer.setRenderer(renderer)
-        # After every repoint: `setDataSource` can rebuild the pipe.
+        # A fresh layer's first draw, and any new renderer. Each tick's
+        # repoint sets it again in `_repoint`.
         apply_smooth_resampling(self.layer)
 
     # ---- lifecycle ------------------------------------------------------
