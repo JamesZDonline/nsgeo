@@ -133,11 +133,11 @@ def _spy_on_the_estimate(monkeypatch):
     import nsgeo_qgis.ui.slices_dock as dock_module
 
     real = dock_module.estimate_memory
-    calls: list[tuple[int, int, int, int]] = []
+    calls: list[tuple[int, int, int, int, str]] = []
 
-    def spy(prepared_samples, n_cells, nz, n_covered):
-        calls.append((prepared_samples, n_cells, nz, n_covered))
-        return real(prepared_samples, n_cells, nz, n_covered)
+    def spy(prepared_samples, n_cells, nz, n_covered, *, method):
+        calls.append((prepared_samples, n_cells, nz, n_covered, method))
+        return real(prepared_samples, n_cells, nz, n_covered, method=method)
 
     monkeypatch.setattr(dock_module, "estimate_memory", spy)
     return calls
@@ -163,6 +163,20 @@ def test_the_included_label_counts_only_covered_cells(docked, monkeypatch):
     assert 0 < covered < frame.n_cells
     assert calls and calls[0][3] == covered
     assert dock.included_label.text().startswith("3 of 3 included")
+
+
+def test_the_included_label_counts_the_method_chosen(docked, monkeypatch):
+    """#148: minimum curvature holds its plan beside a kriging preview, so the
+    over-budget warning counts the method the Interpolation panel shows, and
+    choosing another method counts again."""
+    dock, _ = docked
+    calls = _spy_on_the_estimate(monkeypatch)
+    combo = dock.grid_finish.method_combo
+    combo.setCurrentIndex(combo.findData("min_curvature"))
+    assert calls and calls[-1][4] == "min_curvature"
+    del calls[:]
+    combo.setCurrentIndex(combo.findData("idw"))
+    assert calls and calls[-1][4] == "idw"
 
 
 def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeypatch):

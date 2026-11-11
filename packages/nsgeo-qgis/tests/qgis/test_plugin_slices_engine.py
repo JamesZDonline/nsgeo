@@ -30,10 +30,12 @@ from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
     SITE_LIMIT_WINDOWS,
     SOLVED_SLICES_KEPT,
+    WEIGHT_BYTES_PER_CELL,
     Resolution,
     SliceFinish,
     SourceChoice,
@@ -784,6 +786,22 @@ def test_weights_nbytes_counts_the_plan_the_preview_and_the_cache(sourced):
     assert engine.weights_nbytes == plan.nbytes + preview.nbytes + solved.nbytes
     engine.finish(values, coverage, SliceFinish())  # kriging holds its weights alone
     assert engine.weights_nbytes == preview.nbytes
+
+
+def test_the_estimate_counts_the_method_of_the_weights_held(sourced):
+    """#148: once a minimum-curvature plan is held, the status line and the
+    residency choice count it beside its kriging preview. The engine is handed
+    a finish only when it draws, so before that it counts one set of weights."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    one_set = engine.frame.n_cells * WEIGHT_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    plan = engine.frame.n_cells * CURVATURE_PLAN_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set + plan
+    engine.finish(values, coverage, SliceFinish(method="idw"))
+    assert engine.estimate.weights_bytes == one_set
 
 
 def test_provenance_names_the_lines_that_were_actually_prepared(sourced):

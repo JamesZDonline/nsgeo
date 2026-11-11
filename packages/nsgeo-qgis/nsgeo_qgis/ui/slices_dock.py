@@ -1089,7 +1089,9 @@ class SlicesDock(QgsDockWidget):
         nz = z.nz if z is not None else 0
         # A resident cube stores only the cells the lines fall in (#113).
         n_covered = covered_cells(frame, coords) if frame is not None else 0
-        return estimate_memory(samples, n_cells, nz, n_covered)
+        # Minimum curvature holds two sets of weights (#148).
+        method = self.grid_finish.value().method
+        return estimate_memory(samples, n_cells, nz, n_covered, method=method)
 
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
@@ -2227,6 +2229,8 @@ class SlicesDock(QgsDockWidget):
                 grid_id = self.grid_combo.currentText()
                 if grid_id and self.session.is_open:
                     self.session.remember_slice_resolution(grid_id, **{field: value})
+            if field == "method":
+                self._update_included_label()  # the weights it counts follow the method (#148)
             self._finish_debounce.start()
         except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
             _log(f"could not remember the interpolation setting: {exc}")

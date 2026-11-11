@@ -94,6 +94,7 @@ a milestone merges or the plan changes.
 | | Local real-data tests read one survey at a time, so the GPS lines for M17 no longer break them ([#141]) | tests only |
 | | A cube held in memory stores only the cells its lines cross: 3–8× less memory at fine cells, the same slices. Saved cubes use the compact format, and older saved cubes still load ([#113]) | next release |
 | | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
+| | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | next release |
 
 ### In progress
 
@@ -106,8 +107,7 @@ a milestone merges or the plan changes.
 The first six items come before M15. Most are things the next milestones
 build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
-1. **Fine cells.** Never refuse a fine cell in Whole site ([#107]); a memory
-   warning that counts what minimum curvature really holds ([#148]); export
+1. **Fine cells.** Never refuse a fine cell in Whole site ([#107]); export
    finer than the preview ([#108]).
 2. **The background solver** (the worker items in [#120]). M15 solves its cuts
    on the same worker.

@@ -9,9 +9,11 @@ import numpy as np
 import pytest
 from nsgeo.slices import METHODS, plan_fill
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
     METHOD_LABELS,
+    PREVIEW_METHOD,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
     WEIGHT_BYTES_PER_CELL,
@@ -87,7 +89,9 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     """Spec 7.4's inversion: by 120 lines the cached LINES cost more than
     the cube. A policy that only attacks the cube does nothing for a large
     site, so the two are reported apart."""
-    est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230, n_covered=18_000)
+    est = estimate_memory(
+        prepared_samples=10_000_000, n_cells=90_000, nz=230, n_covered=18_000, method="kriging"
+    )
     assert est.lines_bytes == 10_000_000 * 4
     assert est.cube_bytes == 230 * 18_000 * 4 + 18_000 * 4 + 18_000 * 8
     assert est.weights_bytes == 90_000 * WEIGHT_BYTES_PER_CELL
@@ -160,7 +164,11 @@ def test_the_ten_real_lines_still_stream():
     # n_covered is a deliberate upper bound: the trace-count branch of
     # choose_residency answers before it reads the estimate.
     est = estimate_memory(
-        sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230, 120 * 120
+        sum(ln.n_traces * ln.header.n_samples for ln in lines),
+        120 * 120,
+        230,
+        120 * 120,
+        method="kriging",
     )
     assert choose_residency(est, n_traces) == "streaming"
     assert n_traces * STREAM_MS_PER_TRACE < 2.0
@@ -496,16 +504,18 @@ def test_updated_accepts_an_int_as_a_number():
 
 @pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 def test_the_weights_estimate_covers_building_them(method, monkeypatch):
-    """The over-budget warning counts `WEIGHT_BYTES_PER_CELL` before any weights
-    exist (interpolation spec §7), so building them must not need much more:
-    within half as much again. Measured on wandering 0.5 m lines over 50 m at
-    0.05 m: 105-107 B a cell, against 466-561 B before `plan_fill` chunked its
-    working set. Small chunks here, so their fixed few megabytes do not swamp a
-    grid this size.
+    """The over-budget warning counts the weights `estimate_memory` names for
+    the method before any exist (interpolation spec §7), so building them must
+    not need much more: within half as much again. Measured on wandering 0.5 m
+    lines over 50 m at 0.05 m: 105-107 B a cell for IDW or kriging, against
+    466-561 B before `plan_fill` chunked its working set. Small chunks here, so
+    their fixed few megabytes do not swamp a grid this size.
 
-    Minimum curvature's plan is only about 95-100 B a cell (with its hierarchy), but its solve needs
-    buffers of its own, so it is measured over the plan and one `apply`
-    together (plan call 9): about 138 B a cell. IDW's and kriging's `apply` is
+    Minimum curvature holds two sets (#148): its plan, about 95-98 B a cell with
+    its multigrid levels, and the kriging preview built with it, about 95. Its
+    solve needs buffers of its own, so it is measured over the plan, the
+    preview and one `apply` together, as the engine holds them (plan call 9):
+    about 233 B a cell against the 192 counted. IDW's and kriging's `apply` is
     a slice's transient, the 55 B a cell `MAX_FRAME_CELLS` already counts, so
     they are measured over building alone, as before."""
     from nsgeo.slices import interpolate
@@ -513,18 +523,21 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
     monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
     settings = SliceFinish(method=method).in_metres(0.5)
+    md, sr = settings.max_distance_m, settings.search_radius_m
     pop = _binned_rows(0.5, 0.05, nx=200)
     # Varying data, so the solve really runs: constant data leave nothing to
     # solve (b = 0) and the CG buffers would never be allocated.
     yy, xx = np.indices(pop.shape)
     values = np.where(pop, np.sin(xx * 0.05) + np.cos(yy * 0.03), np.nan).astype(np.float32)
     out = None
+    preview = None
     tracemalloc.start()
     try:
         tracemalloc.reset_peak()
         before, _ = tracemalloc.get_traced_memory()
-        fw = plan_fill(pop, 0.05, method, settings.max_distance_m, settings.search_radius_m)
+        fw = plan_fill(pop, 0.05, method, md, sr)
         if method == "min_curvature":
+            preview = plan_fill(pop, 0.05, PREVIEW_METHOD, md, sr)
             out = fw.apply(values)
         _, peak = tracemalloc.get_traced_memory()
     finally:
@@ -534,7 +547,13 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     else:
         assert fw.solve(values)[1] > 0, "the measured solve must have iterated"
     assert (np.isfinite(out) & ~pop).sum() > 0.8 * pop.size
-    assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
+    counted = estimate_memory(0, pop.size, 0, 0, method=method).weights_bytes / pop.size
+    assert (peak - before) / pop.size <= 1.5 * counted
+    if preview is not None:
+        # What the engine holds once both are built, less the solved slices
+        # (`SlicesEngine.weights_nbytes`): counted, not merely bounded.
+        held = (fw.nbytes + preview.nbytes) / pop.size
+        assert held == pytest.approx(counted, rel=0.1)
 
 
 def test_method_labels_follow_methods():
@@ -543,10 +562,21 @@ def test_method_labels_follow_methods():
     assert METHOD_LABELS["min_curvature"] == "Minimum curvature"
 
 
-def test_the_estimate_counts_the_fill_weights():
-    est = estimate_memory(0, 1000, 10, 100)
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_estimate_counts_the_fill_weights(method):
+    est = estimate_memory(0, 1000, 10, 100, method=method)
     assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
+
+
+def test_minimum_curvature_counts_its_plan_beside_its_kriging_preview():
+    """#148: the engine builds the kriging preview with the plan and holds
+    both, so minimum curvature counts its plan on top of kriging's weights."""
+    kriging = estimate_memory(0, 1000, 10, 100, method="kriging")
+    curvature = estimate_memory(0, 1000, 10, 100, method="min_curvature")
+    assert curvature.weights_bytes == kriging.weights_bytes + 1000 * CURVATURE_PLAN_BYTES_PER_CELL
+    assert curvature.lines_bytes == kriging.lines_bytes
+    assert curvature.cube_bytes == kriging.cube_bytes
 
 
 def test_the_estimate_matches_the_cube_it_describes():
@@ -590,4 +620,7 @@ def test_the_estimate_matches_the_cube_it_describes():
     cube = build_cube(lines, [plan_line(ln, frame, z) for ln in lines], frame, z, prov)
     n_covered = covered_cells(frame, (ln.coords for ln in lines))
     assert n_covered < frame.n_cells
-    assert estimate_memory(0, frame.n_cells, z.nz, n_covered).cube_bytes == cube.nbytes
+    assert (
+        estimate_memory(0, frame.n_cells, z.nz, n_covered, method="kriging").cube_bytes
+        == cube.nbytes
+    )
