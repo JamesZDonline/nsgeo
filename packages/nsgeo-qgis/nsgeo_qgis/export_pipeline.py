@@ -22,15 +22,20 @@ One thread, 2026-11-11. Peak is `tracemalloc` over the whole run, prepared
 lines excluded (the live engines hold them already; the lines here are 246 MB).
 The first band includes the setup: plans, taps, seams and, for kriging, every
 grid's fill weights (14 s a grid at 0.025 m).
+The estimate column includes `FINISH_BYTES_PER_CELL` (60 B a cell of the largest grid, for
+finishing one band). With 0.1 m smoothing on, the four rows to 0.025 m were re-measured
+and the peak did not move (the setup, not a band, sets the peak, and the largest grid is
+0.16 M cells at 0.05 m, 0.64 M at 0.025 m); the two 0.0125 m rows are the earlier
+measurements with the estimate raised by the same term (38 MB), not re-run.
 
 | cell | pixel | method | lattice | first band (s) | band (s) | peak (MB) | estimate (MB) |
 |---|---|---|---|---|---|---|---|
-| 0.05 | 0.05 | kriging | 1304 x 1687 | 14.4 | 0.4 | 294 | 305 |
-| 0.05 | 0.05 | min curvature | 1304 x 1687 | 7.6 | 3.3 | 302 | 311 |
-| 0.025 | 0.025 | kriging | 2607 x 3374 | 147.6 | 0.9 | 1204 | 1220 |
-| 0.025 | 0.025 | min curvature | 2607 x 3374 | 44.0 | 22.0 | 1179 | 1243 |
-| 0.025 | 0.0125 | kriging | 5214 x 6748 | 159.5 | 2.2 | 2768 | 2783 |
-| 0.025 | 0.0125 | min curvature | 5214 x 6748 | 51.2 | 20.6 | 2743 | 2806 |
+| 0.05 | 0.05 | kriging | 1304 x 1687 | 14.4 | 0.4 | 294 | 315 |
+| 0.05 | 0.05 | min curvature | 1304 x 1687 | 7.6 | 3.3 | 302 | 320 |
+| 0.025 | 0.025 | kriging | 2607 x 3374 | 147.6 | 0.9 | 1204 | 1259 |
+| 0.025 | 0.025 | min curvature | 2607 x 3374 | 44.0 | 22.0 | 1179 | 1282 |
+| 0.025 | 0.0125 | kriging | 5214 x 6748 | 159.5 | 2.2 | 2768 | 2821 |
+| 0.025 | 0.0125 | min curvature | 5214 x 6748 | 51.2 | 20.6 | 2743 | 2844 |
 
 Where the memory goes at 0.025 m cell, 0.0125 m pixel: the taps, 1575 MB (52 B
 for each of 30 M covered pixels); the fill weights, 614 MB; one band's
