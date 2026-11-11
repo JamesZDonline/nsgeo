@@ -116,10 +116,10 @@ build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 1. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-2. **Measure the destagger shift automatically** ([#47]): offer each grid's
-   shift from its own lines, measured on the lines as they are placed (fitting
-   a grid can flip the shift it needs). Real grids need it now, and M17's GPS
-   lines use the same shift.
+2. **Measure the destagger shift automatically** ([#159], from [#47]): offer
+   each grid's shift from its own lines, measured on the lines as they are
+   placed (fitting a grid can flip the shift it needs). Real grids need it now,
+   and M17's GPS lines use the same shift.
 3. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
 4. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
@@ -213,6 +213,7 @@ Grouped by area. The order within a group is not a priority.
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
+[#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 
 ## Why
 
