@@ -35,6 +35,7 @@ from nsgeo.slices.interpolate import (
     SliceFill,
     plan_fill,
 )
+from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
 from nsgeo.slices.site import (
     AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
@@ -85,8 +86,10 @@ __all__ = [
     "SliceFill",
     "SliceWindow",
     "SolveStopped",
+    "Taps",
     "ZAxis",
     "background_level",
+    "bilinear_taps",
     "build_cube",
     "compose",
     "compose_footprints",
@@ -104,6 +107,8 @@ __all__ = [
     "plan_fill",
     "plan_line",
     "plan_windows",
+    "sample",
+    "sample_counts",
     "save_cube",
     "seam_masks",
     "shared_limit",

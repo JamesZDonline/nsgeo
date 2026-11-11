@@ -109,8 +109,10 @@ several grids' slices into one site view.
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
+| `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
+| `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
 | `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
 | `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
@@ -128,6 +130,8 @@ several grids' slices into one site view.
 | `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_windows` | Every window of a thickness, at a step. |
+| `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
+| `sample_counts` | The smallest corner count at each tap, so a gap is never hidden. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
 | `shared_limit` | One display limit for the whole cube. |
