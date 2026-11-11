@@ -96,13 +96,18 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 2. **Export pixel.** It defaults to the cell size, and a finer one can be asked for. It is a
    separate setting from the export cell.
 3. **Normalisation is measured again on the export's own data** when the export cell differs from
-   the live one. It is not carried over from the screen (author, 2026-11-10).
+   the live one. It is not carried over from the screen (author, 2026-11-10). It is measured on the
+   cells as binned at the export cell, before interpolation, as site spec §4.6 measures it everywhere
+   else, because interpolation invents values.
 4. **Sharpen-as-you-zoom is out of this work** (filed as #138). Past the whole-site limit, the live
    view is a coarser preview with a plain note.
 5. **The cube interface** (author, 2026-11-10). The export reads cubes only through
    `SliceCube.slice_levels()` and `coverage()`, and sizes memory only through `estimate_memory`. It
    never reads `cube.mean` directly. #113, which stores only covered cells in a resident cube, is
-   built alongside, and its layout must drop in without touching the export.
+   built alongside, and its layout must drop in without touching the export. #113's plan (branch
+   `nsgeo-packed-cube`, plan call 11) adds a required `n_covered` argument to `estimate_memory`.
+   So the export sizes memory through the engine's own `estimate()`, which wraps it, and milestone
+   B is built on top of #113 once that merges (*design call*).
 6. **Minimum-curvature timings are a worst case** (author, 2026-11-10). Today's ~11 s per band on a
    50 m grid at 0.05 m is what #111, the multigrid solver built alongside, will cut. The export is
    not designed around it, but must stay usable at that speed: progress, cancel, and the GUI stays
@@ -127,6 +132,17 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
     software gets the values and picks its own colours.
 14. **The everyday export is tiled, band-interleaved, with internal overviews**, not a COG. See
     §6.3 for the measurement and the open question on hosting.
+15. **A small export dialog.** There is none today: both exports go straight to a save-file box
+    (`plugin.py:964`, `plugin.py:1138`). The Export button opens an nsgeo dialog holding the path,
+    the export cell, the export pixel, the estimated size and the free disk space. Its layout is
+    reviewed as a mock-up before it is built.
+16. **The style file's stretch is measured on the export's own bands as they are written,** by the
+    same percentile rule as `limit_over_slices`, and the `.qml` is written last. No extra pass. The
+    file's look then follows its own data, as its normalisation does.
+17. **A target already open in QGIS.** If a project layer reads the target file, or its coverage
+    companion, the export says so and offers to replace it or cancel. Replacing removes the layer,
+    writes the file, and adds it again with the new style. Windows cannot replace a file QGIS holds
+    open (`slice_layer.py`'s module docstring).
 
 ## 4. Goals, non-goals, anti-goals
 
@@ -169,7 +185,15 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 - **Where it applies.** The site lattice's per-grid lookups (today `_gather`/`Footprint`),
   `to_north_up` for This grid's preview and export, and any new export path.
 - **Pixel size.** `lattice_pixel` returns the cell for every azimuth, and half pitch retires. Keep
-  `snap_azimuth` (Ruling F-5) and the scale-aware edge snap in `SiteLattice.covering`.
+  the scale-aware edge snap in `SiteLattice.covering`. `snap_azimuth` (Ruling F-5) only feeds
+  `lattice_pixel` today, so it goes quiet. Remove it, or give it the new job of treating a frame a
+  hair off a right angle as axis-aligned before sampling. The builder chooses.
+- **Axis-aligned grids on the site lattice.** The lattice is anchored on whole multiples of the
+  pixel, and a grid's origin is wherever it was laid out. So an axis-aligned grid's cells generally
+  sit a fraction of a cell off the pixel centres. Today each pixel copies the nearest cell, so values
+  are exact but shifted by up to half a cell. Bilinear blends by the offset, so positions are right
+  and values soften slightly. Accepted, per decision 1. On This grid, `to_north_up` anchors on the
+  frame itself, so an axis-aligned grid is reproduced exactly.
 - **Overlaps between grids.** Still the mean of the grids' blended values.
 - **Drawn smooth.** Every slice layer the plugin adds sets QGIS's zoomed-in resampling to bilinear:
   This grid's preview, Whole site's preview, and exported layers.
@@ -200,7 +224,10 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 
 ### 5.4 Coverage
 
-- **Counts stay whole numbers.** The coverage view and the coverage companion file never blend.
+- **Counts are never blended within a grid.** The coverage view and the coverage companion file
+  never blend one cell's count with its neighbours'. Where grids overlap, counts average as they do
+  today (`compose_footprints`, `site_export.py`'s "coverage is composed like values"), unless the
+  builder finds a reason to change that and records it.
 - **No cell's count may be hidden by the pixel rule.** Coverage exists to find gaps, so a zero-count
   cell that no pixel shows hides a real gap. The rule that meets this is the builder's. For example:
   nearest cell at half the cell for coverage only, or a pixel showing the smallest count among the
@@ -242,13 +269,14 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
   (environment facts).
 - **At an export cell different from the live one,** each grid is rebuilt at the export cell:
   binning, interpolation, smoothing. The live engines are never touched; the export uses its own.
-  Normalisation (background level, edge match, histogram) is measured again on the export's own
-  finished data at each band (decision 3). Manual multipliers are carried as typed (decision 11).
+  Normalisation (background level, edge match, histogram) is measured again on each band's cells
+  as binned at the export cell (decision 3). Manual multipliers are carried as typed (decision 11).
 - **At the live cell**, the export may reuse the live engines' prepared state, but still writes at
   the export pixel.
 - **Streamed.** The file is written band by band. No more than one band of the full site picture
   is held at a time, and no whole cube beyond what `estimate_memory` and the residency rule allow.
-- **The cube interface** is `slice_levels()`, `coverage()` and `estimate_memory` only (decision 5).
+- **The cube interface** is `slice_levels()`, `coverage()`, and memory through the engine's
+  `estimate()` (decision 5).
 - **The order of work is measured, then chosen:**
   - band by band, holding every grid's fill weights;
   - or grid by grid, holding one grid's weights and accumulating the file window by window, with
@@ -283,9 +311,12 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
   - `NSGEO_SITE_CELL_M` is the export cell, and `NSGEO_SITE_PIXEL_M` the export pixel.
   - Add a key naming the resampling (`bilinear`).
   - The per-band `NSGEO_GRID_FACTORS` are the factors the export itself measured.
-  - This grid's file records the same.
-- **Style file.** A `.qml` with the same base name: colour ramp, stretch and zoomed-in bilinear
-  resampling (decision 13). Check that QGIS picks it up as the default style when the file is added
+  - This grid's file has none of the cell, pixel or resampling keys today. It only has
+    `NSGEO_INTERPOLATION`, `NSGEO_MAX_DISTANCE_M`, `NSGEO_SMOOTH_X_M`, `NSGEO_SMOOTH_Y_M` and
+    `NSGEO_FRAME_AZIMUTH_DEG`. It gains cell, pixel and resampling keys. Key names are part of the
+    format, so the plan names them.
+- **Style file.** A `.qml` with the same base name: colour ramp, stretch (decision 16) and
+  zoomed-in bilinear resampling (decision 13). Check that QGIS picks it up as the default style when the file is added
   to a fresh project. The coverage companion gets its own.
 - **Temporal properties.** Applied to the added layer as now.
 
@@ -300,8 +331,8 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 - **The pixel rule:**
   - on a rotated grid, every cell with data feeds some pixel;
   - the outline matches nearest-cell's to the pixel;
-  - an axis-aligned grid at the cell size reproduces the cells exactly, since pixel centres sit on
-    cell centres;
+  - on This grid (`to_north_up`), an axis-aligned grid at the cell size reproduces the cells
+    exactly. That is not expected on the site lattice (§5.1);
   - blank neighbours are re-weighted, not averaged as zero.
 - **The limit and the preview:**
   - the walkthrough site at 0.05 m draws at the cell size;
