@@ -13,8 +13,9 @@ def centres(f, pixel):
     return SiteLattice.covering([slice_extent(f)], pixel, f.crs).pixel_centres()
 
 
-def test_cell_centres_reproduce_the_cells_exactly_and_take_the_fast_path():
-    f = frame()
+@pytest.mark.parametrize("azimuth", [0.0, 17.0, 30.0])
+def test_cell_centres_reproduce_the_cells_exactly_and_take_the_fast_path(azimuth):
+    f = frame(azimuth=azimuth, cell=0.05)
     x_hat, y_hat = f.axes()
     i, j = np.meshgrid(np.arange(f.nx), np.arange(f.ny))
     local = np.column_stack([(i.ravel() + 0.5) * f.cell, (j.ravel() + 0.5) * f.cell])
@@ -75,12 +76,9 @@ def test_counts_take_the_smallest_corner_and_never_hide_a_zero():
     finite = got[np.isfinite(got)]
     assert set(np.unique(finite)) == {3.0}  # whole counts, never blended
     taps = bilinear_taps(f, centres(f, f.cell))
-    hits = (
-        (taps.ix0 <= 10)
-        & (taps.ix0 + 1 >= 10)
-        & (taps.iy0 <= 10)
-        & (taps.iy0 + 1 >= 10)
-        & taps.inside
+    hits = taps.inside & (
+        ((taps.ix0 == 10) & (taps.tx < 1.0) | (taps.ix0 == 9) & (taps.tx > 0.0))
+        & ((taps.iy0 == 10) & (taps.ty < 1.0) | (taps.iy0 == 9) & (taps.ty > 0.0))
     )
     assert hits.any() and np.isnan(got[hits]).all()
 
@@ -93,3 +91,18 @@ def test_points_outside_the_frame_are_blank_and_take_keeps_alignment():
     assert np.isnan(got[~taps.inside]).all()
     idx = np.flatnonzero(taps.inside)[::3]
     np.testing.assert_array_equal(sample(np.ones((f.ny, f.nx)), taps.take(idx)), got[idx])
+
+
+def test_axis_aligned_counts_are_each_cells_own_count():
+    f = frame(azimuth=0.0, nx=12, ny=10)
+    rng = np.random.default_rng(0)
+    counts = rng.integers(1, 6, size=(f.ny, f.nx)).astype(float)
+    counts[5, 4] = np.nan
+    pts = centres(f, f.cell)
+    taps = bilinear_taps(f, pts)
+    assert taps.exact
+    got = sample_counts(counts, taps)
+    ids = f.cell_index(pts)
+    own = np.where(ids >= 0, counts.ravel()[np.clip(ids, 0, None)], np.nan)
+    np.testing.assert_array_equal(got, own.astype(np.float32))
+    assert np.isnan(got).sum() == (ids == 5 * f.nx + 4).sum() + (ids < 0).sum()

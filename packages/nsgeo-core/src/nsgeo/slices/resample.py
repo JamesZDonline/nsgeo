@@ -169,7 +169,8 @@ def sample_counts(counts: np.ndarray, taps: Taps) -> np.ndarray:
         raise ValueError(f"expected counts of shape {(taps.ny, taps.nx)}, got {counts.shape}")
     smallest = np.full(taps.n, np.inf)
     bad = ~taps.inside
-    for _, v, ok in _corners(counts.astype(np.float64, copy=False), taps):
+    for w, v, ok in _corners(counts.astype(np.float64, copy=False), taps):
+        ok = ok & (w > 0.0)  # a zero-weight corner is not part of this point
         bad |= ok & ~(np.isfinite(v) & (v > 0.0))
         smallest = np.where(ok, np.minimum(smallest, np.where(ok, v, np.inf)), smallest)
     return np.where(bad | ~np.isfinite(smallest), np.nan, smallest).astype(np.float32)
