@@ -184,12 +184,20 @@ def test_save_narrows_a_wider_input_dtype(tmp_path):
 
 
 def test_loading_a_file_missing_one_required_array_fails_clearly(tmp_path):
-    """`mean` and `count` alone are not a cube either -- every one of the
-    three arrays is required, not just at least one of them."""
+    """Arrays with no meta record are not a cube, and neither is a version 1
+    file that lacks its `mean` array: a required piece missing is refused
+    clearly, whichever version the meta claims."""
     path = tmp_path / "partial.npz"
     np.savez(path, mean=np.zeros((2, 3), dtype=np.float32), count=np.zeros(3, dtype=np.int32))
     with pytest.raises(CubeStoreError, match="not a cube"):
         load_cube(path)
+
+    arrays, meta = _good_parts(tmp_path)
+    meta["store_version"] = 1
+    v1 = tmp_path / "v1.npz"
+    np.savez_compressed(v1, **arrays, meta=np.array(json.dumps(meta)))
+    with pytest.raises(CubeStoreError):
+        load_cube(v1)
 
 
 def test_save_and_load_agree_on_a_path_without_the_npz_suffix(tmp_path):
@@ -394,9 +402,6 @@ def test_load_cube_refuses_a_pickled_object_array(tmp_path):
     must be load_cube's real behaviour, not just its docstring -- so tamper
     with an otherwise-valid file's `mean` array into object dtype and
     confirm the load is refused rather than silently deserialised."""
-    cube = make_cube()
-    good = tmp_path / "good.npz"
-    save_cube(cube, good)
     arrays, meta = _good_parts(tmp_path)
     arrays["mean_0"] = arrays["mean_0"].astype(object)
 
@@ -439,6 +444,10 @@ def _damage_float_cells(arrays, meta):
     arrays["cells_0"] = arrays["cells_0"].astype(np.float64) + 0.5
 
 
+def _damage_float_counts(arrays, meta):
+    arrays["count_0"] = arrays["count_0"].astype(np.float64) + 0.7
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -450,6 +459,7 @@ def _damage_float_cells(arrays, meta):
         _damage_wrong_mean_shape,
         _damage_object_cells,
         _damage_float_cells,
+        _damage_float_counts,
     ],
     ids=lambda f: f.__name__.removeprefix("_damage_"),
 )

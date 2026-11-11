@@ -157,6 +157,8 @@ def test_the_ten_real_lines_still_stream():
     lines = [Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem)) for p in REAL_DZT[:10]]
     n_traces = sum(line.n_traces for line in lines)
     assert 6000 < n_traces < 6700
+    # n_covered is a deliberate upper bound: the trace-count branch of
+    # choose_residency answers before it reads the estimate.
     est = estimate_memory(
         sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230, 120 * 120
     )

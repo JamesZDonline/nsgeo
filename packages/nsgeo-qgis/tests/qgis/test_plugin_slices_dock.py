@@ -191,6 +191,74 @@ def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeyp
     assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(cube_bytes)})"
 
 
+def test_the_checkbox_does_not_show_the_old_line_sets_figure_while_re_preparing(
+    docked, monkeypatch
+):
+    """`set_included` refreshes the label while the old lines are still in the
+    engine, then `prepare()` empties them. The checkbox must be refreshed
+    after that, from the before-preparing estimate of the NEW line set, not
+    left on the old set's `engine.estimate` until `_on_prepared` (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    shown: list[int] = []
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    # Hold the engine unprepared once `set_source` has emptied it.
+    real_set_source = dock.engine.set_source
+
+    def set_source_and_stay_empty(choice):
+        real_set_source(choice)
+        dock.engine._lines = []
+
+    monkeypatch.setattr(dock.engine, "set_source", set_source_and_stay_empty)
+    old_cube = dock.engine.estimate.cube_bytes
+    fewer = tuple(session.keys())[:-1]
+    shown.clear()
+    dock.set_included(fewer)
+    assert not dock.engine.is_prepared
+    covered, _frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    expected = nz * covered * 4 + covered * 4 + covered * 8
+    assert expected != old_cube, "the fixture must tell the old and new figures apart"
+    assert shown[-1] == expected, "the last refresh must be the new line set's figure"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(expected)})"
+
+
+def test_a_line_whose_position_cannot_be_computed_is_left_out_of_the_count(docked, monkeypatch):
+    """Preparation skips a line whose trace positions cannot be computed (for
+    example `traces_per_metre <= 0`); the estimate skips it too, instead of
+    raising inside a slot where QGIS would swallow it (#113)."""
+    from nsgeo.slices import covered_cells
+
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    keys = list(dock._included)
+    bad = session.line_for_key(keys[0])
+
+    real_coords = type(bad).trace_coords
+
+    def maybe_boom(self, frames):  # Line is frozen, so patch the class
+        if self is bad:
+            raise ValueError("traces_per_metre must be positive")
+        return real_coords(self, frames)
+
+    monkeypatch.setattr(type(bad), "trace_coords", maybe_boom)
+    calls = _spy_on_the_estimate(monkeypatch)
+    dock._update_included_label()  # must not raise
+    frame = dock.engine.frame
+    others = [real_coords(session.line_for_key(k), session.site.frames) for k in keys[1:]]
+    assert calls
+    assert calls[0][3] == covered_cells(frame, others)
+    assert covered_cells(frame, others) > 0
+
+
 def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
     """Final review, Important 3 / Ruling AN. `SliceEngine.set_always_
     resident` existed with no caller anywhere but tests -- the override

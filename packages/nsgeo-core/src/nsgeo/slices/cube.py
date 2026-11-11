@@ -191,7 +191,8 @@ class SliceCube:
         every stored column is finite, and an uncovered cell is NaN at
         every level. One block takes the window mean of its columns in
         float32 and scatters it, the same arithmetic the dense layout did,
-        so the slice is bit-identical to it (#113). Several blocks combine
+        so the slice is bit-identical to it (#113), except that a single-column
+        block sums its column pairwise and can differ by one ulp. Several blocks combine
         as the count-weighted mean, in float64.
         """
         self._window(k0, k1)

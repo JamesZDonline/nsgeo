@@ -284,10 +284,10 @@ class SliceFinish:
 class MemoryEstimate:
     """Held bytes, split the way spec 7.4 splits them.
 
-    Separately, because they grow in opposite directions: cube memory
-    grows with resolution and not with line count, cache memory the
-    reverse. By 120 lines the cached lines cost more than the cube, so a
-    single total would hide which one to act on.
+    Separately, because they grow differently: a packed cube grows with the
+    cells the lines cover (so with line count and with resolution), cache
+    memory with line count alone. By 120 lines the cached lines can cost
+    more than the cube, so a single total would hide which one to act on.
     """
 
     lines_bytes: int
@@ -468,8 +468,9 @@ def format_status(
     """Spec 9.2's status line: what is held, and how fast slices redraw.
 
     Memory first, because spec 7.2 found memory and not time to be the
-    binding constraint -- halving the cell doubles the time and
-    quadruples the cube.
+    binding constraint -- halving the cell doubles the time, roughly
+    doubles a packed cube of line data (the covered cells follow the line
+    length) and still quadruples the fill weights.
     """
     # The interpolation weights are held in either mode (interpolation spec §7).
     held = estimate.lines_bytes + estimate.weights_bytes

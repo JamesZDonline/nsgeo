@@ -1065,7 +1065,9 @@ class SlicesDock(QgsDockWidget):
 
         The one place the before-preparing count lives: the included label
         and, until the engine holds lines, the residency checkbox both read
-        it, so the two never disagree (#113)."""
+        it. They agree whenever the engine holds no lines. Between a grid
+        change and `_on_prepared` the count is made against the frame on
+        screen, which is the old grid's until preparation finishes (#113)."""
         samples = 0
         coords: list[np.ndarray] = []
         frame = self.engine.frame
@@ -1335,6 +1337,10 @@ class SlicesDock(QgsDockWidget):
             return
         try:
             self.engine.set_source(choice)
+            # `set_source` emptied the engine's lines, so the checkbox now
+            # takes the before-preparing figure rather than the old line
+            # set's (#113).
+            self._update_resident_check_label()
             self._refresh_source_status()
         except Exception as exc:  # noqa: BLE001 -- see the docstring above
             message = str(exc)
