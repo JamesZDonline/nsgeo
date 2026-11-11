@@ -16,6 +16,7 @@ from plugin_testing import send_map_key, send_map_mouse, synthetic_dzt
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsPointXY,
     QgsProject,
     QgsRectangle,
@@ -213,3 +214,27 @@ def test_another_map_tool_unchecks_cut(drawing):
     assert d.plugin._cut_tool is None
     assert CUT_HINT_TEXT not in _bar(d.bar)
     d.canvas.unsetMapTool(pan)
+
+
+def test_the_first_point_alone_chooses_the_grid(drawing, monkeypatch):
+    # A later point that will not transform must not make the plugin skip the
+    # grid the first click is in and take another, or none: it says why.
+    from nsgeo_qgis import plugin as plugin_module
+
+    d = drawing
+    real = plugin_module.crs_transform
+
+    def pick(canvas_crs, grid_crs, project):
+        transform = real(canvas_crs, grid_crs, project)
+        assert transform is None  # same CRS here; the failure is simulated below
+        return SimpleNamespace(
+            transform=lambda p: (_ for _ in ()).throw(QgsCsException()) if p.x() > 500 else p
+        )
+
+    monkeypatch.setattr(plugin_module, "crs_transform", pick)
+    d.plugin.act_cut.trigger()
+
+    _draw(d, (310, 210), (600, 240))
+
+    assert d.session.cut_keys() == []
+    assert any("cannot be placed" in text for text in _bar(d.bar))

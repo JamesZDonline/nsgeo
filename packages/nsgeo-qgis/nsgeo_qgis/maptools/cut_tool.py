@@ -7,10 +7,12 @@ message bar: it hands over the points, in the canvas CRS, and the plugin
 decides which grid they land on (`NsgeoPlugin._on_cut_drawn`).
 
 * **Keys.** Enter/Return finishes, Backspace drops the last point, Esc drops
-  the whole path. Esc is `ignore()`d to consume it, as `PickPointTool` does:
-  `QgsMapCanvas` hands a key press over already accepted and carries on with
-  its own handling unless the tool ignores it (see `pick_tool.py`'s module
-  docstring for the trap).
+  the whole path. Every key the tool handles is `ignore()`d to consume it, as
+  `PickPointTool` does and QGIS's own capture tools do: `QgsMapCanvas` hands a
+  key press over already accepted and re-emits it as `keyPressed` unless the
+  tool ignores it (see `pick_tool.py`'s module docstring for the trap). That
+  matters most for Backspace: `QgisApp` answers an accepted Backspace by
+  deleting the current layer's selected features. Other keys are left alone.
 * **The drawing.** One `QgsRubberBand` holds the points clicked so far plus a
   moving last segment to the pointer. It is a `QgsMapCanvasItem`, which the
   canvas's scene owns, so `dispose()` takes it back off the scene; leaving the
@@ -73,13 +75,15 @@ class CutTool(QgsMapTool):
         band.setToGeometry(QgsGeometry.fromPolylineXY(shown), None)
 
     def _add_point(self, point: QgsPointXY) -> None:
+        if self._band is None:
+            return  # disposed: the tool is inert
         self._points.append(QgsPointXY(point))
         self._redraw()
 
     def _finish(self) -> None:
         points, self._points = self._points, []
         self._redraw()
-        if points:
+        if points and self._band is not None:
             self.drawn.emit(points)
 
     def _cancel(self) -> None:
@@ -111,8 +115,10 @@ class CutTool(QgsMapTool):
                 e.ignore()  # consumed: see the module docstring
                 self._cancel()
             elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                e.ignore()  # consumed
                 self._finish()
             elif key == Qt.Key.Key_Backspace:
+                e.ignore()  # consumed: QGIS would delete the current layer's selection
                 if self._points:
                     self._points.pop()
                     self._redraw()
@@ -132,6 +138,8 @@ class CutTool(QgsMapTool):
     # ---- lifecycle ----------------------------------------------------------
     def dispose(self) -> None:
         """Take the drawing off the map, for good. Idempotent.
+
+        A disposed tool is inert: it collects and emits nothing more.
 
         Not called from `deactivate()`: that fires on every map-tool switch,
         and the same tool can be set again. The band is a canvas item owned

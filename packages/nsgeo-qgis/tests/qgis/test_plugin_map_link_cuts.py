@@ -131,6 +131,36 @@ def test_cut_mode_hover_previews_the_cut_not_the_nearby_line(cutlink):
     assert c.session.current_key == c.keys[0]  # hover never moves the working line
 
 
+def _nearer_the_line_than_the_cut(c):
+    """A vertex of the line at x = 1.5 whose distance to the cut is 0.1-0.4 m: the
+    pointer is ON the line and within reach of the cut, so the line is nearer."""
+    cut = c.session.cut_for_key(c.key)
+    geom = c.link._geometries()[c.keys[1]]
+    for i in range(geom.constGet().numPoints()):
+        world = QgsPointXY(geom.vertexAt(i))
+        local = GRID.to_local(np.array([[world.x(), world.y()]]))[0]
+        distance, offset = cut.locate((float(local[0]), float(local[1])))
+        if 0.1 < offset < 0.4:
+            return world, distance
+    raise AssertionError("no line vertex 0.1-0.4 m from the cut")
+
+
+def test_cut_mode_previews_the_cut_even_when_a_line_is_nearer(cutlink):
+    # Decision 11: in cut mode the lines are not candidates at all. A nearest-wins
+    # hit test would pick the line here (distance 0 against 0.1-0.4 m).
+    c = cutlink
+    c.link.set_cut_mode(True)
+    point, distance = _nearer_the_line_than_the_cut(c)
+
+    _hover(c, point)
+
+    assert c.session.preview_key == c.key
+    assert c.session.preview_trace == c.sections.column_at(c.key, distance)
+    c.link.set_cut_mode(False)
+    _hover(c, point)
+    assert c.session.preview_key == c.keys[1]  # line mode: the nearer line, not the cut
+
+
 def test_line_mode_ignores_cuts(cutlink):
     c = cutlink
     point, _ = _spot(c, 0.33)
@@ -303,3 +333,26 @@ def test_the_plugin_follows_the_current_layer(fake_iface, tmp_path, answer_modal
     finally:
         answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
         plugin.unload()
+
+
+def test_a_missing_transform_logs_once_not_on_every_move(cutlink, monkeypatch, message_log):
+    from nsgeo_qgis import map_link
+
+    c = cutlink
+    c.link.set_cut_mode(True)
+    c.session.open_line(c.key)
+    c.link._invalidate()
+
+    def none_available(*_a):
+        raise RuntimeError("no path")
+
+    monkeypatch.setattr(map_link, "crs_transform", none_available)
+    point, _ = _spot(c, 0.33)
+    for _ in range(5):
+        c.canvas.xyCoordinates.emit(point)
+        _fire_dwell(c.link)
+
+    assert sum("cannot follow the pointer" in m for m in message_log) == 1
+    assert c.session.preview_key is None  # no column, but nothing raised either
+    c.link._invalidate()  # the cache is dropped with the rest, so a fixed CRS is retried
+    assert c.link._no_transform == set()

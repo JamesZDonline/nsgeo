@@ -62,7 +62,6 @@ from nsgeo.slices import plan_windows
 from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
     QgsCsException,
     QgsMessageLog,
     QgsPointXY,
@@ -87,7 +86,7 @@ from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.lookup import CORNER_ROLES
-from nsgeo_qgis.map_link import MapLink
+from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
@@ -547,7 +546,8 @@ class NsgeoPlugin:
             self.iface.currentLayerChanged.disconnect(self._on_current_layer_changed)
         with contextlib.suppress(Exception):
             self.iface.mapCanvas().mapToolSet.disconnect(self._on_map_tool_set)
-        self._drop_cut_tool()
+        with contextlib.suppress(Exception):
+            self._drop_cut_tool()
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
@@ -1373,33 +1373,39 @@ class NsgeoPlugin:
         self.message(f"drawing a cut failed: {reason}", Qgis.MessageLevel.Critical)
 
     def _cut_grid_and_vertices(self, points: Sequence[QgsPointXY]) -> tuple[str, list[Any]] | None:
-        """The grid the first point is inside (the first in survey order when
+        """The grid the FIRST point is inside (the first in survey order when
         several are), and all the points as that grid's metres; None when the
-        first point is in no grid. Points are in the canvas CRS, the grid's
-        metres are in the grid's own CRS, so each point is transformed first
-        (cut spec §4.1)."""
+        first point is in no grid (cut spec call 6).
+
+        Only the first point chooses the grid; the rest are transformed after,
+        so a later point that will not transform cannot pass over the grid the
+        first click is in (that raises, and the caller says so). Points are in
+        the canvas CRS, the grid's metres are in the grid's own CRS.
+        """
         assert self.session is not None and self.layers is not None
         site = self.session.site
         assert site is not None
         canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        first = points[0]
         for grid in site.grids:
-            grid_crs = QgsCoordinateReferenceSystem(grid.crs)
-            transform = None
-            if canvas_crs != grid_crs:
-                transform = QgsCoordinateTransform(canvas_crs, grid_crs, self.layers.project)
-                if not transform.isValid():
-                    raise RuntimeError(
-                        f"no coordinate transform from {canvas_crs.authid()} to {grid_crs.authid()}"
-                    )
+            try:
+                transform = crs_transform(
+                    canvas_crs, QgsCoordinateReferenceSystem(grid.crs), self.layers.project
+                )
+                head = transform.transform(first) if transform else first
+            except (RuntimeError, QgsCsException):
+                continue  # this grid's CRS cannot be reached from the click: it is not in this grid
+            x, y = grid.to_local(np.array([[head.x(), head.y()]], dtype=float))[0]
+            if not (0.0 <= x <= grid.size_x and 0.0 <= y <= grid.size_y):
+                continue
             try:
                 mapped = [transform.transform(p) if transform else p for p in points]
-            except QgsCsException:
-                continue  # outside where this grid's CRS works: not in this grid
+            except QgsCsException as exc:
+                raise RuntimeError(
+                    f"part of the path cannot be placed on {grid.id}'s coordinate system: {exc}"
+                ) from exc
             world = np.array([(q.x(), q.y()) for q in mapped], dtype=float)
-            local = grid.to_local(world)
-            x, y = local[0]
-            if 0.0 <= x <= grid.size_x and 0.0 <= y <= grid.size_y:
-                return grid.id, [(float(a), float(b)) for a, b in local]
+            return grid.id, [(float(a), float(b)) for a, b in grid.to_local(world)]
         return None
 
     def _on_cut_drawn(self, points: list[QgsPointXY]) -> None:

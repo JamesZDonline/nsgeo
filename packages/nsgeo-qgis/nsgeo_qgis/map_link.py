@@ -82,6 +82,29 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+class _NoTransform(Exception):  # noqa: N818 -- a signal, not an error to report
+    """A grid's CRS cannot be reached from the canvas's; already logged."""
+
+
+def crs_transform(
+    source: QgsCoordinateReferenceSystem, dest: QgsCoordinateReferenceSystem, project: Any
+) -> QgsCoordinateTransform | None:
+    """The transform from `source` to `dest`; None means "same CRS (or one is
+    invalid): do not transform". Raises `RuntimeError` when there is no
+    transform: `QgsCoordinateTransform.transform()` does not raise on an
+    invalid one, it leaves the point unchanged. The one rule the map link and
+    the plugin's Cut drawing share (cut spec §4.1, §4.3)."""
+    if not source.isValid() or not dest.isValid() or source == dest:
+        return None
+    transform = QgsCoordinateTransform(source, dest, project)
+    if not transform.isValid():
+        raise RuntimeError(
+            f"no coordinate transform between {source.authid() or source.toWkt()} and "
+            f"{dest.authid() or dest.toWkt()}"
+        )
+    return transform
+
+
 class MapLink(QObject):
     HOVER_DWELL_MS = HOVER_DWELL_MS
     HOVER_TOLERANCE_PX = HOVER_TOLERANCE_PX
@@ -120,6 +143,9 @@ class MapLink(QObject):
         # Canvas <-> grid-CRS transforms, per grid id; None means "same CRS".
         self._to_grid: dict[str, QgsCoordinateTransform | None] = {}
         self._to_canvas: dict[str, QgsCoordinateTransform | None] = {}
+        # (grid id, to_grid) pairs with no transform: logged once, then answered
+        # as "no column" until the next invalidation, not once per mouse move.
+        self._no_transform: set[tuple[str, bool]] = set()
         # A section's columns in canvas CRS, built once per section object.
         self._columns_canvas: dict[str, tuple[Any, list[QgsPointXY]]] = {}
         self._cut_mode = False
@@ -185,6 +211,7 @@ class MapLink(QObject):
         self._cut_geoms = None
         self._to_grid.clear()
         self._to_canvas.clear()
+        self._no_transform.clear()
         self._columns_canvas.clear()
 
     # ---- cut mode and sections -----------------------------------------------
@@ -232,22 +259,23 @@ class MapLink(QObject):
     def _grid_transform(self, grid_id: str, *, to_grid: bool) -> QgsCoordinateTransform | None:
         """The canvas -> grid CRS transform (or the reverse); None for "same CRS".
 
-        Raises rather than answering with an untransformed point, for the
-        reason `_transform` gives.
+        Raises `_NoTransform` (quietly, after logging the first time) rather than
+        answering with an untransformed point, for the reason `crs_transform` gives.
         """
         cache = self._to_grid if to_grid else self._to_canvas
         if grid_id in cache:
             return cache[grid_id]
+        if (grid_id, to_grid) in self._no_transform:
+            raise _NoTransform
         grid_crs = QgsCoordinateReferenceSystem(self.session.grid(grid_id).crs)
         canvas_crs = self._canvas_crs()
-        transform: QgsCoordinateTransform | None = None
-        if canvas_crs.isValid() and grid_crs.isValid() and canvas_crs != grid_crs:
-            source, dest = (canvas_crs, grid_crs) if to_grid else (grid_crs, canvas_crs)
-            transform = QgsCoordinateTransform(source, dest, self.layers.project)
-            if not transform.isValid():
-                raise RuntimeError(
-                    f"no coordinate transform between {canvas_crs.authid()} and {grid_crs.authid()}"
-                )
+        source, dest = (canvas_crs, grid_crs) if to_grid else (grid_crs, canvas_crs)
+        try:
+            transform = crs_transform(source, dest, self.layers.project)
+        except RuntimeError as exc:
+            _log(f"cuts on grid {grid_id} cannot follow the pointer: {exc}")
+            self._no_transform.add((grid_id, to_grid))
+            raise _NoTransform from exc
         cache[grid_id] = transform
         return transform
 
@@ -288,7 +316,10 @@ class MapLink(QObject):
             cut = self.session.cut_for_key(key)
         except KeyError:
             return None
-        transform = self._grid_transform(cut.grid_id, to_grid=True)
+        try:
+            transform = self._grid_transform(cut.grid_id, to_grid=True)
+        except _NoTransform:
+            return None
         mapped = transform.transform(canvas_point) if transform else canvas_point
         local = self.session.grid(cut.grid_id).to_local(
             np.array([[mapped.x(), mapped.y()]], dtype=float)
@@ -306,7 +337,10 @@ class MapLink(QObject):
         cached = self._columns_canvas.get(key)
         if cached is not None and cached[0] is section:
             return cached[1]
-        columns = self._section_canvas_points(section)
+        try:
+            columns = self._section_canvas_points(section)
+        except _NoTransform:
+            return None
         self._columns_canvas[key] = (section, columns)
         return columns
 

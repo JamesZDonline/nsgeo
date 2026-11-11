@@ -43,10 +43,31 @@ def test_left_clicks_add_points_and_right_click_finishes(tool):
 
 def test_enter_finishes_and_backspace_removes_the_last_point(tool):
     _left(tool, (100, 100), (200, 150), (300, 100))
-    send_map_key(tool, Qt.Key.Key_Backspace)
-    send_map_key(tool, Qt.Key.Key_Return)
+    back = send_map_key(tool, Qt.Key.Key_Backspace)
+    done = send_map_key(tool, Qt.Key.Key_Return)
 
     assert [(p.x(), p.y()) for p in tool.drawn_log[0]] == [(100, 100), (200, 150)]
+    # Consumed: an accepted Backspace would make QGIS delete the current layer's selection.
+    assert not back.isAccepted() and not done.isAccepted()
+
+
+def test_the_keys_the_tool_handles_never_reach_the_canvas(tool):
+    seen: list[int] = []
+    tool.canvas().keyPressed.connect(lambda e: seen.append(e.key()))
+    canvas = tool.canvas()
+    canvas.setMapTool(tool)
+    try:
+        from qgis.PyQt.QtCore import QEvent
+        from qgis.PyQt.QtGui import QKeyEvent
+        from qgis.PyQt.QtWidgets import QApplication
+
+        for key in (Qt.Key.Key_Backspace, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            QApplication.sendEvent(
+                canvas, QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+            )
+        assert seen == []
+    finally:
+        canvas.unsetMapTool(tool)
 
 
 def test_esc_cancels_and_leaves_nothing_behind(tool):
@@ -97,8 +118,19 @@ def test_an_exception_in_an_event_becomes_failed(tool, monkeypatch):
 
 
 def test_dispose_is_idempotent_and_draws_nothing_more(tool):
-    _left(tool, (100, 100))
+    failures: list[str] = []
+    tool.failed.connect(failures.append)
+    _left(tool, (100, 100), (150, 150))
+    band = tool.band
+    assert band.scene() is not None
+
     tool.dispose()
     tool.dispose()
+    assert band.scene() is None  # taken off the canvas's scene
+
     _left(tool, (200, 200))
     send_map_mouse(tool, "move", (250, 250))
+    send_map_key(tool, Qt.Key.Key_Return)
+    assert failures == []
+    assert tool.points == []
+    assert tool.drawn_log == []
