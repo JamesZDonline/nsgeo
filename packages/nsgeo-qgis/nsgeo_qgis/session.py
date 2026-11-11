@@ -1464,6 +1464,74 @@ class SiteSession(QObject):
             float(model.velocity_at(times)[0]),
         )
 
+    def add_cut_pick(
+        self, key: str, column: int, distance_m: float, time_ns: float, stack_json: str
+    ) -> Pick:
+        """Author one pick on the WORKING cut (cut spec §4.5, calls 2 and 12).
+
+        A cut pick is a distance along the cut and a time. `column` is the
+        section column it was made on, stored in `trace` for the record
+        only: a column's index changes with the cell size, so nothing ever
+        places the pick by it. The distance is clamped into the cut. The
+        time is on the cube's clock (call 18) and is stored as given,
+        never converted, and never clamped to a line's window since a cut
+        has none. `stack_json` is the section's provenance, in place of a
+        line's stack.
+
+        Refuses like `add_pick`: only the working key, and a raise rather
+        than a silent no-op, since a pick that does not appear is authored
+        data lost. Does not dirty the session, for the reason `add_pick`
+        gives.
+        """
+        if not is_cut_key(key) or key != self._current_key:
+            raise ValueError(
+                f"a cut pick targets the working cut ({self._current_key!r}), not {key!r}; "
+                f"select the cut to work on it"
+            )
+        if self._pick_store is None:
+            raise RuntimeError("no pick store is attached to this session; cannot author a pick")
+        if not math.isfinite(time_ns) or not math.isfinite(distance_m):
+            raise ValueError(
+                f"a pick needs a finite distance and time, not {distance_m!r} and {time_ns!r}"
+            )
+        cut = self.cut_for_key(key)
+        distance = max(0.0, min(float(distance_m), cut.length_m))
+        depth_m, velocity_m_ns = self.derived_cut_pick_fields(key, distance, float(time_ns))
+        pick = Pick(
+            line_key=key,
+            trace=max(0, int(column)),
+            time_ns=float(time_ns),
+            distance_m=distance,
+            depth_m=depth_m,
+            velocity_m_ns=velocity_m_ns,
+            stack_json=stack_json,
+            note="",
+            created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        )
+        self._pick_store.write_pick(pick)
+        self.picks_changed.emit()
+        return pick
+
+    def derived_cut_pick_fields(
+        self, key: str, distance_m: float, time_ns: float
+    ) -> tuple[float | None, float | None]:
+        """`(depth_m, velocity_m_ns)` for a pick on cut `key` at `time_ns`,
+        from the cut's velocity (cut spec call 16), or `(None, None)` when
+        its grid has neither a velocity nor a line to take one from.
+
+        `distance_m` takes no part in the maths (a cut has one velocity):
+        it is in the signature so a caller hands over a pick's whole
+        position, as `derived_pick_fields` takes its trace. `KeyError` for
+        a key that names no cut.
+        """
+        cut = self.cut_for_key(key)
+        try:
+            model = self.cut_velocity(cut.grid_id)
+        except KeyError:
+            return (None, None)
+        times = [time_ns]
+        return (float(model.depth_at(times)[0]), float(model.velocity_at(times)[0]))
+
     @staticmethod
     def _pick_distance(line: Line, index: int) -> float | None:
         """Distance along the line at `index`, or None when the line has

@@ -245,7 +245,12 @@ class NsgeoPlugin:
         # Constructed here, with `layers`, because it reads the `lines`
         # layer's geometry and must be connected before the first
         # site_opened fires -- same reason SiteLayers is built this early.
-        self.map_link = MapLink(self.session, self.layers, self.iface.mapCanvas())
+        self.map_link = MapLink(
+            self.session,
+            self.layers,
+            self.iface.mapCanvas(),
+            on_info=lambda msg: self.message(msg, Qgis.MessageLevel.Info),
+        )
         main = self.iface.mainWindow()
 
         self.toolbar = self.iface.addToolBar("nsgeo")
@@ -1471,9 +1476,28 @@ class NsgeoPlugin:
         try:
             if self.session is None:
                 return
-            self.session.add_pick(key, trace, time_ns)
+            if is_cut_key(key):
+                self._add_cut_pick(key, trace, time_ns)
+            else:
+                self.session.add_pick(key, trace, time_ns)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
+
+    def _add_cut_pick(self, key: str, column: int, time_ns: float) -> None:
+        """A pick on the open cut: its distance and provenance come from the
+        section on screen (cut spec §4.5). No section means no column to
+        click, so the reason it has none goes on the message bar."""
+        assert self.session is not None
+        if self.cut_sections is None:
+            raise RuntimeError("no section is shown for this cut")
+        section = self.cut_sections.section(key, build_cube=False)
+        if isinstance(section, str):
+            raise RuntimeError(section or "no section is shown for this cut")
+        distances = section.columns.distance_m
+        index = max(0, min(int(column), distances.size - 1))
+        self.session.add_cut_pick(
+            key, index, float(distances[index]), time_ns, section.provenance_json
+        )
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

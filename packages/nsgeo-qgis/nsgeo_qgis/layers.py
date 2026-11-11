@@ -33,7 +33,7 @@ from typing import Any
 import numpy as np
 from nsgeo.geometry import Grid
 from nsgeo.io import DzxError, read_dzx
-from nsgeo.model import Line
+from nsgeo.model import Cut, Line, is_cut_key
 from qgis.core import (
     NULL,
     Qgis,
@@ -622,6 +622,9 @@ class SiteLayers(QObject):
         follows once it is saved. Only the rows whose values differ are
         written, so a refresh that changes nothing writes nothing.
 
+        A row on a cut follows the same way (`_follow_cut_pick`): placed from
+        its `distance_m` on the cut, never at its column.
+
         Left exactly as they are: a row whose `line_key` is no site line (a
         removed line's picks wait for it to come back) and a row with no trace
         or time (digitised by hand). A row on a line with no grid or no
@@ -649,6 +652,7 @@ class SiteLayers(QObject):
             return 0
         provider = layer.dataProvider()
         keys = set(self.session.keys())
+        cut_keys = set(self.session.cut_keys())
         # One computation per line, however many picks it carries. None
         # marks a line with no points to put a pick on (no grid, or no
         # distance axis): its picks still follow its velocity.
@@ -659,6 +663,11 @@ class SiteLayers(QObject):
         for feature in provider.getFeatures():
             key = _as_str(_attr(feature, "line_key"))
             trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
+            if is_cut_key(key):
+                self._follow_cut_pick(
+                    feature, key, cut_keys, provider, failed, geometry_changes, attribute_changes
+                )
+                continue
             if key not in keys or trace == NULL or time_ns == NULL:
                 continue
             if key not in placed:
@@ -706,6 +715,51 @@ class SiteLayers(QObject):
         if written:
             layer.triggerRepaint()
         return written
+
+    def _follow_cut_pick(
+        self,
+        feature: QgsFeature,
+        key: str,
+        cut_keys: set[str],
+        provider: Any,
+        failed: set[str],
+        geometry_changes: dict[int, QgsGeometry],
+        attribute_changes: dict[int, dict[int, Any]],
+    ) -> None:
+        """`follow_lines` for one row on a cut (cut spec §4.8, calls 3, 12, 16).
+
+        Position comes from the stored `distance_m`, which is never
+        rewritten: a grid that moves takes the cut, and so the pick, with
+        it, and a pick past a shrunk grid's edge keeps its distance. Depth
+        and velocity come from the cut's velocity. `trace`, `time_ns` and
+        everything else authored are never touched. A row whose cut is gone
+        (deleted, never saved, or on a removed grid) or whose distance or
+        time is NULL is left exactly as it is: the pick stays where it was
+        last written.
+        """
+        distance, time_ns = _attr(feature, "distance_m"), _attr(feature, "time_ns")
+        if key not in cut_keys or key in failed or distance == NULL or time_ns == NULL:
+            return
+        try:
+            depth, velocity = self.session.derived_cut_pick_fields(
+                key, float(distance), float(time_ns)
+            )
+            point = self._cut_point(self.session.cut_for_key(key), float(distance))
+        except Exception as exc:  # noqa: BLE001 -- one bad cut must not stop the rest
+            _log(f"could not re-derive the picks on {key}: {exc}", Qgis.MessageLevel.Critical)
+            failed.add(key)
+            return
+        assert point is not None  # the distance is not NULL
+        stored = feature.geometry()
+        if stored.isNull() or stored.isEmpty() or not point.compare(stored.asPoint(), _SAME_COORD):
+            geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+        changed = {
+            provider.fieldNameIndex(name): NULL if value is None else value
+            for name, value in (("depth_m", depth), ("velocity_m_ns", velocity))
+            if not _same_number(_attr(feature, name), value)
+        }
+        if changed:
+            attribute_changes[feature.id()] = changed
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
@@ -1509,6 +1563,11 @@ class SiteLayers(QObject):
         site = self.session.site
         if site is None:
             return None
+        if is_cut_key(pick.line_key):
+            # A cut pick sits where its DISTANCE along the cut says, never at
+            # its column (cut spec call 12).
+            cut = self.session.cut_for_key(pick.line_key)
+            return self._cut_point(cut, pick.distance_m)
         line = self.session.line_for_key(pick.line_key)
         grid = self.session.grid_for_line(line)
         if grid is None:
@@ -1517,6 +1576,15 @@ class SiteLayers(QObject):
         if coords is None:
             return None
         return _clamped(coords, pick.trace)
+
+    def _cut_point(self, cut: Cut, distance_m: float | None) -> QgsPointXY | None:
+        """The point `distance_m` along `cut`, in the package CRS; None when
+        the pick has no distance (a hand-digitised row)."""
+        if distance_m is None:
+            return None
+        grid = self.session.grid(cut.grid_id)
+        world = grid.to_world(np.asarray([cut.point_at(float(distance_m))], dtype=float))
+        return self._points(world, grid.crs)[0]
 
     def write_pick(self, pick: Pick) -> None:
         """Write one authored pick through the loaded layer's data
@@ -1558,8 +1626,9 @@ class SiteLayers(QObject):
             # line" before ever calling here, but this method's own
             # contract is "raises RuntimeError on any failure to write";
             # it must not depend on a caller's guard holding to keep it.
+            kind = "cut" if is_cut_key(pick.line_key) else "line"
             raise RuntimeError(
-                f"could not write the pick: no line with key {pick.line_key!r}"
+                f"could not write the pick: no {kind} with key {pick.line_key!r}"
             ) from None
         if point is None:
             # Time is the truth and the pick is authored data with no

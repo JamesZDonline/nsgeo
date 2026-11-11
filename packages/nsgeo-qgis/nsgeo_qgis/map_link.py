@@ -32,6 +32,7 @@ on, and the CI container routes it to qFatal(). See `session.py`.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -58,6 +59,8 @@ from .session import SiteSession
 if TYPE_CHECKING:
     from .cut_sections import CutSection, CutSections
 
+# Shown when a pick's cut is no longer in the site (cut spec call 3).
+CUT_GONE_TEXT = "This pick's cut no longer exists. The pick stays where it was drawn."
 MARKER_COLOUR = QColor("#e67e22")
 BAND_COLOUR = QColor("#e67e22")
 MARKER_SIZE_PX = 9
@@ -115,11 +118,14 @@ class MapLink(QObject):
         layers: SiteLayers,
         canvas: QgsMapCanvas,
         parent: QObject | None = None,
+        on_info: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.layers = layers
         self.canvas = canvas
+        #: Where a message for the user goes (the plugin's message bar).
+        self.on_info = on_info
 
         self._marker: QgsVertexMarker | None = QgsVertexMarker(canvas)
         self._marker.setIconType(QgsVertexMarker.ICON_CROSS)
@@ -764,6 +770,9 @@ class MapLink(QObject):
             return
         feature = layer.getFeature(ids[0])
         key = str(feature["line_key"])
+        if is_cut_key(key):
+            self._jump_to_cut_pick(key, feature)
+            return
         if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
             # Reachable by design, not just corruption: `remove_line`
             # deliberately leaves a line's picks and marks in place
@@ -786,6 +795,22 @@ class MapLink(QObject):
             # right answer; `int(NULL)` raises, and this runs in a slot.
             return
         self.session.set_trace(key, int(trace))
+
+    def _jump_to_cut_pick(self, key: str, feature: Any) -> None:
+        """Select a cut's pick: open the cut and put the cursor on the column
+        its distance falls on now (cut spec §4.5, call 12). A pick whose cut
+        is gone says so and opens nothing (call 3)."""
+        if key not in self.session.cut_keys():
+            if self.on_info is not None:
+                self.on_info(CUT_GONE_TEXT)
+            return
+        self.session.open_line(key)
+        distance = feature["distance_m"]
+        if distance == NULL or self._sections is None:
+            return  # opening the cut is still the right answer
+        column = self._sections.column_at(key, float(distance))
+        if column is not None:
+            self.session.set_trace(key, column)
 
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:

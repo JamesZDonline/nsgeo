@@ -869,10 +869,34 @@ class ProfileDock(QgsDockWidget):
         whatever is on screen rather than filtering on one.
         """
         key = self._key
-        if key is None or is_cut_key(key):  # a cut's picks are drawn from Task 5
+        if key is None:
             self.view.set_picks([])
             return
+        if is_cut_key(key):
+            self.view.set_picks(self._cut_pick_points(key))
+            return
         self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
+
+    def _cut_pick_points(self, key: str) -> list[tuple[int, float]]:
+        """A cut's picks as (column, time) on the section on screen.
+
+        A pick is a distance and a time (cut spec call 12), so its column is
+        found afresh from the distance under the section's own step; the
+        stored `trace` is never used. The time is drawn as stored: it is
+        already on the cube's clock, as the section's axis is (call 18).
+        Nothing is shown when no section is (a message, or no source).
+        """
+        sections = self._cut_sections
+        if sections is None or self._cut_shown is None or self._cut_shown.key != key:
+            return []
+        points: list[tuple[int, float]] = []
+        for pick in self.session.picks_for(key):
+            if pick.distance_m is None:
+                continue
+            column = sections.column_at(key, pick.distance_m)
+            if column is not None:
+                points.append((column, pick.time_ns))
+        return points
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
