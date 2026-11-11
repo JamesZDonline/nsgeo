@@ -881,8 +881,8 @@ def _drawn_values(layer):
 def test_the_plugin_draws_a_rotated_coverage_view_as_whole_counts(plugin, qgis_app):
     """The plugin passes the coverage check to the layer as `counts=`: the
     drawn counts are whole numbers, and the same view with coverage off is
-    blended, not min-sampled. A hard-coded False at that call site would blend
-    the counts; a hard-coded True would min-sample the amplitudes."""
+    blended, not largest-count sampled. A hard-coded False at that call site would
+    blend the counts; a hard-coded True would largest-count sample the amplitudes."""
     plugin, s = plugin
     s.replace_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
     _prepare(plugin)
@@ -898,8 +898,8 @@ def test_the_plugin_draws_a_rotated_coverage_view_as_whole_counts(plugin, qgis_a
     dock.coverage_check.setChecked(False)
     qgis_app.processEvents()
     amplitudes = _drawn_values(plugin.slice_layer.layer)
-    # Largest-corner sampling only ever returns cell values; a blend does not
-    # only return cell values.
+    # Largest count among the in-frame positive-weight corners only ever
+    # returns cell values; a blend does not only return cell values.
     cells = np.asarray(dock.current_values(), dtype=np.float32)
     assert not np.isin(amplitudes.astype(np.float32), cells).all()
 
