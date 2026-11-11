@@ -32,20 +32,39 @@ def analytic_envelope(data: np.ndarray) -> np.ndarray:
     The analytic signal is built by doubling the positive frequencies of a
     full FFT and zeroing the negative half; its modulus is the envelope.
 
-    The FFT is taken at the array's own length and is **never zero-padded
-    to a faster one**. After `time_zero` the real files leave 463 rows,
-    which is prime and therefore the worst case for an FFT -- padding to
-    480 is 2.2x faster and was measured and rejected, because the Hilbert
-    transform is non-local: padding shifts the result by ~1.3% through the
-    interior and ~13% in the last rows. This step runs once per line in the
-    cached tier, so exactness is the better trade. (Reflect-padding is
-    worse than zero-padding here, at ~2.6% interior, not better.)
+    Each trace is zero-padded to a power of two at least **4x** its length
+    (463 rows -> 2048). An FFT at the trace's own length treats the trace as
+    one period of a repeating signal, so its top and bottom leak into each
+    other, and the Hilbert kernel decays only as 1/t, so the leak reaches
+    far: on a real line with no gain before the envelope, zeroing the top
+    tenth moved the bottom 15% by 2.7-4.1x its own RMS (#116). This
+    reverses an earlier decision not to pad, which had compared the
+    unpadded result with a 17-row pad (463 -> 480). Both of those wrap, so
+    the ~1.3% gap between them said nothing about which was right.
+
+    Why 4x and not the bandpass's 2x: an FFT of M rows carries the kernel's
+    tail as (2/M)cot(pi k/M) instead of 2/(pi k), and that falls to zero at
+    k = M/2. With M >= 4N every row of the trace has k <= M/4, where the
+    tail is at most 21.5% short; with M >= 2N the deepest rows lose most of
+    it. Against a 64x pad on real lines, the bottom 15% of an un-gained
+    envelope is 1-3% off at 4x and 6-13% off at 2x. With AGC before the
+    envelope (the usual stack) both are within 0.05%. 4x costs about twice
+    the unpadded time, ~50 ms for a 600-trace line, once per line in the
+    cached tier.
     """
     data = np.asarray(data, dtype=float)
     if data.ndim != 2:
         raise ValueError(f"expected a 2-D radargram, got shape {data.shape}")
     n = data.shape[0]
-    spectrum = np.fft.fft(data, axis=0)
+    n_fft = 1 << (4 * n - 1).bit_length()
+    return np.abs(_analytic_signal(data, n_fft)[:n])
+
+
+def _analytic_signal(data: np.ndarray, n_fft: int | None = None) -> np.ndarray:
+    """The analytic signal of `data` zero-padded to `n_fft` rows (default: its
+    own length, which treats each trace as one period of a repeating signal)."""
+    n = data.shape[0] if n_fft is None else n_fft
+    spectrum = np.fft.fft(data, n=n, axis=0)
     weights = np.zeros(n)
     weights[0] = 1.0
     if n % 2 == 0:
@@ -53,7 +72,7 @@ def analytic_envelope(data: np.ndarray) -> np.ndarray:
         weights[1 : n // 2] = 2.0
     else:
         weights[1 : (n + 1) // 2] = 2.0
-    return np.abs(np.fft.ifft(spectrum * weights[:, None], axis=0))
+    return np.fft.ifft(spectrum * weights[:, None], axis=0)
 
 
 class _NoParams:
