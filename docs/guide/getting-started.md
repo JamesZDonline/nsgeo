@@ -526,29 +526,39 @@ from the side.
    Survey**, where a right-click renames or deletes it.
 3. The profile opens it. Its title reads **nsgeo Profile · cut:**, followed by
    the name, the grid and the length. The distance along the cut runs left to
-   right from where you started. The depth axis is the grid's. The pale blue band shows the slice
-   you are looking at in **nsgeo Slices**, so you can see which reflection a
-   slice is made from. Blank stretches are places the cut passes outside the
-   grid, or farther than the **Max distance to data** from any line.
+   right from where you started. The depth axis is the grid's. The pale blue
+   band shows the slice you are looking at in **nsgeo Slices**, so you can see
+   which reflection a slice is made from. Blank stretches are places the cut
+   passes outside the grid, or farther than the **Max distance to data** from
+   any line.
 
-With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first, and
-the title says so: *Kriging preview · minimum curvature 12 of 211 depths*. The
-finished section replaces it a depth at a time, starting at the slice you are
-looking at, and the title then reads *Minimum curvature*. It can take up to a
-minute or two for a long cut at a fine cell. Change a setting while it works
-and it starts again; changing the palette or renaming the cut does not. Only the cut you have opened is finished: hovering
-another one shows its kriging preview.
+If the grid is being prepared again, the profile says so and redraws the cut
+when it is ready. A grid whose volume is too large to hold in memory cannot be
+cut: use a coarser cell or a shorter depth range in **nsgeo Slices**.
+
+With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first,
+and the title says so: *Kriging preview · minimum curvature 12 of 463 depths*.
+The finished section replaces it a depth at a time, starting at the slice you
+are looking at, and the title then reads *Minimum curvature*. It can take up to
+a minute or two for a long cut at a fine cell, and longer when **Max distance
+to data** is more than three quarters of the line spacing, because each depth
+is then solved over the whole grid. Move the slice window and the work turns to
+the new depth once the window has rested. Change a setting while it works and
+it starts again; changing the palette or renaming the cut does not. Only the
+cut you have opened is finished: hovering another one shows its kriging
+preview.
 
 The map works on cuts while the **cuts** layer is the current layer, and on
 lines otherwise. With **cuts** current, moving the pointer along a cut moves the
-profile cursor, hovering a cut previews it, and clicking one opens it. Choose
+profile cursor, and hovering a cut previews it. Selecting a cut with QGIS's
+Select tool opens it, and so does clicking its name in **nsgeo Survey**. Choose
 another layer, and the map goes back to following your recorded lines.
 
 **Pick** works on a cut as it does on a line: click the profile, and the pick
 lands on the cut's path on the map. A pick on a cut records its distance along
 the cut and its time, with a note of how the section was made. If you pick while
-the section is still the kriging preview, the pick says so. Picks on a cut use the
-grid's velocity, or its first line's if the grid has none, and a cut is not
+the section is still the kriging preview, the pick says so. Picks on a cut use
+the grid's velocity, or its first line's if the grid has none, and a cut is not
 processed: the steps in **nsgeo Processing** belong to recorded lines.
 
 ### Step 9: Save, and next time
@@ -591,9 +601,10 @@ A few things to know:
   remove them yourself. The pick's note still says which cut it was made on.
   Removing a grid deletes its cuts too, and asks first.
 - **A site with cuts does not open in nsgeo 0.3.0 or earlier.** Those versions
-  would drop the cuts the next time you saved, so they refuse the site and say
-  why. A site with no cuts still opens in them. Update nsgeo on every computer
-  that opens the site.
+  would drop the cuts the next time you saved, so they refuse to open it. They
+  say the site's file declares schema version 2, but that they read version 1.
+  A site with no cuts still opens in them. Update nsgeo on every computer that
+  opens the site.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the
