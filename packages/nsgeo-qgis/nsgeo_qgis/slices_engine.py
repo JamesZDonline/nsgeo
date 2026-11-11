@@ -336,7 +336,8 @@ class SliceEngine(QObject):
         #: `grids_changed` (M12 final review I2): whether an edit that
         #: moved nothing was to THIS grid -- its velocity -- or to another.
         self._grid_seen: Any = None
-        self._cube: SliceCube | None = None
+        self._cube_generation = 0
+        self._cube_held: SliceCube | None = None
         #: The interpolation weights for the current frame and settings, built
         #: on first use and kept: applying them is cheap per slice, building
         #: them is not (interpolation spec §7). One `(key, weights, preview)`
@@ -480,6 +481,26 @@ class SliceEngine(QObject):
         """What this engine was last pointed at. The exporter needs it to
         write a recipe; nothing may reach past this for `_choice`."""
         return self._choice
+
+    @property
+    def _cube(self) -> SliceCube | None:
+        return self._cube_held
+
+    @_cube.setter
+    def _cube(self, cube: SliceCube | None) -> None:
+        # Every build, drop and clear goes through here, so the generation
+        # moves exactly when the cube held does (see `cube_generation`).
+        if cube is not self._cube_held:
+            self._cube_generation += 1
+        self._cube_held = cube
+
+    @property
+    def cube_generation(self) -> int:
+        """Counts every change of the resident cube: a build, `drop_cube`, a
+        re-source, a resolution or velocity change, `clear`. What a cut's
+        section is fingerprinted by: a rebuild with the same source, frame and
+        axis is a new cube, and `id()` of one nothing holds could repeat."""
+        return self._cube_generation
 
     @property
     def has_cube(self) -> bool:
@@ -1334,10 +1355,15 @@ class SliceEngine(QObject):
         What the engine holds when it was built for these settings and this
         cube's covered cells, which is what the slice's own draw leaves
         behind; otherwise built through `_fill_for` and held, so a cut never
-        plans weights of its own. Needs a cube: `RuntimeError` without lines.
+        plans weights of its own.
+
+        Needs the cube already resident: `RuntimeError` without one, so
+        nothing that only previews (a hover) can build a cube through here.
         """
+        if self._cube_held is None:
+            raise RuntimeError("no cube is held; build it before asking for its fills")
         frame, _ = self._require_geometry()
-        return self._fill_for(self.cube().coverage(), frame, self.finish_settings(finish))
+        return self._fill_for(self._cube_held.coverage(), frame, self.finish_settings(finish))
 
     def _keep_solved(self, key: bytes, solved: np.ndarray) -> None:
         """Into the solved-slice cache as the most recent; the least recently

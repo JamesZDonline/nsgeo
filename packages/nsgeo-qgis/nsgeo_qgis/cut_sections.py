@@ -41,6 +41,7 @@ from nsgeo.slices import (
     FinishSettings,
     SectionColumns,
     ZAxis,
+    column_distances,
     finish_section,
     section_columns,
 )
@@ -102,6 +103,10 @@ class CutSections(QObject):
         self.session = session
         self.slices_dock = slices_dock
         self._cache: dict[str, tuple[tuple[Any, ...], CutSection]] = {}
+        #: Cuts last answered with a message, and what they wait for: "source"
+        #: (no engine shows their grid) or "cube" (a preview with none built).
+        #: A cut with nothing cached would never be announced otherwise.
+        self._waiting: dict[str, str] = {}
         self._connections = [
             (slices_dock.slice_changed, self._on_inputs_changed),
             (session.cuts_changed, self._on_inputs_changed),
@@ -119,6 +124,8 @@ class CutSections(QObject):
         prepared for `grid_id` (cut spec call 10).
         """
         dock = self.slices_dock
+        if not self.session.is_open:
+            return None
         try:
             scope = dock.scope()
             if scope == "site":
@@ -132,7 +139,7 @@ class CutSections(QObject):
                 if not engine.is_prepared or choice is None or choice.grid_id != grid_id:
                     return None
                 finish = dock.grid_finish.value()
-            if engine is None or engine.frame is None or engine.z is None:
+            if engine is None or engine.frame is None or engine.z is None or engine.choice is None:
                 return None
             settings = engine.finish_settings(finish)
             return CutSource(
@@ -144,7 +151,10 @@ class CutSections(QObject):
                 palette=dock.palette_combo.currentText(),
                 unipolar=engine.output_unipolar,
             )
-        except Exception:  # noqa: BLE001 -- a site closing mid-call, a disposed widget: no source
+        except Exception as exc:  # noqa: BLE001 -- reported, then no source
+            _log(
+                f"could not resolve a cut's source on {grid_id}: {exc}", Qgis.MessageLevel.Critical
+            )
             return None
 
     # ---- sections -----------------------------------------------------------
@@ -154,27 +164,31 @@ class CutSections(QObject):
         `build_cube` is True when the user opened the cut (the build waits
         under a cursor) and False for a hover preview, which never builds.
         """
-        try:
-            cut = self.session.cut_for_key(key)
-        except Exception:  # noqa: BLE001 -- the cut or the site is gone
+        cut = self._cut(key)
+        if cut is None:
             self._cache.pop(key, None)
+            self._waiting.pop(key, None)
             return ""
         source = self.source_for(cut.grid_id)
         if source is None:
             self._cache.pop(key, None)
+            self._waiting[key] = "source"
             return NO_SOURCE_TEXT.format(name=cut.name, grid=cut.grid_id)
         engine = source.engine
         if not engine.has_cube:
             if not build_cube:
+                self._waiting[key] = "cube"
                 return NO_CUBE_TEXT.format(name=cut.name, grid=cut.grid_id)
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 engine.cube()
             except Exception as exc:  # noqa: BLE001 -- no lines, a vanished source
                 _log(f"could not build {cut.grid_id}'s cube: {exc}", Qgis.MessageLevel.Warning)
+                self._waiting[key] = "source"
                 return NO_SOURCE_TEXT.format(name=cut.name, grid=cut.grid_id)
             finally:
                 QApplication.restoreOverrideCursor()
+        self._waiting.pop(key, None)
         stamp = self._fingerprint(cut, source)
         cached = self._cache.get(key)
         if cached is not None and cached[0] == stamp:
@@ -189,33 +203,36 @@ class CutSections(QObject):
         Columns are fixed by the cut and the cell, so this needs no section
         and no cube; None when the cut has no source.
         """
-        try:
-            cut = self.session.cut_for_key(key)
-        except Exception:  # noqa: BLE001
+        cut = self._cut(key)
+        if cut is None:
             return None
         source = self.source_for(cut.grid_id)
         if source is None:
             return None
         frame = source.engine.frame
         assert frame is not None  # source_for checked
-        step = frame.cell / 2.0
-        length = cut.length_m
-        count = int(np.ceil(length / step - 1e-9))
-        along = np.minimum(np.arange(count + 1, dtype=float) * step, length)
-        along[-1] = length
+        along = column_distances(cut.length_m, frame.cell / 2.0)
         return int(np.argmin(np.abs(along - distance_m)))
+
+    def _cut(self, key: str) -> Cut | None:
+        """The cut, or None when it is gone or the site is closed."""
+        if not self.session.is_open:
+            return None
+        try:
+            return self.session.cut_for_key(key)
+        except KeyError:
+            return None
 
     # ---- building -----------------------------------------------------------
     def _fingerprint(self, cut: Cut, source: CutSource) -> tuple[Any, ...]:
         """Everything a section is made from. Cheap: it builds nothing."""
         engine = source.engine
-        cube = engine.cube() if engine.has_cube else None
         return (
             id(engine),
             engine.choice,
             engine.frame,
             engine.z,
-            None if cube is None else id(cube),
+            engine.cube_generation,
             source.settings,
             source.scope,
             source.palette,
@@ -275,19 +292,37 @@ class CutSections(QObject):
 
     # ---- redraws ------------------------------------------------------------
     def _on_inputs_changed(self) -> None:
-        """Drop each cached section whose inputs moved, and announce it.
+        """Announce each cut whose answer may now differ, once.
+
+        A cached section whose inputs moved is dropped. A cut waiting on a
+        message (nothing cached, so the walk of the cache alone would never
+        reach it) is announced when what it waited for is there: a source, or
+        a held cube for a preview. The profile then asks again.
 
         A slot on Qt signals: it reports rather than raises.
         """
         try:
+            if not self.session.is_open:
+                self._cache.clear()
+                self._waiting.clear()
+                return
             for key in list(self._cache):
-                try:
-                    self.session.cut_for_key(key)
-                except Exception:  # noqa: BLE001 -- deleted, or the site closed: the session cleared it
+                if self._cut(key) is None:
                     del self._cache[key]
+                elif not self._still_current(key):
+                    del self._cache[key]
+                    self.section_changed.emit(key)
+            for key, reason in list(self._waiting.items()):
+                cut = self._cut(key)
+                if cut is None:
+                    del self._waiting[key]
                     continue
-                if not self._still_current(key):
-                    del self._cache[key]
+                source = self.source_for(cut.grid_id)
+                ready = source is not None and (reason == "source" or source.engine.has_cube)
+                if reason == "cube" and source is None:
+                    ready = True  # the message changes to "show the grid"
+                if ready:
+                    del self._waiting[key]
                     self.section_changed.emit(key)
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             _log(f"could not refresh a cut's section: {exc}", Qgis.MessageLevel.Warning)
@@ -306,3 +341,4 @@ class CutSections(QObject):
                 signal.disconnect(slot)
         self._connections = []
         self._cache.clear()
+        self._waiting.clear()

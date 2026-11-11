@@ -148,6 +148,7 @@ several grids' slices into one site view.
 | `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
+| `column_distances` | Distances of a section's columns along a path: 0, step, ... and the length. |
 | `section_columns` | Columns half a cell apart along a path, with the pixel rule's taps. |
 | `section_crops` | Boxes round a cut, each serving at most a piece of it. |
 | `shared_limit` | One display limit for the whole cube. |

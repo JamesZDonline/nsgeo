@@ -1833,3 +1833,24 @@ def test_section_fills_reuse_the_held_weights(sourced, monkeypatch):
     other = dataclasses.replace(krig, max_distance_spacings=1.0)
     fill2, _ = engine.section_fills(other)
     assert fill2 is engine._weights[1]
+
+
+def test_section_fills_refuse_to_build_a_cube_and_the_generation_follows_it(sourced):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.drop_cube()
+    assert not engine.has_cube
+    with pytest.raises(RuntimeError):
+        engine.section_fills(SliceFinish())
+    assert not engine.has_cube  # nothing was built through it
+    before = engine.cube_generation
+    engine.cube()
+    assert engine.cube_generation == before + 1
+    engine.section_fills(SliceFinish())
+    assert engine.cube_generation == before + 1  # reading the fills moves nothing
+    # A rebuild with the same choice, frame and axis is another generation.
+    choice, frame, z = engine.choice, engine.frame, engine.z
+    engine.drop_cube()
+    engine.cube()
+    assert (engine.choice, engine.frame, engine.z) == (choice, frame, z)
+    assert engine.cube_generation == before + 3

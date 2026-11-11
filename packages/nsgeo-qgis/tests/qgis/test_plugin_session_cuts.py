@@ -192,3 +192,32 @@ def test_removing_a_grid_clears_a_working_cut_on_it(session):
     session.remove_grid("A")
     assert session.current_key is None
     assert opened.calls == [("",)]
+
+
+@pytest.mark.parametrize("working_is_cut", [True, False])
+def test_removing_a_grid_announces_the_dropped_items_in_one_order(
+    session, tmp_path, message_log, working_is_cut
+):
+    """`line_opened("")` before `preview_changed("")`, whichever kind each is (the
+    profile asks for a key that is already gone otherwise)."""
+    from nsgeo_qgis.ui.profile_dock import ProfileDock
+
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 3))
+    line = session.keys()[0]
+    cut = session.add_cut("A", V)
+    dock = ProfileDock(session)
+    try:
+        working, previewed = (cut, line) if working_is_cut else (line, cut)
+        session.open_line(working)
+        session.set_preview(previewed, 2)
+        order = []
+        session.line_opened.connect(lambda k: order.append(("opened", k)))
+        session.preview_changed.connect(lambda k, t: order.append(("preview", k)))
+        session.remove_grid("A", with_lines=True)
+        assert order == [("opened", ""), ("preview", "")]
+        assert session.current_key is None and session.preview_key is None
+        assert not [m for m in message_log if "could not" in m]
+    finally:
+        dock.hide()
+        dock.deleteLater()

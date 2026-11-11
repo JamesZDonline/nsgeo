@@ -183,3 +183,68 @@ def test_velocity_is_greyed_on_a_cut_and_back_on_a_line(fake_iface, tmp_path, an
         assert plugin.act_velocity.toolTip() != VELOCITY_ON_CUT_TIP
     finally:
         plugin.unload()
+
+
+def _shown_cut(pd):
+    return pd.view._image is not None and pd.view.transform is not None
+
+
+def test_a_cut_on_another_grid_draws_once_that_grid_is_shown(profile):
+    """(a) The message is not final: showing B in the Slices panel draws it."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("B", H)
+    session.open_line(key)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="B")
+    dock.grid_combo.setCurrentText("B")
+    _ready(dock)
+    assert _shown_cut(pd)
+    assert pd.windowTitle() == "nsgeo Profile · cut: Cut 1 · B · 4.0 m · Kriging"
+
+
+def test_a_cut_recovers_after_its_grid_is_shrunk_under_it(profile):
+    """(b) `grids_changed` arrives while the grid re-prepares; the cut comes back."""
+    import dataclasses
+
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", [(1.0, 1.0), (5.0, 1.0)])
+    session.open_line(key)
+    assert _shown_cut(pd)
+    n = pd.view.transform.n_traces
+    session.replace_grid(dataclasses.replace(session.grid("A"), size_x=3.0))
+    dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert _shown_cut(pd)
+    assert pd.view.transform.n_traces == n
+    assert pd.windowTitle().startswith("nsgeo Profile · cut: Cut 1 · A · 4.0 m")
+
+
+def test_a_cut_recovers_when_its_grid_is_switched_away_and_back(profile):
+    """(c)"""
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert _shown_cut(pd)
+    dock.grid_combo.setCurrentText("B")
+    dock.engine.wait_for_preparation(20_000)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="A")
+    dock.grid_combo.setCurrentText("A")
+    _ready(dock)
+    assert _shown_cut(pd)
+
+
+def test_a_second_cut_of_equal_length_opens_fitted(profile):
+    pd, dock, session, sections = profile
+    first = session.add_cut("A", [(1.0, 1.0), (5.0, 1.0)])
+    second = session.add_cut("A", [(1.0, 2.0), (5.0, 2.0)])
+    session.open_line(first)
+    fitted = pd.view.transform
+    pd.view.zoom_at(3.0, 100.0, 60.0)
+    assert pd.view.transform.trace_bounds == fitted.trace_bounds
+    assert (pd.view.transform.trace_lo, pd.view.transform.trace_hi) != (
+        fitted.trace_lo,
+        fitted.trace_hi,
+    )
+    session.open_line(second)
+    t = pd.view.transform
+    assert (t.trace_lo, t.trace_hi) == tuple(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == (t.t0_ns, t.t_end)

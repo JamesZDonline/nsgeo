@@ -165,24 +165,35 @@ def test_an_open_cut_shows_the_message_when_its_engine_goes_away(site, monkeypat
     session = site.session
     sections = site.cut_sections
     key = session.add_cut("A", H)
+    changed = Spy(sections.section_changed)
     assert isinstance(sections.section(key, build_cube=True), CutSection)
-    # Switching the shown grid: A's cut has no source until A is shown again.
+    # Switching the shown grid: A's cut loses its source, is announced, and
+    # recovers (is announced again) when A is shown again.
     first_engine = dock.engine
     dock.grid_combo.setCurrentText("B")
+    dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert (key,) in changed.calls
     assert isinstance(sections.section(key, build_cube=False), str)
+    changed.calls.clear()
     dock.grid_combo.setCurrentText("A")
     dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert changed.calls.count((key,)) >= 1
+    assert isinstance(sections.section(key, build_cube=True), CutSection)
     # Switching scope: the cut reads the site engine, never the This-grid one.
-    monkeypatch.setattr(first_engine, "cube", _boom)
+    changed.calls.clear()
     whole_site(site)
-    got = sections.section(key, build_cube=True)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(first_engine, "cube", _boom)
+        got = sections.section(key, build_cube=True)
+    assert (key,) in changed.calls
     assert isinstance(got, CutSection) and got.source.scope == "site"
     assert got.source.engine is dock.site_engine.engine_for("A")
     # Back to This grid, then the site closes: a message or nothing, never a read.
     dock.set_scope("grid")
     dock.engine.wait_for_preparation(20_000)
-    monkeypatch.setattr(dock.site_engine.engine_for("A"), "cube", _boom)
-    assert isinstance(sections.section(key, build_cube=False), (CutSection, str))
+    assert isinstance(sections.section(key, build_cube=False), CutSection)
     for engine in (dock.engine, dock.site_engine.engine_for("A")):
         monkeypatch.setattr(engine, "cube", _boom)
     session.close_site()
@@ -202,7 +213,7 @@ def test_a_cut_past_a_shrunk_grid_edge_shows_blank_columns(shown):
     session.replace_grid(dataclasses.replace(session.grid("A"), size_x=3.0))
     dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
-    assert (key,) in changed.calls
+    assert changed.calls.count((key,)) >= 1  # announced; the profile tests check it recovers
     got = sections.section(key, build_cube=True)
     assert isinstance(got, CutSection)
     outside = got.columns.cells < 0
@@ -266,3 +277,53 @@ def test_column_at_is_the_nearest_column(shown):
     other = session.add_cut("B", H)  # B is not shown
     assert sections.column_at(other, 1.0) is None
     assert sections.column_at("cut:nope", 1.0) is None
+
+
+def test_a_waiting_cut_is_announced_once_its_source_returns(shown):
+    dock, session, sections = shown
+    key = session.add_cut("B", H)
+    changed = Spy(sections.section_changed)
+    assert sections.section(key, build_cube=True) == NO_SOURCE_TEXT.format(name="Cut 1", grid="B")
+    assert changed.calls == []
+    dock.grid_combo.setCurrentText("B")
+    _ready(dock)
+    assert changed.calls.count((key,)) == 1  # once, and not again for later redraws
+    assert isinstance(sections.section(key, build_cube=True), CutSection)
+    dock.refresh_slice()
+    assert changed.calls.count((key,)) == 1
+
+
+def test_a_preview_waiting_for_a_cube_is_announced_when_one_is_held(shown):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    dock.engine.drop_cube()
+    changed = Spy(sections.section_changed)
+    assert sections.section(key, build_cube=False) == NO_CUBE_TEXT.format(name="Cut 1", grid="A")
+    dock.refresh_slice()
+    assert changed.calls == []  # still no cube: nothing to say
+    dock.engine.cube()
+    dock.refresh_slice()
+    assert changed.calls == [(key,)]
+
+
+def test_a_rebuilt_cube_redraws_the_cut_though_nothing_else_moved(shown):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    first = sections.section(key, build_cube=True)
+    changed = Spy(sections.section_changed)
+    engine = dock.engine
+    before = (engine.choice, engine.frame, engine.z)
+    engine.drop_cube()
+    engine.cube()
+    assert (engine.choice, engine.frame, engine.z) == before
+    dock.refresh_slice()
+    assert changed.calls == [(key,)]
+    again = sections.section(key, build_cube=True)
+    assert isinstance(again, CutSection) and again is not first
+
+
+def test_a_source_that_cannot_be_read_is_logged_critical(shown, message_log, monkeypatch):
+    dock, session, sections = shown
+    monkeypatch.setattr(dock, "scope", lambda: (_ for _ in ()).throw(ValueError("boom")))
+    assert sections.source_for("A") is None
+    assert any("boom" in m for m in message_log)

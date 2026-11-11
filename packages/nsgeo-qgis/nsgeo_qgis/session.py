@@ -606,10 +606,12 @@ class SiteSession(QObject):
         cut_keys_gone = [c.key for c in gone_cuts]
         if grid_id in site.site_view.get("grids", []):
             site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
-        dropped = self._drop_lines(keys)
+        lines_dropped = self._drop_lines(keys)
+        cuts_dropped = self._reset_cuts(cut_keys_gone)
         self._set_dirty(True)
-        self._announce_dropped(*dropped)
-        self._forget_cuts(cut_keys_gone)
+        self._announce_dropped(
+            lines_dropped[0] or cuts_dropped[0], lines_dropped[1] or cuts_dropped[1]
+        )
         self.grids_changed.emit()
         if keys:
             self.lines_changed.emit()
@@ -907,11 +909,13 @@ class SiteSession(QObject):
         else:
             self.line_for_key(key)
 
-    def _forget_cuts(self, keys: Sequence[str]) -> None:
-        """Reset the working and previewed item if it is one of `keys`, then announce.
+    def _reset_cuts(self, keys: Sequence[str]) -> tuple[bool, bool]:
+        """Reset the working and previewed item if it is one of `keys`.
 
-        Same order as `_announce_dropped`: `line_opened` first, so the profile
-        drops its working key before `preview_changed` asks it to render.
+        Emits nothing; returns (dropped current, dropped preview) for
+        `_announce_dropped`, like `_drop_lines`. A caller that drops lines
+        and cuts together resets both first and announces once, so
+        `line_opened` always precedes `preview_changed`.
         """
         dropped_current = self._current_key in keys
         dropped_preview = self._preview_key in keys
@@ -922,7 +926,7 @@ class SiteSession(QObject):
         if dropped_preview:
             self._preview_key = None
             self._preview_trace = -1
-        self._announce_dropped(dropped_current, dropped_preview)
+        return dropped_current, dropped_preview
 
     def cut_for_key(self, key: str) -> Cut:
         for cut in self._require_site().cuts:
@@ -966,7 +970,7 @@ class SiteSession(QObject):
         site = self._require_site()
         site.cuts.remove(self.cut_for_key(key))
         self._set_dirty(True)
-        self._forget_cuts([key])
+        self._announce_dropped(*self._reset_cuts([key]))
         self.cuts_changed.emit()
 
     def cut_velocity(self, grid_id: str) -> VelocityModel:

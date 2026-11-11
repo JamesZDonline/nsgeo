@@ -97,6 +97,22 @@ class SectionColumns:
         return np.unique(self.taps.ids[:, inside])
 
 
+def column_distances(length_m: float, step_m: float) -> np.ndarray:
+    """Distances of a section's columns along a path: 0, step, 2*step, ... with
+    a last column exactly at `length_m`. Defined once, so whoever places a
+    column by distance (the plugin's cursor) agrees with `section_columns`.
+
+    The tolerance keeps a length that is a whole number of steps from growing
+    a sliver column from rounding (30.000000000000004 steps).
+    """
+    if not (length_m > 0.0 and step_m > 0.0):
+        raise ValueError(f"length and step must be positive, got {length_m} and {step_m}")
+    count = int(math.ceil(length_m / step_m - 1e-9))
+    distance = np.minimum(np.arange(count + 1, dtype=float) * step_m, length_m)
+    distance[-1] = length_m
+    return distance
+
+
 def section_columns(
     frame: CubeFrame, path_local: np.ndarray, step_m: float | None = None
 ) -> SectionColumns:
@@ -119,11 +135,7 @@ def section_columns(
     length = float(along[-1])
     if not length > 0.0:
         raise ValueError("the path has zero length")
-    # The tolerance keeps a length that is a whole number of steps from
-    # growing a sliver column from rounding (30.000000000000004 steps).
-    count = int(math.ceil(length / step - 1e-9))
-    distance = np.minimum(np.arange(count + 1, dtype=float) * step, length)
-    distance[-1] = length
+    distance = column_distances(length, step)
     local = np.column_stack(
         [np.interp(distance, along, path[:, 0]), np.interp(distance, along, path[:, 1])]
     )

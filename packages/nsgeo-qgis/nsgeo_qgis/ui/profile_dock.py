@@ -518,6 +518,10 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and ruler is None
             and old_ruler is None
+            # A cut opens fitted to its own length (cut spec §4.3): another
+            # cut's zoom, or a cut's t0 and dt on a line, is not carried over.
+            and not is_cut_key(key)
+            and not (old_key and is_cut_key(old_key))
             and (old.n_traces, old.n_samples) == (n_traces, n_samples)
         ):
             view.transform = old

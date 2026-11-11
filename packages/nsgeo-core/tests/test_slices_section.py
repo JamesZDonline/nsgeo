@@ -27,6 +27,7 @@ from nsgeo.slices.section import (
     SECTION_MARGIN_SPACINGS,
     SECTION_PIECE_M,
     SectionColumns,
+    column_distances,
     curvature_margin_cells,
     finish_section,
     plan_section_curvature,
@@ -377,3 +378,15 @@ def test_section_columns_are_immutable():
     assert isinstance(columns, SectionColumns)
     with pytest.raises(AttributeError):
         columns.distance_m = np.zeros(1)  # type: ignore[misc]
+
+
+def test_column_distances_are_defined_once_for_the_section_and_its_callers():
+    d = column_distances(3.05, 0.1)
+    assert d[0] == 0.0 and d[-1] == 3.05
+    np.testing.assert_allclose(np.diff(d)[:-1], 0.1, atol=1e-12)
+    # A whole number of steps grows no sliver column from rounding.
+    assert column_distances(30.000000000000004, 0.1).size == 301
+    columns = section_columns(axis_frame(), straight((1.0, 1.0), (4.05, 1.0)))
+    np.testing.assert_array_equal(columns.distance_m, column_distances(3.05, 0.1))
+    with pytest.raises(ValueError):
+        column_distances(0.0, 0.1)
