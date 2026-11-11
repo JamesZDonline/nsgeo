@@ -370,3 +370,17 @@ def test_row_envelope_validates_its_arguments(kwargs):
 
 def test_row_envelope_of_a_zero_trace_array_is_zeros():
     np.testing.assert_array_equal(row_envelope(np.empty((3, 0)), 90.0), np.zeros(3))
+
+
+@pytest.mark.parametrize("unipolar", [True, False])
+def test_section_rgba8_makes_blanks_transparent_in_both_polarities(unipolar):
+    lut = colormap("amp_black_high" if unipolar else DEFAULT_COLORMAP)
+    values = np.array([[1.0, np.nan], [0.5, 2.0]])
+    rgba = render.section_rgba8(values, 99.0, lut, unipolar=unipolar)
+    assert rgba.shape == (2, 2, 4) and rgba.dtype == np.uint8
+    assert rgba[0, 1, 3] == 0
+    assert (rgba[..., 3][[0, 1, 1], [0, 0, 1]] == 255).all()
+    assert (
+        render.section_rgba8(np.full((2, 3), np.nan), 99.0, lut, unipolar=unipolar)[..., 3] == 0
+    ).all()
+    assert render.section_rgba8(np.zeros((2, 3)), 99.0, lut, unipolar=unipolar).shape == (2, 3, 4)
