@@ -1367,3 +1367,10 @@ def test_a_stop_during_overviews_raises_and_leaves_the_file_closed(exportable, t
         build_overviews(path, should_stop=lambda: True)
     path.unlink()  # closed: removable (Windows would refuse an open file)
     assert not path.exists()
+
+
+def test_coverage_path_is_the_stem_plus_coverage_tif(tmp_path):
+    from nsgeo_qgis.slice_export import coverage_path
+
+    assert coverage_path(tmp_path / "site.tif") == tmp_path / "site_coverage.tif"
+    assert coverage_path(str(tmp_path / "site.tiff")) == tmp_path / "site_coverage.tif"

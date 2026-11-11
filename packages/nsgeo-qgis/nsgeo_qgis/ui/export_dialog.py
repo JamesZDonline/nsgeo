@@ -38,6 +38,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.slice_export import coverage_path
 from nsgeo_qgis.slices_plan import (
     EXPORT_BUDGET_BYTES,
     ExportPreview,
@@ -56,6 +57,8 @@ DEBOUNCE_MS = 150
 #: The largest export cell offered, metres.
 MAX_CELL_M = 100.0
 MIN_PIXEL_M = 0.001
+#: The summary group's last row, kept for the reason an export is refused.
+_REASON_ROW = 99
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,7 @@ class ExportChoice:
 def target_paths(path: Path) -> list[Path]:
     """The files an export to `path` writes: the raster, its style file and the
     coverage companion with its own."""
-    companion = path.with_name(f"{path.stem}_coverage{path.suffix}")
+    companion = coverage_path(path)
     return [path, path.with_suffix(".qml"), companion, companion.with_suffix(".qml")]
 
 
@@ -161,8 +164,8 @@ class ExportDialog(QDialog):
         self.reason_label = QLabel("")
         self.reason_label.setWordWrap(True)
         self.reason_label.setStyleSheet("font-weight: bold;")
+        self._summary_layout.addWidget(self.reason_label, _REASON_ROW, 0, 1, 2)
         layout.addWidget(self.summary_group)
-        layout.addWidget(self.reason_label)
 
         self.confirm_strip = QFrame()
         self.confirm_strip.setFrameShape(QFrame.Shape.StyledPanel)
@@ -271,9 +274,9 @@ class ExportDialog(QDialog):
                 export_refusal(preview.held_bytes, EXPORT_BUDGET_BYTES, finest_cell, finest_pixel)
             )
         if free is not None and free < DISK_MARGIN * preview.file_bytes:
+            need = format_bytes(round(DISK_MARGIN * preview.file_bytes))
             reasons.append(
-                f"Not enough free disk space: about {format_bytes(preview.file_bytes)} needed, "
-                f"{format_bytes(free)} free."
+                f"Not enough free disk space: about {need} needed, {format_bytes(free)} free."
             )
         self.reason_label.setText("\n".join(reasons))
         self.reason_label.setVisible(bool(reasons))
@@ -282,10 +285,10 @@ class ExportDialog(QDialog):
     def _set_rows(self, rows: list[tuple[str, str]]) -> None:
         self._rows = rows
         lay = self._summary_layout
-        while lay.count():
-            item = lay.takeAt(0)
+        for item in [lay.itemAt(i) for i in range(lay.count())]:
             widget = item.widget()
-            if widget is not None:
+            if widget is not None and widget is not self.reason_label:
+                lay.removeWidget(widget)
                 widget.deleteLater()
         for i, (key, value) in enumerate(rows):
             name = QLabel(key)

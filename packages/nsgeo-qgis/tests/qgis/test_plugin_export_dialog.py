@@ -155,13 +155,39 @@ def test_over_budget_disables_export_and_names_the_finest_fit(make):
     d.refresh_now()
     held = int(k / (0.025 * 0.0125))
     assert not d.export_button.isEnabled()
-    # Fits from a 0.024 m pixel at this cell, and from a 0.026 m cell above it
-    # (0.025 m would fit too, but is not "finer than now").
-    assert d.reason_label.text() == export_refusal(held, EXPORT_BUDGET_BYTES, 0.026, 0.024)
+    # The current cell fits at pixel = cell, so only a finer-than-now pixel is
+    # offered: from 0.024 m at this cell.
+    assert d.reason_label.text() == export_refusal(held, EXPORT_BUDGET_BYTES, None, 0.024)
     assert d.reason_label.text() == (
         "This export would hold about 2.8 GB in memory, more than the 1.5 GB it is allowed."
-        " A 0.026 m export cell would fit. A 0.024 m export pixel would fit."
+        " A 0.024 m export pixel would fit."
     )
+
+
+def test_over_budget_names_a_cell_when_the_current_one_does_not_fit(make):
+    k = 2_800_000_000 * 0.02 * 0.02  # 2.8 GB at 0.02 / 0.02: the cell itself is too fine
+    d = make(held=lambda c, p: int(k / (c * p)))
+    d.cell_spin.setValue(0.02)
+    d.refresh_now()
+    assert "export cell would fit." in d.reason_label.text()
+
+
+def test_the_reason_sits_inside_the_summary_group(make):
+    d = make()
+    assert d.reason_label.parentWidget() is d.summary_group
+
+
+def test_target_paths_use_the_companion_rule_whatever_the_suffix(qgis_app, tmp_path):
+    from nsgeo_qgis.ui.export_dialog import target_paths
+
+    for suffix in (".tif", ".tiff"):
+        t = tmp_path / f"site{suffix}"
+        assert target_paths(t) == [
+            t,
+            tmp_path / "site.qml",
+            tmp_path / "site_coverage.tif",
+            tmp_path / "site_coverage.qml",
+        ]
 
 
 def test_a_fitting_export_is_enabled_with_no_reason(make):
@@ -177,7 +203,7 @@ def test_low_disk_disables_export_with_the_exact_copy(make, monkeypatch):
     d.refresh_now()
     assert not d.export_button.isEnabled()
     assert d.reason_label.text() == (
-        f"Not enough free disk space: about {format_bytes(600_000_000)} needed, "
+        f"Not enough free disk space: about {format_bytes(720_000_000)} needed, "
         f"{format_bytes(700_000_000)} free."
     )
 

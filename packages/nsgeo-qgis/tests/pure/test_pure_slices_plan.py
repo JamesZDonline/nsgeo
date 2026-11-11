@@ -724,3 +724,20 @@ def test_finest_cell_is_none_past_eight_times_the_current_cell():
     # ... and exactly at the reach it is found.
     held_at, _ = _counting(lambda c, p: 0 if c >= 0.2 - 1e-9 else 10**12)
     assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] == pytest.approx(0.2)
+
+
+def test_finest_cell_is_none_when_the_current_cell_already_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits from a 20 mm pixel; at pixel = cell the 25 mm cell is well inside budget.
+    budget = 10**9
+    held_at, _ = _counting(lambda c, p: int(budget * 0.02 / p))
+    assert finest_fits(held_at, 0.025, 0.0125, budget) == (None, 0.02)
+
+
+def test_finest_cell_is_still_offered_when_the_current_cell_does_not_fit():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.03 - 1e-9 else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, 10**9)
+    assert cell == pytest.approx(0.03)

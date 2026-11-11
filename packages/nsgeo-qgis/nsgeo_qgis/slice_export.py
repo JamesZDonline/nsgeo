@@ -182,6 +182,12 @@ def partial_path(target: str | Path) -> Path:
     return target.with_name(f"{target.stem}.partial{target.suffix}")
 
 
+def coverage_path(target: str | Path) -> Path:
+    """`<stem>_coverage.tif`, the coverage companion beside a target."""
+    target = Path(target)
+    return target.with_name(f"{target.stem}_coverage.tif")
+
+
 def commit_partial(partial: str | Path, target: str | Path) -> None:
     """Put a finished partial file on the target name, replacing what was there."""
     os.replace(partial, target)
