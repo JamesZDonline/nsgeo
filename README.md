@@ -94,7 +94,10 @@ a milestone merges or the plan changes.
 
 ### In progress
 
-Nothing at the moment. The first item under *Next* starts next.
+- **A faster minimum-curvature solver** ([#111]), one of the fine-cell items:
+  multigrid, about 5× faster at a 0.05 m cell with the same slices, so the
+  sharp slice arrives in under a second after the depth stops. Plan written, on
+  `nsgeo-multigrid`.
 
 ### Next, in order
 
