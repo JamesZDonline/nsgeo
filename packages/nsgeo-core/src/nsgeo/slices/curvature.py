@@ -28,34 +28,41 @@ method's is.
 
 D and the operator depend only on where data is, never on its values
 (interpolation spec §7), so `plan_curvature` builds them once per grid and
-distance. `CurvaturePlan.solve` then runs conjugate gradients per slice
-(plan call 3): matrix-free in float32 with float64 dot products, Jacobi
-preconditioned, started from linear interpolation along columns and rows
-weighted by span (`_start`), and stopped at `CURVATURE_TOL` of the
-right-hand side. Against a float64 solve to 1e-12 on the full 50 m grids
-below, its largest error inside the max distance was 6.2e-6 of the data
-range at 0.2 m, 4.8e-5 at 0.1 m and 4.0e-4 at 0.05 m, where 99% of cells were
-within 2.2e-5. A multigrid solver would be faster (#111).
+distance, with a multigrid hierarchy on the operator (`multigrid.py`, #111;
+design and measurements in docs/superpowers/notes/2026-11-10-multigrid-spike.md).
+`CurvaturePlan.solve` then runs conjugate gradients per slice (plan call 3):
+matrix-free in float32 with float64 dot products, started from linear
+interpolation along columns and rows weighted by span (`_start`), and stopped
+at `CURVATURE_TOL` of the right-hand side. Each iteration is preconditioned by
+one V-cycle: degree-2 Chebyshev smoothing, Galerkin coarse operators on
+cell-doubled grids, and a dense solve once a level has few unknowns. Jacobi
+took about 4x the iterations for each halving of the cell (38, 155, 492 at
+0.2, 0.1 and 0.05 m on a 50 m grid); the V-cycle holds them near 6 to 15.
+Against a float64 solve to 1e-10 on the ten real lines at 0.05 m, the largest
+error inside the max distance was 3.0e-5 to 3.6e-5 of the data range (two
+windows), against 4.1e-5 to 6.9e-5 for Jacobi (the spike note). On the 50 m
+grids it stays within milestone B's 6.2e-6 at 0.2 m, 4.8e-5 at 0.1 m and
+4.0e-4 at 0.05 m, where 99% of cells were within 2.2e-5.
 
 numpy only, no scipy. Measured medians per slice, at max distance 0.375 m
-(0.75 x the 0.5 m line spacing): on the ten real lines (25 x 100 cells at
-0.2 m), on 50 m x 50 m of wandering lines 0.5 m apart along X, and on the
-same lines over the lower 40% of the frame with one skipped:
+(0.75 x the 0.5 m line spacing) with `bench.py` from the spike note: on the ten
+real lines (25 x 100 cells at 0.2 m, 100 x 400 at 0.05 m), on 50 m x 50 m of
+wandering lines 0.5 m apart along X, and on the same lines over the lower 40%
+of the frame with one skipped. Before is Jacobi at e701f82 (load average about
+2.6); after is the hierarchy (load average about 2.0, one run, nothing else of
+mine running):
 
-    case                             plan      solve    iterations
-    real lines, 0.2 m                0.001 s   4 ms      38
-    50 m grid, 0.2 m                 0.004 s   49 ms     42
-    50 m grid, 0.1 m                 0.02 s    0.79 s   158
-    50 m grid, 0.05 m (one slice)    0.11 s    12.2 s   459
-    50 m, 40% covered, line skipped  0.003 s   0.16 s   141
+    case                             before: plan  solve    its   after: plan  solve    its
+    real lines, 0.2 m                0.001 s       0.004 s   38   0.019 s      0.009 s    7
+    real lines, 0.05 m               0.005 s       0.410 s  540   0.060 s      0.105 s   15
+    50 m grid, 0.2 m                 0.004 s       0.054 s   41   0.080 s      0.071 s    6
+    50 m grid, 0.1 m                 0.023 s       0.892 s  155   0.270 s      0.442 s   11
+    50 m grid, 0.05 m                0.132 s       14.3 s   492   1.39 s       3.29 s    15
+    50 m, 40% covered, line skipped  0.003 s       0.157 s  136   0.582 s      0.088 s    7
 
-An iteration costs about what it did in the spike (27 ms at 0.05 m against
-25), but the finer grids take more of them than its 0.55 s and 10 s did.
-Its start ran along columns only: 39 and 131 iterations at 0.2 and 0.1 m
-here, but 61 and 207 on the same lines turned along Y, where the span
-weighting's 42 and 158 do not change. An equal average of the two
-directions needed 56 and 184. The kriging preview's figures are in
-`interpolate.py`.
+The plan costs more, since it builds the hierarchy once per grid and distance,
+and the coarse grids are not worth it at 0.2 m, where the solve is no faster.
+The kriging preview's figures are in `interpolate.py`.
 """
 
 from __future__ import annotations
@@ -67,6 +74,7 @@ from typing import Callable
 import numpy as np
 
 from nsgeo.slices.interpolate import reach_mask
+from nsgeo.slices.multigrid import Hierarchy, build_hierarchy
 
 CURVATURE_TOL: float = 1e-6  # ‖r‖ ≤ tol · ‖b‖ ends the solve (plan call 3)
 CURVATURE_EPS: float = 1e-6  # the slope term's weight, in cell units (plan call 1)
@@ -111,6 +119,7 @@ class CurvaturePlan:
     reach: np.ndarray  # (ny*nx,) bool: finite in the output
     domain: np.ndarray  # (ny, nx) bool: the solve area D (plan call 2)
     coefficients: np.ndarray  # (13, ny, nx) float32: A's row at each unknown, by offset
+    hierarchy: Hierarchy  # the multigrid preconditioner built on `coefficients` (#111)
     # Kept to re-plan around a non-finite datum (plan call 10).
     cell: float
     max_distance_m: float
@@ -118,7 +127,8 @@ class CurvaturePlan:
     def __post_init__(self) -> None:
         # Frozen in fact, not only in name: the worker thread's safety rests on
         # nothing writing to a plan once it is built (plan call 6), so its
-        # arrays refuse writes. A non-finite datum is solved on a new plan.
+        # arrays refuse writes (the hierarchy froze its own). A non-finite
+        # datum is solved on a new plan.
         for array in (self.populated, self.reach, self.domain, self.coefficients):
             array.flags.writeable = False
 
@@ -167,7 +177,7 @@ class CurvaturePlan:
         pop: np.ndarray,
         should_stop: Callable[[], bool] | None,
     ) -> int:
-        """Jacobi-preconditioned CG for A·x = b on the unknowns, b = −A·d with d
+        """Multigrid-preconditioned CG for A·x = b on the unknowns, b = −A·d with d
         the data on data cells and 0 elsewhere (plan call 3). `x` comes in as
         zeros and leaves holding the unknowns."""
         unknown = self.domain & ~pop
@@ -189,9 +199,7 @@ class CurvaturePlan:
         np.copyto(p, x, where=unknown)
         self._times(padded, q, work)
         r = np.negative(q)  # r = b − A·x = −A·(d + x)
-        inverse = np.zeros(self.shape, np.float32)
-        np.divide(1.0, self.coefficients[_CENTRE], out=inverse, where=unknown)
-        z = r * inverse
+        z = self.hierarchy.precondition(r)
         p[...] = z
         rz = _dot(r, z)
         iterations = 0
@@ -209,7 +217,7 @@ class CurvaturePlan:
             x += work
             np.multiply(q, alpha, out=work)
             r -= work
-            np.multiply(r, inverse, out=z)
+            z = self.hierarchy.precondition(r)
             rz_next = _dot(r, z)
             p *= rz_next / rz
             p += z
@@ -245,6 +253,7 @@ class CurvaturePlan:
             + self.reach.nbytes
             + self.domain.nbytes
             + self.coefficients.nbytes
+            + self.hierarchy.nbytes
         )
 
 
@@ -381,12 +390,15 @@ def plan_curvature(populated: np.ndarray, cell: float, max_distance_m: float) ->
     pop2 = pop2.astype(bool)
     reach = reach_mask(pop2, cell, max_distance_m)
     domain = _grow(reach, SOLVE_MARGIN_CELLS)
+    unknown = domain & ~pop2
+    coefficients = _stencil(domain, unknown)
     return CurvaturePlan(
         shape=(int(pop2.shape[0]), int(pop2.shape[1])),
         populated=pop2.ravel(),
         reach=reach.ravel(),
         domain=domain,
-        coefficients=_stencil(domain, domain & ~pop2),
+        coefficients=coefficients,
+        hierarchy=build_hierarchy(_OFFSETS, coefficients, unknown),
         cell=float(cell),
         max_distance_m=float(max_distance_m),
     )

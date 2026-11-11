@@ -5,12 +5,22 @@
 from __future__ import annotations
 
 import math
+import threading
 
 import numpy as np
 import pytest
-from nsgeo.slices import CurvaturePlan, SolveStopped, plan_curvature, plan_fill
-from nsgeo.slices.curvature import CURVATURE_EPS
+from nsgeo.slices import (
+    CubeFrame,
+    CurvaturePlan,
+    SolveStopped,
+    multigrid,
+    plan_curvature,
+    plan_fill,
+)
+from nsgeo.slices.curvature import _OFFSETS, CURVATURE_EPS
 from nsgeo.slices.interpolate import reach_mask
+
+from tests.real_lines import SPACING, WINDOWS, binned, needs_real_files, prepared_lines
 
 STEP = 0.05
 ROWS = (5, 15, 25, 35)
@@ -104,17 +114,37 @@ def test_a_large_offset_costs_no_precision():
     np.testing.assert_allclose(shifted[fin], plan.apply(v)[fin], rtol=0, atol=1e-4 * np.ptp(v[pop]))
 
 
+@pytest.mark.parametrize("coarsest", [500, 2])
 @pytest.mark.parametrize("max_distance", [0.15, 0.5])
-def test_min_curvature_matches_a_dense_solve(max_distance):
-    """Spec §9's reference case, over part of the frame and over all of it."""
+def test_min_curvature_matches_a_dense_solve(max_distance, coarsest, monkeypatch):
+    """Spec §9's reference case, over part of the frame and over all of it,
+    on one level and, with a tiny coarsest level, on a hierarchy (#111)."""
+    monkeypatch.setattr(multigrid, "COARSEST_UNKNOWNS", coarsest)
     rng = np.random.default_rng(5)
     pop = rng.random((12, 14)) < 0.2
     v = rng.normal(size=pop.shape)
     reach = reach_mask(pop, 0.1, max_distance)
     assert reach.all() == (max_distance == 0.5)
     want = dense_solve(pop, v, 0.1, max_distance)
-    got = plan_curvature(pop, 0.1, max_distance).apply(v)
+    plan = plan_curvature(pop, 0.1, max_distance)
+    assert (len(plan.hierarchy.levels) > 1) == (coarsest == 2)
+    got = plan.apply(v)
     assert np.array_equal(np.isfinite(got), reach)
+    np.testing.assert_allclose(got[reach], want[reach], rtol=0, atol=1e-4 * np.ptp(v[pop]))
+
+
+def test_min_curvature_matches_a_dense_solve_across_levels():
+    """A frame big enough for the default coarsest level to be a coarse grid:
+    sparse scatter plus four full rows, against the dense solve."""
+    rng = np.random.default_rng(7)
+    pop = rng.random((30, 34)) < 0.08
+    pop[[4, 12, 20, 27]] = True
+    v = rng.normal(size=pop.shape)
+    reach = reach_mask(pop, 0.1, 0.3)
+    want = dense_solve(pop, v, 0.1, 0.3)
+    plan = plan_curvature(pop, 0.1, 0.3)
+    assert len(plan.hierarchy.levels) >= 2
+    got = plan.apply(v)
     np.testing.assert_allclose(got[reach], want[reach], rtol=0, atol=1e-4 * np.ptp(v[pop]))
 
 
@@ -143,7 +173,9 @@ def test_the_solve_area_is_the_reach_grown_by_two_cells():
 def test_partial_coverage_solves_in_few_iterations():
     """Lines 0.5 m apart over the lower 40% of a 50 m frame at 0.2 m, one
     skipped. Solved over the whole frame this took 14,593 iterations in the
-    spike, crawling through the empty ground (interpolation spec §5.4)."""
+    spike, crawling through the empty ground (interpolation spec §5.4). Inside
+    the solve area Jacobi took 95 iterations here; the multigrid
+    preconditioner took 4 in the spike (#111)."""
     cell, n = 0.2, 250
     pop = np.zeros((n, n), bool)
     rows = (np.arange(0.25, 0.4 * n * cell, 0.5) // cell).astype(int)
@@ -152,7 +184,70 @@ def test_partial_coverage_solves_in_few_iterations():
     v = np.sin(x / 1.7) * np.cos(y / 2.3) + 0.05 * x
     plan = plan_curvature(pop, cell, 0.375)
     assert not plan.domain[n // 2 :].any()
-    assert plan.solve(v)[1] <= 400
+    assert plan.solve(v)[1] <= 20
+
+
+def crossing_lines(cell):
+    """10 m x 10 m: lines along X, wandering, 0.5 m apart, and three full
+    columns (the spike's crossing-lines frame)."""
+    n = int(round(10 / cell))
+    pop = np.zeros((n, n), bool)
+    x = (np.arange(n) + 0.5) * cell
+    for i, y0 in enumerate(np.arange(0.25, 10, 0.5)):
+        y = y0 + 0.06 * np.sin(x / 3.0 + i)
+        pop[np.clip((y / cell).astype(int), 0, n - 1), np.arange(n)] = True
+    for x0 in (2.1, 5.3, 8.6):
+        pop[:, int(x0 / cell)] = True
+    return pop
+
+
+def test_iterations_barely_grow_as_cells_shrink():
+    """The point of #111: with Jacobi the count grew about 4x per halving of
+    the cell (39, 152, 549 here); with the hierarchy the spike took 6, 10, 14."""
+    its = {}
+    for cell in (0.2, 0.1, 0.05):
+        pop = crossing_lines(cell)
+        y, x = centres(pop.shape, cell)
+        v = np.sin(x / 1.7) * np.cos(y / 2.3) + 0.3 * np.sin(3.1 * x + 1.3 * y)
+        its[cell] = plan_curvature(pop, cell, 0.375).solve(v)[1]
+    assert all(n <= 30 for n in its.values()), its
+    assert its[0.05] <= 3 * its[0.2], its
+
+
+def test_the_hierarchy_shares_the_plans_operator():
+    pop = lines()
+    plan = plan_curvature(pop, STEP, 0.25)
+    assert plan.hierarchy.levels[0].coefficients is plan.coefficients
+    assert np.array_equal(plan.hierarchy.levels[0].active, plan.domain & ~pop)
+
+
+def test_the_hierarchy_costs_less_memory_than_the_operator():
+    pop = np.zeros((400, 400), bool)
+    pop[::10] = True
+    plan = plan_curvature(pop, STEP, 0.375)
+    assert plan.hierarchy.nbytes < plan.coefficients.nbytes  # the spike measured 0.78x
+
+
+def test_two_threads_solve_one_plan_as_one():
+    """Plans are shared between threads: `precondition` and `solve` keep their
+    scratch to themselves."""
+    pop = lines((10, 30, 50, 70), ny=80, nx=120)
+    plan = plan_curvature(pop, STEP, 0.25)
+    fields = [values(pop, seed) for seed in range(4)]
+    want = [plan.solve(v) for v in fields]
+    got = [None] * 4
+
+    def work(k):
+        got[k] = plan.solve(fields[k])
+
+    threads = [threading.Thread(target=work, args=(k,)) for k in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for (out, its), (want_out, want_its) in zip(got, want):
+        assert its == want_its
+        assert np.array_equal(out, want_out, equal_nan=True)
 
 
 def test_the_start_weights_each_direction_by_its_span():
@@ -277,7 +372,11 @@ def test_a_plan_is_read_only():
     plan = plan_curvature(pop, STEP, 0.25)
     with pytest.raises(ValueError):
         plan.coefficients[0, 0, 0] = 1.0
-    for array in (plan.populated, plan.reach, plan.domain, plan.coefficients):
+    hierarchy = plan.hierarchy
+    arrays = [hierarchy.coarse_cells, hierarchy.coarse_inverse]
+    for level in hierarchy.levels:
+        arrays += [level.coefficients, level.active, level.scale]
+    for array in (plan.populated, plan.reach, plan.domain, plan.coefficients, *arrays):
         assert not array.flags.writeable
     pop[0, 0] = True  # the caller's own array stays theirs
     assert not plan.populated[0]
@@ -292,7 +391,11 @@ def test_nbytes_counts_the_arrays():
     assert plan.coefficients.shape == (13, 40, 60)
     assert plan.coefficients.dtype == np.float32
     assert plan.nbytes == (
-        plan.populated.nbytes + plan.reach.nbytes + plan.domain.nbytes + plan.coefficients.nbytes
+        plan.populated.nbytes
+        + plan.reach.nbytes
+        + plan.domain.nbytes
+        + plan.coefficients.nbytes
+        + plan.hierarchy.nbytes
     )
 
 
@@ -308,3 +411,65 @@ def test_plan_curvature_refuses_bad_input():
             plan_curvature(*args)
     with pytest.raises(ValueError):
         plan_curvature(pop, STEP, 0.25).apply(np.zeros((3, 3)))
+
+
+def tight_solve(plan, values):
+    """float64 Jacobi-preconditioned CG on the plan's operator to 1e-10, the
+    reference for fine cells: the slice with the data in place, NaN off the
+    reach. About 1,100 iterations on the real lines at 0.05 m."""
+    shape = plan.shape
+    pop = plan.populated.reshape(shape)
+    unknown = plan.domain & ~pop
+    a = plan.coefficients.astype(np.float64)
+
+    def times(x):
+        pad = np.zeros((shape[0] + 4, shape[1] + 4))
+        pad[2:-2, 2:-2] = x
+        return sum(
+            a[k] * pad[2 + dy : 2 + dy + shape[0], 2 + dx : 2 + dx + shape[1]]
+            for k, (dy, dx) in enumerate(_OFFSETS)
+        )
+
+    v = np.asarray(values, np.float64)
+    b = -times(np.where(pop, v, 0.0))
+    x = np.zeros(shape)
+    diag = a[_OFFSETS.index((0, 0))]
+    inv = np.where(unknown, 1.0 / np.where(unknown, diag, 1.0), 0.0)
+    r = b.copy()
+    z = r * inv
+    p = z.copy()
+    rz = (r * z).sum()
+    b_norm = math.sqrt((b * b).sum())
+    its = 0
+    while math.sqrt((r * r).sum()) > 1e-10 * b_norm and its < 20000:
+        q = times(p * unknown)
+        alpha = rz / (p * q).sum()
+        x += alpha * p
+        r -= alpha * q
+        z = r * inv
+        rz_next = (r * z).sum()
+        p = z + rz_next / rz * p
+        rz = rz_next
+        its += 1
+    out = np.where(pop, v, x)
+    out[~plan.reach.reshape(shape)] = np.nan
+    return out
+
+
+@needs_real_files
+def test_real_lines_at_a_fine_cell_match_a_tight_solve():
+    """The ten real lines at 0.05 m, where Jacobi took 540 iterations: the
+    hierarchy takes about 16 (spike), and agrees with a float64 solve to
+    milestone B's 0.05 m figure, 4e-4 of the data range (spike: 3e-5)."""
+    frame = CubeFrame((0.0, 0.0), 0.0, 0.05, 400, 100, "EPSG:32633")
+    lns = prepared_lines(range(10), lambda local: local)
+    for k0, k1 in (WINDOWS[0], WINDOWS[2]):
+        v, cov = binned(lns, frame, k0, k1)
+        pop = cov > 0
+        plan = plan_curvature(pop, 0.05, 0.75 * SPACING)
+        out, iterations = plan.solve(v)
+        assert iterations <= 30
+        want = tight_solve(plan, v)
+        gap = plan.reach.reshape(plan.shape) & ~pop
+        err = np.abs(out - want)[gap].max() / np.ptp(np.asarray(v)[pop])
+        assert err <= 4e-4
