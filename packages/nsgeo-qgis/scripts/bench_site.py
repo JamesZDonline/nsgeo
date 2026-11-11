@@ -11,8 +11,8 @@ no plugin and no iface:
         [--azimuths 0 30]
 
 Each site is timed north-up and laid at each further bearing (final review
-I1): a rotated grid halves the lattice pitch (Ruling 2), so a site at 30
-degrees has about four times the lattice pixels of the same site north-up.
+I1): the lattice pixel is the cell at any bearing, but a rotated grid samples
+bilinearly, so a tick at 30 degrees costs more than the same site north-up.
 
 Synthetic lines are fine for timing (spec 4.8). A tick's cost goes with
 traces (traces per metre) and frame size, not with the samples per trace,

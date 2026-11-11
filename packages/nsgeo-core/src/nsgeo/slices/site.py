@@ -3,8 +3,10 @@
 A site is several grids shown as one map. Everything here is pure numpy and
 does no I/O, so the plugin only has to feed it arrays.
 
-* `SiteLattice` and `lattice_pixel` -- the common north-up pixel lattice
-  (spec 4.7, Ruling 2) and `compose`, which gathers grid-local slices onto it.
+* `SiteLattice` -- the common north-up pixel lattice (spec 4.7), at the cell
+  size whatever a grid's bearing; `Footprint`, `footprint` and
+  `compose_footprints` sample each grid-local slice onto it with the
+  bilinear rule (`nsgeo.slices.resample`).
 * `site_axis`, `grid_axis` and `window_on` -- the time-window mapping
   (spec 4.3). `window_on` is the single place a site window becomes a grid
   window; lining up by depth, once velocity fitting lands, replaces its body.
@@ -22,6 +24,7 @@ import numpy as np
 
 from nsgeo.slices.display import SliceWindow
 from nsgeo.slices.frame import CubeFrame, ZAxis
+from nsgeo.slices.resample import Taps, sample, sample_counts
 
 NORMALISATION_METHODS = ("none", "background", "edge", "histogram")
 BACKGROUND_FRACTION = 0.75
@@ -29,10 +32,6 @@ SEAM_WIDTH_SPACINGS = 1.5
 MIN_SEAM_CELLS = 20
 
 _SNAP = 1e-6  # levels: window and axis snapping
-_RIGHT_ANGLE_TOL_DEG = 1e-9
-#: Ruling F-5: how far, in cells, a frame's far corner may sit from where an
-#: axis-aligned frame's would and the frame still count as axis-aligned.
-AXIS_SNAP_CELLS = 0.01
 
 
 def _snap_eps(coords: Iterable[float], pixel: float) -> float:
@@ -113,133 +112,78 @@ class SiteLattice:
         )
 
 
-def snap_azimuth(azimuth_deg: float, extent_m: float, cell: float) -> float:
-    """The nearest multiple of 90 degrees if the frame is axis-aligned in effect.
-
-    Ruling F-5 (final review D3). A frame counts as axis-aligned when its
-    deviation from the nearest right angle moves its far corner by less
-    than `AXIS_SNAP_CELLS` (1%) of a cell across the frame's own extent:
-    `extent_m * |sin(deviation)| < 0.01 * cell`, `extent_m` the distance
-    from the frame's origin to its far corner. Otherwise `azimuth_deg` is
-    returned unchanged. A grid laid north-up in a CRS that differs from the
-    site's by a datum shift alone comes out microdegrees off; taken at face
-    value it halves the lattice pitch (Ruling 2) and quadruples the pixels
-    for a turn no pixel can see. Feed the result to `lattice_pixel`.
-    """
-    right = 90.0 * round(azimuth_deg / 90.0)
-    deviation = math.radians(azimuth_deg - right)
-    if extent_m * abs(math.sin(deviation)) < AXIS_SNAP_CELLS * cell:
-        return right
-    return azimuth_deg
-
-
-def lattice_pixel(cell: float, azimuths: Iterable[float]) -> float:
-    """The lattice pitch for a site (Ruling 2): `cell`, or `cell / 2` if any frame is rotated.
-
-    A backward nearest-neighbour gather loses no cell when every frame is
-    axis-aligned (each cell holds exactly one pixel centre at pitch = cell),
-    but does lose cells in a rotated frame. At half the pitch a rotated
-    square still contains a lattice point. An azimuth counts as a multiple
-    of 90 degrees within 1e-9 degrees; `snap_azimuth` decides first whether
-    a frame a hair off a right angle is axis-aligned in effect (Ruling F-5).
-    """
-    for az in azimuths:
-        if abs(az - 90.0 * round(az / 90.0)) > _RIGHT_ANGLE_TOL_DEG:
-            return cell / 2.0
-    return cell
-
-
-def compose(lattice: SiteLattice, layers: Sequence[tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
-    """Gather grid-local slices onto the lattice; overlaps take the mean.
-
-    Each layer is `(ids, values)`: `ids` is `(n_pixels,)` from
-    `frame.cell_index(lattice.pixel_centres())` (-1 outside the frame) and
-    `values` is the frame's `(ny, nx)` array. Each pixel is the mean of the
-    finite values covering it, NaN where none do. Returns float32
-    `(height, width)`.
-    """
-    total = np.zeros(lattice.n_pixels, dtype=float)
-    count = np.zeros(lattice.n_pixels, dtype=np.int64)
-    for ids, values in layers:
-        ids = np.asarray(ids)
-        if ids.shape != (lattice.n_pixels,):
-            raise ValueError(f"ids must be ({lattice.n_pixels},), got {ids.shape}")
-        flat = np.asarray(values, dtype=float).reshape(-1)
-        got = flat[np.clip(ids, 0, flat.size - 1)]
-        ok = (ids >= 0) & np.isfinite(got)
-        total += np.where(ok, got, 0.0)
-        count += ok
-    out = np.full(lattice.n_pixels, np.nan, dtype=float)
-    np.divide(total, count, out=out, where=count > 0)
-    return out.reshape(lattice.height, lattice.width).astype(np.float32)
-
-
 @dataclass(frozen=True, eq=False)
 class Footprint:
-    """Where one layer lands on a lattice: a window, and the cell ids inside it.
+    """Where one layer lands on a lattice: a window, and the taps of its pixels.
 
     The window is lattice rows `[row0, row1)` and columns `[col0, col1)`;
-    `ids` is `(row1 - row0, col1 - col0)`, the frame cell under each pixel
-    centre, -1 outside the frame. Every pixel outside the window is -1 in
-    the whole-lattice gather this stands for, so `compose_footprints` over
-    windows gives exactly what `compose` gives over the whole lattice
-    (final review I1): a 50 m grid at 30 degrees touches about a tenth of a
-    ten-grid site's half-pitch lattice. Built tight by `footprint`.
+    `taps` holds the bilinear taps (`nsgeo.slices.resample`) of its pixel
+    centres, row-major over the window, so `taps.n` is the window's pixel
+    count. Every pixel outside the window is outside the frame, so
+    `compose_footprints` works over windows alone (final review I1): a 50 m
+    grid at 30 degrees touches a small part of a ten-grid site's lattice.
+    Built tight by `footprint`.
 
-    `eq=False`, as for `Seam`: an ndarray field.
+    `eq=False`, as for `Seam`: the taps hold ndarrays.
     """
 
     row0: int
     row1: int
     col0: int
     col1: int
-    ids: np.ndarray
+    taps: Taps
 
     def __post_init__(self) -> None:
-        shape = (self.row1 - self.row0, self.col1 - self.col0)
-        if self.ids.shape != shape:
-            raise ValueError(f"ids must be {shape} for this window, got {self.ids.shape}")
+        n = (self.row1 - self.row0) * (self.col1 - self.col0)
+        if self.taps.n != n:
+            raise ValueError(f"taps must hold {n} points for this window, got {self.taps.n}")
 
     @property
     def n_pixels(self) -> int:
-        return int(self.ids.size)
+        return int(self.taps.n)
 
 
-def footprint(ids: np.ndarray, row0: int = 0, col0: int = 0) -> Footprint:
-    """The tight window around the placed pixels of a block of cell ids.
+def footprint(taps: Taps, rows: int, cols: int, row0: int = 0, col0: int = 0) -> Footprint:
+    """The tight window around the inside points of a block of taps.
 
-    `ids` is `(rows, cols)` with its top-left pixel at lattice `(row0,
-    col0)`: a whole-lattice gather reshaped to `(height, width)`, or a
-    padded window around one frame. Only rows and columns that place a
-    pixel (an id >= 0) are kept, so every edge of the window places one.
-    With no placed pixel the footprint is empty, at `(row0, col0)`.
+    `taps` is row-major over a `(rows, cols)` block whose top-left pixel is
+    at lattice `(row0, col0)`: a whole-lattice gather, or a padded window
+    around one frame. Only rows and columns holding a point with
+    `taps.inside` are kept, so every edge of the window places one. With
+    none the footprint is empty, at `(row0, col0)`.
     """
-    ids = np.asarray(ids)
-    if ids.ndim != 2:
-        raise ValueError(f"ids must be 2-D, got shape {ids.shape}")
-    placed = ids >= 0
-    rows = np.flatnonzero(placed.any(axis=1))
-    cols = np.flatnonzero(placed.any(axis=0))
-    if rows.size == 0:
-        return Footprint(row0, row0, col0, col0, np.empty((0, 0), dtype=ids.dtype))
-    r0, r1 = int(rows[0]), int(rows[-1]) + 1
-    c0, c1 = int(cols[0]), int(cols[-1]) + 1
-    return Footprint(row0 + r0, row0 + r1, col0 + c0, col0 + c1, ids[r0:r1, c0:c1].copy())
+    if taps.n != rows * cols:
+        raise ValueError(f"taps must hold {rows * cols} points for {rows} x {cols}, got {taps.n}")
+    inside = taps.inside.reshape(rows, cols)
+    placed_rows = np.flatnonzero(inside.any(axis=1))
+    placed_cols = np.flatnonzero(inside.any(axis=0))
+    if placed_rows.size == 0:
+        return Footprint(row0, row0, col0, col0, taps.take(np.empty(0, dtype=np.intp)))
+    r0, r1 = int(placed_rows[0]), int(placed_rows[-1]) + 1
+    c0, c1 = int(placed_cols[0]), int(placed_cols[-1]) + 1
+    index = np.arange(rows * cols, dtype=np.intp).reshape(rows, cols)[r0:r1, c0:c1].ravel()
+    return Footprint(row0 + r0, row0 + r1, col0 + c0, col0 + c1, taps.take(index))
 
 
 def compose_footprints(
-    lattice: SiteLattice, layers: Sequence[tuple[Footprint, np.ndarray]]
+    lattice: SiteLattice,
+    layers: Sequence[tuple[Footprint, np.ndarray]],
+    *,
+    counts: bool = False,
 ) -> np.ndarray:
-    """`compose`, each layer accumulated over its own window only (final review I1).
+    """Sample each layer over its own window and average the overlaps.
 
     Each layer is `(footprint, values)`, `values` the frame's `(ny, nx)`
-    array. The same sums and counts in the same layer order as `compose`,
-    so the result is bit-identical to `compose` over the whole-lattice
-    gathers the footprints stand for. Raises ValueError for a window that
-    is not on the lattice.
+    array. A layer is sampled bilinearly (`sample`), or as whole counts
+    (`sample_counts`) when `counts`. A pixel is the mean of the finite
+    samples covering it, NaN where none do. Accumulated in float32 with a
+    uint8 count (a pixel is covered by a handful of grids), so a tick holds
+    no float64 lattice. Returns float32 `(height, width)`. Raises ValueError
+    for a window that is not on the lattice.
     """
-    total = np.zeros((lattice.height, lattice.width), dtype=float)
-    count = np.zeros((lattice.height, lattice.width), dtype=np.int64)
+    take = sample_counts if counts else sample
+    total = np.zeros((lattice.height, lattice.width), dtype=np.float32)
+    count = np.zeros((lattice.height, lattice.width), dtype=np.uint8)
     for where, values in layers:
         if not (
             0 <= where.row0 <= where.row1 <= lattice.height
@@ -251,15 +195,14 @@ def compose_footprints(
             )
         if where.n_pixels == 0:
             continue
-        flat = np.asarray(values, dtype=float).reshape(-1)
-        got = flat[np.clip(where.ids, 0, flat.size - 1)]
-        ok = (where.ids >= 0) & np.isfinite(got)
+        got = take(values, where.taps).reshape(where.row1 - where.row0, where.col1 - where.col0)
+        ok = np.isfinite(got)
         window = (slice(where.row0, where.row1), slice(where.col0, where.col1))
-        total[window] += np.where(ok, got, 0.0)
+        total[window] += np.where(ok, got, np.float32(0.0))
         count[window] += ok
-    out = np.full(lattice.n_pixels, np.nan, dtype=float)
-    np.divide(total.reshape(-1), count.reshape(-1), out=out, where=count.reshape(-1) > 0)
-    return out.reshape(lattice.height, lattice.width).astype(np.float32)
+    out = np.full((lattice.height, lattice.width), np.nan, dtype=np.float32)
+    np.divide(total, count, out=out, where=count > 0)
+    return out
 
 
 def site_axis(

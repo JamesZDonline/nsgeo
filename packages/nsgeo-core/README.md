@@ -86,7 +86,6 @@ several grids' slices into one site view.
 
 | Name | Purpose |
 |---|---|
-| `AXIS_SNAP_CELLS` | How far, in cells, a frame's far corner may sit from an axis-aligned frame's and still count as axis-aligned. |
 | `BACKGROUND_FRACTION` | The weakest fraction of populated cells that `background_level` averages. |
 | `CoverageError` | A line cannot contribute to the requested cube. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
@@ -94,7 +93,7 @@ several grids' slices into one site view.
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
 | `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
 | `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
-| `Footprint` | Where one grid lands on a site lattice: a window, and the cell ids inside it. |
+| `Footprint` | Where one grid lands on a site lattice: a window, and the bilinear taps of its pixels. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging, minimum curvature. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
@@ -114,14 +113,12 @@ several grids' slices into one site view.
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
-| `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
-| `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
+| `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
-| `footprint` | The tight window around the placed pixels of a block of cell ids. |
+| `footprint` | The tight window around the inside points of a block of taps. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
-| `lattice_pixel` | The site lattice pitch: the cell, or half of it if any frame is rotated. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
 | `load_cube` | Read a cube written by `save_cube`. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
@@ -138,7 +135,6 @@ several grids' slices into one site view.
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
-| `snap_azimuth` | The nearest right angle, when a frame is axis-aligned in effect. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `window_depths_m` | A window in metres, through a velocity model. |

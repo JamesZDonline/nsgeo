@@ -99,16 +99,15 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
+    bilinear_taps,
     compose_footprints,
     find_seams,
     footprint,
     grid_axis,
-    lattice_pixel,
     limit_over_slices,
     normalise,
     site_axis,
     slice_extent,
-    snap_azimuth,
     window_on,
 )
 from qgis.core import (
@@ -651,20 +650,11 @@ class SiteEngine(QObject):
             return
         lattice = self._covering_lattice(ready, res.cell)
         if lattice.n_pixels > MAX_FRAME_CELLS:
-            # Final review M5: a rotated grid quarters the pixel (Ruling 2),
-            # often the real reason, so the refusal says so when it applies.
-            rotated = (
-                f" A rotated grid puts the site on a half-cell pitch ({lattice.pixel:g} m "
-                f"for a {res.cell:g} m cell), four times the pixels of the same grids "
-                "north-up."
-                if lattice.pixel < res.cell
-                else ""
-            )
             raise ValueError(
                 f"the site lattice would be {lattice.width} x {lattice.height} = "
                 f"{lattice.n_pixels:,} pixels at {lattice.pixel:g} m, more than the "
                 f"{MAX_FRAME_CELLS:,} a slice can be drawn at: the included grids are too "
-                f"far apart for this cell size.{rotated} Choose a coarser cell or include "
+                f"far apart for this cell size. Choose a coarser cell or include "
                 "fewer grids"
             )
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
@@ -709,17 +699,13 @@ class SiteEngine(QObject):
         return str(self.session.site.grids[0].crs)
 
     def _covering_lattice(self, ready: Sequence[str], cell: float) -> SiteLattice:
+        """The lattice over the ready grids, one pixel to the cell at any bearing."""
         site_crs = self._site_crs()
         extents = []
-        azimuths = []
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
             extents.append(self._extent_in(frame, site_crs))
-            # Ruling F-5 (final review D3): a frame a hair off a right angle
-            # -- a datum-only CRS shift -- is axis-aligned in effect.
-            far_corner_m = math.hypot(frame.nx, frame.ny) * frame.cell
-            azimuths.append(snap_azimuth(self._azimuth_in(frame, site_crs), far_corner_m, cell))
-        return SiteLattice.covering(extents, lattice_pixel(cell, azimuths), site_crs)
+        return SiteLattice.covering(extents, cell, site_crs)
 
     @staticmethod
     def _transform(points: np.ndarray, source: str, target: str) -> np.ndarray:
@@ -766,25 +752,6 @@ class SiteEngine(QObject):
             float(moved[:, 1].max()),
         )
 
-    @classmethod
-    def _azimuth_in(cls, frame: CubeFrame, crs: str) -> float:
-        """The frame's bearing in the site CRS, for `lattice_pixel` (Ruling 2).
-
-        A grid laid north-up in another zone is turned by the difference in
-        meridian convergence, so it counts as rotated on the site lattice --
-        unless the turn is too small to move its far corner by 1% of a cell
-        (`snap_azimuth`, Ruling F-5), as for a datum-only shift.
-        """
-        if frame.crs == crs:
-            return frame.azimuth
-        _, y_hat = frame.axes()
-        origin = np.asarray(frame.origin, dtype=float)
-        ends = cls._transform(
-            np.array([origin, origin + y_hat * frame.ny * frame.cell]), frame.crs, crs
-        )
-        dx, dy = ends[1] - ends[0]
-        return math.degrees(math.atan2(dx, dy))
-
     def _drop_caches(self) -> None:
         self._gathers = {}
         self._seams = None
@@ -829,16 +796,14 @@ class SiteEngine(QObject):
         return tuple((grid_id, snapshot.get(grid_id)) for grid_id in self.ready_grids)
 
     def _gather(self, grid_id: str, lattice: SiteLattice) -> Footprint:
-        """`grid_id`'s frame cell under each lattice pixel, kept to its own window.
+        """`grid_id`'s bilinear taps under each lattice pixel, kept to its own window.
 
         Once per grid per lattice (spec 4.7). Only the pixels inside the
         frame's extent (plus one) are looked up, and, for a frame in
         another CRS, transformed into it first. The result is a
-        `Footprint`, the tight window around the placed pixels (final
-        review I1): every pixel outside it is outside the frame, so the
-        tick composes over the window alone. A whole-lattice array per
-        grid made a rotated site, at half the pitch (Ruling 2), cost a
-        full-lattice pass per grid per tick.
+        `Footprint`, the tight window around the pixels inside the frame
+        (final review I1): every pixel outside it is outside the frame, so
+        the tick composes over the window alone.
         """
         cached = self._gathers.get(grid_id)
         if cached is not None:
@@ -862,10 +827,10 @@ class SiteEngine(QObject):
             centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
             if frame.crs != lattice.crs:
                 centres = self._transform(centres, lattice.crs, frame.crs)
-            ids = frame.cell_index(centres).reshape(row1 - row0, col1 - col0)
-            gathered = footprint(ids, row0, col0)
+            taps = bilinear_taps(frame, centres)
+            gathered = footprint(taps, row1 - row0, col1 - col0, row0, col0)
         else:
-            gathered = footprint(np.empty((0, 0), dtype=np.intp))
+            gathered = footprint(bilinear_taps(frame, np.empty((0, 2))), 0, 0)
         self._gathers[grid_id] = gathered
         return gathered
 
@@ -1081,7 +1046,9 @@ class SiteEngine(QObject):
         windows, shown, factors = self._shown(
             top_ns, thickness_ns, method, manual, coverage, draw, sliced=sliced
         )
-        array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
+        array = compose_footprints(
+            lattice, [(self._gather(g, lattice), shown[g]) for g in shown], counts=coverage
+        )
         self._record_redraw((time.perf_counter() - started) * 1000.0)
         return SiteSlice(
             array=array,

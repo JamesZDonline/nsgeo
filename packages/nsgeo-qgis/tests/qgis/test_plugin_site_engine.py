@@ -13,14 +13,16 @@ from nsgeo.slices import (
     NORMALISATION_METHODS,
     SiteLattice,
     SliceWindow,
-    compose,
+    bilinear_taps,
     find_seams,
     limit_over_slices,
     normalise,
+    sample,
+    sample_counts,
     window_on,
 )
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis import slices_engine
+from nsgeo_qgis import site_engine, slices_engine
 from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -114,13 +116,21 @@ def expected_shown(site, session, top_ns, thickness_ns, *, finish, method, manua
     return shown, factors
 
 
-def composed(site, shown):
-    """`shown` composed on the site lattice from whole-lattice gathers."""
+def composed(site, shown, *, counts=False):
+    """`shown` composed on the site lattice: the mean over grids of each grid's
+    own bilinear (or whole-count) samples at every pixel centre."""
     lattice = site.lattice
-    return compose(
-        lattice,
-        [(site.engine_for(g).frame.cell_index(lattice.pixel_centres()), shown[g]) for g in shown],
-    )
+    take = sample_counts if counts else sample
+    total = np.zeros(lattice.n_pixels)
+    n = np.zeros(lattice.n_pixels)
+    for g in shown:
+        got = take(shown[g], bilinear_taps(site.engine_for(g).frame, lattice.pixel_centres()))
+        ok = np.isfinite(got)
+        total += np.where(ok, got, 0.0)
+        n += ok
+    out = np.full(lattice.n_pixels, np.nan)
+    np.divide(total, n, out=out, where=n > 0)
+    return out.reshape(lattice.height, lattice.width)
 
 
 def slow(site, ms: float = 500.0) -> None:
@@ -614,11 +624,7 @@ def test_histogram_factors_apply_to_the_filled_slice_as_a_gain_and_a_shift(site3
     assert any(abs(shift) > 1e-3 for _, shift in factors.values()), factors
     for g in "ABC":
         assert drawn.factors[g] == pytest.approx(factors[g])
-    lattice = drawn.lattice
-    layers = [
-        (site.engine_for(g).frame.cell_index(lattice.pixel_centres()), shown[g]) for g in shown
-    ]
-    np.testing.assert_allclose(drawn.array, compose(lattice, layers), rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(drawn.array, composed(site, shown), rtol=1e-5, atol=1e-6)
 
 
 def test_site_slices_are_each_grids_finished_slice_times_its_gain(site3, make_site):
@@ -915,7 +921,7 @@ def test_the_shared_limit_follows_normalisation(site3_factory, make_site):
 
 def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, make_site):
     """Spec 4.7: for a grid in another CRS the lattice's pixel centres are
-    transformed into that grid's CRS before `cell_index`. B is declared in
+    transformed into that grid's CRS before `bilinear_taps`. B is declared in
     EPSG:32615 (the next UTM zone) at the same place on the ground, so its
     own coordinates are some 160 km of easting away from the site's.
 
@@ -941,36 +947,88 @@ def test_a_grid_in_another_crs_lands_where_its_coordinates_say(site3_factory, ma
     in_b = np.array(
         [(p.x(), p.y()) for p in (to_b.transform(QgsPointXY(x, y)) for x, y in centres)]
     )
-    ids_b = frame_b.cell_index(in_b)
-    only_b = ids_b >= 0
+    taps_b = bilinear_taps(frame_b, in_b)
+    only_b = taps_b.inside.copy()
     for g in "AC":
         only_b &= site.engine_for(g).frame.cell_index(centres) < 0
-    expected = shown_b.ravel()[ids_b[only_b]]
+    expected = sample(shown_b, taps_b)[only_b]
     assert np.isfinite(expected).sum() > 50
-    np.testing.assert_array_equal(drawn.array.ravel()[only_b], expected)
+    np.testing.assert_allclose(drawn.array.ravel()[only_b], expected, atol=1e-6, equal_nan=True)
     # And on the ground: between A and C, in the site's own coordinates.
     xs = centres[only_b & np.isfinite(drawn.array.ravel()), 0]
     assert xs.min() >= 506.0 and xs.max() <= 512.1
     assert errors == [], errors
 
 
-def test_a_rotated_site_composes_exactly_as_whole_lattice_gathers_would(site3, make_site):
-    """Final review I1: each grid's gather is kept to its own window on the
-    lattice, and composed there only. B laid at 30 degrees halves the pitch
-    (Ruling 2) and overlaps C at a corner, which must still average. The
-    tick is bit-identical to `compose` over whole-lattice gathers."""
+def test_a_rotated_site_composes_each_grid_bilinearly(site3, make_site):
+    """Each grid's taps are kept to its own window on the lattice and sampled
+    there only. B laid at 30 degrees overlaps C at a corner, which must still
+    average; the tick is the mean over grids of each grid's bilinear sample
+    at every pixel centre, on a lattice one cell to the pixel."""
     session = site3.session
     session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=30.0))
     site, errors = prepared(make_site, site3)
     lattice = site.lattice
-    assert lattice.pixel == RES.cell / 2
+    assert lattice.pixel == RES.cell
     drawn = site.slice_at(20.0, 5.0, **TICK)
     shown, _ = expected_shown(site, session, 20.0, 5.0, **TICK)
     centres = lattice.pixel_centres()
-    gathers = {g: site.engine_for(g).frame.cell_index(centres) for g in shown}
-    assert ((gathers["B"] >= 0) & (gathers["C"] >= 0)).sum() > 50, "B and C must overlap"
-    expected = compose(lattice, [(gathers[g], shown[g]) for g in shown])
-    assert np.array_equal(drawn.array, expected, equal_nan=True)
+    taps = {g: bilinear_taps(site.engine_for(g).frame, centres) for g in shown}
+    assert (taps["B"].inside & taps["C"].inside).sum() > 50, "B and C must overlap"
+    assert not taps["B"].exact, "a rotated grid is blended, not copied"
+    expected = composed(site, shown)
+    np.testing.assert_allclose(drawn.array, expected, atol=1e-5, equal_nan=True)
+    np.testing.assert_array_equal(np.isnan(drawn.array), np.isnan(expected))
+    nearest = np.where(
+        taps["B"].inside, shown["B"].ravel()[np.clip(taps["B"].nearest, 0, None)], np.nan
+    )
+    blend = sample(shown["B"], taps["B"])
+    only_b = taps["B"].inside & ~taps["C"].inside & ~taps["A"].inside
+    assert np.nanmax(np.abs(nearest - blend)[only_b]) > 1e-3, "nearest and blend must differ"
+    assert errors == [], errors
+
+
+@pytest.mark.parametrize("azimuth", [0.0, 1e-6, 2.0, 30.0])
+def test_the_site_pixel_is_the_cell_at_any_bearing(site3, make_site, azimuth):
+    session = site3.session
+    session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=azimuth))
+    site, errors = prepared(make_site, site3)
+    assert site.lattice.pixel == RES.cell
+    assert errors == [], errors
+
+
+def test_coverage_on_the_site_is_whole_counts(site3, make_site, monkeypatch):
+    """Coverage composes with counts=True: a rotated grid's tick holds only
+    its own whole counts (or the mean of two overlapping grids' counts),
+    never a bilinear blend of neighbouring cells' counts. The synthetic
+    lines give every populated cell the same count, so the values alone
+    cannot tell a blend from a count: the call itself is pinned too."""
+    calls = []
+    real = site_engine.compose_footprints
+
+    def spy(lattice, layers, **kwargs):
+        calls.append(kwargs)
+        return real(lattice, layers, **kwargs)
+
+    monkeypatch.setattr(site_engine, "compose_footprints", spy)
+    session = site3.session
+    session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=30.0))
+    # A cell a line spacing wide, so a rotated grid's counts are populated.
+    site, errors = prepared(make_site, site3, resolution=dataclasses.replace(RES, cell=1.5))
+    site.slice_at(20.0, 5.0, **TICK)
+    drawn = site.slice_at(20.0, 5.0, **TICK, coverage=True)
+    assert [c.get("counts", False) for c in calls] == [False, True]
+    counts = {g: site.engine_for(g).slice_at(drawn.windows[g])[1].astype(np.float32) for g in "ABC"}
+    taps_b = bilinear_taps(site.engine_for("B").frame, site.lattice.pixel_centres())
+    own_b = sample_counts(counts["B"], taps_b)
+    shown_b = np.isfinite(own_b)
+    assert shown_b.sum() > 5, "B must show counts"
+    assert np.isfinite(drawn.array.ravel()[shown_b]).all()
+    allowed = {float(v) for v in np.unique(np.concatenate([c[c > 0] for c in counts.values()]))}
+    everywhere = drawn.array[np.isfinite(drawn.array)]
+    assert set(np.unique(everywhere)) <= allowed | {(a + b) / 2.0 for a in allowed for b in allowed}
+    expected = composed(site, counts, counts=True)
+    np.testing.assert_allclose(drawn.array, expected, atol=1e-5, equal_nan=True)
     assert errors == [], errors
 
 
@@ -991,46 +1049,6 @@ def test_grids_too_far_apart_for_the_lattice_are_refused_by_pixel_count(site3, m
         site.set_resolution(RES)
     assert f"{n_pixels:,}" in str(refused.value)
     assert site.lattice is None
-
-
-def test_a_refusal_with_a_rotated_grid_names_the_half_cell_pitch(site3, make_site):
-    """Final review M5: a rotated grid puts the site on a half-cell pitch
-    (Ruling 2) -- four times the pixels, and often the actual reason the
-    lattice is refused -- so the message says so, and only then."""
-    session = site3.session
-    session.replace_grid(dataclasses.replace(session.grid("C"), origin=(5000.0, 5000.0)))
-    site = make_site(session)
-    site.set_source(site3.source())
-    assert site.wait_until_idle(60_000)
-    with pytest.raises(ValueError, match="pixels") as north_up:
-        site.set_resolution(RES)
-    assert "half-cell" not in str(north_up.value)
-
-    session.replace_grid(dataclasses.replace(session.grid("C"), azimuth=30.0))
-    assert site.wait_until_idle(60_000)
-    with pytest.raises(ValueError, match="pixels") as rotated:
-        site.set_resolution(RES)
-    text = str(rotated.value)
-    assert "at 0.125 m" in text
-    assert "rotated grid puts the site on a half-cell pitch (0.125 m for a 0.25 m cell)" in text
-    assert text.endswith("Choose a coarser cell or include fewer grids")
-
-
-@pytest.mark.parametrize(
-    ("azimuth", "pitch"),
-    [(1e-6, 1.0), (90.0 + 1e-6, 1.0), (2.0, 0.5), (0.01, 1.0), (0.02, 0.5)],
-)
-def test_a_grid_a_hair_off_north_keeps_the_full_cell_pitch(site3, make_site, azimuth, pitch):
-    """Final review D3 (Ruling F-5): a frame counts as axis-aligned when its
-    deviation moves its far corner under 1% of a cell. B is 6 x 6 m, so its
-    far corner is 8.49 m out: 0.01 degrees moves it 1.5 mm (under 2.5 mm,
-    1% of 0.25 m) and 0.02 degrees 3.0 mm (over). Measured along one side
-    (6 m) instead, 0.02 degrees would be 2.1 mm and wrongly snap."""
-    session = site3.session
-    session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=azimuth))
-    site, errors = prepared(make_site, site3)
-    assert site.lattice.pixel == RES.cell * pitch
-    assert errors == [], errors
 
 
 def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):

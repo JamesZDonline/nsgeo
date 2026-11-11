@@ -37,7 +37,6 @@ from nsgeo.slices.interpolate import (
 )
 from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
 from nsgeo.slices.site import (
-    AXIS_SNAP_CELLS,
     BACKGROUND_FRACTION,
     MIN_SEAM_CELLS,
     NORMALISATION_METHODS,
@@ -46,24 +45,20 @@ from nsgeo.slices.site import (
     Seam,
     SiteLattice,
     background_level,
-    compose,
     compose_footprints,
     edge_match_solve,
     find_seams,
     footprint,
     grid_axis,
-    lattice_pixel,
     normalise,
     seam_masks,
     site_axis,
-    snap_azimuth,
     window_on,
 )
 from nsgeo.slices.smooth import smooth
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 
 __all__ = [
-    "AXIS_SNAP_CELLS",
     "BACKGROUND_FRACTION",
     "CoverageError",
     "CubeFrame",
@@ -91,14 +86,12 @@ __all__ = [
     "background_level",
     "bilinear_taps",
     "build_cube",
-    "compose",
     "compose_footprints",
     "edge_match_solve",
     "find_seams",
     "finish_slice",
     "footprint",
     "grid_axis",
-    "lattice_pixel",
     "limit_over_slices",
     "load_cube",
     "normalise",
@@ -115,7 +108,6 @@ __all__ = [
     "site_axis",
     "slice_extent",
     "smooth",
-    "snap_azimuth",
     "stream_slice",
     "to_north_up",
     "window_depths_m",
