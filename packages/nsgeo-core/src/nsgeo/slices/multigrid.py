@@ -124,7 +124,9 @@ def _level(
     offsets: Sequence[tuple[int, int]], coefficients: np.ndarray, active: np.ndarray
 ) -> Level:
     # l1-Jacobi: every eigenvalue of scale · A is at most 1, with no estimate.
-    absolute_sum = np.abs(coefficients).sum(axis=0, dtype=np.float32)
+    absolute_sum = np.zeros(active.shape, np.float32)
+    for plane in coefficients:  # one offset at a time: no full float32 copy of level 0
+        absolute_sum += np.abs(plane)
     scale = np.zeros(active.shape, np.float32)
     np.divide(1.0, absolute_sum, out=scale, where=active)
     return Level(tuple(offsets), coefficients, active, scale)
@@ -145,26 +147,35 @@ def _coarsen(level: Level) -> Level:
             for k, (oy, ox) in enumerate(COARSE_OFFSETS):
                 sy, sx = (py - oy) % _PERIOD, (px - ox) % _PERIOD
                 coef[k, sy::_PERIOD, sx::_PERIOD] = column[sy::_PERIOD, sx::_PERIOD]
-    # Symmetrise: row i at offset o pairs with row i + o at offset -o.
-    sym = np.empty_like(coef)
+    # Symmetrise in place: row i at offset o pairs with row i + o at offset -o.
+    # Each pair (k, k') is averaged through one plane-sized temporary.
     for k, (oy, ox) in enumerate(COARSE_OFFSETS):
-        mirror = np.zeros(cs, np.float32)
+        k2 = _COARSE_INDEX[(-oy, -ox)]
+        if k2 < k:
+            continue
         ys = slice(max(0, -oy), min(cs[0], cs[0] - oy))
         xs = slice(max(0, -ox), min(cs[1], cs[1] - ox))
-        mirror[ys, xs] = coef[
-            _COARSE_INDEX[(-oy, -ox)],
-            ys.start + oy : ys.stop + oy,
-            xs.start + ox : xs.stop + ox,
-        ]
-        sym[k] = 0.5 * (coef[k] + mirror)
-    active = sym[_COARSE_CENTRE] > 0
-    sym *= active
-    return _level(COARSE_OFFSETS, sym, active)
+        ys2 = slice(ys.start + oy, ys.stop + oy)
+        xs2 = slice(xs.start + ox, xs.stop + ox)
+        mirror = np.zeros(cs, np.float32)  # plane k's partner values, 0 off the array
+        mirror[ys, xs] = coef[k2, ys2, xs2]
+        if k2 == k:
+            coef[k] = 0.5 * (coef[k] + mirror)
+            continue
+        mirror2 = np.zeros(cs, np.float32)  # and plane k2's
+        ys3 = slice(max(0, oy), min(cs[0], cs[0] + oy))
+        xs3 = slice(max(0, ox), min(cs[1], cs[1] + ox))
+        mirror2[ys3, xs3] = coef[k, ys3.start - oy : ys3.stop - oy, xs3.start - ox : xs3.stop - ox]
+        coef[k] = 0.5 * (coef[k] + mirror)
+        coef[k2] = 0.5 * (coef[k2] + mirror2)
+    active = coef[_COARSE_CENTRE] > 0
+    coef *= active
+    return _level(COARSE_OFFSETS, coef, active)
 
 
 def _chebyshev(level: Level, b: np.ndarray, x: np.ndarray | None) -> np.ndarray:
     """SMOOTHING_DEGREE Chebyshev steps on scale·A over [1/ratio, 1], from x
-    (zero if None). Returns a new array; `x` is advanced in place."""
+    (zero if None). Returns x, advanced in place (a new array when x is None)."""
     hi = 1.0
     lo = hi / SMOOTHING_RATIO
     theta, delta = 0.5 * (hi + lo), 0.5 * (hi - lo)
@@ -176,8 +187,10 @@ def _chebyshev(level: Level, b: np.ndarray, x: np.ndarray | None) -> np.ndarray:
     else:
         r = (b - apply_stencil(level.offsets, level.coefficients, x * level.active)) * level.scale
     d = r / np.float32(theta)
-    for _ in range(SMOOTHING_DEGREE):
+    for step in range(SMOOTHING_DEGREE):
         x += d
+        if step == SMOOTHING_DEGREE - 1:
+            break  # the residual and direction below would go unused
         r -= apply_stencil(level.offsets, level.coefficients, d * level.active) * level.scale
         rho_next = 1.0 / (2.0 * sigma - rho)
         d = np.float32(rho_next * rho) * d + np.float32(2.0 * rho_next / delta) * r

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import threading
 
 import numpy as np
@@ -54,9 +55,7 @@ def small_frame():
 
 
 def test_coarse_offsets_are_the_25_row_major():
-    assert len(COARSE_OFFSETS) == 25
-    assert COARSE_OFFSETS[0] == (-2, -2) and COARSE_OFFSETS[-1] == (2, 2)
-    assert tuple(sorted(COARSE_OFFSETS)) == COARSE_OFFSETS
+    assert COARSE_OFFSETS == tuple(itertools.product(range(-2, 3), repeat=2))
 
 
 def test_restrict_is_the_transpose_of_prolong():
@@ -128,8 +127,9 @@ def test_the_preconditioner_is_symmetric_and_positive(monkeypatch):
         r2 = (rng.normal(size=act.shape) * act).astype(np.float32)
         keep = r1.copy()
         m1, m2 = h.precondition(r1), h.precondition(r2)
-        # Random signs cancel the dot to ~0.3 against norm products of ~1e5, so float32
-        # rounding in the cycle is held to the norms, not to the dot itself.
+        # Random signs cancel the dot to between 0.3 and 200 (0.27 for seed 1)
+        # against norm products of about 6e3, so float32 rounding in the cycle
+        # is held to the norms, not to the dot itself.
         a = float(np.vdot(m1.astype(np.float64), r2))
         b = float(np.vdot(r1.astype(np.float64), m2))
         scale = max(
@@ -188,6 +188,7 @@ def test_a_hierarchy_is_read_only():
 def test_nbytes_counts_every_array_but_the_fine_coefficients():
     coef, act = operator(lines(), 0.05, 0.25)
     h = build_hierarchy(_OFFSETS, coef, act)
+    assert h.levels[0].coefficients is coef
     want = h.coarse_cells.nbytes + h.coarse_inverse.nbytes - h.levels[0].coefficients.nbytes
     for level in h.levels:
         want += level.coefficients.nbytes + level.active.nbytes + level.scale.nbytes
