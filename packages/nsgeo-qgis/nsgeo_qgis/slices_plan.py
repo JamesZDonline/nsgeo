@@ -528,7 +528,8 @@ def finest_fits(
     The pixel is searched in `[pixel, cell]` at this cell; it is `None` when
     the pixel already equals the cell, or nothing fits. The cell is searched
     from this one up with the pixel set to it (`None` when this cell already fits),
-    by doubling and then bisection, and is `None` past `FINEST_CELL_REACH` times this cell. Both assume the
+    by doubling and then bisection, and is `None` past `FINEST_CELL_REACH` times this
+    cell. Both assume the
     held bytes fall as the cell or the pixel grows, and use O(log) calls of
     `held_at`, each of which can be slow.
     """
