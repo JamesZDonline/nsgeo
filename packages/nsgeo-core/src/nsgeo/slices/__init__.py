@@ -11,10 +11,11 @@ from nsgeo.slices.binning import (
     LinePlan,
     PreparedLine,
     build_cube,
+    covered_cells,
     plan_line,
     stream_slice,
 )
-from nsgeo.slices.cube import Provenance, SliceCube
+from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
@@ -65,6 +66,7 @@ __all__ = [
     "AXIS_SNAP_CELLS",
     "BACKGROUND_FRACTION",
     "CoverageError",
+    "CubeBlock",
     "CubeFrame",
     "CubeStoreError",
     "CurvaturePlan",
@@ -90,6 +92,7 @@ __all__ = [
     "build_cube",
     "compose",
     "compose_footprints",
+    "covered_cells",
     "edge_match_solve",
     "find_seams",
     "finish_slice",

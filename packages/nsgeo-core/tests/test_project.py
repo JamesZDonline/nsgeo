@@ -11,6 +11,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing import StepStack, build_step
 from nsgeo.project import ProjectError, line_key, load_site, save_site
+from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 
 from tests.synthetic import write_dzt
@@ -58,6 +59,25 @@ def test_round_trips(tmp_path, site):
     assert [ln.placement.axis for ln in back.lines] == ["y", "y", "x"]
     assert back.lines[1].placement.direction == -1
     assert back.lines[2].placement.label == "line 2"
+
+
+def test_a_grid_without_a_velocity_saves_none_and_loads_none(tmp_path, site):
+    # #4: an unset grid velocity is "fall through to the line headers", not
+    # an error, so it must survive the file as unset rather than as a number.
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert "velocity" not in json.loads(out.read_text())["grids"][0]
+    assert load_site(out).grids[0].velocity is None
+
+
+def test_a_stored_grid_velocity_loads_unchanged(tmp_path, site):
+    # #4: making the velocity optional must not disturb a file that has one,
+    # layered or not, to the last digit.
+    model = VelocityModel(((0.0, 0.08012345678), (20.0, 0.07)))
+    site.grids[0] = dataclasses.replace(site.grids[0], velocity=model)
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    assert load_site(out).grids[0].velocity == model
 
 
 def test_paths_are_stored_relative_with_posix_separators(tmp_path, site):

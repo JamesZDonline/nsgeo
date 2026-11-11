@@ -49,7 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,6 @@ import nsgeo
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
-from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
@@ -91,6 +90,7 @@ from nsgeo_qgis.slice_export import (
 from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import LIVE_SOLVE_BUDGET_MS, SliceFinish
+from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
@@ -180,6 +180,7 @@ class NsgeoPlugin:
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
+        self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
         # actually displays -- the same shape ProcessingDock keeps
@@ -199,16 +200,10 @@ class NsgeoPlugin:
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
         #
-        # M8 walkthrough Finding C: `on_warning` follows `LineLoader.on_error`'s
-        # own precedent just below, verbatim in shape -- a moved-grid
-        # warning used to reach only `QgsMessageLog` (the Log Messages
-        # Panel, closed by default), which the author could not find when
-        # they went looking for it. The log entry stays (see
-        # `_warn_if_a_placed_grid_moved`); this also puts it on the
-        # message bar, where a warning is actually seen.
+        # `on_info` puts the site-open report of followed picks on the message bar.
         self.layers = SiteLayers(
             self.session,
-            on_warning=lambda msg: self.message(msg, Qgis.MessageLevel.Warning),
+            on_info=lambda msg: self.message(msg, Qgis.MessageLevel.Info),
         )
         self.loader = LineLoader(
             self.session,
@@ -252,6 +247,8 @@ class NsgeoPlugin:
         self.survey_dock.import_requested.connect(self.open_import_dialog)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
+        self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
+        self.survey_dock.move_lines_requested.connect(self.move_lines)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -526,6 +523,12 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        # Same reasoning again: Edit lines tables are modeless too, one per
+        # grid, and reject() (not close()) runs each one's finished-signal
+        # cleanup instead of leaving it dangling with a reference to a
+        # session this method is about to tear down.
+        for edit_dialog in list(self._edit_lines_dialogs.values()):
+            edit_dialog.reject()
         # Same reasoning again: LineChoiceDialog is modeless too, so it
         # can still be open here, and reject() (not close()) is what runs
         # its finished-signal cleanup instead of leaving it dangling with
@@ -1420,25 +1423,9 @@ class NsgeoPlugin:
             # slot (see the module docstring), so this must not raise.
             self.message(str(exc), Qgis.MessageLevel.Critical)
             return
-        suggestion = None
-        if grid is None:
-            lines = self.session.site.lines if self.session.site else []
-            if lines:
-                try:
-                    suggestion = VelocityModel.from_dielectric(
-                        lines[0].header.epsr
-                    ).surface_velocity
-                except ValueError as exc:
-                    # Cosmetic only -- a bad header must not block the
-                    # dialog from opening at all, just leave it unseeded.
-                    self.message(
-                        f"could not suggest a velocity from the header: {exc}",
-                        Qgis.MessageLevel.Warning,
-                    )
         dialog = GridDialog(
             self.session,
             grid=grid,
-            suggested_velocity=suggestion,
             parent=self.iface.mainWindow(),
             canvas=self.iface.mapCanvas(),
         )
@@ -1490,7 +1477,14 @@ class NsgeoPlugin:
                             if grid is None:
                                 self.session.add_grid(new_grid)
                             else:
-                                self.session.replace_grid(new_grid)
+                                report = self.session.replace_grid(new_grid)
+                                if report.message():
+                                    self.message(
+                                        report.message(),
+                                        Qgis.MessageLevel.Warning
+                                        if report.outside
+                                        else Qgis.MessageLevel.Info,
+                                    )
                         except (ValueError, KeyError) as exc:
                             self.message(str(exc), Qgis.MessageLevel.Critical)
             finally:
@@ -1835,6 +1829,86 @@ class NsgeoPlugin:
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
+        # A slot of the Survey panel's edit_lines_requested: guarded, so a
+        # failure reaches the message bar and never the swallowing signal.
+        try:
+            self._open_edit_lines_dialog(grid_id, keys)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open Edit lines: {exc}", Qgis.MessageLevel.Critical)
+
+    def _open_edit_lines_dialog(self, grid_id: str, keys: Sequence[str] = ()) -> None:
+        # Modeless, one table per grid -- open_import_dialog()'s shape: a
+        # second request for the same grid raises the open table and selects
+        # the lines asked for (line editing spec §4.1).
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        existing = self._edit_lines_dialogs.get(grid_id)
+        if existing is not None and existing.opened_against != self.session.json_path:
+            # Tables are keyed by grid id, and "A" or "Grid1" recur from site
+            # to site: a table opened against the old site would only be
+            # refused at OK and lose its edits (line editing spec §3 call 14).
+            # reject() runs `finished`, which drops it from the dict.
+            existing.reject()
+            existing = self._edit_lines_dialogs.get(grid_id)
+        if existing is not None:
+            existing.select_keys(keys)
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dialog = EditLinesDialog(self.session, grid_id, select=keys, parent=self.iface.mainWindow())
+
+        def finished(result: int) -> None:
+            # A pyqtSignal slot: must not raise (module docstring). The write
+            # was done, and re-checked, by EditLinesDialog.accept().
+            try:
+                if result == QDialog.DialogCode.Accepted and dialog.outcome is not None:
+                    self.message(
+                        f"Edit lines · {grid_id}: {dialog.outcome.message()}",
+                        Qgis.MessageLevel.Warning
+                        if dialog.outcome.skipped
+                        else Qgis.MessageLevel.Info,
+                    )
+            finally:
+                dialog.deleteLater()
+                if self._edit_lines_dialogs.get(grid_id) is dialog:
+                    del self._edit_lines_dialogs[grid_id]
+
+        def clear_if_current() -> None:
+            # Identity only, never touching `dialog` (already gone).
+            if self._edit_lines_dialogs.get(grid_id) is dialog:
+                del self._edit_lines_dialogs[grid_id]
+
+        dialog.finished.connect(finished)
+        dialog.destroyed.connect(clear_if_current)
+        self._edit_lines_dialogs[grid_id] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def move_lines(self, keys: list[str], grid_id: str) -> None:
+        """Move lines to another grid, from the Survey panel's Move to grid.
+
+        A slot: it never raises, and reports on the message bar (line editing
+        spec §3 call 7). Lines already on the grid are left alone."""
+        try:
+            assert self.session is not None
+            outcome = self.session.move_lines(keys, grid_id)
+        except (KeyError, ProjectError) as exc:
+            # str(KeyError) is repr(arg): quotes inside the bar's own quotes.
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"Move to {grid_id}: {what}", Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not move the lines: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self.message(
+            f"Move to {grid_id}: {outcome.message()}",
+            Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info,
+        )
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a

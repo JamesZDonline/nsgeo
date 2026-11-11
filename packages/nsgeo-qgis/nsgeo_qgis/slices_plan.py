@@ -123,6 +123,21 @@ class SourceChoice:
     transform: str
     line_keys: tuple[str, ...]
 
+    def same_source(self, other: SourceChoice | None) -> bool:
+        """Whether `other` builds the same cube: equal but for the ORDER of
+        `line_keys`. A cube is a sum of per-line contributions
+        (`accumulate`, `build_cube`, `stream_slice`), so the survey order a
+        reorder changes moves nothing but float rounding; it is not a change
+        of lines and must neither read stale nor cost a re-preparation
+        (line editing spec §4.5)."""
+        return (
+            other is not None
+            and self.grid_id == other.grid_id
+            and self.preset == other.preset
+            and self.transform == other.transform
+            and set(self.line_keys) == set(other.line_keys)
+        )
+
 
 @dataclass(frozen=True)
 class SiteSource:
@@ -269,10 +284,10 @@ class SliceFinish:
 class MemoryEstimate:
     """Held bytes, split the way spec 7.4 splits them.
 
-    Separately, because they grow in opposite directions: cube memory
-    grows with resolution and not with line count, cache memory the
-    reverse. By 120 lines the cached lines cost more than the cube, so a
-    single total would hide which one to act on.
+    Separately, because they grow differently: a packed cube grows with the
+    cells the lines cover (so with line count and with resolution), cache
+    memory with line count alone. By 120 lines the cached lines can cost
+    more than the cube, so a single total would hide which one to act on.
     """
 
     lines_bytes: int
@@ -387,16 +402,21 @@ def default_cell(spacing_m: float, floor: float) -> float:
     return max(floor, min(DEFAULT_CELL_M, spacing_m / 2.0))
 
 
-def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstimate:
+def estimate_memory(prepared_samples: int, n_cells: int, nz: int, n_covered: int) -> MemoryEstimate:
     """Bytes held by the prepared lines, and by a cube of this shape.
 
     `prepared_samples` is the total float32 sample count across every
-    prepared line (`sum(n_samples * n_traces)`). The cube is float32
-    `mean` plus int32 `count`, which is what `SliceCube` stores.
+    prepared line (`sum(n_samples * n_traces)`). A resident cube is packed
+    (#113): it stores float32 `mean` (nz rows), int32 `count` and int64 cell
+    ids for the `n_covered` covered cells only, which is exactly
+    `SliceCube.nbytes`. `n_covered` is required so no caller can keep the
+    dense figure by omission. The fill weights are written for every cell of
+    the frame, so they still scale with `n_cells`.
     """
+    covered = int(n_covered)
     return MemoryEstimate(
         lines_bytes=int(prepared_samples) * 4,
-        cube_bytes=int(nz) * int(n_cells) * 4 + int(n_cells) * 4,
+        cube_bytes=int(nz) * covered * 4 + covered * 4 + covered * 8,
         weights_bytes=int(n_cells) * WEIGHT_BYTES_PER_CELL,
     )
 
@@ -448,8 +468,9 @@ def format_status(
     """Spec 9.2's status line: what is held, and how fast slices redraw.
 
     Memory first, because spec 7.2 found memory and not time to be the
-    binding constraint -- halving the cell doubles the time and
-    quadruples the cube.
+    binding constraint -- halving the cell doubles the time, roughly
+    doubles a packed cube of line data (the covered cells follow the line
+    length) and still quadruples the fill weights.
     """
     # The interpolation weights are held in either mode (interpolation spec §7).
     held = estimate.lines_bytes + estimate.weights_bytes
@@ -463,21 +484,34 @@ def format_status(
     return f"{what}, {format_bytes(held)} · slices redraw in {speed}"
 
 
-def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
-    """-1, 0 or +1 slice steps for one wheel event.
+#: One notch of an ordinary mouse wheel, in `QWheelEvent.angleDelta()` units
+#: (eighths of a degree, so 15 degrees).
+WHEEL_NOTCH = 120
+
+
+def depth_scroll_steps(pending: int, angle_delta_y: int) -> tuple[int, int]:
+    """`(steps, pending)` for one shift+wheel event: the slice steps to move
+    (+1 deeper per notch turned down) and the part-notch left over, which
+    the caller hands back in with the next event.
+
+    #109: a high-resolution wheel reports one notch as several smaller
+    events, so stepping once per event moved the depth two Steps per notch
+    on the user's mouse. Qt's `angleDelta` documentation says to add the
+    deltas up until they reach a notch. Turning the wheel the other way
+    drops the leftover, so the first notch back still takes effect.
 
     Kept here, away from Qt, for two reasons: the plugin's boundary rule
     keeps arithmetic out of widgets, and `QWheelEvent`'s constructor
     differs between Qt 5 and Qt 6, so a rule pinned only through a
     synthesised event would be pinned only on one of them.
-
-    Without shift this returns 0 and the event is not consumed: plain
-    scrolling stays the map's zoom, because spec 9.3 is explicit that the
-    slice introduces no new tool and takes no gesture away.
     """
-    if not shift_held or angle_delta_y == 0:
-        return 0
-    return 1 if angle_delta_y < 0 else -1
+    if angle_delta_y == 0:
+        return 0, pending
+    if pending and (pending > 0) != (angle_delta_y > 0):
+        pending = 0
+    total = pending + angle_delta_y
+    notches = abs(total) // WHEEL_NOTCH * (1 if total > 0 else -1)
+    return -notches, total - notches * WHEEL_NOTCH
 
 
 # ---- the site view (M12) --------------------------------------------------

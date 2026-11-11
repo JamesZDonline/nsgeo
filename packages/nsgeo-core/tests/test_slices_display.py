@@ -129,19 +129,19 @@ def _cube_with_varying_levels(seed: int = 0) -> SliceCube:
         built_utc="2026-09-19T00:00:00Z",
         core_version="0.1.0.dev0",
     )
-    return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=prov)
+    return SliceCube.from_dense(frame, z, mean, count, prov)
 
 
 def test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels():
     """The M10 final review's Important 3, now a test. A window mean has
     far lower variance than the levels it averages, so UnipolarClip().
-    limit(cube.mean) is systematically too high -- and because the bias is
+    limit over every level is systematically too high -- and because the bias is
     uniform across depth, every slice renders dim IDENTICALLY at every
     depth, which reads as 'the data is dim' rather than as a bug. That is
     exactly why it needs a test rather than an eye."""
     cube = _cube_with_varying_levels()
     clip = UnipolarClip()
-    over_levels = clip.limit(cube.mean)
+    over_levels = clip.limit(np.stack([cube.level(k) for k in range(cube.z.nz)]))
     over_slices = shared_limit(cube, thickness_levels=10, clip=clip)
     assert over_slices < over_levels
     assert over_slices / over_levels < 0.8  # measured ~0.55 on this fixture
@@ -168,11 +168,11 @@ def test_the_shared_limit_covers_every_level_exactly_once():
 
     # nz=37 with thickness 10: plan_windows gives 0,10,20 and stops at 30,
     # leaving 7 levels. shared_limit must still see all 37.
+    (block,) = cube.blocks
     odd = SliceCube(
         frame=cube.frame,
         z=ZAxis(t0_ns=0.0, dz_ns=0.5, nz=37),
-        mean=cube.mean[:37],
-        count=cube.count,
+        blocks=(dataclasses.replace(block, mean=block.mean[:37]),),
         provenance=cube.provenance,
     )
     seen: list[np.ndarray] = []

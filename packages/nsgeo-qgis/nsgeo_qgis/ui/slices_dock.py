@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,6 +43,7 @@ from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
     SliceWindow,
+    covered_cells,
     limit_over_slices,
     plan_windows,
     window_label,
@@ -81,12 +83,13 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
+    MemoryEstimate,
     Resolution,
     SiteSource,
     SliceFinish,
     SourceChoice,
     default_cell,
-    depth_scroll_delta,
+    depth_scroll_steps,
     estimate_memory,
     format_bytes,
     frame_cells,
@@ -839,6 +842,23 @@ class SlicesDock(QgsDockWidget):
                 self.prepare()
             elif (
                 self._scope == "grid"
+                and self._included_is_default
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and any(
+                    self.engine.had_line(k)
+                    for k in self._included
+                    if k not in self.engine.choice.line_keys
+                )
+            ):
+                # A line moved onto a grid whose source takes every line: the
+                # default now holds a line the source was never built from,
+                # and an edit is no `Prepare` button to wait for. One that
+                # was imported was never in the engine's snapshot, so it
+                # keeps today's "stale" status (line editing spec §4.5).
+                self.prepare()
+            elif (
+                self._scope == "grid"
                 and not self._resolution_owed
                 and self.engine.is_prepared
                 and self.engine.choice is not None
@@ -973,7 +993,10 @@ class SlicesDock(QgsDockWidget):
             self._included = self._default_included(grid_id)
             self._seed_dz_z_defaults(grid_id)
             return
-        valid = set(self.session.keys()) if self.session.is_open else set()
+        # Only this grid's own lines: a line moved to another grid keeps its
+        # key, so "still in the site" would leave it in the choice (line
+        # editing spec §4.5).
+        valid = set(self._default_included(grid_id))
         pruned = tuple(k for k in self._included if k in valid)
         if self._included and not pruned:
             # #74: removal took every line the user had chosen. An empty set
@@ -1037,6 +1060,37 @@ class SlicesDock(QgsDockWidget):
         lines = None if every_line or self._included_is_default else self._included
         self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
 
+    def _included_estimate(self) -> MemoryEstimate:
+        """The memory the included lines will cost, before preparing them.
+
+        The one place the before-preparing count lives: the included label
+        and, until the engine holds lines, the residency checkbox both read
+        it. Each refreshes on its own triggers, though: `_apply_resolution`
+        refreshes only the checkbox, so after a cell-size change the label
+        can show the old size's figure until the next inclusion change or
+        `_on_prepared`. Between a grid change and `_on_prepared` the count
+        is made against the frame on screen, which is the old grid's until
+        preparation finishes (#113)."""
+        samples = 0
+        coords: list[np.ndarray] = []
+        frame = self.engine.frame
+        if self.session.is_open:
+            for key in self._included:
+                line = self.session.line_for_key(key)
+                samples += line.n_traces * line.header.n_samples
+                if frame is None:
+                    continue
+                try:
+                    coords.append(line.trace_coords(self.session.site.frames))
+                except Exception:  # noqa: BLE001 -- a missing grid; preparation skips it too
+                    continue
+        z = self.engine.z
+        n_cells = frame.n_cells if frame is not None else 0
+        nz = z.nz if z is not None else 0
+        # A resident cube stores only the cells the lines fall in (#113).
+        n_covered = covered_cells(frame, coords) if frame is not None else 0
+        return estimate_memory(samples, n_cells, nz, n_covered)
+
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
         ~0.9 s of preparing it.
@@ -1064,32 +1118,33 @@ class SlicesDock(QgsDockWidget):
         grid_id = self.grid_combo.currentText() or None
         total = len(self._default_included(grid_id))
         included = self._included
-        samples = 0
-        if self.session.is_open:
-            for key in included:
-                line = self.session.line_for_key(key)
-                samples += line.n_traces * line.header.n_samples
-        frame = self.engine.frame
-        z = self.engine.z
-        n_cells = frame.n_cells if frame is not None else 0
-        nz = z.nz if z is not None else 0
-        estimate = estimate_memory(samples, n_cells, nz)
+        estimate = self._included_estimate()
         text = f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
         if estimate.total_bytes > DEFAULT_BUDGET_BYTES:
             text += " -- over the default budget; slices will stream rather than hold it all"
         self.included_label.setText(text)
-        self._update_resident_check_label()
+        self._update_resident_check_label(estimate)
 
-    def _update_resident_check_label(self) -> None:
+    def _update_resident_check_label(self, before: MemoryEstimate | None = None) -> None:
         """Spec 9.2's own wording for the residency override, with the
         cost it names filled in: `engine.estimate.cube_bytes` is what
         turning it on actually adds -- the prepared lines are already held
         in memory in EITHER mode, so the whole-volume checkbox's own cost
         is the cube alone, not the total. Called from `_update_included_
-        label` (every place that estimate could have changed) and from
+        label` (every place that estimate could have changed), from
         `_apply_resolution` (a resolution change moves `frame`/`z`, and so
-        `engine.estimate`, without necessarily touching `_included`)."""
-        mb = format_bytes(self.engine.estimate.cube_bytes)
+        `engine.estimate`, without necessarily touching `_included`), from
+        `prepare` (`set_source` empties the engine's lines, so the figure
+        falls back to the before-preparing one) and once at construction."""
+        # Until the engine holds lines its own estimate counts no covered
+        # cells; the before-preparing figure the included label shows is the
+        # honest one then (#113). `before` saves a second count when the
+        # caller just made it.
+        if self.engine.is_prepared:
+            cube_bytes = self.engine.estimate.cube_bytes
+        else:
+            cube_bytes = (before or self._included_estimate()).cube_bytes
+        mb = format_bytes(cube_bytes)
         # Short on the face, the full wording in the tooltip. A QCheckBox
         # cannot elide or wrap its own text, so its minimum width is the
         # width of that text -- "Keep the whole volume in memory for
@@ -1281,12 +1336,16 @@ class SlicesDock(QgsDockWidget):
         choice = self.source_choice()
         if (
             choice is not None
-            and choice == self.engine.choice
+            and choice.same_source(self.engine.choice)
             and self._prepared_steps_match(choice.preset)
         ):
             return
         try:
             self.engine.set_source(choice)
+            # `set_source` emptied the engine's lines, so the checkbox now
+            # takes the before-preparing figure rather than the old line
+            # set's (#113).
+            self._update_resident_check_label()
             self._refresh_source_status()
         except Exception as exc:  # noqa: BLE001 -- see the docstring above
             message = str(exc)
@@ -1397,7 +1456,7 @@ class SlicesDock(QgsDockWidget):
         if current.transform != choice.transform:
             self.source_status.setText("stale · the transform changed since this was prepared")
             return
-        if current.line_keys != choice.line_keys:
+        if set(current.line_keys) != set(choice.line_keys):  # a reorder is no change
             self.source_status.setText("stale · the lines changed since this was prepared")
             return
         if not self._prepared_steps_match(choice.preset):
@@ -1794,9 +1853,22 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
-                self._included = recipe.choice.line_keys
+                # A line moved to another grid since the cube was saved is left
+                # out: its key still names a line, but it is no longer this
+                # grid's, and `set_source` would refuse it anyway (line
+                # editing spec §4.5). A key no longer in the site stays, for
+                # `set_source` to name.
+                moved = [
+                    k
+                    for k in recipe.choice.line_keys
+                    if k in self.session.keys()  # noqa: SIM118 -- SiteSession.keys()
+                    and getattr(self.session.line_for_key(k).placement, "grid_id", None)
+                    not in (None, recipe.choice.grid_id)
+                ]
+                kept_keys = tuple(k for k in recipe.choice.line_keys if k not in moved)
+                self._included = kept_keys
                 self._included_is_default = False
-                if not recipe.choice.line_keys:
+                if not kept_keys:
                     self._included = self._default_included(recipe.choice.grid_id)
                     self._included_is_default = True
                 self._last_grid_id = recipe.choice.grid_id
@@ -1858,6 +1930,14 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
+            if moved:
+                labels = ", ".join(
+                    self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
+                )
+                self.error.emit(
+                    f"cube {cube_id!r}: {len(moved)} line(s) moved to another grid "
+                    f"since it was saved and were left out: {labels}"
+                )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)
@@ -3096,6 +3176,9 @@ class CanvasDepthScroll(QObject):
     Without shift the event is not consumed, so plain scrolling remains
     the map's zoom.
 
+    One Step per notch, however many events the wheel splits the notch
+    into (#109, `depth_scroll_steps`).
+
     `eventFilter` is a Qt-invoked virtual, the same hazard class as
     `paintEvent`: an exception escaping it is swallowed locally and
     reaches `qFatal()` in the CI container, so the body is guarded.
@@ -3105,6 +3188,7 @@ class CanvasDepthScroll(QObject):
         super().__init__(parent)
         self._canvas = canvas
         self._dock = dock
+        self._pending = 0  # the part-notch turned so far, in angleDelta units
         canvas.viewport().installEventFilter(self)
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802
@@ -3112,11 +3196,16 @@ class CanvasDepthScroll(QObject):
             if event.type() != QEvent.Type.Wheel:
                 return False
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            delta = depth_scroll_delta(int(event.angleDelta().y()), shift)
-            if delta == 0:
+            angle = int(event.angleDelta().y())
+            if not shift or angle == 0:
+                self._pending = 0
                 return False
-            self._dock.step_slice(delta)
-            return True  # consumed: the map must not also zoom
+            steps, self._pending = depth_scroll_steps(self._pending, angle)
+            if steps:
+                self._dock.step_slice(steps)
+            # Consumed even for a part-notch: the map must not zoom by the
+            # first half of a notch that is moving the depth.
+            return True
         except Exception as exc:  # noqa: BLE001 -- see the class docstring
             _log(f"could not step the slice from the canvas: {exc}")
             return False

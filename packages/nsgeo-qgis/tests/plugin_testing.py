@@ -10,14 +10,13 @@ from typing import Any, Callable
 
 import numpy as np
 import pytest
+from tests.real_data import CAMPUS_LINES
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
 LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
-REAL_DZT = (
-    sorted(p for p in LOCAL_DATA.rglob("*") if p.suffix.lower() == ".dzt")
-    if LOCAL_DATA.exists()
-    else []
-)
+#: The ten campus lines only. The other surveys under tests/data/local reuse
+#: their file names (#141); each has its own list in the core's real_data.py.
+REAL_DZT = CAMPUS_LINES
 
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
@@ -426,3 +425,9 @@ def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: floa
             return slowed(out)
 
         monkeypatch.setattr(engine, name, wrapper)
+
+
+SUNNYSIDE = LOCAL_DATA / "sunnyside.nsgeo.json"
+needs_sunnyside = pytest.mark.skipif(
+    not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
+)

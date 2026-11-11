@@ -196,6 +196,17 @@ _PICKS_EDIT_SIGNALS = (
     "afterRollBack",
 )
 
+# Two floats this close are the same placement (line editing spec §4.4): the
+# tolerance `follow_lines` compares stored picks against re-derived ones with,
+# so a refresh that moves nothing writes nothing.
+_SAME = 1e-9
+# The same for a map position, in CRS units. At a UTM northing (about 4.3e6) one
+# ulp is already 1e-9, so a point recomputed from the line's origin can differ
+# from the one stored by a few ulps and would be rewritten on every refresh at
+# 1e-9; a micrometre is far below anything a pick can mean and far above that
+# noise. Attributes (metres, a few hundred at most) keep `_SAME`.
+_SAME_COORD = 1e-6
+
 # Sentinel returned by `_table_schema` in place of a CRS when a table by
 # that name is present in the GeoPackage but `QgsVectorLayer` could not
 # open it -- distinct from `None` (the table does not exist at all).
@@ -234,6 +245,20 @@ def _attr(feature: QgsFeature, name: str) -> Any:
     return feature[name] if feature.fields().indexOf(name) >= 0 else NULL
 
 
+def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
+    """The point of `trace`, or of the nearest trace the line has: the trace
+    index IS the vertex index, and a pick past either end sits on that end."""
+    return coords[max(0, min(trace, len(coords) - 1))]
+
+
+def _same_number(stored: Any, value: float | None) -> bool:
+    """Whether a stored numeric attribute already holds `value` (within
+    `_SAME`); NULL equals only `None`."""
+    if value is None:
+        return bool(stored == NULL)
+    return bool(stored != NULL and abs(float(stored) - value) <= _SAME)
+
+
 def _as_float(value: Any) -> float | None:
     """A nullable numeric attribute. A QGIS NULL reads back as a
     `QVariant` for which `value is None` is False but `value == NULL` is
@@ -260,32 +285,24 @@ class SiteLayers(QObject):
         self,
         session: SiteSession,
         project: QgsProject | None = None,
-        on_warning: Callable[[str], None] | None = None,
+        on_info: Callable[[str], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.project = project or QgsProject.instance()
-        # Finding C (M8 walkthrough): "Where does this warning exist?" --
-        # nowhere the author could see, before this. `_warn_if_a_placed_grid_moved`
-        # only ever reached `QgsMessageLog` (the Log Messages Panel, closed
-        # by default). `SiteLayers` has no access to the message bar
-        # itself, so -- following `LineLoader`'s `on_error` precedent
-        # exactly (see loader.py and plugin.py's `initGui`) -- this is an
-        # optional callback the plugin wires to `self.message(...,
-        # Qgis.MessageLevel.Warning)`. Default None so every existing
-        # caller (tests included) behaves exactly as before.
-        self.on_warning = on_warning
+        # Following a pick onto its line is silent on every refresh but the
+        # one that opens a site; that one reports how many picks it moved,
+        # through this callback, which the plugin wires to the message bar
+        # (following `LineLoader.on_error`'s precedent). Default None, so
+        # every existing caller behaves as before.
+        self.on_info = on_info
+        # True only while `_on_site_opened`'s refresh runs: the one refresh
+        # that may report what following changed (line editing spec §4.4).
+        self._report_follow = False
         self.layers: dict[str, QgsVectorLayer] = {}
         self._group: Any = None
         self._group_token = ""
-        # Final review, Important 2: each placed grid's own origin/
-        # azimuth/size, as of the last successful refresh -- see
-        # `_warn_if_a_placed_grid_moved`, the only reader. Starts empty so
-        # the very first refresh of a freshly opened site (which may
-        # already have picks on disk) compares against nothing and stays
-        # quiet, rather than reporting every grid as newly "moved".
-        self._last_grid_placements: dict[str, tuple[Any, ...]] = {}
         # Finding A: which `picks` QgsVectorLayer object `_on_picks_edited`
         # is currently connected to, tracked separately from
         # `self.layers.get("picks")` -- see `_bind_picks_signals` for why
@@ -316,7 +333,11 @@ class SiteLayers(QObject):
     # ---- lifecycle --------------------------------------------------------
     def _on_site_opened(self) -> None:
         self.detach()
-        self.refresh()
+        self._report_follow = True
+        try:
+            self.refresh()
+        finally:
+            self._report_follow = False
 
     def _forget_group(self) -> None:
         self._group = None
@@ -391,12 +412,6 @@ class SiteLayers(QObject):
             if parent is not None:
                 parent.removeChildNode(group)
         self._group = None
-        # A closing site's grids must not be compared against the NEXT
-        # site's: two unrelated sites can reuse a grid id (e.g. "A"), and
-        # without this reset `_warn_if_a_placed_grid_moved` would read
-        # that as the same grid having moved the instant the new site's
-        # first refresh runs.
-        self._last_grid_placements = {}
 
     def _commit_pending_edits(self) -> None:
         """Save anything still sitting in a layer's edit buffer.
@@ -533,14 +548,7 @@ class SiteLayers(QObject):
             return
         if not site.grids:
             self._clear_derived_tables()
-            self._last_grid_placements = {}
             return
-        try:
-            self._warn_if_a_placed_grid_moved(site)
-        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
-            # A diagnostic, not a write: it must never be the reason the
-            # rest of this refresh (which DOES write) fails to run.
-            _log(f"could not check whether a grid moved: {exc}", Qgis.MessageLevel.Critical)
         try:
             self.ensure_tables()
         except Exception as exc:  # noqa: BLE001 -- see rule 4 above
@@ -560,94 +568,131 @@ class SiteLayers(QObject):
                 fn()
             except Exception as exc:  # noqa: BLE001 -- see rule 4 above
                 _log(f"could not refill {name!r}: {exc}", Qgis.MessageLevel.Critical)
-        self._last_grid_placements = self._grid_placements(site)
-
-    @staticmethod
-    def _grid_placements(site: Any) -> dict[str, tuple[Any, ...]]:
-        """Each grid's placement-relevant fields, keyed by grid id:
-        `origin`, `azimuth`, `size_x`, `size_y` -- exactly what
-        `_line_points` (by way of `Line.trace_coords`/`Grid.to_world`)
-        actually uses to put a trace somewhere in the world. Not
-        `velocity` or `default_spacing`, neither of which moves anything
-        on the map, and not `crs`: a CRS change is a different signal
-        entirely, one `_rebuild_picks` already re-projects every pick
-        through, so it must not also trip the warning below.
-        """
-        return {g.id: (g.origin, g.azimuth, g.size_x, g.size_y) for g in site.grids}
-
-    def _warn_if_a_placed_grid_moved(self, site: Any) -> None:
-        """Important 2 (M8 final fix wave): `_pick_point` computes a
-        pick's map position once, at write time, and nothing ever
-        re-derives it (see its own docstring for why that is deliberate).
-        `replace_grid` changing an existing grid's origin, azimuth or
-        size moves every line drawn against that grid -- `refill_lines`/
-        `refill_marks`, called later in this same `refresh()`, redraw
-        them in their new place -- but a pick already written against the
-        old placement keeps the position it was authored at and drifts
-        off its line. A CRS change, by contrast, DOES reach picks, via
-        `_rebuild_picks`'s transform, so only half of "the grid changed"
-        was ever handled; this names the other half instead of silently
-        leaving it be.
-
-        Detected by comparing this refresh's grid placements against the
-        ones cached from the last successful refresh (`_grid_placements`,
-        cached as `_last_grid_placements`), for any grid id common to
-        both. A ruling from the same review explicitly forbids re-placing
-        a pick automatically -- doing so on every refresh would silently
-        overwrite a pick the user moved by hand in QGIS, which the README
-        invites them to do -- so this only ever logs.
-
-        Deliberately NOT "warn on every `grids_changed`": `add_grid`
-        (a new id, absent from the cache) and `remove_grid` (an id
-        missing from the current site) both fire that same signal without
-        moving any EXISTING grid's own fields, and a refresh with no
-        grid geometry change must stay quiet. Comparing placements by id
-        is what tells "moved" apart from "added" or "removed" without
-        needing a payload on `grids_changed` itself, which is public and
-        bound elsewhere (map_link.py, survey_dock.py) -- widening it was
-        judged more risk than this warning is worth in a fix wave whose
-        scope is picks, not the signal graph. The first refresh of a
-        freshly opened site (the cache starts empty, see __init__) also
-        stays quiet by the same comparison: nothing "moved" relative to
-        nothing, even though that site's `picks` table may already hold
-        rows from before this session opened it.
-
-        Finding C (M8 walkthrough): the author asked "Where does this
-        warning exist?" -- the honest answer used to be "the Log Messages
-        Panel, which is closed by default", i.e. nowhere they would ever
-        see it. `_log` stays (it is the durable record: a QGIS session's
-        message bar auto-dismisses, the log does not), but now also
-        reaches `self.on_warning`, if the plugin gave one -- see
-        `SiteLayers.__init__` and `LineLoader.on_error`, whose precedent
-        this follows exactly. Guarded locally rather than trusting only
-        `refresh()`'s own containment around this whole method: this is
-        the one place in this class that calls out into plugin code from
-        inside a method reached by a Qt slot, and that call must not be
-        allowed to escape regardless of what any caller happens to do.
-        """
-        moved = sorted(
-            grid_id
-            for grid_id, placement in self._grid_placements(site).items()
-            if grid_id in self._last_grid_placements
-            and placement != self._last_grid_placements[grid_id]
-        )
-        if not moved:
+        # After the refills, so a pick follows the line as it is NOW. Every
+        # change to a line or grid reaches here through `lines_changed` or
+        # `grids_changed`, which is why following needs no hook of its own
+        # (line editing spec §4.4).
+        try:
+            moved = self.follow_lines()
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            _log(f"could not move the picks onto their lines: {exc}", Qgis.MessageLevel.Critical)
             return
-        layer = self.layers.get("picks")
-        if layer is None or sip.isdeleted(layer) or self.feature_count("picks") == 0:
+        if moved and self._report_follow:
+            self._tell(f"updated {moved} pick(s) to sit on their lines, at the current velocity")
+
+    def _tell(self, message: str) -> None:
+        """Hand `message` to the plugin's `on_info`, if it gave one. The one
+        place this class calls out into plugin code from a method a Qt slot
+        reaches, so it guards the call itself."""
+        if self.on_info is None:
             return
-        message = (
-            f"grid(s) {', '.join(moved)} changed position, orientation or size; "
-            "picks already recorded against lines on them keep the map position "
-            "they were authored at and will no longer sit on their line -- picks "
-            "are not re-placed automatically (see the Picking section of the README)"
-        )
-        _log(message, Qgis.MessageLevel.Warning)
-        if self.on_warning is not None:
+        try:
+            self.on_info(message)
+        except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
+            _log(f"the on_info callback raised: {exc}", Qgis.MessageLevel.Critical)
+
+    def follow_lines(self) -> int:
+        """Put every authored pick back on its line: map position, distance,
+        depth and velocity re-derived from the line's current placement and
+        resolved velocity. Returns the number of rows written
+        (line editing spec §4.4).
+
+        A pick is a trace and a time on a line; everything else about it is
+        a convenience, so a line that moves, or whose velocity changes,
+        takes its picks with it. `trace`, `time_ns`, `stack_json`, `note`,
+        `created`, `feature_id` and `seq` are never touched.
+
+        `picks` cannot be regenerated, so this writes through the loaded
+        layer's data provider -- committed rows only -- and never reads or
+        changes the edit buffer: a note typed in editing mode survives
+        (the buffer commits field by field), and a row added in editing mode
+        follows once it is saved. Only the rows whose values differ are
+        written, so a refresh that changes nothing writes nothing.
+
+        Left exactly as they are: a row whose `line_key` is no site line (a
+        removed line's picks wait for it to come back) and a row with no trace
+        or time (digitised by hand). A row on a line with no grid or no
+        distance axis keeps its geometry and `distance_m`, but its depth and
+        velocity still follow the line's velocity: the user's decision 7 says
+        whenever a line's resolved velocity changes, its picks' depth and
+        velocity are worked out again from their time, and that outranks
+        §4.4's "untouched", which was about position (line editing spec §3
+        decision 7). A trace past the end of its line sits on the last trace
+        with no distance, as `_pick_point` places it.
+        """
+        layer = self._picks_layer()
+        site = self.session.site
+        if layer is None or site is None:
+            return 0
+        target = self.crs()
+        if target is not None and layer.crs() != target:
+            # `write_pick`'s guard, for the same reason: positions computed
+            # into the package CRS must not land in a layer declaring another.
+            _log(
+                f"picks were not moved onto their lines: the layer's CRS "
+                f"({layer.crs().authid()}) does not match the package CRS ({target.authid()})",
+                Qgis.MessageLevel.Critical,
+            )
+            return 0
+        provider = layer.dataProvider()
+        keys = set(self.session.keys())
+        # One computation per line, however many picks it carries. None
+        # marks a line with no points to put a pick on (no grid, or no
+        # distance axis): its picks still follow its velocity.
+        placed: dict[str, list[QgsPointXY] | None] = {}
+        failed: set[str] = set()
+        geometry_changes: dict[int, QgsGeometry] = {}
+        attribute_changes: dict[int, dict[int, Any]] = {}
+        for feature in provider.getFeatures():
+            key = _as_str(_attr(feature, "line_key"))
+            trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
+            if key not in keys or trace == NULL or time_ns == NULL:
+                continue
+            if key not in placed:
+                line = self.session.line_for_key(key)
+                grid = self.session.grid_for_line(line)
+                placed[key] = None if grid is None else self._line_points(line, grid, site.frames)
+            coords = placed[key]
+            if key in failed:
+                continue
             try:
-                self.on_warning(message)
-            except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
-                _log(f"the on_warning callback raised: {exc}", Qgis.MessageLevel.Critical)
+                distance, depth, velocity = self.session.derived_pick_fields(
+                    key, int(trace), float(time_ns)
+                )
+            except Exception as exc:  # noqa: BLE001 -- one bad line must not stop the rest
+                _log(f"could not re-derive the picks on {key}: {exc}", Qgis.MessageLevel.Critical)
+                failed.add(key)
+                continue
+            derived = [("depth_m", depth), ("velocity_m_ns", velocity)]
+            if coords is not None:
+                point = _clamped(coords, int(trace))
+                stored = feature.geometry()
+                if (
+                    stored.isNull()
+                    or stored.isEmpty()
+                    or not point.compare(stored.asPoint(), _SAME_COORD)
+                ):
+                    geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+                derived.insert(0, ("distance_m", distance))
+            changed = {
+                provider.fieldNameIndex(name): NULL if value is None else value
+                for name, value in derived
+                if not _same_number(_attr(feature, name), value)
+            }
+            if changed:
+                attribute_changes[feature.id()] = changed
+        if geometry_changes and not provider.changeGeometryValues(geometry_changes):
+            raise RuntimeError(
+                f"could not move the picks onto their lines: {provider.error().message()}"
+            )
+        if attribute_changes and not provider.changeAttributeValues(attribute_changes):
+            raise RuntimeError(
+                f"could not update the picks' depth and velocity: {provider.error().message()}"
+            )
+        written = len(geometry_changes.keys() | attribute_changes.keys())
+        if written:
+            layer.triggerRepaint()
+        return written
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
@@ -1236,6 +1281,8 @@ class SiteLayers(QObject):
             for name in _PICKS_EDIT_SIGNALS:
                 with contextlib.suppress(TypeError, RuntimeError):
                     getattr(layer, name).disconnect(self._on_picks_edited)
+            with contextlib.suppress(TypeError, RuntimeError):
+                layer.afterCommitChanges.disconnect(self._on_picks_committed)
         self._bound_picks = None
 
     def _bind_picks_signals(self) -> None:
@@ -1268,6 +1315,7 @@ class SiteLayers(QObject):
         if layer is not None and not sip.isdeleted(layer):
             for name in _PICKS_EDIT_SIGNALS:
                 getattr(layer, name).connect(self._on_picks_edited)
+            layer.afterCommitChanges.connect(self._on_picks_committed)
 
     def _on_picks_edited(self, *_: Any) -> None:
         """Any live edit-buffer change, commit or rollback on the `picks`
@@ -1311,6 +1359,25 @@ class SiteLayers(QObject):
         except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
             _log(
                 f"could not notify the profile of a picks edit: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
+
+    def _on_picks_committed(self) -> None:
+        """The picks layer's edits were just saved: put any pick the user
+        dragged back on its line (line editing spec §4.4). Re-deriving waits
+        for the commit, so while the layer is still in editing mode a
+        dragged point shows where it was dropped.
+
+        Emits nothing: following never changes a trace or a time, which is
+        all the profile draws, and `_on_picks_edited` already announces the
+        commit. A Qt slot, so it guards its own body (module docstring
+        rule 4).
+        """
+        try:
+            self.follow_lines()
+        except Exception as exc:  # noqa: BLE001 -- see this method's own docstring
+            _log(
+                f"could not move the picks onto their lines after the save: {exc}",
                 Qgis.MessageLevel.Critical,
             )
 
@@ -1421,20 +1488,10 @@ class SiteLayers(QObject):
         exactly where the line is drawn rather than somewhere
         independently computed that could disagree with it.
 
-        Called once, at `write_pick` time, and never again -- unlike
-        `refill_lines`/`refill_marks`, which recompute from the session
-        on every `refresh()`, nothing calls this a second time for a
-        pick that already exists. So a `replace_grid` that moves,
-        resizes or reorients the grid a pick's line sits on moves that
-        line (and its marks) on the very next refresh, but leaves the
-        pick's own, already-written geometry exactly where it was: half
-        of "the grid changed" is handled (a CRS change IS re-projected,
-        through `_rebuild_picks`), half is not. Deliberate, not a gap to
-        close here -- re-deriving a pick's position from `line_key`/
-        `trace` on every refresh would silently overwrite a pick the
-        user has since moved by hand in QGIS, which the README invites
-        them to do. `refresh()`'s `_warn_if_a_placed_grid_moved` names
-        this instead of fixing it.
+        Called by `write_pick` for a new pick. `follow_lines` places the
+        existing ones the same way (through `_clamped`) on every refresh, so
+        a pick always sits where its line is drawn now (line editing spec
+        §4.4).
         """
         site = self.session.site
         if site is None:
@@ -1446,7 +1503,7 @@ class SiteLayers(QObject):
         coords = self._line_points(line, grid, site.frames)
         if coords is None:
             return None
-        return coords[max(0, min(pick.trace, len(coords) - 1))]
+        return _clamped(coords, pick.trace)
 
     def write_pick(self, pick: Pick) -> None:
         """Write one authored pick through the loaded layer's data

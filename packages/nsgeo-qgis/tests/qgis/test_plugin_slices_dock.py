@@ -24,6 +24,7 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_INDICATOR,
     REFINE_REST_MS,
     REFINING_SLICE_INDICATOR,
+    Resolution,
     SliceFinish,
     limit_windows,
     transform_names,
@@ -121,6 +122,141 @@ def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     text = dock.included_label.text()
     assert text.startswith(f"{len(session.keys())} of {len(session.keys())} included")
     assert "MB" in text or "GB" in text
+
+
+def _spy_on_the_estimate(monkeypatch):
+    """Record every `estimate_memory` call the dock makes, then delegate.
+
+    The label shows whole MB, and this fixture's cube rounds to "1 MB"
+    whatever the covered count is, so the label cannot tell a packed figure
+    from a dense one. The arguments can."""
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real = dock_module.estimate_memory
+    calls: list[tuple[int, int, int, int]] = []
+
+    def spy(prepared_samples, n_cells, nz, n_covered):
+        calls.append((prepared_samples, n_cells, nz, n_covered))
+        return real(prepared_samples, n_cells, nz, n_covered)
+
+    monkeypatch.setattr(dock_module, "estimate_memory", spy)
+    return calls
+
+
+def _covered_by_the_included_lines(dock, session):
+    from nsgeo.slices import covered_cells
+
+    frame = dock.engine.frame
+    assert frame is not None
+    coords = [session.line_for_key(k).trace_coords(session.site.frames) for k in dock._included]
+    return covered_cells(frame, coords), frame
+
+
+def test_the_included_label_counts_only_covered_cells(docked, monkeypatch):
+    """Before preparing, the label's figure counts the cells the included
+    lines fall in, not every cell of the frame (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    calls = _spy_on_the_estimate(monkeypatch)
+    dock._update_included_label()
+    covered, frame = _covered_by_the_included_lines(dock, session)
+    assert 0 < covered < frame.n_cells
+    assert calls and calls[0][3] == covered
+    assert dock.included_label.text().startswith("3 of 3 included")
+
+
+def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeypatch):
+    """While no lines are prepared the engine's own estimate counts no cells
+    (it reads 1 MB), so the checkbox shows the before-preparing figure the
+    included label uses, and the two agree (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    monkeypatch.setattr(dock.engine, "_lines", [])  # the unprepared window
+    assert not dock.engine.is_prepared
+    calls = _spy_on_the_estimate(monkeypatch)
+    shown: list[int] = []
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    dock._update_included_label()
+    covered, frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    cube_bytes = nz * covered * 4 + covered * 4 + covered * 8
+    assert covered < frame.n_cells
+    assert all(c[3] == covered for c in calls)
+    assert cube_bytes in shown, "the checkbox must be sized from the packed count"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(cube_bytes)})"
+
+
+def test_the_checkbox_does_not_show_the_old_line_sets_figure_while_re_preparing(
+    docked, monkeypatch
+):
+    """`set_included` refreshes the label while the old lines are still in the
+    engine, then `prepare()` empties them. The checkbox must be refreshed
+    after that, from the before-preparing estimate of the NEW line set, not
+    left on the old set's `engine.estimate` until `_on_prepared` (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    shown: list[int] = []
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    # Hold the engine unprepared once `set_source` has emptied it.
+    real_set_source = dock.engine.set_source
+
+    def set_source_and_stay_empty(choice):
+        real_set_source(choice)
+        dock.engine._lines = []
+
+    monkeypatch.setattr(dock.engine, "set_source", set_source_and_stay_empty)
+    old_cube = dock.engine.estimate.cube_bytes
+    fewer = tuple(session.keys())[:-1]
+    shown.clear()
+    dock.set_included(fewer)
+    assert not dock.engine.is_prepared
+    covered, _frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    expected = nz * covered * 4 + covered * 4 + covered * 8
+    assert expected != old_cube, "the fixture must tell the old and new figures apart"
+    assert shown[-1] == expected, "the last refresh must be the new line set's figure"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(expected)})"
+
+
+def test_a_line_whose_position_cannot_be_computed_is_left_out_of_the_count(docked, monkeypatch):
+    """Preparation skips a line whose trace positions cannot be computed (for
+    example `traces_per_metre <= 0`); the estimate skips it too, instead of
+    raising inside a slot where QGIS would swallow it (#113)."""
+    from nsgeo.slices import covered_cells
+
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    keys = list(dock._included)
+    bad = session.line_for_key(keys[0])
+
+    real_coords = type(bad).trace_coords
+
+    def maybe_boom(self, frames):  # Line is frozen, so patch the class
+        if self is bad:
+            raise ValueError("traces_per_metre must be positive")
+        return real_coords(self, frames)
+
+    monkeypatch.setattr(type(bad), "trace_coords", maybe_boom)
+    calls = _spy_on_the_estimate(monkeypatch)
+    dock._update_included_label()  # must not raise
+    frame = dock.engine.frame
+    others = [real_coords(session.line_for_key(k), session.site.frames) for k in keys[1:]]
+    assert calls
+    assert calls[0][3] == covered_cells(frame, others)
+    assert covered_cells(frame, others) > 0
 
 
 def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
@@ -1289,12 +1425,12 @@ class _WheelStub:
     """The minimal `QWheelEvent`-shaped surface `eventFilter` reads.
 
     Not a real `QWheelEvent`: its constructor signature differs between
-    Qt 5 and Qt 6 (the same reason `depth_scroll_delta` itself is a plain
+    Qt 5 and Qt 6 (the same reason `depth_scroll_steps` itself is a plain
     function tested without one), but `eventFilter`'s own body only ever
     calls `.type()`, `.modifiers()` and `.angleDelta().y()` on the event
     it is handed -- so a stub exposing exactly those three is a Qt-version-
     independent way to exercise the filter directly, the same way
-    `depth_scroll_delta`'s own pure test needs no event at all.
+    `depth_scroll_steps`'s own pure test needs no event at all.
     """
 
     def __init__(self, angle_delta_y: int, shift: bool) -> None:
@@ -1324,13 +1460,13 @@ class _NonWheelStub:
 
 
 def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(fake_iface, docked):
-    """Minor 3 (Task 5 review): `depth_scroll_delta` was pinned as a pure
+    """Minor 3 (Task 5 review): `depth_scroll_steps` was pinned as a pure
     function, but nothing pinned `CanvasDepthScroll.eventFilter` itself --
     the thing that actually decides whether an event is consumed. A
     mutant that returns `True` before the `delta == 0` check would take
     the map's zoom away entirely (every wheel event on the canvas
     swallowed, shift or not) and would survive the whole suite without
-    this test: `depth_scroll_delta`'s own test never touches the filter,
+    this test: `depth_scroll_steps`'s own test never touches the filter,
     and nothing else calls `eventFilter` at all.
     """
     dock, _ = docked
@@ -1351,6 +1487,26 @@ def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(
         consumed = filt.eventFilter(None, _NonWheelStub())
         assert consumed is False
         assert dock.slice_slider.value() == moved_to
+    finally:
+        filt.dispose()
+
+
+def test_canvas_depth_scroll_moves_one_step_per_notch_of_a_hi_res_wheel(fake_iface, docked):
+    """#109: one notch of the user's wheel arrives as two events of 60.
+    The depth moves one Step for the notch, not one per event, and the
+    first half is still consumed so that the map does not zoom by half a
+    notch in between."""
+    dock, _ = docked
+    _ready(dock)
+    filt = CanvasDepthScroll(fake_iface.mapCanvas(), dock)
+    try:
+        start = dock.slice_slider.value()
+        step_levels = dock.thickness_step_levels()[1]
+
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start, "half a notch must not move the depth"
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start + step_levels
     finally:
         filt.dispose()
 
@@ -3275,3 +3431,100 @@ def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
     # Nothing left to say, so neither the line nor its tooltip says anything.
     assert dock.refine_label.text() == ""
     assert dock.refine_label.toolTip() == ""
+
+
+# ---- line editing (spec §4.5) ------------------------------------------------
+
+
+def test_a_line_moved_off_the_grid_leaves_an_explicit_choice(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+
+    session.move_lines([a_keys[1]], "B")
+    assert dock.included_keys() == (a_keys[0],)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.source_status.text() == "prepared \u00b7 1 lines"
+
+
+def test_a_line_moved_onto_a_default_grid_re_prepares_it(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    b_key = _grid_keys(session, "B")[0]
+
+    session.move_lines([b_key], "A")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert b_key in dock.engine.choice.line_keys
+    assert dock.engine.line_count == 4
+    assert dock.source_status.text().startswith("prepared")
+
+
+def test_a_line_imported_onto_a_default_grid_still_shows_stale(docked_two_grids, tmp_path):
+    """Today's behaviour, pinned: an imported line was never in the engine's
+    snapshot, so nothing re-prepares for it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    assert not dock.engine.is_running
+    assert dock.source_status.text().startswith("stale")
+
+
+def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    _save_cube(
+        dock, session, "A__m", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    session.move_lines([a_keys[2]], "B")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__m")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert a_keys[2] not in dock.included_keys()
+    assert any("moved to another grid since it was saved" in e for e in errors), errors
+
+
+def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
+    """Line editing spec §4.5: a cube is a sum over lines, so the survey
+    order is not part of what it was built from. No re-preparation, and no
+    false "stale" with no Prepare button to clear it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    before = dock.engine.choice
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines([], grid_id="A", order=list(reversed(a_keys)))
+    assert dock.included_keys() == tuple(reversed(a_keys))
+    assert not dock.engine.is_running
+    assert dock.engine.wait_for_preparation(2_000)
+    assert count == []
+    assert dock.engine.choice == before
+    assert dock.source_status.text() == "prepared · 3 lines"
+
+
+def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docked_two_grids):
+    from nsgeo_qgis.line_edit import LineEdit
+
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines(
+        [LineEdit(a_keys[0], session.line_for_key(a_keys[0]).placement, offset=1.5)],
+        grid_id="A",
+        order=list(reversed(a_keys)),
+    )
+    assert dock.engine.wait_for_preparation(20_000)
+    assert count == [1]
+    assert dock.engine.choice.line_keys == tuple(reversed(a_keys))
+    assert dock.source_status.text() == "prepared · 3 lines"

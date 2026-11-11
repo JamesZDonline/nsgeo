@@ -9,22 +9,18 @@ bandwidth the local lines actually have.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 from nsgeo.io.dzt import read_header, read_samples
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.migration import migrate_fk
 
+from tests.real_data import CAMPUS_LINES
+
 # The real local lines: dt 0.2165 ns, 60 traces/m, HS350US at 350 MHz, and
 # M13's measured velocity.
 V, DT_NS, DX_M = 0.0733, 0.2165, 1 / 60.0
 FC_GHZ = 0.35
-
-#: The real lines, gitignored and so absent on CI (see test_real_files.py).
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
 
 
 def _diffraction(
@@ -354,10 +350,10 @@ def test_output_preserves_shape_dt_and_t0():
     """Picks, map-to-profile cursor sync and cube binning all index by
     trace, and `StepStack.difference()` refuses a step that changes the
     sample count. Asserted on a real line, not a square array."""
-    if not FILES:
+    if not CAMPUS_LINES:
         pytest.skip("no real DZT files in tests/data/local")
-    header = read_header(FILES[0])
-    data = read_samples(FILES[0], header)[0]
+    header = read_header(CAMPUS_LINES[0])
+    data = read_samples(CAMPUS_LINES[0], header)[0]
     rg = Radargram(data=np.asarray(data, dtype=float), dt_ns=header.dt_ns, t0_ns=0.0, dx_m=1 / 60.0)
 
     out = build_step("migrate_fk", velocity_m_ns=V).apply(rg)
