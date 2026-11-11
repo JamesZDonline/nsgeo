@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from nsgeo.processing import StepStack, build_step
-from nsgeo.processing.amplitude import analytic_envelope
+from nsgeo.processing.amplitude import _analytic_signal, analytic_envelope
 from nsgeo.processing.base import Radargram, is_unipolar
 
 
@@ -31,13 +31,18 @@ def test_transforms_preserve_the_time_axis():
         assert out.data.shape == (10, 4)
 
 
+# The exact-value tests run `_analytic_signal` at the trace's own length,
+# where a sinusoid that fits the trace is exact. `analytic_envelope` pads
+# (#116), so it sees a sinusoid that starts and stops, and the edges ripple.
+
+
 def test_envelope_of_a_sinusoid_is_its_amplitude():
     """The defining property: the envelope rides the peaks, not the wave."""
     n = 512
     t = np.arange(n)
     wave = 3.0 * np.sin(2.0 * np.pi * t / 16.0)
-    env = analytic_envelope(wave[:, None])[:, 0]
-    np.testing.assert_allclose(env[32:-32], 3.0, rtol=1e-6)
+    env = np.abs(_analytic_signal(wave[:, None]))[:, 0]
+    np.testing.assert_allclose(env, 3.0, rtol=1e-6)
 
 
 def test_envelope_is_never_negative():
@@ -47,23 +52,31 @@ def test_envelope_is_never_negative():
 
 
 def test_envelope_handles_an_odd_and_prime_length():
-    """463 rows is what time_zero leaves on the real files, and it is prime
-    -- the worst case for an FFT and the one we deliberately do not pad."""
+    """463 rows is what time_zero leaves on the real files, and it is prime."""
     rng = np.random.default_rng(1)
     env = analytic_envelope(rng.normal(size=(463, 3)))
     assert env.shape == (463, 3)
     assert np.isfinite(env).all()
 
 
-def test_envelope_is_not_the_zero_padded_approximation():
-    """Padding to a fast length is 2.2x quicker and shifts the interior by
-    ~1.3%. Pin the exact transform so that optimisation cannot reappear
-    silently."""
-    rng = np.random.default_rng(2)
-    data = rng.normal(size=(463, 2))
-    exact = analytic_envelope(data)
-    padded = analytic_envelope(np.pad(data, ((0, 480 - 463), (0, 0))))[:463]
-    assert not np.allclose(exact, padded, rtol=1e-3)
+def test_an_impulse_at_the_top_leaves_only_the_hilbert_tail_at_the_bottom():
+    """#116. The envelope of an impulse at row 0 is the Hilbert kernel itself:
+    2/(pi k) on odd rows, 0 on even ones. Unpadded, the FFT treated the trace
+    as periodic, so the impulse wrapped round and sat one row past the bottom,
+    putting 0.64 into the last rows where the true tail is 0.0014.
+
+    Zero-padding to M rows carries the tail as (2/M)cot(pi k/M), which falls
+    to nothing at k = M/2. With M >= 4N every row of the trace is within
+    k <= M/4, where it is at most 1 - (pi/4)cot(pi/4) = 21.5% short. Padding
+    only to 2N would leave the bottom rows 55-80% short of the tail."""
+    n = 463
+    data = np.zeros((n, 1))
+    data[0] = 1.0
+    env = analytic_envelope(data)[:, 0]
+
+    k = np.arange(n - (15 * n) // 100, n)
+    tail = np.where(k % 2 == 1, 2.0 / (np.pi * k), 0.0)
+    assert np.all(np.abs(env[k] - tail) <= 0.25 * 2.0 / (np.pi * k))
 
 
 def test_envelope_of_an_odd_length_sinusoid_is_its_amplitude():
@@ -73,7 +86,7 @@ def test_envelope_of_an_odd_length_sinusoid_is_its_amplitude():
     n = 463
     k = (n - 1) // 2
     wave = 3.0 * np.sin(2.0 * np.pi * k * np.arange(n) / n)
-    env = analytic_envelope(wave[:, None])[:, 0]
+    env = np.abs(_analytic_signal(wave[:, None]))[:, 0]
     np.testing.assert_allclose(env, 3.0, rtol=1e-6)
 
 
@@ -93,7 +106,7 @@ def test_envelope_energy_identity_pins_every_bin_weight():
     rng = np.random.default_rng(2)
     for n in (463, 512):
         x = rng.standard_normal((n, 3))
-        env = analytic_envelope(x)
+        env = np.abs(_analytic_signal(x))
         lhs = np.mean(env**2, axis=0)
         mean_x = np.mean(x, axis=0)
         mean_x2 = np.mean(x**2, axis=0)
@@ -110,7 +123,7 @@ def test_envelope_even_length_nyquist_bin_is_not_doubled():
     """The even branch's Nyquist bin is real and unpaired, like DC -- weight
     1, not 2. cos(pi*n) sits exactly on that bin, so doubling it doubles the
     envelope."""
-    env = analytic_envelope(np.cos(np.pi * np.arange(64))[:, None])
+    env = np.abs(_analytic_signal(np.cos(np.pi * np.arange(64))[:, None]))
     np.testing.assert_allclose(env, 1.0, rtol=1e-6)
 
 
