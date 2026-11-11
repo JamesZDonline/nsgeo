@@ -1011,7 +1011,10 @@ class NsgeoPlugin:
             apply_temporal_properties(layer, plan)
             self._add_exported_layer(layer)
 
-            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            parts = [
+                f"exported {len(plan.bands)} bands to {path} "
+                f"({plan.frame.cell:g} m cell, {plan.frame.cell:g} m pixels)"
+            ]
             if dock.coverage_check.isChecked():
                 coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
                 try:
@@ -1135,6 +1138,9 @@ class NsgeoPlugin:
                     "prepare the site's grids before exporting.", Qgis.MessageLevel.Warning
                 )
                 return
+            if site.export_refusal:
+                self.message(site.export_refusal, Qgis.MessageLevel.Warning)
+                return
             default_path = self.session.root / "slices" / "site.tif"
             path, _ = QFileDialog.getSaveFileName(
                 self.iface.mainWindow(),
@@ -1191,7 +1197,10 @@ class NsgeoPlugin:
             apply_site_temporal_properties(layer, plan)
             self._add_exported_layer(layer)
 
-            parts = [f"exported {len(plan.bands)} bands to {path}"]
+            parts = [
+                f"exported {len(plan.bands)} bands to {path} "
+                f"({plan.cell_m:g} m cell, {plan.lattice.pixel:g} m pixels)"
+            ]
             if dock.coverage_check.isChecked():
                 coverage_path = target.with_name(f"{target.stem}_coverage.tif")
                 try:

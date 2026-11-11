@@ -3061,3 +3061,139 @@ def test_a_line_moved_while_the_site_is_still_preparing_ends_on_its_new_grid(plu
     assert not [e for e in errors if "now on grid" in e], errors
     assert dock.site_engine.ready_grids == ("A", "B", "C")
     _every_engine_holds_only_its_own_lines(dock, session)
+
+
+# ---- the panel says why: preview note, not-drawn reason, export pixel size ----------------
+
+
+def _nudge_cell(dock) -> None:
+    """Change the cell so the site re-applies its resolution, then let it draw."""
+    dock.cell_spin.setValue(dock.cell_spin.value() + 0.05)
+    dock.flush_debounce()
+    settle(dock)
+
+
+def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_note.text() == ""
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    engine = dock.site_engine
+    assert engine.is_preview and engine.preview_note
+    assert dock.site_note.text() == engine.preview_note
+    assert dock.site_note.isVisibleTo(dock)
+    # The refusal is in the panel before anyone clicks Export (spec 5.5).
+    assert "can't be exported at full detail" in dock.site_note.toolTip()
+    assert engine.preview_note in dock.site_note.toolTip()
+
+
+def test_the_note_clears_when_the_site_fits_again(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.text()
+    dock.site_engine.max_pixels = 10**9
+    _nudge_cell(dock)
+    assert not dock.site_engine.is_preview
+    assert dock.site_note.text() == ""
+    assert dock.site_note.toolTip() == ""
+
+
+def test_the_note_clears_on_switching_to_this_grid(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.isVisibleTo(dock)
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.scope() == "grid"
+    assert not dock.site_note.isVisibleTo(dock)
+
+
+def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    def refuse(self, resolution):
+        raise RuntimeError("the lattice could not be built")
+
+    monkeypatch.setattr(site_engine_module.SiteEngine, "set_resolution", refuse)
+    dock.site_scope_button.click()
+    settle(dock)
+    scope = dock._site
+    assert dock.site_engine.lattice is None, "nothing is drawn"
+    scope.refresh_slice()
+    assert scope.problem == "the lattice could not be built"
+    assert any("the lattice could not be built" in e for e in errors), "the toast stays"
+    assert dock.site_note.text().startswith("Not drawn: ")
+    assert "the lattice could not be built" in dock.site_note.toolTip()
+
+
+def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    scope = dock._site
+    scope.problem = "stale"
+    _nudge_cell(dock)
+    assert scope.problem is None
+    assert not dock.site_note.text().startswith("Not drawn")
+
+
+def test_the_site_note_never_widens_the_dock(plugin):
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    probe.settle()
+    content = probe.scroll.widget()
+    before = content.minimumSizeHint().width()
+    height = dock.site_note.height()
+    longest = "a very long preview note " * 12
+    assert len(longest) >= 300
+    dock.site_note.setText(longest)
+    probe.settle()
+    assert content.minimumSizeHint().width() == before
+    assert dock.site_note.height() == height, "empty or full, the line keeps its height"
+    assert dock.site_note.text() == longest
+
+
+def test_export_messages_name_the_cell_and_the_pixel(plugin, answer_modal, tmp_path):
+    dock = whole_site(plugin)
+    target = tmp_path / "site.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    assert target.exists()
+    cell = dock.cell_spin.value()
+    pixel = dock.site_engine.lattice.pixel
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({cell:g} m cell, {pixel:g} m pixels)" in text, text
+
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.engine.wait_for_preparation(20_000) or True
+    grid_target = tmp_path / "grid.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(grid_target), "GeoTIFF (*.tif *.tiff)"))
+    if not dock.engine.is_prepared:
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(20_000)
+    dock.export_button.click()
+    assert grid_target.exists()
+    gcell = dock.engine.frame.cell
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({gcell:g} m cell, {gcell:g} m pixels)" in text, text
+
+
+def test_a_preview_site_export_is_refused_before_any_dialog(plugin, answer_modal, fake_iface):
+    from qgis.core import Qgis
+
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    refusal = dock.site_engine.export_refusal
+    assert refusal
+    calls = answer_modal(QFileDialog, "getSaveFileName", ("", ""))
+    dock.export_button.click()
+    assert calls == [], "no save dialog opens for a site that cannot be exported"
+    item = fake_iface.messageBar().currentItem()
+    assert item.text() == refusal
+    assert item.level() == Qgis.MessageLevel.Warning
