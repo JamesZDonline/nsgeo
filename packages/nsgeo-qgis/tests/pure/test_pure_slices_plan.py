@@ -503,9 +503,9 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     working set. Small chunks here, so their fixed few megabytes do not swamp a
     grid this size.
 
-    Minimum curvature's plan is only about 55 B a cell, but its solve needs
+    Minimum curvature's plan is only about 95-100 B a cell (with its hierarchy), but its solve needs
     buffers of its own, so it is measured over the plan and one `apply`
-    together (plan call 9): about 103 B a cell. IDW's and kriging's `apply` is
+    together (plan call 9): about 138 B a cell. IDW's and kriging's `apply` is
     a slice's transient, the 55 B a cell `MAX_FRAME_CELLS` already counts, so
     they are measured over building alone, as before."""
     from nsgeo.slices import interpolate
