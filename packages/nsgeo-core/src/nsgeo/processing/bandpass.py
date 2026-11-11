@@ -63,23 +63,33 @@ class Bandpass:
                 label="Taper",
                 default=0.25,
                 min=0.0,
-                help="Cosine taper width as a fraction of the passband.",
+                help=(
+                    "Cosine taper width as a fraction of the passband. Below Low it "
+                    "stops at 0 MHz, so DC is always removed."
+                ),
             ),
         )
 
     def _mask(self, freqs_mhz: np.ndarray) -> np.ndarray:
         width = self.taper_frac * (self.high_mhz - self.low_mhz)
-        lo_stop, lo_pass = self.low_mhz - width, self.low_mhz
+        # A low-side ramp of full width would start below 0 MHz when Low is
+        # under the taper width, and be cut off partway up, passing part of
+        # DC (9.5% at 100-600, #117). Narrow it to start at 0 MHz instead:
+        # steeper on that side, but DC is always removed. Low = 0 is a
+        # lowpass, which keeps DC.
+        lo_width = min(width, self.low_mhz)
+        lo_stop, lo_pass = self.low_mhz - lo_width, self.low_mhz
         hi_pass, hi_stop = self.high_mhz, self.high_mhz + width
 
         mask = np.zeros_like(freqs_mhz)
         mask[(freqs_mhz >= lo_pass) & (freqs_mhz <= hi_pass)] = 1.0
 
-        if width > 0:
+        if lo_width > 0:
             rising = (freqs_mhz > lo_stop) & (freqs_mhz < lo_pass)
-            x = (freqs_mhz[rising] - lo_stop) / width
+            x = (freqs_mhz[rising] - lo_stop) / lo_width
             mask[rising] = 0.5 * (1.0 - np.cos(np.pi * x))
 
+        if width > 0:
             falling = (freqs_mhz > hi_pass) & (freqs_mhz < hi_stop)
             x = (freqs_mhz[falling] - hi_pass) / width
             mask[falling] = 0.5 * (1.0 + np.cos(np.pi * x))

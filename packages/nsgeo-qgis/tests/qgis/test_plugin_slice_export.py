@@ -345,6 +345,26 @@ def test_coverage_exports_as_a_companion_single_band_raster(exportable, tmp_path
         ds.Close()
 
 
+def test_an_amplitude_plan_without_a_finish_still_writes_a_blend(exportable, tmp_path):
+    """`finish=None` does not mean coverage: negative amplitudes must survive."""
+    from nsgeo_qgis.slice_export import plan_export
+    from osgeo import gdal
+
+    engine = exportable
+    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    assert plan.finish is None and not plan.coverage
+    values = np.full((engine.frame.ny, engine.frame.nx), -2.0, dtype=np.float32)
+    path = tmp_path / "amp.tif"
+    GeoTiffSliceWriter().write(path, plan, [values] * len(plan.bands))
+    ds = gdal.Open(str(path))
+    try:
+        arr = ds.GetRasterBand(1).ReadAsArray()
+    finally:
+        ds.Close()
+    assert np.isfinite(arr).any()
+    assert np.nanmax(arr) == pytest.approx(-2.0)
+
+
 def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(exportable, tmp_path):
     """Final review, Minor 8. The dock's own coverage VIEW maps `count ==
     0 -> NaN` (transparent, `refresh_slice`'s coverage branch); this
@@ -531,7 +551,7 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
     What matters here is that a rotated export still lands every band on
     the same grid (no truncation error) and that its own bounding box
     genuinely is not fully covered by the rotated frame's cells. That no
-    frame cell is lost is `test_a_rotated_export_is_at_half_pitch_and_keeps_
+    frame cell is lost is `test_a_rotated_export_is_at_the_cell_and_keeps_
     every_cell`'s."""
     from osgeo import gdal
 
@@ -572,12 +592,15 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
         engine.dispose()
 
 
-def test_a_rotated_export_is_at_half_pitch_and_keeps_every_cell(qgis_app, tmp_path):
-    """Interpolation spec §9: on a rotated frame `to_north_up` samples at half
-    the cell, so no frame cell is dropped (it used to lose 15-18% of them at
-    the cell's own pitch). Pinned with `none`, so no value is mixed, and with
-    a unique id in every frame cell: each id must survive among the band's
-    finite pixels, and the pixel pitch is half the frame's cell."""
+def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path):
+    """Spec §3 decision 1: a rotated frame is exported at the cell, read
+    bilinearly, and no frame cell is dropped (the nearest-cell gather lost
+    15-18% of them at that pitch). Pinned with `none` interpolation and the
+    export itself: the pixel is the cell, and a probe through the written
+    plan (one bright cell at a time) reaches a finite pixel for every cell,
+    while the exported band carries a finite pixel for every cell's worth
+    of ground."""
+    from nsgeo.slices import to_north_up
     from osgeo import gdal
 
     session = SiteSession()
@@ -600,22 +623,80 @@ def test_a_rotated_export_is_at_half_pitch_and_keeps_every_cell(qgis_app, tmp_pa
         engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
         frame = engine.frame
         assert frame.azimuth == 30.0
-        ids = np.arange(1, frame.ny * frame.nx + 1, dtype=np.float32).reshape(frame.ny, frame.nx)
+        ones = np.ones((frame.ny, frame.nx), dtype=np.float32)
         everywhere = np.ones((frame.ny, frame.nx), dtype=np.int32)
-        engine.slice_at = lambda _window: (ids, everywhere)  # type: ignore[method-assign]
+        engine.slice_at = lambda _window: (ones, everywhere)  # type: ignore[method-assign]
 
-        path = tmp_path / "ids.tif"
+        path = tmp_path / "ones.tif"
         export_slices(engine, path, 10, 5, None, NONE)
 
         ds = gdal.Open(str(path))
         try:
-            assert ds.GetGeoTransform()[1] == pytest.approx(frame.cell / 2.0)
+            assert ds.GetGeoTransform()[1] == pytest.approx(frame.cell)
             band = ds.GetRasterBand(1).ReadAsArray()
-            seen = set(np.unique(band[np.isfinite(band)]).astype(np.int64))
-            missing = set(range(1, frame.ny * frame.nx + 1)) - seen
-            assert not missing, f"{len(missing)} of {frame.ny * frame.nx} frame cells lost"
+            assert np.isfinite(band).sum() >= 0.9 * frame.ny * frame.nx
+            assert set(np.unique(band[np.isfinite(band)])) == {1.0}
         finally:
             ds.Close()
+        # A varying field with negative values: the writer blends it (counts
+        # off for a data export) exactly as `to_north_up` does.
+        rng = np.random.default_rng(11)
+        field = rng.normal(size=(frame.ny, frame.nx)).astype(np.float32)
+        engine.slice_at = lambda _window: (field, everywhere)  # type: ignore[method-assign]
+        path = tmp_path / "field.tif"
+        export_slices(engine, path, 10, 5, None, NONE)
+        ds = gdal.Open(str(path))
+        try:
+            written = ds.GetRasterBand(1).ReadAsArray()
+        finally:
+            ds.Close()
+        expected, _ = to_north_up(field, frame)
+        np.testing.assert_allclose(written, expected, equal_nan=True)
+        assert (written[np.isfinite(written)] < 0).any()
+        for index in range(frame.ny * frame.nx):
+            probe = np.zeros(frame.ny * frame.nx, dtype=np.float32)
+            probe[index] = 1.0
+            out, _ = to_north_up(probe.reshape(frame.ny, frame.nx), frame)
+            assert np.nanmax(out) > 0.0, f"cell {index} reaches no pixel"
+    finally:
+        engine.dispose()
+
+
+def test_a_coverage_export_holds_whole_counts(qgis_app, tmp_path):
+    """A coverage raster on a rotated frame is resampled with `counts=True`:
+    every finite pixel is a whole number of traces >= 1, never a blend."""
+    from osgeo import gdal
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", 1.0 + i * 1.0, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    engine = SliceEngine(session)
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+        assert engine.frame.azimuth == 30.0
+        path = tmp_path / "coverage.tif"
+        write_coverage(engine, path)
+        ds = gdal.Open(str(path))
+        try:
+            arr = ds.GetRasterBand(1).ReadAsArray()
+        finally:
+            ds.Close()
+        finite = arr[np.isfinite(arr)]
+        assert finite.size > 0
+        assert (finite >= 1).all()
+        np.testing.assert_array_equal(finite, np.round(finite))
     finally:
         engine.dispose()
 

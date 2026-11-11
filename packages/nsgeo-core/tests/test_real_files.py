@@ -211,7 +211,7 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     because envelope detection is itself a smoothing operation, so a window
     mean barely differs from the levels it averages. Measured on this
     corpus (with the tail window included, per Ruling F), shared_limit
-    falls from 2.724 at thickness 1 to 2.171 at 20, 2.061 at 23, and 2.051
+    falls from 2.726 at thickness 1 to 2.175 at 20, 2.060 at 23, and 2.051
     at 90 -- still monotonic, but far flatter past thickness 20 than
     before that fix (which measured 1.265 at 90): thickness=90 leaves the
     axis's last level as a tail window of its own, and that level is one
@@ -291,7 +291,7 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     # window's end to nz" rule `shared_limit` uses, rather than deriving it
     # independently, so a wrong-but-overlapping tail is invisible here: an
     # overlapping `(158, 181)` tail (vs. the correct `(161, 181)`) measured
-    # 2.060750 on both sides, to 6 decimal places, on this corpus. Tail
+    # 2.059925 on both sides, to 6 decimal places, on this corpus. Tail
     # placement is pinned instead by the synthetic, exact-identity test in
     # `test_slices_display.py`.
     windows = list(plan_windows(z, thickness, thickness))
@@ -331,3 +331,27 @@ def test_bandpass_late_time_does_not_depend_on_the_direct_wave(path):
 
     rms = np.sqrt((out_no_top**2).mean())
     assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.05 * rms
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
+def test_envelope_late_time_barely_depends_on_the_direct_wave(path):
+    """#116, the envelope's version of the bandpass test above, on a stack
+    with no gain before the envelope (the case the wrap hurt most): zeroing
+    the top tenth moved the bottom 15% of the unpadded envelope by 2.7-4.1x
+    the bottom's own RMS. Padded, it moves by 0.17-0.26x. That remainder is the
+    Hilbert transform's own 1/t reach, which a correct envelope keeps."""
+    h = read_header(path)
+    rg = Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    for name in ("time_zero", "background_mean"):
+        rg = build_step(name).apply(rg)
+    envelope = build_step("amp_envelope")
+
+    n = rg.n_samples
+    no_top = rg.data.copy()
+    no_top[: n // 10] = 0.0
+    bottom = slice(n - (15 * n) // 100, n)
+    out = envelope.apply(rg).data[bottom]
+    out_no_top = envelope.apply(rg.replace(data=no_top)).data[bottom]
+
+    rms = np.sqrt((out_no_top**2).mean())
+    assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.5 * rms
