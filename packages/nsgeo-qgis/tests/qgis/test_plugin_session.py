@@ -1623,6 +1623,35 @@ def test_moving_a_line_keeps_its_inset_and_joins_the_new_grid_at_the_end(session
     assert set(session.keys_on_grid("B")) == set(b) | {key}
 
 
+def test_a_grid_length_change_keeps_fitted_lines_fitted(session, tmp_path):
+    session.add_grid(Grid("F", (500.0, 700.0), 0.0, 5.0, 10.5, "EPSG:32616", 0.5))
+    lines = []
+    for i, (start, direction, scale) in enumerate(
+        [(0.0, 1, 1.05), (10.5, -1, 1.05), (0.0, 1, 1.0)]
+    ):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__0{i + 1}.DZT", n_traces=601)
+        placement = GridPlacement("F", "y", i * 0.5, start, direction, p.stem, scale=scale)
+        lines.append(Line.open(p, placement))
+    session.add_lines(lines)
+    keys = session.keys_on_grid("F")
+    grids, changed = Spy(session.grids_changed), Spy(session.lines_changed)
+
+    report = session.replace_grid(dataclasses.replace(session.grid("F"), size_y=11.0))
+
+    for key, direction in ((keys[0], 1), (keys[1], -1)):
+        p = session.line_for_key(key).placement
+        assert p.scale == pytest.approx(1.1)
+        ends = sorted([p.start_along, p.start_along + direction * p.scale * 10.0])
+        assert ends == [pytest.approx(0.0), pytest.approx(11.0)]
+    third = session.line_for_key(keys[2]).placement
+    assert (third.start_along, third.scale) == (0.0, 1.0)
+    assert report.message() == (
+        "F is now 11.00 m along y; its 1 reversed line(s) moved with the far edge, "
+        "and its 2 fitted line(s) were fitted to the new length."
+    )
+    assert len(grids.calls) == 1 and len(changed.calls) == 1
+
+
 def test_a_moved_line_leaves_the_old_grids_remembered_slice_lines(session, tmp_path):
     a, _ = _zigzag(session, tmp_path)
     session.remember_slice_source("A", preset="p", lines=(a[0], a[1]))

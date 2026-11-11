@@ -43,8 +43,10 @@ from nsgeo_qgis.line_edit import (
     LineEdit,
     Skipped,
     followed_length,
+    is_fitted,
     length_along,
     same_placement,
+    span_m,
     width_across,
 )
 
@@ -521,7 +523,8 @@ class SiteSession(QObject):
         so when the grid's length along an axis changes, every reversed line
         on that axis moves with the edge, keeping its inset (line editing
         spec §3 call 6 for the message; the rule itself is decision 4 and
-        §4.3). Lines whose offset now lies outside a changed width
+        §4.3). A fitted line is fitted again to the new length instead
+        (placement corrections plan, call 7). Lines whose offset now lies outside a changed width
         are reported, not moved. All of it happens before anything is
         emitted, then one `grids_changed` and one `lines_changed`."""
         site = self._require_site()
@@ -533,6 +536,7 @@ class SiteSession(QObject):
         else:
             raise KeyError(f"no grid with id {grid.id!r}")
         moved: list[tuple[str, float, int]] = []
+        refitted: list[tuple[str, float, int]] = []
         outside: list[str] = []
         for axis in ("y", "x"):
             old_len, new_len = length_along(old, axis), length_along(grid, axis)
@@ -545,15 +549,19 @@ class SiteSession(QObject):
                 and line.placement.axis == axis
             ]
             if abs(new_len - old_len) > SAME_M:
-                count = 0
+                count = refit = 0
                 for key, line in on_axis:
-                    if line.placement.direction != -1:
-                        continue
-                    placement = followed_length(line.placement, old_len, new_len)
-                    self._replace_line(key, dataclasses.replace(line, placement=placement))
-                    count += 1
+                    span = span_m(line.n_traces, line.header.traces_per_metre)
+                    fitted = span > 0 and is_fitted(line.placement, span, old_len)
+                    placement = followed_length(line.placement, old_len, new_len, span)
+                    if not same_placement(placement, line.placement):
+                        self._replace_line(key, dataclasses.replace(line, placement=placement))
+                    count += line.placement.direction == -1
+                    refit += fitted
                 if count:
                     moved.append((axis, new_len, count))
+                if refit:
+                    refitted.append((axis, new_len, refit))
             if abs(new_wid - old_wid) > SAME_M:
                 for key, line in on_axis:
                     offset = line.placement.offset
@@ -562,7 +570,7 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.grids_changed.emit()
         self.lines_changed.emit()  # line geometry follows the frame
-        return GridEditReport(grid.id, tuple(moved), tuple(outside))
+        return GridEditReport(grid.id, tuple(moved), tuple(outside), tuple(refitted))
 
     def _replace_line(self, key: str, new_line: Line) -> None:
         """Put `new_line` where the line under `key` stood, in both indexes.

@@ -12,10 +12,13 @@ from nsgeo_qgis.line_edit import (
     LineEdit,
     Skipped,
     edge_inset,
+    fit_scale,
     followed_length,
+    is_fitted,
     length_along,
     placement_note,
     same_placement,
+    span_m,
     start_at_inset,
     width_across,
 )
@@ -141,3 +144,70 @@ def test_on_sunnyside_the_note_flags_exactly_grid5s_reversed_lines():
     assert len(flagged) == 15
     assert {r[0] for r in flagged} == {"Grid5"}
     assert {r[2] for r in flagged} == {"starts 1.00 m past the far edge"}
+
+
+def test_fit_puts_both_ends_on_the_edges_whichever_way_the_line_runs():
+    span = 15.5  # a line that read 0.5 m long on the 15 m grid
+    for seen in (dataclasses.replace(FWD, start_along=0.3), REV):
+        p = LineEdit("k", seen).fitted(span).placed(FRAMES)
+        first, last = p.start_along, p.start_along + p.direction * p.scale * span
+        assert sorted([first, last]) == [pytest.approx(0.0), pytest.approx(15.0)]
+    assert span_m(931, 60.0) == pytest.approx(15.5) and span_m(1, 60.0) == 0.0
+    assert span_m(100, 0.0) == 0.0
+    with pytest.raises(ValueError):
+        LineEdit("k", FWD).fitted(0.0)
+    with pytest.raises(ValueError):
+        fit_scale(0.0, 15.0)
+
+
+def test_flip_and_move_keep_scale_and_shift_and_a_pending_fit_refits():
+    seen = dataclasses.replace(FWD, scale=1.02, travel_shift=0.24)
+    flipped = LineEdit("k", seen).flipped(FRAMES).placed(FRAMES)
+    assert (flipped.scale, flipped.travel_shift) == (1.02, 0.24)
+    typed = LineEdit("k", seen).moved_to("B", FRAMES).placed(FRAMES)  # GB is 9 m along y
+    assert typed.scale == 1.02
+    fitted = LineEdit("k", seen).fitted(15.5).moved_to("B", FRAMES).placed(FRAMES)
+    assert fitted.scale == pytest.approx(9.0 / 15.5) and fitted.travel_shift == 0.24
+
+
+def test_setting_the_values_a_line_already_has_is_no_change():
+    e = LineEdit("k", REV, scale=1.0, travel_shift=0.0)
+    assert not e.changes(FRAMES)
+    assert LineEdit("k", REV, travel_shift=0.1).changes(FRAMES)
+    assert not same_placement(REV, dataclasses.replace(REV, scale=1.001))
+
+
+def test_a_scale_far_from_one_is_noted():
+    assert placement_note(dataclasses.replace(FWD, scale=1.45), GRID) == (
+        "scale ×1.450 stretches it by 45%"
+    )
+    assert placement_note(dataclasses.replace(FWD, scale=0.7), GRID) == (
+        "scale ×0.700 compresses it by 30%"
+    )
+    assert placement_note(dataclasses.replace(FWD, scale=1.19), GRID) == ""
+    assert placement_note(dataclasses.replace(FWD, travel_shift=3.0), GRID) == ""  # call 4
+
+
+def test_a_fitted_line_is_fitted_again_when_its_grid_changes_length():
+    span = 15.5
+    fitted_rev = dataclasses.replace(REV, scale=15.0 / span)
+    assert is_fitted(fitted_rev, span, 15.0)
+    again = followed_length(fitted_rev, 15.0, 16.0, span)
+    assert (again.start_along, again.scale) == (pytest.approx(16.0), pytest.approx(16.0 / span))
+    typed = dataclasses.replace(FWD, scale=1.02)  # ends at 15.81, not on the edge
+    assert not is_fitted(typed, span, 15.0) and followed_length(typed, 15.0, 16.0, span) == typed
+    as_recorded = dataclasses.replace(FWD)  # scale 1 is never "fitted"
+    assert not is_fitted(as_recorded, 15.0, 15.0)
+    shifted = dataclasses.replace(fitted_rev, travel_shift=0.3)  # call 4: ends judged unshifted
+    assert is_fitted(shifted, span, 15.0)
+
+
+def test_the_length_report_counts_refitted_lines():
+    both = GridEditReport("F", moved=(("y", 11.0, 1),), refitted=(("y", 11.0, 2),))
+    assert both.message() == (
+        "F is now 11.00 m along y; its 1 reversed line(s) moved with the far edge, "
+        "and its 2 fitted line(s) were fitted to the new length."
+    )
+    assert GridEditReport("F", refitted=(("y", 11.0, 2),)).message() == (
+        "F is now 11.00 m along y; its 2 fitted line(s) were fitted to the new length."
+    )

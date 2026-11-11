@@ -1600,6 +1600,21 @@ def test_a_placement_edit_to_a_prepared_line_re_prepares(sourced):
     assert errors == []
 
 
+def test_a_scale_or_destagger_edit_to_a_prepared_line_re_prepares(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    key = session.keys()[0]
+    for change in ({"scale": 0.95}, {"travel_shift": 0.2}):
+        count = len(prepared)
+        _edit(session, key, **change)
+        assert engine.wait_for_preparation(20_000)
+        assert len(prepared) == count + 1
+        line = next(p for p in engine.prepared_lines() if p.key == key)
+        expected = session.line_for_key(key).trace_coords(session.site.frames)
+        assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
+    assert errors == []
+
+
 def test_an_edit_to_a_line_outside_the_source_does_not_re_prepare(sourced):
     engine, session, errors, prepared = sourced
     keys = session.keys()
