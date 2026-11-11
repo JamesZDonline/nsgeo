@@ -203,18 +203,44 @@ def test_the_value_objects_validate_themselves():
     assert choice.line_keys == ("a", "b")
 
 
-def test_shift_scroll_steps_deeper_downward_and_is_inert_without_shift():
+def test_shift_scroll_steps_deeper_downward_one_step_per_notch():
     """Spec 9.2: shift + scroll on the canvas cycles depth, which is the
     convention users of other packages already have. The direction is the
     one the world uses -- scrolling down goes deeper -- and the rule is a
     plain function so it is pinned without synthesising a Qt event, whose
     constructor signature differs between Qt 5 and Qt 6."""
-    from nsgeo_qgis.slices_plan import depth_scroll_delta
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
 
-    assert depth_scroll_delta(-120, shift_held=True) == 1  # down: deeper
-    assert depth_scroll_delta(120, shift_held=True) == -1  # up: shallower
-    assert depth_scroll_delta(-120, shift_held=False) == 0  # plain scroll is a map zoom
-    assert depth_scroll_delta(0, shift_held=True) == 0  # a horizontal-only wheel
+    assert depth_scroll_steps(0, -120) == (1, 0)  # down: deeper
+    assert depth_scroll_steps(0, 120) == (-1, 0)  # up: shallower
+    assert depth_scroll_steps(0, -240) == (2, 0)  # two notches Qt delivered as one event
+    assert depth_scroll_steps(-60, 0) == (0, -60)  # a horizontal-only wheel changes nothing
+
+
+def test_a_high_resolution_wheel_steps_once_per_notch_not_once_per_event():
+    """#109: a high-resolution wheel (the user's Logitech M720 under libinput)
+    reports one notch as several smaller events. Stepping once per event
+    moved the depth two Steps per notch. Qt's `angleDelta` documentation
+    says to add the deltas up until they reach 120, one notch."""
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
+
+    assert depth_scroll_steps(0, -60) == (0, -60)  # half a notch: wait for the rest
+    assert depth_scroll_steps(-60, -60) == (1, 0)
+
+    pending, moved = 0, 0
+    for _ in range(8):  # one notch in eighths
+        steps, pending = depth_scroll_steps(pending, -15)
+        moved += steps
+    assert (moved, pending) == (1, 0)
+
+
+def test_turning_the_wheel_back_drops_the_part_notch():
+    """A part-notch left over from scrolling down must not swallow the first
+    notch back up: the reversal takes effect on that notch."""
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
+
+    assert depth_scroll_steps(-60, 120) == (-1, 0)
+    assert depth_scroll_steps(60, -120) == (1, 0)
 
 
 # ---- the cell-size floor (walkthrough round 2, W7: a crash) ---------------

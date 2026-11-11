@@ -90,6 +90,7 @@ a milestone merges or the plan changes.
 | | Survey panel grids start collapsed ([#133]) | 0.3.0 |
 | | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
 | | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | next release |
+| | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | next release |
 | | Local real-data tests read one survey at a time, so the GPS lines for M17 no longer break them ([#141]) | tests only |
 
 ### In progress
@@ -98,13 +99,13 @@ Nothing at the moment. The first item under *Next* starts next.
 
 ### Next, in order
 
-The first five items come before M15 because the next milestones build on
-them: doing them now is cheaper than reworking M15–M17 afterwards.
+The first six items come before M15. Most are things the next milestones
+build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
 1. **Fine cells.** Store only the covered cells in a resident cube ([#113]);
    never refuse a fine cell in Whole site ([#107]); a faster minimum-curvature
-   solver ([#111]); export finer than the preview ([#108]); one slice per wheel
-   notch ([#109]). M15 and M16 read the cube, so its layout changes first.
+   solver ([#111]); export finer than the preview ([#108]). M15 and M16 read
+   the cube, so its layout changes first.
 2. **The background solver** (the worker items in [#120]). M15 solves its cuts
    on the same worker.
 3. **This grid and Whole site agree** on a grid's lines and preset ([#100],
@@ -115,13 +116,13 @@ them: doing them now is cheaper than reworking M15–M17 afterwards.
 5. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-6. **M15: cut anywhere.** Draw a line on the map and see the vertical section
-   beneath it, with the same hover, cursor and picks as a survey line. Designed.
-7. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
-   Being designed.
-8. **Line placement corrections:** a destagger shift ([#47]) and stretching or
+6. **Line placement corrections:** a destagger shift ([#47]) and stretching or
    compressing lines to fit the grid ([#3]). Real grids need them now, and
    M17's GPS lines use the same shift.
+7. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+   beneath it, with the same hover, cursor and picks as a survey line. Designed.
+8. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+   Being designed.
 9. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
 10. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
@@ -152,8 +153,9 @@ Grouped by area. The order within a group is not a priority.
   the slice band ([#131]); trace stacking ([#114]); a frequency profile
   ([#34]); configurable axes ([#11]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
-  ([#132]). Whether several sites will ever be open at once is worth deciding
-  before M16, which adds more code that assumes one.
+  ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
+  cell size ([#138]). Whether several sites will ever be open at once is worth
+  deciding before M16, which adds more code that assumes one.
 - **Output:** annotated, publication-quality profile figures ([#83]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
@@ -200,6 +202,7 @@ Grouped by area. The order within a group is not a priority.
 [#132]: https://github.com/JamesZDonline/nsgeo/issues/132
 [#133]: https://github.com/JamesZDonline/nsgeo/issues/133
 [#134]: https://github.com/JamesZDonline/nsgeo/issues/134
+[#138]: https://github.com/JamesZDonline/nsgeo/issues/138
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 [#141]: https://github.com/JamesZDonline/nsgeo/issues/141
 
