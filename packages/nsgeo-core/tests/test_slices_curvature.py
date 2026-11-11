@@ -339,12 +339,15 @@ def test_max_distance_zero_returns_the_data_alone():
     assert np.isnan(out[~pop]).all()
 
 
-def test_a_solve_stops_when_asked():
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_a_solve_stops_when_asked(dtype):
     """Task 2 runs solves on a worker thread, so a stop must land between
-    iterations and the solve must touch neither the plan nor the values."""
+    iterations and the solve must touch neither the plan nor the values.
+    The plugin's slices are float32, which the solve works in: a copy it
+    skipped for them would write into the caller's array (#120)."""
     pop = lines()
     plan = plan_curvature(pop, STEP, 0.25)
-    v = values(pop)
+    v = values(pop).astype(dtype)
     kept_values, kept_coefficients = v.copy(), plan.coefficients.copy()
     want, iterations = plan.solve(v)
     assert iterations > 5

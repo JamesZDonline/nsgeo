@@ -496,3 +496,111 @@ def test_roles_from_ring_tie_goes_to_the_lower_vertex_on_either_winding():
     for ring, lowest_tied in ((sq, 0), (sq[::-1], 2)):
         _, idx = roles_from_ring(ring)
         assert idx[0] == lowest_tied
+
+
+# --- fit to the grid at import (placement corrections plan, calls 5, 6, 11) ---
+
+
+@needs_real_data
+def test_real_campus_lines_fitted_to_a_10_m_grid_end_on_its_far_edge():
+    options = ImportOptions(
+        grid_id="G", axis="y", spacing=0.5, grid_size_along=10.0, fit_to_grid=True
+    )
+    rows = plan_import(REAL_DZT, options)
+    recompute_offsets(rows, options)
+    lines = rows_to_lines(rows, options)
+    assert len(lines) == 10
+    for line in lines:
+        along = line.distance_along()
+        p = line.placement
+        near, far = (0.0, 10.0) if p.direction == 1 else (10.0, 0.0)
+        assert along[0] == pytest.approx(near, abs=1e-9)
+        assert along[-1] == pytest.approx(far, abs=1e-9)
+    by_name = {r.path.stem: r for r in rows}
+    assert by_name["FILE__008"].scale == pytest.approx(10.0 / 11.08, rel=1e-3)
+    for row in rows:
+        assert "fitted to the grid's 10.00 m" in row.note
+        assert "exceeds grid size" not in row.note
+
+
+@needs_real_data
+def test_fit_off_leaves_scale_one_and_keeps_the_exceeds_note():
+    options = ImportOptions(grid_id="G", axis="y", spacing=0.5, grid_size_along=10.0)
+    rows = plan_import(REAL_DZT, options)
+    recompute_offsets(rows, options)
+    assert all(r.scale == 1.0 for r in rows)
+    by_name = {r.path.stem: r for r in rows}
+    assert "exceeds grid size along y" in by_name["FILE__008"].note
+    assert all("fitted to the grid's" not in r.note for r in rows)
+
+
+def test_fit_without_a_grid_length_says_so(tmp_path):
+    path = synthetic_dzt(tmp_path, "FILE__001.DZT", n_traces=660)
+    options = ImportOptions(grid_id="G", axis="y", spacing=0.5, fit_to_grid=True)
+    rows = plan_import([path], options)
+    recompute_offsets(rows, options)
+    recompute_offsets(rows, options)
+    assert rows[0].scale == 1.0
+    assert rows[0].note.count("cannot be fitted without a known grid length") == 1
+
+
+def test_toggling_fit_back_and_forth_leaves_no_stale_note(tmp_path):
+    path = synthetic_dzt(tmp_path, "FILE__001.DZT", n_traces=720)  # 12 m
+    off = ImportOptions(grid_id="G", axis="y", spacing=0.5, grid_size_along=10.0)
+    on = dataclasses.replace(off, fit_to_grid=True)
+    rows = plan_import([path], off)
+    exceeds = rows[0].note
+    assert "exceeds grid size along" in exceeds
+    recompute_offsets(rows, on)
+    assert "fitted to the grid's 10.00 m" in rows[0].note
+    assert "exceeds" not in rows[0].note
+    assert rows[0].scale == pytest.approx(10.0 / (719 / 60))
+    recompute_offsets(rows, off)
+    assert rows[0].note == exceeds
+    assert rows[0].scale == 1.0
+
+
+def test_fit_at_import_ignores_start_along_and_lands_on_both_edges(tmp_path):
+    from nsgeo_qgis.line_edit import is_fitted, span_m
+
+    paths = [
+        synthetic_dzt(tmp_path, f"FILE__00{i}.DZT", n_traces=n) for i, n in ((1, 660), (2, 540))
+    ]
+    base = ImportOptions(grid_id="G", axis="y", spacing=0.5, start_along=0.5, grid_size_along=10.0)
+    on = dataclasses.replace(base, fit_to_grid=True)
+    rows = plan_import(paths, on)
+    recompute_offsets(rows, on)
+    lines = rows_to_lines(rows, on)
+    assert len(lines) == len(rows)  # zip(strict=) needs Python 3.10; CI runs 3.9
+    for line, row in zip(lines, rows):
+        along = line.distance_along()
+        assert {round(along[0], 9), round(along[-1], 9)} == {0.0, 10.0}
+        span = span_m(row.n_traces, row.traces_per_metre)
+        assert is_fitted(line.placement, span, 10.0)
+    recompute_offsets(rows, base)
+    starts = [ln.distance_along()[0] for ln in rows_to_lines(rows, base)]
+    assert starts == pytest.approx([0.5, 10.5])
+
+
+def test_a_big_stretch_or_squeeze_is_named_in_the_fitted_note(tmp_path):
+    short = synthetic_dzt(tmp_path, "FILE__001.DZT", n_traces=420)  # 7 m on a 10 m grid
+    long = synthetic_dzt(tmp_path, "FILE__002.DZT", n_traces=900)  # 15 m on a 10 m grid
+    near = synthetic_dzt(tmp_path, "FILE__003.DZT", n_traces=540)  # 9 m: ~11%
+    options = ImportOptions(
+        grid_id="G", axis="y", spacing=0.5, grid_size_along=10.0, fit_to_grid=True
+    )
+    rows = plan_import([short, long, near], options)
+    for _ in range(2):  # a replan must not duplicate the clause
+        recompute_offsets(rows, options)
+    stretched, squeezed, slight = rows
+    pct = f"{abs(stretched.scale - 1):.0%}"
+    assert stretched.scale > 1.2
+    expected = f"fitted to the grid's 10.00 m (scale ×{stretched.scale:.4f}), stretches it by {pct}"
+    assert expected in stretched.note
+    assert stretched.note.count("stretches it by") == 1
+    assert f"compresses it by {abs(squeezed.scale - 1):.0%}" in squeezed.note
+    assert squeezed.note.count("compresses it by") == 1
+    assert "stretches" not in slight.note and "compresses" not in slight.note
+    off = dataclasses.replace(options, fit_to_grid=False)
+    recompute_offsets(rows, off)
+    assert all("stretches" not in r.note and "compresses" not in r.note for r in rows)
