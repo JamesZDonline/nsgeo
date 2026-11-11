@@ -466,9 +466,9 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    the panel. An export is not limited by the preview: it works out its own
    cells at the size you choose (see step 6).
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
-   many traces fell in each cell, rather than the amplitude. A cell with a
-   high number has many traces under it. A cell with 0 had no line cross it, and
-   a low number means only one or two traces, so a slice there rests on little.
+   many traces fell in each cell, rather than the amplitude. The number in a cell
+   is how many traces fell in it. A blank cell had no line through it, and a low
+   number means only one or two traces, so a slice there rests on little.
    Use it to spot gaps and thin coverage between lines before you trust a slice
    in that spot. With **Show coverage** ticked, an export also writes the
    counts as a second file beside it, named like the export with
