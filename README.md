@@ -160,7 +160,8 @@ Grouped by area. The order within a group is not a priority.
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
-- **Output:** annotated, publication-quality profile figures ([#83]); a help
+- **Output:** annotated, publication-quality profile figures ([#83]); one
+  cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
   walkthrough).
 
@@ -209,6 +210,7 @@ Grouped by area. The order within a group is not a priority.
 [#138]: https://github.com/JamesZDonline/nsgeo/issues/138
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 [#141]: https://github.com/JamesZDonline/nsgeo/issues/141
+[#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 
 ## Why
 

@@ -17,7 +17,8 @@ Supersedes the "nearest, not bilinear" rationale in `to_north_up`'s docstring.
 
 Everything else in those specs stands.
 
-Closes #107, #108, #112. Defers #138.
+Closes #107, #108, #112. Defers #138 (sharpen as you zoom) and #146 (one COG per depth band, for
+hosting).
 
 ---
 
@@ -113,6 +114,16 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
    not designed around it, but must stay usable at that speed: progress, cancel, and the GUI stays
    responsive.
 
+Settled after the builder check (author, 2026-11-10):
+
+- **A. The per-grid limit holds for exports too.** A single grid's frame at the export cell stays
+  under `MAX_FRAME_CELLS`. A 50 × 50 m grid exports at 0.025 m; a bigger single grid stops at a
+  coarser cell, with the plain reason and the finest cell that fits. Lifting the limit would need
+  chunked interpolation of very large grids, which is not part of this work. A 120 × 120 m site
+  works as long as its grids each fit.
+- **B. Hosting is a follow-up.** One cloud-optimised GeoTIFF per depth band is #146. #108's "COG
+  option" moves there.
+
 **Mine** (*design call*; each was put to the author and not objected to):
 
 7. **The edge rule.** A pixel is blank exactly where the nearest cell is blank. Inside the data it
@@ -164,6 +175,8 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 - Faster per-grid preparation at fine cells: that is #111 and #113.
 - Exact cell values in every pixel.
 - A rotated-geotransform export. GIS support for those is uneven (#112's notes).
+- Exporting a single grid finer than `MAX_FRAME_CELLS` allows (decision A).
+- Files for hosting online: #146 (decision B).
 
 **Anti-goals.** Any of these makes the work a failure, even if it otherwise works.
 
@@ -238,8 +251,9 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 
 - **Where they appear.** Every refusal that remains is shown in the Slices panel, where the slider
   says "not prepared" today, and stays until the cause is fixed. A toast may also appear, but it is
-  never the only place. Remaining refusals include a single grid's frame over `MAX_FRAME_CELLS`, and
-  milestone A's export over the limit.
+  never the only place. Remaining refusals include a single grid's frame over `MAX_FRAME_CELLS`,
+  live or at the export cell (decision A), and milestone A's export over the limit. A grid refusal
+  names the finest cell that fits.
 - **What they say.** What is too big, and why, in plain words. What to do about it. For the site,
   name the grids whose removal shrinks the rectangle most. The old toast's wording, "the site lattice
   would be … at 0.025 m, more than the 4,000,000 a slice can be drawn at …", is the example of what
@@ -253,7 +267,8 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
 ### 6.1 What the user sets
 
 - **Two new fields on both export dialogs,** site and This grid:
-  - **Export cell.** How finely the grids are binned and interpolated. It defaults to the live cell.
+  - **Export cell.** How finely the grids are binned and interpolated. It defaults to the live cell,
+    and no finer than every included grid's own limit allows (decision A).
   - **Export pixel.** How finely the file is written. It defaults to the export cell, can be set
     finer, and is never coarser than the export cell.
 - **A finer pixel** is bilinear evaluated at that pixel, so the file looks smooth in any viewer.
@@ -301,7 +316,7 @@ Walkthrough site Grid 1: 0.05 m cells, azimuth 10.497°, kriging, 15–20 ns. Th
   - The COG copy also took 14 s against about 5 s for overviews in place, and the file was 25%
     larger.
   - Metadata, band descriptions and NaN nodata all survived the COG copy.
-- **Hosting online.** Hosting is an open question for the author (§9).
+- **Hosting online.** Out of this work: #146 (decision B).
 - **Disk.** Check free space before starting, using the estimate shown in the dialog.
 - **Write safely.** Write to a temporary name in the target directory and rename on success. A
   cancel or failure removes the temporary file and leaves any existing file at the target path
@@ -364,12 +379,7 @@ Human gates, tracked and reported, never passed silently.
 
 ## 9. Open for the author
 
-- **Hosting online.** What happens when the author decides to host exports?
-  - One COG per depth band, written by an option on the export. This avoids the interleave problem
-    entirely, and is how such files are usually served.
-  - Or a multi-band COG once the GDAL under the author's QGIS supports band interleave. That is
-    believed to be GDAL 3.11 or later, not yet confirmed.
-  - Or leave it to a later issue.
+Nothing. Both questions from the builder check were settled (decisions A and B).
 
 ## 10. Left to the builder
 
