@@ -83,6 +83,7 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
+    MemoryEstimate,
     Resolution,
     SiteSource,
     SliceFinish,
@@ -1059,6 +1060,32 @@ class SlicesDock(QgsDockWidget):
         lines = None if every_line or self._included_is_default else self._included
         self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
 
+    def _included_estimate(self) -> MemoryEstimate:
+        """The memory the included lines will cost, before preparing them.
+
+        The one place the before-preparing count lives: the included label
+        and, until the engine holds lines, the residency checkbox both read
+        it, so the two never disagree (#113)."""
+        samples = 0
+        coords: list[np.ndarray] = []
+        frame = self.engine.frame
+        if self.session.is_open:
+            for key in self._included:
+                line = self.session.line_for_key(key)
+                samples += line.n_traces * line.header.n_samples
+                if frame is None:
+                    continue
+                try:
+                    coords.append(line.trace_coords(self.session.site.frames))
+                except Exception:  # noqa: BLE001 -- a missing grid; preparation skips it too
+                    continue
+        z = self.engine.z
+        n_cells = frame.n_cells if frame is not None else 0
+        nz = z.nz if z is not None else 0
+        # A resident cube stores only the cells the lines fall in (#113).
+        n_covered = covered_cells(frame, coords) if frame is not None else 0
+        return estimate_memory(samples, n_cells, nz, n_covered)
+
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
         ~0.9 s of preparing it.
@@ -1086,32 +1113,14 @@ class SlicesDock(QgsDockWidget):
         grid_id = self.grid_combo.currentText() or None
         total = len(self._default_included(grid_id))
         included = self._included
-        samples = 0
-        coords: list[np.ndarray] = []
-        frame = self.engine.frame
-        if self.session.is_open:
-            for key in included:
-                line = self.session.line_for_key(key)
-                samples += line.n_traces * line.header.n_samples
-                if frame is None:
-                    continue
-                try:
-                    coords.append(line.trace_coords(self.session.site.frames))
-                except Exception:  # noqa: BLE001 -- a missing grid; preparation skips it too
-                    continue
-        z = self.engine.z
-        n_cells = frame.n_cells if frame is not None else 0
-        nz = z.nz if z is not None else 0
-        # A resident cube stores only the cells the lines fall in (#113).
-        n_covered = covered_cells(frame, coords) if frame is not None else 0
-        estimate = estimate_memory(samples, n_cells, nz, n_covered)
+        estimate = self._included_estimate()
         text = f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
         if estimate.total_bytes > DEFAULT_BUDGET_BYTES:
             text += " -- over the default budget; slices will stream rather than hold it all"
         self.included_label.setText(text)
-        self._update_resident_check_label()
+        self._update_resident_check_label(estimate)
 
-    def _update_resident_check_label(self) -> None:
+    def _update_resident_check_label(self, before: MemoryEstimate | None = None) -> None:
         """Spec 9.2's own wording for the residency override, with the
         cost it names filled in: `engine.estimate.cube_bytes` is what
         turning it on actually adds -- the prepared lines are already held
@@ -1120,7 +1129,15 @@ class SlicesDock(QgsDockWidget):
         label` (every place that estimate could have changed) and from
         `_apply_resolution` (a resolution change moves `frame`/`z`, and so
         `engine.estimate`, without necessarily touching `_included`)."""
-        mb = format_bytes(self.engine.estimate.cube_bytes)
+        # Until the engine holds lines its own estimate counts no covered
+        # cells; the before-preparing figure the included label shows is the
+        # honest one then (#113). `before` saves a second count when the
+        # caller just made it.
+        if self.engine.is_prepared:
+            cube_bytes = self.engine.estimate.cube_bytes
+        else:
+            cube_bytes = (before or self._included_estimate()).cube_bytes
+        mb = format_bytes(cube_bytes)
         # Short on the face, the full wording in the tooltip. A QCheckBox
         # cannot elide or wrap its own text, so its minimum width is the
         # width of that text -- "Keep the whole volume in memory for

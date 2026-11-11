@@ -124,25 +124,71 @@ def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     assert "MB" in text or "GB" in text
 
 
-def test_the_included_label_counts_only_covered_cells(docked):
+def _spy_on_the_estimate(monkeypatch):
+    """Record every `estimate_memory` call the dock makes, then delegate.
+
+    The label shows whole MB, and this fixture's cube rounds to "1 MB"
+    whatever the covered count is, so the label cannot tell a packed figure
+    from a dense one. The arguments can."""
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real = dock_module.estimate_memory
+    calls: list[tuple[int, int, int, int]] = []
+
+    def spy(prepared_samples, n_cells, nz, n_covered):
+        calls.append((prepared_samples, n_cells, nz, n_covered))
+        return real(prepared_samples, n_cells, nz, n_covered)
+
+    monkeypatch.setattr(dock_module, "estimate_memory", spy)
+    return calls
+
+
+def _covered_by_the_included_lines(dock, session):
+    from nsgeo.slices import covered_cells
+
+    frame = dock.engine.frame
+    assert frame is not None
+    coords = [session.line_for_key(k).trace_coords(session.site.frames) for k in dock._included]
+    return covered_cells(frame, coords), frame
+
+
+def test_the_included_label_counts_only_covered_cells(docked, monkeypatch):
     """Before preparing, the label's figure counts the cells the included
     lines fall in, not every cell of the frame (#113)."""
-    from nsgeo.slices import covered_cells
-    from nsgeo_qgis.slices_plan import estimate_memory, format_bytes
-
     dock, session = docked
     dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    calls = _spy_on_the_estimate(monkeypatch)
     dock._update_included_label()
-    frame, z = dock.engine.frame, dock.engine.z
-    assert frame is not None and z is not None
-    lines = [session.line_for_key(k) for k in dock._included]
-    coords = [ln.trace_coords(session.site.frames) for ln in lines]
-    covered = covered_cells(frame, coords)
+    covered, frame = _covered_by_the_included_lines(dock, session)
     assert 0 < covered < frame.n_cells
-    samples = sum(ln.n_traces * ln.header.n_samples for ln in lines)
-    expected = format_bytes(estimate_memory(samples, frame.n_cells, z.nz, covered).total_bytes)
+    assert calls and calls[0][3] == covered
     assert dock.included_label.text().startswith("3 of 3 included")
-    assert dock.included_label.text().split("about ")[1].split(" --")[0] == expected
+
+
+def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeypatch):
+    """While no lines are prepared the engine's own estimate counts no cells
+    (it reads 1 MB), so the checkbox shows the before-preparing figure the
+    included label uses, and the two agree (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    monkeypatch.setattr(dock.engine, "_lines", [])  # the unprepared window
+    assert not dock.engine.is_prepared
+    calls = _spy_on_the_estimate(monkeypatch)
+    shown: list[int] = []
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    dock._update_included_label()
+    covered, frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    cube_bytes = nz * covered * 4 + covered * 4 + covered * 8
+    assert covered < frame.n_cells
+    assert all(c[3] == covered for c in calls)
+    assert cube_bytes in shown, "the checkbox must be sized from the packed count"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(cube_bytes)})"
 
 
 def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
