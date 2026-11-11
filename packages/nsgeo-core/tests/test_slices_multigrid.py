@@ -55,7 +55,7 @@ def small_frame():
 
 
 def test_coarse_offsets_are_the_25_row_major():
-    assert COARSE_OFFSETS == tuple(itertools.product(range(-2, 3), repeat=2))
+    assert tuple(itertools.product(range(-2, 3), repeat=2)) == COARSE_OFFSETS
 
 
 def test_restrict_is_the_transpose_of_prolong():
