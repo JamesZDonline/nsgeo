@@ -241,14 +241,13 @@ Settled after the builder check (author, 2026-11-10):
   never blend one cell's count with its neighbours'. Where grids overlap, counts average as they do
   today (`compose_footprints`, `site_export.py`'s "coverage is composed like values"), unless the
   builder finds a reason to change that and records it.
-- **No cell's count may be hidden by the pixel rule.** Coverage exists to find gaps, so a zero-count
-  cell that no pixel shows hides a real gap. The rule that meets this is the builder's. For example:
-  nearest cell at half the cell for coverage only, or a pixel showing the smallest count among the
-  cells it touches. If coverage keeps a finer pixel than the amplitude picture, it is checked
-  against the limit separately.
-  **Build-time amendment:** no trace count may be hidden. A pixel shows the largest count among the
-  cells it would blend, so lines one cell wide stay visible; a gap of about a cell or less beside
-  data may close. Ruled during the build: the smallest-count rule erased every line at fine cells.
+- **No trace count may be hidden by the pixel rule.** As built, a coverage pixel shows the largest
+  count among the in-frame cells with positive weight in its blend, so lines one cell wide stay
+  visible; a gap of a cell or less beside data may close. If coverage keeps a finer pixel than the
+  amplitude picture, it is checked against the limit separately.
+  **Build-time amendment:** this replaced the rule first written here, a pixel showing the smallest
+  count among the cells it touches (or nearest cell at half the cell), which erased every line at
+  fine cells.
 
 ### 5.5 Plain reasons
 

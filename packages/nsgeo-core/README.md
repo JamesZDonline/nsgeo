@@ -129,7 +129,7 @@ several grids' slices into one site view.
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_windows` | Every window of a thickness, at a step. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
-| `sample_counts` | The smallest corner count at each tap, so a gap is never hidden. |
+| `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
 | `shared_limit` | One display limit for the whole cube. |

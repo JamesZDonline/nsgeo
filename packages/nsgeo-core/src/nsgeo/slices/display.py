@@ -229,9 +229,11 @@ def to_north_up(
     interpolate across a gap (`max_distance`) or smooth; those stay the
     user's choices.
 
-    `counts=True` is for a coverage raster: each pixel takes the smallest
-    count among the cells that feed it, never a blend, so a count stays a
-    whole number (or NaN).
+    `counts=True` is for a coverage raster: each pixel takes the largest
+    count among the in-frame cells that feed it (those with positive
+    weight), never a blend, so a count stays a whole number (or NaN). No
+    trace count is hidden, so a line one cell wide stays visible; a gap of
+    a cell or less beside data may close.
 
     Which cells each pixel reads depends only on the frame, so it is planned
     once per frame (`_north_up_plan`) and each call after the first is one
