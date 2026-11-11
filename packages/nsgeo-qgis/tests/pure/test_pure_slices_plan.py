@@ -16,12 +16,14 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_METHOD,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
+    TIME_BASE_MIXED,
     WEIGHT_BYTES_PER_CELL,
     MemoryEstimate,
     Resolution,
     SliceFinish,
     SourceChoice,
     choose_residency,
+    combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
@@ -674,3 +676,11 @@ def test_mixed_clock_note_names_the_radar_grids():
         "Grid A has no Time zero step, so its times are from the radar's own zero "
         "and will not line up with the other grids."
     )
+
+
+def test_combined_time_base_is_one_rule_for_a_set_of_grids():
+    assert combined_time_base(["time_zero", "time_zero"]) == "time_zero"
+    assert combined_time_base(["radar"]) == "radar"
+    assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
+    with pytest.raises(ValueError):
+        combined_time_base([])

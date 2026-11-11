@@ -437,9 +437,7 @@ def test_exporting_a_preview_site_refuses_and_writes_nothing(site3, make_site, t
     assert not path.exists()
 
 
-def test_a_mixed_site_records_each_grids_time_base_and_the_site_s(
-    site3, make_site, tmp_path, open_tif
-):
+def test_a_mixed_site_records_each_grids_time_base_and_its_own(site3, tmp_path, open_tif):
     site3.session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
     site = SiteEngine(site3.session)
     try:
@@ -453,10 +451,12 @@ def test_a_mixed_site_records_each_grids_time_base_and_the_site_s(
         site.set_resolution(RES)
         path = tmp_path / "mixed.tif"
         plan = export_site(site, path, 8, 24, **KW)
+        companion = open_tif(write_site_coverage(site, path, plan)).GetMetadata()
     finally:
         site.wait_until_idle(20_000)
         site.dispose()
     assert {g.grid_id: g.time_base for g in plan.grids} == {"A": "time_zero", "B": "radar"}
+    assert companion["NSGEO_SITE_TIME_BASE"] == "mixed"
     ds = open_tif(path)
     md = ds.GetMetadata()
     assert md["NSGEO_SITE_TIME_BASE"] == "mixed"

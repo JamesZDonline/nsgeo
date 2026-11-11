@@ -15,6 +15,7 @@ import time
 
 import numpy as np
 import pytest
+from nsgeo.processing import time_base_of
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     SliceWindow,
@@ -3535,3 +3536,59 @@ def test_grid_time_bases_reads_each_grids_preset(plugin):
         "B": "time_zero",
         "C": "radar",
     }
+
+
+def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
+    """Ruling R15: saving over a preset does not re-prepare, so the drawn cubes
+    and the export keep the old steps; the note must say what they say."""
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    session.site.presets["radar"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+    _events()
+    engine = dock.site_engine
+    assert time_base_of(engine.engine_for("B").provenance().steps) == "radar"
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
+    session = plugin.session
+    _preset_per_grid(session, B="raw")  # both presets carry time_zero
+    dock = whole_site(plugin)
+    session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    _events()
+    assert time_base_of(dock.site_engine.engine_for("B").provenance().steps) == "time_zero"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
+    session = plugin.session
+    _add_refused_preset(session)
+    _preset_per_grid(session, B="zz_bad")
+    dock = whole_site(plugin)
+    assert dock.site_engine.grid_state("B") != "ready"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugin, monkeypatch):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    scope = dock._site
+    warning = mixed_clock_note(["B"])
+    monkeypatch.setattr(type(scope.engine), "preview_note", property(lambda s: "A preview"))
+    scope.show_note(drawn=True)
+    assert dock.site_note.text() == f"A preview. {warning}"
+    scope.problem = "no depth range"
+    scope.show_note(drawn=False)
+    assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
+    assert dock.site_note.toolTip().endswith(warning)

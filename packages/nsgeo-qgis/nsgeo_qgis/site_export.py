@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, time_base_of
+from nsgeo.processing import time_base_of
 from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
@@ -54,7 +54,7 @@ from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsRasterLayer
 
 from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
 from nsgeo_qgis.slice_export import ExportCancelled, GeoTiffSliceWriter, band_time_range
-from nsgeo_qgis.slices_plan import SliceFinish
+from nsgeo_qgis.slices_plan import SliceFinish, combined_time_base
 
 _SEPARATORS = (",", ":")
 
@@ -203,12 +203,7 @@ class SiteWriter(Protocol):
 
 def site_time_base(grids: Iterable[SiteGridRecord]) -> str:
     """`time_zero` or `radar` when every grid is on that clock, else `mixed`."""
-    bases = {g.time_base for g in grids}
-    if bases == {TIME_BASE_TIME_ZERO}:
-        return TIME_BASE_TIME_ZERO
-    if bases == {TIME_BASE_RADAR}:
-        return TIME_BASE_RADAR
-    return "mixed"
+    return combined_time_base(g.time_base for g in grids)
 
 
 def _json(value: Any) -> str:

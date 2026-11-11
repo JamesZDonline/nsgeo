@@ -516,7 +516,7 @@ def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
         ds.Close()
 
 
-def test_the_geotiff_names_its_time_base(exportable, exportable_with_session, tmp_path):
+def test_the_geotiff_names_its_time_base(exportable_with_session, tmp_path):
     from osgeo import gdal
 
     engine, session = exportable_with_session
@@ -536,16 +536,28 @@ def test_the_geotiff_names_its_time_base(exportable, exportable_with_session, tm
         other.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
         radar = tmp_path / "radar.tif"
         export_slices(other, radar, 10, 5, None, SliceFinish())
+        radar_cov = tmp_path / "radar_cov.tif"
+        write_coverage(other, radar_cov)
     finally:
         other.dispose()
     found = {}
-    for name, target in (("zero", path), ("coverage", coverage), ("radar", radar)):
+    for name, target in (
+        ("zero", path),
+        ("coverage", coverage),
+        ("radar", radar),
+        ("radar_coverage", radar_cov),
+    ):
         ds = gdal.Open(str(target))
         try:
             found[name] = ds.GetMetadata().get("NSGEO_TIME_BASE")
         finally:
             ds.Close()
-    assert found == {"zero": "time_zero", "coverage": "time_zero", "radar": "radar"}
+    assert found == {
+        "zero": "time_zero",
+        "coverage": "time_zero",
+        "radar": "radar",
+        "radar_coverage": "radar",
+    }
 
 
 def test_the_geotiff_metadata_follows_the_chosen_finish(exportable, tmp_path):

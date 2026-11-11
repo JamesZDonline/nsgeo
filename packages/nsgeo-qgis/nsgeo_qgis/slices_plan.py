@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -413,6 +413,22 @@ def old_cube_note(shift_ns: float) -> str:
         "This cube was saved before times were measured from each line's first break. "
         f"It was rebuilt that way, with its range moved by {shift_ns:+.2f} ns."
     )
+
+
+#: A site whose grids are not all on one clock (a site-level notion; the two
+#: clocks themselves are the core's `TIME_BASE_TIME_ZERO` and `TIME_BASE_RADAR`).
+TIME_BASE_MIXED = "mixed"
+
+
+def combined_time_base(bases: Iterable[str]) -> str:
+    """The one clock a set of grids is on, or `TIME_BASE_MIXED` when they differ.
+
+    The single rule behind both the site note and `NSGEO_SITE_TIME_BASE`. An
+    empty set has no clock: refused, never called mixed."""
+    distinct = set(bases)
+    if not distinct:
+        raise ValueError("no grids, so no time base")
+    return distinct.pop() if len(distinct) == 1 else TIME_BASE_MIXED
 
 
 def mixed_clock_note(radar_grids: Sequence[str]) -> str:

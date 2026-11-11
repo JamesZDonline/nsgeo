@@ -52,10 +52,12 @@ from nsgeo_qgis.site_engine import SiteSlice
 from nsgeo_qgis.slices_engine import PendingSolve
 from nsgeo_qgis.slices_plan import (
     NO_TRANSFORM,
+    TIME_BASE_MIXED,
     Resolution,
     SiteSource,
     SliceFinish,
     SourceChoice,
+    combined_time_base,
     default_cell,
     mixed_clock_note,
     smallest_safe_cell,
@@ -179,12 +181,41 @@ def site_source(session: Any, included: Iterable[str], transform_text: str) -> S
     return SiteSource(transform=transform, grids=tuple(grids))
 
 
-def grid_time_bases(session: Any, source: SiteSource) -> dict[str, str]:
-    """Each grid's clock, from its chosen preset's steps (#97)."""
-    return {
-        choice.grid_id: time_base_of(session.site.presets.get(choice.preset, []))
-        for choice in source.grids
-    }
+def _then(text: str, sentence: str) -> str:
+    """`sentence` after `text` as its own sentence (a full stop is added if `text` has none)."""
+    if text and not text.endswith((".", "!", "?")):
+        text += "."
+    return f"{text} {sentence}".strip()
+
+
+def grid_time_bases(
+    session: Any, source: SiteSource, site_engine: Any | None = None
+) -> dict[str, str]:
+    """Each grid's clock, as the picture and the export have it (#97, ruling R15).
+
+    A ready grid is read from the steps its preparation captured
+    (`provenance().steps`), which a later save over the preset does not
+    change. A grid still queued or preparing has no cubes yet, so its live
+    preset stands in. A grid with no lines or a failed preparation is not
+    drawn or exported, so it is left out. Without `site_engine` every grid
+    is read from its live preset.
+    """
+    out: dict[str, str] = {}
+    for choice in source.grids:
+        steps: Any = None
+        if site_engine is not None:
+            state = state_text(site_engine, choice.grid_id)
+            engine = site_engine.engine_for(choice.grid_id)
+            if state == "ready" and engine is not None:
+                steps = engine.provenance().steps
+            elif state in ("queued", "waiting") or state.startswith("preparing"):
+                steps = None
+            else:
+                continue
+        if steps is None:
+            steps = session.site.presets.get(choice.preset, [])
+        out[choice.grid_id] = time_base_of(steps)
+    return out
 
 
 def state_text(site_engine: Any, grid_id: str) -> str:
@@ -1028,7 +1059,12 @@ class SiteScope:
     def show_note(self, *, drawn: bool) -> None:
         """The site note: the preview note while drawn, the reason when nothing
         is drawn and one is known, else empty. The tooltip carries the full
-        text, and a preview's export refusal, so it is read before Export."""
+        text, and a preview's export refusal, so it is read before Export.
+
+        When the drawn grids are not all on one clock (some have no Time zero
+        step) the note ends with `mixed_clock_note`, as its own sentence, in
+        the text and the tooltip alike; a site wholly on the radar clock says
+        nothing, since its grids still line up."""
         note = self.dock.site_note
         engine = self.engine
         text = hint = ""
@@ -1039,12 +1075,12 @@ class SiteScope:
             text = hint = f"Not drawn: {self.problem}"
         source = self.source_sent or self.source()
         if source is not None:
-            bases = grid_time_bases(self.session, source)
+            bases = grid_time_bases(self.session, source, engine)
             radar = [g for g, base in bases.items() if base == TIME_BASE_RADAR]
-            if radar and len(radar) < len(bases):
+            if bases and combined_time_base(bases.values()) == TIME_BASE_MIXED:
                 mixed = mixed_clock_note(radar)
-                text = f"{text} {mixed}".strip()
-                hint = f"{hint} {mixed}".strip()
+                text = _then(text, mixed)
+                hint = _then(hint, mixed)
         note.set_hint(hint, whole=True)
         note.setText(text)
 
