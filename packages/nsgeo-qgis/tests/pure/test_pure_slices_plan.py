@@ -25,7 +25,10 @@ from nsgeo_qgis.slices_plan import (
     estimate_memory,
     format_bytes,
     format_status,
+    name_list,
     preset_transform_conflict,
+    preview_note,
+    site_export_refusal,
     transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data
@@ -577,6 +580,33 @@ def test_minimum_curvature_counts_its_plan_beside_its_kriging_preview():
     assert curvature.weights_bytes == kriging.weights_bytes + 1000 * CURVATURE_PLAN_BYTES_PER_CELL
     assert curvature.lines_bytes == kriging.lines_bytes
     assert curvature.cube_bytes == kriging.cube_bytes
+
+
+def test_name_list_reads_as_a_sentence():
+    assert name_list(["A"]) == "A"
+    assert name_list(["A", "B"]) == "A and B"
+    assert name_list(["A", "B", "C"]) == "A, B and C"
+
+
+def test_preview_note_is_exact_copy():
+    base = (
+        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
+        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "It draws in full at a 0.12 m cell or coarser."
+    )
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
+        base + " Leaving out C and D would also let it draw in full."
+    )
+
+
+def test_site_export_refusal_is_exact_copy():
+    base = (
+        "The site can't be exported at full detail yet: the site "
+        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a cell of 0.12 m or coarser"
+    )
+    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, []) == base + "."
+    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, ["C"]) == base + ", or leave out C."
 
 
 def test_the_estimate_matches_the_cube_it_describes():
