@@ -867,3 +867,34 @@ def test_a_failed_redraw_after_an_export_changes_nothing_it_reported(
     else:
         assert target.exists()
         assert any("exported" in m and str(target) in m for m, _lv in levels), levels
+
+
+def _drawn_values(layer):
+    """The finite pixel values the slice layer's provider holds."""
+    block = layer.dataProvider().block(1, layer.extent(), layer.width(), layer.height())
+    values = np.array(
+        [[block.value(r, c) for c in range(block.width())] for r in range(block.height())]
+    )
+    return values[np.isfinite(values) & (values > -1e30)]
+
+
+def test_the_plugin_draws_a_rotated_coverage_view_as_whole_counts(plugin, qgis_app):
+    """The plugin passes the coverage check to the layer as `counts=`: the
+    drawn counts are whole numbers, and the same view with coverage off is
+    blended. A hard-coded False at that call site would blend the counts."""
+    plugin, s = plugin
+    s.replace_grid(Grid("A", (500.0, 700.0), 30.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    assert dock.engine.frame.azimuth == 30.0
+
+    dock.coverage_check.setChecked(True)
+    qgis_app.processEvents()
+    counts = _drawn_values(plugin.slice_layer.layer)
+    assert counts.size > 0 and (counts >= 1).all()
+    np.testing.assert_array_equal(counts, np.round(counts))
+
+    dock.coverage_check.setChecked(False)
+    qgis_app.processEvents()
+    amplitudes = _drawn_values(plugin.slice_layer.layer)
+    assert (amplitudes != np.round(amplitudes)).any()

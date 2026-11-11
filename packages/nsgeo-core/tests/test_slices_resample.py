@@ -126,7 +126,7 @@ def test_a_constant_field_resamples_to_itself_exactly(c, azimuth):
 def test_a_plateau_at_the_maximum_never_blends_above_it():
     f = frame(azimuth=30.0, nx=40, ny=25)
     values = np.random.default_rng(5).random((f.ny, f.nx))
-    values[5:15, 8:30] = 0.9  # a plateau above everything else
+    values[5:15, 8:30] = 7.3  # a plateau above everything else (random() < 1)
     values = values.astype(np.float32)
     got = sample(values, bilinear_taps(f, centres(f, f.cell)))
     assert np.nanmax(got) <= values.max() and np.nanmin(got) >= values.min()
