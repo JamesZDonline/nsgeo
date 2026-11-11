@@ -7,7 +7,7 @@
 **Architecture:**
 - **Core.**
   - A `Cut` value (`nsgeo/model/cut.py`): an id, a name, a grid id, and vertices in grid-local metres. `Site.cuts` stores the cuts, and `survey.nsgeo.json` saves them.
-  - `nsgeo/slices/section.py` turns a cut into columns (distance, world position, cell) and reads a finished section from a cube's levels.
+  - `nsgeo/slices/section.py` turns a cut into columns (distance, world position, nearest cell and bilinear taps) and reads a finished section from a cube's levels, blended as #107's pixel rule blends a slice.
     - IDW and kriging reuse the grid's weights.
     - Smoothing works on crops round the cut.
     - Minimum curvature is solved one depth at a time, on crops.
@@ -18,7 +18,13 @@
 
 **Tech Stack:** Python 3, numpy (core); PyQt through `qgis.PyQt`, QGIS map tools and rubber bands, and `concurrent.futures` through `Refiner` (plugin); pytest on two tiers: core and pure in `.venv`, QGIS in `.venv-qgis`.
 
-**Spec:** `docs/superpowers/specs/2026-10-30-nsgeo-cut-anywhere-design.md`, approved 2026-10-30 and revised 2026-11-06 (`630d85d`). Read §3 (decisions and calls 1–17), §4 and §8 before any task. Where this plan and the spec disagree, the plan wins, because it records the decisions below.
+**Spec:** `docs/superpowers/specs/2026-10-30-nsgeo-cut-anywhere-design.md`, approved 2026-10-30, revised 2026-11-06 (`630d85d`), and brought up to main `d8acb01` and the time-zero branch (#97) on 2026-11-11. Read §2, §3 (decisions and calls 1–18), §4 and §8 before any task.
+
+**Updated 2026-11-11** for what merged after the plan was written: #113 (the cube's read path, done earlier in `f9546ac`), #111, #107 A, #120, #153, #148, #3/#47 and #4. It is also updated for #97 (time zero), which is about to merge.
+- Call 11 now blends bilinearly (plan call 4, Task 1).
+- Cut picks are on the cube's clock (plan call 13, Tasks 3 and 5).
+- The spike numbers are re-measured with multigrid (plan call 7).
+- The coordinator's prerequisites follow the roadmap. Where this plan and the spec disagree, the plan wins, because it records the decisions below.
 
 ## Plan calls (where the spec leaves the builder a choice)
 
@@ -32,11 +38,12 @@
    - The id never changes; rename changes only `name`.
 3. **The survey file.**
    - A site with cuts saves `"schema_version": 2` and a `"cuts"` list. A site without cuts still saves 1.
-   - `load_site` accepts 1 and 2. 0.2.0 refuses a file with cuts and says so, rather than opening it and silently dropping the cuts on its next save. Sites without cuts stay readable by 0.2.0.
+   - `load_site` accepts 1 and 2. Released builds (0.3.0 and earlier) refuse a file with cuts and say so, rather than opening it and silently dropping the cuts on their next save. Sites without cuts stay readable by them. (`SCHEMA_VERSION` is still 1 on main as of `d8acb01`; if #97 or anything else bumps it before M15, `CUTS_SCHEMA_VERSION` becomes that plus one and the same rule holds.)
    - A cut entry is `{"id", "name", "grid_id", "vertices": [[x, y], …]}`. A malformed entry, or one on an unknown grid, is a `ProjectError`, as a line on an unknown grid is.
 4. **Columns.**
    - Columns are `frame.cell / 2` apart along the cut, from 0, with a last column exactly at the cut's length.
-   - Each column takes the value of the cell it falls in (spec call 11). Its cell comes from frame-local coordinates, so the ids match `CubeFrame.cell_index` of its world position (tested).
+   - Each column takes the bilinear blend of the four finished cells around it, and is blank exactly where its nearest cell is (spec call 11, #107's pixel rule). The columns carry `nsgeo.slices.resample.bilinear_taps(frame, world)`, and a level's column values are `resample.sample(finished, taps)`. `cells` is `taps.nearest` (−1 outside), so it matches `CubeFrame.cell_index` of the column's world position (tested).
+   - The finished values are needed only at the taps' cells: the union of `taps.ids` over inside columns. Fill a (ny, nx) NaN canvas at those cells and call `sample` on it. That equals sampling the whole finished slice, because `sample` reads only the nearest cell and the four taps.
    - The session's "trace" for a cut is a column index. It is clamped only below (−1), because the column count belongs to the section, not the session. It is never the truth for a pick (spec call 12).
 5. **Where the values come from.**
    - A section reads the engine's resident cube (`SliceEngine.cube()`, every level). A hover preview never builds one. If the engine holds no cube, the preview shows a message.
@@ -45,9 +52,10 @@
    - The section asks the engine for its fills through a new public `SliceEngine.section_fills(finish)`. It returns what the engine holds when its key matches, and otherwise builds through the engine's own `_fill_for`. A cut never plans weights of its own (§5).
    - Minimum curvature's kriging stand-in is the engine's `PREVIEW_METHOD` weights.
 7. **Crops.**
-   - Smoothing crops reach the smoothing kernel's radius (`ceil(SMOOTH_TRUNCATE_SIGMAS · σ / cell)` cells) past the cut's cells, so a smoothed section equals the smoothed slice exactly.
-   - Minimum-curvature crops reach `max(SECTION_MARGIN_M, the smoothing reach)`.
-   - Pieces cover at most `SECTION_PIECE_M` of the cut. These are the spike's settings: ±1 m and 4 m pieces gave 0.002% at 0.25 s a level on Grid 1 at 0.05 m.
+   - Smoothing crops reach the smoothing kernel's radius (`ceil(SMOOTH_TRUNCATE_SIGMAS · σ / cell)` cells) plus one cell (the blend's far tap) past the columns' nearest cells, so a smoothed section equals the sampled smoothed slice exactly.
+   - Minimum-curvature crops reach `max(ceil(SECTION_MARGIN_M / cell), the smoothing reach) + 1` cells.
+   - Pieces cover at most `SECTION_PIECE_M` of the cut, and each piece's curvature plan (which now includes #111's multigrid hierarchy) is built once per solve, not per level.
+   - Re-measured on 2026-11-11 with multigrid on Grid 1 at 0.05 m, for a 12 m cut: 0.10 s a level (about 20 s for 211 levels), within 0.0015% of a whole-frame solve. Three crop plans took 0.09 s once. The whole-frame solve is now 0.30 s a level (about 1 min); crops stay three times faster.
 8. **Two worker threads, not one shared.** A cut's solve runs on its own `Refiner` (thread prefix `nsgeo-cut`).
    - Why: the slice's `Refiner.start` cancels whatever runs, so a shared thread would kill one list with the other. A second thread means the slice's refine never queues behind a cut (spec §4.7's fairness rule).
    - The jobs are one depth each. Depths are solved outward from the slice band's centre, so the depth the user is looking at improves first.
@@ -61,6 +69,12 @@
     - Turning **Cut** on calls `iface.setActiveLayer(cuts layer)`.
 11. **The guide step goes after "Build slices",** not straight after "Make a pick". A cut needs the grid prepared in the Slices panel, so it reads in that order. The old Step 8 becomes Step 9.
 12. **Survey panel layout.** A grid with cuts gets a **Cuts** child item, placed before its lines and holding one item per cut in drawing order. Cut items have kind `"cut"` and id = key.
+13. **The clock** (spec call 18, #97). These names are taken from `nsgeo-time-zero` `6e42814`; the coordinator confirms them after #97 merges.
+    - A cut pick is written with `Pick.zero_ns = None`.
+    - `SiteSession.line_zero(key)` returns `None` for a cut key without logging.
+    - `SiteLayers._follow_key` returns at once for a cut key, so `follow_zero` never runs on one.
+    - The profile's pick overlay, its slice band and its axes use a cut's times as they are, with no `retime_ns`, `shown_zero_ns` or `_cube_zero_lookup` conversion, since all three are already on the cube's clock.
+    - A pick whose provenance `time_base` differs from the shown cube's `time_base_of(provenance.steps)` is left out of the overlay and counted in the title (` · {n} picks on another clock`).
 
 ## Global Constraints
 
@@ -71,6 +85,8 @@
 - **Python 3.9 floor for the core:** no `zip(..., strict=...)`, no `match`, no `X | Y` outside annotations, no `dataclass(slots=..., kw_only=...)`.
 - **Slots guard their bodies.** Every slot connected to a Qt signal or timer, and every Qt-invoked map-tool method, guards its own body. It reports through `_log`, a `failed`/`error` signal, or the message bar, and never raises. This includes `CutSections`' slots, `CutTool`'s events, and the plugin's `currentLayerChanged` slot.
 - **No orphan signals.** `tests/pure/test_no_orphan_signals.py` stays green, so every new `pyqtSignal` is connected.
+- **The pixel rule** (#107): a column's value is `resample.sample` over `bilinear_taps`, never a hand-written blend and never nearest-cell alone.
+- **The clock** (#97): every time on a cut is on its cube's clock. Code that converts a line's times (`retime_ns`, `Pick.radar_ns`, `line_zero`, `follow_zero`) is never applied to a cut key.
 - **The cube is read only through its read path** (#113): `cube.level(k)` and `cube.slice_levels(k0, k1)` give a (ny, nx) slice, `cube.values_at(cells, k0, k1)` gives (k1 − k0, n) with NaN for −1 and for cells nothing landed in, and `cube.coverage()` gives (ny, nx). Code and tests never index `cube.blocks` or a block's `mean` or `count`. The resident cube stores only covered cells, one block per direction.
 - **Picks are authored data.**
   - Writes go through the loaded layer's provider, as `write_pick` and `follow_lines` do.
@@ -108,7 +124,7 @@
   | `CUT_GONE_TEXT` | `This pick's cut no longer exists. The pick stays where it was drawn.` |
   | Delete prompt | `Delete {name}?`, plus ` Its 1 pick stays on the map.` or ` Its {n} picks stay on the map.` |
   | Grid removal addition | ` Its {n} cut(s) are deleted too; their picks stay on the map.` (`cut`/`cuts` by count) |
-  | Profile title | `nsgeo Profile · cut: {name} · {grid} · {length:.1f} m · {method}`, then ` · site view, not normalised` in Whole site scope, and the existing `PREVIEW: ` prefix on a preview. The `cut:` stays even after a rename, so the title always says a cut is showing (decision 11). |
+  | Profile title | `nsgeo Profile · cut: {name} · {grid} · {length:.1f} m · {method}`, then ` · site view, not normalised` in Whole site scope, then ` · {n} picks on another clock` when there are any (plan call 13), and the existing `PREVIEW: ` prefix on a preview. The `cut:` stays even after a rename, so the title always says a cut is showing (decision 11). |
   | `{method}` | `METHOD_LABELS[method]`. While kriging stands in: `Kriging preview (minimum curvature when opened)` on a preview, `Kriging preview · minimum curvature {done} of {total} depths` while solving, and `Minimum curvature` when done. |
 
 - **Comments and docstrings** follow the file they are in. They say why, and cite the spec as `(cut spec §4.7)`.
@@ -116,18 +132,21 @@
 
 ## Before Task 1 (coordinator)
 
-1. **Wait for the dependencies.** Line editing (`nsgeo-line-editing`), and the roadmap's earlier item #107–#109, must be merged to main. Merge `origin/main` into `nsgeo-m15-cut-anywhere`. Confirm that `SiteLayers.follow_lines` and `SiteSession.derived_pick_fields` exist. Tasks 2 and 5 extend them, and the line numbers in this plan's sources were taken before that merge.
+1. **Wait for the dependencies.** The roadmap (2026-11-11) puts #97 (time zero) and #159 (measuring the destagger shift) before M15. Line editing, #113, #111, #107 A and #109 have already merged and are in this branch (`0ae1471`).
+   - Merge `origin/main` into `nsgeo-m15-cut-anywhere` once #97 and #159 are on main.
+   - Confirm these names exist: `SiteLayers.follow_lines`, `SiteSession.derived_pick_fields`, `Pick.zero_ns`, `SiteSession.line_zero`, `SiteLayers._follow_key` / `follow_zero`, `nsgeo.processing.timezero.time_base_of`, and `ProfileDock.set_cube_zero_lookup`. Tasks 2, 3 and 5 extend them; if #97 renamed any, use its names.
+   - **If #36 (edit or delete a pick from the profile) has merged,** add to Task 5: its edit and delete work on a cut's picks, with tests mirroring #36's own. Delete keeps the rule that nothing here deletes a pick except the user doing so.
 2. **Build both venvs** in the worktree (`.venv` for core + pure, `.venv-qgis` for QGIS), as for slice interpolation B.
-3. **Copy the real files** from the main checkout's `packages/nsgeo-core/tests/data/local/` into the worktree's (gitignored).
+3. **Copy the real files** from the main checkout's `packages/nsgeo-core/tests/data/local/` into the worktree's (gitignored): the whole folder, including the per-survey subfolders #141 lists and `sunnyside.nsgeo.json` (`needs_sunnyside`).
 4. **Record the baseline:** core + pure and QGIS counts, ruff and mypy.
-5. **Keep the spike for reference.** It is in the session scratchpad (`cut_cost.py`, `band_cost.py`, `crop_cost.py`) and is not committed.
+5. **The spike is not kept.** Its scripts lived in a session scratchpad that is gone. Its numbers are in spec §4.7 and §5 and in plan call 7.
 
 ## Verification commands (exactly these, from the worktree root)
 
 - **core + pure:** `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest packages/nsgeo-core/tests packages/nsgeo-qgis/tests/pure -q -p no:cacheprovider`
 - **qgis:** `PYTHONDONTWRITEBYTECODE=1 QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python -m pytest packages/nsgeo-qgis/tests/qgis -q -p no:cacheprovider -p no:xonsh`. About 11 minutes, so run single files while iterating.
 - **lint:** `.venv/bin/ruff check . && .venv/bin/ruff format --check .`
-- **types:** `.venv/bin/mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py`
+- **types** (CI's list): `.venv/bin/mypy --config-file packages/nsgeo-core/pyproject.toml --follow-imports=silent packages/nsgeo-core/src/nsgeo packages/nsgeo-qgis/nsgeo_qgis/lookup.py packages/nsgeo-qgis/nsgeo_qgis/ui/view_transform.py packages/nsgeo-qgis/nsgeo_qgis/ui/ruler.py packages/nsgeo-qgis/nsgeo_qgis/slices_plan.py packages/nsgeo-qgis/nsgeo_qgis/line_edit.py`
 
 ## Review Focus
 
@@ -183,7 +202,9 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - `distance_m: np.ndarray`, shape (n,)
     - `local: np.ndarray`, shape (n, 2)
     - `world: np.ndarray`, shape (n, 2)
-    - `cells: np.ndarray`, shape (n,), intp; −1 outside the frame
+    - `cells: np.ndarray`, shape (n,), intp; −1 outside the frame (equal to `taps.nearest`)
+    - `taps: Taps`, from `nsgeo.slices.resample.bilinear_taps(frame, world)` (#107)
+    - `tap_cells -> np.ndarray`: sorted unique flat ids of `taps.ids` over the inside columns, the only cells a section reads
   - `section_columns(frame: CubeFrame, path_local: np.ndarray, step_m: float | None = None) -> SectionColumns`. `step_m` defaults to `frame.cell / 2`. It raises `ValueError` if the step is ≤ 0 or > `frame.cell / 2`, or if the path has fewer than 2 points or zero length.
   - `@dataclass(frozen=True) class SectionCrop`:
     - fields: `rows: tuple[int, int]`, `cols: tuple[int, int]` (half-open), `columns: np.ndarray` (indices into the `SectionColumns`)
@@ -227,7 +248,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - **Frames.** An axis-aligned frame is `CubeFrame((0, 0), 0, 0.2, 100, 25, crs)`. A rotated one is `CubeFrame.for_grid(Grid("G", (500000.0, 4000000.0), 10.497, 20.0, 5.0, crs, 0.5), 0.2)`, with `to_world = grid.to_world`. Each test uses `needs_real_files`.
   - **Tests:**
     - `test_columns_start_at_zero_end_at_the_length_and_step_at_half_a_cell`: a 3.05 m path at cell 0.2. `distance_m[0] == 0`, `distance_m[-1] == 3.05`, the inner steps equal 0.1, and the last step is ≤ 0.1.
-    - `test_columns_land_in_the_cells_cell_index_finds` (spec test 2): on the rotated frame, an oblique path. `cells` equals `frame.cell_index(columns.world)`, and `frame.to_local(columns.world)` equals `columns.local` within 1e-9.
+    - `test_columns_land_in_the_cells_cell_index_finds` (spec test 2): on the rotated frame, an oblique path. `cells` equals `frame.cell_index(columns.world)`, and `frame.to_local(columns.world)` equals `columns.local` within 1e-9. `columns.taps.ids` and `.weights` equal those of `bilinear_taps(frame, columns.world)`, and `tap_cells` holds exactly their ids at the inside columns.
     - `test_columns_past_the_frame_edge_are_minus_one`: a path from (19, 2) to (23, 2). Columns beyond x = 20 give −1.
     - `test_a_step_over_half_a_cell_and_a_zero_length_path_are_refused`.
     - `test_a_hundred_vertex_cut_and_a_long_cut`: 100 vertices zig-zagging inside the frame give `len(distance_m) == ceil(length / 0.1) + 1`. A 1 km path gives columns that are almost all −1, with no error.
@@ -235,16 +256,20 @@ These are the inputs most likely to hurt a user that the spec does not spell out
       - the union of `crop.columns` is exactly the inside columns, with no repeats;
       - every crop's span along the cut is ≤ `SECTION_PIECE_M`;
       - every crop lies within `[0, ny) × [0, nx)`;
-      - every column's cell is inside its crop by at least `min(margin, distance to the frame edge)`.
-    - `test_a_cut_along_a_recorded_line_reads_that_lines_cells` (spec test 1, the anchor): method `none`, a path along y = 0.25 + 3 · 0.5 from x = 0 to 20. At every level, the section equals `cube.values_at(columns.cells)[k]` wherever that is finite (a covered cell inside the frame), and at least one column is finite.
-    - `test_section_equals_the_finished_slice_at_every_level` (parametrised over `none`, `idw`, `kriging`, × smoothing `(0, 0)` and `(0, 0.1)`), on the rotated frame. For each level k, `finish_section(...)[k]` equals `finish_slice(cube.level(k), fill, cell, settings).ravel()[cells]`, with `np.testing.assert_allclose(rtol=0, atol=1e-5 * range)` and `equal_nan=True`.
-    - `test_window_average_of_a_section_equals_the_slice_window` (spec test 11) on the same parameters. For each `WINDOWS` entry `(k0, k1)`, `nanmean` over the section's rows `k0:k1` equals `finish_slice(cube.slice_levels(k0, k1), …)` at the cells. (`slice_levels` returns the (ny, nx) slice itself, so there is no `[0]`.)
+      - every column's four tap cells are inside its crop, with at least `min(margin, distance to the frame edge)` cells to spare around its nearest cell.
+    - `test_a_cut_along_a_recorded_line_reads_that_lines_cells` (spec test 1, the anchor): method `none`, a path along the cell-centre row the recorded line at y = 0.25 + 3 · 0.5 binned into, starting on a cell centre, from x = 0.1 to 19.9.
+      - At every level, the columns that sit on a cell centre (every other one) equal `cube.values_at(columns.cells)[k]` exactly.
+      - Every column equals `resample.sample(canvas, columns.taps)` of the binned level, which is the blend of its two along-line neighbours (call 11).
+      - At least half the columns are finite.
+    - `test_columns_blend_as_the_slice_picture_does` (call 11): on the rotated frame at cell 0.2, for an oblique path and kriging, `finish_section(...)[k]` equals `resample.sample(finish_slice(cube.level(k), …), bilinear_taps(frame, columns.world))` for three levels. A column whose nearest cell is blank is NaN, even with three finite neighbours.
+    - `test_section_equals_the_finished_slice_at_every_level` (parametrised over `none`, `idw`, `kriging`, × smoothing `(0, 0)` and `(0, 0.1)`), on the rotated frame. For each level k, `finish_section(...)[k]` equals `resample.sample(finish_slice(cube.level(k), fill, cell, settings), columns.taps)`, with `np.testing.assert_allclose(rtol=0, atol=1e-5 * range)` and `equal_nan=True`.
+    - `test_window_average_of_a_section_equals_the_slice_window` (spec test 11) on the same parameters. For each `WINDOWS` entry `(k0, k1)`, `nanmean` over the section's rows `k0:k1` equals `resample.sample(finish_slice(cube.slice_levels(k0, k1), …), columns.taps)`. The blend is linear and its blanks are the same at every level, so averaging commutes with it. (`slice_levels` returns the (ny, nx) slice itself, so there is no `[0]`.)
     - `test_blank_beyond_max_distance_and_outside_the_frame` (spec test 3):
       - a cut along a gap with max distance 0.1 m (below the half gap of 0.25 m) is NaN off the lines;
       - with 0.375 m it is finite;
       - the columns past the frame edge are NaN.
     - `test_finish_section_refuses_a_curvature_plan`.
-    - `test_curvature_on_crops_matches_the_whole_frame_solve` (spec test 12a): at cell 0.05 on the axis-aligned frame, with max distance 0.25. For three paths (along x, along y, diagonal) and three levels, `solve_section_level` is within `1e-3 · (nanmax − nanmin)` of `plan_fill(..., "min_curvature", ...).solve(level)[0].ravel()[cells]`. Crops come from `section_crops(..., margin_cells=ceil(SECTION_MARGIN_M / 0.05))`.
+    - `test_curvature_on_crops_matches_the_whole_frame_solve` (spec test 12a): at cell 0.05 on the axis-aligned frame, with max distance 0.25. For three paths (along x, along y, diagonal) and three levels, `solve_section_level` is within `1e-3 · (nanmax − nanmin)` of `resample.sample(plan_fill(..., "min_curvature", ...).solve(level)[0], columns.taps)`. Crops come from `section_crops(..., margin_cells=ceil(SECTION_MARGIN_M / 0.05) + 1)`. The spike measured 0.0015% at 0.05 m and 0.07% at 0.2 m with #111's solver.
     - `test_curvature_on_crops_with_smoothing_matches_the_whole_frame` at `smooth_y_m = 0.1`, same tolerance.
   - **Rendering**, in `test_render.py`: `test_section_rgba8_makes_blanks_transparent_in_both_polarities`.
     - `values = [[1.0, nan], [0.5, 2.0]]`. With `unipolar=True` and `False`, `alpha[0, 1] == 0` and the other alphas are 255.
@@ -252,10 +277,10 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - An all-zero array does not raise.
 - [ ] **Step 8: Run them and see them fail.**
 - [ ] **Step 9: Implement `section.py` and `section_rgba8`.**
-  - `finish_section` (where `level_2d = cube.level(k)`):
-    - with no smoothing, it calls `fill.apply_at(level_2d, inside_cells)` per level;
-    - with smoothing, it works per crop (margin = `smoothing_reach_cells`): `fill.apply_at(level_2d, crop.flat_cells(nx))`, then reshape, then `smooth`, then read the crop's columns.
-  - `solve_section_level` runs, per crop, `plans[i].solve(level[r0:r1, c0:c1], should_stop)[0]`, then `smooth` with the settings, then reads the crop's columns. `SolveStopped` propagates.
+  - `finish_section` (where `level_2d = cube.level(k)`; plan call 4's canvas):
+    - with no smoothing, it calls `fill.apply_at(level_2d, columns.tap_cells)` per level, writes those into a NaN (ny, nx) canvas, and calls `sample(canvas, columns.taps)`;
+    - with smoothing, it works per crop (margin = `smoothing_reach_cells + 1`): `fill.apply_at(level_2d, crop.flat_cells(nx))`, then reshape, then `smooth`. The crop goes into the canvas, then `sample`, keeping the crop's columns.
+  - `solve_section_level` runs, per crop, `plans[i].solve(level[r0:r1, c0:c1], should_stop)[0]`, then `smooth` with the settings. The crop goes into a canvas, then `sample`, keeping the crop's columns. `SolveStopped` propagates.
   - `section_rgba8`:
     - The limit comes from `UnipolarClip` or `PercentileClip` over the finite values. A limit ≤ 0 or non-finite becomes 1.0.
     - It calls `to_rgba8(..., unipolar=unipolar)`.
@@ -404,9 +429,10 @@ These are the inputs most likely to hurt a user that the spec does not spell out
      "cube": "<Provenance.to_dict()>",
      "resolution": {"cell": 0.05, "dz_ns": 0.2165},
      "finish": {"method": "kriging", "max_distance_m": 0.25, "smooth_x_m": 0.0, "smooth_y_m": 0.1},
+     "time_base": "time_zero" | "radar",
      "standing_in_for": "min_curvature"}
     ```
-    `standing_in_for` appears only when kriging stands in.
+    `standing_in_for` appears only when kriging stands in. `time_base` is `nsgeo.processing.timezero.time_base_of(engine.provenance().steps)` (spec call 18, #97's hand-off).
 
 - [ ] **Step 1: Write the failing session and tolerance tests**
   - In `test_plugin_session_cuts.py`:
@@ -416,8 +442,10 @@ These are the inputs most likely to hurt a user that the spec does not spell out
       - `set_trace(cut_key, 10_000)` keeps 10_000 (no upper clamp, plan call 4);
       - `set_trace(cut_key, -5)` gives −1.
     - `test_resolved_velocity_of_a_cut_is_its_grids` (call 16).
+    - `test_line_zero_of_a_cut_is_none_and_logs_nothing` (plan call 13): use `message_log`.
     - `test_removing_the_working_or_previewed_cut_clears_it`: `remove_cut` on the open cut leaves `current_key is None` and emits `line_opened("")`. On a previewed cut it emits `preview_changed("", -1)`.
   - In `test_plugin_loader.py`: `test_opening_or_previewing_a_cut_starts_no_load`.
+  - In `test_plugin_layers.py`: `test_opening_a_cut_runs_no_time_zero_follow` (plan call 13). A cut key with a pick row, opened as the working item, never calls `follow_zero` (spy) and logs nothing.
   - In `test_plugin_processing_dock.py`: `test_a_cut_shows_that_processing_does_not_apply`: the list is empty and disabled, and the label is `PROCESSING_ON_CUT_TEXT`; reopening a line restores it.
 - [ ] **Step 2: Run them and see them fail. Implement them. Run them and see them pass.**
 - [ ] **Step 3: Write the failing engine test** (`test_plugin_slices_engine.py`, with the `sourced` fixture and `_prepare`): `test_section_fills_reuse_the_held_weights`.
@@ -460,17 +488,20 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - `colormap_combo` is disabled with `PALETTE_ON_CUT_TIP`;
     - opening a line re-enables it with its previous choice.
   - `test_the_percentile_slider_still_applies_to_a_cut`.
-  - `test_the_slice_band_shows_on_a_cut` (call 13).
+  - `test_the_slice_band_shows_on_a_cut` (call 13, and spec call 18): `window_changed(12.0, 14.0)` draws the band at exactly 12.0–14.0 ns on a cut whose preset sets a time zero, with a cube-zero lookup installed. It is not converted; a line in the same state still is, as #97 tests.
   - `test_velocity_is_greyed_on_a_cut_and_back_on_a_line` (spec test 8, plugin-level, with `_plugin_with_one_line`): `act_velocity` is disabled with `VELOCITY_ON_CUT_TIP` while a cut is current and enabled again for a line. Pick stays enabled.
   - `test_the_depth_axis_uses_the_cut_velocity`: `view._velocity` is `session.cut_velocity("A")`.
+  - `test_a_cut_on_a_time_zero_preset_starts_its_axis_at_the_cubes_t0` (spec call 18): with a preset holding an enabled `time_zero`, the view's `t0_ns` equals `section.z.t0_ns`, and `provenance_json`'s `time_base` is `"time_zero"`.
   - `test_a_section_change_redraws_the_shown_cut`: an emitted `section_changed(key)` re-renders; one for another key does not.
   - In `test_plugin_survey_dock.py`: `test_open_on_a_cut_opens_it`.
 - [ ] **Step 10: Run them and see them fail.**
 - [ ] **Step 11: Implement the profile side.**
   - `_show_line` branches to `_show_cut(key, *, is_preview)`.
+  - Every #97 conversion in the dock (`shown_zero_ns`, the cube-zero lookup in `set_slice_band`, pick and fit drawing through `retime_ns`) is skipped for a cut key (plan call 13).
   - Channels, difference, the cutoff handle, the gain strip and the velocity strip stay off or hidden while a cut shows, and come back for a line.
   - `_render` and `_display_changed` redraw a cut through `section_rgba8` → `rgba_to_qimage`.
   - In `plugin.py`, build `CutSections(self.session, self.slices_dock)` after the Slices panel and pass it to the profile with `set_cut_sections`. Dispose it in `unload`. Velocity's enable test is `has_line and not is_cut_key(current_key)`.
+  - In `session.py` and `layers.py`, add plan call 13's two guards (`line_zero`, `_follow_key`).
 - [ ] **Step 12: Run the touched QGIS files, then core + pure, lint and types.**
 - [ ] **Step 13: Commit and push:**
   `git commit -m "feat(cuts): a cut's section from the Slices panel's cube, drawn in the profile (cut spec §4.3, §4.4)"`
@@ -571,8 +602,9 @@ These are the inputs most likely to hurt a user that the spec does not spell out
 - Produces:
   - `SiteSession.add_cut_pick(key: str, column: int, distance_m: float, time_ns: float, stack_json: str) -> Pick`:
     - working key only, `ValueError` otherwise;
-    - a finite time;
-    - the distance clamped to `[0, length_m]`.
+    - a finite time, on the cube's clock (spec call 18), never converted;
+    - the distance clamped to `[0, length_m]`;
+    - `zero_ns=None` on the `Pick` (#97's column left empty, plan call 13).
   - `SiteSession.derived_cut_pick_fields(key: str, distance_m: float, time_ns: float) -> tuple[float | None, float | None]`, giving depth and velocity, or `(None, None)` when the cut velocity raises `KeyError`.
   - `MapLink(..., on_info: Callable[[str], None] | None = None)`.
 
@@ -580,7 +612,8 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - `test_a_pick_on_a_cut_lands_on_the_cut_and_records_its_provenance` (spec test 5, call 2):
     - a pick at column 12 has `line_key == cut_key`, `trace == 12` and `distance_m == columns.distance_m[12]`;
     - its geometry is `grid.to_world(cut.point_at(distance_m))` in the package CRS;
-    - `json.loads(stack_json)["kind"] == "cut"`;
+    - `json.loads(stack_json)["kind"] == "cut"`, and its `time_base` names the cube's clock;
+    - `time_ns` equals the clicked time as given, and the row's `zero_ns` is NULL;
     - depth equals `cut_velocity("A").depth_at([t])[0]`.
   - `test_selecting_a_cut_pick_reopens_the_cut_at_its_distance`: with another line working, selecting the pick opens the cut, and `current_trace == column_at(key, distance_m)`.
   - `test_renaming_the_cut_keeps_the_way_back`.
@@ -593,7 +626,13 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - `test_opening_a_site_rederives_cut_picks_with_no_engine_prepared` (spec test 13).
   - `test_removing_a_grid_keeps_its_cut_picks_on_the_map` (spec test 13): the prompt is answered Yes; the rows are unchanged.
   - `test_a_pick_past_a_shrunk_grid_edge_keeps_its_distance` (Review Focus 2).
-  - `test_the_profile_overlays_cut_picks_at_their_columns`.
+  - `test_the_profile_overlays_cut_picks_at_their_columns`: at `(column_at(key, distance_m), time_ns)`, with no time conversion, even when the shown cube's preset sets a time zero.
+  - `test_a_pick_made_on_another_clock_is_left_out_and_counted` (spec call 18):
+    - make a cut pick under a preset without `time_zero`, then enable `time_zero` in the preset so the cube is rebuilt;
+    - the pick is not in `view.set_picks`'s list, and the title ends ` · 1 picks on another clock`;
+    - the row is unchanged;
+    - turning `time_zero` off again brings it back.
+  - `test_a_line_stack_change_never_rezeroes_cut_picks`: after editing the working line's stack so its zero moves, `follow_zero` rewrites that line's rows only, and the cut picks' `time_ns` and `zero_ns` are unchanged.
   - `test_a_preview_cannot_take_a_pick`: the existing preview refusal also holds for cuts.
 - [ ] **Step 2: Run them and see them fail.**
 - [ ] **Step 3: Implement.**
@@ -604,7 +643,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - `write_pick` reports `no cut with key …`;
     - `follow_lines` takes cut keys: position from `distance_m` (never rewritten), depth and velocity from `derived_cut_pick_fields`;
     - a row whose cut is gone, or whose `distance_m` is NULL, is left alone.
-  - The profile's `_refresh_picks` maps cut picks through `column_at`.
+  - The profile's `_refresh_picks` maps cut picks through `column_at`. It uses `time_ns` as stored, and leaves out, and counts, any pick whose provenance `time_base` differs from the section's (plan call 13).
   - `_jump_to_feature` opens a cut and sets its column. For a gone cut it calls `on_info(CUT_GONE_TEXT)`; the plugin passes the message bar.
 - [ ] **Step 4: Run them and see them pass. Then run the touched QGIS files (including `test_plugin_layers.py`'s follow tests), core + pure, lint and types.**
 - [ ] **Step 5: Commit and push:**
@@ -677,7 +716,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - the **cuts** layer is redrawn from them and is read-only;
     - a cut moves with its grid, and its picks with it;
     - a pick on a deleted cut stays on the map;
-    - a site with cuts does not open in nsgeo 0.2.0.
+    - a site with cuts does not open in nsgeo 0.3.0 or earlier.
   - It is written for archaeologists, in the guide's existing voice.
 - [ ] **Step 6: Measure on Grid 1** (`needs_sunnyside` from `plugin_testing.py`), and record the numbers in `cut_sections.py`'s module docstring (spec §5), at its remembered settings (0.05 m, minimum curvature, smoothing Y 0.1 m):
   - the first preview after the panel prepared the grid;
@@ -685,7 +724,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - the redraw after a settings change;
   - the time until the walkthrough-length cut (about 12 m) is solved.
 
-  If a hover under kriging takes over 100 ms, stop and report rather than ship.
+  The spike's figure for the solve (multigrid, 2026-11-11) is about 20 s for a 12 m cut at 0.05 m. If a hover under kriging takes over 100 ms, or the solve takes over a minute, stop and report rather than ship.
 - [ ] **Step 7: Run the full core + pure suite, the full QGIS suite, lint and types.**
 - [ ] **Step 8: Commit and push:**
   `git commit -m "feat(cuts): minimum curvature solved near the cut behind a kriging preview; the guide (cut spec §4.7, §7)"`
@@ -704,7 +743,8 @@ These are the manual checkpoints from spec §8. Track them and report them; neve
    - check it against a slice at the line's depth where they cross;
    - pick it;
    - redraw it as a new cut, delete the old one, and confirm the old picks stay on the map;
-   - also: the cuts-layer switch over the 0.5 m lines; Whole site scope with "not normalised"; a grid edit moving a cut and its picks; closing with an unsaved cut.
+   - also: the cuts-layer switch over the 0.5 m lines; Whole site scope with "not normalised"; a grid edit moving a cut and its picks; closing with an unsaved cut;
+   - with time zero (#97) in Grid 1's preset: the cut's axis starts at 0 ns, the slice band sits on the same reflection in the cut and in a crossing line, and a cut pick made before time zero was turned on is left out and counted.
 3. **The help-pages ledger.** Note the new **Cut** tool in the `nsgeo-help-pages` ledger (spec §7). The help-pages branch itself is not edited.
 4. **README roadmap.** Move M15 to Done on merge, per the roadmap upkeep rule.
 5. **File the deferred follow-ups** from review.

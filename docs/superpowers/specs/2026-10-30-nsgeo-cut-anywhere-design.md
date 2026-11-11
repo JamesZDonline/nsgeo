@@ -11,6 +11,15 @@ You draw a line on the map and the profile view shows the cube's vertical sectio
 - Two new decisions, taken by the user on 2026-11-06: minimum curvature on cuts (§4.7) and cuts that move with their grid (§4.8).
 - §5 has measurements on Grid 1's real cubes. §6 and §8 gain the matching goals and tests.
 
+**Revised again 2026-11-11** against main `d8acb01` (merged into this branch at `0ae1471`), and against the time-zero branch (#97, `nsgeo-time-zero` `6e42814`, about to merge). What changed:
+
+- §2 adds what has merged since: line editing, the packed cube (#113), multigrid minimum curvature (#111), the pixel rule (#107), placement corrections (#3, #47) and the optional grid velocity (#4). It also adds time zero (#97).
+- **Call 11 is revised.** A column now takes the bilinear blend the slice view shows (#107's pixel rule), not its nearest cell's value.
+- **Call 2 adds the cube's time base** (#97).
+- **Call 18 is new:** a cut's times are on its cube's clock (#97's hand-off).
+- §4.7 and §5 are re-measured with the multigrid solver: about 20 s for a 12 m cut on Grid 1 at 0.05 m, down from about a minute.
+- §1's order follows the README roadmap.
+
 ---
 
 ## 1. What this is for
@@ -29,11 +38,15 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
 
 **What success looks like.** The user draws a cut along the lower line, holding the profile beside the map. Moving the cursor along the cut shows the line's depth at each point, against the bowl's rim and bottom, all the way to where it meets the higher line. They can pick it, and the picks land on the map.
 
-**Order.** This is M15; the 3-D scene is M16. They are separate milestones, at the user's request. The README roadmap puts it after whole-site fine cells (#107–#109). It is built after line editing merges, because cut picks join line editing's path for picks that follow their line (§4.8).
+**Order.** This is M15; the 3-D scene is M16. They are separate milestones, at the user's request. The README roadmap (2026-11-11) puts two items before it:
+- the time base (#97), because cut picks store times;
+- measuring the destagger shift automatically (#159).
+
+It also suggests doing #36 (edit or delete a pick from the profile) early, before cuts bring picking to a second kind of profile.
 
 ---
 
-## 2. Starting state (main at `be2acee`)
+## 2. Starting state (main at `d8acb01`, with #97 about to merge)
 
 - **Profiles come only from recorded lines.** `ProfileDock._show_line` is built around a `Line`: its header, its `StepStack` (`session.stack_for`), channels, the difference view, the time cutoff, display gain and velocity fits (saved, applied and deleted, #85/#90).
 - **#67 is merged** (`ui/ruler.py`, `ProfileDock._ruler_for`, `_set_axes_holding`, `_held`):
@@ -47,12 +60,19 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
   - The session keeps `current_key` (the working line) apart from `preview_key`. Writes such as `add_pick` refuse anything but the working line.
 - **Picks** (`session.Pick`, the `picks` table in `layers.py`):
   - Fields: `line_key`, `trace`, `time_ns`, `distance_m`, `depth_m`, `velocity_m_ns`, `stack_json`, `note`, `created`, `feature_id`, `seq`.
-  - On main, a pick's map position is written once (`_pick_point`) and never recomputed.
   - `picks` is the only authored table. It gets a migrate-and-verify rebuild (`_rebuild_picks`) and a backup (`_recover_picks_backup`).
-- **Line editing** (branch `nsgeo-line-editing`, final review done, not merged) changes picks:
-  - `LayerStore.follow_lines` re-derives every line pick's map position, `distance_m`, `depth_m` and `velocity_m_ns` from its trace and time, whenever grids or lines change and when a site opens (its spec §4.4).
+- **Line editing** (merged, PR #137, released in 0.3.0) makes picks follow their line:
+  - `SiteLayers.follow_lines` re-derives every line pick's map position, `distance_m`, `depth_m` and `velocity_m_ns` from its trace and time, whenever grids or lines change and when a site opens (its spec §4.4).
   - A pick's depth and velocity follow its line's current velocity (its decision 7, the user's ruling).
   - A pick whose key is not a site line is left exactly where it is. Its spec names M15's cut picks as one such case and leaves re-placing them to M15.
+- **Placement corrections** (#3, #47, merged): a line's placement gains `scale` (fitting it to its grid) and `travel_shift` (the destagger). Lines and their picks follow them. A grid edit refits fitted lines. Cuts are unaffected, except that the cube under them changes.
+- **The grid velocity is optional** (#4, merged). Unset, a line falls back to its header. Call 16 already allows for this.
+- **Time zero** (#97, branch `nsgeo-time-zero`, built, about to merge). It relabels the clock: the row the Time zero step lands on reads 0 ns.
+  - A `Radargram` carries `zero_ns`, the radar-clock time it calls 0.
+  - A line pick gains a `zero_ns` column. `SiteLayers.follow_zero` moves a line's picks to its current zero when that line is opened or its stack changes (`_follow_key`, `SiteSession.line_zero`).
+  - A cube's z axis is on the time-zero clock of its preset (its decision 9). Its time base is `time_base_of(provenance.steps)`, which gives `"time_zero"` or `"radar"`.
+  - The profile converts the slice band from the cube's clock to the line's.
+  - Its hand-off to M15 (its §13): cut picks write `time_ns` on the cube's clock and leave the zero column empty, and their provenance carries the cube's time base.
 - **The site GeoPackage's rules** (`layers.py` docstring):
   - `grids`, `lines` and `marks` are derived and read-only. Picks are authored.
   - Writes go through the loaded layer's provider.
@@ -60,17 +80,19 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
 - **Slices** (`slices_engine.py`, `slices_plan.py`, `site_engine.py`):
   - One `SliceEngine` holds one source: a `SourceChoice` (grid, preset, transform, line keys) plus a `Resolution`.
   - Preparation (load, preset, transform) is the expensive step. A resident cube is built on demand (`SliceEngine.cube`) and is "a latency optimisation, never a capability".
+  - **The cube is read only through its read path** (#113, packed cube): `level(k)`, `slice_levels(k0, k1)`, `values_at(cells, k0, k1)` and `coverage()`. It stores only covered cells.
+  - **The pixel rule** (#107, milestone A): every slice picture is the bilinear blend of the four cells around each pixel centre, at the cell size. A pixel is blank exactly where its nearest cell is blank or outside the frame. In code this is `nsgeo.slices.resample`: `bilinear_taps(frame, world)` and `sample(values, taps)`. Whole site may draw a coarser lattice as a preview, but its per-grid engines keep the cell.
   - **The fill radius is gone.** A slice is finished by a `SliceFinish`: the method, the max distance to data (in line spacings), and smoothing X and Y (in metres, along the grid's own axes). The methods are None, IDW, kriging (the default) and minimum curvature. These settings are remembered per grid (`slice_sources[g].resolution`) and for the site (`site_view.resolution`). `SliceFinish.in_metres(spacing)` turns them into the core's `FinishSettings`.
   - **The pipeline per slice** (interpolation spec §4): window mean, then interpolate, then blank beyond the max distance, then smooth, then (site scope only) the site gain `a·v + b`. A data cell is never changed except by smoothing. Every step is linear, and coverage is the same at every level.
   - **IDW and kriging** are planned once per grid and settings (`plan_fill` → `FillWeights`, cached by the engine) and applied per slice. `FillWeights.apply_at(values, cells)` gives chosen cells without building the whole slice.
-  - **Minimum curvature** (`CurvaturePlan`) is solved per slice, over the cells near the data. It has no weights, and its `apply_at` is the whole solve, indexed. In the panel, kriging stands in while the depth moves. After a 300 ms rest, minimum curvature is solved on one background thread (`PendingSolve`, `refine.py`) and replaces it.
+  - **Minimum curvature** (`CurvaturePlan`) is solved per slice, over the cells near the data, with a multigrid preconditioner (#111, about 4–5× faster at fine cells). It has no weights, and its `apply_at` is the whole solve, indexed. In the panel, kriging stands in while the depth moves. After a 300 ms rest, minimum curvature is solved on one background thread (`PendingSolve`, `refine.py`) and replaces it.
   - The Slices panel has a **This grid** scope and a **Whole site** scope (M12). Whole site keeps per-grid engines, and `SiteEngine._shown` applies `a * draw(...) + b` per window.
 - **Core geometry:**
   - `CubeFrame` (`nsgeo/slices/frame.py`) maps world to frame-local metres, azimuth included (`to_local`).
   - The flat cell id is `iy * nx + ix`.
   - The finishing code is `nsgeo/slices/interpolate.py`, `curvature.py`, `smooth.py` and `finish.py` (`finish_slice`).
 - **Test data:**
-  - The real-data fixtures are `nsgeo-core/tests/data/local/FILE__001`–`010`.
+  - The real-data fixtures are in `nsgeo-core/tests/data/local/`, listed per survey since #141 (`tests/real_data.py`'s `CAMPUS_LINES`, `tests/real_lines.py`). The Sunnyside survey is there too (`needs_sunnyside` in the plugin's `plugin_testing.py`).
   - The Sunnyside site is at `~/nsgeo-m4-check/Sunnyside/`, with raw DZTs on `/mnt/DataStorage/VISR/Sunnyside_2023/`. Grid 1 is 20 × 16 m at an azimuth of 10.497°, with 40 lines 0.5 m apart along grid y.
   - **Grid 1's remembered settings** (survey file, 2026-11-06): 0.05 m cells, **minimum curvature**, max distance 0.5 × line spacing, smoothing Y 0.1 m. The driving case runs under minimum curvature.
   - Saved Grid 1 cubes: `grid1cube.npz` (0.2 m, 234 levels, 100 × 80) and `mincurv_cube.npz` (0.05 m, 211 levels, 400 × 320).
@@ -121,7 +143,8 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
      - the engine's `provenance()`: preset name and steps, transform, line keys, velocity;
      - the resolution: cell and level step;
      - the finish **as drawn when the pick was made**: the method, the max distance in metres, smoothing X and Y. If kriging was standing in for minimum curvature (§4.7), it says kriging.
-     - the scope: This grid, or Whole site (not normalised).
+     - the scope: This grid, or Whole site (not normalised);
+     - the cube's time base, `time_base_of(provenance.steps)` (#97's hand-off; call 18). *(Added 2026-11-11.)*
    - The key says it is a cut (see 4.6).
 3. **Deleting a cut never deletes its picks.** A pick whose cut no longer exists stays on the map, at the position it was last written to. That covers a deleted cut, and a cut that was never saved before the site closed, since picks go straight into the GeoPackage while cuts wait for **Save site**. Selecting such a pick says its cut is gone and opens nothing.
 4. **A redrawn cut is a new cut,** with a new id and the next default name. The old cut's picks stay with the old cut, so they become orphans if it is deleted (call 3). Carrying picks across to a redrawn path is not attempted.
@@ -139,7 +162,11 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
     - **Whole site scope:** a cut reads its grid's site engine, with the site's finish at that grid's line spacing. It does **not** apply the site gain (`SiteEngine._shown`'s `a * draw(...) + b`, re-measured for every window).
     - **Why no site gain:** it balances grids against each other. Applied to a section, it would become a depth-varying gain that depends on which other grids are included, and it would need every included grid binned at every level. Depth balance on a profile is the display gain's job.
     - **What the title says:** in Whole site scope it reads "site view, not normalised", so a cut is never mistaken for the normalised site slice.
-11. **A column takes its cell's value.** *(New.)* Each column reads the finished value of the cube cell it falls in: nearest cell, no blending between cells. Every value on a cut is then a value the slice view also shows.
+11. **A column takes the value the slice view shows at that point.** *(Revised 2026-11-11, for #107.)*
+    - **The rule:** each column is the bilinear blend of the four finished cells around it. It is blank exactly where its nearest cell is blank or outside the frame. This is #107's pixel rule, through the same code (`bilinear_taps`, `sample`).
+    - **Why:** since #107, every slice picture is drawn this way. A column read from its nearest cell, as the first draft had it, would show steps the slice does not have, and differ from the slice between cell centres.
+    - **The outline is unchanged.** A column is blank exactly where the nearest-cell rule would blank it.
+    - **The section still needs no cell from beyond the four** around each column, so it reads only those, plus the crops that smoothing and minimum curvature need (§5).
 12. **A cut pick is a distance along the cut and a time.** *(New.)* That is its truth, as a trace and a time is a line pick's. `trace` stores the column it was made on, for the record only. It is never used to place the pick, because a column's index changes with the cell size.
 13. **The slice band shows on a cut** as on a line. *(New.)* It is how the user relates the cut to the slice on screen. #131's hide button, when it comes, applies to both.
 14. **Cursor tracking on a cut projects onto the cut's path.** *(New.)* A line's vertices are its traces. A cut's vertices are the user's clicks, so the vertex trick does not carry over. The point on the path gives the distance, and the distance gives the column.
@@ -157,6 +184,15 @@ The spike that led here cut the saved Grid 1 cube along a north–south line thr
     - **The profile's own colour list** is greyed out while a cut is open, and comes back unchanged for a line.
     - **Blank columns** (beyond the max distance or past the grid's edge) must not read as zero, or as "no reflection". How they are drawn is the builder's call.
     - **Why:** the section and the slice then look alike side by side, which the walkthrough's comparison relies on.
+18. **A cut's times are on its cube's clock.** *(New 2026-11-11, #97's hand-off.)*
+    - **The axis:** the section's time axis is the cube's z axis. When the preset sets a time zero, that is time below each line's own first break (#97 decision 9). Depth is measured from there at the cut's velocity (call 16).
+    - **Picks:** a cut pick's `time_ns` is on that clock, and its `zero_ns` column stays empty. A reader must not take an empty zero on a cut key to mean the radar clock. The provenance's time base (call 2) says which clock it is.
+    - **No re-zeroing:** #97's re-zeroing (`follow_zero`, run when a line opens or its stack changes) never touches a cut key, and opening a cut logs nothing about time zero. A cut's picks never change time.
+    - **A pick made on another clock.** If the preset's time zero is turned on or off after cut picks were made, the cube's clock changes under them. A column has no single line zero to convert by, since it lies between lines.
+      - Such a pick (its recorded time base differs from the cube's) is left out of the profile's overlay. The title adds ` · {n} picks on another clock`.
+      - It stays on the map and in the table, unchanged.
+      - Why: drawing it at its stored time would put it on a reflection it was not made on, which #97 lists as an anti-goal. The roadmap puts #97 before M15 so that this stays rare.
+    - **The slice band on a cut** is drawn as the Slices panel gives it, with no conversion, because the cut and the band share the cube's clock. #97 converts the band only for a line, whose stack may set a different zero.
 
 ---
 
@@ -220,7 +256,7 @@ A cut has a stable id that never changes when it is renamed. Its session key can
 
 ### 4.7 Minimum curvature on a cut (decision 12)
 
-The interpolation spec left this to M15 (its §12). Minimum curvature has no reusable weights, so a section needs a solve at every level. On Grid 1 at its remembered 0.05 m cell, a whole-frame solve is 2.2 s a level, about 8 minutes for all 211 levels (§5).
+The interpolation spec left this to M15 (its §12). Minimum curvature has no reusable weights, so a section needs a solve at every level. On Grid 1 at its remembered 0.05 m cell, a whole-frame solve is 0.30 s a level with #111's multigrid, about a minute for all 211 levels (§5). It was 2.2 s, about 8 minutes, before #111.
 
 On real single levels, kriging is not a close stand-in. In the gaps between lines it differed from minimum curvature by 5–7% of the level's range at the 99th percentile, and by up to 43% in the worst cells. The interpolation spec's 0.5% was a synthetic grid's window mean. A cut that silently showed kriging would break the first anti-goal.
 
@@ -228,7 +264,7 @@ On real single levels, kriging is not a close stand-in. In the gaps between line
 
 - **Kriging at once.** Under minimum curvature, a cut first shows kriging at the same max distance and smoothing, so the blanks are the same. The title says kriging is standing in.
 - **Minimum curvature behind it.** For the working cut, minimum curvature is solved at every level in the background and replaces kriging when done. The title shows how far it has got.
-- **Solved near the cut.** Each level is solved on crops around the cut, not the whole frame. A spike on `mincurv_cube.npz` crossed the cut on crops reaching 1 m beyond it, in 2–4 m pieces. It matched the whole-frame solve on the cut's cells to within 0.003% of the range. The time fell to 0.25–0.35 s a level, about a minute for a 12 m cut. The requirement is agreement within 0.1% of the level's range. Crop sizes are the builder's call.
+- **Solved near the cut.** Each level is solved on crops around the cut, not the whole frame. A spike on `mincurv_cube.npz` crossed the cut on crops reaching 1 m beyond it, in 2–4 m pieces. It matched the whole-frame solve on the cut's cells to within 0.003% of the range. Re-measured with multigrid and the bilinear columns of call 11 (2026-11-11), crops reaching 1 m (plus one cell for the blend), in 4 m pieces, took 0.10 s a level, about 20 s for a 12 m cut. They were within 0.0015% of the whole-frame solve at 0.05 m and 0.07% at 0.2 m. The requirement is agreement within 0.1% of the level's range. Crop sizes are the builder's call.
 - **Only the working cut.** Hover previews show kriging and start no solve.
 - **Kept, and discarded.** A solved section is kept while the source and settings hold. Any change in 4.4's list discards it.
 - **Fair to the slices.** A cut's solve must not hold the slice's own refinement back by more than one level's solve. Whether the two share `refine.py`'s thread is the builder's call.
@@ -258,16 +294,17 @@ Line editing makes a line pick follow its line through a grid edit, a line edit 
 
 ## 5. Performance
 
-**Measured** on 2026-11-06, one thread, on Grid 1's saved cubes, with a 12 m diagonal cut and columns at half a cell. These are spike numbers, not the build's. The build records its own.
+**Measured** on 2026-11-06, and again on 2026-11-11 after #111 (multigrid) and #107 (bilinear columns, call 11). One thread, on Grid 1's saved cubes, with a 12 m diagonal cut and columns at half a cell. These are spike numbers, not the build's. The build records its own.
 
 | | 0.2 m cells (234 levels, 100 × 80) | 0.05 m cells (211 levels, 400 × 320) |
 |---|---|---|
 | Kriging plan (the engine already holds it) | 0.02 s | 1.0 s |
-| Kriging section, every level, cut cells only | 11 ms | 32 ms |
-| Kriging section with smoothing Y 0.1 m, finishing whole levels | 0.11 s | 2.3 s |
-| Minimum curvature, one level, whole frame | 0.04 s | 2.2 s (863 iterations) |
-| Minimum curvature, every level, whole frame | about 8 s | about 8 min |
-| Minimum curvature, every level, on crops round the cut (±1 m, 2–4 m pieces) | not measured | about 1 min (0.25–0.35 s a level) |
+| Kriging section, every level, the four cells around each column only | 11 ms | 33 ms |
+| Kriging on whole levels, then the blend, every level | 0.07 s | 1.0 s |
+| Kriging section with smoothing Y 0.1 m, finishing whole levels | 0.12 s | 2.2 s |
+| Minimum curvature, one level, whole frame | 0.02 s (was 0.04 s) | 0.30 s, 15 iterations (was 2.2 s, 863) |
+| Minimum curvature, every level, whole frame | about 5 s (was 8 s) | about 1 min (was 8 min) |
+| Minimum curvature, every level, on crops round the cut (±1 m + 1 cell, 4 m pieces, planned once) | about 2 s; within 0.07% | about 20 s (0.10 s a level; was about 1 min); within 0.0015% |
 | Kriging against minimum curvature, one level, gap cells | 99th percentile 5.5–7.4%, worst 17–28% of the range | 99th percentile 5.1–5.9%, worst 35–43% |
 
 **Requirements:**
@@ -337,8 +374,8 @@ The help-pages branch is separate and is not edited here. Note the new tool in i
 
 Real files first. Synthetic data only where it mirrors them. Each of these input classes needs a test that actually feeds it:
 
-1. **A cut drawn exactly along a recorded line.** Under None, its section matches the cube's values in the cells that line binned into, level by level. This is the anchor test.
-2. **An oblique cut on a rotated grid** (Grid 1's 10.497°, or a fixture frame at a non-zero azimuth). Columns land in the right cells; checked against `CubeFrame.to_local`, not against a copy of the code under test.
+1. **A cut drawn exactly along a recorded line.** Under None, its section matches the cube's values in the cells that line binned into, level by level, at the columns on cell centres, and their blend between them (call 11). This is the anchor test.
+2. **An oblique cut on a rotated grid** (Grid 1's 10.497°, or a fixture frame at a non-zero azimuth). Columns land in the right cells and blend the right four (call 11); checked against `CubeFrame.to_local`, `cell_index` and `bilinear_taps`, not against a copy of the code under test.
 3. **A cut that runs past its grid's edge,** a cut along a gap between lines, and a cut through a coverage hole. These give blank columns, or interpolated ones within the max distance, never another grid's data.
 4. **Degenerate input:**
    - a single click;
@@ -353,6 +390,11 @@ Real files first. Synthetic data only where it mirrors them. Each of these input
    - **A cut never saved:** a pick made on it, after the site closes without saving, behaves the same way.
    - **A CRS rebuild:** both the pick and the cut survive.
    - **A change of cell:** a pick made at one cell size reopens at the same distance and time at another (call 12).
+   - **The clock** (call 18):
+     - a cut pick leaves the zero column empty and records the cube's time base;
+     - opening a cut with picks writes nothing and logs nothing about time zero;
+     - after the preset's time zero is turned on, a pick made before is left out of the overlay and counted in the title;
+     - the slice band on a cut is unconverted.
 6. **Draw tool and storage.**
    - A finished cut marks the site unsaved. **Save site** writes it, and reopening restores both the cut and its layer.
    - Closing with unsaved cuts prompts.
