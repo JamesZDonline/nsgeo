@@ -96,8 +96,8 @@ a milestone merges or the plan changes.
 ### In progress
 
 - **A resident cube stores only its covered cells** ([#113]), the first of the
-  fine-cell items: 3–8× less memory at fine cells, the same slices. Plan written,
-  on `nsgeo-packed-cube`.
+  fine-cell items: 3–8× less memory at fine cells, the same slices. Built and
+  reviewed on `nsgeo-packed-cube`; hand walkthrough next.
 
 ### Next, in order
 
