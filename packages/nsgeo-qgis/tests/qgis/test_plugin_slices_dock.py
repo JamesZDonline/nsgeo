@@ -3638,9 +3638,31 @@ def test_an_old_recipe_restores_shifted_when_the_engine_already_holds_its_source
 def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed):
     dock, session = docked_zeroed
     _prepared_with_owed_record(dock, session, clear=False)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
     dock._grid_prepare_pending = True  # R-P5: a site task is still live
     dock.restore_cube("A__old")
     assert dock._pending_z_shift is True
+
+    dock._run_pending_grid_prepare()  # the engine holds the source: a no-op prepare
+
+    _assert_shifted_once(dock, errors)
+
+    # Exactly once: a later unrelated preparation leaves a user-set range alone.
+    for spin, value in ((dock.z0_spin, 20.0), (dock.z1_spin, 30.0)):
+        spin.setValue(value)
+    dock.flush_debounce()
+    dock._on_prepared()
+    assert dock.z0_spin.value() == pytest.approx(20.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(30.0, abs=1e-3)
+    assert errors.count(old_cube_note(-dock.engine.median_zero())) == 1
+
+
+def test_rebuilding_the_source_drops_an_owed_shift(docked_zeroed):
+    dock, _session = docked_zeroed
+    dock._pending_z_shift = True
+    dock.rebuild_source()
+    assert dock._pending_z_shift is False
 
 
 def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):

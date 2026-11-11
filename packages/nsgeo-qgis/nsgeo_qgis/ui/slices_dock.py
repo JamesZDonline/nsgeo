@@ -836,6 +836,8 @@ class SlicesDock(QgsDockWidget):
         for why one was rejected.
         """
         try:
+            # A restore's owed shift belongs to the site it was made in.
+            self._pending_z_shift = False
             self._updating += 1
             try:
                 site = self.session.site
@@ -1576,6 +1578,17 @@ class SlicesDock(QgsDockWidget):
         self.error.emit(old_cube_note(-median))
         return True
 
+    def _apply_owed_z_shift(self) -> None:
+        """After a `prepare()` that dispatched nothing: apply a shift a restore owes.
+
+        A preparation that IS running consumes the flag in `_on_prepared`
+        instead, so the shift lands exactly once either way."""
+        if self.engine.is_running or not self._pending_z_shift:
+            return
+        self._pending_z_shift = False
+        if self._shift_z_by_median_zero():
+            self._apply_resolution()
+
     def line_zero_in_cube(self, key: str) -> float | None:
         """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
         engine = self.site_engine if self._scope == "site" else self.engine
@@ -2046,10 +2059,8 @@ class SlicesDock(QgsDockWidget):
                 # source (the usual case: the restored source was the
                 # remembered one), the shift is applied here; a preparation
                 # still owed (R-P5) keeps the flag for its `_on_prepared`.
-                if self._pending_z_shift and not self._grid_prepare_pending:
-                    self._pending_z_shift = False
-                    if self._shift_z_by_median_zero():
-                        self._apply_resolution()
+                if not self._grid_prepare_pending:
+                    self._apply_owed_z_shift()
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
@@ -3204,6 +3215,7 @@ class SlicesDock(QgsDockWidget):
                 # grid opened from the site list (#70) still holds the left
                 # grid's, whatever the spins' own change signals did.
                 self._apply_resolution()
+            self._apply_owed_z_shift()  # a restore made while this was owed
             self._sync_grid_slider()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not prepare the slice source: {exc}")
