@@ -1,9 +1,13 @@
 """What flows through processing, and how steps are discovered.
 
 A step returns a whole Radargram rather than a bare array. Time-zero
-correction crops rows, so a step that returned only an array would silently
-desynchronise the time axis from the data. Returning the Radargram makes that
-an obvious test failure instead of a silent bug.
+correction crops rows and relabels the clock, so a step that returned only an
+array would silently desynchronise the time axis from the data. Returning the
+Radargram makes that an obvious test failure instead of a silent bug.
+
+`time_zero` relabels the clock: the row it lands on reads 0 ns, and `zero_ns`
+keeps every row's radar time (`zero_ns + t0_ns + i * dt_ns`). Every other step
+passes the clock through untouched.
 """
 
 from __future__ import annotations
@@ -28,6 +32,11 @@ class Radargram:
     #: no spatial axis. Optional and last so every existing construction and
     #: every `replace()` keeps working untouched.
     dx_m: float | None = None
+    #: The radar-clock time this axis calls 0. Row `i` is at radar time
+    #: `zero_ns + t0_ns + i * dt_ns`.
+    zero_ns: float = 0.0
+    #: True once a Time zero step has set the clock.
+    zero_set: bool = False
 
     def __post_init__(self) -> None:
         if np.asarray(self.data).ndim != 2:
@@ -46,6 +55,14 @@ class Radargram:
     def times_ns(self) -> np.ndarray:
         """Two-way time of each sample row."""
         return self.t0_ns + np.arange(self.n_samples, dtype=float) * self.dt_ns
+
+    def to_radar_ns(self, t: Any) -> Any:
+        """Convert time on this axis to the radar's own clock (float or array)."""
+        return t + self.zero_ns
+
+    def from_radar_ns(self, r: Any) -> Any:
+        """Convert radar-clock time to this axis (float or array)."""
+        return r - self.zero_ns
 
     def replace(self, **changes: Any) -> Radargram:
         return _dc_replace(self, **changes)
@@ -69,6 +86,13 @@ class Radargram:
             t0_ns=profile.header.position_ns,
             dx_m=(1.0 / tpm) if tpm > 0 else None,
         )
+
+
+def retime_ns(t: Any, from_zero_ns: float, to_zero_ns: float) -> Any:
+    """Move time `t` from the axis whose zero is `from_zero_ns` (radar clock)
+    to the one whose zero is `to_zero_ns`. The one conversion rule; float or
+    array in, same kind out."""
+    return t + from_zero_ns - to_zero_ns
 
 
 def nyquist_mhz(dt_ns: float) -> float:

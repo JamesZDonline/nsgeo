@@ -13,6 +13,7 @@ from nsgeo.processing.base import (
     get_step,
     nyquist_mhz,
     register,
+    retime_ns,
 )
 
 from tests.synthetic import write_dzt
@@ -254,3 +255,50 @@ def test_from_profile_leaves_dx_none_for_a_time_triggered_file(tmp_path):
 
 def test_dx_m_defaults_to_none_so_existing_constructions_are_untouched():
     assert Radargram(data=np.zeros((4, 4)), dt_ns=0.2, t0_ns=0.0).dx_m is None
+
+
+def test_retime_ns_converts_between_clocks():
+    assert retime_ns(10.0, -0.5, 0.0) == pytest.approx(9.5)
+    assert retime_ns(10.0, 0.0, -0.5) == pytest.approx(10.5)
+    np.testing.assert_allclose(retime_ns(np.array([1.0, 2.0]), 2.0, 0.5), [2.5, 3.5])
+
+
+_PASS_THROUGH = [
+    ("dewow", {}),
+    ("gain_agc", {}),
+    ("gain_parametric", {}),
+    ("gain_curve", {"points": [[0.0, 0.0], [10.0, 6.0]]}),
+    ("bandpass", {"low_mhz": 100.0, "high_mhz": 800.0}),
+    ("background_mean", {}),
+    ("background_sliding", {"window_traces": 5}),
+    ("background_svd", {}),
+    ("amp_abs", {}),
+    ("amp_square", {}),
+    ("amp_envelope", {}),
+    ("time_cutoff", {"end_ns": 10.0}),
+    ("migrate_fk", {"velocity_m_ns": 0.1}),
+]
+
+
+def test_the_pass_through_list_covers_every_step_but_time_zero():
+    import nsgeo.processing  # noqa: F401  (registers every step)
+
+    names = {n for n, _ in _PASS_THROUGH}
+    assert names | {"time_zero"} == set(available_steps())
+
+
+@pytest.mark.parametrize("name, params", _PASS_THROUGH)
+def test_every_other_step_passes_the_clock_through(name, params):
+    import nsgeo.processing  # noqa: F401
+
+    rg = Radargram(
+        data=np.random.default_rng(0).normal(size=(128, 40)),
+        dt_ns=0.2,
+        t0_ns=0.0,
+        dx_m=0.02,
+        zero_ns=-1.25,
+        zero_set=True,
+    )
+    out = build_step(name, **params).apply(rg)
+    assert out.zero_ns == -1.25
+    assert out.zero_set is True

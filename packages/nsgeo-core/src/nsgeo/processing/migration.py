@@ -31,13 +31,13 @@ from nsgeo.velocity import C_M_PER_NS
 
 #: How far from zero a time zero may sit and still be migrated, in ns.
 #:
-#: Expressed in time rather than in implied depth, deliberately. The residual
-#: is produced by `time_zero`'s sample pick, which is a time quantity; the
-#: measured band it leaves across its three threshold settings on the real
-#: lines is -0.69 to +0.82 ns, so 2.0 ns leaves better than twice the
-#: headroom while still refusing an uncorrected -11.09 ns by 5.5x; and a
-#: threshold that moved with the number in the velocity box would make the
-#: refusal depend on something unrelated to the fault it reports.
+#: Expressed in time rather than in implied depth, deliberately. After a Time
+#: zero step `t0_ns` is exactly 0, so the guard now catches a record with no
+#: Time zero step: an uncorrected -11.09 ns is refused by 5.5x. 2.0 ns also
+#: still admits the -0.69 to +0.82 ns residual the old crop-only `time_zero`
+#: left on the real lines; and a threshold that moved with the number in the
+#: velocity box would make the refusal depend on something unrelated to the
+#: fault it reports.
 MAX_T0_NS = 2.0
 
 #: How many times the record's own length to transform over, in time.
