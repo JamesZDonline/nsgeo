@@ -272,14 +272,23 @@ def test_an_error_is_reported_with_its_type(refiner):
     assert not refiner.busy
 
 
+class Fatal(BaseException):
+    """Not an Exception, as KeyboardInterrupt and SystemExit are not."""
+
+
 class Unprintable(Exception):
+    def __init__(self, raises):
+        super().__init__()
+        self.raises = raises
+
     def __str__(self):
-        raise RuntimeError("no message")
+        raise self.raises("no message")
 
 
-def test_an_error_that_cannot_be_printed_still_ends_the_list(refiner):
+@pytest.mark.parametrize("raises", [RuntimeError, Fatal])
+def test_an_error_that_cannot_be_printed_still_ends_the_list(refiner, raises):
     errors, landed = [], []
-    refiner.start([Job("u", error=Unprintable())], landed.append, errors.append)
+    refiner.start([Job("u", error=Unprintable(raises))], landed.append, errors.append)
     _pump_until(lambda: errors)
     assert errors == ["Unprintable"]
     assert not refiner.busy
@@ -288,10 +297,6 @@ def test_an_error_that_cannot_be_printed_still_ends_the_list(refiner):
     refiner.start([after], landed.append, errors.append)
     _pump_until(lambda: landed)
     assert landed == [after]
-
-
-class Fatal(BaseException):
-    """Not an Exception, as KeyboardInterrupt and SystemExit are not."""
 
 
 def test_a_base_exception_still_ends_the_list(refiner):
@@ -330,6 +335,56 @@ def test_a_job_that_finishes_as_it_is_cancelled_is_let_go(refiner):
     assert not refiner.busy
 
 
+def test_a_list_started_from_a_landing_still_lets_go_of_its_late_job(refiner):
+    """The poll's "worker idle" is read for one list; a landing that starts
+    another in the same drain must not let that reading stop the poll
+    while the new list still runs (#120 review)."""
+    gate = threading.Event()
+    first, quick = Job("first"), Job("quick")
+    held = [Job("late", gate=gate)]  # ignores should_stop: it finishes, not raises
+    ref, returned = weakref.ref(held[0]), held[0].returned
+    landed = []
+
+    def on_quick(job):
+        landed.append(job)
+        refiner.cancel()  # as a preview for another window does
+
+    def on_first(job):
+        refiner.start([quick, held.pop()], on_quick, lambda m: None)
+        quick.returned.wait(2)
+        time.sleep(0.05)  # `quick` is queued, so it lands in this same drain
+
+    refiner.start([first], on_first, lambda m: None)
+    _pump_until(lambda: landed)
+    assert landed == [quick]
+    _pump_for(0.1)
+    gate.set()
+    assert returned.wait(2)
+    _pump_until(lambda: _released(ref), 2)
+    assert not refiner.busy
+
+
+def test_a_job_stopped_with_its_panel_deleted_is_let_go(qgis_app):
+    """With the panel gone there is no poll to drain the queue, so a job
+    whose list was stopped is not queued at all."""
+    parent = QObject()
+    r = Refiner(parent)
+    gate = threading.Event()
+    held = [Job("late", gate=gate)]  # ignores should_stop: it finishes, not raises
+    ref, returned, started = weakref.ref(held[0]), held[0].returned, held[0].started
+    r.start([held.pop()], lambda j: None, lambda m: None)
+    assert started.wait(2)
+    sip.delete(parent)
+    r.start([], lambda j: None, lambda m: None)  # ignored, and stops the list
+    gate.set()
+    assert returned.wait(2)
+    deadline = time.monotonic() + 2
+    while not _released(ref) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _released(ref)
+    r.shutdown()
+
+
 def test_shutdown_lets_go_of_what_the_stopped_list_queued(refiner):
     looping = Job("loop", loop=True)  # stops when asked by returning, not raising
     ref = weakref.ref(looping)
@@ -364,7 +419,9 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     """The solve leaves the GIL to the GUI thread (numpy releases it), so a
     10 ms timer keeps ticking at about its rate. Measured against the time
     taken, not a fixed count, which a faster solve would make unreachable
-    and a slower one easy (#120)."""
+    and a slower one easy (#120). The solve ticks at about 0.99 of the rate;
+    a pure-Python job, which shares the GIL, at 0.43 to 0.51, and one that
+    holds it in a single C call at about 0.1."""
     job = SolveJob()  # planning is not the worker's, so it is outside the timing
     ticks = []
     timer = QTimer()
@@ -381,4 +438,4 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     print(f"solve {elapsed:.2f} s, {len(ticks)} of {expected:.0f} ticks")
     assert job.result is not None
     assert expected >= 10, "the solve is too quick to tell anything"
-    assert len(ticks) >= 0.5 * expected
+    assert len(ticks) >= 0.75 * expected

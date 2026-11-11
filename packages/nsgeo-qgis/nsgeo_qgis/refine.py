@@ -58,7 +58,7 @@ def _describe(exc: BaseException) -> str:
     name = type(exc).__name__
     try:
         message = str(exc)
-    except Exception:  # noqa: BLE001 -- a broken __str__ still ends the list
+    except BaseException:  # noqa: BLE001 -- a broken __str__ still ends the list
         return name
     return f"{name}: {message}" if message else name
 
@@ -156,13 +156,21 @@ class Refiner:
                 # kept on a future nobody reads: the list ends as for any error.
                 self._done.put((generation, None, _describe(exc)))
                 return
+            if stop.is_set():
+                # Finished as its list was stopped: it can never land, so it
+                # is not queued to hold its plan. The poll drains what a stop
+                # just after this check still lets through.
+                return
             self._done.put((generation, job, None))
 
     def _drain(self) -> None:
         try:
             # Read before the queue: a list queues everything before its
             # future is done, so a drain after that leaves nothing behind.
-            idle = self._future is None or self._future.done()
+            # It says so for this list only: a callback below may start
+            # another, which the poll must then wait for too.
+            future = self._future
+            idle = future is None or future.done()
             while True:
                 try:
                     generation, job, message = self._done.get_nowait()
@@ -177,7 +185,7 @@ class Refiner:
                 else:
                     self._remaining -= 1
                     self._deliver(self._on_landed, job)
-            if self._remaining <= 0 and idle:
+            if self._remaining <= 0 and idle and self._future is future:
                 self._poll.stop()
         except Exception as exc:
             _log(f"the refine poll failed: {exc}")
