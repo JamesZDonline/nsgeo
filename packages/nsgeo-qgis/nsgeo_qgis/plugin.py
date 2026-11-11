@@ -101,6 +101,7 @@ from nsgeo_qgis.slice_export import (
     coverage_path,
     cube_record,
     grid_export_job,
+    restore_band_times,
     save_cube_npz,
     window_ns,
 )
@@ -1047,6 +1048,7 @@ class NsgeoPlugin:
             live_cell=live_cell,
             build=build,
             dock=dock,
+            coverage=coverage,
         )
 
     def _export_site(self) -> None:
@@ -1079,7 +1081,9 @@ class NsgeoPlugin:
             for window in plan_windows(site_z, thickness_levels, step_levels)
         )
         grids = [self.session.grid(g) for g in site.ready_grids]
-        live_cell = dock.cell_spin.value()
+        # The cell the picture is drawn at (the box can show one a refused resolution left).
+        full = site.full_lattice
+        live_cell = full.pixel if full is not None else dock.cell_spin.value()
 
         def build(cell: float, pixel: float) -> _ExportJob:
             job = site_export_job(
@@ -1128,6 +1132,7 @@ class NsgeoPlugin:
             live_cell=live_cell,
             build=build,
             dock=dock,
+            coverage=coverage,
         )
 
     @staticmethod
@@ -1146,6 +1151,7 @@ class NsgeoPlugin:
         live_cell: float,
         build: Callable[[float, float], _ExportJob],
         dock: SlicesDock,
+        coverage: bool,
     ) -> None:
         """Ask for the file, the export cell and the pixel; then start the task.
 
@@ -1161,6 +1167,7 @@ class NsgeoPlugin:
             default_path=str(default),
             project=self.layers.project,
             parent=self.iface.mainWindow(),
+            writes_coverage=coverage,
         )
         dialog.setWindowTitle(title)
         try:
@@ -1229,8 +1236,7 @@ class NsgeoPlugin:
             what=task_name,
         )
         if not start_export(task):
-            back, lost = self._restore_layers(removed)
-            note = self._restore_note(back, lost)
+            note = self._restore_note(*self._restore_layers(removed))
             self.message(
                 "an export is already running; wait for it to finish, "
                 "or cancel it in the task list." + (f" {note}." if note else ""),
@@ -1287,6 +1293,16 @@ class NsgeoPlugin:
                     Qgis.MessageLevel.Warning if "could not" in note else Qgis.MessageLevel.Info,
                 )
                 return
+            if not result.ok and result.values_written:
+                self._finish_half_written(
+                    result,
+                    job,
+                    epoch=epoch,
+                    palette=palette,
+                    unipolar=unipolar,
+                    removed=removed,
+                )
+                return
             if not result.ok:
                 QgsMessageLog.logMessage(
                     f"export failed: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
@@ -1314,12 +1330,14 @@ class NsgeoPlugin:
                 f"exported {job.n_bands} bands to {result.target} "
                 f"({cell:g} m cell, {pixel:g} m pixels)"
             ]
+            style_notes: list[str] = []
             problem = self._add_export_layer(
                 result.target,
                 limit=float(result.limit or 1.0),
                 palette=palette,
                 unipolar=unipolar,
                 temporal=job.temporal,
+                notes=style_notes,
             )
             if problem is not None:
                 self.message(problem, Qgis.MessageLevel.Warning)
@@ -1332,6 +1350,7 @@ class NsgeoPlugin:
                         palette=counts_palette,
                         unipolar=True,
                         temporal=None,
+                        notes=style_notes,
                     )
                     if problem is not None:
                         raise RuntimeError(problem)
@@ -1344,9 +1363,13 @@ class NsgeoPlugin:
                     )
             if job.left_out:
                 parts.append(f"left out {', '.join(job.left_out)}")
-                self.message(", ".join(parts), Qgis.MessageLevel.Warning)
+            text = ", ".join(parts)
+            if style_notes:
+                text += ". " + " ".join(style_notes)
+            if job.left_out or style_notes:
+                self.message(text, Qgis.MessageLevel.Warning)
             else:
-                self.message(", ".join(parts))
+                self.message(text)
         except Exception as exc:  # noqa: BLE001 -- invisible in a task's finished()
             QgsMessageLog.logMessage(
                 f"could not finish the export: {exc}", "nsgeo", Qgis.MessageLevel.Critical
@@ -1357,16 +1380,66 @@ class NsgeoPlugin:
                 Qgis.MessageLevel.Critical,
             )
 
+    def _finish_half_written(
+        self,
+        result: ExportResult,
+        job: _ExportJob,
+        *,
+        epoch: int,
+        palette: str,
+        unipolar: bool,
+        removed: Sequence[tuple[str, Path]],
+    ) -> None:
+        """The values file replaced its target but the companion could not be written.
+
+        Says so. The old layer on the values file is not put back (it would read the new
+        file with the old style); the new one is added. Layers on the other files, which
+        are as they were, are put back.
+        """
+        QgsMessageLog.logMessage(
+            f"export half written: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
+        )
+        written = _norm_path(result.target)
+        note = self._restore_note(
+            *self._restore_layers([r for r in removed if _norm_path(r[1]) != written], epoch)
+        )
+        text = (
+            f"the GeoTIFF was written to {result.target}, but the coverage file could not be: "
+            f"{plain_export_error(result.error)}"
+        )
+        if (
+            epoch == self._export_epoch
+            and self.session is not None
+            and self.session.is_open
+            and self.slices_dock is not None
+        ):
+            style_notes: list[str] = []
+            problem = self._add_export_layer(
+                result.target,
+                limit=float(result.limit or 1.0),
+                palette=palette,
+                unipolar=unipolar,
+                temporal=job.temporal,
+                notes=style_notes,
+            )
+            text += "; the new layer was added" if problem is None else f"; {problem}"
+            text += "".join(f". {n}" for n in style_notes)
+        if note:
+            text += f"; {note}"
+        self.message(text, Qgis.MessageLevel.Warning)
+
     def _restore_layers(
         self, removed: Sequence[tuple[str, Path]], epoch: int | None = None
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], list[str]]:
         """Add back the layers an export removed to replace, from their files.
 
         Each re-add is on its own `try`, so one failure never stops the rest. Same name; a
-        style file beside the file applies as its default style, but the temporal
-        properties and the layer's place in the group are not reapplied. Returns the names
-        put back and the names that could not be (a file gone or unreadable, or an error,
-        logged raw). Both are empty when nothing was removed or the site has closed since.
+        style file beside the file applies as its default style, and the temporal
+        properties come from the band windows the file records (`restore_band_times`);
+        the layer's place in the group is not reapplied. Returns the names put back, the
+        names that could not be (a file gone or unreadable, or an error, logged raw) and
+        the names put back without their time slider (a file written before the windows
+        were recorded). All are empty when nothing was removed or the site has closed since.
         """
         if (
             not removed
@@ -1374,9 +1447,10 @@ class NsgeoPlugin:
             or self.session is None
             or not self.session.is_open
         ):
-            return [], []
+            return [], [], []
         back: list[str] = []
         lost: list[str] = []
+        untimed: list[str] = []
         for name, path in removed:
             try:
                 layer = QgsRasterLayer(str(path), name, "gdal") if path.exists() else None
@@ -1384,6 +1458,8 @@ class NsgeoPlugin:
                     raise OSError(f"{path} is missing or cannot be read as a layer")
                 self._add_exported_layer(layer)
                 back.append(name)
+                if restore_band_times(layer, path) == "missing":
+                    untimed.append(name)
             except Exception as exc:  # noqa: BLE001 -- the others still go back
                 QgsMessageLog.logMessage(
                     f"could not put the layer {name} back from {path}: {exc}",
@@ -1391,16 +1467,21 @@ class NsgeoPlugin:
                     Qgis.MessageLevel.Warning,
                 )
                 lost.append(name)
-        return back, lost
+        return back, lost, untimed
 
     @staticmethod
-    def _restore_note(back: Sequence[str], lost: Sequence[str]) -> str:
+    def _restore_note(back: Sequence[str], lost: Sequence[str], untimed: Sequence[str] = ()) -> str:
         """The words for a cancel or failure that removed layers: what is back, and what is not."""
         parts = []
         if back:
             parts.append(f"{name_list(back)} {'was' if len(back) == 1 else 'were'} put back")
         if lost:
             parts.append(f"{name_list(lost)} could not be put back; add it again from its file")
+        if untimed:
+            parts.append(
+                f"{name_list(untimed)} {'is' if len(untimed) == 1 else 'are'} back without "
+                "the time slider setting, which this older file does not record"
+            )
         return "; ".join(parts)
 
     def _add_export_layer(
@@ -1411,12 +1492,15 @@ class NsgeoPlugin:
         palette: str,
         unipolar: bool,
         temporal: Callable[[Any], None] | None,
+        notes: list[str] | None = None,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
         The `.qml` is written first, so QGIS picks it up as the file's default
         style when the layer is made. The temporal properties go on after the layer
-        is added (the style file stores them switched off).
+        is added (the style file stores them switched off). When the style file cannot be
+        written, the previous export's one is removed (QGIS would apply its stretch to
+        this file) and a sentence about it is appended to `notes`.
         """
         try:
             write_style(path, limit=limit, colormap_name=palette, unipolar=unipolar)
@@ -1426,6 +1510,22 @@ class NsgeoPlugin:
                 "nsgeo",
                 Qgis.MessageLevel.Warning,
             )
+            stale_gone = True
+            try:
+                path.with_suffix(".qml").unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                stale_gone = False
+                QgsMessageLog.logMessage(
+                    f"could not remove the old style file beside {path}: {unlink_exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+            if notes is not None:
+                notes.append(
+                    f"The style file for {path.name} could not be written, so it is drawn "
+                    "in QGIS's own colours."
+                    + ("" if stale_gone else " An older style file beside it could not be removed.")
+                )
         layer = QgsRasterLayer(str(path), path.stem, "gdal")
         if not layer.isValid():
             return f"the exported GeoTIFF at {path} could not be reopened as a layer"

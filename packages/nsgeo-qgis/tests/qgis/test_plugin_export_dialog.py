@@ -67,7 +67,9 @@ def roomy_disk(monkeypatch):
 def make(qgis_app, tmp_path, roomy_disk):
     made = []
 
-    def _make(preview=None, *, floor=0.015, live=0.05, project=None, path=True, **kw):
+    def _make(
+        preview=None, *, floor=0.015, live=0.05, project=None, path=True, coverage=True, **kw
+    ):
         preview = preview or Fake(**kw)
         dialog = ExportDialog(
             preview,
@@ -75,6 +77,7 @@ def make(qgis_app, tmp_path, roomy_disk):
             live_cell=live,
             default_path=str(tmp_path / "site.tif") if path else "",
             project=project or QgsProject(),
+            writes_coverage=coverage,
         )
         made.append(dialog)
         dialog.preview = preview
@@ -302,6 +305,27 @@ def test_a_target_open_as_a_layer_asks_before_replacing(make, project_with_targe
         "Site 15 ns is open in this project. Replace it? "
         "The layer is removed and added again when the export finishes."
     )
+
+
+def test_a_companion_open_as_a_layer_is_not_asked_about_when_none_is_written(make, tmp_path):
+    project = QgsProject()
+    companion = QgsRasterLayer(str(_tif(tmp_path / "site_coverage.tif")), "Site coverage", "gdal")
+    project.addMapLayer(companion)
+    d = make(project=project, coverage=False)
+    d.export_button.click()
+    assert d.confirm_strip.isHidden()
+    assert d.result() == QDialog.DialogCode.Accepted
+    assert d.layers_to_replace() == []
+    again = make(project=project, coverage=True)
+    again.export_button.click()
+    assert not again.confirm_strip.isHidden()
+    assert "Site coverage" in again.confirm_label.text()
+
+
+def test_a_typed_path_expands_the_home_folder(make):
+    d = make()
+    d.path_edit.setText("~/slices/out.tif")
+    assert d.result_settings().path == Path.home() / "slices" / "out.tif"
 
 
 def test_replace_accepts_and_names_the_layers(make, project_with_target):

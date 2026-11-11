@@ -539,12 +539,13 @@ def summary_lines(preview: ExportPreview) -> list[tuple[str, str]]:
         )
     rows.append(("Slices", preview.slices))
     if preview.normalisation is not None:
-        rows.append(
-            (
-                "Normalisation",
-                f"{preview.normalisation}, measured again at {preview.cell:g} m",
-            )
+        # With no normalisation nothing is measured, so there is nothing to measure again.
+        again = (
+            ""
+            if preview.normalisation.lower() == "none"
+            else f", measured again at {preview.cell:g} m"
         )
+        rows.append(("Normalisation", f"{preview.normalisation}{again}"))
     rows.append(
         ("File", f"about {format_bytes(preview.file_bytes)} before compression, plus a style file")
     )

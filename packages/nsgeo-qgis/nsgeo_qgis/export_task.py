@@ -21,7 +21,10 @@ stashes its progress and calls `setProgress` (thread-safe); a slot on
 
 The files: both partials (values with its overviews, then the coverage companion
 with its overviews) are written before either is committed. Any cancel or failure
-discards both and leaves both existing targets untouched.
+before the first rename discards both and leaves both existing targets untouched.
+The two renames cannot be one step: if the second fails (the companion is locked),
+the values file has already replaced its target, and the result says so
+(`values_written`) rather than reporting an export that wrote nothing.
 """
 
 from __future__ import annotations
@@ -71,6 +74,9 @@ class ExportResult:
     coverage_target: Path | None
     limit: float | None
     coverage_limit: float | None
+    #: The values file replaced its target before the export stopped (the companion's
+    #: rename then failed); `ok` is False, `limit` is the new file's.
+    values_written: bool = False
 
 
 #: The one export in flight; addTask() keeps no reference of its own.
@@ -127,6 +133,7 @@ class ExportTask(QgsTask):
         self._limit: float | None = None
         self._coverage_limit: float | None = None
         self._delivered = False
+        self._values_written = False
         self.describe.connect(self._show_description)
 
     # ---- GUI thread -----------------------------------------------------------
@@ -156,8 +163,9 @@ class ExportTask(QgsTask):
                 error=None if ok else error,
                 target=self._target,
                 coverage_target=self._coverage_target,
-                limit=self._limit if ok else None,
+                limit=self._limit if ok or self._values_written else None,
                 coverage_limit=self._coverage_limit if ok else None,
+                values_written=self._values_written and not ok,
             )
             if _held is self:
                 _held = None
@@ -197,6 +205,7 @@ class ExportTask(QgsTask):
             if self.isCanceled():
                 raise ExportCancelled()
             commit_partial(values, self._target)
+            self._values_written = True
             if self._coverage_spec is not None and self._coverage_target is not None:
                 commit_partial(partials[1], self._coverage_target)
             partials.clear()
@@ -249,5 +258,5 @@ class ExportTask(QgsTask):
         limit = self._writer_plan.writer.write_bands(
             partial, plan, bands, clip=clip, progress_band=band_done
         )
-        build_overviews(partial, self.isCanceled)
+        build_overviews(partial, self.isCanceled, counts=bool(getattr(plan, "coverage", False)))
         return float(limit)

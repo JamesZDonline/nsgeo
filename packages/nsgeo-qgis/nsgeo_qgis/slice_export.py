@@ -34,23 +34,20 @@ Two decisions this task owns, recorded here rather than only in the task
 report because a future reader of this file needs them as much as a
 reviewer of this task does:
 
-* **North-up pitch is the cell, read bilinearly (whole-site fine-cells
-  spec §3).** `to_north_up` samples every frame at its own cell, so no
-  frame cell is dropped, and this writer just takes the pitch from the
-  geotransform it returns. A coverage plan (`coverage=True`) passes
-  `counts=True`, so a count is never blended. History: Ruling AE wrote
-  the frame's own cell size with a nearest-cell gather and recorded a
-  15-18% loss at rotated azimuths; half the cell replaced it until the
-  bilinear rule.
-* **The per-band `cell_index` solve is planned once per frame.**
-  `to_north_up`'s resample grid does not depend on the values being
-  resampled, so the core keeps it per frame (`display._north_up_plan`) and
-  every band after the first is one gather. Before that it was solved for
-  every band: measured on a 400x300 frame at cell 0.05, 0.019 s
-  axis-aligned, 0.112 s at 10.497 degrees (half-pitch sampling), about
-  4.4 s over 39 bands on a rotated frame. The same plan serves
-  `SliceLayer.update`'s ticks, so an export of the frame on screen starts
-  with it already built.
+* **North-up pitch is the export pixel, read bilinearly (whole-site fine-cells
+  spec §3).** `export_pipeline.run_export` builds each band on the export
+  lattice (`frame_lattice(frame, pixel)`) from bilinear taps it makes itself, so no
+  frame cell is dropped, and `write_north_up` writes what it is given on that
+  lattice. A coverage plan (`coverage=True`) is written as counts, never blended
+  (its resampling is the largest count). History: Ruling AE wrote the frame's own
+  cell size with a nearest-cell gather and recorded a 15-18% loss at rotated
+  azimuths; half the cell replaced it until the bilinear rule.
+* **The taps are not shared with the live view.** The export runs on a worker
+  thread, so it never calls `to_north_up` (its `lru_cache` of plans is what
+  `SliceLayer.update` draws through on the GUI thread) and never touches a live
+  engine. A grid's taps are built once per export and every band after the first
+  is one gather. The file still equals what the live view draws at the live cell
+  (pinned at several azimuths in the tests).
 """
 
 from __future__ import annotations
@@ -137,8 +134,17 @@ def overview_factors(width: int, height: int) -> list[int]:
     return factors
 
 
-def build_overviews(path: str | Path, should_stop: Callable[[], bool] | None = None) -> None:
-    """Internal overviews, nodata-aware AVERAGE, for a tiled file; a stripped one gets none.
+def build_overviews(
+    path: str | Path,
+    should_stop: Callable[[], bool] | None = None,
+    *,
+    counts: bool = False,
+) -> None:
+    """Internal overviews for a tiled file; a stripped one gets none.
+
+    Nodata-aware AVERAGE for values. `counts=True` (the coverage companion) uses NEAREST:
+    an average of counts is a fraction no cell holds, and GDAL 3.8 has no `MAX` (the
+    live preview max-pools), so a zoomed-out count is a whole count taken from the data.
 
     Worker-thread safe. The factors sum to about a third of the full size, which
     is what `export_pipeline.OVERVIEW_FACTOR` budgets. `should_stop`, polled by
@@ -164,7 +170,9 @@ def build_overviews(path: str | Path, should_stop: Callable[[], bool] | None = N
             factors = overview_factors(dataset.RasterXSize, dataset.RasterYSize)
             if factors:
                 try:
-                    dataset.BuildOverviews("AVERAGE", factors, callback=progress)
+                    dataset.BuildOverviews(
+                        "NEAREST" if counts else "AVERAGE", factors, callback=progress
+                    )
                 except RuntimeError:
                     if should_stop is None or not should_stop():
                         raise
@@ -189,8 +197,14 @@ def coverage_path(target: str | Path) -> Path:
 
 
 def commit_partial(partial: str | Path, target: str | Path) -> None:
-    """Put a finished partial file on the target name, replacing what was there."""
+    """Put a finished partial file on the target name, replacing what was there.
+
+    The old file's `<target>.aux.xml` (statistics) and `<target>.ovr` (an external overview)
+    are dropped too: GDAL would serve them for the new file. (`Create()` used to delete them.)
+    """
     os.replace(partial, target)
+    for suffix in (".aux.xml", ".ovr"):
+        Path(f"{target}{suffix}").unlink(missing_ok=True)
 
 
 def discard_partial(partial: str | Path) -> None:
@@ -551,6 +565,10 @@ class GeoTiffSliceWriter:
             ):
                 dataset.SetMetadataItem(key, value)
 
+        def tag_band(band: Any, index: int, shown: ExportBand) -> None:
+            lo, hi = window_times_ns(plan.z, plan.bands[index].window)
+            band.SetMetadataItem("NSGEO_WINDOW_NS", f"{lo},{hi}")
+
         return write_north_up(
             path,
             lattice,
@@ -558,7 +576,7 @@ class GeoTiffSliceWriter:
             bands,
             clip=clip,
             tag_dataset=tag_dataset,
-            tag_band=lambda band, index, shown: None,
+            tag_band=tag_band,
             progress_band=progress_band,
         )
 
@@ -577,8 +595,8 @@ def band_time_range(lo_ns: float, hi_ns: float) -> QgsDateTimeRange:
     return QgsDateTimeRange(lo, hi)
 
 
-def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
-    """Wire the Temporal Controller's slider to `plan`'s bands, one-to-one.
+def apply_band_windows(layer: QgsRasterLayer, windows: Sequence[tuple[float, float]]) -> None:
+    """Wire the Temporal Controller's slider to `windows` (first, last ns), one per band.
 
     Order matters (verified directly against this QGIS build, 3.44.7):
     the ranges must be set before the mode is switched to
@@ -588,13 +606,50 @@ def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
     QGIS.
     """
     props = layer.temporalProperties()
-    ranges = {
-        index + 1: band_time_range(*window_times_ns(plan.z, band.window))
-        for index, band in enumerate(plan.bands)
-    }
-    props.setFixedRangePerBand(ranges)
+    props.setFixedRangePerBand(
+        {index + 1: band_time_range(lo, hi) for index, (lo, hi) in enumerate(windows)}
+    )
     props.setMode(Qgis.RasterTemporalMode.FixedRangePerBand)
     props.setIsActive(True)
+
+
+def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
+    """Wire the Temporal Controller's slider to `plan`'s bands, one-to-one."""
+    apply_band_windows(layer, [window_times_ns(plan.z, band.window) for band in plan.bands])
+
+
+def restore_band_times(layer: QgsRasterLayer, path: str | Path) -> str:
+    """Wire `layer` to the band windows its own file records (`NSGEO_WINDOW_NS`).
+
+    For a layer put back from an export's file. GUI thread. Returns `"set"`; `"counts"`
+    for a coverage file, which has no time axis to follow; or `"missing"` when the file
+    does not record every band's window (one written before the key existed) and the
+    layer is left as QGIS made it.
+    """
+    dataset = gdal.Open(str(path))
+    if dataset is None:
+        return "missing"
+    try:
+        metadata = dataset.GetMetadata()
+        if "largest_count" in (
+            metadata.get("NSGEO_RESAMPLING"),
+            metadata.get("NSGEO_SITE_RESAMPLING"),
+        ):
+            return "counts"
+        windows: list[tuple[float, float]] = []
+        for index in range(dataset.RasterCount):
+            text = dataset.GetRasterBand(index + 1).GetMetadataItem("NSGEO_WINDOW_NS")
+            try:
+                lo, hi = (float(part) for part in (text or "").split(","))
+            except ValueError:
+                return "missing"
+            windows.append((lo, hi))
+    finally:
+        dataset = None
+    if not windows:
+        return "missing"
+    apply_band_windows(layer, windows)
+    return "set"
 
 
 def save_cube_npz(engine: SliceEngine, path: str | Path) -> Path:

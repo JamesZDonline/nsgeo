@@ -68,11 +68,14 @@ class ExportChoice:
     pixel: float
 
 
-def target_paths(path: Path) -> list[Path]:
-    """The files an export to `path` writes: the raster, its style file and the
-    coverage companion with its own."""
-    companion = coverage_path(path)
-    return [path, path.with_suffix(".qml"), companion, companion.with_suffix(".qml")]
+def target_paths(path: Path, coverage: bool = True) -> list[Path]:
+    """The files an export to `path` writes: the raster and its style file, and, when
+    `coverage` is asked for, the coverage companion with its own."""
+    paths = [path, path.with_suffix(".qml")]
+    if coverage:
+        companion = coverage_path(path)
+        paths += [companion, companion.with_suffix(".qml")]
+    return paths
 
 
 def _norm(path: str | Path) -> str:
@@ -113,8 +116,10 @@ class ExportDialog(QDialog):
         default_path: str = "",
         project: QgsProject | None = None,
         parent: QWidget | None = None,
+        writes_coverage: bool = True,
     ) -> None:
         super().__init__(parent)
+        self._writes_coverage = writes_coverage
         self.setWindowTitle("Export GeoTIFF")
         self._preview_fn = preview
         self._project = project if project is not None else QgsProject.instance()
@@ -239,7 +244,7 @@ class ExportDialog(QDialog):
             self.path_edit.setText(name)
 
     def result_settings(self) -> ExportChoice:
-        path = Path(self.path_edit.text().strip())
+        path = Path(self.path_edit.text().strip()).expanduser()
         if not path.suffix:
             path = path.with_suffix(".tif")
         return ExportChoice(path, self.cell_spin.value(), self.pixel_spin.value())
@@ -306,7 +311,9 @@ class ExportDialog(QDialog):
             self.refresh_now()
             if not self.export_button.isEnabled():
                 return  # the latest numbers do not fit
-        in_use = targets_in_use(self._project, target_paths(self.result_settings().path))
+        in_use = targets_in_use(
+            self._project, target_paths(self.result_settings().path, self._writes_coverage)
+        )
         if not in_use:
             self._replace = []
             self.accept()

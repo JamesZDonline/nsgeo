@@ -392,7 +392,7 @@ class SliceLayer(QObject):
                 finally:
                     # Cheap cluster (final review): `dataset.Close()`,
                     # then the local set to `None` -- `slice_export.py`'s
-                    # `GeoTiffSliceWriter.write` already uses `Close()` on
+                    # `write_north_up` already uses `Close()` on
                     # this same GDAL build (>= 3.7), which surfaces a
                     # write error at close time instead of leaving it
                     # silent until garbage collection, where a SWIG

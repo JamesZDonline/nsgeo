@@ -526,6 +526,82 @@ def _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tm
     now = {lyr.name() for lyr in plugin.layers.project.mapLayers().values()}
     assert names <= now
     assert any("put back" in m for m, _lv in levels), levels
+    # The layer comes back on the time slider it had: the file's own band windows.
+    back = _layer_for(plugin, target)
+    assert back.temporalProperties().isActive()
+    assert len(back.temporalProperties().fixedRangePerBand()) == back.bandCount()
+    assert not any("time slider" in m for m, _lv in levels), levels
+
+
+def test_a_replace_that_could_not_rename_the_companion_adds_the_new_values_layer(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    """The values file was replaced, the companion could not be: the message says exactly
+    that, the old values layer is not put back onto the new file, and the new one is added."""
+    from nsgeo_qgis import export_task
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    _export(plugin, drive_dialog, target)
+    old_values = _layer_for(plugin, target).id()
+    old_counts = _layer_for(plugin, coverage).id()
+    before = coverage.read_bytes()
+    real = export_task.commit_partial
+
+    def commit(partial, to):
+        if str(to) == str(coverage):
+            raise PermissionError(13, "in use by another program")
+        real(partial, to)
+
+    monkeypatch.setattr(export_task, "commit_partial", commit)
+    levels, disconnect = _levels()
+    try:
+        _export(plugin, drive_dialog, target, replace=True)
+    finally:
+        disconnect()
+    assert coverage.read_bytes() == before
+    new_values = _layer_for(plugin, target)
+    assert new_values is not None and new_values.isValid() and new_values.id() != old_values
+    assert new_values.temporalProperties().isActive()
+    counts = _layer_for(plugin, coverage)
+    assert counts is not None and counts.id() != old_counts, "the old companion is put back"
+    texts = [(m, lv) for m, lv in levels if "could not be" in m or "was written" in m]
+    said = [m for m, lv in texts if "GeoTIFF was written" in m]
+    assert said, levels
+    assert "coverage" in said[0] and "cube was put back" not in said[0]
+    assert "cube_coverage was put back" in said[0]
+    assert not any(m.startswith("could not export the GeoTIFF") for m, _lv in levels)
+
+
+def test_a_style_file_that_cannot_be_written_is_not_left_stale(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    from nsgeo_qgis import plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    target = tmp_path / "slices" / "cube.tif"
+    _export(plugin, drive_dialog, target)
+    stale = target.with_suffix(".qml")
+    assert stale.exists()
+
+    def broken(*args, **kwargs):
+        raise OSError("read-only folder")
+
+    monkeypatch.setattr(plugin_module, "write_style", broken)
+    levels, disconnect = _levels()
+    try:
+        _export(plugin, drive_dialog, target, replace=True)
+    finally:
+        disconnect()
+    assert not stale.exists(), "the previous export's stretch must not be applied to the new file"
+    said = [(m, lv) for m, lv in levels if m.startswith("exported")]
+    assert said and said[0][1] == Qgis.MessageLevel.Warning
+    assert "style file" in said[0][0]
 
 
 def _held_replace(plugin, drive_dialog, monkeypatch, tmp_path):

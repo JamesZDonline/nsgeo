@@ -447,7 +447,9 @@ def export_site_lines(samples: int, tpm: float) -> list[tuple]:
     return out
 
 
-def export_spec(layout: list[tuple], cell: float, pixel: float, method: str, n_bands: int):
+def export_spec(
+    layout: list[tuple], cell: float, pixel: float, method: str, n_bands: int, smooth: float = 0.0
+):
     import math
 
     from nsgeo.slices import CubeFrame, FinishSettings, SiteLattice, ZAxis, slice_extent
@@ -459,6 +461,8 @@ def export_spec(layout: list[tuple], cell: float, pixel: float, method: str, n_b
         method,
         DEFAULT_MAX_DISTANCE_SPACINGS * SPACING,
         SEARCH_RADIUS_SPACINGS * SPACING,
+        smooth,
+        smooth,
     )
     grids = []
     for grid_id, origin, azimuth, lines in layout:
@@ -472,7 +476,9 @@ def export_spec(layout: list[tuple], cell: float, pixel: float, method: str, n_b
     return ExportSpec(tuple(grids), lattice, windows, "edge", False)
 
 
-def export_rows(settings: list[tuple[float, float]], samples: int, tpm: float, n_bands: int):
+def export_rows(
+    settings: list[tuple[float, float]], samples: int, tpm: float, n_bands: int, smooth: float = 0.0
+):
     import tracemalloc
 
     from nsgeo_qgis.export_pipeline import estimate_export, run_export
@@ -481,7 +487,7 @@ def export_rows(settings: list[tuple[float, float]], samples: int, tpm: float, n
     rows = []
     for cell, pixel in settings:
         for method in ("kriging", "min_curvature"):
-            spec = export_spec(layout, cell, pixel, method, n_bands)
+            spec = export_spec(layout, cell, pixel, method, n_bands, smooth)
             estimate = estimate_export(spec)
             stamps = [time.perf_counter()]
             for _ in run_export(spec, should_stop=lambda: False, progress=lambda *_: None):
@@ -545,13 +551,23 @@ def main() -> int:
         default=None,
         help="measure the export pipeline at this cell and pixel (metres); repeatable",
     )
+    ap.add_argument(
+        "--export-smooth",
+        type=float,
+        default=0.0,
+        help="smoothing (metres, both axes) for the export rows (default 0, none)",
+    )
     ap.add_argument("--export-bands", type=int, default=3, help="bands per export (default 3)")
     ap.add_argument("--workdir", type=Path, default=None, help="where to write the lines")
     args = ap.parse_args()
 
     if args.export:
         rows = export_rows(
-            [(c, p) for c, p in args.export], args.samples, args.tpm, args.export_bands
+            [(c, p) for c, p in args.export],
+            args.samples,
+            args.tpm,
+            args.export_bands,
+            args.export_smooth,
         )
         print(
             "| cell (m) | pixel (m) | method | lattice | grid cells (M) "

@@ -78,7 +78,7 @@ def fake_run(monkeypatch):
             yield ExportBand(np.zeros((2, 2), np.float32), {})
 
     monkeypatch.setattr(export_task, "run_export", run)
-    monkeypatch.setattr(export_task, "build_overviews", lambda path, should_stop=None: None)
+    monkeypatch.setattr(export_task, "build_overviews", lambda path, should_stop=None, **kw: None)
     return state
 
 
@@ -239,7 +239,7 @@ def test_a_cancel_in_a_later_phase_keeps_both_existing_targets(
     cov.write_bytes(b"old counts")
     calls: list[Path] = []
 
-    def overviews(path, should_stop=None):
+    def overviews(path, should_stop=None, **kw):
         calls.append(Path(path))
         if (phase == "values overviews" and len(calls) == 1) or (
             phase == "companion overviews" and len(calls) == 2
@@ -275,6 +275,63 @@ def test_a_failure_in_the_companion_keeps_both_existing_targets(qgis_app, tmp_pa
     assert sorted(p.name for p in tmp_path.glob("*")) == ["out.tif", "out_coverage.tif"]
 
 
+def test_a_companion_that_cannot_be_renamed_leaves_the_written_values_file_reported(
+    qgis_app, tmp_path, fake_run, monkeypatch
+):
+    results, on_done = _collector()
+    task, target, cov = _make(tmp_path, on_done)
+    target.write_bytes(b"old values")
+    cov.write_bytes(b"old counts")
+    real = export_task.commit_partial
+
+    def commit(partial, to):
+        if Path(to) == cov:
+            raise PermissionError(13, "in use by another program")
+        real(partial, to)
+
+    monkeypatch.setattr(export_task, "commit_partial", commit)
+    assert start_export(task)
+    _wait(lambda: results, "the half-committed export to finish")
+    (result,) = results
+    assert not result.ok and not result.cancelled
+    assert result.values_written, "the values file was replaced"
+    assert result.limit == 2.5
+    assert target.read_bytes() == b"values" and cov.read_bytes() == b"old counts"
+    assert sorted(p.name for p in tmp_path.glob("*")) == ["out.tif", "out_coverage.tif"]
+
+
+def test_a_failure_before_any_commit_writes_nothing(qgis_app, tmp_path, fake_run):
+    results, on_done = _collector()
+    task, target, cov = _make(
+        tmp_path, on_done, writer=FakeWriter(b"values"), cov_writer=FakeWriter(b"counts", fail_at=2)
+    )
+    assert start_export(task)
+    _wait(lambda: results, "the failed export to finish")
+    assert not results[0].values_written and results[0].limit is None
+
+
+def test_the_companions_overviews_are_built_for_counts(qgis_app, tmp_path, fake_run, monkeypatch):
+    results, on_done = _collector()
+    task, target, cov = _make(tmp_path, on_done)
+    task._writer_plan = WriterPlan(
+        writer=task._writer_plan.writer,
+        plan=SimpleNamespace(coverage=False),
+        coverage_plan=SimpleNamespace(coverage=True),
+        clip=object(),
+        coverage_clip=object(),
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def overviews(path, should_stop=None, *, counts=False):
+        seen.append((Path(path).name, counts))
+
+    monkeypatch.setattr(export_task, "build_overviews", overviews)
+    assert start_export(task)
+    _wait(lambda: results, "the export to finish")
+    assert results[0].ok
+    assert seen == [("out.partial.tif", False), ("out_coverage.partial.tif", True)]
+
+
 def test_a_failure_in_the_overviews_keeps_the_existing_targets(
     qgis_app, tmp_path, fake_run, monkeypatch
 ):
@@ -282,7 +339,7 @@ def test_a_failure_in_the_overviews_keeps_the_existing_targets(
     task, target, cov = _make(tmp_path, on_done)
     target.write_bytes(b"old")
 
-    def broken(path, should_stop=None):
+    def broken(path, should_stop=None, **kw):
         raise RuntimeError("no room for overviews")
 
     monkeypatch.setattr(export_task, "build_overviews", broken)

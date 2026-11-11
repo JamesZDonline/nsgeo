@@ -48,7 +48,6 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from qgis.core import (
-    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsCoordinateTransformContext,
@@ -59,7 +58,7 @@ from qgis.core import (
 
 from nsgeo_qgis.export_pipeline import ExportBand, ExportGrid, ExportSpec
 from nsgeo_qgis.site_engine import SiteEngine
-from nsgeo_qgis.slice_export import band_time_range, write_north_up
+from nsgeo_qgis.slice_export import apply_band_windows, write_north_up
 from nsgeo_qgis.slices_plan import SliceFinish
 
 _SEPARATORS = (",", ":")
@@ -443,11 +442,4 @@ def _depths(band: SiteBand) -> dict[str, list[float] | None]:
 
 def apply_site_temporal_properties(layer: QgsRasterLayer, plan: SiteExportPlan) -> None:
     """Wire the Temporal Controller to the site's bands, one-to-one (see M11's)."""
-    props = layer.temporalProperties()
-    ranges = {
-        index + 1: band_time_range(*window_times_ns(plan.site_z, band.window))
-        for index, band in enumerate(plan.bands)
-    }
-    props.setFixedRangePerBand(ranges)
-    props.setMode(Qgis.RasterTemporalMode.FixedRangePerBand)
-    props.setIsActive(True)
+    apply_band_windows(layer, [window_times_ns(plan.site_z, band.window) for band in plan.bands])

@@ -3237,6 +3237,19 @@ def test_the_site_export_dialog_gives_every_included_grids_limit_as_the_cell_flo
     assert shown[0].path_edit.text().replace("\\", "/").endswith("slices/site.tif")
 
 
+def test_the_site_export_dialog_starts_at_the_cell_drawn_not_the_spin_box(plugin, drive_dialog):
+    """After a refused resolution the box can show a cell the picture is not at."""
+    dock = whole_site(plugin)
+    drawn = dock.site_engine.full_lattice.pixel
+    dock.cell_spin.blockSignals(True)
+    dock.cell_spin.setValue(dock.cell_spin.value() * 2)
+    dock.cell_spin.blockSignals(False)
+    assert dock.cell_spin.value() != pytest.approx(drawn)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    dock.export_button.click()
+    assert shown[0].cell_spin.value() == pytest.approx(drawn, abs=0.0005)
+
+
 # ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
 
 

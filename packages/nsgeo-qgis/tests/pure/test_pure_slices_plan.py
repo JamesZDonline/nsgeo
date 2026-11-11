@@ -683,6 +683,13 @@ def test_the_summary_for_a_two_grid_site_is_exact():
     ]
 
 
+def test_the_summary_does_not_say_measured_again_for_no_normalisation():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(normalisation="none")))
+    assert rows["Normalisation"] == "none"
+
+
 def test_the_summary_for_one_grid_drops_the_site_rows():
     from nsgeo_qgis.slices_plan import summary_lines
 

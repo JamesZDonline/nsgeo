@@ -636,17 +636,17 @@ def test_the_cache_keeps_at_most_sixteen_and_drops_with_the_plan(sourced, solves
     # A z-only edit keeps the plan, so it keeps what was solved on it.
     engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=28.0))
     assert len(engine._solved) == SOLVED_SLICES_KEPT
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     # A new cell is a new plan: nothing solved on the old one is kept.
     engine.set_resolution(Resolution(cell=0.2, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
     engine.finish(*engine.slice_at(SliceWindow(4, 14)), MC)
     assert len(engine._solved) == 1
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     engine.set_source(engine.choice)
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
     assert engine.wait_for_preparation(20_000)
 
 
@@ -676,7 +676,7 @@ def test_finish_is_slow_follows_the_last_solve(sourced):
     fresh = engine.slice_at(SliceWindow(20, 30))
     assert engine.finish_is_slow(*fresh, MC), "no plan yet, so no solve is timed on it"
     engine.finish(*cached, MC)  # builds the plan (which resets the timing), then solves
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     for ms, slow in ((None, True), (10.0, False), (80.0, True)):
         engine._last_solve_ms = ms
         assert engine.finish_is_slow(*fresh, MC) is slow, ms
@@ -707,7 +707,7 @@ def test_a_pending_solve_lands_in_the_cache(sourced, solves):
     assert job.land() is True
     drawn = engine.finish(values, coverage, MC)
     assert len(solves) == 1, "a landed solve must be served from the cache"
-    assert engine.last_solve_ms == job.ms
+    assert engine._last_solve_ms == job.ms
     np.testing.assert_array_equal(drawn, job.solved)
     assert engine.pending_solve(values, coverage, MC) is None
     assert engine.pending_solve(values, coverage, SliceFinish(method="kriging")) is None
@@ -734,7 +734,7 @@ def test_a_solve_for_a_dropped_plan_does_not_land(sourced, change):
     assert job.solved is not None
     assert job.land() is False
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
 
 
 def test_the_minimum_curvature_stretch_is_measured_over_twelve_windows_at_most(sourced, solves):

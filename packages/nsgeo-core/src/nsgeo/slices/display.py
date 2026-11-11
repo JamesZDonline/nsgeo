@@ -278,7 +278,7 @@ def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
 def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
     """The north-up lattice over `frame`'s own extent, at any `pixel`.
 
-    Anchored at the extent's south-west corner and snapped, so the width and
+    Anchored at the extent's north-west corner and snapped, so the width and
     height of an axis-aligned frame are exact (`to_north_up`'s phantom row
     and column, below). Unlike `SiteLattice.covering` it is anchored on the
     frame, not on a multiple of the pixel, so at `pixel == frame.cell` an

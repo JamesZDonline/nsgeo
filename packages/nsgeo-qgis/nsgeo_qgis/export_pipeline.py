@@ -96,12 +96,12 @@ from nsgeo_qgis.slices_plan import (
 
 
 class ExportCancelled(Exception):
-    """The user cancelled an export between two bands (plan call 11).
+    """The export was cancelled (plan call 11).
 
-    Raised by the exporters when their `progress` callback returns False, so a
-    caller can tell a cancel from a failure and report each in its own words.
-    The pipeline raises it where its `should_stop` says so: between grids and
-    inside a minimum-curvature solve.
+    Raised where `should_stop` says so, so a caller can tell a cancel from a failure and
+    report each in its own words: by the pipeline between grids and inside a
+    minimum-curvature solve, and by the writers and the overview build when the task
+    is cancelled.
     """
 
 
@@ -120,6 +120,12 @@ COMPOSE_BYTES_PER_PIXEL = 9
 #: values and coverage (float32, int32) and its shown slice (float32).
 BAND_BYTES_PER_CELL = 12
 
+#: Bytes per frame cell of the largest grid that finishing one band holds beyond
+#: `BAND_BYTES_PER_CELL`: applying the weights (about 55 B a cell, see `slices_plan`'s
+#: `MAX_FRAME_CELLS` note), smoothing (41-49 B, `smooth` works in float64) and the
+#: `a * x + b` copies. One grid is finished at a time, so the largest counts. Rounded to 60.
+FINISH_BYTES_PER_CELL = 60
+
 #: Bytes per frame cell a stream bin holds while it runs: a float32 sum and an int64 count.
 STREAM_BYTES_PER_CELL = 12
 
@@ -130,7 +136,8 @@ SOLVE_BYTES_PER_CELL = 36
 #: How many lattice points per side a grid in another CRS is probed with to find its window.
 _PROBE_POINTS = 96
 
-#: A bigger file than this holds its bands as BigTIFF; used by the writers, here for the estimate.
+#: The overviews' overhead: factors 2, 4, 8 ... add up to a third of the full size, so a
+#: tiled file is 4/3 of its bands. Used for the estimate of the file on disk.
 OVERVIEW_FACTOR = 4.0 / 3.0
 
 
@@ -243,6 +250,7 @@ def _fixed_bytes(spec: ExportSpec, covered: Sequence[int]) -> dict[str, int]:
     band = BAND_BYTES_PER_CELL * sum(cells) + COMPOSE_BYTES_PER_PIXEL * spec.lattice.n_pixels
     # One grid is binned at a time and one is solved at a time: the largest counts.
     band += STREAM_BYTES_PER_CELL * max(cells, default=0)
+    band += FINISH_BYTES_PER_CELL * max(cells, default=0)
     solve = 0
     if not spec.coverage:
         curving = [g.frame.n_cells for g in spec.grids if g.finish.method == "min_curvature"]
