@@ -8,7 +8,14 @@ no plugin and no iface:
 
     QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python \\
         packages/nsgeo-qgis/scripts/bench_site.py [--samples 128] [--tpm 60] \\
-        [--azimuths 0 30]
+        [--azimuths 0 30] [--lattice-scale 1 4 8]
+
+`--lattice-scale N` multiplies the step between grids, spacing the ten out so
+the lattice grows (about 6400 x (4N + 1)(N + 1) pixels for 20 m grids at the
+0.25 m cell). It runs a short version of the bench: the time of one `slice_at`
+compose (`compose_footprints`), the peak transient memory of one such call
+under `tracemalloc`, and the bytes the site's gathers hold -- the numbers
+behind `SITE_MAX_PIXELS`. The site limit is lifted for it.
 
 Each site is timed north-up and laid at each further bearing (final review
 I1): the lattice pixel is the cell at any bearing, but a rotated grid samples
@@ -56,7 +63,14 @@ THIN_NS = 1.5
 N_WINDOWS = 20
 
 
-def write_site(folder: Path, size_m: float, samples: int, tpm: float, azimuth: float = 0.0) -> list:
+def write_site(
+    folder: Path,
+    size_m: float,
+    samples: int,
+    tpm: float,
+    azimuth: float = 0.0,
+    scale: float = 1.0,
+) -> list:
     """Ten adjacent grids of lines along y, as `[(grid, [(path, offset), ...]), ...]`.
 
     At `azimuth` the whole block of grids is turned about the first one's
@@ -73,7 +87,7 @@ def write_site(folder: Path, size_m: float, samples: int, tpm: float, azimuth: f
     x_hat, y_hat = Grid("axes", (0.0, 0.0), azimuth, 1.0, 1.0, "EPSG:32616", SPACING).axes()
     grids = []
     for g in range(N_GRIDS):
-        step = (g % COLUMNS) * size_m * x_hat + (g // COLUMNS) * size_m * y_hat
+        step = (g % COLUMNS) * size_m * scale * x_hat + (g // COLUMNS) * size_m * scale * y_hat
         origin = (500_000.0 + float(step[0]), 4_000_000.0 + float(step[1]))
         grid = Grid(f"G{g}", origin, azimuth, size_m, size_m, "EPSG:32616", SPACING)
         lines = []
@@ -101,7 +115,14 @@ def ms(seconds: float) -> float:
     return seconds * 1000.0
 
 
-def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float = 0.0) -> dict:
+def bench(
+    size_m: float,
+    samples: int,
+    tpm: float,
+    workdir: Path,
+    azimuth: float = 0.0,
+    scale: float | None = None,
+) -> dict:
     from nsgeo.geometry.placement import GridPlacement
     from nsgeo.model.survey import Line
     from nsgeo.render import PercentileClip
@@ -117,10 +138,10 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
         limit_windows,
     )
 
-    folder = workdir / f"site_{int(size_m)}m_{azimuth:g}deg"
+    folder = workdir / f"site_{int(size_m)}m_{azimuth:g}deg_{scale or 1:g}"
     folder.mkdir()
     started = time.perf_counter()
-    grids = write_site(folder / "raw", size_m, samples, tpm, azimuth)
+    grids = write_site(folder / "raw", size_m, samples, tpm, azimuth, scale or 1.0)
     written_s = time.perf_counter() - started
 
     session = SiteSession()
@@ -160,6 +181,8 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
             header.position_ns,
             header.position_ns + (header.n_samples - 1) * header.dt_ns,
         )
+        if scale is not None:
+            site.max_pixels = 10**9  # measuring the lattice, not previewing it
         started = time.perf_counter()
         site.set_resolution(res)
         geometry_s = time.perf_counter() - started
@@ -180,6 +203,8 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
             return out
 
         plain = timed("none")
+        if scale is not None:
+            return lattice_row(site, scale, tops, tick, plain)
         site.slice_at(float(tops[0]), THICKNESS_NS, method="edge", **tick)  # builds the seams
         edge = timed("edge")
 
@@ -256,6 +281,52 @@ def bench(size_m: float, samples: int, tpm: float, workdir: Path, azimuth: float
         session.close_site()
 
 
+def lattice_row(site, scale: float, tops, tick: dict, plain: list[float]) -> dict:
+    """Compose time, its peak transient memory, and the gathers' bytes at this lattice."""
+    import tracemalloc
+
+    from nsgeo_qgis import site_engine
+
+    real = site_engine.compose_footprints
+    times: list[float] = []
+
+    def timing(*args, **kwargs):
+        t = time.perf_counter()
+        out = real(*args, **kwargs)
+        times.append(ms(time.perf_counter() - t))
+        return out
+
+    peaks: list[float] = []
+
+    def tracing(*args, **kwargs):
+        tracemalloc.start()
+        try:
+            out = real(*args, **kwargs)
+            peaks.append(tracemalloc.get_traced_memory()[1] / 1e6)
+        finally:
+            tracemalloc.stop()
+        return out
+
+    try:
+        site_engine.compose_footprints = timing
+        for top in tops:
+            site.slice_at(float(top), THICKNESS_NS, method="none", **tick)
+        site_engine.compose_footprints = tracing
+        site.slice_at(float(tops[0]), THICKNESS_NS, method="none", **tick)
+    finally:
+        site_engine.compose_footprints = real
+    lattice = site.lattice
+    return {
+        "scale": scale,
+        "pixels": lattice.n_pixels,
+        "lattice": f"{lattice.width} x {lattice.height}",
+        "tick_ms": statistics.median(plain),
+        "compose_ms": statistics.median(times),
+        "transient_mb": max(peaks),
+        "gathers_mb": sum(f.taps.nbytes for f in site._gathers.values()) / 1e6,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--samples", type=int, default=128, help="samples per trace (default 128)")
@@ -263,6 +334,13 @@ def main() -> int:
     ap.add_argument("--sizes", type=float, nargs="+", default=[20.0, 50.0])
     ap.add_argument(
         "--azimuths", type=float, nargs="+", default=[0.0, 30.0], help="bearings (degrees)"
+    )
+    ap.add_argument(
+        "--lattice-scale",
+        type=float,
+        nargs="+",
+        default=None,
+        help="grid step multipliers: measure compose time and memory at each lattice size",
     )
     ap.add_argument("--workdir", type=Path, default=None, help="where to write the lines")
     args = ap.parse_args()
@@ -276,13 +354,28 @@ def main() -> int:
     rows = []
     try:
         with tempfile.TemporaryDirectory(dir=args.workdir) as tmp:
-            for size in args.sizes:
+            for scale in args.lattice_scale or []:
+                rows.append(bench(args.sizes[0], args.samples, args.tpm, Path(tmp), 0.0, scale))
+                print(f"done: scale {scale:g}", file=sys.stderr, flush=True)
+            for size in [] if args.lattice_scale else args.sizes:
                 for azimuth in args.azimuths:
                     rows.append(bench(size, args.samples, args.tpm, Path(tmp), azimuth))
                     print(f"done: {size:g} m at {azimuth:g} deg", file=sys.stderr, flush=True)
     finally:
         app.exitQgis()
 
+    if args.lattice_scale:
+        print(
+            "| scale | lattice | pixels (M) | tick (ms) | compose (ms) "
+            "| transient (MB) | gathers (MB) |"
+        )
+        print("|---|---|---|---|---|---|---|")
+        for r in rows:
+            print(
+                f"| {r['scale']:g} | {r['lattice']} | {r['pixels'] / 1e6:.1f} | {r['tick_ms']:.0f} "
+                f"| {r['compose_ms']:.0f} | {r['transient_mb']:.0f} | {r['gathers_mb']:.0f} |"
+            )
+        return 0
     print(
         f"\n{N_GRIDS} grids per site, {SPACING} m line spacing, {args.tpm:g} traces/m, "
         f"{args.samples} samples/trace (time_zero, dewow, gain_agc; transform none); "

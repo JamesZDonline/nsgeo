@@ -19,6 +19,7 @@ from nsgeo.slices import (
     compose_footprints,
     edge_match_solve,
     find_seams,
+    fitting_lattice,
     footprint,
     grid_axis,
     normalise,
@@ -27,6 +28,7 @@ from nsgeo.slices import (
     seam_masks,
     site_axis,
     slice_extent,
+    stretching_grids,
     window_on,
 )
 
@@ -51,6 +53,32 @@ def test_lattice_is_anchored_on_whole_multiples_of_the_pixel():
     assert lat.geotransform == (500.0, 0.25, 0.0, 706.25, 0.0, -0.25)
     assert (lat.width, lat.height) == (24, 25)
     assert lat.n_pixels == 24 * 25
+
+
+def test_fitting_lattice_doubles_the_pitch_until_it_fits():
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 300)
+    assert lat.pixel == pytest.approx(0.2)  # 0.1 -> 900, 0.2 -> 225
+    assert lat.n_pixels <= 300
+
+
+def test_fitting_lattice_keeps_the_cell_when_it_fits():
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 900)
+    assert lat.pixel == 0.1
+    assert lat == SiteLattice.covering([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS)
+
+
+def test_stretching_grids_names_the_outlier_first():
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "C": (12.0, 0.0, 18.0, 6.0),
+        "D": (200.0, 0.0, 206.0, 6.0),
+    }
+    assert stretching_grids(ext, 0.5, CRS) == ["D"]
+
+
+def test_stretching_grids_is_empty_for_one_grid():
+    assert stretching_grids({"A": (0.0, 0.0, 6.0, 6.0)}, 0.5, CRS) == []
 
 
 def test_lattice_covers_the_union_and_has_no_phantom_row_at_utm_scale():

@@ -325,6 +325,9 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     # Lines, and the weights each engine has built for the drawn slice.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
     held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
+    # And the taps of the gathers the drawn slice built on the site lattice.
+    held += sum(f.taps.nbytes for f in site._gathers.values())
+    assert site._gathers
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()

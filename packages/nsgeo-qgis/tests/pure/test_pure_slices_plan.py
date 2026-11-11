@@ -23,7 +23,10 @@ from nsgeo_qgis.slices_plan import (
     estimate_memory,
     format_bytes,
     format_status,
+    name_list,
     preset_transform_conflict,
+    preview_note,
+    site_export_refusal,
     transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data
@@ -542,3 +545,29 @@ def test_the_estimate_counts_the_fill_weights():
     est = estimate_memory(0, 1000, 10)
     assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
+
+
+def test_name_list_reads_as_a_sentence():
+    assert name_list(["A"]) == "A"
+    assert name_list(["A", "B"]) == "A and B"
+    assert name_list(["A", "B", "C"]) == "A, B and C"
+
+
+def test_preview_note_is_exact_copy():
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, []) == (
+        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the area around them "
+        "(1234 \u00d7 568 m) is too big to draw at full detail."
+    )
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, ["C", "D"]).endswith(
+        " Leaving out C and D would shrink it most."
+    )
+
+
+def test_site_export_refusal_is_exact_copy():
+    assert site_export_refusal(0.05, 1234.4, 567.6, []) == (
+        "The site can't be exported at full detail yet: the area around the included grids "
+        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a coarser cell."
+    )
+    assert site_export_refusal(0.05, 1234.4, 567.6, ["C"]).endswith(
+        "Choose a coarser cell, or leave out C."
+    )

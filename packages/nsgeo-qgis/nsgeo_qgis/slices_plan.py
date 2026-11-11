@@ -351,6 +351,60 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: than spec 4's own "no smaller than the trace spacing" would allow.
 MAX_FRAME_CELLS = 4_000_000
 
+#: The most pixels the whole-site picture is drawn at before the site draws a
+#: coarser preview instead (and refuses to export). The site lattice is not
+#: a frame: its cost is the compose, one bilinear blend per grid footprint,
+#: not the interpolation `MAX_FRAME_CELLS` guards. Measured with
+#: `scripts/bench_site.py --lattice-scale` (ten 20 m grids, kriging, no
+#: smoothing, 0.25 m cell, 64 samples, one idle workstation, 15.9 GB RAM):
+#:
+#:     pixels   compose (median)   transient (tracemalloc)   gathers held
+#:      4 M          12 ms               40 MB                  3 MB
+#:      8 M          19 ms               80 MB                  3 MB
+#:     12 M          23 ms              120 MB                  3 MB
+#:     16 M          29 ms              160 MB                  3 MB
+#:     24 M          39 ms              240 MB                  3 MB
+#:
+#: Every size meets compose <= 250 ms and transient <= 400 MB, so the limit
+#: is the 16 M cap. Gathers scale with the grids' area, not the lattice, and
+#: are counted in `SiteEngine.held_bytes`.
+SITE_MAX_PIXELS = 16_000_000
+
+
+def name_list(names: Sequence[str]) -> str:
+    """`A`, `A and B`, `A, B and C`."""
+    names = list(names)
+    if len(names) <= 1:
+        return "".join(names)
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def preview_note(
+    pitch: float, cell: float, width_m: float, height_m: float, stretching: Sequence[str]
+) -> str:
+    """Why the site is drawn coarser than its grids."""
+    note = (
+        f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the area around "
+        f"them ({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail."
+    )
+    if stretching:
+        note += f" Leaving out {name_list(stretching)} would shrink it most."
+    return note
+
+
+def site_export_refusal(
+    cell: float, width_m: float, height_m: float, stretching: Sequence[str]
+) -> str:
+    """Why the site cannot be written at full detail."""
+    text = (
+        f"The site can't be exported at full detail yet: the area around the included grids "
+        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
+        "Choose a coarser cell"
+    )
+    if stretching:
+        text += f", or leave out {name_list(stretching)}"
+    return text + "."
+
 
 def frame_cells(size_x: float, size_y: float, cell: float) -> int:
     """How many cells `CubeFrame.for_grid` would build for this geometry.

@@ -102,12 +102,14 @@ from nsgeo.slices import (
     bilinear_taps,
     compose_footprints,
     find_seams,
+    fitting_lattice,
     footprint,
     grid_axis,
     limit_over_slices,
     normalise,
     site_axis,
     slice_extent,
+    stretching_grids,
     window_on,
 )
 from qgis.core import (
@@ -121,13 +123,15 @@ from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
-    MAX_FRAME_CELLS,
+    SITE_MAX_PIXELS,
     Resolution,
     SiteSource,
     SliceFinish,
     SourceChoice,
     format_bytes,
     limit_windows,
+    preview_note,
+    site_export_refusal,
 )
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
@@ -239,6 +243,11 @@ class SiteEngine(QObject):
         self._resolution: Resolution | None = None
         self._site_z: ZAxis | None = None
         self._lattice: SiteLattice | None = None
+        self._full_lattice: SiteLattice | None = None
+        self._preview_note: str | None = None
+        self._export_refusal: str | None = None
+        #: The most pixels the site is drawn at; past it, a coarser preview.
+        self.max_pixels: int = SITE_MAX_PIXELS
         self._gathers: dict[str, Footprint] = {}
         self._seams: tuple[Seam, ...] | None = None
         #: Each site grid's (registration, line spacing) as of the last
@@ -266,7 +275,26 @@ class SiteEngine(QObject):
 
     @property
     def lattice(self) -> SiteLattice | None:
+        """The lattice drawn: the full one, or a coarser preview of it."""
         return self._lattice
+
+    @property
+    def full_lattice(self) -> SiteLattice | None:
+        """The lattice at the cell, whether or not it is what is drawn."""
+        return self._full_lattice
+
+    @property
+    def is_preview(self) -> bool:
+        return self._export_refusal is not None
+
+    @property
+    def preview_note(self) -> str | None:
+        return self._preview_note
+
+    @property
+    def export_refusal(self) -> str | None:
+        """Why the site cannot be exported, set exactly when it is a preview."""
+        return self._export_refusal
 
     @property
     def ready_grids(self) -> tuple[str, ...]:
@@ -623,9 +651,8 @@ class SiteEngine(QObject):
     def set_resolution(self, resolution: Resolution | None) -> None:
         """Store the site resolution and re-derive the geometry.
 
-        Raises ValueError naming the pixel count when the lattice over the
-        ready grids exceeds `MAX_FRAME_CELLS` (spec 4.7); the geometry is
-        then empty until a coarser cell or fewer grids fit.
+        A lattice over `max_pixels` is drawn at a coarser pixel instead
+        (`is_preview`), and the site refuses to export until it fits.
         """
         self._resolution = resolution
         try:
@@ -644,19 +671,25 @@ class SiteEngine(QObject):
         self._drop_caches()
         self._site_z = None
         self._lattice = None
+        self._full_lattice = None
+        self._preview_note = None
+        self._export_refusal = None
         res = self._resolution
         ready = self.ready_grids
         if res is None or not ready or not self.session.is_open:
             return
-        lattice = self._covering_lattice(ready, res.cell)
-        if lattice.n_pixels > MAX_FRAME_CELLS:
-            raise ValueError(
-                f"the site lattice would be {lattice.width} x {lattice.height} = "
-                f"{lattice.n_pixels:,} pixels at {lattice.pixel:g} m, more than the "
-                f"{MAX_FRAME_CELLS:,} a slice can be drawn at: the included grids are too "
-                f"far apart for this cell size. Choose a coarser cell or include "
-                "fewer grids"
+        site_crs = self._site_crs()
+        extents = self._grid_extents(ready, res.cell)
+        full = SiteLattice.covering(list(extents.values()), res.cell, site_crs)
+        lattice = full
+        if full.n_pixels > self.max_pixels:
+            lattice = fitting_lattice(list(extents.values()), res.cell, site_crs, self.max_pixels)
+            width_m, height_m = full.width * full.pixel, full.height * full.pixel
+            stretching = stretching_grids(extents, res.cell, site_crs)
+            self._preview_note = preview_note(
+                lattice.pixel, res.cell, width_m, height_m, stretching
             )
+            self._export_refusal = site_export_refusal(res.cell, width_m, height_m, stretching)
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
             [b for b in bounds.values() if b is not None], res.t0_ns, res.t1_ns, res.dz_ns
@@ -674,6 +707,7 @@ class SiteEngine(QObject):
                 )
         self._site_z = site_z
         self._lattice = lattice
+        self._full_lattice = full
 
     def _apply_resolution(self, grid_id: str, want: Resolution | None) -> None:
         """Give an engine its resolution, unless it is already binned at exactly it.
@@ -698,14 +732,16 @@ class SiteEngine(QObject):
         """Spec 4.7: the site's CRS is the one its GeoPackage uses, `grids[0].crs`."""
         return str(self.session.site.grids[0].crs)
 
-    def _covering_lattice(self, ready: Sequence[str], cell: float) -> SiteLattice:
-        """The lattice over the ready grids, one pixel to the cell at any bearing."""
+    def _grid_extents(
+        self, ready: Sequence[str], cell: float
+    ) -> dict[str, tuple[float, float, float, float]]:
+        """Each ready grid's extent in the site CRS, as its frame at `cell` spans."""
         site_crs = self._site_crs()
-        extents = []
+        extents = {}
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
-            extents.append(self._extent_in(frame, site_crs))
-        return SiteLattice.covering(extents, cell, site_crs)
+            extents[grid_id] = self._extent_in(frame, site_crs)
+        return extents
 
     @staticmethod
     def _transform(points: np.ndarray, source: str, target: str) -> np.ndarray:
@@ -1249,6 +1285,7 @@ class SiteEngine(QObject):
             if engine.mode == "resident":
                 held += estimate.cube_bytes
             held += engine.weights_nbytes
+        held += sum(f.taps.nbytes for f in self._gathers.values())
         return held
 
     def status_text(self) -> str:
@@ -1313,6 +1350,9 @@ class SiteEngine(QObject):
         self._resolution = None
         self._site_z = None
         self._lattice = None
+        self._full_lattice = None
+        self._preview_note = None
+        self._export_refusal = None
         self._drop_caches()
         self._seen = {}
         self._redraw_ms = None

@@ -112,6 +112,50 @@ class SiteLattice:
         )
 
 
+def fitting_lattice(
+    extents: Sequence[tuple[float, float, float, float]],
+    cell: float,
+    crs: str,
+    max_pixels: int,
+) -> SiteLattice:
+    """`SiteLattice.covering` at `cell * 2**k`, for the smallest `k >= 0` that fits.
+
+    Doubling keeps each coarser pixel a whole number of cells, so the
+    preview's lattice nests on the full one.
+    """
+    pixel = cell
+    while True:
+        lattice = SiteLattice.covering(extents, pixel, crs)
+        if lattice.n_pixels <= max_pixels:
+            return lattice
+        pixel *= 2.0
+
+
+def stretching_grids(
+    extents: Mapping[str, tuple[float, float, float, float]],
+    pixel: float,
+    crs: str,
+    *,
+    most: int = 3,
+) -> list[str]:
+    """The grids whose omission alone cuts the lattice's pixel count by 10% or more.
+
+    Largest cut first, at most `most`; empty for a single grid.
+    """
+    if len(extents) < 2:
+        return []
+    ids = list(extents)
+    whole = SiteLattice.covering([extents[g] for g in ids], pixel, crs).n_pixels
+    cuts: list[tuple[int, str]] = []
+    for grid_id in ids:
+        rest = [extents[g] for g in ids if g != grid_id]
+        cut = whole - SiteLattice.covering(rest, pixel, crs).n_pixels
+        if cut >= 0.1 * whole:
+            cuts.append((cut, grid_id))
+    cuts.sort(key=lambda c: -c[0])
+    return [g for _, g in cuts[:most]]
+
+
 @dataclass(frozen=True, eq=False)
 class Footprint:
     """Where one layer lands on a lattice: a window, and the taps of its pixels.

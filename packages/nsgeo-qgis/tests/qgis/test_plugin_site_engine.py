@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import re
 import time
 
@@ -26,7 +27,6 @@ from nsgeo_qgis import slices_engine
 from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
-    MAX_FRAME_CELLS,
     NO_TRANSFORM,
     Resolution,
     SiteSource,
@@ -1021,23 +1021,69 @@ def test_coverage_on_the_site_is_whole_counts(site3, make_site):
     assert errors == [], errors
 
 
-def test_grids_too_far_apart_for_the_lattice_are_refused_by_pixel_count(site3, make_site):
-    """Spec 4.7: M11's cell cap applies to the lattice, which spans the
-    grids' bounding box -- mostly empty for grids far apart."""
+def far_site(site3, make_site, max_pixels):
+    """A site whose grid C is 5 km away, with `max_pixels` too few for the cell."""
     session = site3.session
     session.replace_grid(dataclasses.replace(session.grid("C"), origin=(5000.0, 5000.0)))
     errors: list[str] = []
     site = make_site(session, on_error=errors.append)
+    site.max_pixels = max_pixels
     site.set_source(site3.source())
     assert site.wait_until_idle(60_000)
+    return site, errors
+
+
+def test_grids_too_far_apart_draw_a_coarser_preview_and_say_why(site3, make_site):
+    """The site no longer refuses a wide area: it draws at a coarser pixel,
+    names the grids that stretch it, and slices still compose."""
+    site, errors = far_site(site3, make_site, 1_000_000)
     extents = [(500.0, 700.0, 506.0, 706.0), (506.0, 700.0, 512.0, 706.0)]
     extents.append((5000.0, 5000.0, 5006.0, 5006.0))
-    n_pixels = SiteLattice.covering(extents, RES.cell, "EPSG:32616").n_pixels
-    assert n_pixels > MAX_FRAME_CELLS
-    with pytest.raises(ValueError, match="pixels") as refused:
-        site.set_resolution(RES)
-    assert f"{n_pixels:,}" in str(refused.value)
-    assert site.lattice is None
+    assert SiteLattice.covering(extents, RES.cell, "EPSG:32616").n_pixels > site.max_pixels
+    site.set_resolution(RES)  # does not raise
+    assert site.is_preview
+    ratio = site.lattice.pixel / RES.cell
+    k = round(math.log2(ratio))
+    assert k >= 1 and site.lattice.pixel == 2**k * RES.cell
+    assert site.lattice.n_pixels <= site.max_pixels
+    assert site.full_lattice.pixel == RES.cell
+    assert "Leaving out C" in site.preview_note
+    assert site.export_refusal is not None
+    drawn = site.slice_at(20.0, 5.0, **TICK)
+    assert drawn.lattice == site.lattice
+    assert drawn.array.shape == (site.lattice.height, site.lattice.width)
+    assert errors == []
+
+
+def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):
+    site, _ = far_site(site3, make_site, 1_000_000)
+    site.set_resolution(RES)
+    assert site.is_preview
+    site.set_source(site3.source("AB"))
+    assert site.wait_until_idle(60_000)
+    site.set_resolution(RES)
+    assert not site.is_preview
+    assert site.lattice.pixel == RES.cell
+    assert site.preview_note is None and site.export_refusal is None
+
+
+def test_a_site_that_fits_is_not_a_preview(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    assert not site.is_preview
+    assert site.preview_note is None
+    assert site.export_refusal is None
+    assert site.lattice == site.full_lattice
+
+
+def test_the_sites_held_bytes_count_the_gathers_taps(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    before = site.held_bytes
+    site.slice_at(20.0, 5.0, finish=FINISH, method="none", manual={})
+    assert site._gathers
+    taps = sum(f.taps.nbytes for f in site._gathers.values())
+    weights = sum(e.weights_nbytes for e in site._engines.values() if e.is_prepared)
+    assert taps > 0
+    assert site.held_bytes - before == taps + weights
 
 
 def test_moving_a_grid_rebuilds_the_lattice_and_seams(site3, make_site):

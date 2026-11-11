@@ -117,6 +117,7 @@ several grids' slices into one site view.
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
+| `fitting_lattice` | The site lattice at the cell, doubled until it fits a pixel limit. |
 | `footprint` | The tight window around the inside points of a block of taps. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
@@ -135,6 +136,7 @@ several grids' slices into one site view.
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
+| `stretching_grids` | The grids whose omission alone shrinks the site lattice by at least a tenth. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `window_depths_m` | A window in metres, through a velocity model. |
