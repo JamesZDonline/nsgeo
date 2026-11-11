@@ -86,19 +86,20 @@ pixel rule, the limits and the coverage rule this milestone builds on.
 
 1. **Cancel mid-band at a fine cell.** Minimum curvature is the slow case. The task stops within
    one grid's band, the partial file is gone, no layer is added, an existing target is untouched,
-   and the live view never paused. Pinned in Task 4.
+   and the live view never paused. Pinned in Task 3.
 2. **The survey changes while an export runs.** Lines are re-prepared, a grid is moved or the site
    is closed. The export finishes on its snapshot or is cancelled cleanly, never reads a live
-   engine, and never crashes. Pinned in Tasks 1 and 4.
+   engine, and never crashes. Ruling: closing the site cancels the export, so no layer is added to a
+   closed site. Pinned in Tasks 1, 3 and 5.
 3. **The target is already a layer in the project.** On Export the dialog offers to replace it
    (remove the layer, write, add it again with the new style) or to cancel. This applies to the
-   coverage companion and the `.qml` too. Pinned in Task 5.
+   coverage companion and the `.qml` too. Pinned in Tasks 4 and 5.
 4. **The export does not fit.** When memory or free disk space is not enough, Export is disabled
    before anything starts, with the reason in the summary and the finest cell or pixel that would
-   fit. Pinned in Tasks 1 and 5.
+   fit. Pinned in Tasks 1 and 4.
 5. **A preview site.** In milestone A it could not be exported. Now it exports at full detail
    through the dialog, within the export's own memory budget. The note's tooltip no longer carries
-   the old refusal. Pinned in Task 6.
+   the old refusal. Pinned in Task 5.
 
 ---
 
@@ -349,7 +350,7 @@ pixel rule, the limits and the coverage rule this milestone builds on.
   - snapshot builders `site_export_spec(...)` and `grid_export_spec(...)` run on the GUI thread and
     read the engines and the session once.
 - Modify: `packages/nsgeo-qgis/nsgeo_qgis/ui/site_scope.py`: the preview note's tooltip drops the
-    export refusal (spec decision 13/16 and walkthrough D2), and `export_refusal` no longer blocks
+    export refusal (spec §5.3, walkthrough D2), and `export_refusal` no longer blocks
     the button.
 - Test: `test_plugin_slice_export_dialogs.py`, `test_plugin_site_scope.py`,
   `test_plugin_slice_export.py` and `test_plugin_site_export.py`. Rewrite the tests that pin the
@@ -381,6 +382,8 @@ pixel rule, the limits and the coverage rule this milestone builds on.
   - A preview site (lowered `max_covered`) now exports at full detail.
   - This grid at a finer pixel: the file is twice the width and the height.
   - Cancel from the task list: no file, no layer.
+  - Closing the site during an export cancels it: `site_closed` cancels the held task, and no
+    layer is added.
   - The coverage companion is written and styled.
   - A replaced target: the layer is removed, then added again.
 - [ ] **Step 2: Run and see them fail.**
