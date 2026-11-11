@@ -22,6 +22,7 @@ import functools
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -30,6 +31,9 @@ from nsgeo.slices.cube import SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
 from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
 from nsgeo.velocity import VelocityModel
+
+if TYPE_CHECKING:
+    from nsgeo.slices.site import SiteLattice
 
 
 @dataclass(frozen=True)
@@ -271,12 +275,22 @@ def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     return _build_north_up_plan(frame)
 
 
-def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
-    """`(taps, shape, geotransform)`: the bilinear taps of every north-up
-    pixel centre, the raster's `(height, width)` and its geotransform."""
+def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
+    """The north-up lattice over `frame`'s own extent, at any `pixel`.
+
+    Anchored at the extent's south-west corner and snapped, so the width and
+    height of an axis-aligned frame are exact (`to_north_up`'s phantom row
+    and column, below). Unlike `SiteLattice.covering` it is anchored on the
+    frame, not on a multiple of the pixel, so at `pixel == frame.cell` an
+    axis-aligned frame's pixel centres sit on its cell centres and come back
+    exactly, at any pixel the grid is read bilinearly.
+    """
+    from nsgeo.slices.site import SiteLattice  # `site` imports this module
+
+    if not pixel > 0.0:
+        raise ValueError(f"pixel must be positive, got {pixel}")
     xmin, ymin, xmax, ymax = slice_extent(frame)
-    pixel = frame.cell
-    # `(xmax - xmin) / cell` is an exact integer for an axis-aligned frame,
+    # `(xmax - xmin) / pixel` is an exact integer for an axis-aligned frame,
     # but in floating point it lands a few ulps above one, so a plain
     # ceil() adds a phantom all-nodata row and column. Snap the ratio --
     # scale-free, unlike a tolerance in metres. Measured before the fix: a
@@ -294,15 +308,23 @@ def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     # `cell_index` uses, converted from metres to pixels by dividing by
     # the pixel pitch.
     eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / pixel
-    width = max(1, int(math.ceil((xmax - xmin) / pixel - eps)))
-    height = max(1, int(math.ceil((ymax - ymin) / pixel - eps)))
+    return SiteLattice(
+        x0=xmin,
+        y1=ymax,
+        pixel=pixel,
+        width=max(1, int(math.ceil((xmax - xmin) / pixel - eps))),
+        height=max(1, int(math.ceil((ymax - ymin) / pixel - eps))),
+        crs=frame.crs,
+    )
 
+
+def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
+    """`(taps, shape, geotransform)`: the bilinear taps of every north-up
+    pixel centre, the raster's `(height, width)` and its geotransform."""
+    lattice = frame_lattice(frame, frame.cell)
     # Pixel CENTRES, so a sample lands in the middle of its output pixel
     # rather than on a boundary where round-off decides which cell it
     # reads -- the same reason `cell_index` has its own edge tolerance.
-    xs = xmin + (np.arange(width, dtype=float) + 0.5) * pixel
-    ys = ymax - (np.arange(height, dtype=float) + 0.5) * pixel  # row 0 is north
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    world = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-
-    return bilinear_taps(frame, world), (height, width), (xmin, pixel, 0.0, ymax, 0.0, -pixel)
+    taps = bilinear_taps(frame, lattice.pixel_centres())
+    shape = (lattice.height, lattice.width)
+    return taps, shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)

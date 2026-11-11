@@ -81,6 +81,7 @@ from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
+from nsgeo_qgis.export_pipeline import ExportCancelled
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     DEFAULT_MAX_DISTANCE_SPACINGS,
@@ -334,14 +335,6 @@ class GeoTiffSliceWriter:
                     if dataset is not None:
                         dataset.Close()
                     dataset = None
-
-
-class ExportCancelled(Exception):
-    """The user cancelled an export between two bands (plan call 11).
-
-    Raised by the exporters when their `progress` callback returns False, so a
-    caller can tell a cancel from a failure and report each in its own words.
-    """
 
 
 def export_slices(

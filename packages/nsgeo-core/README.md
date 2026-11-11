@@ -123,6 +123,7 @@ several grids' slices into one site view.
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `fitting_lattice` | The site lattice at the cell, doubled until it fits both a lattice-pixel limit and a covered-pixel limit. |
 | `footprint` | The tight window around the inside points of a block of taps. |
+| `frame_lattice` | The north-up lattice over a frame's own extent at any pixel; at the cell it reproduces an axis-aligned grid exactly. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
 | `load_cube` | Read a cube written by `save_cube`. |

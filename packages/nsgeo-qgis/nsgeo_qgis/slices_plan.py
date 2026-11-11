@@ -108,6 +108,13 @@ MEASURING_STRETCH_INDICATOR = "Colour stretch ({done} of {total})…"
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
 DEFAULT_BUDGET_BYTES = 1_500_000_000
 
+#: What one export may hold in memory: every grid's fill weights, its taps and
+#: one band's accumulators, plus any cube it keeps (`export_pipeline`, where
+#: the measurement behind it is recorded). Unlike the live budget it IS a cap:
+#: an export that would hold more is refused before it starts. The live
+#: engines hold up to `DEFAULT_BUDGET_BYTES` in the same process, so it is no more.
+EXPORT_BUDGET_BYTES = DEFAULT_BUDGET_BYTES
+
 
 @dataclass(frozen=True)
 class SourceChoice:
@@ -438,6 +445,21 @@ def site_export_refusal(
     if stretching:
         text += f", or leave out {name_list(stretching)}"
     return text + "."
+
+
+def export_refusal(
+    held_bytes: int, budget: int, finest_cell: float | None, finest_pixel: float | None
+) -> str:
+    """Why an export cannot start, and the finest cell or pixel that would fit."""
+    text = (
+        f"This export would hold about {format_bytes(held_bytes)} in memory, "
+        f"more than the {format_bytes(budget)} it is allowed."
+    )
+    if finest_cell is not None:
+        text += f" A {finest_cell:g} m export cell would fit."
+    if finest_pixel is not None:
+        text += f" A {finest_pixel:g} m export pixel would fit."
+    return text
 
 
 def frame_cells(size_x: float, size_y: float, cell: float) -> int:
