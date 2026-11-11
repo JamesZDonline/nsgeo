@@ -101,6 +101,7 @@ from nsgeo.slices import (
     ZAxis,
     bilinear_taps,
     compose_footprints,
+    covered_pixels,
     find_seams,
     fitting_lattice,
     footprint,
@@ -112,7 +113,6 @@ from nsgeo.slices import (
     stretching_grids,
     window_on,
 )
-from nsgeo.slices.site import covered_pixels
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,

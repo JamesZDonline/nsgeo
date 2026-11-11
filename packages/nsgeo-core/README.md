@@ -114,6 +114,7 @@ several grids' slices into one site view.
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
+| `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
