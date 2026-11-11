@@ -89,6 +89,7 @@ several grids' slices into one site view.
 | `AXIS_SNAP_CELLS` | How far, in cells, a frame's far corner may sit from an axis-aligned frame's and still count as axis-aligned. |
 | `BACKGROUND_FRACTION` | The weakest fraction of populated cells that `background_level` averages. |
 | `CoverageError` | A line cannot contribute to the requested cube. |
+| `CubeBlock` | The covered cells of one travel direction, packed: cell ids, means and counts. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
@@ -114,6 +115,7 @@ several grids' slices into one site view.
 | `build_cube` | Bin every line into a resident cube. |
 | `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
 | `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
+| `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
