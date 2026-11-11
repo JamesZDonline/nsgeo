@@ -570,7 +570,9 @@ def test_fit_at_import_ignores_start_along_and_lands_on_both_edges(tmp_path):
     on = dataclasses.replace(base, fit_to_grid=True)
     rows = plan_import(paths, on)
     recompute_offsets(rows, on)
-    for line, row in zip(rows_to_lines(rows, on), rows, strict=True):
+    lines = rows_to_lines(rows, on)
+    assert len(lines) == len(rows)  # zip(strict=) needs Python 3.10; CI runs 3.9
+    for line, row in zip(lines, rows):
         along = line.distance_along()
         assert {round(along[0], 9), round(along[-1], 9)} == {0.0, 10.0}
         span = span_m(row.n_traces, row.traces_per_metre)
