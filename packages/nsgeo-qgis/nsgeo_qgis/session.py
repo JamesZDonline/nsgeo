@@ -19,12 +19,13 @@ import dataclasses
 import datetime as _dt
 import json
 import math
+import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
-from nsgeo.model import Line, Profile, Site
+from nsgeo.model import Cut, Line, Profile, Site
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
@@ -121,6 +122,7 @@ class SiteSession(QObject):
     dirty_changed = pyqtSignal(bool)
     grids_changed = pyqtSignal()
     lines_changed = pyqtSignal()
+    cuts_changed = pyqtSignal()
     line_opened = pyqtSignal(str)  # "" when no line is current
     line_loaded = pyqtSignal(str)
     trace_changed = pyqtSignal(str, int)
@@ -597,6 +599,10 @@ class SiteSession(QObject):
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
+        # A cut on a removed grid would make validate() refuse every save
+        # (cut spec §4.2). Its picks stay: they are authored data.
+        gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
+        site.cuts = [c for c in site.cuts if c.grid_id != grid_id]
         if grid_id in site.site_view.get("grids", []):
             site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
         dropped = self._drop_lines(keys)
@@ -605,6 +611,8 @@ class SiteSession(QObject):
         self.grids_changed.emit()
         if keys:
             self.lines_changed.emit()
+        if gone_cuts:
+            self.cuts_changed.emit()
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         # The report is empty: a velocity change moves no line.
@@ -878,6 +886,72 @@ class SiteSession(QObject):
     def resolved_velocity(self, key: str) -> VelocityModel:
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
+
+    # ---- cuts (cut spec §4.2) ------------------------------------------------
+    def cut_keys(self) -> list[str]:
+        """Every cut's key, in drawing order. `keys()` stays lines-only."""
+        return [c.key for c in self._require_site().cuts]
+
+    def cut_keys_on_grid(self, grid_id: str) -> list[str]:
+        """The keys of the cuts drawn on `grid_id`, in drawing order."""
+        return [c.key for c in self._require_site().cuts if c.grid_id == grid_id]
+
+    def cut_for_key(self, key: str) -> Cut:
+        for cut in self._require_site().cuts:
+            if cut.key == key:
+                return cut
+        raise KeyError(f"no cut with key {key!r}")
+
+    def add_cut(self, grid_id: str, vertices: Sequence[tuple[float, float]]) -> str:
+        """Add a cut on `grid_id` (vertices in grid metres) and return its key.
+
+        `KeyError` for an unknown grid, `ValueError` from `Cut.new` for fewer
+        than two different points. The name is `Cut {n}`, one past the highest
+        `Cut <n>` there is, so a deleted name is not handed out again while a
+        higher one stays.
+        """
+        site = self._require_site()
+        self.grid(grid_id)
+        highest = 0
+        for existing in site.cuts:
+            m = re.fullmatch(r"Cut (\d+)", existing.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        cut = Cut.new(grid_id, vertices, f"Cut {highest + 1}")
+        site.cuts.append(cut)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+        return cut.key
+
+    def rename_cut(self, key: str, name: str) -> None:
+        site = self._require_site()
+        name = name.strip()
+        if not name:
+            raise ValueError("a cut needs a name")
+        old = self.cut_for_key(key)
+        site.cuts[site.cuts.index(old)] = dataclasses.replace(old, name=name)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+
+    def remove_cut(self, key: str) -> None:
+        """Delete a cut. Its picks stay where they are (picks are authored data)."""
+        site = self._require_site()
+        site.cuts.remove(self.cut_for_key(key))
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+
+    def cut_velocity(self, grid_id: str) -> VelocityModel:
+        """The velocity every cut on `grid_id` uses (cut spec call 16): the
+        grid's own, else the first line's resolved model in survey order. A cut
+        is not a line, so it has no override of its own. `KeyError` when the
+        grid has neither."""
+        grid = self.grid(grid_id)
+        if grid.velocity is not None:
+            return grid.velocity
+        keys = self.keys_on_grid(grid_id)
+        if not keys:
+            raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+        return self.resolved_velocity(keys[0])
 
     # ---- stacks -----------------------------------------------------------
     def stack_for(self, key: str, *, insert: bool = True) -> StepStack:

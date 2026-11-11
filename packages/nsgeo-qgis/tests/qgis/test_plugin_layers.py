@@ -111,7 +111,7 @@ def test_layers_are_grouped_in_the_project_under_the_site_name(populated):
     session, layers, project = populated
     group = project.layerTreeRoot().findGroup(f"nsgeo · {session.site_name}")
     assert group is not None
-    assert len(group.findLayers()) == 4
+    assert len(group.findLayers()) == 5
 
 
 def test_refill_never_touches_the_picks_table(populated):
@@ -2285,7 +2285,7 @@ def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
 
 def test_the_group_draws_points_over_lines_over_grid_outlines(populated):
     _, layers, _ = populated
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
@@ -2294,7 +2294,7 @@ def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populated):
@@ -2324,7 +2324,7 @@ def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == ["imagery", name]  # not moved back, no second group
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
     assert layers.feature_count("lines") == 3
 
     layers.detach()
@@ -2341,7 +2341,7 @@ def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == [f"nsgeo · {session.site_name}"]
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(populated, tmp_path):
@@ -2356,7 +2356,7 @@ def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(popula
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_lines_and_marks_hide_beyond_1_800_per_metre_of_line_spacing(populated, tmp_path):
@@ -2719,3 +2719,86 @@ def test_real_lines_carry_their_picks_through_a_grid_move_a_flip_and_a_move_to_a
     finally:
         layers.detach()
         project.clear()
+
+
+# --- M15, cut spec §4.8: cuts are drawn on the map from the survey file,
+# in grid metres, so they follow their grid. ------------------------------
+
+_CUT = [(1.0, 1.0), (6.0, 1.0)]
+
+
+def _cut_features(layers):
+    return list(layers.layers["cuts"].getFeatures())
+
+
+def test_cuts_table_has_the_declared_fields_and_is_read_only(populated):
+    session, layers, _ = populated
+    assert TABLES["cuts"][0] == QgsWkbTypes.Type.LineString
+    assert TABLES["cuts"][1] == [
+        ("cut_key", "str"),
+        ("name", "str"),
+        ("grid_id", "str"),
+        ("length_m", "float"),
+    ]
+    assert "cuts" in DERIVED
+    lyr = layers.layers["cuts"]
+    assert lyr.readOnly()
+    assert [f.name() for f in lyr.fields() if f.name() != "fid"] == [
+        "cut_key",
+        "name",
+        "grid_id",
+        "length_m",
+    ]
+    symbol = lyr.renderer().symbol()
+    assert symbol.color().name() == "#e6550d"
+    assert symbol.width() == pytest.approx(0.6)
+    assert lyr.labelsEnabled()
+    assert lyr.labeling().settings().fieldName == "name"
+
+
+def test_legend_order_puts_cuts_between_marks_and_lines(populated):
+    session, layers, _ = populated
+    assert LEGEND_ORDER == ("picks", "marks", "cuts", "lines", "grids")
+    assert _names(layers.group) == list(LEGEND_ORDER)
+
+
+def test_refill_cuts_places_a_cut_in_world_coordinates(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    (feat,) = _cut_features(layers)
+    assert (feat["cut_key"], feat["name"], feat["grid_id"]) == (key, "Cut 1", "A")
+    assert feat["length_m"] == pytest.approx(5.0)
+    first = feat.geometry().asPolyline()[0]
+    expected = GRID.to_world([[1.0, 1.0]])[0]
+    assert (first.x(), first.y()) == pytest.approx(tuple(expected), abs=1e-6)
+    session.remove_cut(key)
+    assert layers.feature_count("cuts") == 0
+
+
+def test_a_moved_grid_moves_its_cuts(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    before = _cut_features(layers)[0].geometry().asPolyline()
+    session.replace_grid(_MOVED_GRID)
+    after = _cut_features(layers)[0].geometry().asPolyline()
+    for b, a in zip(before, after):
+        assert (a.x() - b.x(), a.y() - b.y()) == pytest.approx((1.0, 0.0), abs=1e-6)
+    assert session.cut_for_key(key).vertices == ((1.0, 1.0), (6.0, 1.0))
+
+
+def test_a_crs_rebuild_refills_the_cuts(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    assert layers.layers["cuts"].crs().authid() == "EPSG:4326"
+    assert [f["cut_key"] for f in _cut_features(layers)] == [key]
+
+
+def test_removing_the_last_grid_empties_the_cuts_table(populated):
+    session, layers, _ = populated
+    session.add_cut("A", _CUT)
+    assert layers.feature_count("cuts") == 1
+    for key in list(session.keys()):
+        session.remove_line(key)
+    session.remove_grid("A")
+    assert layers.feature_count("cuts") == 0

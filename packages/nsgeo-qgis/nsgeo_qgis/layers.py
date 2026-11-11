@@ -46,6 +46,7 @@ from qgis.core import (
     QgsGeometry,
     QgsLayerTree,
     QgsMessageLog,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
@@ -54,6 +55,7 @@ from qgis.core import (
     QgsSymbol,
     QgsVectorFileWriter,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
     QgsWkbTypes,
 )
 from qgis.PyQt import sip
@@ -101,6 +103,12 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         QgsWkbTypes.Type.Point,
         [("line_key", "str"), ("scan", "int"), ("kind", "str"), ("name", "str")],
     ),
+    # M15 (cut spec §4.8): drawn from `Site.cuts`, so read-only like the other
+    # derived tables. A cut's vertices are grid metres, so it follows its grid.
+    "cuts": (
+        QgsWkbTypes.Type.LineString,
+        [("cut_key", "str"), ("name", "str"), ("grid_id", "str"), ("length_m", "float")],
+    ),
     "picks": (
         QgsWkbTypes.Type.Point,
         [
@@ -129,12 +137,15 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         ],
     ),
 }
-DERIVED = ("grids", "lines", "marks")
+DERIVED = ("grids", "lines", "marks", "cuts")
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
 # slice preview and exported GeoTIFFs join below them.
-LEGEND_ORDER = ("picks", "marks", "lines", "grids")
+LEGEND_ORDER = ("picks", "marks", "cuts", "lines", "grids")
+
+# One colour for every cut, and none of the grid colours (cut spec §4.8).
+CUT_COLOUR = "#e6550d"
 
 # Dragging a group in the Layers panel does not move the node:
 # QgsLayerTreeModel serialises it, builds a new node at the drop and deletes
@@ -315,6 +326,7 @@ class SiteLayers(QObject):
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
+        session.cuts_changed.connect(self.refresh)
         # A layer removed from the legend by hand (or any other code) is
         # gone from QGIS but not from the GeoPackage: drop it from our
         # registry so the next refresh reopens it, rather than holding a
@@ -563,6 +575,7 @@ class SiteLayers(QObject):
             ("grids", self.refill_grids),
             ("lines", self.refill_lines),
             ("marks", self.refill_marks),
+            ("cuts", self.refill_cuts),
         ):
             try:
                 fn()
@@ -1746,6 +1759,39 @@ class SiteLayers(QObject):
                 feats.append(f)
         self._refill("marks", feats)
         self._hide_when_lines_crowd("marks")
+
+    def refill_cuts(self) -> None:
+        site = self.session.site
+        assert site is not None
+        feats = []
+        for cut in site.cuts:
+            grid = self.session.grid(cut.grid_id)
+            world = grid.to_world(np.asarray(cut.vertices, dtype=float))
+            f = QgsFeature(self.layers["cuts"].fields())
+            f.setGeometry(QgsGeometry.fromPolylineXY(self._points(world, grid.crs)))
+            f["cut_key"] = cut.key
+            f["name"] = cut.name
+            f["grid_id"] = cut.grid_id
+            f["length_m"] = float(cut.length_m)
+            feats.append(f)
+        self._refill("cuts", feats)
+        self._style_cuts()
+
+    def _style_cuts(self) -> None:
+        # Solid and heavier than the dashed survey lines, in one colour that
+        # no grid colour uses, so a cut reads as something drawn on top of the
+        # survey rather than part of it (cut spec §4.8).
+        layer = self.layers["cuts"]
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(CUT_COLOUR))
+        symbol.setWidth(0.6)
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "name"
+        settings.placement = Qgis.LabelPlacement.Line
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        layer.triggerRepaint()
 
     def _style_lines(self) -> None:
         site = self.session.site
