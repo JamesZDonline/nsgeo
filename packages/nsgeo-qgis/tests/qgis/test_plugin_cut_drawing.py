@@ -41,9 +41,8 @@ def _line(tmp_path, grid_id, name, offset):
     )
 
 
-@pytest.fixture
-def drawing(real_iface, tmp_path, answer_modal):
-    """A plugin on a shown canvas with grids A and B, each with lines, and a site open."""
+def _drawing(real_iface, tmp_path, grids):
+    """A plugin on a shown canvas with `grids` (each with lines) added in order, a site open."""
     import nsgeo_qgis
 
     iface = real_iface(UTM16, QgsRectangle(0, 0, 800, 600))
@@ -51,21 +50,37 @@ def drawing(real_iface, tmp_path, answer_modal):
     plugin.initGui()
     session = plugin.session
     session.new_site(tmp_path)
-    session.add_grid(GRID_A)
-    session.add_grid(GRID_B)
+    for grid in grids:
+        session.add_grid(grid)
     session.add_lines(
         [_line(tmp_path, "A", "FILE__001", 10.0), _line(tmp_path, "A", "FILE__002", 20.0)]
     )
     session.add_lines([_line(tmp_path, "B", "FILE__011", 10.0)])
-    yield SimpleNamespace(
+    return SimpleNamespace(
         iface=iface,
         plugin=plugin,
         session=session,
         canvas=iface.mapCanvas(),
         bar=iface.messageBar(),
     )
+
+
+@pytest.fixture
+def drawing(real_iface, tmp_path, answer_modal):
+    """Grids A then B, each with lines, and a site open."""
+    d = _drawing(real_iface, tmp_path, (GRID_A, GRID_B))
+    yield d
     answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
-    plugin.unload()
+    d.plugin.unload()
+
+
+@pytest.fixture
+def drawing_ba(real_iface, tmp_path, answer_modal):
+    """The same overlapping grids added B first, so survey order and id order differ."""
+    d = _drawing(real_iface, tmp_path, (GRID_B, GRID_A))
+    yield d
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    d.plugin.unload()
 
 
 def _bar(bar: Any) -> list[str]:
@@ -156,6 +171,7 @@ def test_one_point_or_two_on_the_same_spot_is_refused(drawing):
 
 
 def test_a_first_click_inside_two_grids_takes_the_first_in_survey_order(drawing):
+    """With A then B the cut is on A."""
     d = drawing
     d.plugin.act_cut.trigger()
 
@@ -166,6 +182,21 @@ def test_a_first_click_inside_two_grids_takes_the_first_in_survey_order(drawing)
     assert d.session.cut_for_key(key).vertices == (
         pytest.approx((70.0, 70.0)),
         pytest.approx((80.0, 90.0)),
+    )
+
+
+def test_a_first_click_inside_two_grids_follows_survey_order_not_ids(drawing_ba):
+    d = drawing_ba
+    assert [g.id for g in d.session.site.grids] == ["B", "A"]
+    d.plugin.act_cut.trigger()
+
+    _draw(d, (370, 270), (380, 290))  # inside A and B
+
+    (key,) = d.session.cut_keys()
+    assert d.session.cut_for_key(key).grid_id == "B"
+    assert d.session.cut_for_key(key).vertices == (
+        pytest.approx((20.0, 20.0)),
+        pytest.approx((30.0, 40.0)),
     )
 
 

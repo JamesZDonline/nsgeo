@@ -38,6 +38,7 @@ from nsgeo.slices.interpolate import (
 )
 from nsgeo.slices.resample import Taps, bilinear_taps, max_pool_counts, sample, sample_counts
 from nsgeo.slices.section import (
+    CROP_MAX_DISTANCE_SPACINGS,
     SECTION_MARGIN_SPACINGS,
     SECTION_PIECE_M,
     SectionColumns,
@@ -50,6 +51,8 @@ from nsgeo.slices.section import (
     section_crops,
     smoothing_reach_cells,
     solve_section_level,
+    solve_section_level_whole,
+    uses_crops,
 )
 from nsgeo.slices.site import (
     BACKGROUND_FRACTION,
@@ -79,6 +82,7 @@ from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
 
 __all__ = [
     "BACKGROUND_FRACTION",
+    "CROP_MAX_DISTANCE_SPACINGS",
     "CoverageError",
     "CubeBlock",
     "CubeFrame",
@@ -145,9 +149,11 @@ __all__ = [
     "smooth",
     "smoothing_reach_cells",
     "solve_section_level",
+    "solve_section_level_whole",
     "stream_slice",
     "stretching_grids",
     "to_north_up",
+    "uses_crops",
     "window_depths_m",
     "window_label",
     "window_on",

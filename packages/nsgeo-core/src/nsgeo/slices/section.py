@@ -54,6 +54,16 @@ thread, 0.05 m cells: 0.18 s along x (12 m), 0.07 s along y (4.4 m), 0.20 s on
 the 12 m diagonal; at 0.2 m cells 0.02 s. Planning each crop once is not
 counted. A whole-frame solve at 0.05 m is 0.30 s a level.
 
+Crops hold only up to a max distance of `CROP_MAX_DISTANCE_SPACINGS` (0.75)
+line spacings. The 6-spacing reach rests on coupling that falls by a fixed
+factor per line crossed, and a coverage hole has no lines to cross, so the
+coupling reaches much further. Measured on 2026-11-11 on the ten real lines
+with lines 3-6 dropped (a 2 m hole), worst gap on the cut's columns as a share
+of the range: 3.3e-4 at 0.75 spacings, 2.1e-3 at 1.0, 0.5-0.9% at 1.5 and up
+to 1.4% at 2.0; on synthetic grids with a 7 m hole the solved cut went blank
+where the slice is filled. So above the threshold a section solves the whole
+frame (`solve_section_level_whole`), about 0.30 s a level on Grid 1 at 0.05 m.
+
 numpy only.
 """
 
@@ -77,6 +87,9 @@ from nsgeo.slices.smooth import SMOOTH_TRUNCATE_SIGMAS, smooth
 # How far a curvature crop reaches round the cut, in line spacings (see the module docstring).
 SECTION_MARGIN_SPACINGS: float = 6.0
 SECTION_PIECE_M: float = 4.0  # the most of a cut one crop covers
+# Crops are exact only while no hole can couple far past the lines: up to this max distance, in line
+# spacings. Past it a section solves the whole frame (`uses_crops`, I1 of M15's final review).
+CROP_MAX_DISTANCE_SPACINGS: float = 0.75
 _STEP_SLACK = 1e-9  # relative: a step of exactly half a cell is allowed
 
 
@@ -184,6 +197,15 @@ def curvature_margin_cells(settings: FinishSettings, cell: float, spacing_m: flo
     """
     reach = int(math.ceil(SECTION_MARGIN_SPACINGS * spacing_m / cell))
     return max(reach, smoothing_reach_cells(settings, cell)) + 1
+
+
+def uses_crops(max_distance_m: float, spacing_m: float) -> bool:
+    """Whether a minimum-curvature section may be solved on crops (cut spec §4.7).
+
+    True up to `CROP_MAX_DISTANCE_SPACINGS` line spacings; above it a hole can
+    couple past any crop, so the whole frame is solved.
+    """
+    return max_distance_m <= CROP_MAX_DISTANCE_SPACINGS * spacing_m * (1.0 + 1e-9)
 
 
 def section_crops(
@@ -310,3 +332,22 @@ def solve_section_level(
         canvas[r0:r1, c0:c1] = smooth(solved, cell, settings.smooth_x_m, settings.smooth_y_m)
         out[crop.columns] = sample(canvas, crop_taps)
     return out
+
+
+def solve_section_level_whole(
+    level: np.ndarray,
+    columns: SectionColumns,
+    plan: CurvaturePlan,
+    settings: FinishSettings,
+    cell: float,
+    should_stop: Callable[[], bool] | None = None,
+) -> np.ndarray:
+    """(n,) float32: one level solved on the whole frame and read along the columns.
+
+    The path for a max distance above `CROP_MAX_DISTANCE_SPACINGS` (`uses_crops`).
+    `plan` is the frame's own plan, the one the slice view solves with. A solve
+    writes nothing to it, so jobs on several threads may share it.
+    """
+    solved, _ = plan.solve(np.asarray(level), should_stop)
+    smoothed = smooth(solved, cell, settings.smooth_x_m, settings.smooth_y_m)
+    return np.asarray(sample(smoothed, columns.taps), dtype=np.float32)

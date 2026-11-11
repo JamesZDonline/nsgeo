@@ -16,6 +16,8 @@ from nsgeo.slices import (
     plan_section_curvature,
     section_crops,
     solve_section_level,
+    solve_section_level_whole,
+    uses_crops,
     window_times_ns,
 )
 from nsgeo.slices.section import curvature_margin_cells
@@ -74,12 +76,22 @@ def working(profile, ran):  # noqa: F811
 
 
 def _reference(section, rows=None):
-    """Each level solved the long way, with the section's own source."""
+    """Each level solved the long way, with the section's own source: on crops up to the
+    threshold, on the engine's whole-frame plan above it."""
     source = section.source
     engine = source.engine
     cube = engine.cube()
     frame = cube.frame
     cut_spacing = engine.session.grid(source.grid_id).default_spacing
+    levels = range(cube.z.nz) if rows is None else rows
+    if not uses_crops(source.settings.max_distance_m, cut_spacing):
+        plan, _ = engine.section_fills(source.finish)
+        return {
+            k: solve_section_level_whole(
+                cube.level(k), section.columns, plan, source.settings, frame.cell
+            )
+            for k in levels
+        }
     crops = section_crops(
         section.columns, frame, curvature_margin_cells(source.settings, frame.cell, cut_spacing)
     )
@@ -90,7 +102,7 @@ def _reference(section, rows=None):
         k: solve_section_level(
             cube.level(k), section.columns, crops, plans, source.settings, frame.cell
         )
-        for k in (range(cube.z.nz) if rows is None else rows)
+        for k in levels
     }
 
 
@@ -383,6 +395,8 @@ def test_a_redraw_during_the_solve_keeps_the_zoom_the_cursor_and_the_selection(w
 
 def test_a_cancelled_solve_leaves_the_true_count_for_the_reopened_cut(working):
     pd, dock, session, sections, key, ran = working
+    # A resident engine keeps its cube when a line is opened, so the solved depths stay.
+    dock.engine.set_always_resident(True)
     ran.pause = 0.01
     assert spin_until(lambda: len(_entry(sections, key).levels) >= 3)
     line = session.keys()[0]
@@ -397,3 +411,82 @@ def test_a_cancelled_solve_leaves_the_true_count_for_the_reopened_cut(working):
 
 def _entry(sections, key):
     return sections._cache[key]
+
+
+def _spy_paths(monkeypatch):
+    """Which solver each depth went through."""
+    calls = SimpleNamespace(crops=0, whole=0)
+    crops, whole = (
+        cut_sections_module.solve_section_level,
+        cut_sections_module.solve_section_level_whole,
+    )
+
+    def on_crops(*a, **k):
+        calls.crops += 1
+        return crops(*a, **k)
+
+    def on_whole(*a, **k):
+        calls.whole += 1
+        return whole(*a, **k)
+
+    monkeypatch.setattr(cut_sections_module, "solve_section_level", on_crops)
+    monkeypatch.setattr(cut_sections_module, "solve_section_level_whole", on_whole)
+    return calls
+
+
+def test_up_to_the_threshold_each_depth_solves_on_crops(working, monkeypatch):
+    pd, dock, session, sections, key, ran = working
+    calls = _spy_paths(monkeypatch)
+    base = dock.grid_finish.value()
+    dock.grid_finish.set_value(dataclasses.replace(base, max_distance_spacings=0.75))
+    dock.refresh_slice()
+    nz = sections.section(key, build_cube=True).z.nz
+    assert spin_until(lambda: _done(sections, key))
+    assert (calls.crops, calls.whole) == (nz, 0)
+
+
+@pytest.mark.parametrize("spacings", [1.0, 1.5, 2.0])
+def test_above_the_threshold_each_depth_solves_the_engines_whole_frame_plan(
+    working, monkeypatch, spacings
+):
+    pd, dock, session, sections, key, ran = working
+    calls = _spy_paths(monkeypatch)
+    base = dock.grid_finish.value()
+    dock.grid_finish.set_value(dataclasses.replace(base, max_distance_spacings=spacings))
+    dock.refresh_slice()
+    first = sections.section(key, build_cube=True)
+    nz = first.z.nz
+    assert spin_until(lambda: _done(sections, key))
+    assert (calls.crops, calls.whole) == (0, nz)
+    final = sections.section(key, build_cube=True)
+    assert final.source.settings.max_distance_m == pytest.approx(spacings * 0.5)
+    engine = final.source.engine
+    plan, _ = engine.section_fills(final.source.finish)
+    want = _reference(final)
+    for k in range(nz):
+        np.testing.assert_array_equal(final.values[k], want[k])
+    # The plan the jobs shared is the one the engine still holds, and nothing was written to it.
+    assert engine.holds(plan)
+
+
+def test_a_rested_window_change_recentres_the_solve_on_the_new_band(working):
+    pd, dock, session, sections, key, ran = working
+    ran.pause = 0.03
+    z = sections.section(key, build_cube=True).z
+    assert spin_until(lambda: len(ran.levels) >= 4)
+    assert ran.levels[0] < 10  # the panel's band sits shallow, so it started there
+    far = z.nz - 9
+    dock.window_changed.emit(*window_times_ns(z, SliceWindow(far - 2, far + 3)))
+    mark = len(ran.levels)
+    # The band rests for the (patched) rest, then the solve starts again from the depths it has
+    # not done, centre first: so the next depth taken is the nearest unsolved one to `far`.
+    assert spin_until(lambda: any(abs(k - far) <= 1 for k in ran.levels[mark:]))
+    assert abs(sections._centre_level(z) - far) <= 1
+    hit = next(i for i, k in enumerate(ran.levels[mark:]) if abs(k - far) <= 1)
+    assert hit <= 4  # a job or two already in flight at the change, never a walk there
+    ran.pause = 0.0
+    assert spin_until(lambda: _done(sections, key))
+    final = sections.section(key, build_cube=True)
+    want = _reference(final)
+    for k in range(z.nz):
+        np.testing.assert_array_equal(final.values[k], want[k])

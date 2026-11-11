@@ -56,7 +56,9 @@ def test_rename_keeps_the_key_and_refuses_an_empty_name(session):
     session.add_grid(GRID)
     key = session.add_cut("A", V)
     changed = Spy(session.cuts_changed)
+    session._set_dirty(False)
     session.rename_cut(key, "  Lower line ")
+    assert session.dirty  # a rename is an edit the site must save
     assert session.cut_for_key(key).name == "Lower line"
     assert session.cut_keys() == [key]
     assert len(changed.calls) == 1
@@ -65,6 +67,14 @@ def test_rename_keeps_the_key_and_refuses_an_empty_name(session):
     assert session.cut_for_key(key).name == "Lower line"
     with pytest.raises(KeyError):
         session.cut_for_key("cut:nope")
+
+
+def test_remove_cut_marks_the_site_dirty(session):
+    session.add_grid(GRID)
+    key = session.add_cut("A", V)
+    session._set_dirty(False)
+    session.remove_cut(key)
+    assert session.dirty and session.cut_keys() == []
 
 
 def test_remove_grid_drops_its_cuts_and_keeps_the_others(session):

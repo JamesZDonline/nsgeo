@@ -15,6 +15,10 @@ panel's, so a cut shows what the slice shows, cut another way (plan call 5).
 * **The cube.** Opening a cut builds the engine's resident cube under a wait
   cursor (`build_cube=True`); a hover preview never does (`NO_CUBE_TEXT`), so
   moving the pointer cannot freeze the canvas (cut spec §5).
+  A streaming engine whose estimate is over the residency budget is not asked
+  to (`TOO_BIG_TEXT`), and one under it drops the cube again once no open cut
+  reads it: the working item leaves the cut, the cut goes, or the site closes.
+  A resident engine's cube is never dropped here (M15 final review, I2).
 * **Redraws.** Each section is cached with a fingerprint of everything it was
   made from. The Slices panel, the survey's cuts and grids, and closing the
   site each re-check the cache, and a section whose fingerprint moved is
@@ -27,7 +31,11 @@ panel's, so a cut shows what the slice shows, cut another way (plan call 5).
   is solved in the background once its section has rested `CUT_SOLVE_REST_MS`:
   one `CutLevelJob` per depth, on a worker of its own (`nsgeo-cut`, plan call
   8) so the slice's own refine never queues behind it, solved outward from the
-  slice band's centre. Each landed row replaces the kriging row in place, and
+  slice band's centre, and again from the new centre once the band has moved and
+  rested. Up to a max distance of `CROP_MAX_DISTANCE_SPACINGS` line spacings a
+  depth solves on crops round the cut; above it, on the engine's whole-frame
+  plan, since a coverage hole couples further than any crop reaches (M15 final
+  review, I1). Each landed row replaces the kriging row in place, and
   the profile is told at most every `CUT_REDRAW_MS`. Anything that changes the
   cut, its grid, the panel's settings, the open item or the site stops the
   solve, and a stopped solve lands nothing: a row is written only while the
@@ -61,6 +69,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from nsgeo.model import Cut
 from nsgeo.slices import (
+    CurvaturePlan,
     FinishSettings,
     SectionColumns,
     ZAxis,
@@ -71,6 +80,8 @@ from nsgeo.slices import (
     section_columns,
     section_crops,
     solve_section_level,
+    solve_section_level_whole,
+    uses_crops,
 )
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -80,13 +91,19 @@ from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import PREVIEW_METHOD, SliceFinish
+from nsgeo_qgis.slices_plan import DEFAULT_BUDGET_BYTES, PREVIEW_METHOD, SliceFinish
 
 if TYPE_CHECKING:
     from nsgeo_qgis.ui.slices_dock import SlicesDock
 
 NO_SOURCE_TEXT = "{name} is on {grid}. Show {grid} in the Slices panel to see it."
 NO_CUBE_TEXT = "Select {name} to build {grid}'s cube for it."
+PREPARING_TEXT = "{grid} is being prepared again. The cut will redraw when it is ready."
+BUILD_FAILED_TEXT = "{grid}'s cube could not be built for this cut: {reason}"
+TOO_BIG_TEXT = (
+    "{grid}'s cube is too large to hold in memory for a cut. "
+    "Use a coarser cell or a shorter depth range in the Slices panel."
+)
 
 #: How long the working cut's section rests before its minimum curvature is
 #: solved, so a settings drag or a quick pass does not start a solve per step.
@@ -144,10 +161,13 @@ class _Entry:
 
 
 class _SolveInputs:
-    """What every depth of one solve shares: the cube, the crops and their plans.
+    """What every depth of one solve shares: the cube, and the crops and their plans.
 
     Built by the first job, on the worker, so the crops' multigrid plans never
-    cost the GUI thread a frame. Only the worker touches it after that.
+    cost the GUI thread a frame. Only the worker touches it after that. Above
+    `CROP_MAX_DISTANCE_SPACINGS` there are no crops: every depth solves the
+    engine's own whole-frame `plan`, which a solve only reads, so the jobs
+    share it (cut spec §4.7; the core's `uses_crops`).
     """
 
     def __init__(
@@ -158,6 +178,7 @@ class _SolveInputs:
         columns: SectionColumns,
         settings: FinishSettings,
         spacing: float,
+        plan: CurvaturePlan | None = None,
     ):
         self.key = key  # what the solve is for, so a landing can be checked against it
         self.stamp = stamp
@@ -165,11 +186,15 @@ class _SolveInputs:
         self.columns = columns
         self.settings = settings
         self.spacing = spacing
+        self.whole = not uses_crops(settings.max_distance_m, spacing)
+        self.plan = plan
+        if self.whole and plan is None:
+            raise ValueError("a section above the crop threshold needs the frame's plan")
         self.crops: tuple[Any, ...] | None = None
         self.plans: tuple[Any, ...] = ()
 
     def prepare(self) -> None:
-        if self.crops is not None:
+        if self.whole or self.crops is not None:
             return
         frame = self.cube.frame
         margin = curvature_margin_cells(self.settings, frame.cell, self.spacing)
@@ -192,6 +217,17 @@ class CutLevelJob:
 
     def run(self, should_stop: Callable[[], bool]) -> None:
         inputs = self._inputs
+        if inputs.whole:
+            assert inputs.plan is not None
+            self.result = solve_section_level_whole(
+                inputs.cube.level(self.level),
+                inputs.columns,
+                inputs.plan,
+                inputs.settings,
+                inputs.cube.frame.cell,
+                should_stop,
+            )
+            return
         inputs.prepare()
         assert inputs.crops is not None
         self.result = solve_section_level(
@@ -221,6 +257,9 @@ class CutSections(QObject):
         #: (no engine shows their grid) or "cube" (a preview with none built).
         #: A cut with nothing cached would never be announced otherwise.
         self._waiting: dict[str, str] = {}
+        #: Cuts opened on a streaming engine, and the engine whose cube each one built (or
+        #: found): the cube is dropped once none of them reads it (M15 final review, I2).
+        self._streamed: dict[str, SliceEngine] = {}
         #: The working cut's minimum curvature (cut spec §4.7). `_working` is
         #: the key waiting out its rest or being solved, `_stamp` the cached
         #: section's values stamp it was armed for.
@@ -302,21 +341,32 @@ class CutSections(QObject):
         if source is None:
             self._drop(key)
             self._waiting[key] = "source"
-            return NO_SOURCE_TEXT.format(name=cut.name, grid=cut.grid_id)
+            text = PREPARING_TEXT if self._preparing(cut.grid_id) else NO_SOURCE_TEXT
+            return text.format(name=cut.name, grid=cut.grid_id)
         engine = source.engine
         if not engine.has_cube:
             if not build_cube:
                 self._waiting[key] = "cube"
                 return NO_CUBE_TEXT.format(name=cut.name, grid=cut.grid_id)
+            if engine.mode == "streaming" and engine.estimate.total_bytes > DEFAULT_BUDGET_BYTES:
+                # The engine chose to stream because the cube does not fit the budget; a cut
+                # would build it on the GUI thread and hold it while the status says
+                # "streaming" (M15 final review, I2).
+                self._drop(key)
+                self._waiting[key] = "source"
+                return TOO_BIG_TEXT.format(name=cut.name, grid=cut.grid_id)
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 engine.cube()
             except Exception as exc:  # noqa: BLE001 -- no lines, a vanished source
                 _log(f"could not build {cut.grid_id}'s cube: {exc}", Qgis.MessageLevel.Warning)
+                self._drop(key)
                 self._waiting[key] = "source"
-                return NO_SOURCE_TEXT.format(name=cut.name, grid=cut.grid_id)
+                return BUILD_FAILED_TEXT.format(name=cut.name, grid=cut.grid_id, reason=exc)
             finally:
                 QApplication.restoreOverrideCursor()
+        if build_cube and engine.mode == "streaming":
+            self._streamed[key] = engine  # the cube is ours to drop when nothing reads it
         self._waiting.pop(key, None)
         stamp, shown = self._fingerprint(cut, source)
         entry = self._cache.get(key)
@@ -332,6 +382,58 @@ class CutSections(QObject):
         if build_cube and section.standing_in:
             self._arm(key, stamp)
         return section
+
+    def _preparing(self, grid_id: str) -> bool:
+        """Whether the grid's engine is preparing again, in either scope."""
+        try:
+            dock = self.slices_dock
+            if dock.scope() == "site":
+                engine = dock.site_engine.engine_for(grid_id)
+            else:
+                engine = dock.engine
+                if engine is not None and (
+                    engine.choice is None or engine.choice.grid_id != grid_id
+                ):
+                    engine = None
+            return engine is not None and engine.is_running
+        except Exception as exc:  # noqa: BLE001 -- only picks the message
+            _log(f"could not tell if {grid_id} is preparing: {exc}", Qgis.MessageLevel.Warning)
+            return False
+
+    def _release_cubes(self, only: str | None = None) -> None:
+        """Drop the cube of each streaming engine that no cut reads any more.
+
+        A streaming engine builds its cube only because a cut asked for it, so
+        it is let go when the working item leaves the cut (`only` is the item
+        now open: no other cut reads), the cut is deleted, its source moves or
+        the site closes. A resident engine's cube is the engine's own choice and is
+        never touched here (cut spec §5).
+        """
+        keep: list[SliceEngine] = []
+        if only:
+            cut = self._cut(only)
+            source = None if cut is None else self.source_for(cut.grid_id)
+            if source is not None:
+                keep.append(source.engine)  # the cut now open may share the engine
+        gone: list[SliceEngine] = []
+        for key, engine in list(self._streamed.items()):
+            cut = self._cut(key)
+            reads = cut is not None and (only is None or key == only)
+            source = self.source_for(cut.grid_id) if reads and cut is not None else None
+            if source is not None and source.engine is engine:
+                keep.append(engine)
+            else:
+                del self._streamed[key]
+                gone.append(engine)
+        for engine in gone:
+            if any(engine is other for other in keep):
+                continue
+            keep.append(engine)  # dropped once, not once per cut
+            try:
+                if engine.mode == "streaming":
+                    engine.drop_cube()
+            except Exception as exc:  # noqa: BLE001 -- an engine already disposed
+                _log(f"could not drop a cut's cube: {exc}", Qgis.MessageLevel.Warning)
 
     def _drop(self, key: str) -> None:
         """Forget a cached section; a solve for it stops with it."""
@@ -411,9 +513,14 @@ class CutSections(QObject):
         self._stamp = None
 
     def _on_window_changed(self, lo_ns: float, hi_ns: float) -> None:
-        """Remember the slice band: the next solve starts at its centre."""
+        """Remember the slice band: the next solve starts at its centre. A solve
+        under way is started again once the band has rested, so the depths still
+        owed are reordered outward from the new centre (`_start_solve` resumes
+        from the depths already solved)."""
         try:
             self._band = (float(lo_ns), float(hi_ns))
+            if self._working is not None:
+                self._rest.start(CUT_SOLVE_REST_MS)
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             _log(f"could not note the slice band: {exc}", Qgis.MessageLevel.Warning)
 
@@ -422,6 +529,7 @@ class CutSections(QObject):
         try:
             if self._working is not None and key != self._working:
                 self._cancel()
+            self._release_cubes(only=key)
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             _log(f"could not stop a cut's solve: {exc}", Qgis.MessageLevel.Warning)
 
@@ -464,8 +572,21 @@ class CutSections(QObject):
                 self._finish(key)
                 return
             grid = self.session.grid(cut.grid_id)
+            plan = None
+            if not uses_crops(source.settings.max_distance_m, grid.default_spacing):
+                # Above the crop threshold the engine's own whole-frame plan solves each depth;
+                # `_build` held it as the section's `fill` (M15 final review, I1).
+                fill, _ = engine.section_fills(source.finish)
+                assert isinstance(fill, CurvaturePlan)
+                plan = fill
             inputs = _SolveInputs(
-                key, stamp, engine.cube(), section.columns, source.settings, grid.default_spacing
+                key,
+                stamp,
+                engine.cube(),
+                section.columns,
+                source.settings,
+                grid.default_spacing,
+                plan,
             )
             jobs = [CutLevelJob(k, inputs) for k in owed]
             self._refiner.start(jobs, self._on_landed, self._on_failed)
@@ -628,6 +749,7 @@ class CutSections(QObject):
         try:
             if not self.session.is_open:
                 self._cancel()
+                self._release_cubes()
                 self._cache.clear()
                 self._waiting.clear()
                 return
@@ -653,6 +775,7 @@ class CutSections(QObject):
                 if ready:
                     del self._waiting[key]
                     self.section_changed.emit(key)
+            self._release_cubes()
             # What moved may have been what the solve was for; one that was
             # re-armed above for the rebuilt section is left alone.
             if self._working is not None:
@@ -683,5 +806,6 @@ class CutSections(QObject):
         self._connections = []
         self._cancel()
         self._refiner.shutdown()
+        self._release_cubes(only="")
         self._cache.clear()
         self._waiting.clear()

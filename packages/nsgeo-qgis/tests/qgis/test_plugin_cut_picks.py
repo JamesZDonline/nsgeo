@@ -345,3 +345,32 @@ def test_a_pick_takes_its_distance_from_the_section_on_screen(opened):
     plugin._on_pick_requested(key, 12, T)
     (row,) = _rows(plugin)
     assert row["distance_m"] == pytest.approx(float(shown.columns.distance_m[12]))
+
+
+def test_a_cut_pick_with_a_null_distance_is_left_alone_across_a_grid_move(opened, message_log):
+    """The row has nowhere to follow from: its geometry, depth and velocity stay exactly as
+    written, and nothing raises (cut spec §4.8)."""
+    from qgis.core import NULL
+
+    plugin, key = opened
+    session = plugin.session
+    _pick_at(plugin, key, 12)
+    layer = plugin.layers.layers["picks"]
+    (row,) = _rows(plugin)
+    column = layer.fields().indexFromName("distance_m")
+    assert layer.dataProvider().changeAttributeValues({row.id(): {column: NULL}})
+    (row,) = _rows(plugin)
+    assert row["distance_m"] == NULL
+    before = (
+        row.geometry().asPoint().x(),
+        row.geometry().asPoint().y(),
+        row["depth_m"],
+        row["velocity_m_ns"],
+    )
+    grid = session.grid("A")
+    session.replace_grid(dataclasses.replace(grid, origin=(grid.origin[0] + 1.0, grid.origin[1])))
+    (after,) = _rows(plugin)
+    point = after.geometry().asPoint()
+    assert (point.x(), point.y(), after["depth_m"], after["velocity_m_ns"]) == before
+    assert after["distance_m"] == NULL
+    assert not [m for m in message_log if "could not" in m or "failed" in m]

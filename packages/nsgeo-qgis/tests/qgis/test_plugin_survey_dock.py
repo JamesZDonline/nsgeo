@@ -1448,3 +1448,19 @@ def test_the_import_target_falls_back_to_an_open_cuts_grid(dock, message_log):
     dock.tree.clearSelection()
     assert dock.target_grid_id() == "A"
     assert not [m for m in message_log if "could not read the selected grid" in m]
+
+
+def test_a_plain_click_on_a_cut_opens_it_and_a_ctrl_click_does_not(dock, message_log):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    other = session.add_cut("A", _CUT)
+    opened = []
+    session.line_opened.connect(opened.append)
+    _click(dock, dock.item_for_key(key))
+    assert session.current_key == key and opened == [key]
+    assert dock.tree.currentItem() is dock.item_for_key(key)
+    _click(dock, dock.item_for_key(other), Qt.KeyboardModifier.ControlModifier)
+    assert opened == [key]  # building a selection opens nothing
+    _click(dock, dock.item_for_key(other))
+    assert session.current_key == other and opened == [key, other]
+    assert message_log == []

@@ -240,13 +240,19 @@ def test_the_marker_and_band_follow_a_selection_on_a_cut(cutlink):
     c.session.open_line(c.key)
     section = c.sections.section(c.key, build_cube=True)
 
+    # A drag in the profile moves the cursor to the end it is dragging, and selects a range.
+    c.session.set_trace(c.key, 12)
     c.session.set_selection(c.key, 5, 12)
 
     assert c.link._band.numberOfVertices() == 8
     first = c.link._band.getPoint(0, 0)
     assert QgsPointXY(first).distance(QgsPointXY(*section.columns.world[5])) < 1e-6
+    # The marker sits at its column's world position, in the canvas CRS.
+    assert c.link._marker.isVisible()
+    assert c.link._marker.center().distance(QgsPointXY(*section.columns.world[12])) < 1e-6
     c.session.clear_selection()
     assert c.link._band.numberOfVertices() == 0
+    assert c.link._marker.center().distance(QgsPointXY(*section.columns.world[12])) < 1e-6
 
 
 def test_a_cut_with_no_section_shows_no_cursor_but_still_previews(cutlink):

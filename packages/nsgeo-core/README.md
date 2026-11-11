@@ -107,6 +107,7 @@ several grids' slices into one site view.
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
+| `CROP_MAX_DISTANCE_SPACINGS` | The most a section's max distance may be, in line spacings, for its minimum curvature to be solved on crops; above it the whole frame is solved. |
 | `SECTION_MARGIN_SPACINGS` | How far a section's curvature crops reach round the cut, in line spacings. |
 | `SECTION_PIECE_M` | The most of a cut one crop covers, in metres. |
 | `Seam` | Two grids' facing strips, where their levels are compared. |
@@ -157,9 +158,11 @@ several grids' slices into one site view.
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
 | `smoothing_reach_cells` | The smoothing kernel's radius in cells. |
 | `solve_section_level` | One level solved by minimum curvature on a cut's crops and read along its columns. |
+| `solve_section_level_whole` | One level solved by minimum curvature on the whole frame and read along a cut's columns. |
 | `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
+| `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |

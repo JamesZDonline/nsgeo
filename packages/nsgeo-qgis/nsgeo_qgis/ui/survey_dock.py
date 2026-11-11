@@ -400,7 +400,7 @@ class SurveyDock(QgsDockWidget):
         held = QApplication.keyboardModifiers()
         if held & Qt.KeyboardModifier.ControlModifier or held & Qt.KeyboardModifier.ShiftModifier:
             return
-        key = self.key_of(item)
+        key = self.key_of(item) or self.cut_key_of(item)
         if key is not None and item.isSelected() and len(self.tree.selectedItems()) == 1:
             self._open_line(key)
 
