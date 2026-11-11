@@ -14,7 +14,7 @@ deliberately not this module's business.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -217,6 +217,20 @@ def build_cube(
         blocks=(CubeBlock(cells=cells, mean=total, count=count),),
         provenance=provenance,
     )
+
+
+def covered_cells(frame: CubeFrame, coords: Iterable[np.ndarray]) -> int:
+    """The number of distinct in-frame cells any trace falls in.
+
+    `coords` is one `(n_traces, 2)` world-coordinate array per line. This is
+    the cell count of `build_cube`'s block for the same lines, so the plugin
+    can size a packed cube before building it (#113). A trace outside the
+    frame is `cell_index == -1` and is ignored, so this never raises for one.
+    """
+    seen = [idx[idx >= 0] for idx in (frame.cell_index(xy) for xy in coords)]
+    if not seen:
+        return 0
+    return int(np.unique(np.concatenate(seen)).size)
 
 
 def stream_slice(

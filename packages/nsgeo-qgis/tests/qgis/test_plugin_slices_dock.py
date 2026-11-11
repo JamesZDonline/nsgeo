@@ -24,6 +24,7 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_INDICATOR,
     REFINE_REST_MS,
     REFINING_SLICE_INDICATOR,
+    Resolution,
     SliceFinish,
     limit_windows,
     transform_names,
@@ -121,6 +122,27 @@ def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     text = dock.included_label.text()
     assert text.startswith(f"{len(session.keys())} of {len(session.keys())} included")
     assert "MB" in text or "GB" in text
+
+
+def test_the_included_label_counts_only_covered_cells(docked):
+    """Before preparing, the label's figure counts the cells the included
+    lines fall in, not every cell of the frame (#113)."""
+    from nsgeo.slices import covered_cells
+    from nsgeo_qgis.slices_plan import estimate_memory, format_bytes
+
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    dock._update_included_label()
+    frame, z = dock.engine.frame, dock.engine.z
+    assert frame is not None and z is not None
+    lines = [session.line_for_key(k) for k in dock._included]
+    coords = [ln.trace_coords(session.site.frames) for ln in lines]
+    covered = covered_cells(frame, coords)
+    assert 0 < covered < frame.n_cells
+    samples = sum(ln.n_traces * ln.header.n_samples for ln in lines)
+    expected = format_bytes(estimate_memory(samples, frame.n_cells, z.nz, covered).total_bytes)
+    assert dock.included_label.text().startswith("3 of 3 included")
+    assert dock.included_label.text().split("about ")[1].split(" --")[0] == expected
 
 
 def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):

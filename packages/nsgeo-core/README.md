@@ -115,6 +115,7 @@ several grids' slices into one site view.
 | `build_cube` | Bin every line into a resident cube. |
 | `compose` | Gather grid-local slices onto a site lattice; overlaps take the mean. |
 | `compose_footprints` | `compose`, each grid accumulated over its own footprint only. |
+| `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |

@@ -43,6 +43,7 @@ from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
     SliceWindow,
+    covered_cells,
     limit_over_slices,
     plan_windows,
     window_label,
@@ -1086,15 +1087,24 @@ class SlicesDock(QgsDockWidget):
         total = len(self._default_included(grid_id))
         included = self._included
         samples = 0
+        coords: list[np.ndarray] = []
+        frame = self.engine.frame
         if self.session.is_open:
             for key in included:
                 line = self.session.line_for_key(key)
                 samples += line.n_traces * line.header.n_samples
-        frame = self.engine.frame
+                if frame is None:
+                    continue
+                try:
+                    coords.append(line.trace_coords(self.session.site.frames))
+                except Exception:  # noqa: BLE001 -- a missing grid; preparation skips it too
+                    continue
         z = self.engine.z
         n_cells = frame.n_cells if frame is not None else 0
         nz = z.nz if z is not None else 0
-        estimate = estimate_memory(samples, n_cells, nz)
+        # A resident cube stores only the cells the lines fall in (#113).
+        n_covered = covered_cells(frame, coords) if frame is not None else 0
+        estimate = estimate_memory(samples, n_cells, nz, n_covered)
         text = f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
         if estimate.total_bytes > DEFAULT_BUDGET_BYTES:
             text += " -- over the default budget; slices will stream rather than hold it all"

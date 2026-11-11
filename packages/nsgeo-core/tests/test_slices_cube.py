@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from nsgeo.slices.binning import PreparedLine, build_cube, plan_line, resample_window
+from nsgeo.slices.binning import (
+    PreparedLine,
+    build_cube,
+    covered_cells,
+    plan_line,
+    resample_window,
+)
 from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis
 
@@ -262,3 +268,34 @@ def test_nbytes_counts_the_packed_arrays():
     assert cube.nbytes == block.cells.nbytes + block.mean.nbytes + block.count.nbytes
     n = block.cells.size
     assert cube.nbytes == Z.nz * n * 4 + n * 4 + n * 8
+
+
+def test_covered_cells_counts_a_shared_cell_once():
+    frame = _frame(10, 10, 1.0)
+    # Two traces in cell (1, 1); an X line along y=5.5 crossing a Y line
+    # along x=3.5 (one shared cell at (3, 5)); one trace outside the frame.
+    pair = np.array([[1.2, 1.3], [1.7, 1.8]])
+    x_line = np.column_stack([np.array([0.5, 1.5, 2.5, 3.5, 4.5]), np.full(5, 5.5)])
+    y_line = np.column_stack([np.full(5, 3.5), np.array([3.5, 4.5, 5.5, 6.5, 7.5])])
+    outside = np.array([[-40.0, 99.0]])
+    # pair 1 + X line 5 + Y line 5 - 1 shared = 10
+    assert covered_cells(frame, [pair, x_line, y_line, outside]) == 10
+    assert covered_cells(frame, []) == 0
+    assert covered_cells(frame, [outside]) == 0
+
+
+@needs_real_files
+@pytest.mark.parametrize("cell", [0.2, 0.05])
+def test_covered_cells_equals_the_cubes_cell_count(cell):
+    nx, ny = round(20.0 / cell), round(5.0 / cell)
+    frame = CubeFrame(
+        origin=(500000.0, 4500000.0), azimuth=33.0, cell=cell, nx=nx, ny=ny, crs="EPSG:32617"
+    )
+    x_hat, y_hat = frame.axes()
+
+    def to_world(local):
+        return np.asarray(frame.origin) + local[:, [0]] * x_hat + local[:, [1]] * y_hat
+
+    lines = prepared_lines(range(10), to_world)
+    cube, _ = _build(lines, frame, AXIS)
+    assert covered_cells(frame, (ln.coords for ln in lines)) == cube.blocks[0].cells.size

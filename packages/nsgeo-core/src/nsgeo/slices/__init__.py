@@ -11,6 +11,7 @@ from nsgeo.slices.binning import (
     LinePlan,
     PreparedLine,
     build_cube,
+    covered_cells,
     plan_line,
     stream_slice,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "build_cube",
     "compose",
     "compose_footprints",
+    "covered_cells",
     "edge_match_solve",
     "find_seams",
     "finish_slice",
