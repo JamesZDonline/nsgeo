@@ -172,7 +172,7 @@ It also suggests doing #36 (edit or delete a pick from the profile) early, befor
 14. **Cursor tracking on a cut projects onto the cut's path.** *(New.)* A line's vertices are its traces. A cut's vertices are the user's clicks, so the vertex trick does not carry over. The point on the path gives the distance, and the distance gives the column.
 15. **Smoothing applies to cuts.** *(New.)* It follows from call 7: the slice is smoothed, so the cut is too. Smoothing reaches across the cut, so a section needs the finished cells around the cut, not only those under it (§5).
 16. **A cut's velocity is its grid's own velocity.** *(New, from the builder check.)*
-    - **The rule:** the grid's own velocity (`Grid.velocity`). If the grid has none, use the velocity the first line on the grid resolves to, in survey order.
+    - **The rule:** the grid's own velocity (`Grid.velocity`). If the grid has none, use the first line's header velocity (its dielectric, in survey order), as #4's fallback does. A line's own override is ignored. *(Tightened during Task 2, 2026-11-11: "the velocity the first line resolves to" would have let that line's override in.)*
     - **What uses it:** the depth axis, a cut pick's `depth_m` and `velocity_m_ns`, and their re-derivation (§4.8). The title shows the velocity in use.
     - **Why it needs no engine:** picks are re-derived when a site opens and on every grid or line change, often with nothing prepared. A rule tied to the prepared engine would leave cut-pick depths stale at those moments, or flip between two rules.
     - **Why not a line's own override:** a cut crosses many lines, and one line's own velocity says nothing about the others. So a line override never moves a cut pick. A grid velocity change does.

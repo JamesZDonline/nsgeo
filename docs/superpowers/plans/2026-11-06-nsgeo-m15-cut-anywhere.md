@@ -123,7 +123,7 @@
   | `PROCESSING_ON_CUT_TEXT` | `Processing does not apply to a cut.` |
   | `CUT_GONE_TEXT` | `This pick's cut no longer exists. The pick stays where it was drawn.` |
   | Delete prompt | `Delete {name}?`, plus ` Its 1 pick stays on the map.` or ` Its {n} picks stay on the map.` |
-  | Grid removal addition | ` Its {n} cut(s) are deleted too; their picks stay on the map.` (`cut`/`cuts` by count) |
+  | Grid removal addition | Appended to the grid question. ` Its 1 cut is deleted too` or ` Its {n} cuts are deleted too`, then `.` with no picks, or `; its 1 pick stays on the map.` / `; its {m} picks stay on the map.` (`their` for several cuts). `Their …` when several grids go at once. *(Ruling during Task 2: number agreement, plus the pick count spec §4.8 asks for.)* |
   | Profile title | `nsgeo Profile · cut: {name} · {grid} · {length:.1f} m · {method}`, then ` · site view, not normalised` in Whole site scope, then ` · {n} picks on another clock` when there are any (plan call 13), and the existing `PREVIEW: ` prefix on a preview. The `cut:` stays even after a rename, so the title always says a cut is showing (decision 11). |
   | `{method}` | `METHOD_LABELS[method]`. While kriging stands in: `Kriging preview (minimum curvature when opened)` on a preview, `Kriging preview · minimum curvature {done} of {total} depths` while solving, and `Minimum curvature` when done. |
 
@@ -312,7 +312,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - `add_cut(grid_id: str, vertices: Sequence[tuple[float, float]]) -> str`. Returns the key; raises `KeyError` for an unknown grid and `ValueError` from `Cut.new`.
   - `rename_cut(key: str, name: str) -> None` (`ValueError` when the stripped name is empty)
   - `remove_cut(key: str) -> None`
-  - `cut_velocity(grid_id: str) -> VelocityModel` (spec call 16: `grid.velocity`, else `resolved_velocity(keys_on_grid(grid_id)[0])`; `KeyError` when neither exists)
+  - `cut_velocity(grid_id: str) -> VelocityModel` (spec call 16: `grid.velocity`, else the first line's header velocity, ignoring its override — `resolve_velocity(replace(line, velocity=None), grid)`; `KeyError` when neither exists)
 - Produces on `SiteLayers`: `refill_cuts() -> None`, plus the `cuts` table.
 
 - [ ] **Step 1: Write the failing session tests** (`test_plugin_session_cuts.py`, with the `session` and `_two_grids` helpers from `test_plugin_session.py`)
