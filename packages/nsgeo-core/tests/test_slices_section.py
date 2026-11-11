@@ -24,9 +24,10 @@ from nsgeo.slices import (
     smooth,
 )
 from nsgeo.slices.section import (
-    SECTION_MARGIN_M,
+    SECTION_MARGIN_SPACINGS,
     SECTION_PIECE_M,
     SectionColumns,
+    curvature_margin_cells,
     finish_section,
     plan_section_curvature,
     section_columns,
@@ -35,7 +36,7 @@ from nsgeo.slices.section import (
     solve_section_level,
 )
 
-from tests.real_lines import AXIS, WINDOWS, needs_real_files, prepared_lines
+from tests.real_lines import AXIS, SPACING, WINDOWS, needs_real_files, prepared_lines
 
 CRS = "EPSG:32633"
 GRID = Grid("G", (500000.0, 4000000.0), 10.497, 20.0, 5.0, CRS, 0.5)
@@ -310,14 +311,12 @@ CURVATURE_PATHS = {
 }
 
 
-def _curvature_case(name, smoothing, margin_m=SECTION_MARGIN_M):
-    cell = 0.05
+def _curvature_case(name, smoothing, cell=0.05):
     cube = cube_on("axis", cell)
     columns = section_columns(cube.frame, CURVATURE_PATHS[name])
     settings = FinishSettings("min_curvature", 0.25, 0.25, smooth_x_m=0.0, smooth_y_m=smoothing)
     pop = cube.coverage() > 0
-    reach = max(math.ceil(margin_m / cell), smoothing_reach_cells(settings, cell)) + 1
-    crops = section_crops(columns, cube.frame, reach)
+    crops = section_crops(columns, cube.frame, curvature_margin_cells(settings, cell, SPACING))
     plans = plan_section_curvature(pop, crops, cell, 0.25)
     whole = plan_fill(pop, cell, "min_curvature", 0.25, 0.25)
     return cube, columns, settings, crops, plans, whole, cell
@@ -339,36 +338,31 @@ def _crop_error(case, levels=(30, 90, 150)):
     return worst
 
 
-# The spike measured 0.0015% at 0.05 m with a 1 m margin on Grid 1. These ten
-# lines do not reproduce it: 0.3% to 3% of the range (see the module's report,
-# task 1). The tolerance is the plan's and stays; the tests are strict xfails
-# so they flip loudly once the margin or the solver is settled.
-CROPS_TOO_TIGHT = pytest.mark.xfail(
-    strict=True, reason="1 m crops differ from the whole frame by 0.3-3% on the ten real lines"
-)
+def test_curvature_margin_is_the_larger_of_the_spacings_and_the_smoothing_plus_one():
+    none = FinishSettings("min_curvature", 0.25, 0.25)
+    assert SECTION_MARGIN_SPACINGS == 6.0
+    assert curvature_margin_cells(none, 0.05, 0.5) == 60 + 1
+    assert curvature_margin_cells(none, 0.2, 0.5) == 15 + 1
+    assert curvature_margin_cells(none, 0.2, 0.55) == math.ceil(6 * 0.55 / 0.2) + 1
+    wide = FinishSettings("min_curvature", 0.25, 0.25, smooth_y_m=2.0)  # kernel 40 cells at 0.2
+    assert smoothing_reach_cells(wide, 0.2) == 40
+    assert curvature_margin_cells(wide, 0.2, 0.5) == 40 + 1
 
 
 @needs_real_files
-@CROPS_TOO_TIGHT
+@pytest.mark.parametrize("cell", [0.05, 0.2])
 @pytest.mark.parametrize("name", sorted(CURVATURE_PATHS))
-def test_curvature_on_crops_matches_the_whole_frame_solve(name):
-    case = _curvature_case(name, 0.0)
+def test_curvature_on_crops_matches_the_whole_frame_solve(name, cell):
+    case = _curvature_case(name, 0.0, cell)
     assert all(isinstance(p, CurvaturePlan) for p in case[4]) and len(case[3]) == len(case[4])
     assert _crop_error(case) <= 1e-3
 
 
 @needs_real_files
-@CROPS_TOO_TIGHT
+@pytest.mark.parametrize("cell", [0.05, 0.2])
 @pytest.mark.parametrize("name", sorted(CURVATURE_PATHS))
-def test_curvature_on_crops_with_smoothing_matches_the_whole_frame(name):
-    assert _crop_error(_curvature_case(name, 0.1)) <= 1e-3
-
-
-@needs_real_files
-@pytest.mark.parametrize("smoothing", [0.0, 0.1])
-def test_curvature_on_wide_crops_matches_the_whole_frame(smoothing):
-    """The crop machinery is exact: with a 4 m margin the gap is 1e-5 of the range."""
-    assert _crop_error(_curvature_case("along x", smoothing, margin_m=4.0), (90,)) <= 1e-3
+def test_curvature_on_crops_with_smoothing_matches_the_whole_frame(name, cell):
+    assert _crop_error(_curvature_case(name, 0.1, cell)) <= 1e-3
 
 
 @needs_real_files

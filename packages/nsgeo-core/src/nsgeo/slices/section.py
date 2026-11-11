@@ -18,7 +18,7 @@ whole slice is finished unless smoothing asks for it:
   the nearest cells, so a smoothed section equals the sampled smoothed slice.
 * Minimum curvature has no weights to reuse: it solves each crop on a plan
   built once for the cut (`plan_section_curvature`), reaching
-  `SECTION_MARGIN_M` plus one cell (plan call 7).
+  `SECTION_MARGIN_SPACINGS` line spacings plus one cell (plan call 7).
 
 Measured on 2026-11-06 and again on 2026-11-11 after #111 (multigrid) and #107
 (bilinear columns), one thread, on Grid 1's saved cubes with a 12 m diagonal
@@ -30,14 +30,29 @@ cut and columns at half a cell. Spike numbers, not this module's:
     kriging, smoothing Y 0.1 m, whole levels  0.12 s              2.2 s
     min curvature, one level, whole frame     0.02 s              0.30 s (15 iterations)
     min curvature, every level, whole frame   about 5 s           about 1 min
-    min curvature, every level, on crops      about 2 s           about 20 s (0.10 s a level)
-    crops against a whole-frame solve         within 0.07%        within 0.0015% of the range
 
 Smoothing whole levels at 0.05 m (2.2 s) is why smoothing works on crops.
-Minimum curvature on crops is about three times faster than on whole frames.
 Kriging against minimum curvature on one level, over the gap cells, differs
 by 5.1-7.4% of the range at the 99th percentile and 17-43% at worst, which is
 why a cut under minimum curvature shows a kriging stand-in until it is solved.
+
+How far a curvature crop must reach is set by the line spacing, not by metres
+(`curvature_margin_cells`). Minimum curvature through one-cell-wide lines
+couples across lines like a spline across knots, falling by a fixed factor per
+line crossed. Measured on 2026-11-11 on the ten real lines (0.5 m apart, levels
+30, 90 and 150, max distance 0.25 m), the worst gap from a whole-frame solve on
+the cut's columns, as a share of the level's range, worst of along x, along y
+and a 12 m diagonal, with no smoothing (smoothing Y 0.1 m is no worse):
+
+    reach (spacings)    2 (1 m)   4 (2 m)   6 (3 m)   8 (4 m)
+    0.2 m cells         0.64%     0.017%    0.00016%  0.00003%
+    0.05 m cells        3.2%      0.19%     0.0022%   0.0020%
+
+So 1 m, the plan's first setting, missed the 0.1% requirement by up to 30x;
+6 spacings meets it with 45x to spare. Solve time a level at 6 spacings, one
+thread, 0.05 m cells: 0.18 s along x (12 m), 0.07 s along y (4.4 m), 0.20 s on
+the 12 m diagonal; at 0.2 m cells 0.02 s. Planning each crop once is not
+counted. A whole-frame solve at 0.05 m is 0.30 s a level.
 
 numpy only.
 """
@@ -59,7 +74,8 @@ from nsgeo.slices.interpolate import FillWeights
 from nsgeo.slices.resample import Taps, bilinear_taps, sample
 from nsgeo.slices.smooth import SMOOTH_TRUNCATE_SIGMAS, smooth
 
-SECTION_MARGIN_M: float = 1.0  # how far a curvature crop reaches round the cut (plan call 7)
+# How far a curvature crop reaches round the cut, in line spacings (see the module docstring).
+SECTION_MARGIN_SPACINGS: float = 6.0
 SECTION_PIECE_M: float = 4.0  # the most of a cut one crop covers
 _STEP_SLACK = 1e-9  # relative: a step of exactly half a cell is allowed
 
@@ -142,6 +158,20 @@ def smoothing_reach_cells(settings: FinishSettings, cell: float) -> int:
     if sigma_m == 0.0:
         return 0
     return int(math.ceil(SMOOTH_TRUNCATE_SIGMAS * (sigma_m / cell)))
+
+
+def curvature_margin_cells(settings: FinishSettings, cell: float, spacing_m: float) -> int:
+    """The margin `section_crops` needs for a minimum-curvature solve, in cells.
+
+    `SECTION_MARGIN_SPACINGS` line spacings, or the smoothing kernel's radius
+    if that is larger, plus one cell for the blend's far tap. It is in spacings
+    because the curvature surface couples across lines by a fixed factor per
+    line, so the reach that meets the 0.1% requirement follows the spacing:
+    a 1 m margin on 0.5 m lines was 0.2-3% off a whole-frame solve, 3 m is
+    0.002% (module docstring).
+    """
+    reach = int(math.ceil(SECTION_MARGIN_SPACINGS * spacing_m / cell))
+    return max(reach, smoothing_reach_cells(settings, cell)) + 1
 
 
 def section_crops(

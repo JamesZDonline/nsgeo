@@ -107,7 +107,7 @@ several grids' slices into one site view.
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
-| `SECTION_MARGIN_M` | How far a section's curvature crops reach round the cut, in metres. |
+| `SECTION_MARGIN_SPACINGS` | How far a section's curvature crops reach round the cut, in line spacings. |
 | `SECTION_PIECE_M` | The most of a cut one crop covers, in metres. |
 | `Seam` | Two grids' facing strips, where their levels are compared. |
 | `SectionColumns` | Where a section's columns sit along a cut and among the frame's cells, with their taps. |
@@ -125,6 +125,7 @@ several grids' slices into one site view.
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
+| `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |

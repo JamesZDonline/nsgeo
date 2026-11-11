@@ -38,10 +38,11 @@ from nsgeo.slices.interpolate import (
 )
 from nsgeo.slices.resample import Taps, bilinear_taps, max_pool_counts, sample, sample_counts
 from nsgeo.slices.section import (
-    SECTION_MARGIN_M,
+    SECTION_MARGIN_SPACINGS,
     SECTION_PIECE_M,
     SectionColumns,
     SectionCrop,
+    curvature_margin_cells,
     finish_section,
     plan_section_curvature,
     section_columns,
@@ -93,7 +94,7 @@ __all__ = [
     "PreparedLine",
     "Provenance",
     "SEAM_WIDTH_SPACINGS",
-    "SECTION_MARGIN_M",
+    "SECTION_MARGIN_SPACINGS",
     "SECTION_PIECE_M",
     "Seam",
     "SectionColumns",
@@ -111,6 +112,7 @@ __all__ = [
     "compose_footprints",
     "covered_cells",
     "covered_pixels",
+    "curvature_margin_cells",
     "edge_match_solve",
     "find_seams",
     "finest_fitting_cell",
