@@ -15,19 +15,23 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     background_level,
-    compose,
+    bilinear_taps,
     compose_footprints,
+    covered_pixels,
     edge_match_solve,
     find_seams,
+    finest_fitting_cell,
+    fitting_lattice,
     footprint,
     grid_axis,
-    lattice_pixel,
+    max_pool_counts,
     normalise,
+    sample,
+    sample_counts,
     seam_masks,
     site_axis,
     slice_extent,
-    snap_azimuth,
-    to_north_up,
+    stretching_grids,
     window_on,
 )
 
@@ -52,6 +56,107 @@ def test_lattice_is_anchored_on_whole_multiples_of_the_pixel():
     assert lat.geotransform == (500.0, 0.25, 0.0, 706.25, 0.0, -0.25)
     assert (lat.width, lat.height) == (24, 25)
     assert lat.n_pixels == 24 * 25
+
+
+def test_fitting_lattice_doubles_the_pitch_until_it_fits():
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 300, 10**9)
+    assert lat.pixel == pytest.approx(0.2)  # 0.1 -> 900, 0.2 -> 225
+    assert lat.n_pixels <= 300
+
+
+def test_fitting_lattice_keeps_the_cell_when_it_fits():
+    lat = fitting_lattice([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS, 900, 900)
+    assert lat.pixel == 0.1
+    assert lat == SiteLattice.covering([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS)
+
+
+def test_stretching_grids_names_the_outlier_that_alone_restores_full_detail():
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "C": (12.0, 0.0, 18.0, 6.0),
+        "D": (200.0, 0.0, 206.0, 6.0),
+    }
+    assert SiteLattice.covering(list(ext.values()), 0.5, CRS).n_pixels > 2000
+    assert stretching_grids(ext, 0.5, CRS, 2000, 10**9) == ["D"]
+
+
+def test_fitting_lattice_doubles_for_covered_pixels_alone():
+    """A dense site: the lattice is under max_pixels but the grids' windows are not."""
+    ext = [(0.0, 0.0, 3.0, 3.0), (3.0, 0.0, 6.0, 3.0)]  # 2 x 900 covered at 0.1 m
+    assert SiteLattice.covering(ext, 0.1, CRS).n_pixels <= 2000
+    lat = fitting_lattice(ext, 0.1, CRS, 2000, 1000)
+    assert lat.pixel == pytest.approx(0.2)  # 2 x 225 covered
+    assert fitting_lattice(ext, 0.1, CRS, 2000, 1800).pixel == 0.1
+
+
+def test_fitting_lattice_refuses_limits_that_can_never_fit():
+    ext = [(0.0, 0.0, 3.0, 3.0), (3.0, 0.0, 6.0, 3.0)]
+    with pytest.raises(ValueError, match="never fit"):
+        fitting_lattice(ext, 0.1, CRS, 3, 10**9)
+    with pytest.raises(ValueError, match="never fit"):
+        fitting_lattice(ext, 0.1, CRS, 10**9, 1)
+    assert fitting_lattice(ext, 0.1, CRS, 4, 2).n_pixels <= 4  # the smallest limits do fit
+
+
+def test_stretching_grids_orders_by_cut_and_honours_most():
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "NEAR": (0.0, 60.0, 6.0, 66.0),
+        "FAR": (400.0, 0.0, 406.0, 6.0),
+    }
+    # Either outlier alone is enough at this limit; FAR cuts the lattice most.
+    assert stretching_grids(ext, 0.5, CRS, 20_000, 10**9) == ["FAR", "NEAR"]
+    assert stretching_grids(ext, 0.5, CRS, 20_000, 10**9, most=1) == ["FAR"]
+    # A lower limit only the FAR-less site meets: NEAR alone is not enough.
+    far_less = SiteLattice.covering([ext[g] for g in ("A", "B", "NEAR")], 0.5, CRS).n_pixels
+    near_less = SiteLattice.covering([ext[g] for g in ("A", "B", "FAR")], 0.5, CRS).n_pixels
+    assert far_less < near_less
+    assert stretching_grids(ext, 0.5, CRS, far_less, 10**9) == ["FAR"]
+
+
+def test_stretching_grids_is_empty_for_one_grid():
+    assert stretching_grids({"A": (0.0, 0.0, 6.0, 6.0)}, 0.5, CRS, 100, 100) == []
+
+
+def test_stretching_grids_names_no_one_when_only_the_covered_limit_binds():
+    """The outlier cuts the lattice most, but the covered limit still forces a preview."""
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "C": (12.0, 0.0, 18.0, 6.0),
+        "D": (200.0, 0.0, 206.0, 6.0),
+    }
+    assert covered_pixels(list(ext.values()), 0.5) == 576  # 4 x 144
+    # Without D still 432 > 400 covered: no grid alone is enough.
+    assert stretching_grids(ext, 0.5, CRS, 10**9, 400) == []
+    # With room for three windows, leaving out any one is enough; D cuts the lattice most.
+    assert stretching_grids(ext, 0.5, CRS, 10**9, 440)[0] == "D"
+
+
+def test_finest_fitting_cell_fits_and_the_next_finer_does_not():
+    ext = [(0.0, 0.0, 30.0, 20.0), (30.0, 0.0, 60.0, 20.0)]
+    for max_pixels, max_covered in [(5000, 10**9), (10**9, 6000), (3000, 4000)]:
+        cell = 0.1
+        assert fitting_lattice(ext, cell, CRS, max_pixels, max_covered).pixel != cell
+        got = finest_fitting_cell(ext, cell, CRS, max_pixels, max_covered)
+        assert got > cell
+        assert abs(got * 100 - round(got * 100)) < 1e-9  # whole centimetres
+        assert fitting_lattice(ext, got, CRS, max_pixels, max_covered).pixel == got
+        finer = round(got - 0.01, 2)
+        assert finer <= cell or (
+            fitting_lattice(ext, finer, CRS, max_pixels, max_covered).pixel != finer
+        )
+
+
+def test_finest_fitting_cell_rounds_up_from_an_unrounded_cell():
+    ext = [(0.0, 0.0, 30.0, 20.0)]
+    got = finest_fitting_cell(ext, 0.0125, CRS, 10**9, 100_000)
+    assert got > 0.0125
+    assert fitting_lattice(ext, got, CRS, 10**9, 100_000).pixel == got
+    finer = round(got - 0.01, 2)
+    assert finer <= 0.0125 or fitting_lattice(ext, finer, CRS, 10**9, 100_000).pixel != finer
 
 
 def test_lattice_covers_the_union_and_has_no_phantom_row_at_utm_scale():
@@ -92,151 +197,103 @@ def test_pixel_centres_run_row_major_from_the_north():
     np.testing.assert_allclose(c[1], (10.75, 19.75))
 
 
-def _ids_for(frame, pixel):
-    lat = SiteLattice.covering([slice_extent(frame)], pixel, frame.crs)
-    return frame.cell_index(lat.pixel_centres())
+def _taps_over(frame, lat):
+    """The frame's bilinear taps at every pixel centre of the lattice."""
+    return bilinear_taps(frame, lat.pixel_centres())
 
 
-def test_an_axis_aligned_frame_loses_no_cell_at_pixel_equal_to_cell():
-    cell = 0.25
-    frame = CubeFrame((0.37 * cell, 0.81 * cell), 0.0, cell, 30, 25, CRS)
-    ids = _ids_for(frame, lattice_pixel(cell, [0.0]))
-    assert set(np.unique(ids[ids >= 0])) == set(range(frame.n_cells))
+def _footprint_of(frame, lat):
+    return footprint(_taps_over(frame, lat), lat.height, lat.width)
 
 
-def test_a_rotated_frame_loses_cells_at_pixel_equal_to_cell():
+def test_footprint_compose_samples_each_grid_bilinearly():
     frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
-    ids = _ids_for(frame, frame.cell)
-    assert len(np.unique(ids[ids >= 0])) < frame.n_cells  # why Ruling 2 exists
-
-
-@pytest.mark.parametrize("azimuth", [7.0, 33.0, 45.0, 78.0])
-def test_a_rotated_frame_loses_no_cell_at_half_pitch(azimuth):
-    frame = CubeFrame((3.0, 4.0), azimuth, 0.25, 30, 25, CRS)
-    pixel = lattice_pixel(frame.cell, [azimuth])
-    assert pixel == frame.cell / 2
-    ids = _ids_for(frame, pixel)
-    assert set(np.unique(ids[ids >= 0])) == set(range(frame.n_cells))
-
-
-def test_lattice_pixel_is_the_cell_for_right_angles_and_half_for_anything_else():
-    assert lattice_pixel(0.25, [0.0, 90.0, 270.0]) == 0.25
-    assert lattice_pixel(0.25, [0.0, 2.0]) == 0.125
-    assert lattice_pixel(0.25, [90.0 + 5e-10]) == 0.25
-    assert lattice_pixel(0.25, [90.0 + 1e-8]) == 0.125
-
-
-def test_a_frame_a_hair_off_a_right_angle_counts_as_axis_aligned():
-    """Ruling F-5 (final review D3): axis-aligned when the deviation from a
-    right angle moves the far corner by under 1% of a cell across the
-    frame's own extent, `extent * |sin(deviation)| < 0.01 * cell`. A
-    datum-only CRS shift no longer quadruples the lattice."""
-    cell, extent = 0.25, math.hypot(6.0, 6.0)
-    for azimuth, want in ((1e-6, 0.0), (90.0 + 1e-6, 90.0), (-1e-6, 0.0), (270.0 - 1e-6, 270.0)):
-        assert snap_azimuth(azimuth, extent, cell) == want
-        assert lattice_pixel(cell, [snap_azimuth(azimuth, extent, cell)]) == cell
-    assert snap_azimuth(2.0, extent, cell) == 2.0
-    assert lattice_pixel(cell, [snap_azimuth(2.0, extent, cell)]) == cell / 2
-    # The threshold itself: 0.9% and 1.1% of a cell at the far corner.
-    for fraction, snapped in ((0.009, True), (0.011, False)):
-        azimuth = 90.0 + math.degrees(math.asin(fraction * cell / extent))
-        assert (snap_azimuth(azimuth, extent, cell) == 90.0) is snapped, fraction
-
-
-def test_compose_averages_overlaps_and_leaves_uncovered_pixels_nodata():
-    lat = SiteLattice(0.0, 2.0, 1.0, 3, 2, CRS)  # 6 pixels
-    ids_a = np.array([0, 1, 2, -1, -1, -1])
-    ids_b = np.array([-1, 0, 1, 2, -1, -1])
-    va = np.array([[2.0, 4.0, 6.0]])
-    vb = np.array([[10.0, np.nan, 20.0]])
-    out = compose(lat, [(ids_a, va), (ids_b, vb)])
-    assert out.dtype == np.float32 and out.shape == (2, 3)
-    # px0: A only; px1: mean(4, 10); px2: A=6 and B=nan -> 6; px3: B=20; px4-5: none
-    np.testing.assert_allclose(out.ravel()[:4], [2.0, 7.0, 6.0, 20.0])
-    assert np.isnan(out.ravel()[4:]).all()
-
-
-def test_compose_of_one_layer_is_that_layer_resampled():
-    frame = CubeFrame((0.0, 0.0), 0.0, 1.0, 4, 3, CRS)
-    values = np.arange(12.0).reshape(3, 4)
-    lat = SiteLattice.covering([slice_extent(frame)], 1.0, CRS)
-    out = compose(lat, [(frame.cell_index(lat.pixel_centres()), values)])
-    expected, _ = to_north_up(values, frame)
-    np.testing.assert_array_equal(out, expected)
-    assert out[0, 0] == 8.0  # row 0 is north: the frame's top row
-
-
-# --- footprints (final review I1) ------------------------------------------------
-
-
-def _gathers(lat, frames):
-    """Each frame's whole-lattice gather and its footprint, as compose and
-    compose_footprints take them."""
-    full = [frame.cell_index(lat.pixel_centres()) for frame in frames]
-    return full, [footprint(ids.reshape(lat.height, lat.width)) for ids in full]
-
-
-def test_a_footprint_is_the_tight_window_around_every_placed_pixel():
-    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
-    lat = SiteLattice.covering(
-        [slice_extent(frame), (30.0, 0.0, 31.0, 1.0)], lattice_pixel(0.25, [33.0]), CRS
-    )
-    (ids,), (where,) = _gathers(lat, [frame])
-    grid = ids.reshape(lat.height, lat.width)
-    assert where.ids.shape == (where.row1 - where.row0, where.col1 - where.col0)
-    np.testing.assert_array_equal(where.ids, grid[where.row0 : where.row1, where.col0 : where.col1])
-    outside = np.ones_like(grid, dtype=bool)
-    outside[where.row0 : where.row1, where.col0 : where.col1] = False
-    assert (grid[outside] == -1).all(), "a placed pixel outside the window"
-    # Tight: every edge row and column of the window places a pixel.
-    for edge in (where.ids[0], where.ids[-1], where.ids[:, 0], where.ids[:, -1]):
-        assert (edge >= 0).any()
-    assert where.n_pixels < lat.n_pixels // 2  # the point of it
-    empty = footprint(np.full((4, 5), -1))
-    assert empty.n_pixels == 0 and empty.ids.shape == (0, 0)
-
-
-def test_footprint_compose_equals_full_compose_on_a_rotated_frame():
-    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
-    other = CubeFrame((12.0, 4.0), 0.0, 0.25, 8, 8, CRS)  # apart: the windows do not meet
-    lat = SiteLattice.covering(
-        [slice_extent(frame), slice_extent(other)], lattice_pixel(0.25, [33.0, 0.0]), CRS
-    )
-    full, fps = _gathers(lat, [frame, other])
-    values = [np.arange(30 * 25, dtype=float).reshape(25, 30) + 1.0, np.full((8, 8), -2.5)]
-    out = compose_footprints(lat, list(zip(fps, values)))
+    lat = SiteLattice.covering([slice_extent(frame), (30.0, 0.0, 31.0, 1.0)], 0.25, CRS)
+    rng = np.random.default_rng(3)
+    values = rng.normal(size=(25, 30))
+    out = compose_footprints(lat, [(_footprint_of(frame, lat), values)])
     assert out.dtype == np.float32 and out.shape == (lat.height, lat.width)
-    assert np.array_equal(out, compose(lat, list(zip(full, values))), equal_nan=True)
+    expected = sample(values, _taps_over(frame, lat)).reshape(lat.height, lat.width)
+    np.testing.assert_allclose(out, expected, atol=1e-6)
+    np.testing.assert_array_equal(np.isnan(out), np.isnan(expected))
+    # Not the nearest cell: a rotated frame's pixels fall between cell centres.
+    nearest = values.ravel()[np.clip(_taps_over(frame, lat).nearest, 0, None)]
+    nearest = np.where(_taps_over(frame, lat).inside, nearest, np.nan).reshape(out.shape)
+    assert np.nanmax(np.abs(out - nearest)) > 0.05
+
+
+def test_a_footprint_is_the_tight_window_around_every_inside_point():
+    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
+    lat = SiteLattice.covering([slice_extent(frame), (30.0, 0.0, 31.0, 1.0)], 0.25, CRS)
+    taps = _taps_over(frame, lat)
+    where = footprint(taps, lat.height, lat.width)
+    grid = taps.inside.reshape(lat.height, lat.width)
+    rows, cols = where.row1 - where.row0, where.col1 - where.col0
+    assert where.taps.n == rows * cols == where.n_pixels
+    window = (slice(where.row0, where.row1), slice(where.col0, where.col1))
+    np.testing.assert_array_equal(
+        where.taps.nearest, taps.nearest.reshape(grid.shape)[window].ravel()
+    )
+    np.testing.assert_array_equal(
+        where.taps.weights,
+        taps.weights.reshape(4, *grid.shape)[(slice(None), *window)].reshape(4, -1),
+    )
+    outside = np.ones_like(grid)
+    outside[window] = False
+    assert not grid[outside].any(), "an inside point outside the window"
+    inside = where.taps.inside.reshape(rows, cols)
+    for edge in (inside[0], inside[-1], inside[:, 0], inside[:, -1]):
+        assert edge.any()  # tight
+    assert where.n_pixels < lat.n_pixels // 2  # the point of it
+    nothing = bilinear_taps(frame, np.full((20, 2), 1e6))
+    empty = footprint(nothing, 4, 5, 7, 9)
+    assert empty.n_pixels == 0 and (empty.row0, empty.col0) == (7, 9)
+    assert empty.row1 == 7 and empty.col1 == 9
 
 
 def test_footprint_compose_still_averages_overlapping_layers():
     a = CubeFrame((3.0, 4.0), 20.0, 0.25, 30, 25, CRS)
     b = CubeFrame((6.0, 5.0), 50.0, 0.25, 30, 25, CRS)
-    lat = SiteLattice.covering(
-        [slice_extent(a), slice_extent(b)], lattice_pixel(0.25, [20.0, 50.0]), CRS
-    )
-    full, fps = _gathers(lat, [a, b])
+    lat = SiteLattice.covering([slice_extent(a), slice_extent(b)], 0.25, CRS)
+    ta, tb = _taps_over(a, lat), _taps_over(b, lat)
     rng = np.random.default_rng(12)
     va, vb = rng.normal(size=(25, 30)), rng.normal(size=(25, 30)) + 3.0
     va[3, 4] = vb[10, 11] = np.nan  # an unpopulated cell is skipped, not averaged in
-    both = (full[0] >= 0) & (full[1] >= 0)
+    sa, sb = sample(va, ta), sample(vb, tb)
+    both = np.isfinite(sa) & np.isfinite(sb)
     assert both.sum() > 100, "the frames must overlap"
-    out = compose_footprints(lat, [(fps[0], va), (fps[1], vb)])
-    assert np.array_equal(out, compose(lat, [(full[0], va), (full[1], vb)]), equal_nan=True)
-    pixel = np.flatnonzero(
-        both & np.isfinite(va.ravel()[full[0]]) & np.isfinite(vb.ravel()[full[1]])
-    )[0]
-    mean = (va.ravel()[full[0][pixel]] + vb.ravel()[full[1][pixel]]) / 2.0
-    assert out.ravel()[pixel] == np.float32(mean)
+    out = compose_footprints(lat, [(_footprint_of(a, lat), va), (_footprint_of(b, lat), vb)])
+    expected = np.where(both, (sa + sb) / 2.0, np.where(np.isfinite(sa), sa, sb)).reshape(out.shape)
+    np.testing.assert_allclose(out, expected, atol=1e-6)
+    np.testing.assert_array_equal(np.isnan(out), np.isnan(expected))
+    assert np.abs(sa[both] - sb[both]).max() > 1.0  # the mean is not either layer
+
+
+def test_compose_counts_takes_whole_counts_within_a_grid():
+    frame = CubeFrame((3.0, 4.0), 33.0, 0.25, 30, 25, CRS)
+    lat = SiteLattice.covering([slice_extent(frame)], 0.25, CRS)
+    rng = np.random.default_rng(5)
+    counts = rng.integers(1, 6, size=(25, 30)).astype(np.float32)
+    counts[4:8, 6:12] = 0.0  # a hole: no pixel next to it may blend a count in
+    where = _footprint_of(frame, lat)
+    out = compose_footprints(lat, [(where, counts)], counts=True)
+    got = out[np.isfinite(out)]
+    assert got.size > 100
+    assert set(np.unique(got)) <= {1.0, 2.0, 3.0, 4.0, 5.0}  # never a blend
+    blended = compose_footprints(lat, [(where, counts)])
+    assert not set(np.unique(blended[np.isfinite(blended)])) <= {0.0, 1.0, 2.0, 3.0, 4.0, 5.0}
+    expected = sample_counts(counts, _taps_over(frame, lat)).reshape(out.shape)
+    np.testing.assert_array_equal(out, expected)
 
 
 def test_compose_footprints_refuses_a_window_off_the_lattice():
     lat = SiteLattice(0.0, 2.0, 1.0, 3, 2, CRS)
-    ids = np.zeros((1, 2), dtype=np.intp)
+    frame = CubeFrame((0.0, 0.0), 0.0, 1.0, 1, 1, CRS)
+    taps = bilinear_taps(frame, np.array([[0.5, 0.5], [0.5, 0.5]]))
     with pytest.raises(ValueError, match="lattice"):
-        compose_footprints(lat, [(Footprint(1, 2, 2, 4, ids), np.ones((1, 1)))])
-    with pytest.raises(ValueError, match="ids"):
-        Footprint(0, 1, 0, 1, ids)
+        compose_footprints(lat, [(Footprint(1, 2, 2, 4, taps), np.ones((1, 1)))])
+    with pytest.raises(ValueError, match="taps"):
+        Footprint(0, 1, 0, 1, taps)
 
 
 # --- the window mapping --------------------------------------------------------
@@ -624,23 +681,19 @@ def test_real_halves_at_different_azimuths_compose_and_find_their_seam():
     seams = find_seams({"A": frame_a, "B": frame_b}, {"A": ca, "B": cb}, dict(A=SPACING, B=SPACING))
     assert [(s.a, s.b) for s in seams] == [("A", "B")]
 
-    pixel = lattice_pixel(CELL, [frame_a.azimuth, frame_b.azimuth])
-    assert pixel == CELL / 2
-    lat = SiteLattice.covering([slice_extent(frame_a), slice_extent(frame_b)], pixel, crs)
+    lat = SiteLattice.covering([slice_extent(frame_a), slice_extent(frame_b)], CELL, crs)
     centres = lat.pixel_centres()
     layers = []
     covered = np.zeros(lat.n_pixels, dtype=bool)
     for frame, v, c in ((frame_a, va, ca), (frame_b, vb, cb)):
-        ids = frame.cell_index(centres)
+        taps = bilinear_taps(frame, centres)
         populated = np.flatnonzero(c.ravel() > 0)
-        assert np.isin(populated, ids).all()  # every populated cell is placed
-        layers.append((ids, v))
-        covered |= (ids >= 0) & np.isfinite(v.ravel()[np.clip(ids, 0, None)])
-    out = compose(lat, layers)
+        assert np.isin(populated, taps.nearest).all()  # every populated cell is placed
+        layers.append((footprint(taps, lat.height, lat.width), v))
+        covered |= np.isfinite(sample(v, taps))
+    out = compose_footprints(lat, layers)
     np.testing.assert_array_equal(np.isfinite(out).ravel(), covered)
-    # Final review I1: composing each half over its own window gives the same bits.
-    windows = [(footprint(ids.reshape(lat.height, lat.width)), v) for ids, v in layers]
-    assert np.array_equal(compose_footprints(lat, windows), out, equal_nan=True)
+    assert covered.any()
 
 
 def _chain_slices(k, g_b, g_c):
@@ -678,3 +731,46 @@ def test_real_chain_edge_match_recovers_gains_and_equals_the_pairwise_solve():
         # (b) global == pairwise: one equation per seam, strips measured in the test
         assert n1["B"] / n1["A"] == pytest.approx(_strip_ratio(perturbed, seams_p[0]), rel=1e-5)
         assert n1["C"] / n1["B"] == pytest.approx(_strip_ratio(perturbed, seams_p[1]), rel=1e-5)
+
+
+def _lines_seen(ratio, offset, phase):
+    """How many of 40 one-cell-wide lines (every 0.5 m, 20 m grid) a preview draws."""
+    cell = 0.05
+    n = int(round(20.0 / cell))
+    frame = CubeFrame((offset, offset), 0.0, cell, n, n, CRS)
+    columns = list(range(phase, n, 10))
+    lat = SiteLattice.covering([slice_extent(frame)], cell * ratio, CRS)
+    where = footprint(bilinear_taps(frame, lat.pixel_centres()), lat.height, lat.width)
+    seen = 0
+    for column in columns:
+        one = np.full((n, n), np.nan, dtype=np.float32)
+        one[:, column] = 1.0
+        out = compose_footprints(lat, [(where, one)], counts=True, cells_per_pixel=ratio)
+        seen += int(np.isfinite(out).any())
+    return seen, len(columns)
+
+
+@pytest.mark.parametrize("ratio", [2, 4, 8])
+@pytest.mark.parametrize("offset", [0.0, 0.025])
+@pytest.mark.parametrize("phase", [0, 1])  # which cell column a line sits on
+def test_a_preview_shows_every_one_cell_line_of_coverage(ratio, offset, phase):
+    assert _lines_seen(ratio, offset, phase) == (40, 40)
+
+
+def test_max_pool_counts_takes_the_window_maximum_and_ignores_blanks():
+    counts = np.full((7, 9), np.nan, dtype=np.float32)
+    counts[3, 4] = 2.0
+    counts[0, 0] = 5.0
+    got = max_pool_counts(counts, 2)
+    assert got.dtype == np.float32
+    assert got[2, 2] == 5.0
+    assert got[3, 6] == 2.0 and np.isnan(got[3, 7])  # reach 2: columns 2..6
+    assert got[5, 4] == 2.0 and np.isnan(got[6, 4])
+    np.testing.assert_array_equal(max_pool_counts(counts, 0), counts)
+    for reach in (1, 3, 5):
+        brute = np.full_like(counts, np.nan)
+        for y in range(7):
+            for x in range(9):
+                w = counts[max(0, y - reach) : y + reach + 1, max(0, x - reach) : x + reach + 1]
+                brute[y, x] = np.nanmax(w) if np.isfinite(w).any() else np.nan
+        np.testing.assert_array_equal(max_pool_counts(counts, reach), brute)

@@ -131,6 +131,8 @@ def plan_site_export(
     (Ruling F-2); the caller knows what was included, the engine only what
     it was sent.
     """
+    if site_engine.export_refusal is not None:
+        raise RuntimeError(site_engine.export_refusal)
     lattice, site_z = site_engine.lattice, site_engine.site_z
     ready = site_engine.ready_grids
     if lattice is None or site_z is None or not ready:

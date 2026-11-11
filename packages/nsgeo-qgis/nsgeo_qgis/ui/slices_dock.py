@@ -138,13 +138,17 @@ class ElidedLabel(QLabel):
         super().__init__("")
         self.full_text = ""
         self._hint = ""
+        self._hint_whole = False
         self.setWordWrap(False)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._fit_height()
         self.setText(text)
 
-    def set_hint(self, hint: str) -> None:
+    def set_hint(self, hint: str, *, whole: bool = False) -> None:
+        """`whole`: the hint already contains the full text and more, so it is the
+        tooltip even when the text is elided (the site note's export refusal)."""
         self._hint = hint
+        self._hint_whole = whole
         self._elide()
 
     def setText(self, text: str | None) -> None:  # noqa: N802 -- Qt override
@@ -185,7 +189,7 @@ class ElidedLabel(QLabel):
         super().setText(shown)
         # The full text when it is cut short; the hint only while there is a
         # state to explain, so a blank line never carries one (walkthrough round 1).
-        if shown != self.full_text:
+        if shown != self.full_text and not (self._hint_whole and self._hint):
             self.setToolTip(self.full_text)
         else:
             self.setToolTip(self._hint if self.full_text else "")
@@ -442,6 +446,14 @@ class SlicesDock(QgsDockWidget):
         self.refine_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         readout_row.addWidget(self.refine_label, 1)
         position_layout.addLayout(readout_row)
+
+        # Whole site only: the preview note, or why nothing is drawn. One
+        # elided line of fixed height (as `refine_label`), the full text in
+        # its tooltip, so a long reason never widens the dock or moves the
+        # scrolled panel.
+        self.site_note = ElidedLabel("")
+        self.site_note.setVisible(False)
+        position_layout.addWidget(self.site_note)
 
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
