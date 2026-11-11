@@ -96,6 +96,7 @@ a milestone merges or the plan changes.
 | | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
 | | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | next release |
 | | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | next release |
+| | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | next release |
 
 ### In progress
 
@@ -104,34 +105,32 @@ a milestone merges or the plan changes.
 
 ### Next, in order
 
-The first five items come before M15. Most are things the next milestones
+The first four items come before M15. Most are things the next milestones
 build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
 1. **Fine cells.** A memory warning that counts what minimum curvature really
    holds ([#148]).
-2. **The background solver** (the worker items in [#120]). M15 solves its cuts
-   on the same worker.
-3. **This grid and Whole site agree** on a grid's lines and preset ([#100],
+2. **This grid and Whole site agree** on a grid's lines and preset ([#100],
    [#101], [#106], [#103]). A cut shows the cube of whichever scope is on
    screen.
-4. **Decide the time base** ([#97]): whether samples will ever be shifted so the
+3. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-5. **Line placement corrections:** a destagger shift ([#47]) and stretching or
+4. **Line placement corrections:** a destagger shift ([#47]) and stretching or
    compressing lines to fit the grid ([#3]). Real grids need them now, and
    M17's GPS lines use the same shift.
-6. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+5. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-7. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+6. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-8. **How a line is identified** ([#89]), settled before M17 stores GPS
+7. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-9. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+8. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-10. **M18: issue cleanup.** Work through the backlog of open bugs and review
-    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-11. **M19: magnetometer data.** The first instrument other than GPR.
+9. **M18: issue cleanup.** Work through the backlog of open bugs and review
+   follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
+10. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
 M15 brings picking to cuts; and the migration real-data test ([#125]), before

@@ -21,7 +21,11 @@ through a `queue.SimpleQueue` that a `QTimer` drains every
 `REFINE_POLL_MS`. Nothing Qt is touched off the GUI thread and no
 cross-thread signal is used. Every entry carries the generation it was
 queued under, so anything a cancelled or superseded list delivers late is
-dropped on the GUI thread, never shown.
+dropped on the GUI thread, never shown. The timer runs until the worker's
+last list has ended, not only until nothing more is owed: a job that
+finishes just as it is cancelled is queued after the cancel, and it holds
+its values and plan (about 220 MB at the frame cap), so it is drained and
+let go then, not kept until the next list (#120).
 
 The poll slot is a Qt slot, so it guards its own body: an exception there
 is swallowed by PyQt locally but aborts CI's QGIS containers (`qFatal`).
@@ -33,7 +37,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Protocol
 
 from nsgeo.slices import SolveStopped
@@ -48,8 +52,15 @@ THREAD_NAME_PREFIX = "nsgeo-refine"
 
 
 def _describe(exc: BaseException) -> str:
-    """The message, or the type when there is none (`MemoryError()`)."""
-    return str(exc) or type(exc).__name__
+    """The type and the message, as Python prints them (`KeyError: 'k'`), or
+    the type alone when there is no message (`MemoryError()`) or it cannot
+    be had: the worker reports every error, so this must not raise."""
+    name = type(exc).__name__
+    try:
+        message = str(exc)
+    except BaseException:  # noqa: BLE001 -- a broken __str__ still ends the list
+        return name
+    return f"{name}: {message}" if message else name
 
 
 class RefineJob(Protocol):
@@ -65,6 +76,9 @@ class Refiner:
         self._stop = threading.Event()
         self._remaining = 0
         self._closed = False
+        #: The last list handed to the worker; lists run one after another, so
+        #: once it is done, so is every one before it.
+        self._future: Future | None = None
         self._on_landed: Callable[[RefineJob], None] | None = None
         self._on_error: Callable[[str], None] | None = None
         self._poll = QTimer(parent)
@@ -84,7 +98,13 @@ class Refiner:
         """Cancel whatever runs, then run `jobs` in order; each lands on the
         GUI thread through `on_landed` after it finishes."""
         if self._closed or sip.isdeleted(self._poll):
-            _log("a refine was started after the worker shut down; ignored")
+            # A list still running is stopped all the same: with no poll it
+            # could never land, and each of its jobs holds its plan.
+            self.cancel()
+            if self._closed:
+                _log("a refine was started after the worker shut down; ignored")
+            else:
+                _log("a refine was started after its panel was deleted; ignored")
             return
         self.cancel()
         self._generation += 1
@@ -94,7 +114,9 @@ class Refiner:
         self._on_error = on_error
         if not jobs:
             return
-        self._executor.submit(self._run_list, self._generation, list(jobs), self._stop)
+        self._future = self._executor.submit(
+            self._run_list, self._generation, list(jobs), self._stop
+        )
         self._poll.start(REFINE_POLL_MS)
 
     def cancel(self) -> None:
@@ -109,6 +131,8 @@ class Refiner:
         self._closed = True
         self.cancel()
         self._executor.shutdown(wait=True, cancel_futures=True)
+        # Nothing lands after this, so what the stopped list queued is let go.
+        self._discard()
         # The timer is parented to the dock, which may be gone by now.
         if not sip.isdeleted(self._poll):
             self._poll.stop()
@@ -127,15 +151,26 @@ class Refiner:
                 # Nobody asked it to stop, so the list must not end silently.
                 self._done.put((generation, None, "the solve stopped unexpectedly"))
                 return
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 -- reported, never re-raised
+                # Re-raised, a KeyboardInterrupt or SystemExit would only be
+                # kept on a future nobody reads: the list ends as for any error.
                 self._done.put((generation, None, _describe(exc)))
-                if not isinstance(exc, Exception):
-                    raise
+                return
+            if stop.is_set():
+                # Finished as its list was stopped: it can never land, so it
+                # is not queued to hold its plan. The poll drains what a stop
+                # just after this check still lets through.
                 return
             self._done.put((generation, job, None))
 
     def _drain(self) -> None:
         try:
+            # Read before the queue: a list queues everything before its
+            # future is done, so a drain after that leaves nothing behind.
+            # It says so for this list only: a callback below may start
+            # another, which the poll must then wait for too.
+            future = self._future
+            idle = future is None or future.done()
             while True:
                 try:
                     generation, job, message = self._done.get_nowait()
@@ -150,10 +185,18 @@ class Refiner:
                 else:
                     self._remaining -= 1
                     self._deliver(self._on_landed, job)
-            if self._remaining <= 0:
+            if self._remaining <= 0 and idle and self._future is future:
                 self._poll.stop()
         except Exception as exc:
             _log(f"the refine poll failed: {exc}")
+
+    def _discard(self) -> None:
+        """Let go of everything queued, unread."""
+        while True:
+            try:
+                self._done.get_nowait()
+            except queue.Empty:
+                return
 
     @staticmethod
     def _deliver(callback: Callable | None, argument: object) -> None:
