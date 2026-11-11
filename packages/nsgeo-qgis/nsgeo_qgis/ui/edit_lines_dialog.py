@@ -151,7 +151,9 @@ class EditLinesDialog(QDialog):
             pass  # an empty table; _refresh says why
 
         self.setWindowTitle(f"Edit lines · {grid_id}")
-        self.resize(1100, 560)
+        # The bulk panel grew by two rows, so open taller and let the table take
+        # the extra height (placement corrections plan, Ruling C1).
+        self.resize(1100, 760)
         layout = QVBoxLayout(self)
         self.header_label = QLabel("")
         layout.addWidget(self.header_label)
@@ -181,7 +183,7 @@ class EditLinesDialog(QDialog):
             self._combos.append(combo)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.itemSelectionChanged.connect(self._selection_changed)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
 
         self.bulk = QGroupBox("")
         bulk = QVBoxLayout(self.bulk)
