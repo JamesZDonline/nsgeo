@@ -558,3 +558,23 @@ def test_toggling_fit_back_and_forth_leaves_no_stale_note(tmp_path):
     recompute_offsets(rows, off)
     assert rows[0].note == exceeds
     assert rows[0].scale == 1.0
+
+
+def test_fit_at_import_ignores_start_along_and_lands_on_both_edges(tmp_path):
+    from nsgeo_qgis.line_edit import is_fitted, span_m
+
+    paths = [
+        synthetic_dzt(tmp_path, f"FILE__00{i}.DZT", n_traces=n) for i, n in ((1, 660), (2, 540))
+    ]
+    base = ImportOptions(grid_id="G", axis="y", spacing=0.5, start_along=0.5, grid_size_along=10.0)
+    on = dataclasses.replace(base, fit_to_grid=True)
+    rows = plan_import(paths, on)
+    recompute_offsets(rows, on)
+    for line, row in zip(rows_to_lines(rows, on), rows, strict=True):
+        along = line.distance_along()
+        assert {round(along[0], 9), round(along[-1], 9)} == {0.0, 10.0}
+        span = span_m(row.n_traces, row.traces_per_metre)
+        assert is_fitted(line.placement, span, 10.0)
+    recompute_offsets(rows, base)
+    starts = [ln.distance_along()[0] for ln in rows_to_lines(rows, base)]
+    assert starts == pytest.approx([0.5, 10.5])

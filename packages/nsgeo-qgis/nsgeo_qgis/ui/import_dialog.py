@@ -236,7 +236,7 @@ class ImportDialog(QDialog):
             self.label_number,
         ):
             b.toggled.connect(self._replan)
-        self.fit_to_grid.toggled.connect(self._replan)
+        self.fit_to_grid.toggled.connect(self._fit_toggled)
         self._follow_spacing()
         self._grid_changed()
 
@@ -368,6 +368,17 @@ class ImportDialog(QDialog):
             self.status.setText(f"could not read a file: {exc}")
             return
         self.rows.extend(new_rows)
+        self._replan()
+
+    def _fit_toggled(self, checked: bool) -> None:
+        # A fit puts both ends on the grid's edges, so Start along is unused
+        # while it is on; greyed out, the ignored value stays visible.
+        self.start_along.setEnabled(not checked)
+        self.start_along.setToolTip(
+            "Fitting puts every line's ends on the grid's edges, so Start along is not used."
+            if checked
+            else ""
+        )
         self._replan()
 
     def _replan(self, *_: Any) -> None:

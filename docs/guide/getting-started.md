@@ -283,7 +283,8 @@ and its **Import** button name the grid the lines will go into.
    sits in the middle of its strip like the others, and follows **Spacing
    across** until you type a value of your own. Tick **Stretch or compress each
    line to the grid's length** if your lines were walked edge to edge but the
-   wheel read long or short; it is off by default, so lines run long or short on
+   wheel read long or short; it greys out **Start along**, because a fitted line starts
+   on the grid's edge. It is off by default, so lines run long or short on
    purpose stay as recorded.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.

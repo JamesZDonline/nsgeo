@@ -240,6 +240,11 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
                 span = span_m(row.n_traces or 0, row.traces_per_metre)
                 if span > 0:  # not `<= 0`: a corrupt header's NaN must not pass
                     row.scale = fit_scale(span, options.grid_size_along)
+                    # Like Edit lines' Fit (inset 0): the first trace on the
+                    # edge the line starts at, the last on the other, so
+                    # Start along is not used (placement corrections plan,
+                    # call 5). This also makes call 7's refit apply.
+                    row.start_along = options.grid_size_along if row.direction == -1 else 0.0
                     fitted = (
                         f"fitted to the grid's {options.grid_size_along:.2f} m "
                         f"(scale ×{row.scale:.4f})"
