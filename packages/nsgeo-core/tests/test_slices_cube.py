@@ -163,16 +163,8 @@ def test_values_at_rejects_ids_outside_the_frame(bad):
         cube.values_at(np.array(bad))
 
 
-@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint", "overlapping"])
-def test_two_blocks_read_as_the_count_weighted_mean(overlap):
-    frame = _frame(100, 125, 0.2)
-    lines = _synthetic_lines(6)
-    out_idx, back_idx = ([0, 1, 2, 3], [2, 3, 4, 5]) if overlap else ([0, 2, 4], [1, 3, 5])
-    outward, _ = _build([lines[i] for i in out_idx], frame, Z)
-    back, _ = _build([lines[i] for i in back_idx], frame, Z)
-    both = SliceCube(frame=frame, z=Z, blocks=outward.blocks + back.blocks, provenance=_prov())
-    # Lines in both blocks count twice, as they would if built twice.
-    reference, _ = _build([lines[i] for i in out_idx + back_idx], frame, Z)
+def _assert_blocks_combine(frame, first, second, reference):
+    both = SliceCube(frame=frame, z=Z, blocks=first.blocks + second.blocks, provenance=_prov())
     for k0, k1 in [(0, 24), (4, 9), (23, 24)]:
         np.testing.assert_allclose(
             both.slice_levels(k0, k1), reference.slice_levels(k0, k1), rtol=1e-6, equal_nan=True
@@ -182,6 +174,33 @@ def test_two_blocks_read_as_the_count_weighted_mean(overlap):
         both.values_at(ids, 3, 8), reference.values_at(ids, 3, 8), rtol=1e-6, equal_nan=True
     )
     np.testing.assert_array_equal(both.coverage(), reference.coverage())
+
+
+@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint", "overlapping"])
+def test_two_blocks_read_as_the_count_weighted_mean(overlap):
+    frame = _frame(100, 125, 0.2)
+    lines = _synthetic_lines(6)
+    out_idx, back_idx = ([0, 1, 2, 3], [2, 3, 4, 5]) if overlap else ([0, 2, 4], [1, 3, 5])
+    outward, _ = _build([lines[i] for i in out_idx], frame, Z)
+    back, _ = _build([lines[i] for i in back_idx], frame, Z)
+    # Lines in both blocks count twice, as they would if built twice.
+    reference, _ = _build([lines[i] for i in out_idx + back_idx], frame, Z)
+    _assert_blocks_combine(frame, outward, back, reference)
+
+
+def test_blocks_sharing_cells_with_different_means_and_counts_are_count_weighted():
+    """The two cases above cannot tell a count-weighted read from a plain mean
+    of the blocks' means: shared cells there hold the same mean in both. Here
+    X and Y lines share 16 cells with different data and different counts."""
+    frame = _frame(27, 27, 0.75)
+    xs = _synthetic_lines(5, "x", seed=1, extent=4.9)
+    ys = _synthetic_lines(5, "y", seed=2, n_traces=37, extent=4.9)
+    first, _ = _build(xs, frame, Z)
+    second, _ = _build(ys, frame, Z)
+    shared = np.intersect1d(first.blocks[0].cells, second.blocks[0].cells)
+    assert shared.size > 0
+    reference, _ = _build(xs + ys, frame, Z)
+    _assert_blocks_combine(frame, first, second, reference)
 
 
 def _block(cells=(1, 4, 9), nz=24, count=None, mean=None):
@@ -200,6 +219,8 @@ _MALFORMED = {
     "negative cell": lambda: _block(cells=(-1, 4, 9)),
     "mean of the wrong shape": lambda: _block(mean=np.ones((24, 2), np.float32)),
     "mean nz differs from z": lambda: _block(nz=23),
+    "non-float mean": lambda: _block(mean=np.ones((24, 3), np.int32)),
+    "float count": lambda: _block(count=np.ones(3, np.float32)),
     "zero count": lambda: _block(count=np.array([1, 0, 1], np.int32)),
 }
 

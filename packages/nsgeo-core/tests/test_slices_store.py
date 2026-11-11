@@ -435,6 +435,10 @@ def _damage_object_cells(arrays, meta):
     arrays["cells_0"] = arrays["cells_0"].astype(object)
 
 
+def _damage_float_cells(arrays, meta):
+    arrays["cells_0"] = arrays["cells_0"].astype(np.float64) + 0.5
+
+
 @pytest.mark.parametrize(
     "damage",
     [
@@ -445,6 +449,7 @@ def _damage_object_cells(arrays, meta):
         _damage_zero_count,
         _damage_wrong_mean_shape,
         _damage_object_cells,
+        _damage_float_cells,
     ],
     ids=lambda f: f.__name__.removeprefix("_damage_"),
 )

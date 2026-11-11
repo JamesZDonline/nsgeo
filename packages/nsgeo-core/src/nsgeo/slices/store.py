@@ -103,9 +103,9 @@ def _read_blocks(path: Path, bundle: Any, listed: list[dict[str, Any]]) -> list[
         heading = entry["heading_deg"]
         blocks.append(
             CubeBlock(
-                cells=bundle[f"cells_{i}"].astype(np.int64, copy=False),
-                mean=bundle[f"mean_{i}"].astype(np.float32, copy=False),
-                count=bundle[f"count_{i}"].astype(np.int32, copy=False),
+                cells=bundle[f"cells_{i}"].astype(np.int64, casting="same_kind", copy=False),
+                mean=bundle[f"mean_{i}"].astype(np.float32, casting="same_kind", copy=False),
+                count=bundle[f"count_{i}"].astype(np.int32, casting="same_kind", copy=False),
                 heading_deg=None if heading is None else float(heading),
             )
         )

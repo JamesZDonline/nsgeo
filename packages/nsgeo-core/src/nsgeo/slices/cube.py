@@ -76,8 +76,8 @@ class CubeBlock:
     for a block holding every direction; #47 sets it once it groups lines
     by travel direction.
 
-    Dtypes are float32, int32 and int64 as built and as saved, but not
-    enforced here: `save_cube` narrows whatever it is given, so a wide
+    Dtypes are float32, int32 and int64 as built and as saved, but only
+    their kinds are enforced here: `save_cube` narrows whatever it is given, so a wide
     block is a caller's convenience and not a corrupt one.
     """
 
@@ -91,6 +91,10 @@ class CubeBlock:
             raise ValueError(f"cells must be 1-D, got shape {self.cells.shape}")
         if self.cells.dtype.kind not in "iu":
             raise ValueError(f"cells must be integer ids, got dtype {self.cells.dtype}")
+        if self.mean.dtype.kind != "f":
+            raise ValueError(f"mean must be floating point, got dtype {self.mean.dtype}")
+        if self.count.dtype.kind not in "iu":
+            raise ValueError(f"count must be integer, got dtype {self.count.dtype}")
         n = self.cells.size
         if self.mean.ndim != 2 or self.mean.shape[1] != n:
             raise ValueError(f"mean must be (nz, {n}), got {self.mean.shape}")
