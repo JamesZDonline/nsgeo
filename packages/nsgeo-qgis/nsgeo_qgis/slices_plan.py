@@ -226,6 +226,13 @@ METHOD_LABELS: dict[str, str] = {
 #: (`test_the_weights_estimate_covers_building_them`).
 WEIGHT_BYTES_PER_CELL = 4 * NEIGHBOURS_PER_QUADRANT * 8
 
+#: Minimum curvature holds two sets of weights for a frame (#148): its plan
+#: (the operator and, since #111, its multigrid levels: 95-98 B a cell,
+#: measured on the same lines) and, built with it, the kriging preview drawn
+#: while the depth moves (`PREVIEW_METHOD`, `WEIGHT_BYTES_PER_CELL`). This is
+#: the plan's part; `estimate_memory` counts it on top of the preview's.
+CURVATURE_PLAN_BYTES_PER_CELL = 96
+
 #: The remembered fields a `SliceFinish` is made of.
 FINISH_FIELDS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
 
@@ -346,9 +353,14 @@ def preset_transform_conflict(steps: Sequence[Mapping[str, Any]]) -> str | None:
 #: while they are built (`WEIGHT_BYTES_PER_CELL`), and each finished slice
 #: needs about 55 B a cell more to apply them and 41 B to smooth, against
 #: the 4 B a cell of the slice itself. 4 million cells is then about 0.4 GB
-#: of weights and 0.2 GB a slice (0.4 GB smoothed), inside the 1.5 GB
-#: default budget, and still covers a 100 m grid at 0.05 m -- far finer
-#: than spec 4's own "no smaller than the trace spacing" would allow.
+#: of weights and 0.2 GB a slice (0.4 GB smoothed). Minimum curvature holds
+#: twice the weights, its plan beside a kriging preview (about 190 B a cell,
+#: `CURVATURE_PLAN_BYTES_PER_CELL`, #148), so nearer 0.8 GB, and each solve
+#: needs about 35 B a cell of working space, with up to two running at once
+#: (the refine worker and the GUI thread): about 1.2 GB smoothed. Both stay
+#: inside the 1.5 GB default budget, and the cap still covers a 100 m grid at
+#: 0.05 m -- far finer than spec 4's own "no smaller than the trace spacing"
+#: would allow.
 MAX_FRAME_CELLS = 4_000_000
 
 #: Two limits decide whether the whole-site picture is drawn at the cell or as
@@ -490,8 +502,11 @@ def default_cell(spacing_m: float, floor: float) -> float:
     return max(floor, min(DEFAULT_CELL_M, spacing_m / 2.0))
 
 
-def estimate_memory(prepared_samples: int, n_cells: int, nz: int, n_covered: int) -> MemoryEstimate:
-    """Bytes held by the prepared lines, and by a cube of this shape.
+def estimate_memory(
+    prepared_samples: int, n_cells: int, nz: int, n_covered: int, *, method: str
+) -> MemoryEstimate:
+    """Bytes held by the prepared lines, by a cube of this shape, and by the
+    interpolation weights for `method`.
 
     `prepared_samples` is the total float32 sample count across every
     prepared line (`sum(n_samples * n_traces)`). A resident cube is packed
@@ -499,13 +514,18 @@ def estimate_memory(prepared_samples: int, n_cells: int, nz: int, n_covered: int
     ids for the `n_covered` covered cells only, which is exactly
     `SliceCube.nbytes`. `n_covered` is required so no caller can keep the
     dense figure by omission. The fill weights are written for every cell of
-    the frame, so they still scale with `n_cells`.
+    the frame, so they still scale with `n_cells`. Minimum curvature holds its
+    plan beside the kriging preview built with it, so it counts both (#148);
+    `method` is required for the same reason as `n_covered`.
     """
     covered = int(n_covered)
+    per_cell = WEIGHT_BYTES_PER_CELL
+    if method == "min_curvature":
+        per_cell += CURVATURE_PLAN_BYTES_PER_CELL
     return MemoryEstimate(
         lines_bytes=int(prepared_samples) * 4,
         cube_bytes=int(nz) * covered * 4 + covered * 4 + covered * 8,
-        weights_bytes=int(n_cells) * WEIGHT_BYTES_PER_CELL,
+        weights_bytes=int(n_cells) * per_cell,
     )
 
 
