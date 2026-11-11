@@ -15,8 +15,8 @@ of zoomed-in pixels show a neighbouring cell's value. Bilinear at the cell
 pitch drops no cell's influence and shows no stair-stepped neighbour.
 
 Counts (coverage) are never blended: `sample_counts` takes the largest
-count among the corners, so a line one cell wide stays visible. A gap of
-about a cell or less beside data can close.
+count among the in-frame corners with positive weight, so a line one cell
+wide stays visible. A gap of about a cell or less beside data can close.
 """
 
 from __future__ import annotations
@@ -148,6 +148,52 @@ def sample(values: np.ndarray, taps: Taps) -> np.ndarray:
     num += base
     num[blank] = np.nan
     return num
+
+
+def max_pool_counts(counts: np.ndarray, reach: int) -> np.ndarray:
+    """Each cell takes the largest count within `reach` cells of it (a square window).
+
+    A (2 * reach + 1) square maximum, with NaN (a cell with no traces) ignored
+    and kept only where the whole window is blank. Float32 `(ny, nx)`. Used
+    before `sample_counts` when a preview pixel spans several cells, so a line
+    one cell wide is read by some pixel's corners instead of falling between
+    them. `reach` 0 returns the counts unchanged.
+    """
+    if reach < 0:
+        raise ValueError(f"reach must be >= 0, got {reach}")
+    out = np.asarray(counts, dtype=np.float32)
+    if reach == 0:
+        return out
+    for axis in (0, 1):
+        out = _window_max(out, reach, axis)
+    return out
+
+
+def _window_max(values: np.ndarray, reach: int, axis: int) -> np.ndarray:
+    """The maximum over `[i - reach, i + reach]` along `axis`, NaN-ignoring."""
+    width = 2 * reach + 1
+    pad = [(0, 0), (0, 0)]
+    pad[axis] = (reach, reach)
+    padded = np.pad(values, pad, mode="constant", constant_values=np.nan)
+    n = values.shape[axis]
+
+    def part(a: np.ndarray, start: int, length: int) -> np.ndarray:
+        index = [slice(None), slice(None)]
+        index[axis] = slice(start, start + length)
+        return a[tuple(index)]
+
+    # running[m] holds the maximum over windows of `span` starting at m.
+    span = 1
+    running = padded
+    while span * 2 <= width:
+        length = running.shape[axis] - span
+        running = np.fmax(part(running, 0, length), part(running, span, length))
+        span *= 2
+    if span < width:
+        shift = width - span
+        length = n
+        running = np.fmax(part(running, 0, length), part(running, shift, length))
+    return np.ascontiguousarray(part(running, 0, n))
 
 
 def sample_counts(counts: np.ndarray, taps: Taps) -> np.ndarray:

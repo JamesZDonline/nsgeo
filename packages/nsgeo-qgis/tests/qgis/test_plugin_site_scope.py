@@ -3170,12 +3170,12 @@ def test_export_messages_name_the_cell_and_the_pixel(plugin, answer_modal, tmp_p
 
     dock.grid_scope_button.click()
     _events()
-    assert dock.engine.wait_for_preparation(20_000) or True
-    grid_target = tmp_path / "grid.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(grid_target), "GeoTIFF (*.tif *.tiff)"))
     if not dock.engine.is_prepared:
         dock.prepare()
-        assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    grid_target = tmp_path / "grid.tif"
+    answer_modal(QFileDialog, "getSaveFileName", (str(grid_target), "GeoTIFF (*.tif *.tiff)"))
     dock.export_button.click()
     assert grid_target.exists()
     gcell = dock.engine.frame.cell

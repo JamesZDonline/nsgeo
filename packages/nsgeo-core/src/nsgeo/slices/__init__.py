@@ -35,7 +35,7 @@ from nsgeo.slices.interpolate import (
     SliceFill,
     plan_fill,
 )
-from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
+from nsgeo.slices.resample import Taps, bilinear_taps, max_pool_counts, sample, sample_counts
 from nsgeo.slices.site import (
     BACKGROUND_FRACTION,
     MIN_SEAM_CELLS,
@@ -49,6 +49,7 @@ from nsgeo.slices.site import (
     covered_pixels,
     edge_match_solve,
     find_seams,
+    finest_fitting_cell,
     fitting_lattice,
     footprint,
     grid_axis,
@@ -93,12 +94,14 @@ __all__ = [
     "covered_pixels",
     "edge_match_solve",
     "find_seams",
+    "finest_fitting_cell",
     "finish_slice",
     "fitting_lattice",
     "footprint",
     "grid_axis",
     "limit_over_slices",
     "load_cube",
+    "max_pool_counts",
     "normalise",
     "npz_path",
     "plan_curvature",

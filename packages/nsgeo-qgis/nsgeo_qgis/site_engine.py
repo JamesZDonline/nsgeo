@@ -103,6 +103,7 @@ from nsgeo.slices import (
     compose_footprints,
     covered_pixels,
     find_seams,
+    finest_fitting_cell,
     fitting_lattice,
     footprint,
     grid_axis,
@@ -692,9 +693,14 @@ class SiteEngine(QObject):
         if full.n_pixels > self.max_pixels or covered_pixels(boxes, res.cell) > self.max_covered:
             lattice = fitting_lattice(boxes, res.cell, site_crs, self.max_pixels, self.max_covered)
             width_m, height_m = full.width * full.pixel, full.height * full.pixel
-            stretching = stretching_grids(extents, res.cell, site_crs)
-            note = preview_note(lattice.pixel, res.cell, width_m, height_m, stretching)
-            refusal = site_export_refusal(res.cell, width_m, height_m, stretching)
+            finest = finest_fitting_cell(
+                boxes, res.cell, site_crs, self.max_pixels, self.max_covered
+            )
+            stretching = stretching_grids(
+                extents, res.cell, site_crs, self.max_pixels, self.max_covered
+            )
+            note = preview_note(lattice.pixel, res.cell, width_m, height_m, finest, stretching)
+            refusal = site_export_refusal(res.cell, width_m, height_m, finest, stretching)
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
             [b for b in bounds.values() if b is not None], res.t0_ns, res.t1_ns, res.dz_ns
@@ -1090,8 +1096,13 @@ class SiteEngine(QObject):
         windows, shown, factors = self._shown(
             top_ns, thickness_ns, method, manual, coverage, draw, sliced=sliced
         )
+        res = self._resolution
+        per_pixel = max(1, round(lattice.pixel / res.cell)) if res is not None else 1
         array = compose_footprints(
-            lattice, [(self._gather(g, lattice), shown[g]) for g in shown], counts=coverage
+            lattice,
+            [(self._gather(g, lattice), shown[g]) for g in shown],
+            counts=coverage,
+            cells_per_pixel=per_pixel,
         )
         self._record_redraw((time.perf_counter() - started) * 1000.0)
         return SiteSlice(

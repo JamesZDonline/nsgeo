@@ -404,26 +404,36 @@ def name_list(names: Sequence[str]) -> str:
 
 
 def preview_note(
-    pitch: float, cell: float, width_m: float, height_m: float, stretching: Sequence[str]
+    pitch: float,
+    cell: float,
+    width_m: float,
+    height_m: float,
+    finest: float,
+    stretching: Sequence[str],
 ) -> str:
-    """Why the site is drawn coarser than its grids."""
+    """Why the site is drawn coarser than its grids, and what would draw it in full."""
     note = (
         f"Preview at {pitch:g} m pixels: the grids are at {cell:g} m, but the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail."
+        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big to draw at full detail. "
+        f"It draws in full at a {finest:g} m cell or coarser."
     )
     if stretching:
-        note += f" Leaving out {name_list(stretching)} would shrink it most."
+        note += f" Leaving out {name_list(stretching)} would also let it draw in full."
     return note
 
 
 def site_export_refusal(
-    cell: float, width_m: float, height_m: float, stretching: Sequence[str]
+    cell: float,
+    width_m: float,
+    height_m: float,
+    finest: float,
+    stretching: Sequence[str],
 ) -> str:
     """Why the site cannot be written at full detail."""
     text = (
         f"The site can't be exported at full detail yet: the site "
         f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
-        "Choose a coarser cell"
+        f"Choose a cell of {finest:g} m or coarser"
     )
     if stretching:
         text += f", or leave out {name_list(stretching)}"

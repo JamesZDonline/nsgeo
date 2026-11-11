@@ -24,7 +24,7 @@ import numpy as np
 
 from nsgeo.slices.display import SliceWindow
 from nsgeo.slices.frame import CubeFrame, ZAxis
-from nsgeo.slices.resample import Taps, sample, sample_counts
+from nsgeo.slices.resample import Taps, max_pool_counts, sample, sample_counts
 
 NORMALISATION_METHODS = ("none", "background", "edge", "histogram")
 BACKGROUND_FRACTION = 0.75
@@ -156,27 +156,54 @@ def fitting_lattice(
         pixel *= 2.0
 
 
+def finest_fitting_cell(
+    extents: Sequence[tuple[float, float, float, float]],
+    cell: float,
+    crs: str,
+    max_pixels: int,
+    max_covered: int,
+) -> float:
+    """The finest cell, in whole centimetres above `cell`, the site draws in full at.
+
+    Steps up from `cell` in 0.01 m: the first `c = n / 100 > cell` for which
+    `fitting_lattice` keeps `c` itself (under both limits). So the answer is
+    rounded up to 0.01 m and the cell one step finer does not fit, unless
+    that is the current cell. Raises ValueError for limits no pitch can meet.
+    """
+    fitting_lattice(extents, cell, crs, max_pixels, max_covered)  # validates the limits
+    n = math.floor(cell * 100.0 + 1e-9) + 1
+    while True:
+        candidate = round(n / 100.0, 2)
+        if fitting_lattice(extents, candidate, crs, max_pixels, max_covered).pixel == candidate:
+            return candidate
+        n += 1
+
+
 def stretching_grids(
     extents: Mapping[str, tuple[float, float, float, float]],
-    pixel: float,
+    cell: float,
     crs: str,
+    max_pixels: int,
+    max_covered: int,
     *,
     most: int = 3,
 ) -> list[str]:
-    """The grids whose omission alone cuts the lattice's pixel count by 10% or more.
+    """The grids whose omission alone lets the site draw at full detail at `cell`.
 
-    Largest cut first, at most `most`; empty for a single grid.
+    Full detail means under both limits (`fitting_lattice` keeps `cell`).
+    Largest cut of the lattice's pixel count first, at most `most`; empty for
+    a single grid or when no one grid's omission is enough.
     """
     if len(extents) < 2:
         return []
     ids = list(extents)
-    whole = SiteLattice.covering([extents[g] for g in ids], pixel, crs).n_pixels
+    whole = SiteLattice.covering([extents[g] for g in ids], cell, crs).n_pixels
     cuts: list[tuple[int, str]] = []
     for grid_id in ids:
         rest = [extents[g] for g in ids if g != grid_id]
-        cut = whole - SiteLattice.covering(rest, pixel, crs).n_pixels
-        if cut >= 0.1 * whole:
-            cuts.append((cut, grid_id))
+        if fitting_lattice(rest, cell, crs, max_pixels, max_covered).pixel != cell:
+            continue
+        cuts.append((whole - SiteLattice.covering(rest, cell, crs).n_pixels, grid_id))
     cuts.sort(key=lambda c: -c[0])
     return [g for _, g in cuts[:most]]
 
@@ -239,6 +266,7 @@ def compose_footprints(
     layers: Sequence[tuple[Footprint, np.ndarray]],
     *,
     counts: bool = False,
+    cells_per_pixel: int = 1,
 ) -> np.ndarray:
     """Sample each layer over its own window and average the overlaps.
 
@@ -249,8 +277,14 @@ def compose_footprints(
     uint8 count (a pixel is covered by a handful of grids), so a tick holds
     no float64 lattice. Returns float32 `(height, width)`. Raises ValueError
     for a window that is not on the lattice.
+
+    `cells_per_pixel` is how many cells a pixel spans (a preview's 2**k).
+    Above 1, counts are first max-pooled (`max_pool_counts`) over enough
+    cells that every cell lies within some pixel's corners, so no line is
+    hidden between pixels; amplitudes are untouched.
     """
     take = sample_counts if counts else sample
+    reach = math.ceil(cells_per_pixel / math.sqrt(2.0)) if counts and cells_per_pixel > 1 else 0
     total = np.zeros((lattice.height, lattice.width), dtype=np.float32)
     count = np.zeros((lattice.height, lattice.width), dtype=np.uint8)
     for where, values in layers:
@@ -264,6 +298,8 @@ def compose_footprints(
             )
         if where.n_pixels == 0:
             continue
+        if reach:
+            values = max_pool_counts(values, reach)
         got = take(values, where.taps).reshape(where.row1 - where.row0, where.col1 - where.col0)
         ok = np.isfinite(got)
         window = (slice(where.row0, where.row1), slice(where.col0, where.col1))

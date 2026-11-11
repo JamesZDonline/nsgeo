@@ -17,11 +17,14 @@ from nsgeo.slices import (
     background_level,
     bilinear_taps,
     compose_footprints,
+    covered_pixels,
     edge_match_solve,
     find_seams,
+    finest_fitting_cell,
     fitting_lattice,
     footprint,
     grid_axis,
+    max_pool_counts,
     normalise,
     sample,
     sample_counts,
@@ -67,14 +70,15 @@ def test_fitting_lattice_keeps_the_cell_when_it_fits():
     assert lat == SiteLattice.covering([(0.0, 0.0, 3.0, 3.0)], 0.1, CRS)
 
 
-def test_stretching_grids_names_the_outlier_first():
+def test_stretching_grids_names_the_outlier_that_alone_restores_full_detail():
     ext = {
         "A": (0.0, 0.0, 6.0, 6.0),
         "B": (6.0, 0.0, 12.0, 6.0),
         "C": (12.0, 0.0, 18.0, 6.0),
         "D": (200.0, 0.0, 206.0, 6.0),
     }
-    assert stretching_grids(ext, 0.5, CRS) == ["D"]
+    assert SiteLattice.covering(list(ext.values()), 0.5, CRS).n_pixels > 2000
+    assert stretching_grids(ext, 0.5, CRS, 2000, 10**9) == ["D"]
 
 
 def test_fitting_lattice_doubles_for_covered_pixels_alone():
@@ -102,13 +106,57 @@ def test_stretching_grids_orders_by_cut_and_honours_most():
         "NEAR": (0.0, 60.0, 6.0, 66.0),
         "FAR": (400.0, 0.0, 406.0, 6.0),
     }
-    # Dropping FAR cuts most, NEAR (off to the north) a little less, A/B under 10%.
-    assert stretching_grids(ext, 0.5, CRS) == ["FAR", "NEAR"]
-    assert stretching_grids(ext, 0.5, CRS, most=1) == ["FAR"]
+    # Either outlier alone is enough at this limit; FAR cuts the lattice most.
+    assert stretching_grids(ext, 0.5, CRS, 20_000, 10**9) == ["FAR", "NEAR"]
+    assert stretching_grids(ext, 0.5, CRS, 20_000, 10**9, most=1) == ["FAR"]
+    # A lower limit only the FAR-less site meets: NEAR alone is not enough.
+    far_less = SiteLattice.covering([ext[g] for g in ("A", "B", "NEAR")], 0.5, CRS).n_pixels
+    near_less = SiteLattice.covering([ext[g] for g in ("A", "B", "FAR")], 0.5, CRS).n_pixels
+    assert far_less < near_less
+    assert stretching_grids(ext, 0.5, CRS, far_less, 10**9) == ["FAR"]
 
 
 def test_stretching_grids_is_empty_for_one_grid():
-    assert stretching_grids({"A": (0.0, 0.0, 6.0, 6.0)}, 0.5, CRS) == []
+    assert stretching_grids({"A": (0.0, 0.0, 6.0, 6.0)}, 0.5, CRS, 100, 100) == []
+
+
+def test_stretching_grids_names_no_one_when_only_the_covered_limit_binds():
+    """The outlier cuts the lattice most, but the covered limit still forces a preview."""
+    ext = {
+        "A": (0.0, 0.0, 6.0, 6.0),
+        "B": (6.0, 0.0, 12.0, 6.0),
+        "C": (12.0, 0.0, 18.0, 6.0),
+        "D": (200.0, 0.0, 206.0, 6.0),
+    }
+    assert covered_pixels(list(ext.values()), 0.5) == 576  # 4 x 144
+    # Without D still 432 > 400 covered: no grid alone is enough.
+    assert stretching_grids(ext, 0.5, CRS, 10**9, 400) == []
+    # With room for three windows, leaving out any one is enough; D cuts the lattice most.
+    assert stretching_grids(ext, 0.5, CRS, 10**9, 440)[0] == "D"
+
+
+def test_finest_fitting_cell_fits_and_the_next_finer_does_not():
+    ext = [(0.0, 0.0, 30.0, 20.0), (30.0, 0.0, 60.0, 20.0)]
+    for max_pixels, max_covered in [(5000, 10**9), (10**9, 6000), (3000, 4000)]:
+        cell = 0.1
+        assert fitting_lattice(ext, cell, CRS, max_pixels, max_covered).pixel != cell
+        got = finest_fitting_cell(ext, cell, CRS, max_pixels, max_covered)
+        assert got > cell
+        assert abs(got * 100 - round(got * 100)) < 1e-9  # whole centimetres
+        assert fitting_lattice(ext, got, CRS, max_pixels, max_covered).pixel == got
+        finer = round(got - 0.01, 2)
+        assert finer <= cell or (
+            fitting_lattice(ext, finer, CRS, max_pixels, max_covered).pixel != finer
+        )
+
+
+def test_finest_fitting_cell_rounds_up_from_an_unrounded_cell():
+    ext = [(0.0, 0.0, 30.0, 20.0)]
+    got = finest_fitting_cell(ext, 0.0125, CRS, 10**9, 100_000)
+    assert got > 0.0125
+    assert fitting_lattice(ext, got, CRS, 10**9, 100_000).pixel == got
+    finer = round(got - 0.01, 2)
+    assert finer <= 0.0125 or fitting_lattice(ext, finer, CRS, 10**9, 100_000).pixel != finer
 
 
 def test_lattice_covers_the_union_and_has_no_phantom_row_at_utm_scale():
@@ -683,3 +731,46 @@ def test_real_chain_edge_match_recovers_gains_and_equals_the_pairwise_solve():
         # (b) global == pairwise: one equation per seam, strips measured in the test
         assert n1["B"] / n1["A"] == pytest.approx(_strip_ratio(perturbed, seams_p[0]), rel=1e-5)
         assert n1["C"] / n1["B"] == pytest.approx(_strip_ratio(perturbed, seams_p[1]), rel=1e-5)
+
+
+def _lines_seen(ratio, offset, phase):
+    """How many of 40 one-cell-wide lines (every 0.5 m, 20 m grid) a preview draws."""
+    cell = 0.05
+    n = int(round(20.0 / cell))
+    frame = CubeFrame((offset, offset), 0.0, cell, n, n, CRS)
+    columns = list(range(phase, n, 10))
+    lat = SiteLattice.covering([slice_extent(frame)], cell * ratio, CRS)
+    where = footprint(bilinear_taps(frame, lat.pixel_centres()), lat.height, lat.width)
+    seen = 0
+    for column in columns:
+        one = np.full((n, n), np.nan, dtype=np.float32)
+        one[:, column] = 1.0
+        out = compose_footprints(lat, [(where, one)], counts=True, cells_per_pixel=ratio)
+        seen += int(np.isfinite(out).any())
+    return seen, len(columns)
+
+
+@pytest.mark.parametrize("ratio", [2, 4, 8])
+@pytest.mark.parametrize("offset", [0.0, 0.025])
+@pytest.mark.parametrize("phase", [0, 1])  # which cell column a line sits on
+def test_a_preview_shows_every_one_cell_line_of_coverage(ratio, offset, phase):
+    assert _lines_seen(ratio, offset, phase) == (40, 40)
+
+
+def test_max_pool_counts_takes_the_window_maximum_and_ignores_blanks():
+    counts = np.full((7, 9), np.nan, dtype=np.float32)
+    counts[3, 4] = 2.0
+    counts[0, 0] = 5.0
+    got = max_pool_counts(counts, 2)
+    assert got.dtype == np.float32
+    assert got[2, 2] == 5.0
+    assert got[3, 6] == 2.0 and np.isnan(got[3, 7])  # reach 2: columns 2..6
+    assert got[5, 4] == 2.0 and np.isnan(got[6, 4])
+    np.testing.assert_array_equal(max_pool_counts(counts, 0), counts)
+    for reach in (1, 3, 5):
+        brute = np.full_like(counts, np.nan)
+        for y in range(7):
+            for x in range(9):
+                w = counts[max(0, y - reach) : y + reach + 1, max(0, x - reach) : x + reach + 1]
+                brute[y, x] = np.nanmax(w) if np.isfinite(w).any() else np.nan
+        np.testing.assert_array_equal(max_pool_counts(counts, reach), brute)

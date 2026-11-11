@@ -117,12 +117,14 @@ several grids' slices into one site view.
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
+| `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `fitting_lattice` | The site lattice at the cell, doubled until it fits both a lattice-pixel limit and a covered-pixel limit. |
 | `footprint` | The tight window around the inside points of a block of taps. |
 | `grid_axis` | The levels of the site axis inside one grid's time bounds. |
 | `limit_over_slices` | A display limit measured over every finite value in some slices. |
 | `load_cube` | Read a cube written by `save_cube`. |
+| `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
@@ -137,7 +139,7 @@ several grids' slices into one site view.
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
-| `stretching_grids` | The grids whose omission alone shrinks the site lattice by at least a tenth. |
+| `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `window_depths_m` | A window in metres, through a velocity model. |

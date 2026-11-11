@@ -257,9 +257,9 @@ def to_north_up(
 
 #: Frames whose north-up plan is kept. The preview and an export of it share
 #: one; the second slot keeps the grid just left. A plan is the frame's
-#: bilinear taps, about 17 bytes a pixel (`Taps.nbytes`), so a rotated 50 m
-#: grid at 0.05 m is tens of MB and a few million pixels hundreds: hence two,
-#: not more.
+#: bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated 50 m
+#: grid at 0.05 m is tens of MB and a very large rotated frame of a few
+#: million pixels hundreds each, two plans together: hence two, not more.
 _NORTH_UP_PLANS = 2
 _NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
 

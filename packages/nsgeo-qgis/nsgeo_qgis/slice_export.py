@@ -37,7 +37,7 @@ reviewer of this task does:
 * **North-up pitch is the cell, read bilinearly (whole-site fine-cells
   spec §3).** `to_north_up` samples every frame at its own cell, so no
   frame cell is dropped, and this writer just takes the pitch from the
-  geotransform it returns. A coverage plan (`finish=None`) passes
+  geotransform it returns. A coverage plan (`coverage=True`) passes
   `counts=True`, so a count is never blended. History: Ruling AE wrote
   the frame's own cell size with a nearest-cell gather and recorded a
   15-18% loss at rotated azimuths; half the cell replaced it until the
@@ -131,6 +131,7 @@ class ExportPlan:
     bands: tuple[SliceBand, ...]
     provenance: Provenance
     finish: FinishSettings | None = None
+    coverage: bool = False  # a counts raster: written as counts, never blended
 
 
 def plan_export(
@@ -147,7 +148,8 @@ def plan_export(
     are never two agreeing implementations, only one.
 
     `finish` is carried through onto the plan only -- it changes no band
-    here, only what `GeoTiffSliceWriter.write` later records as metadata.
+    here and does not choose between amplitude and counts (`coverage` does);
+    it is only what `GeoTiffSliceWriter.write` later records as metadata.
     Optional and keyword-compatible with every existing caller
     (`export_slices` is the only one that has a real value to pass).
     """
@@ -266,9 +268,7 @@ class GeoTiffSliceWriter:
                     written = 0
                     iterator = iter(slices)
                     for index, (band_plan, values) in enumerate(zip(plan.bands, iterator)):
-                        array, geotransform = to_north_up(
-                            values, plan.frame, counts=plan.finish is None
-                        )
+                        array, geotransform = to_north_up(values, plan.frame, counts=plan.coverage)
                         if dataset is None:
                             height, width = array.shape
                             shape = array.shape
@@ -477,6 +477,7 @@ def write_coverage(
         bands=(SliceBand(window=window, description="coverage: traces per cell"),),
         provenance=engine.provenance(),
         finish=None,
+        coverage=True,
     )
     writer = writer if writer is not None else GeoTiffSliceWriter()
     writer.write(path, plan, [shown])

@@ -554,20 +554,21 @@ def test_name_list_reads_as_a_sentence():
 
 
 def test_preview_note_is_exact_copy():
-    assert preview_note(0.4, 0.05, 1234.4, 567.6, []) == (
+    base = (
         "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
-        "(1234 \u00d7 568 m) is too big to draw at full detail."
+        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "It draws in full at a 0.12 m cell or coarser."
     )
-    assert preview_note(0.4, 0.05, 1234.4, 567.6, ["C", "D"]).endswith(
-        " Leaving out C and D would shrink it most."
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
+        base + " Leaving out C and D would also let it draw in full."
     )
 
 
 def test_site_export_refusal_is_exact_copy():
-    assert site_export_refusal(0.05, 1234.4, 567.6, []) == (
+    base = (
         "The site can't be exported at full detail yet: the site "
-        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a coarser cell."
+        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a cell of 0.12 m or coarser"
     )
-    assert site_export_refusal(0.05, 1234.4, 567.6, ["C"]).endswith(
-        "Choose a coarser cell, or leave out C."
-    )
+    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, []) == base + "."
+    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, ["C"]) == base + ", or leave out C."

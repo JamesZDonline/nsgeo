@@ -15,7 +15,10 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     bilinear_taps,
+    compose_footprints,
     find_seams,
+    finest_fitting_cell,
+    fitting_lattice,
     limit_over_slices,
     normalise,
     sample,
@@ -1069,6 +1072,45 @@ def test_covered_pixels_alone_force_the_preview(site3, make_site):
     site.max_covered = 10**9
     site.set_resolution(RES)
     assert not site.is_preview and site.lattice.pixel == RES.cell
+
+
+def test_the_covered_limit_note_gives_the_finest_cell_and_names_no_useless_grid(site3, make_site):
+    """Leaving out one 6 x 6 m grid leaves 1152 covered, still over 1000: no name."""
+    site, _ = prepared(make_site, site3)
+    site.max_pixels = 10**9
+    site.max_covered = 1_000
+    site.set_resolution(RES)
+    assert site.is_preview
+    boxes = list(site._grid_extents(site.ready_grids, RES.cell).values())
+    finest = finest_fitting_cell(boxes, RES.cell, "EPSG:32616", site.max_pixels, site.max_covered)
+    assert finest > RES.cell
+    assert fitting_lattice(boxes, finest, "EPSG:32616", site.max_pixels, 1_000).pixel == finest
+    assert f"It draws in full at a {finest:g} m cell or coarser." in site.preview_note
+    assert "Leaving out" not in site.preview_note
+    assert f"Choose a cell of {finest:g} m or coarser." in site.export_refusal
+    assert "leave out" not in site.export_refusal
+
+
+def test_a_previews_coverage_is_max_pooled_so_no_line_hides(site3, make_site):
+    site, errors = prepared(make_site, site3)
+    site.max_pixels = 10**9
+    site.max_covered = 1_000
+    site.set_resolution(RES)
+    assert site.is_preview
+    per_pixel = round(site.lattice.pixel / RES.cell)
+    assert per_pixel >= 2
+    drawn = site.slice_at(20.0, 5.0, **TICK, coverage=True)
+    layers = [
+        (site._gather(g, site.lattice), site.engine_for(g).slice_at(drawn.windows[g])[1])
+        for g in drawn.windows
+        if drawn.windows[g] is not None
+    ]
+    layers = [(w, c.astype(np.float32)) for w, c in layers]
+    pooled = compose_footprints(site.lattice, layers, counts=True, cells_per_pixel=per_pixel)
+    unpooled = compose_footprints(site.lattice, layers, counts=True)
+    assert np.isfinite(unpooled).sum() < np.isfinite(pooled).sum()
+    np.testing.assert_array_equal(drawn.array, pooled)
+    assert errors == []
 
 
 def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):

@@ -345,6 +345,26 @@ def test_coverage_exports_as_a_companion_single_band_raster(exportable, tmp_path
         ds.Close()
 
 
+def test_an_amplitude_plan_without_a_finish_still_writes_a_blend(exportable, tmp_path):
+    """`finish=None` does not mean coverage: negative amplitudes must survive."""
+    from nsgeo_qgis.slice_export import plan_export
+    from osgeo import gdal
+
+    engine = exportable
+    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    assert plan.finish is None and not plan.coverage
+    values = np.full((engine.frame.ny, engine.frame.nx), -2.0, dtype=np.float32)
+    path = tmp_path / "amp.tif"
+    GeoTiffSliceWriter().write(path, plan, [values] * len(plan.bands))
+    ds = gdal.Open(str(path))
+    try:
+        arr = ds.GetRasterBand(1).ReadAsArray()
+    finally:
+        ds.Close()
+    assert np.isfinite(arr).any()
+    assert np.nanmax(arr) == pytest.approx(-2.0)
+
+
 def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(exportable, tmp_path):
     """Final review, Minor 8. The dock's own coverage VIEW maps `count ==
     0 -> NaN` (transparent, `refresh_slice`'s coverage branch); this
