@@ -22,7 +22,7 @@ from nsgeo.slices import (
     window_on,
 )
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis import site_engine, slices_engine
+from nsgeo_qgis import slices_engine
 from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -997,32 +997,21 @@ def test_the_site_pixel_is_the_cell_at_any_bearing(site3, make_site, azimuth):
     assert errors == [], errors
 
 
-def test_coverage_on_the_site_is_whole_counts(site3, make_site, monkeypatch):
+def test_coverage_on_the_site_is_whole_counts(site3, make_site):
     """Coverage composes with counts=True: a rotated grid's tick holds only
-    its own whole counts (or the mean of two overlapping grids' counts),
-    never a bilinear blend of neighbouring cells' counts. The synthetic
-    lines give every populated cell the same count, so the values alone
-    cannot tell a blend from a count: the call itself is pinned too."""
-    calls = []
-    real = site_engine.compose_footprints
-
-    def spy(lattice, layers, **kwargs):
-        calls.append(kwargs)
-        return real(lattice, layers, **kwargs)
-
-    monkeypatch.setattr(site_engine, "compose_footprints", spy)
+    whole counts (or the mean of two overlapping grids' counts), never a
+    bilinear blend of a count with its empty neighbours, and its thin
+    lines (one cell wide, 1.5 m apart) show."""
     session = site3.session
     session.replace_grid(dataclasses.replace(session.grid("B"), azimuth=30.0))
-    # A cell a line spacing wide, so a rotated grid's counts are populated.
-    site, errors = prepared(make_site, site3, resolution=dataclasses.replace(RES, cell=1.5))
-    site.slice_at(20.0, 5.0, **TICK)
+    # Lines 1.5 m apart at a 0.25 m cell: one-cell-wide lines between empty cells.
+    site, errors = prepared(make_site, site3)
     drawn = site.slice_at(20.0, 5.0, **TICK, coverage=True)
-    assert [c.get("counts", False) for c in calls] == [False, True]
     counts = {g: site.engine_for(g).slice_at(drawn.windows[g])[1].astype(np.float32) for g in "ABC"}
     taps_b = bilinear_taps(site.engine_for("B").frame, site.lattice.pixel_centres())
     own_b = sample_counts(counts["B"], taps_b)
     shown_b = np.isfinite(own_b)
-    assert shown_b.sum() > 5, "B must show counts"
+    assert shown_b.sum() > 50, "a rotated grid's thin lines must show"
     assert np.isfinite(drawn.array.ravel()[shown_b]).all()
     allowed = {float(v) for v in np.unique(np.concatenate([c[c > 0] for c in counts.values()]))}
     everywhere = drawn.array[np.isfinite(drawn.array)]

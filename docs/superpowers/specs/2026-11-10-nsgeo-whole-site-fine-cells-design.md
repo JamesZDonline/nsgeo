@@ -246,6 +246,9 @@ Settled after the builder check (author, 2026-11-10):
   nearest cell at half the cell for coverage only, or a pixel showing the smallest count among the
   cells it touches. If coverage keeps a finer pixel than the amplitude picture, it is checked
   against the limit separately.
+  **Build-time amendment:** no trace count may be hidden. A pixel shows the largest count among the
+  cells it would blend, so lines one cell wide stay visible; a gap of about a cell or less beside
+  data may close. Ruled during the build: the smallest-count rule erased every line at fine cells.
 
 ### 5.5 Plain reasons
 

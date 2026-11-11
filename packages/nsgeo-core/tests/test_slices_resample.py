@@ -68,16 +68,36 @@ def test_every_cell_feeds_some_drawn_pixel_at_the_cell_pitch(azimuth):
         assert np.nanmax(got) > 0.0, k
 
 
-def test_counts_take_the_smallest_corner_and_never_hide_a_zero():
-    f = frame(azimuth=30.0, nx=20, ny=20)
-    counts = np.full((f.ny, f.nx), 3.0)
-    counts[10, 10] = np.nan  # an empty cell
-    got = sample_counts(counts, bilinear_taps(f, centres(f, f.cell)))
-    finite = got[np.isfinite(got)]
-    assert set(np.unique(finite)) == {3.0}  # whole counts, never blended
+def test_thin_lines_stay_visible_in_coverage():
+    f = frame(azimuth=30.0, nx=60, ny=60, cell=0.05)
+    counts = np.full((f.ny, f.nx), np.nan)
+    counts[::10, :] = 4.0
+    counts[:, ::10] = 7.0
+    counts[0, 0] = 5.0
     taps = bilinear_taps(f, centres(f, f.cell))
-    hits = taps.inside & ((taps.ids == 10 * f.nx + 10) & (taps.weights > 0.0)).any(axis=0)
-    assert hits.any() and np.isnan(got[hits]).all()
+    got = sample_counts(counts, taps)
+    assert set(np.unique(got[np.isfinite(got)])) <= {4.0, 5.0, 7.0}  # whole, in the set
+    shown = set(np.unique(taps.ids[:, np.isfinite(got)][taps.weights[:, np.isfinite(got)] > 0]))
+    # every line cell reaches some pixel that shows a count
+    line = {r * f.nx + c for r in range(f.ny) for c in range(f.nx) if r % 10 == 0 or c % 10 == 0}
+    reached = set()
+    for k in range(4):
+        pos = taps.weights[k] > 0.0
+        reached |= set(taps.ids[k][pos & np.isfinite(got)].tolist())
+    assert line <= reached and shown
+
+
+def test_coverage_is_blank_only_where_every_corner_is_empty():
+    f = frame(azimuth=30.0, nx=40, ny=40, cell=0.05)
+    counts = np.full((f.ny, f.nx), 3.0)
+    counts[:, 15:25] = np.nan  # a gap ten cells wide
+    taps = bilinear_taps(f, centres(f, f.cell))
+    got = sample_counts(counts, taps)
+    corners = counts.ravel()[taps.ids]
+    empty = ~((taps.weights > 0.0) & np.isfinite(corners)).any(axis=0)
+    np.testing.assert_array_equal(np.isnan(got), empty | ~taps.inside)
+    assert empty.sum() > 50  # the middle of the gap is blank
+    assert set(np.unique(got[np.isfinite(got)])) == {3.0}
 
 
 def test_points_outside_the_frame_are_blank_and_take_keeps_alignment():

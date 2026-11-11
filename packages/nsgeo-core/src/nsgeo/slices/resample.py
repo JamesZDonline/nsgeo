@@ -14,9 +14,9 @@ the design spec: nearest-cell at the cell size drops 2.7% of cells at a
 of zoomed-in pixels show a neighbouring cell's value. Bilinear at the cell
 pitch drops no cell's influence and shows no stair-stepped neighbour.
 
-Counts (coverage) are never blended: `sample_counts` takes the smallest
-count among the corners, so a gap is never hidden. It can look up to one
-cell wider than the nearest-cell outline.
+Counts (coverage) are never blended: `sample_counts` takes the largest
+count among the corners, so a line one cell wide stays visible. A gap of
+about a cell or less beside data can close.
 """
 
 from __future__ import annotations
@@ -151,18 +151,16 @@ def sample(values: np.ndarray, taps: Taps) -> np.ndarray:
 
 
 def sample_counts(counts: np.ndarray, taps: Taps) -> np.ndarray:
-    """(ny, nx) counts -> (n,) float32: the smallest in-frame corner count.
+    """(ny, nx) counts -> (n,) float32: the largest in-frame corner count.
 
-    NaN where the point is outside or any in-frame corner with positive
-    weight is non-finite or not positive, so "count 0" is never hidden by a
-    neighbour.
+    Only corners with positive weight are looked at. NaN where the point is
+    outside the frame or every such corner is non-finite or not positive,
+    so a line one cell wide stays visible, and a pixel is blank only where
+    all the cells it would blend are empty.
     """
     flat = _flat32(counts, taps)
     v = flat[taps.ids]
-    pos = taps.weights > 0.0
-    good = np.isfinite(v) & (v > 0.0)
-    bad = (pos & ~good).any(axis=0) | ~taps.inside
-    smallest = np.where(pos, v, np.float32(np.inf)).min(axis=0)
-    return np.where(bad | ~np.isfinite(smallest), np.float32(np.nan), smallest).astype(
-        np.float32, copy=False
-    )
+    good = (taps.weights > 0.0) & np.isfinite(v) & (v > 0.0)
+    largest = np.where(good, v, np.float32(-np.inf)).max(axis=0)
+    blank = ~good.any(axis=0) | ~taps.inside
+    return np.where(blank, np.float32(np.nan), largest).astype(np.float32, copy=False)
