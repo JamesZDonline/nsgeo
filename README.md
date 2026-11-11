@@ -98,8 +98,8 @@ Nothing at the moment. The first item under *Next* starts next.
 
 ### Next, in order
 
-The first six items come before M15 because the next milestones build on
-them: doing them now is cheaper than reworking M15–M17 afterwards.
+The first seven items come before M15. Most are things the next milestones
+build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
 1. **Real-data tests that read the wrong survey** ([#141]). The GPS lines added
    for M17 break the local real-file tests, and every later step is checked on
@@ -118,13 +118,13 @@ them: doing them now is cheaper than reworking M15–M17 afterwards.
 6. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-7. **M15: cut anywhere.** Draw a line on the map and see the vertical section
-   beneath it, with the same hover, cursor and picks as a survey line. Designed.
-8. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
-   Being designed.
-9. **Line placement corrections:** a destagger shift ([#47]) and stretching or
+7. **Line placement corrections:** a destagger shift ([#47]) and stretching or
    compressing lines to fit the grid ([#3]). Real grids need them now, and
    M17's GPS lines use the same shift.
+8. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+   beneath it, with the same hover, cursor and picks as a survey line. Designed.
+9. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+   Being designed.
 10. **How a line is identified** ([#89]), settled before M17 stores GPS
     coordinates in it.
 11. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
