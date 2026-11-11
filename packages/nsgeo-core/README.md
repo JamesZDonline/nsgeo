@@ -89,6 +89,7 @@ several grids' slices into one site view.
 | `AXIS_SNAP_CELLS` | How far, in cells, a frame's far corner may sit from an axis-aligned frame's and still count as axis-aligned. |
 | `BACKGROUND_FRACTION` | The weakest fraction of populated cells that `background_level` averages. |
 | `CoverageError` | A line cannot contribute to the requested cube. |
+| `CubeBlock` | The covered cells of one travel direction, packed: cell ids, means and counts. |
 | `CubeFrame` | An affine raster frame in world coordinates. |
 | `CubeStoreError` | A cube file is missing, unreadable or not a cube. |
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
