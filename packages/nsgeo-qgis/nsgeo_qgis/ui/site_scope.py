@@ -121,8 +121,8 @@ def source_keys(
     session: Any, grid_id: str, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
     """The grid's remembered lines, still on it and in survey order; every line
-    if none is remembered or they have all left the grid (#74: the reading
-    `SlicesDock._restore_remembered_source` gives This grid, so both scopes agree)."""
+    if none is remembered or they have all left the grid (#74, #100: the reading
+    `SlicesDock._read_remembered_lines` gives This grid, so both scopes agree)."""
     every = grid_keys(session, grid_id, by_grid)
     lines = (session.slice_source(grid_id) or {}).get("lines")
     if lines is None:

@@ -640,6 +640,86 @@ def test_a_reimported_line_brings_back_an_emptied_choice_in_both_scopes(plugin, 
     assert site_scope.source_keys(session, "A") == (first,)
 
 
+def test_a_reimported_line_rejoins_a_choice_it_was_removed_from_in_both_scopes(plugin, site3):
+    """#100, after any import: removing one chosen line of two and importing it
+    again brings it back in both scopes, in survey order (it is imported last)."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    assert dock.included_keys() == (second,)
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (second, first)
+    assert dock.included_keys() == (second, first)
+
+
+def test_accepting_the_chooser_unchanged_after_a_reimport_writes_nothing(plugin, site3):
+    """#101: the record names the same lines in another order (the re-imported
+    one is last in the survey); OK on the unchanged chooser leaves it and the
+    survey's saved state alone."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    _reimport(session, gone)
+    session.save()
+    record = session.slice_source("A")
+    plugin.open_line_choice_dialog()
+    plugin._line_choice_dialog.accept()
+    assert session.slice_source("A") == record
+    assert not session.dirty
+
+
+def test_a_choice_made_before_any_preset_survives_a_record_that_names_no_lines(plugin, site3):
+    """#100's reading takes only a record that names lines. With no preset a
+    line choice cannot be remembered, and a record holding only a resolution
+    says nothing about lines: the live choice stands."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    saved = dict(session.site.presets)
+    session.site.presets.clear()
+    session.presets_changed.emit()
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    assert session.slice_source("A") is None, "nothing could be remembered"
+    session.remember_slice_resolution("A", cell=0.1)
+    session.site.presets.update(saved)
+    session.presets_changed.emit()
+    assert dock.included_keys() == (first, second)
+
+
+def test_a_line_moved_onto_a_choice_that_names_it_re_prepares(plugin, site3):
+    """#100 with line editing (spec §4.5): A's record still names 001 after its
+    removal. Imported again onto B and the survey reopened, 001 is a site line
+    the engine has seen; moved to A, it is in the choice again, and This grid
+    re-prepares with it, as it does for a line moved onto a default source."""
+    from nsgeo.model.survey import Line
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    line = session.line_for_key(first)
+    session.remove_lines((first,))
+    session.add_lines([Line.open(line.path, dataclasses.replace(line.placement, grid_id="B"))])
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    session.open_site(session.json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.line_keys == (second,)
+    session.edit_lines([LineEdit(first, session.line_for_key(first).placement, grid_id="A")])
+    assert dock.included_keys() == (second, first)
+    assert spin_until(
+        lambda: dock.engine.is_prepared and first in dock.engine.choice.line_keys, 30_000
+    )
+
+
 def test_a_reimported_line_brings_back_an_emptied_choice_on_a_grid_opened_from_the_site(
     plugin, site3
 ):
@@ -673,6 +753,7 @@ def test_accepting_the_line_chooser_unchanged_keeps_every_line_in_both_scopes(pl
     every = site3.keys("A")
     plugin.open_line_choice_dialog()
     plugin._line_choice_dialog.accept()
+    assert not session.dirty, "an unchanged OK writes nothing"
     last = _lines_for(session, every[-1:])
     session.remove_lines(every[-1:])
     _reimport(session, last)
@@ -709,6 +790,10 @@ def test_ticking_every_line_in_the_site_takes_in_lines_imported_later(plugin, si
     dock.set_included_for("B", every[:3])  # every line still on B
     _reimport(session, last)
     assert site_scope.source_keys(session, "B") == every
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.included_keys() == every
 
 
 def test_accepting_every_line_rewrites_an_old_full_list_as_every_line(plugin, site3):
