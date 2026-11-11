@@ -262,6 +262,32 @@ def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
     return coords[max(0, min(trace, len(coords) - 1))]
 
 
+def _stage_point(
+    feature: QgsFeature, point: QgsPointXY, geometry_changes: dict[int, QgsGeometry]
+) -> None:
+    """Queue `point` as the row's geometry unless it already sits there: the
+    "write only what differs" rule of `follow_lines`, for lines and cuts alike."""
+    stored = feature.geometry()
+    if stored.isNull() or stored.isEmpty() or not point.compare(stored.asPoint(), _SAME_COORD):
+        geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+
+
+def _stage_fields(
+    feature: QgsFeature,
+    provider: Any,
+    derived: list[tuple[str, float | None]],
+    attribute_changes: dict[int, dict[int, Any]],
+) -> None:
+    """Queue each `(field, value)` that differs from the row (None writes NULL)."""
+    changed = {
+        provider.fieldNameIndex(name): NULL if value is None else value
+        for name, value in derived
+        if not _same_number(_attr(feature, name), value)
+    }
+    if changed:
+        attribute_changes[feature.id()] = changed
+
+
 def _same_number(stored: Any, value: float | None) -> bool:
     """Whether a stored numeric attribute already holds `value` (within
     `_SAME`); NULL equals only `None`."""
@@ -591,7 +617,9 @@ class SiteLayers(QObject):
             _log(f"could not move the picks onto their lines: {exc}", Qgis.MessageLevel.Critical)
             return
         if moved and self._report_follow:
-            self._tell(f"updated {moved} pick(s) to sit on their lines, at the current velocity")
+            self._tell(
+                f"updated {moved} pick(s) to sit on their lines and cuts, at the current velocity"
+            )
 
     def _tell(self, message: str) -> None:
         """Hand `message` to the plugin's `on_info`, if it gave one. The one
@@ -664,9 +692,16 @@ class SiteLayers(QObject):
             key = _as_str(_attr(feature, "line_key"))
             trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
             if is_cut_key(key):
-                self._follow_cut_pick(
-                    feature, key, cut_keys, provider, failed, geometry_changes, attribute_changes
-                )
+                derived_cut = self._cut_pick_derivation(feature, key, cut_keys, failed)
+                if derived_cut is not None:
+                    point, depth, velocity = derived_cut
+                    _stage_point(feature, point, geometry_changes)
+                    _stage_fields(
+                        feature,
+                        provider,
+                        [("depth_m", depth), ("velocity_m_ns", velocity)],
+                        attribute_changes,
+                    )
                 continue
             if key not in keys or trace == NULL or time_ns == NULL:
                 continue
@@ -687,22 +722,9 @@ class SiteLayers(QObject):
                 continue
             derived = [("depth_m", depth), ("velocity_m_ns", velocity)]
             if coords is not None:
-                point = _clamped(coords, int(trace))
-                stored = feature.geometry()
-                if (
-                    stored.isNull()
-                    or stored.isEmpty()
-                    or not point.compare(stored.asPoint(), _SAME_COORD)
-                ):
-                    geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+                _stage_point(feature, _clamped(coords, int(trace)), geometry_changes)
                 derived.insert(0, ("distance_m", distance))
-            changed = {
-                provider.fieldNameIndex(name): NULL if value is None else value
-                for name, value in derived
-                if not _same_number(_attr(feature, name), value)
-            }
-            if changed:
-                attribute_changes[feature.id()] = changed
+            _stage_fields(feature, provider, derived, attribute_changes)
         if geometry_changes and not provider.changeGeometryValues(geometry_changes):
             raise RuntimeError(
                 f"could not move the picks onto their lines: {provider.error().message()}"
@@ -716,30 +738,24 @@ class SiteLayers(QObject):
             layer.triggerRepaint()
         return written
 
-    def _follow_cut_pick(
-        self,
-        feature: QgsFeature,
-        key: str,
-        cut_keys: set[str],
-        provider: Any,
-        failed: set[str],
-        geometry_changes: dict[int, QgsGeometry],
-        attribute_changes: dict[int, dict[int, Any]],
-    ) -> None:
-        """`follow_lines` for one row on a cut (cut spec §4.8, calls 3, 12, 16).
+    def _cut_pick_derivation(
+        self, feature: QgsFeature, key: str, cut_keys: set[str], failed: set[str]
+    ) -> tuple[QgsPointXY, float | None, float | None] | None:
+        """What `follow_lines` stages for one row on a cut (cut spec §4.8,
+        calls 3, 12, 16): `(point, depth, velocity)`, or None to leave the
+        row alone.
 
         Position comes from the stored `distance_m`, which is never
         rewritten: a grid that moves takes the cut, and so the pick, with
         it, and a pick past a shrunk grid's edge keeps its distance. Depth
-        and velocity come from the cut's velocity. `trace`, `time_ns` and
-        everything else authored are never touched. A row whose cut is gone
+        and velocity come from the cut's velocity. A row whose cut is gone
         (deleted, never saved, or on a removed grid) or whose distance or
         time is NULL is left exactly as it is: the pick stays where it was
-        last written.
+        last written. Staging is `follow_lines`', shared with line picks.
         """
         distance, time_ns = _attr(feature, "distance_m"), _attr(feature, "time_ns")
         if key not in cut_keys or key in failed or distance == NULL or time_ns == NULL:
-            return
+            return None
         try:
             depth, velocity = self.session.derived_cut_pick_fields(
                 key, float(distance), float(time_ns)
@@ -748,18 +764,9 @@ class SiteLayers(QObject):
         except Exception as exc:  # noqa: BLE001 -- one bad cut must not stop the rest
             _log(f"could not re-derive the picks on {key}: {exc}", Qgis.MessageLevel.Critical)
             failed.add(key)
-            return
+            return None
         assert point is not None  # the distance is not NULL
-        stored = feature.geometry()
-        if stored.isNull() or stored.isEmpty() or not point.compare(stored.asPoint(), _SAME_COORD):
-            geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
-        changed = {
-            provider.fieldNameIndex(name): NULL if value is None else value
-            for name, value in (("depth_m", depth), ("velocity_m_ns", velocity))
-            if not _same_number(_attr(feature, name), value)
-        }
-        if changed:
-            attribute_changes[feature.id()] = changed
+        return point, depth, velocity
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry

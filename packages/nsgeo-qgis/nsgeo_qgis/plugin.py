@@ -1488,11 +1488,9 @@ class NsgeoPlugin:
         section on screen (cut spec §4.5). No section means no column to
         click, so the reason it has none goes on the message bar."""
         assert self.session is not None
-        if self.cut_sections is None:
-            raise RuntimeError("no section is shown for this cut")
-        section = self.cut_sections.section(key, build_cube=False)
-        if isinstance(section, str):
-            raise RuntimeError(section or "no section is shown for this cut")
+        section = None if self.profile_dock is None else self.profile_dock.shown_cut_section(key)
+        if section is None:
+            raise RuntimeError("the profile shows no section for this cut, so there is no column")
         distances = section.columns.distance_m
         index = max(0, min(int(column), distances.size - 1))
         self.session.add_cut_pick(

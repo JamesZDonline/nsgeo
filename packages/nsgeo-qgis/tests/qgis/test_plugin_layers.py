@@ -2584,7 +2584,7 @@ def test_opening_a_site_reports_once_how_many_picks_it_put_back_on_their_lines(p
     told: list[str] = []
     again, layers2 = _reopen(session, layers, project, on_info=told.append)
     try:
-        assert told == ["updated 1 pick(s) to sit on their lines, at the current velocity"]
+        assert told == ["updated 1 pick(s) to sit on their lines and cuts, at the current velocity"]
         again.replace_grid(_MOVED_GRID)
         assert len(told) == 1
     finally:

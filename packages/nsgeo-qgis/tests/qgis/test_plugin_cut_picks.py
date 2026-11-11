@@ -16,6 +16,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.cut_sections import CutSection
 from nsgeo_qgis.map_link import CUT_GONE_TEXT
 from nsgeo_qgis.session import Pick
+from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsProject
 from qgis.PyQt.QtWidgets import QMessageBox
 from test_plugin_cut_sections import H, site  # noqa: F401 -- fixtures
 
@@ -95,7 +96,7 @@ def test_renaming_the_cut_keeps_the_way_back(opened):
     assert session.current_key == key
 
 
-def test_deleting_the_cut_leaves_its_picks_and_selecting_one_says_so(opened, monkeypatch):
+def test_deleting_the_cut_leaves_its_picks_and_selecting_one_says_so(opened):
     plugin, key = opened
     session = plugin.session
     row = _pick_at(plugin, key, 12)
@@ -139,11 +140,25 @@ def test_a_pick_on_a_never_saved_cut_behaves_the_same_after_reopening(
 def test_a_crs_rebuild_keeps_the_cut_pick(opened):
     plugin, key = opened
     session = plugin.session
-    _pick_at(plugin, key, 12)
+    row = _pick_at(plugin, key, 12)
+    distance = row["distance_m"]
+    layer = plugin.layers.layers["picks"]
+    assert layer.crs().authid() == "EPSG:32616"
+    session.replace_grid(dataclasses.replace(session.grid("A"), crs="EPSG:32617"))
+    layer = plugin.layers.layers["picks"]
+    assert layer.crs().authid() == "EPSG:32617"  # the table really was rebuilt
+    assert key in session.cut_keys()
+    (kept,) = [r for r in _rows(plugin) if r["line_key"] == key]
+    assert (kept["time_ns"], kept["trace"], kept["distance_m"]) == (T, 12, distance)
     grid = session.grid("A")
-    session.replace_grid(dataclasses.replace(grid, crs="EPSG:32617"))
-    rows = [r for r in _rows(plugin) if r["line_key"] == key]
-    assert len(rows) == 1 and rows[0]["time_ns"] == T and rows[0]["trace"] == 12
+    world = grid.to_world(np.asarray([session.cut_for_key(key).point_at(distance)]))[0]
+    want = QgsCoordinateTransform(
+        QgsCoordinateReferenceSystem("EPSG:32617"),
+        layer.crs(),
+        QgsProject.instance(),
+    ).transform(QgsPointXY(float(world[0]), float(world[1])))
+    point = kept.geometry().asPoint()
+    assert (point.x(), point.y()) == pytest.approx((want.x(), want.y()), abs=1e-6)
 
 
 def test_a_cell_change_reopens_the_pick_at_the_same_distance_and_time(opened):
@@ -159,12 +174,16 @@ def test_a_cell_change_reopens_the_pick_at_the_same_distance_and_time(opened):
     dock.engine.wait_for_preparation(20_000)
     dock.refresh_slice()
     session = plugin.session
-    session.open_line(key)  # redraw at the new step
     column = plugin.cut_sections.column_at(key, distance)
     assert column != before[0][0]
-    assert profile.view._picks == [(column, T)]
+    assert profile.view._picks == [(column, T)]  # redrawn by section_changed alone
     (stored,) = _rows(plugin)
     assert (stored["distance_m"], stored["trace"]) == (distance, 12)
+    # Selecting it reopens at the distance's column now, not at the stored trace.
+    session.open_line(session.keys()[0])
+    _select(plugin, stored)
+    assert session.current_key == key
+    assert session.current_trace == column != stored["trace"]
 
 
 def test_a_moved_grid_moves_cut_picks_and_keeps_distance(opened):
@@ -185,10 +204,11 @@ def test_a_grid_velocity_change_rederives_depth_and_a_line_override_does_not(ope
     plugin, key = opened
     session = plugin.session
     _pick_at(plugin, key, 12)
+    (row,) = _rows(plugin)
+    first, first_velocity = row["depth_m"], row["velocity_m_ns"]
     session.set_line_velocity(session.keys()[0], VelocityModel.constant(0.2))
     (row,) = _rows(plugin)
-    first = row["depth_m"]
-    assert first == pytest.approx(float(session.cut_velocity("A").depth_at([T])[0]))
+    assert (row["depth_m"], row["velocity_m_ns"]) == (first, first_velocity)
     session.set_grid_velocity("A", VelocityModel.constant(0.1))
     (row,) = _rows(plugin)
     assert row["depth_m"] == pytest.approx(0.1 * T / 2.0)
@@ -254,7 +274,9 @@ def test_a_pick_past_a_shrunk_grid_edge_keeps_its_distance(opened):
     want = _world(session, "A", session.cut_for_key(key).point_at(distance))
     point = after.geometry().asPoint()
     assert (point.x(), point.y()) == pytest.approx(want, abs=1e-9)
-    assert plugin.profile_dock.view is not None  # and the profile keeps working
+    # The profile keeps working: still the cut's title, and no overlay while no section is drawn.
+    assert plugin.profile_dock.windowTitle().startswith("nsgeo Profile · cut:")
+    assert plugin.profile_dock.view._picks == []
 
 
 def test_the_profile_overlays_cut_picks_at_their_columns(opened):
@@ -304,3 +326,22 @@ def test_a_cut_pick_with_no_velocity_anywhere_has_no_depth(opened):
     for line_key in session.keys_on_grid("A"):
         session.remove_lines([line_key])
     assert session.derived_cut_pick_fields(key, 1.0, T) == (None, None)
+
+
+def test_a_pick_takes_its_distance_from_the_section_on_screen(opened):
+    plugin, key = opened
+    messages = []
+    plugin.message = lambda text, level=None, title="nsgeo": messages.append(text)
+    # Another cut is open: nothing is shown for `key`, so there is no column to take.
+    other = plugin.session.add_cut("A", [(1.0, 2.0), (5.0, 2.0)])
+    plugin.session.open_line(other)
+    plugin._on_pick_requested(key, 12, T)
+    assert _rows(plugin) == [] and messages and "no section" in messages[-1]
+    # The section on screen is the one clicked, even when the service would answer differently.
+    plugin.session.open_line(key)
+    shown = plugin.profile_dock.shown_cut_section(key)
+    assert shown is not None
+    plugin.cut_sections.section = lambda *a, **k: "ignored"
+    plugin._on_pick_requested(key, 12, T)
+    (row,) = _rows(plugin)
+    assert row["distance_m"] == pytest.approx(float(shown.columns.distance_m[12]))

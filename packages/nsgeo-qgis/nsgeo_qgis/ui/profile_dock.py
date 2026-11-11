@@ -877,6 +877,13 @@ class ProfileDock(QgsDockWidget):
             return
         self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
 
+    def shown_cut_section(self, key: str) -> CutSection | None:
+        """The section on screen for cut `key`, or None when the dock shows
+        none for it (a message, a line, another cut). A pick takes its
+        distance from exactly these columns, the ones the user clicked."""
+        shown = self._cut_shown
+        return shown if shown is not None and shown.key == key else None
+
     def _cut_pick_points(self, key: str) -> list[tuple[int, float]]:
         """A cut's picks as (column, time) on the section on screen.
 
@@ -887,7 +894,7 @@ class ProfileDock(QgsDockWidget):
         Nothing is shown when no section is (a message, or no source).
         """
         sections = self._cut_sections
-        if sections is None or self._cut_shown is None or self._cut_shown.key != key:
+        if sections is None or self.shown_cut_section(key) is None:
             return []
         points: list[tuple[int, float]] = []
         for pick in self.session.picks_for(key):
