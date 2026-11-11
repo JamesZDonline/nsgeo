@@ -36,21 +36,22 @@ interpolation along columns and rows weighted by span (`_start`), and stopped
 at `CURVATURE_TOL` of the right-hand side. Each iteration is preconditioned by
 one V-cycle: degree-2 Chebyshev smoothing, Galerkin coarse operators on
 cell-doubled grids, and a dense solve once a level has few unknowns. Jacobi
-took about 4x the iterations for each halving of the cell (38, 155, 492 at
+took about 3.5x the iterations for each halving of the cell (41, 155, 492 at
 0.2, 0.1 and 0.05 m on a 50 m grid); the V-cycle holds them near 6 to 15.
 Against a float64 solve to 1e-10 on the ten real lines at 0.05 m, the largest
 error inside the max distance was 3.0e-5 to 3.6e-5 of the data range (two
 windows), against 4.1e-5 to 6.9e-5 for Jacobi (the spike note). On the 50 m
-grids it stays within milestone B's 6.2e-6 at 0.2 m, 4.8e-5 at 0.1 m and
-4.0e-4 at 0.05 m, where 99% of cells were within 2.2e-5.
+grids, against a float64 solve, the largest error was 3.5e-6, 1.4e-5 and
+1.1e-4 of the data range at 0.2, 0.1 and 0.05 m (99th percentile 1.3e-5 at
+0.05 m), within milestone B's 6.2e-6, 4.8e-5 and 4.0e-4.
 
 numpy only, no scipy. Measured medians per slice, at max distance 0.375 m
 (0.75 x the 0.5 m line spacing) with `bench.py` from the spike note: on the ten
 real lines (25 x 100 cells at 0.2 m, 100 x 400 at 0.05 m), on 50 m x 50 m of
 wandering lines 0.5 m apart along X, and on the same lines over the lower 40%
 of the frame with one skipped. Before is Jacobi at e701f82 (load average about
-2.6); after is the hierarchy (load average about 2.0, one run, nothing else of
-mine running):
+2.6); after is the hierarchy (load average about 2.0, one run per case, the
+plan column included):
 
     case                             before: plan  solve    its   after: plan  solve    its
     real lines, 0.2 m                0.001 s       0.004 s   38   0.019 s      0.009 s    7
@@ -58,11 +59,25 @@ mine running):
     50 m grid, 0.2 m                 0.004 s       0.054 s   41   0.080 s      0.071 s    6
     50 m grid, 0.1 m                 0.023 s       0.892 s  155   0.270 s      0.442 s   11
     50 m grid, 0.05 m                0.132 s       14.3 s   492   1.39 s       3.29 s    15
-    50 m, 40% covered, line skipped  0.003 s       0.157 s  136   0.582 s      0.088 s    7
+    50 m, 40% covered, line skipped  0.003 s       0.157 s  136   0.582 s *    0.088 s    7
 
-The plan costs more, since it builds the hierarchy once per grid and distance,
-and the coarse grids are not worth it at 0.2 m, where the solve is no faster.
-The kriging preview's figures are in `interpolate.py`.
+* A single noisy sample: re-measured at 0.10-0.22 s (0.12-0.16 s at load 3.3),
+  as `eigh` on the 448-unknown coarsest level varies under BLAS thread
+  contention.
+
+The plan costs more, since it builds the hierarchy once per grid and distance.
+At the frame cap (`MAX_FRAME_CELLS`, 2000 x 2000 cells at 0.05 m) building the
+plan takes about 6.0 s against 0.54 s before, the plan holds about 95 B a
+cell, and a solve takes about 13 s in 14 iterations.
+
+The coarse grids are not worth it at 0.2 m, where the solve is slower: 1.4 to
+2x on regular lines (median of 7, wandering 0.5 m lines: 5 x 20 m 4.8 to
+9.6 ms; 30 x 30 m 20 to 31 ms; 40 x 40 m 34 to 51 ms; 50 x 50 m 51 to 72 ms;
+the ten real lines 4 to 9 ms). It breaks even on the spike's irregular real
+20 x 16 m grid, where Jacobi needed 144-171 iterations. Whole site adds its
+grids' last solve times against the 50 ms live budget, so several mid-size
+grids at 0.2 m can now show the kriging preview where they followed the depth
+live before. The kriging preview's figures are in `interpolate.py`.
 """
 
 from __future__ import annotations
@@ -138,8 +153,9 @@ class CurvaturePlan:
         """(The slice, CG iterations run). Data cells as they are, the rest of
         the reach solved, NaN elsewhere.
 
-        `should_stop`, when given, is asked before every iteration; True
-        raises `SolveStopped`. Neither the plan nor `values` is written.
+        `should_stop`, when given, is asked once before the first V-cycle and
+        then before every iteration; True raises `SolveStopped`. Neither the plan
+        nor `values` is written.
         """
         values = np.asarray(values)
         if values.shape != self.shape:
@@ -149,6 +165,7 @@ class CurvaturePlan:
         if not finite.all():
             # A non-finite datum shows as it is and is solved around, on a plan
             # for the finite data alone (plan call 10). Binned data never come here.
+            # The re-plan builds a hierarchy too (Grid 1 size: 0.25 to 0.43 s a solve).
             usable = pop.copy()
             usable[pop] = finite
             plan = plan_curvature(usable, self.cell, self.max_distance_m)
@@ -203,6 +220,8 @@ class CurvaturePlan:
         np.copyto(p, x, where=unknown)
         self._times(padded, q, work)
         r = np.negative(q)  # r = b − A·x = −A·(d + x)
+        if should_stop is not None and should_stop():
+            raise SolveStopped  # before the first V-cycle, which is long at the frame cap
         z = self.hierarchy.precondition(r, (q, work))
         p[...] = z
         rz = _dot(r, z)

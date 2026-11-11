@@ -231,7 +231,8 @@ def test_the_hierarchy_costs_less_memory_than_the_operator():
 def test_two_threads_solve_one_plan_as_one():
     """Plans are shared between threads: `precondition` and `solve` keep their
     scratch to themselves."""
-    pop = lines((10, 30, 50, 70), ny=80, nx=120)
+    # Large enough that a solve outlasts a thread's start-up, so the four overlap.
+    pop = lines(tuple(range(5, 400, 10)), ny=400, nx=400)
     plan = plan_curvature(pop, STEP, 0.25)
     fields = [values(pop, seed) for seed in range(4)]
     want = [plan.solve(v) for v in fields]
@@ -363,6 +364,27 @@ def test_a_solve_stops_when_asked():
     assert np.array_equal(plan.coefficients, kept_coefficients)
 
 
+def test_a_solve_asked_to_stop_at_once_runs_no_v_cycle(monkeypatch):
+    """At the frame cap a V-cycle takes over a second, so the first check
+    comes before the first one, not after it."""
+    from nsgeo.slices.multigrid import Hierarchy
+
+    pop = lines()
+    plan = plan_curvature(pop, STEP, 0.25)
+    v = values(pop)
+    cycles = []
+    original = Hierarchy.precondition
+
+    def counting(self, *args, **kwargs):
+        cycles.append(None)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Hierarchy, "precondition", counting)
+    with pytest.raises(SolveStopped):
+        plan.solve(v, should_stop=lambda: True)
+    assert cycles == []
+
+
 def test_a_plan_is_read_only():
     """A worker thread solves on a plan while the GUI thread reads it (plan
     call 6), which is safe only while nothing writes to it: its arrays refuse
@@ -451,6 +473,7 @@ def tight_solve(plan, values):
         p = z + rz_next / rz * p
         rz = rz_next
         its += 1
+    assert its < 20000, "the reference solve hit its iteration cap unconverged"
     out = np.where(pop, v, x)
     out[~plan.reach.reshape(shape)] = np.nan
     return out

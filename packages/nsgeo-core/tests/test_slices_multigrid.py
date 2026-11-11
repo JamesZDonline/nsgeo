@@ -127,8 +127,8 @@ def test_the_preconditioner_is_symmetric_and_positive(monkeypatch):
         r2 = (rng.normal(size=act.shape) * act).astype(np.float32)
         keep = r1.copy()
         m1, m2 = h.precondition(r1), h.precondition(r2)
-        # Random signs cancel the dot to between 0.3 and 200 (0.27 for seed 1)
-        # against norm products of about 6e3, so float32 rounding in the cycle
+        # Random signs cancel the dot to between 0.27 (seed 1) and 309 (seed 9)
+        # against norm products of 6e3 to 8e3, so float32 rounding in the cycle
         # is held to the norms, not to the dot itself.
         a = float(np.vdot(m1.astype(np.float64), r2))
         b = float(np.vdot(r1.astype(np.float64), m2))

@@ -1,7 +1,8 @@
 """A multigrid V-cycle to precondition minimum curvature's conjugate gradients.
 
 Jacobi leaves the biharmonic's smooth error to be ground out a cell at a
-time, which is why the 0.05 m solve took 459 iterations (`curvature.py`). A
+time, which is why the 0.05 m solve took 492 iterations on a 50 m grid and 540 on
+the ten real lines (`curvature.py`). A
 multigrid cycle takes that smooth error to a grid a quarter the size, where
 it is rough again, and so ends it in a few. The method and the spike's
 decisions are in `docs/superpowers/notes/2026-11-10-multigrid-spike.md`.
@@ -27,8 +28,8 @@ The pieces, all numpy and all float32 but the coarsest solve:
 
 Read-only throughout, as a `CurvaturePlan` is: a hierarchy is built once per
 plan and shared between the refine worker and the GUI thread, so
-`Hierarchy.precondition` writes nothing it was given and allocates its own
-scratch.
+`Hierarchy.precondition` writes nothing it was given, except the planes a
+caller lends it as `spare`, and allocates its own scratch.
 """
 
 from __future__ import annotations
@@ -162,7 +163,8 @@ def _coarsen(level: Level) -> Level:
                 sy, sx = (py - oy) % _PERIOD, (px - ox) % _PERIOD
                 coef[k, sy::_PERIOD, sx::_PERIOD] = column[sy::_PERIOD, sx::_PERIOD]
     # Symmetrise in place: row i at offset o pairs with row i + o at offset -o.
-    # Each pair (k, k') is averaged through one plane-sized temporary.
+    # Each pair (k, k') is averaged through up to four plane-sized temporaries
+    # (mirror, mirror2 and the sums).
     for k, (oy, ox) in enumerate(COARSE_OFFSETS):
         k2 = _COARSE_INDEX[(-oy, -ox)]
         if k2 < k:
@@ -275,7 +277,8 @@ class Hierarchy:
         self, r: np.ndarray, spare: tuple[np.ndarray, np.ndarray] | None = None
     ) -> np.ndarray:
         """One V-cycle from zero: float32 (ny, nx), zero off the finest
-        unknowns. `r` is not written; the scratch is this call's own.
+        unknowns. `r` is not written; the scratch is this call's own, except
+        the planes lent as `spare`.
 
         `spare` may lend two float32 (ny, nx) planes the caller has no use for
         meanwhile, which the finest level overwrites instead of allocating its
