@@ -21,7 +21,6 @@ cell wider than the nearest-cell outline.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,13 +33,20 @@ _BELOW_ONE = np.nextafter(np.float32(1.0), np.float32(0.0))
 
 @dataclass(frozen=True, eq=False)
 class Taps:
-    """Where each of n world points sits among a frame's cells."""
+    """Where each of n world points sits among a frame's cells.
+
+    The four corners of the 2x2 block around each point are precomputed:
+    `ids` (4, n) intp flat cell ids, clipped in-bounds, and `weights`
+    (4, n) float32 bilinear weights, exactly 0 for a corner outside the
+    frame and for every corner of a point outside it. Corner order is
+    (dy, dx) = (0, 0), (0, 1), (1, 0), (1, 1). 52 bytes a point (was 20):
+    `ids` is intp because numpy gathers 2x faster with it than with int32,
+    which it would otherwise convert on every call.
+    """
 
     nearest: np.ndarray  # (n,) int32 flat cell id, -1 outside
-    ix0: np.ndarray  # (n,) int32 lower corner of the 2x2 block
-    iy0: np.ndarray  # (n,) int32
-    tx: np.ndarray  # (n,) float32 in [0, 1)
-    ty: np.ndarray  # (n,) float32 in [0, 1)
+    ids: np.ndarray  # (4, n) intp, safe to gather with
+    weights: np.ndarray  # (4, n) float32, 0 where not in the frame
     nx: int
     ny: int
     exact: bool  # every inside point sits on a cell centre
@@ -55,41 +61,22 @@ class Taps:
 
     @property
     def nbytes(self) -> int:
-        return int(
-            self.nearest.nbytes
-            + self.ix0.nbytes
-            + self.iy0.nbytes
-            + self.tx.nbytes
-            + self.ty.nbytes
-        )
+        return int(self.nearest.nbytes + self.ids.nbytes + self.weights.nbytes)
 
     def take(self, index: np.ndarray) -> Taps:
         """The taps of a subset of the points, in the order given."""
         return _make(
-            self.nearest[index],
-            self.ix0[index],
-            self.iy0[index],
-            self.tx[index],
-            self.ty[index],
-            self.nx,
-            self.ny,
+            self.nearest[index], self.ids[:, index], self.weights[:, index], self.nx, self.ny
         )
 
 
-def _make(
-    nearest: np.ndarray,
-    ix0: np.ndarray,
-    iy0: np.ndarray,
-    tx: np.ndarray,
-    ty: np.ndarray,
-    nx: int,
-    ny: int,
-) -> Taps:
+def _make(nearest: np.ndarray, ids: np.ndarray, weights: np.ndarray, nx: int, ny: int) -> Taps:
     inside = nearest >= 0
-    exact = bool(not (tx[inside].any() or ty[inside].any()))
-    for a in (nearest, ix0, iy0, tx, ty):
+    # Exact: each inside point's whole weight sits on its first corner.
+    exact = bool((weights[0][inside] == 1.0).all())
+    for a in (nearest, ids, weights):
         a.setflags(write=False)
-    return Taps(nearest, ix0, iy0, tx, ty, nx, ny, exact)
+    return Taps(nearest, ids, weights, nx, ny, exact)
 
 
 def bilinear_taps(frame: CubeFrame, world: np.ndarray) -> Taps:
@@ -106,71 +93,70 @@ def bilinear_taps(frame: CubeFrame, world: np.ndarray) -> Taps:
     f = np.where(np.abs(f - rounded) <= tol[:, None], rounded, f)
     base = np.floor(f)
     t = np.minimum((f - base).astype(np.float32), _BELOW_ONE)
-    return _make(
-        nearest,
-        base[:, 0].astype(np.int32),
-        base[:, 1].astype(np.int32),
-        np.ascontiguousarray(t[:, 0]),
-        np.ascontiguousarray(t[:, 1]),
-        frame.nx,
-        frame.ny,
-    )
-
-
-def _corners(values: np.ndarray, taps: Taps) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Yield (weight, value, in_frame) for the four corners of every point."""
-    tx = taps.tx.astype(np.float64)
-    ty = taps.ty.astype(np.float64)
+    tx, ty = t[:, 0], t[:, 1]
+    ix0 = base[:, 0].astype(np.int64)
+    iy0 = base[:, 1].astype(np.int64)
+    n = world.shape[0]
+    ids = np.empty((4, n), dtype=np.intp)
+    weights = np.empty((4, n), dtype=np.float32)
+    k = 0
     for dy in (0, 1):
-        wy = ty if dy else 1.0 - ty
-        iy = taps.iy0.astype(np.intp) + dy
+        wy = ty if dy else np.float32(1.0) - ty
+        iy = iy0 + dy
         for dx in (0, 1):
-            wx = tx if dx else 1.0 - tx
-            ix = taps.ix0.astype(np.intp) + dx
-            ok = taps.inside & (ix >= 0) & (ix < taps.nx) & (iy >= 0) & (iy < taps.ny)
-            v = np.where(
-                ok, values[np.clip(iy, 0, taps.ny - 1), np.clip(ix, 0, taps.nx - 1)], np.nan
-            )
-            yield wx * wy, v, ok
+            wx = tx if dx else np.float32(1.0) - tx
+            ix = ix0 + dx
+            ok = inside & (ix >= 0) & (ix < frame.nx) & (iy >= 0) & (iy < frame.ny)
+            ids[k] = np.where(ok, iy * frame.nx + ix, 0)
+            weights[k] = np.where(ok, wx * wy, np.float32(0.0))
+            k += 1
+    return _make(nearest, ids, weights, frame.nx, frame.ny)
+
+
+def _flat32(values: np.ndarray, taps: Taps) -> np.ndarray:
+    values = np.asarray(values)
+    if values.shape != (taps.ny, taps.nx):
+        raise ValueError(f"expected values of shape {(taps.ny, taps.nx)}, got {values.shape}")
+    return np.ascontiguousarray(values, dtype=np.float32).ravel()
 
 
 def sample(values: np.ndarray, taps: Taps) -> np.ndarray:
     """(ny, nx) values -> (n,) float32: the bilinear blend at each point."""
-    values = np.asarray(values)
-    if values.shape != (taps.ny, taps.nx):
-        raise ValueError(f"expected values of shape {(taps.ny, taps.nx)}, got {values.shape}")
-    flat = values.ravel()
+    flat = _flat32(values, taps)
+    nearest_value = flat[np.maximum(taps.nearest, 0)]
+    # blank where outside (nearest < 0) or the nearest cell is not finite
+    blank = ~np.isfinite(nearest_value)
+    blank |= taps.nearest < 0
     if taps.exact:
-        out = np.full(taps.n, np.nan, dtype=np.float32)
-        ids = taps.nearest
-        out[taps.inside] = flat[ids[taps.inside]]
-        return out
-    num = np.zeros(taps.n)
-    den = np.zeros(taps.n)
-    for w, v, ok in _corners(values.astype(np.float64, copy=False), taps):
-        use = ok & np.isfinite(v)
-        num += np.where(use, w * np.where(use, v, 0.0), 0.0)
-        den += np.where(use, w, 0.0)
+        # inf in a nearest cell is blank, as on the slow path.
+        nearest_value[blank] = np.nan
+        return nearest_value
+    # One gather; blank neighbours are dropped by weighting.
+    v = flat[taps.ids]
+    finite = np.isfinite(v)
+    v[~finite] = 0.0
+    num = np.einsum("kn,kn->n", taps.weights, v)
+    den = np.einsum("kn,kn->n", taps.weights, finite.astype(np.float32))
+    blank |= ~(den > 0.0)
     with np.errstate(invalid="ignore", divide="ignore"):
-        out = np.where(den > 0.0, num / den, np.nan)
-    nearest_value = np.where(taps.inside, flat[np.clip(taps.nearest, 0, None)], np.nan)
-    out = np.where(np.isfinite(nearest_value), out, np.nan)
-    return out.astype(np.float32)
+        np.divide(num, den, out=num)
+    num[blank] = np.nan
+    return num
 
 
 def sample_counts(counts: np.ndarray, taps: Taps) -> np.ndarray:
     """(ny, nx) counts -> (n,) float32: the smallest in-frame corner count.
 
-    NaN where the point is outside or any in-frame corner is non-finite or
-    not positive, so "count 0" is never hidden by a neighbour.
+    NaN where the point is outside or any in-frame corner with positive
+    weight is non-finite or not positive, so "count 0" is never hidden by a
+    neighbour.
     """
-    counts = np.asarray(counts)
-    if counts.shape != (taps.ny, taps.nx):
-        raise ValueError(f"expected counts of shape {(taps.ny, taps.nx)}, got {counts.shape}")
-    smallest = np.full(taps.n, np.inf)
-    bad = ~taps.inside
-    for w, v, ok in _corners(counts.astype(np.float64, copy=False), taps):
-        ok = ok & (w > 0.0)  # a zero-weight corner is not part of this point
-        bad |= ok & ~(np.isfinite(v) & (v > 0.0))
-        smallest = np.where(ok, np.minimum(smallest, np.where(ok, v, np.inf)), smallest)
-    return np.where(bad | ~np.isfinite(smallest), np.nan, smallest).astype(np.float32)
+    flat = _flat32(counts, taps)
+    v = flat[taps.ids]
+    pos = taps.weights > 0.0
+    good = np.isfinite(v) & (v > 0.0)
+    bad = (pos & ~good).any(axis=0) | ~taps.inside
+    smallest = np.where(pos, v, np.float32(np.inf)).min(axis=0)
+    return np.where(bad | ~np.isfinite(smallest), np.float32(np.nan), smallest).astype(
+        np.float32, copy=False
+    )

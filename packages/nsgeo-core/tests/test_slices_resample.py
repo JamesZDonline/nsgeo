@@ -76,10 +76,7 @@ def test_counts_take_the_smallest_corner_and_never_hide_a_zero():
     finite = got[np.isfinite(got)]
     assert set(np.unique(finite)) == {3.0}  # whole counts, never blended
     taps = bilinear_taps(f, centres(f, f.cell))
-    hits = taps.inside & (
-        ((taps.ix0 == 10) & (taps.tx < 1.0) | (taps.ix0 == 9) & (taps.tx > 0.0))
-        & ((taps.iy0 == 10) & (taps.ty < 1.0) | (taps.iy0 == 9) & (taps.ty > 0.0))
-    )
+    hits = taps.inside & ((taps.ids == 10 * f.nx + 10) & (taps.weights > 0.0)).any(axis=0)
     assert hits.any() and np.isnan(got[hits]).all()
 
 
@@ -106,3 +103,11 @@ def test_axis_aligned_counts_are_each_cells_own_count():
     own = np.where(ids >= 0, counts.ravel()[np.clip(ids, 0, None)], np.nan)
     np.testing.assert_array_equal(got, own.astype(np.float32))
     assert np.isnan(got).sum() == (ids == 5 * f.nx + 4).sum() + (ids < 0).sum()
+
+
+def test_an_infinite_nearest_cell_is_blank_on_the_exact_path():
+    f = frame(azimuth=0.0, nx=6, ny=5)
+    values = np.ones((f.ny, f.nx))
+    values[2, 3] = np.inf
+    got = sample(values, bilinear_taps(f, centres(f, f.cell)))
+    assert not np.isinf(got).any() and np.isnan(got).sum() == 1
