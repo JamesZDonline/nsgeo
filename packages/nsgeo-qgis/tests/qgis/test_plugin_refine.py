@@ -94,6 +94,19 @@ def test_jobs_land_in_order_on_the_gui_thread(refiner):
     assert all(t is threading.main_thread() for _, t in landed)
 
 
+def test_a_custom_thread_name_prefix_names_the_thread(qgis_app):
+    parent = QObject()
+    worker = Refiner(parent, thread_name_prefix="nsgeo-cut")
+    try:
+        job, landed = Job("a"), []
+        worker.start([job], landed.append, lambda m: None)
+        _pump_until(lambda: landed)
+        assert job.thread_name.startswith("nsgeo-cut")
+    finally:
+        worker.shutdown()
+        del parent
+
+
 def test_busy_is_false_when_the_last_job_lands(refiner):
     jobs = [Job("a"), Job("b")]
     busy_at_landing = []

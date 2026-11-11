@@ -390,3 +390,23 @@ def test_column_distances_are_defined_once_for_the_section_and_its_callers():
     np.testing.assert_array_equal(columns.distance_m, column_distances(3.05, 0.1))
     with pytest.raises(ValueError):
         column_distances(0.0, 0.1)
+
+
+@needs_real_files
+@pytest.mark.parametrize("cell", [0.05, 0.2])
+def test_window_mean_of_level_solves_equals_the_solve_of_the_window_mean(cell):
+    """Minimum curvature is linear for a fixed coverage (cut spec test 11): the
+    mean of the per-level crop solves is the crop solve of the mean slice."""
+    cube, columns, settings, crops, plans, _, cell = _curvature_case("diagonal", 0.1, cell)
+    for k0, k1 in WINDOWS[:3]:
+        levels = [
+            solve_section_level(cube.level(k), columns, crops, plans, settings, cell)
+            for k in range(k0, k1)
+        ]
+        window = solve_section_level(
+            cube.slice_levels(k0, k1), columns, crops, plans, settings, cell
+        )
+        mean = np.nanmean(np.stack(levels), axis=0)
+        assert np.array_equal(np.isnan(mean), np.isnan(window))
+        scale = float(np.nanmax(window) - np.nanmin(window))
+        assert float(np.nanmax(np.abs(mean - window))) <= 1e-3 * scale
