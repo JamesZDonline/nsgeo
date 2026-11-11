@@ -100,6 +100,9 @@ a milestone merges or the plan changes.
 - **Whole site at fine cells** ([#107], [#108]): Whole site never refuses a
   fine cell, and the export can be finer than the preview. Being designed on
   `nsgeo-whole-site-fine-cells`.
+- **The background solver** (the worker items in [#120]): a cancelled solve
+  no longer holds its memory until the next one starts, and its errors name
+  their type. Built on `nsgeo-refine-worker`; review next.
 
 ### Next, in order
 
