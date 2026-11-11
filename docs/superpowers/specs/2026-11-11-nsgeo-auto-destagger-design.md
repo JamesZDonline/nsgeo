@@ -135,7 +135,7 @@ Real data, spike method (§7), destagger in metres:
 - It measures the lines as they are placed now, and the data decides the sign (#159, and the
   author agreed with the playback of §4).
 
-Claude's calls are marked **C1–C9** in §7–§9. The author has not separately confirmed them.
+Claude's calls are marked **C1–C14** in §7–§10. The author has not separately confirmed them.
 
 ## 7. The estimator (nsgeo-core)
 
@@ -157,6 +157,18 @@ the builder (§11).
   - some measure of how sure the grid value is, for the status line (the spike used a bootstrap
     over lines).
 
+**C10 — the grid value can fail too.** If the grid value's peak is not clear, Measure changes
+nothing and says why on the status line. "Not clear" covers a peak at the edge of the search
+range, a peak that does not stand clear of the next-highest one, or too few lines with an
+opposite neighbour to measure. A clear peak with a wide bootstrap interval still fills, and the
+status line says how sure it is. This follows "named, not guessed at" (§5) at the grid level.
+
+**C11 — lines on both axes.** A grid can hold lines along x and along y (cross-hatched;
+`keys_on_grid` returns both). Measure treats each axis's lines as a separate set, with its own
+neighbours by offset and its own grid value. Each selected row gets its own set's values. The
+Destagger box gets the value of the axis with more lines, and the status line gives both values.
+The two sets can genuinely differ: unfitted wheel error scales with each axis's length.
+
 **C1 — the current destagger is ignored.** Positions are computed with `travel_shift = 0` and every
 other field as the table now shows it (pending Start, Scale, Dir, Offset edits included). Measure
 returns full values, not increments, so pressing it twice gives the same numbers.
@@ -177,9 +189,14 @@ returns full values, not increments, so pressing it twice gives the same numbers
 4. **Neighbours (C3).** Order the lines by offset. A line's neighbours are the lines either side of
    it that run the other way. It is compared with **the mean of its two neighbours**, or with its
    one neighbour at the edge of the grid.
-5. **Correlate** over lags of ±1 m. Express the lag as a shift in the line's own direction of
+5. **Correlate** over a range of lags. Express the lag as a shift in the line's own direction of
    travel, so both directions add up instead of cancelling. Sum the curves over bins, average over
-   lines, and take the peak with a parabola.
+   lines, and take the peak with a parabola. **C12 — the search range grows with the lines.**
+   The spike searched ±1 m, which is enough for 30 m lines. Unfitted neighbours disagree by about
+   (scale − 1) × length plus the stagger: about 0.4 m at 30 m with a 1.4% short wheel, but about
+   1 m at 60 m. The range is therefore ±max(1 m, about 3% of the longest line). The peak must
+   stand clear of the next-highest one (C10), which guards against locking onto repeating
+   features such as rows of graves. The exact factor and margin are the builder's (§11).
 6. **Grid value = −(peak lag) / 2.** Opposite lines each move half their disagreement.
 
 ### 7.3 Why the mean of both neighbours (C3)
@@ -204,10 +221,14 @@ behaviour (the method is the builder's):
   per-line values.
 - **Pure stagger** produces the grid value only.
 - **A line gets its own value only when it is clear and repeatable.** The two answers from
-  independent halves of the data must agree, and the correlation peak must be clear (not at the ±1
-  m search edge). The spike's halves were shallow/deep bins and first/second half along the line.
-  Along-the-line halves also need features in both halves to mean anything (spike note, Grid 1
-  lines 8 and 9). The thresholds are tuned by the builder on the real grids (§10).
+  independent halves of the data must agree, and the correlation peak must be clear (not at the
+  edge of the search range). The spike's halves were shallow/deep bins and first/second half along the line.
+  **A half without a clear peak of its own neither confirms nor counts against the line (C13).**
+  It has nothing to match: Grid 1's first half has few compact features, which is why lines 8
+  and 9 read about 0 there. A line needs at least two independent halves with clear peaks that
+  agree. The thresholds are tuned by the builder on the real grids (§10). Whether Grid 1 lines 8
+  and 9 end up with their own values is left to those thresholds and the walkthrough, not pinned
+  here.
 - **Changes partway along:** the along-line halves disagree by much more than noise, and both have
   a clear peak. The line is named and left at the grid value.
 - **No clear match:** the peak is at the search edge, or there is no peak worth the name. The line
@@ -234,9 +255,9 @@ keeps the panel's rule and never measures a line without its neighbours.)
 - **Each selected row's Destagger cell** gets its value. The cell is shaded like any pending edit.
 - **The status line** says what happened in a sentence or two. It gives the grid value with how
   sure it is, names the lines with their own values, and names the lines left at the grid value or
-  not measured, with the reason. For example: "Measured +0.152 m from 60 lines (±0.012). Lines
-  8, 9 and 15 have their own values. FILE__011 changes partway along and is left at +0.152." The
-  exact words are the builder's.
+  not measured, with the reason. An illustration of the shape, not of the expected results: "Measured
+  +0.152 m from 60 lines (±0.012). FILE__045 and FILE__027 have their own values. FILE__011
+  changes partway along and is left at +0.152." The exact words are the builder's.
 
 The author then edits any cell, presses Set, or presses Cancel. Measure adds no new column. The
 button sits in the Destagger (m) row, after Set.
@@ -293,6 +314,16 @@ line 1 forward, on a 30 m grid.
 Synthetic data only where it mirrors the real records (project rule): the injected-error cases
 above use the real lines.
 
+**C14 — the author sees the estimator's results before the dialog is built.** After the core
+task, the plan stops at a checkpoint. It shows the author the grid and per-line values for Grids
+1 and 2, unfitted and fitted, beside line-strip pictures at the depth they judge by (the spike's
+`destagger_panels.py`, with the per-line values applied). Threshold choices get the author's eye
+before the dialog work. Preferring −0.15 on fitted Grid 1 while looking at one feature is the
+author adjusting a starting point, which Measure is for (§1). It is not a failure of the whole-grid
+value, which follows the author's own model in §2. A preference that the per-line results look
+worse overall than the grid value alone would send the plan back to the estimator at that
+checkpoint.
+
 **Walkthrough (author, QGIS, deployed profile).**
 - Grid 1, unfitted and fitted: Measure, look at the slice at 14.9–19.7 ns, and judge the wiggle on
   big sharp features against the values found by eye.
@@ -304,8 +335,8 @@ above use the real lines.
 ## 11. Left to the builder
 
 - Module and function names in nsgeo-core, and the per-line solve that meets §7.4's behaviour.
-- The thresholds for "clear", "repeatable" and "changes partway", tuned on Grid 1 and, in the
-  walkthrough, Grid 2.
+- The thresholds for "clear", "repeatable" and "changes partway", tuned on the real grids (§10).
+- The search range's factor and the peak-clearance margin (C10, C12).
 - The time window's end for records and antennas unlike the spike's. For example, stop where the
   bin median falls to the noise floor.
 - How "how sure" is computed and worded.
