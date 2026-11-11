@@ -443,7 +443,7 @@ def mixed_clock_note(radar_grids: Sequence[str]) -> str:
             "zero and will not line up with the other grids."
         )
     return (
-        f"Grids {', '.join(grids)} have no Time zero step, so their times are from the "
+        f"Grids {name_list(grids)} have no Time zero step, so their times are from the "
         "radar's own zero and will not line up with the other grids."
     )
 

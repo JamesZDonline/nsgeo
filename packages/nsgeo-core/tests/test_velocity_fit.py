@@ -187,7 +187,7 @@ def _stored_on_the_radar_clock(zero_ns=-0.5):
         fitted.v_stderr_m_ns,
         fitted.rms_ns,
         4,
-        tuple((int(tr), float(ti + zero_ns)) for tr, ti in zip(traces, t, strict=True)),
+        tuple((int(tr), float(ti + zero_ns)) for tr, ti in zip(traces, t)),
         "2026-11-10T00:00:00+00:00",
         zero_ns,
     )

@@ -61,13 +61,35 @@ def docked_zeroed(qgis_app, tmp_path):
     yield from _docked_with(tmp_path, TIME_ZERO_PRESET)
 
 
-def _docked_with(tmp_path, preset):
+@pytest.fixture
+def docked_banded(qgis_app, tmp_path):
+    """Time-zero preset on lines whose flat bands sit at rows 40, 40 and 41:
+    two lines on the earlier zero, one a sample later (the GPS survey's case)."""
+    yield from _docked_with(tmp_path, TIME_ZERO_PRESET, band_rows=(40, 40, 41))
+
+
+def _banded_dzt(folder, name, band_row):
+    import zlib
+
+    from tests.synthetic import write_dzt
+
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
+    data = (rng.normal(size=(512, 60)) * 1e4).astype(np.int32)  # quiet: the band is the break
+    data[band_row : band_row + 4, :] = 5_000_000
+    write_dzt(folder / name, data)
+    return folder / name
+
+
+def _docked_with(tmp_path, preset, band_rows=None):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
     lines = [
         Line.open(
-            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+            if band_rows is None
+            else _banded_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", band_rows[i]),
             GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
         )
         for i in range(3)
@@ -3597,6 +3619,141 @@ def _prepared_with_owed_record(dock, session, clear=True, **kw):
     _owed_record(dock, session, **kw)
     if clear:
         dock.engine.clear()
+
+
+def _clock_start_record(dock, session, cube_id="A__old"):
+    """An old record built the way the old clock saved it: z0 the latest-starting
+    line's radar-clock start (below 0), z1 the earliest end, no `time_base`."""
+    zeros = [dock.engine.line_zero(k) for k in dock.engine.choice.line_keys]
+    low, high = dock.engine.prepared_z_bounds()
+    z = {"t0_ns": low + max(zeros), "t1_ns": high + min(zeros), "dz_ns": 0.5}
+    assert z["t0_ns"] < 0.0, z
+    return _owed_record(dock, session, cube_id=cube_id, z=z)
+
+
+def _assert_a_clean_old_restore(dock, errors):
+    median = dock.engine.median_zero()
+    assert not [m for m in errors if "does not cover" in m or "could not" in m], errors
+    assert errors.count(old_cube_note(-median)) == 1, errors
+    low, high = dock.engine.prepared_z_bounds()
+    assert low - 1e-9 <= dock.engine.z.t0_ns < dock.engine.z.t_end_ns <= high + 1e-9
+    assert dock.current_values() is not None
+
+
+def test_a_realistic_old_record_restores_inside_the_bounds_when_the_engine_holds_its_source(
+    docked_banded,
+):
+    dock, session = docked_banded
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    zeros = [dock.engine.line_zero(k) for k in dock.engine.choice.line_keys]
+    assert len({round(z, 6) for z in zeros}) == 2, zeros  # one sample apart
+    _clock_start_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert not dock.engine.is_running
+
+    _assert_a_clean_old_restore(dock, errors)
+    # The grid remembers the range the cube shows, not the record's radar-clock one.
+    remembered = session.slice_resolution("A")
+    assert remembered["t0_ns"] == pytest.approx(dock.z0_spin.value())
+    assert remembered["t1_ns"] == pytest.approx(dock.z1_spin.value())
+
+
+def test_a_realistic_old_record_restores_inside_the_bounds_when_a_preparation_runs(
+    docked_banded,
+):
+    dock, session = docked_banded
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _clock_start_record(dock, session)
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_a_clean_old_restore(dock, errors)
+
+
+@needs_real_data
+def test_a_real_data_old_record_restores_without_a_coverage_error(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+            for i in range(4)
+        ]
+    )
+    session.site.presets["p"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.flush_debounce()
+        assert dock.engine.wait_for_preparation(60_000)
+        _clock_start_record(dock, session)
+        errors: list[str] = []
+        dock.error.connect(errors.append)
+
+        dock.restore_cube("A__old")
+        assert dock.engine.wait_for_preparation(60_000)
+
+        _assert_a_clean_old_restore(dock, errors)
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_lands(
+    docked_zeroed,
+):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock._pending_z_shift is True
+    dock._scope = "site"
+    try:
+        dock._on_prepared()  # the preparation lands while Whole site is showing
+    finally:
+        dock._scope = "grid"
+    assert dock._pending_z_shift is True
+    assert not errors.count(old_cube_note(-(dock.engine.median_zero() or 0.0)))
+
+    assert dock.engine.wait_for_preparation(20_000)
+    dock._on_prepared()  # This grid's preparation lands
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    assert dock._pending_z_shift is True
+
+    dock._apply_owed_z_shift()  # must not consume the flag or say anything
+
+    assert dock._pending_z_shift is True
+    assert not [m for m in errors if "first break" in m], errors
+    assert dock.engine.wait_for_preparation(20_000)
+    _assert_shifted_once(dock, errors)
 
 
 def _assert_shifted_once(dock, errors):

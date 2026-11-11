@@ -32,8 +32,8 @@ def first_break_row(rg: Radargram, threshold: float = 0.2) -> int:
 
 
 def first_break_ns(rg: Radargram, threshold: float = 0.2) -> float:
-    """Radar-clock time of the first arrival (the row `first_break_row` picks),
-    as the axis of `rg` labels it."""
+    """Time of the first arrival (the row `first_break_row` picks) on `rg`'s own
+    axis: radar time only when `rg.zero_ns == 0`."""
     return float(rg.t0_ns + first_break_row(rg, threshold) * rg.dt_ns)
 
 

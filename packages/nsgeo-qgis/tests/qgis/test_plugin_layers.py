@@ -2216,6 +2216,21 @@ def test_changing_the_threshold_keeps_picks_on_their_sample(populated):
     assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
 
 
+def test_disabling_the_time_zero_step_keeps_a_pick_on_its_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert session.line_zero(KEY1) != 0.0
+    session.set_step_enabled(KEY1, 0, False)
+    assert session.line_zero(KEY1) == 0.0
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+    assert row["time_ns"] == pytest.approx(20.0 - row["zero_ns"])
+    model = session.resolved_velocity(KEY1)
+    assert row["depth_m"] == pytest.approx(model.depth_at([row["time_ns"]])[0])
+    assert row["time_ns"] == pytest.approx(20.0)  # the radar clock again
+
+
 def test_applying_a_stack_to_the_grid_moves_picks_on_lines_not_open(populated):
     session, layers, _ = populated
     session.open_line(KEY1)

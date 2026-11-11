@@ -671,7 +671,7 @@ def test_the_old_cube_note_names_the_shift_with_its_sign():
 def test_mixed_clock_note_names_the_radar_grids():
     assert mixed_clock_note([]) == ""
     assert mixed_clock_note(["A"]).startswith("Grid A has no Time zero step")
-    assert mixed_clock_note(["A", "C"]).startswith("Grids A, C have no Time zero step")
+    assert mixed_clock_note(["A", "C"]).startswith("Grids A and C have no Time zero step")
     assert mixed_clock_note(["A"]) == (
         "Grid A has no Time zero step, so its times are from the radar's own zero "
         "and will not line up with the other grids."

@@ -1575,6 +1575,14 @@ class SlicesDock(QgsDockWidget):
                     spin.blockSignals(False)
         finally:
             self._updating -= 1
+        # The grid remembers the shifted range, not the record's radar-clock
+        # one (the spins were written with signals blocked, so nothing else
+        # would re-remember it).
+        grid_id = self._last_grid_id
+        if grid_id is not None:
+            self.session.remember_slice_resolution(
+                grid_id, t0_ns=self.z0_spin.value(), t1_ns=self.z1_spin.value()
+            )
         self.error.emit(old_cube_note(-median))
         return True
 
@@ -1586,8 +1594,11 @@ class SlicesDock(QgsDockWidget):
         if self.engine.is_running or not self._pending_z_shift:
             return
         self._pending_z_shift = False
-        if self._shift_z_by_median_zero():
-            self._apply_resolution()
+        self._shift_z_by_median_zero()
+        # The shifted end can run past the new prepared bound (lines whose
+        # zeros differ by a sample); clamp as `_on_prepared` does, then push.
+        self._clamp_z_to_prepared()
+        self._apply_resolution()
 
     def line_zero_in_cube(self, key: str) -> float | None:
         """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
@@ -1604,9 +1615,11 @@ class SlicesDock(QgsDockWidget):
         DZT header, which is the best estimate available before a
         preparation has run but is only right for a preset that leaves the
         sample axis alone. `time_zero` -- first in the ordinary preset,
-        not an exotic one -- crops rows off the FRONT, and on this repo's
+        not an exotic one -- crops rows off the FRONT (and relabels
+        the axis so the row it lands on reads 0 ns), and on this repo's
         own real files drops 49 of 512, moving the start from -11.086 ns
-        to -0.476 while the header still says -11.086. The cube then asked
+        to the prepared lines' own, much later start while the header
+        still says -11.086. The cube then asked
         for 10.6 ns of two-way time that no prepared line has, and the
         first slice raised `CoverageError` naming the line. Correcting it
         here, against `engine.prepared_z_bounds()`, is the only point
@@ -1656,18 +1669,20 @@ class SlicesDock(QgsDockWidget):
 
     def _on_prepared(self) -> None:
         try:
-            owed_shift, self._pending_z_shift = self._pending_z_shift, False
             if self._scope == "site":
                 # M12: the Resolution and Display widgets are the site's
                 # now; This grid's clamp and redraw run on the way back.
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
+            # Consumed only on This grid: a switch to Whole site within the
+            # preparation window leaves the flag for This grid's preparation.
+            owed_shift, self._pending_z_shift = self._pending_z_shift, False
             shifted = self._shift_z_by_median_zero() if owed_shift else False
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
-            clamped = self._clamp_z_to_prepared() or shifted
+            clamped = self._clamp_z_to_prepared() or shifted or owed_shift
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
@@ -2041,7 +2056,12 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
-            self.flush_debounce()
+            if self._pending_z_shift:
+                # An old record's range is still on the radar clock: nothing
+                # is pushed at the engine until the shift has been applied.
+                self._debounce.stop()
+            else:
+                self.flush_debounce()
             self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
