@@ -21,6 +21,7 @@ def write_dzt(
     n_channels: int = 1,
     rh_data: int = 128,
     tag: int = 2047,
+    epsr: float = 14.0,
 ) -> None:
     """Write `data` (n_samples, n_traces) as a DZT file.
 
@@ -55,7 +56,7 @@ def write_dzt(
     struct.pack_into("<f", head, 22, -11.086)  # rhf_position
     struct.pack_into("<f", head, 26, range_ns)
     struct.pack_into("<H", head, 52, n_channels)
-    struct.pack_into("<f", head, 54, 14.0)  # rhf_epsr
+    struct.pack_into("<f", head, 54, epsr)  # rhf_epsr
     head[98 : 98 + 7] = b"HS350US"
 
     headsize = MINHEADSIZE * rh_data if rh_data < MINHEADSIZE else MINHEADSIZE * n_channels

@@ -426,3 +426,9 @@ def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: floa
             return slowed(out)
 
         monkeypatch.setattr(engine, name, wrapper)
+
+
+SUNNYSIDE = LOCAL_DATA / "sunnyside.nsgeo.json"
+needs_sunnyside = pytest.mark.skipif(
+    not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
+)

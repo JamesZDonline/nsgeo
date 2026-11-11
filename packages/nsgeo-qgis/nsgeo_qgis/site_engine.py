@@ -340,7 +340,7 @@ class SiteEngine(QObject):
                 self._drop_engine(grid_id)
                 self._states[grid_id] = "no lines"
                 continue
-            if old.get(grid_id) == choice and grid_id in self._engines:
+            if choice.same_source(old.get(grid_id)) and grid_id in self._engines:
                 continue
             if grid_id == self._preparing:
                 self._preparing = None  # its cancelled callback is not a result

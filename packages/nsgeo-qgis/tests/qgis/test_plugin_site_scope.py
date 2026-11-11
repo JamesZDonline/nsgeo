@@ -27,6 +27,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import site_engine as site_engine_module
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -2975,3 +2976,85 @@ def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
         probe.settle()
         widths.append(probe.scroll.widget().width())
     assert widths[1] > widths[0], widths
+
+
+def test_a_placement_edit_re_prepares_only_that_grid_in_the_site_view(plugin, site3):
+    """Line editing spec §4.5: B's engine hands the move over to the site
+    engine, which re-queues B alone; A and C keep what they hold."""
+    dock = whole_site(plugin)
+    session = plugin.session
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    seen: list[dict[str, str]] = []
+    inner = dock.site_engine.on_changed
+
+    def record() -> None:
+        seen.append({g: dock.site_engine.grid_state(g) for g in "ABC"})
+        if inner is not None:
+            inner()
+
+    dock.site_engine.on_changed = record
+    key = site3.keys("B")[0]
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, offset=1.75)])
+    settle(dock)
+
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    assert any(state["B"] == "queued" for state in seen), seen
+    assert all(state["A"] == "ready" and state["C"] == "ready" for state in seen), seen
+    assert seen[-1]["B"] == "ready"
+
+
+def _capture_site_errors(dock) -> list[str]:
+    errors: list[str] = []
+    inner = dock.site_engine.on_error
+
+    def record(message: str) -> None:
+        errors.append(message)
+        if inner is not None:
+            inner(message)
+
+    dock.site_engine.on_error = record
+    return errors
+
+
+def _every_engine_holds_only_its_own_lines(dock, session) -> None:
+    for grid_id in "ABC":
+        engine = dock.site_engine.engine_for(grid_id)
+        held = {line.key for line in engine.prepared_lines()}
+        on_grid = {
+            session.line_key(line)
+            for line in session.site.lines
+            if getattr(line.placement, "grid_id", None) == grid_id
+        }
+        assert held == on_grid, grid_id
+
+
+def test_a_line_moved_while_the_site_view_is_prepared_and_idle_ends_on_its_new_grid(plugin, site3):
+    """Line editing spec §7, "a line moved while it is in a prepared source
+    on each grid": the site is idle, every grid ready."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    moved = site3.keys("B")[0]
+    plugin.move_lines([moved], "C")
+    settle(dock)
+    assert plugin.session.line_for_key(moved).placement.grid_id == "C"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, plugin.session)
+
+
+def test_a_line_moved_while_the_site_is_still_preparing_ends_on_its_new_grid(plugin, site3):
+    """The same, with a preparation in flight: B was just queued by an edit
+    and not yet settled when another of its lines moves to A."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    session = plugin.session
+    b = site3.keys("B")
+    session.edit_lines([LineEdit(b[0], session.line_for_key(b[0]).placement, offset=1.75)])
+    assert dock.site_engine.grid_state("B") != "ready"  # the preparation has not finished
+    plugin.move_lines([b[1]], "A")
+    settle(dock)
+    assert session.line_for_key(b[1]).placement.grid_id == "A"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, session)

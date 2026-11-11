@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.2.0. It is **experimental**, so keep
+This guide covers nsgeo 0.3.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.2.0](#5-known-issues-in-020)
+5. [Known issues in 0.3.0](#5-known-issues-in-030)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.2.0.zip` from the
+1. Download `nsgeo_qgis-0.3.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.2.0 · core 0.2.0 · build`, followed by
+   bar above the map should show `plugin 0.3.0 · core 0.3.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.2.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.3.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -67,7 +67,10 @@ QGIS 3.40, QGIS 3.44 and QGIS 4.2 on Linux.
 
 Install the new zip exactly as above. QGIS replaces the old version. Then
 **restart QGIS** and check **Plugins → nsgeo → About nsgeo** for the new
-version number. Upgrading does not touch your site folders.
+version number. Upgrading does not touch your site folders. The first time
+nsgeo 0.3.0 opens a site that has picks, it puts any pick that had drifted off
+its line back onto it, with its depth at the line's current velocity, and the
+message bar says how many picks it updated.
 
 ### Uninstalling
 
@@ -101,13 +104,16 @@ QGIS docks the four panels around the map. You can drag, float or close them lik
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
-  Click a line to open it. Right-click a grid for **Edit grid…**, **Import DZT
-  files…**, **Set velocity…** and **Remove grid**, which removes the grid along
-  with its lines. Right-click a line for **Open** and **Remove line from site**.
-  To remove several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click
-  to select them, then press Delete or right-click the selection. Removing never
-  deletes the DZT files, and the site file isn't changed until you choose
-  **Save site**.
+  Click a line to open it. Right-click a grid for **Edit grid…**, **Edit
+  lines…**, **Import DZT files…**, **Set velocity…** and **Remove grid**, which
+  removes the grid along with its lines. **Edit lines…** is greyed out while the
+  grid has no lines. Right-click a line for **Open**, **Edit line…**, **Set
+  velocity override…**, **Move to grid** and **Remove line from site**. To work
+  on several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click to
+  select them. Press Delete to remove them, or right-click the selection. Lines
+  on one grid offer **Edit N lines…**. Any lines offer **Move N lines to grid**
+  and **Remove N lines from site**. Removing never deletes the DZT files, and
+  the site file isn't changed until you choose **Save site**.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. Every line on a grid is
@@ -142,7 +148,9 @@ works too. The toolbar is under **View → Toolbars → nsgeo**.
 **Set velocity override…** on a line's right-click menu sets or clears that line's
 own velocity. It also lists the velocity fits you have measured on the line, and
 you can apply one of them as the override. Without an override, the line uses its
-grid's velocity (right-click the grid, then **Set velocity…**).
+grid's velocity (right-click the grid, then **Set velocity…**). If the grid has
+none either, it uses the dielectric in its file header. The profile names the
+source next to the velocity, for example `v = 0.080 m/ns (header ε 14)`.
 
 ---
 
@@ -221,11 +229,13 @@ far (see [What the map shows](#what-the-map-shows)).
    says so, for example `the corners measure 20.41 × 19.87 m · your size is kept`.
    Click **Use these** to take the measured size instead. Check **Default spacing
    (m)** too. The azimuth is measured clockwise from north to the grid's +Y axis.
-6. Enter **Velocity (m/ns)**. It is required, and it sets the depth scale for the
-   grid's profiles and slices. A working estimate is fine, because you can change
-   it later with **Set velocity…**.
-7. Click **OK**. It stays greyed out until the Id, CRS, size and velocity are all
-   usable.
+6. **Velocity (m/ns)** is optional. Left at **from line headers**, each line
+   uses the dielectric in its own file header for depths. The note beside the
+   box shows what the headers give, for example `header ε 14 ≈ 0.0801 m/ns`.
+   The header value is only the instrument's setting, not a measurement, so
+   enter a velocity when you have a better one, for example from a fit. You can
+   change it, or set it back to 0 to clear it, later with **Set velocity…**.
+7. Click **OK**. It stays greyed out until the Id, CRS and size are all usable.
 
 **The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until
 you choose one yourself, nsgeo uses the first of these that suits the map's
@@ -278,11 +288,33 @@ and its **Import** button name the grid the lines will go into.
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
    **Offset (m)** or **Dir**. Use **↑** and **↓** to fix the order. Leaving out
    a redone line moves the later files up into its place, unless you have edited
-   them by hand.
+   them by hand. The **Note** column flags a file whose header dielectric is
+   outside 1–81, which no soil has. Such a line still imports, but its depths
+   need a grid or line velocity.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
    Survey**. They are drawn as thin dashed lines in the grid's colour, and are
    hidden when you zoom out far enough that they would run together (beyond
    1:400 at 0.5 m spacing). Grid outlines and picks stay at every scale.
+
+#### Fixing lines after import
+
+If a line went in with the wrong start, offset, direction or grid, right-click
+the grid and choose **Edit lines…**. A table opens with every line on the grid,
+in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
+**Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
+panel shows.
+
+The panel under the table changes every selected line at once. Type a start and
+press **Set**, press **Snap to grid edge**, type an amount and press **Shift**
+to move the offsets, press **Flip** to reverse the direction, or choose a grid
+and press **Move**.
+
+The **Note** column flags a line that starts off its edge, or that lies outside
+the grid's width. Nothing changes until you click **OK**, and then everything
+changes as one step. Picks move with their lines.
+
+Changing a grid's length in **Edit grid…** moves its reversed lines with the far
+edge. The message bar tells you how many moved.
 
 ### Step 4: Open a line and use the map
 
@@ -359,9 +391,9 @@ line, the depth and the velocity.
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
   [Known issues](#5-known-issues-in-020) before you do.
-- Do not drag a pick to a new place on the map. It keeps the trace, time and
-  distance it was made at, so the point and its record would no longer agree.
-  To move a pick, delete it and pick again on the profile.
+- A pick follows its line, so dragging it on the map does not move it: it goes
+  back onto its line when you save the layer's edits. To move a pick along its
+  line, delete it and pick again on the profile.
 
 ### Step 7: Build slices
 
@@ -463,11 +495,8 @@ A few things to know:
 - **Keep DZT files inside the site folder.** If they are elsewhere, **Save site**
   asks whether to record them by their full path, and the site will then open
   only on a computer where that path exists.
-- **A pick's map position is fixed when you make it.** If you later move, resize
-  or rotate its grid with **Edit grid…**, the line is redrawn in its new place but
-  the pick stays where it was. nsgeo shows a warning when this happens. The
-  warning says to see "the Picking section of the README"; this paragraph is
-  what it means. So finish placing a grid before you start picking on its lines.
+- **A pick follows its line.** Editing a grid or a line moves its picks too, and
+  dragging a pick on the map does not move it.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the
@@ -476,7 +505,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.2.0
+## 5. Known issues in 0.3.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -537,8 +566,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.2.0 · core
-   0.2.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.3.0 · core
+   0.3.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open

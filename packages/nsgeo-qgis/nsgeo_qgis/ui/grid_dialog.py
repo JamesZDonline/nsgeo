@@ -77,6 +77,10 @@ COL_ROLE, COL_A, COL_B, COL_FROM, COL_PICK, COL_OFF = range(6)
 CRS_SCALE_WARN = 0.001  # 0.1%
 CRS_SCALE_REFUSE = 0.02  # ~2%
 
+# What the velocity box reads at 0: the grid has no velocity, and each of its
+# lines uses its header's dielectric instead (#4).
+VELOCITY_UNSET = "from line headers"
+
 # A measured grid side shorter than this (metres) is not a grid: it is
 # degrees read as metres, or a CRS that is not the one the corners were
 # measured in. A degree-sized grid fits to RMS 0.000 and would move an
@@ -154,7 +158,6 @@ class GridDialog(QDialog):
         self,
         session: SiteSession,
         grid: Grid | None = None,
-        suggested_velocity: float | None = None,
         parent: QWidget | None = None,
         canvas: QgsMapCanvas | None = None,
     ) -> None:
@@ -220,9 +223,11 @@ class GridDialog(QDialog):
         self.size_x = _spin(0.0, 1e5, 2, 0.5, 10.0)
         self.size_y = _spin(0.0, 1e5, 2, 0.5, 10.0)
         self.spacing = _spin(0.01, 100.0, 3, 0.05, 0.5)
+        # Optional (#4): 0 is "unset", and each line then falls back on its
+        # own header dielectric -- resolve_velocity's last tier.
         self.velocity = _spin(0.0, 0.3, 4, 0.001)
-        self.velocity.setSpecialValueText("required")
-        self.velocity_hint = QLabel("")
+        self.velocity.setSpecialValueText(VELOCITY_UNSET)
+        self.velocity_hint = QLabel(self._header_hint(grid))
         self.crs_hint = QLabel("")
         self.crs_hint.setWordWrap(True)
         origin_row = QHBoxLayout()
@@ -257,8 +262,8 @@ class GridDialog(QDialog):
         # a QHBoxLayout, the way velocity_hint shares with velocity)
         # squeezed crs_widget down to an unreadable few px whenever the
         # hint had anything to say -- exactly the moment F3 added it to
-        # be seen. velocity_hint's text is always short ("from the
-        # header dielectric"); crs_hint's can run to a full sentence, so
+        # be seen. velocity_hint's text is always short ("header ε 14 ≈
+        # 0.0801 m/ns"); crs_hint's can run to a full sentence, so
         # it was moved to its own row -- which round 4's Finding 2 then
         # found was silently clipped to one line's height regardless
         # (see the comment above form_top/form_bottom): added directly
@@ -313,9 +318,6 @@ class GridDialog(QDialog):
             self._prefill(grid)
             self._typed = [True, True]
         else:
-            if suggested_velocity is not None:
-                self.velocity.setValue(suggested_velocity)
-                self.velocity_hint.setText("from the header dielectric")
             self._settle_crs_at_open()
         self._validate()
         self._refresh_derived()
@@ -1413,7 +1415,6 @@ class GridDialog(QDialog):
         crs_ok = kind is None
         ok = (
             bool(self.id_edit.text().strip())
-            and self.velocity.value() > 0
             and self.size_x.value() > 0
             and self.size_y.value() > 0
             and crs_ok
@@ -1429,5 +1430,38 @@ class GridDialog(QDialog):
             size_y=self.size_y.value(),
             crs=self.crs_widget.crs().authid(),
             default_spacing=self.spacing.value(),
-            velocity=VelocityModel.constant(self.velocity.value()),
+            velocity=self._result_velocity(),
         )
+
+    def _result_velocity(self) -> VelocityModel | None:
+        """None when unset; the grid's own model when the box still shows it,
+        so editing a grid's corners neither rounds a fit's full-precision
+        velocity to the box's four decimals nor flattens a layered model to
+        its top layer; otherwise the typed number."""
+        v = self.velocity.value()
+        if v == 0.0:
+            return None
+        stored = self.existing.velocity if self.existing is not None else None
+        if stored is not None and round(v, 4) == round(stored.surface_velocity, 4):
+            return stored
+        return VelocityModel.constant(v)
+
+    def _header_hint(self, grid: Grid | None) -> str:
+        """What the line headers would give an unset grid: the grid's own
+        lines when editing, the site's when the grid is new. Named beside the
+        box, never entered in it: a copy in the grid would outrank the
+        headers for good (#4)."""
+        site = self.session.site
+        lines = site.lines if site is not None else []
+        if grid is not None:
+            lines = [ln for ln in lines if getattr(ln.placement, "grid_id", None) == grid.id]
+        epsrs = sorted({float(ln.header.epsr) for ln in lines})
+        if not epsrs:
+            return ""
+        if len(epsrs) > 1:
+            return f"headers ε {epsrs[0]:g}–{epsrs[-1]:g}"
+        try:
+            v = VelocityModel.from_dielectric(epsrs[0]).surface_velocity
+        except ValueError:
+            return f"header ε {epsrs[0]:g} gives no velocity"
+        return f"header ε {epsrs[0]:g} ≈ {v:.4f} m/ns"

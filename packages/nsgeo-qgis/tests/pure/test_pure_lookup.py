@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.geometry.fit import fit_grid_from_corners
@@ -206,6 +208,34 @@ def test_plan_import_survives_one_corrupt_header_among_good_files(tmp_path):
     assert "time-triggered" not in bad.note
     lines = rows_to_lines(rows, OPTS)
     assert [ln.path.name for ln in lines] == ["FILE__001.DZT"]
+
+
+@pytest.mark.parametrize("epsr", [0.0, -3.0, float("nan"), float("inf"), 0.5, 1e6])
+def test_plan_import_notes_a_header_dielectric_no_soil_has(tmp_path, epsr):
+    """#4: with grid velocity optional, a line's header dielectric is the
+    last tier its depths fall back on. A garbage one would only fail later,
+    when a depth is first drawn; the import table is where it can still be
+    dealt with. A warning, not a refusal: the line still imports."""
+    path = synthetic_dzt(tmp_path, "FILE__001.DZT", epsr=epsr)
+    (row,) = plan_import([path], OPTS)
+    assert f"header ε {np.float32(epsr):g} is outside 1–81" in row.note
+    assert row.include and row.placeable
+
+
+@pytest.mark.parametrize("epsr", [1.0, 14.0, 81.0])
+def test_plan_import_leaves_a_plausible_header_dielectric_alone(tmp_path, epsr):
+    path = synthetic_dzt(tmp_path, "FILE__001.DZT", epsr=epsr)
+    (row,) = plan_import([path], OPTS)
+    assert row.note == ""
+
+
+def test_the_dielectric_note_survives_a_replan(tmp_path):
+    # recompute_offsets rewrites only the note parts it derives itself.
+    path = synthetic_dzt(tmp_path, "FILE__001.DZT", n_traces=720, epsr=0.0)  # 12 m
+    rows = plan_import([path], OPTS)
+    assert "exceeds grid size along" in rows[0].note
+    recompute_offsets(rows, dataclasses.replace(OPTS, grid_size_along=20.0))
+    assert rows[0].note == "header ε 0 is outside 1–81: set a grid or line velocity"
 
 
 # --- review round 1 findings -------------------------------------------------

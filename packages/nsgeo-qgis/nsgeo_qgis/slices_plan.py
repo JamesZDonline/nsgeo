@@ -123,6 +123,21 @@ class SourceChoice:
     transform: str
     line_keys: tuple[str, ...]
 
+    def same_source(self, other: SourceChoice | None) -> bool:
+        """Whether `other` builds the same cube: equal but for the ORDER of
+        `line_keys`. A cube is a sum of per-line contributions
+        (`accumulate`, `build_cube`, `stream_slice`), so the survey order a
+        reorder changes moves nothing but float rounding; it is not a change
+        of lines and must neither read stale nor cost a re-preparation
+        (line editing spec §4.5)."""
+        return (
+            other is not None
+            and self.grid_id == other.grid_id
+            and self.preset == other.preset
+            and self.transform == other.transform
+            and set(self.line_keys) == set(other.line_keys)
+        )
+
 
 @dataclass(frozen=True)
 class SiteSource:
