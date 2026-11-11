@@ -53,9 +53,9 @@
    - Minimum curvature's kriging stand-in is the engine's `PREVIEW_METHOD` weights.
 7. **Crops.**
    - Smoothing crops reach the smoothing kernel's radius (`ceil(SMOOTH_TRUNCATE_SIGMAS · σ / cell)` cells) plus one cell (the blend's far tap) past the columns' nearest cells, so a smoothed section equals the sampled smoothed slice exactly.
-   - Minimum-curvature crops reach `max(ceil(SECTION_MARGIN_M / cell), the smoothing reach) + 1` cells.
+   - Minimum-curvature crops reach `curvature_margin_cells(settings, cell, spacing_m)` = `max(ceil(SECTION_MARGIN_SPACINGS · spacing_m / cell), the smoothing reach) + 1` cells. `spacing_m` is the cut's grid's `default_spacing` in both scopes, the same spacing `SliceEngine.finish_settings` uses. *(Ruling during Task 1, 2026-11-11: the reach is counted in line spacings. Minimum curvature through one-cell-wide lines couples across lines the way a spline couples across knots, so the 1 m the spike chose missed 0.1% by up to 3% on cuts along the lines.)*
    - Pieces cover at most `SECTION_PIECE_M` of the cut, and each piece's curvature plan (which now includes #111's multigrid hierarchy) is built once per solve, not per level.
-   - Re-measured on 2026-11-11 with multigrid on Grid 1 at 0.05 m, for a 12 m cut: 0.10 s a level (about 20 s for 211 levels), within 0.0015% of a whole-frame solve. Three crop plans took 0.09 s once. The whole-frame solve is now 0.30 s a level (about 1 min); crops stay three times faster.
+   - Measured in Task 1 on the ten real lines at 6 spacings: worst error 2.2e-5 of the range, at 0.07–0.20 s a level at 0.05 m (0.20 s for a 12 m diagonal cut) and 0.02 s at 0.2 m. On Grid 1 a whole-frame solve is 0.30 s a level, so crops are now only about 1.5× faster there. They win on big grids, whose whole-frame solve grows with the grid while a crop does not. Task 6 measures Grid 1.
 8. **Two worker threads, not one shared.** A cut's solve runs on its own `Refiner` (thread prefix `nsgeo-cut`).
    - Why: the slice's `Refiner.start` cancels whatever runs, so a shared thread would kill one list with the other. A second thread means the slice's refine never queues behind a cut (spec §4.7's fairness rule).
    - The jobs are one depth each. Depths are solved outward from the slice band's centre, so the depth the user is looking at improves first.
@@ -99,7 +99,7 @@
   | Default cut name | `Cut {n}`, with n one more than the highest existing `Cut <n>` (so names are never reused while a higher one exists) |
   | `CUTS_SCHEMA_VERSION` | `2`. It is written only when `site.cuts` is non-empty. `load_site` reads `(1, 2)`. |
   | Column step | `frame.cell / 2` |
-  | `SECTION_MARGIN_M` | `1.0` |
+  | `SECTION_MARGIN_SPACINGS` | `6.0` (replaces `SECTION_MARGIN_M = 1.0`; ruling during Task 1) |
   | `SECTION_PIECE_M` | `4.0` |
   | Crop agreement with a whole-frame solve | ≤ `1e-3` of the level's finite data range, on the cut's columns |
   | `CUT_SOLVE_REST_MS` | `300` |
@@ -665,7 +665,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
 
 **Interfaces:**
 - Consumes:
-  - Task 1: `section_crops`, `plan_section_curvature`, `solve_section_level`, `smoothing_reach_cells`, `SECTION_MARGIN_M`.
+  - Task 1: `section_crops`, `plan_section_curvature`, `solve_section_level`, `smoothing_reach_cells`, `curvature_margin_cells(settings, cell, spacing_m)` (with `spacing_m` = the cut's grid's `default_spacing`).
   - Task 3: `CutSections`.
   - `Refiner.start` / `cancel` / `shutdown`.
 - Produces:
@@ -724,7 +724,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - the redraw after a settings change;
   - the time until the walkthrough-length cut (about 12 m) is solved.
 
-  The spike's figure for the solve (multigrid, 2026-11-11) is about 20 s for a 12 m cut at 0.05 m. If a hover under kriging takes over 100 ms, or the solve takes over a minute, stop and report rather than ship.
+  Task 1 measured 0.20 s a level for a 12 m cut at 0.05 m on the ten real lines, so expect about 40 s for Grid 1's 211 levels. If a hover under kriging takes over 100 ms, or the solve takes over a minute, stop and report rather than ship.
 - [ ] **Step 7: Run the full core + pure suite, the full QGIS suite, lint and types.**
 - [ ] **Step 8: Commit and push:**
   `git commit -m "feat(cuts): minimum curvature solved near the cut behind a kriging preview; the guide (cut spec §4.7, §7)"`

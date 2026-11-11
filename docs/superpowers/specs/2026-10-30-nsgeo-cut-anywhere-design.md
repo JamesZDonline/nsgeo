@@ -17,7 +17,7 @@ You draw a line on the map and the profile view shows the cube's vertical sectio
 - **Call 11 is revised.** A column now takes the bilinear blend the slice view shows (#107's pixel rule), not its nearest cell's value.
 - **Call 2 adds the cube's time base** (#97).
 - **Call 18 is new:** a cut's times are on its cube's clock (#97's hand-off).
-- §4.7 and §5 are re-measured with the multigrid solver: about 20 s for a 12 m cut on Grid 1 at 0.05 m, down from about a minute.
+- §4.7 and §5 are re-measured with the multigrid solver: about 20 s for a 12 m cut on Grid 1 at 0.05 m, down from about a minute. During the build, crops had to reach six line spacings rather than 1 m to meet 0.1% along the lines, so expect about 40 s.
 - §1's order follows the README roadmap.
 
 ---
@@ -264,7 +264,10 @@ On real single levels, kriging is not a close stand-in. In the gaps between line
 
 - **Kriging at once.** Under minimum curvature, a cut first shows kriging at the same max distance and smoothing, so the blanks are the same. The title says kriging is standing in.
 - **Minimum curvature behind it.** For the working cut, minimum curvature is solved at every level in the background and replaces kriging when done. The title shows how far it has got.
-- **Solved near the cut.** Each level is solved on crops around the cut, not the whole frame. A spike on `mincurv_cube.npz` crossed the cut on crops reaching 1 m beyond it, in 2–4 m pieces. It matched the whole-frame solve on the cut's cells to within 0.003% of the range. Re-measured with multigrid and the bilinear columns of call 11 (2026-11-11), crops reaching 1 m (plus one cell for the blend), in 4 m pieces, took 0.10 s a level, about 20 s for a 12 m cut. They were within 0.0015% of the whole-frame solve at 0.05 m and 0.07% at 0.2 m. The requirement is agreement within 0.1% of the level's range. Crop sizes are the builder's call.
+- **Solved near the cut.** Each level is solved on crops around the cut, not the whole frame. A spike on `mincurv_cube.npz` crossed the cut on crops reaching 1 m beyond it, in 2–4 m pieces. It matched the whole-frame solve on the cut's cells to within 0.003% of the range. Re-measured with multigrid and the bilinear columns of call 11 (2026-11-11), crops reaching 1 m (plus one cell for the blend), in 4 m pieces, took 0.10 s a level, about 20 s for a 12 m cut. They were within 0.0015% of the whole-frame solve at 0.05 m and 0.07% at 0.2 m. That cut was diagonal, though.
+  - **Built with a wider reach (2026-11-11).** On the ten real lines, cuts along the lines missed 0.1% by up to 3% with a 1 m reach. Minimum curvature through lines one cell wide couples across the lines the way a spline couples across its knots.
+  - **So the reach is counted in line spacings:** six (3 m at 0.5 m). That gives a worst error of 2.2e-5 of the range, at about 0.2 s a level for a 12 m cut at 0.05 m, so about 40 s for Grid 1.
+  - **The requirement stands:** agreement within 0.1% of the level's range. Crop sizes are the builder's call.
 - **Only the working cut.** Hover previews show kriging and start no solve.
 - **Kept, and discarded.** A solved section is kept while the source and settings hold. Any change in 4.4's list discards it.
 - **Fair to the slices.** A cut's solve must not hold the slice's own refinement back by more than one level's solve. Whether the two share `refine.py`'s thread is the builder's call.
@@ -304,7 +307,8 @@ Line editing makes a line pick follow its line through a grid edit, a line edit 
 | Kriging section with smoothing Y 0.1 m, finishing whole levels | 0.12 s | 2.2 s |
 | Minimum curvature, one level, whole frame | 0.02 s (was 0.04 s) | 0.30 s, 15 iterations (was 2.2 s, 863) |
 | Minimum curvature, every level, whole frame | about 5 s (was 8 s) | about 1 min (was 8 min) |
-| Minimum curvature, every level, on crops round the cut (±1 m + 1 cell, 4 m pieces, planned once) | about 2 s; within 0.07% | about 20 s (0.10 s a level; was about 1 min); within 0.0015% |
+| Minimum curvature, every level, on crops round the cut (±1 m + 1 cell, 4 m pieces, planned once; superseded, see §4.7) | about 2 s; within 0.07% | about 20 s (0.10 s a level); within 0.0015% on a diagonal cut, but up to 3% along the lines |
+| The same with crops reaching six line spacings (as built) | 0.02 s a level (the ten real lines) | 0.07–0.20 s a level (the ten real lines); worst 2.2e-5 of the range; Grid 1 is measured in Task 6 |
 | Kriging against minimum curvature, one level, gap cells | 99th percentile 5.5–7.4%, worst 17–28% of the range | 99th percentile 5.1–5.9%, worst 35–43% |
 
 **Requirements:**
