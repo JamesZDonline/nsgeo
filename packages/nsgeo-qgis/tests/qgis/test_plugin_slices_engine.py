@@ -99,6 +99,29 @@ def test_preparation_applies_the_preset_and_appends_the_transform(sourced):
     assert (covered >= 0.0).all(), "an envelope is unipolar; a negative means it was not applied"
 
 
+def test_the_estimate_follows_a_new_cell_size_and_a_new_line_set(sourced):
+    """The checkbox and status figures count the covered cells, and follow a
+    new cell size and a re-prepared line set rather than a cached count (#113)."""
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    first = engine.estimate.cube_bytes
+    assert first == engine.cube().nbytes
+
+    engine.set_resolution(Resolution(cell=0.5, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    second = engine.estimate.cube_bytes
+    assert second == engine.cube().nbytes
+    assert second != first
+
+    keys = tuple(session.keys())[:-1]
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+    )
+    assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    assert errors == []
+    assert engine.line_count == 3
+    assert engine.estimate.cube_bytes == engine.cube().nbytes
+
+
 def test_no_transform_leaves_the_data_bipolar_and_says_so(sourced):
     engine, session, errors, _ = sourced
     _prepare(engine, session, transform=NO_TRANSFORM)

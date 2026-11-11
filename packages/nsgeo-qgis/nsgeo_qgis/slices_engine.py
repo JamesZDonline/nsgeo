@@ -147,6 +147,7 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
+    covered_cells,
     finish_slice,
     limit_over_slices,
     plan_fill,
@@ -306,6 +307,9 @@ class SliceEngine(QObject):
         self._choice: SourceChoice | None = None
         self._resolution: Resolution | None = None
         self._lines: list[PreparedLine] = []
+        #: `_covered_count`'s cache; `None` means not counted for the current
+        #: lines and frame (#113).
+        self._covered: int | None = None
         #: The preset's steps as they stood when preparation was
         #: dispatched -- see `provenance()`. Deliberately NOT a live read
         #: of `site.presets[name]`: `save_preset` overwrites a name in
@@ -504,7 +508,20 @@ class SliceEngine(QObject):
         samples = sum(int(line.data.size) for line in self._lines)
         n_cells = self._frame.n_cells if self._frame is not None else 0
         nz = self._z.nz if self._z is not None else 0
-        return estimate_memory(samples, n_cells, nz)
+        return estimate_memory(samples, n_cells, nz, self._covered_count())
+
+    def _covered_count(self) -> int:
+        """Cells the prepared lines fall in, for the packed cube's size (#113).
+
+        Cached: the status line reads `estimate` on every redraw, and a count
+        bins every trace. It never goes through `plan_line`, which can raise,
+        and this is read from slots. Reset wherever `_plans` or `_lines` is.
+        """
+        if self._frame is None or not self._lines:
+            return 0
+        if self._covered is None:
+            self._covered = covered_cells(self._frame, (line.coords for line in self._lines))
+        return self._covered
 
     def set_always_resident(self, flag: bool) -> None:
         """The settings override of spec 9.2, worded there for what it
@@ -665,6 +682,7 @@ class SliceEngine(QObject):
             self._lines = []
             self._steps = ()
             self._plans = None
+            self._covered = None
             self._cube = None
             self._drop_fill()
             self._grid_fp = None
@@ -878,6 +896,7 @@ class SliceEngine(QObject):
                         self._report(str(exception))
                     return
                 self._lines = list(result or [])
+                self._covered = None
                 self._rebuild_geometry()
             except Exception as exc:  # noqa: BLE001 -- see the module docstring:
                 # QgsTaskWrapper swallows this with no traceback anywhere.
@@ -970,6 +989,7 @@ class SliceEngine(QObject):
         # plan and the values alone (plan call 8).
         held = (self._weights, self._solved, self._last_solve_ms)
         self._plans = None
+        self._covered = None
         self._cube = None
         self._drop_fill()
         self._frame = None
@@ -1725,6 +1745,7 @@ class SliceEngine(QObject):
         self._lines = []
         self._steps = ()
         self._plans = None
+        self._covered = None
         self._frame = None
         self._z = None
         self._grid_fp = None

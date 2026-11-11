@@ -187,7 +187,7 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     save_cube(cube, out)
     reloaded = load_cube(out)
     assert reloaded.provenance == prov
-    np.testing.assert_array_equal(reloaded.count, cube.count)
+    np.testing.assert_array_equal(reloaded.coverage(), cube.coverage())
     np.testing.assert_allclose(
         reloaded.slice_levels(10, 28)[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
     )
@@ -272,19 +272,19 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     clip = UnipolarClip()
     thickness = 23  # ~5.0 ns at this dz -- at least one pulse width, spec 6.6
     correct = shared_limit(cube, thickness, clip)
-    over_raw_levels = clip.limit(cube.mean)
+    over_raw_levels = clip.limit(np.stack([cube.level(k) for k in range(z.nz)]))
     assert correct < over_raw_levels  # the direction M10 measured, on real data
 
     # The exact mechanism, on real data: the shared limit IS the percentile
     # over the slices actually displayed at this thickness. This is what
-    # dies against the `clip.limit(cube.mean)` implementation M10 measured,
+    # dies against the limit-over-every-raw-level implementation M10 measured,
     # and against a windows-overlap mutant that weights mid-depths twice.
     # `shared_limit` folds a final, thinner tail window in when thickness
     # does not divide nz (Ruling F) -- 20 of this axis's 181 levels, here
     # -- so this cross-check must add the same tail window or it measures
     # a different (and, per that ruling, wrong) set of displayed slices.
     #
-    # What this DOES pin: it kills the `clip.limit(cube.mean)` mutant and a
+    # What this DOES pin: it kills the limit-over-every-raw-level mutant and a
     # step-overlap mutant inside `shared_limit`, because both change the
     # percentile's VALUE. What it does NOT pin: tail window PLACEMENT --
     # this reconstructs the same "append a window from the last whole

@@ -8,6 +8,11 @@ rebuild reads.
 The metadata rides as a JSON string in a 0-d array, so the file loads with
 `allow_pickle=False`. Pickle in a data file is a remote-code-execution
 surface in exchange for nothing here: every field is a number or a string.
+
+Version 2 (#113) stores each block's covered cells only: `cells_i`,
+`mean_i` and `count_i` for block `i`. Version 1 stored the dense mean and
+count; it still loads, packed on the way in. Nothing outside nsgeo reads
+these files, which is why the format could change.
 """
 
 from __future__ import annotations
@@ -19,10 +24,11 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.slices.cube import Provenance, SliceCube
+from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis
 
-STORE_VERSION = 1
+STORE_VERSION = 2
+READABLE_VERSIONS = (1, 2)
 
 
 class CubeStoreError(Exception):
@@ -58,6 +64,7 @@ def _meta(cube: SliceCube) -> dict[str, Any]:
         },
         "z": {"t0_ns": cube.z.t0_ns, "dz_ns": cube.z.dz_ns, "nz": cube.z.nz},
         "provenance": cube.provenance.to_dict(),
+        "blocks": [{"heading_deg": b.heading_deg} for b in cube.blocks],
     }
 
 
@@ -65,12 +72,44 @@ def save_cube(cube: SliceCube, path: str | Path) -> None:
     """Write `cube` to `path`, creating parent directories as needed."""
     path = npz_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path,
-        mean=cube.mean.astype(np.float32, copy=False),
-        count=cube.count.astype(np.int32, copy=False),
-        meta=np.array(json.dumps(_meta(cube))),
-    )
+    arrays: dict[str, Any] = {}
+    for i, block in enumerate(cube.blocks):
+        arrays[f"cells_{i}"] = block.cells.astype(np.int64, copy=False)
+        arrays[f"mean_{i}"] = block.mean.astype(np.float32, copy=False)
+        arrays[f"count_{i}"] = block.count.astype(np.int32, copy=False)
+    np.savez_compressed(path, **arrays, meta=np.array(json.dumps(_meta(cube))))
+
+
+def _read_blocks(path: Path, bundle: Any, listed: list[dict[str, Any]]) -> list[CubeBlock]:
+    """The version 2 blocks, checked against what `meta` says the file holds.
+
+    A missing array, or one the metadata does not list, means the file and
+    its description disagree; guessing which to trust could load a wrong
+    picture, so it is refused.
+    """
+    if not isinstance(listed, list):
+        raise CubeStoreError(f"{path}: meta.blocks must be a list, got {listed!r}")
+    expected = {"meta"}
+    for i in range(len(listed)):
+        expected |= {f"cells_{i}", f"mean_{i}", f"count_{i}"}
+    found = set(bundle.files)
+    if found != expected:
+        raise CubeStoreError(
+            f"{path}: meta lists {len(listed)} block(s), but the arrays do not match: "
+            f"missing {sorted(expected - found)}, unexpected {sorted(found - expected)}"
+        )
+    blocks = []
+    for i, entry in enumerate(listed):
+        heading = entry["heading_deg"]
+        blocks.append(
+            CubeBlock(
+                cells=bundle[f"cells_{i}"].astype(np.int64, casting="same_kind", copy=False),
+                mean=bundle[f"mean_{i}"].astype(np.float32, casting="same_kind", copy=False),
+                count=bundle[f"count_{i}"].astype(np.int32, casting="same_kind", copy=False),
+                heading_deg=None if heading is None else float(heading),
+            )
+        )
+    return blocks
 
 
 def load_cube(path: str | Path) -> SliceCube:
@@ -92,21 +131,29 @@ def load_cube(path: str | Path) -> SliceCube:
         raise CubeStoreError(f"no cube file at {path}")
     try:
         with np.load(path, allow_pickle=False) as bundle:
-            if not {"mean", "count", "meta"} <= set(bundle.files):
+            if "meta" not in bundle.files:
                 raise CubeStoreError(
-                    f"{path} is not a cube: expected mean, count and meta, "
-                    f"found {sorted(bundle.files)}"
+                    f"{path} is not a cube: expected meta, found {sorted(bundle.files)}"
                 )
-            mean = bundle["mean"].astype(np.float32, copy=False)
-            count = bundle["count"].astype(np.int32, copy=False)
             meta = json.loads(str(bundle["meta"].item()))
-
-        store_version = meta["store_version"]
-        if store_version != STORE_VERSION:
-            raise CubeStoreError(
-                f"{path} was written by cube store version {store_version!r}, "
-                f"but this build reads version {STORE_VERSION}"
-            )
+            store_version = meta["store_version"]
+            if store_version not in READABLE_VERSIONS:
+                raise CubeStoreError(
+                    f"{path} was written by cube store version {store_version!r}, "
+                    f"but this build reads versions {list(READABLE_VERSIONS)}"
+                )
+            if store_version == 1:
+                if not {"mean", "count"} <= set(bundle.files):
+                    raise CubeStoreError(
+                        f"{path} is not a cube: expected mean, count and meta, "
+                        f"found {sorted(bundle.files)}"
+                    )
+                dense_mean = bundle["mean"].astype(np.float32, copy=False)
+                dense_count = bundle["count"].astype(np.int32, copy=False)
+                blocks: list[CubeBlock] = []
+            else:
+                dense_mean = dense_count = None
+                blocks = _read_blocks(path, bundle, meta["blocks"])
 
         frame_doc = meta["frame"]
         z_doc = meta["z"]
@@ -117,20 +164,19 @@ def load_cube(path: str | Path) -> SliceCube:
                 f"would load silently unreferenced and reach a GeoTIFF export with no "
                 f"way to tell a real CRS from a missing one"
             )
-        return SliceCube(
-            frame=CubeFrame(
-                origin=(float(frame_doc["origin"][0]), float(frame_doc["origin"][1])),
-                azimuth=float(frame_doc["azimuth"]),
-                cell=float(frame_doc["cell"]),
-                nx=int(frame_doc["nx"]),
-                ny=int(frame_doc["ny"]),
-                crs=crs,
-            ),
-            z=ZAxis(t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"])),
-            mean=mean,
-            count=count,
-            provenance=Provenance.from_dict(meta["provenance"]),
+        frame = CubeFrame(
+            origin=(float(frame_doc["origin"][0]), float(frame_doc["origin"][1])),
+            azimuth=float(frame_doc["azimuth"]),
+            cell=float(frame_doc["cell"]),
+            nx=int(frame_doc["nx"]),
+            ny=int(frame_doc["ny"]),
+            crs=crs,
         )
+        z = ZAxis(t0_ns=float(z_doc["t0_ns"]), dz_ns=float(z_doc["dz_ns"]), nz=int(z_doc["nz"]))
+        provenance = Provenance.from_dict(meta["provenance"])
+        if dense_mean is not None and dense_count is not None:
+            return SliceCube.from_dense(frame, z, dense_mean, dense_count, provenance)
+        return SliceCube(frame=frame, z=z, blocks=tuple(blocks), provenance=provenance)
     except CubeStoreError:
         raise
     except (

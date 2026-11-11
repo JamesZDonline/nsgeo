@@ -284,10 +284,10 @@ class SliceFinish:
 class MemoryEstimate:
     """Held bytes, split the way spec 7.4 splits them.
 
-    Separately, because they grow in opposite directions: cube memory
-    grows with resolution and not with line count, cache memory the
-    reverse. By 120 lines the cached lines cost more than the cube, so a
-    single total would hide which one to act on.
+    Separately, because they grow differently: a packed cube grows with the
+    cells the lines cover (so with line count and with resolution), cache
+    memory with line count alone. By 120 lines the cached lines can cost
+    more than the cube, so a single total would hide which one to act on.
     """
 
     lines_bytes: int
@@ -402,16 +402,21 @@ def default_cell(spacing_m: float, floor: float) -> float:
     return max(floor, min(DEFAULT_CELL_M, spacing_m / 2.0))
 
 
-def estimate_memory(prepared_samples: int, n_cells: int, nz: int) -> MemoryEstimate:
+def estimate_memory(prepared_samples: int, n_cells: int, nz: int, n_covered: int) -> MemoryEstimate:
     """Bytes held by the prepared lines, and by a cube of this shape.
 
     `prepared_samples` is the total float32 sample count across every
-    prepared line (`sum(n_samples * n_traces)`). The cube is float32
-    `mean` plus int32 `count`, which is what `SliceCube` stores.
+    prepared line (`sum(n_samples * n_traces)`). A resident cube is packed
+    (#113): it stores float32 `mean` (nz rows), int32 `count` and int64 cell
+    ids for the `n_covered` covered cells only, which is exactly
+    `SliceCube.nbytes`. `n_covered` is required so no caller can keep the
+    dense figure by omission. The fill weights are written for every cell of
+    the frame, so they still scale with `n_cells`.
     """
+    covered = int(n_covered)
     return MemoryEstimate(
         lines_bytes=int(prepared_samples) * 4,
-        cube_bytes=int(nz) * int(n_cells) * 4 + int(n_cells) * 4,
+        cube_bytes=int(nz) * covered * 4 + covered * 4 + covered * 8,
         weights_bytes=int(n_cells) * WEIGHT_BYTES_PER_CELL,
     )
 
@@ -463,8 +468,9 @@ def format_status(
     """Spec 9.2's status line: what is held, and how fast slices redraw.
 
     Memory first, because spec 7.2 found memory and not time to be the
-    binding constraint -- halving the cell doubles the time and
-    quadruples the cube.
+    binding constraint -- halving the cell doubles the time, roughly
+    doubles a packed cube of line data (the covered cells follow the line
+    length) and still quadruples the fill weights.
     """
     # The interpolation weights are held in either mode (interpolation spec §7).
     held = estimate.lines_bytes + estimate.weights_bytes
