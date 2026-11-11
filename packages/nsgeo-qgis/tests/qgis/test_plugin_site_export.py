@@ -530,6 +530,7 @@ def test_the_site_counts_companion_writes_through_the_same_writer(
         method="none",
         finish=None,
         grids=tuple(replace(g, gain=1.0) for g in plan.grids),
+        coverage=True,
     )
     bands = _site_bands(counts, fill=2.0)
     limit = GeoTiffSiteWriter().write_bands(
@@ -538,6 +539,7 @@ def test_the_site_counts_companion_writes_through_the_same_writer(
     assert limit == pytest.approx(2.0)
     md = open_tif(tmp_path / "c.tif").GetMetadata()
     assert md["NSGEO_SITE_NORMALISATION"] == "none" and "NSGEO_SITE_INTERPOLATION" not in md
+    assert md["NSGEO_SITE_RESAMPLING"] == "largest_count"  # counts are not blended
 
 
 def test_an_interrupted_site_write_leaves_no_partial_and_an_old_target_alone(

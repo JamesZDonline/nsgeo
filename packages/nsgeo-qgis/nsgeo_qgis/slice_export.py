@@ -73,7 +73,6 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
-    frame_lattice,
     npz_path,
     plan_windows,
     save_cube,
@@ -82,7 +81,7 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from osgeo import gdal, osr
+from osgeo import gdal
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
@@ -138,12 +137,19 @@ def overview_factors(width: int, height: int) -> list[int]:
     return factors
 
 
-def build_overviews(path: str | Path) -> None:
+def build_overviews(path: str | Path, should_stop: Callable[[], bool] | None = None) -> None:
     """Internal overviews, nodata-aware AVERAGE, for a tiled file; a stripped one gets none.
 
     Worker-thread safe. The factors sum to about a third of the full size, which
-    is what `export_pipeline.OVERVIEW_FACTOR` budgets.
+    is what `export_pipeline.OVERVIEW_FACTOR` budgets. `should_stop`, polled by
+    GDAL's progress callback, stops the build promptly with `ExportCancelled`; the
+    file is closed first so the caller can discard it.
     """
+
+    def progress(fraction: float, message: str, data: Any) -> int:
+        return 0 if should_stop is not None and should_stop() else 1
+
+    stopped = False
     options = {
         "COMPRESS_OVERVIEW": "DEFLATE",
         "PREDICTOR_OVERVIEW": "3",
@@ -157,10 +163,17 @@ def build_overviews(path: str | Path) -> None:
                 return
             factors = overview_factors(dataset.RasterXSize, dataset.RasterYSize)
             if factors:
-                dataset.BuildOverviews("AVERAGE", factors)
+                try:
+                    dataset.BuildOverviews("AVERAGE", factors, callback=progress)
+                except RuntimeError:
+                    if should_stop is None or not should_stop():
+                        raise
+                    stopped = True
         finally:
             dataset.Close()
             dataset = None
+    if stopped:
+        raise ExportCancelled()
 
 
 def partial_path(target: str | Path) -> Path:
@@ -207,19 +220,15 @@ class StretchSample:
         return clip.limit(kept)
 
 
-def projection_wkt(crs: str, wkt: str | None) -> str:
-    """The WKT for a lattice's CRS, with no QGIS object (worker threads).
+def projection_wkt(crs: str) -> str:
+    """The WKT for a lattice's CRS authid, custom (`USER:`) ones included.
 
-    `wkt`, taken from `QgsCoordinateReferenceSystem.toWkt()` on the GUI thread
-    when the plan is built, wins; otherwise GDAL resolves the authority id.
+    A CRS object is allowed off the GUI thread (only widgets and layers are not).
     """
-    if wkt:
-        return wkt
-    reference = osr.SpatialReference()
-    if reference.SetFromUserInput(crs) != 0:
-        raise ValueError(f"cannot describe the coordinate system {crs!r} to GDAL")
-    reference.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    return reference.ExportToWkt()
+    reference = QgsCoordinateReferenceSystem(crs)
+    if not reference.isValid():
+        raise ValueError(f"QGIS does not know the coordinate system {crs!r}")
+    return reference.toWkt()
 
 
 def write_north_up(
@@ -228,7 +237,6 @@ def write_north_up(
     descriptions: Sequence[str],
     bands: Iterable[ExportBand],
     *,
-    crs_wkt: str | None,
     clip: Normalizer,
     tag_dataset: Callable[[Any], None],
     tag_band: Callable[[Any, int, ExportBand], None],
@@ -258,7 +266,7 @@ def write_north_up(
                 options=creation_options(lattice.width, lattice.height),
             )
             dataset.SetGeoTransform(lattice.geotransform)
-            dataset.SetProjection(projection_wkt(lattice.crs, crs_wkt))
+            dataset.SetProjection(projection_wkt(lattice.crs))
             tag_dataset(dataset)
             written = 0
             iterator = iter(bands)
@@ -330,13 +338,11 @@ class ExportPlan:
     provenance: Provenance
     finish: FinishSettings | None = None
     coverage: bool = False  # a counts raster: written as counts, never blended
-    #: The raster `write_bands` writes on; None means the frame's own, at its cell.
+    #: The raster `write_bands` writes on; `write_bands` refuses a plan without it.
     lattice: SiteLattice | None = None
-    #: The export cell and pixel in metres; None means the frame's cell / the lattice's pixel.
+    #: The export cell and pixel in metres; `write_bands` refuses a plan without them.
     cell: float | None = None
     pixel: float | None = None
-    #: The CRS as WKT, taken on the GUI thread; None lets the writer resolve `crs` itself.
-    crs_wkt: str | None = None
 
 
 def plan_export(
@@ -410,14 +416,15 @@ class GeoTiffSliceWriter:
     ) -> float:
         """Write `bands` (north-up, on the plan's lattice) and return the stretch limit.
 
-        The lattice is `plan.lattice`, else the frame's own at its cell. The file
-        records the export cell, the pixel and `bilinear` resampling as well as
-        the finish. Worker-thread safe (see `write_north_up`); the caller writes
-        to `partial_path(target)` and commits or discards it.
+        The plan must carry its export lattice, cell and pixel (a silent fallback
+        to the live settings would write settings the file was not made with). The
+        file records them and the resampling (`bilinear`; `largest_count` for a
+        counts plan) as well as the finish. Worker-thread safe (see `write_north_up`);
+        the caller writes to `partial_path(target)` and commits or discards it.
         """
-        lattice = plan.lattice or frame_lattice(plan.frame, plan.frame.cell)
-        cell = plan.cell if plan.cell is not None else plan.frame.cell
-        pixel = plan.pixel if plan.pixel is not None else lattice.pixel
+        lattice, cell, pixel = plan.lattice, plan.cell, plan.pixel
+        if lattice is None or cell is None or pixel is None:
+            raise ValueError("this export plan has no export cell and pixel to write")
 
         def tag_dataset(dataset: Any) -> None:
             if plan.finish is not None:
@@ -432,7 +439,7 @@ class GeoTiffSliceWriter:
                 ("NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)),
                 ("NSGEO_CELL_M", str(cell)),
                 ("NSGEO_PIXEL_M", str(pixel)),
-                ("NSGEO_RESAMPLING", "bilinear"),
+                ("NSGEO_RESAMPLING", "largest_count" if plan.coverage else "bilinear"),
             ):
                 dataset.SetMetadataItem(key, value)
 
@@ -441,7 +448,6 @@ class GeoTiffSliceWriter:
             lattice,
             [band.description for band in plan.bands],
             bands,
-            crs_wkt=plan.crs_wkt,
             clip=clip,
             tag_dataset=tag_dataset,
             tag_band=lambda band, index, shown: None,

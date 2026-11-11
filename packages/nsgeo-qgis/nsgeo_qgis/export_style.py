@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from nsgeo.render import colormap
-from qgis.core import QgsRasterLayer, QgsSingleBandPseudoColorRenderer
+from qgis.core import QgsRasterLayer
 
-from nsgeo_qgis.slice_layer import apply_smooth_resampling, build_shader
+from nsgeo_qgis.slice_layer import apply_renderer
 
 
 def write_style(path: str | Path, *, limit: float, colormap_name: str, unipolar: bool) -> Path:
@@ -27,12 +26,7 @@ def write_style(path: str | Path, *, limit: float, colormap_name: str, unipolar:
     layer = QgsRasterLayer(str(path), path.stem, "gdal")
     if not layer.isValid():
         raise OSError(f"QGIS cannot read {path} to style it")
-    shader = build_shader(colormap(colormap_name), limit, unipolar)
-    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-    renderer.setClassificationMin(0.0 if unipolar else -float(limit))
-    renderer.setClassificationMax(float(limit))
-    layer.setRenderer(renderer)
-    apply_smooth_resampling(layer)
+    apply_renderer(layer, colormap_name, limit, unipolar)
     out = path.with_suffix(".qml")
     message, ok = layer.saveNamedStyle(str(out))
     if not ok:

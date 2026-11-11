@@ -128,20 +128,28 @@ def test_every_band_describes_the_window_it_averages_in_both_units(exportable, t
 
 
 def test_the_creation_options_are_the_measured_ones(exportable, tmp_path):
-    """Spec 9.5: INTERLEAVE=BAND is the difference between a 230-band
-    export being unusable and being free -- pixel interleaving forces a
-    read of every band to reach one of them, which is precisely a slice
-    viewer's access pattern. TILED=NO because tiling a raster barely
-    larger than one tile pads it to 512x512 and wastes 2.9x."""
+    """Spec 9.5: INTERLEAVE=BAND is the difference between a 230-band export being
+    unusable and being free (pixel interleaving reads every band to reach one).
+    Tiling is a ruling with two regimes: 256-pixel tiles only when BOTH sides are
+    at least 1024 pixels; below that, strips. The measured 2.9x waste came from
+    512-pixel tiles on a raster barely larger than one tile."""
     from osgeo import gdal
 
-    engine = exportable
+    big = creation_options(1024, 2048)
+    assert "TILED=YES" in big and "BLOCKXSIZE=256" in big and "BLOCKYSIZE=256" in big
+    for options in (big, creation_options(300, 300)):
+        assert "INTERLEAVE=BAND" in options and "COMPRESS=DEFLATE" in options
+        assert "PREDICTOR=3" in options and "BIGTIFF=IF_SAFER" in options
+    for w, h in ((1023, 4000), (4000, 1023), (300, 300)):
+        small = creation_options(w, h)
+        assert "TILED=NO" in small
+        assert not any(o.startswith("BLOCK") for o in small)
+
     path = tmp_path / "cube.tif"
-    export_slices(engine, path, 10, 5, None, SliceFinish())
+    export_slices(exportable, path, 10, 5, None, SliceFinish())
     ds = gdal.Open(str(path))
     try:
-        interleave = ds.GetMetadata("IMAGE_STRUCTURE").get("INTERLEAVE")
-        assert interleave == "BAND"
+        assert ds.GetMetadata("IMAGE_STRUCTURE").get("INTERLEAVE") == "BAND"
         assert ds.GetRasterBand(1).GetBlockSize()[0] == ds.RasterXSize  # stripped, not tiled
         assert np.isnan(ds.GetRasterBand(1).GetNoDataValue())
         assert ds.GetRasterBand(1).DataType == gdal.GDT_Float32
@@ -1044,6 +1052,7 @@ def _band_plan(engine, n=3, lattice=None, **extra):
 
     plan = plan_export(engine, 10, 5, None, finish=engine.finish_settings(SliceFinish()))
     lattice = lattice or frame_lattice(plan.frame, plan.frame.cell)
+    extra = {"cell": plan.frame.cell, "pixel": lattice.pixel, **extra}
     return replace(plan, bands=plan.bands[:n], lattice=lattice, **extra)
 
 
@@ -1062,18 +1071,6 @@ def _bands(plan, fill=None):
     return out
 
 
-def test_the_creation_options_tile_only_when_both_sides_are_large():
-    big = creation_options(1024, 2048)
-    assert "TILED=YES" in big and "BLOCKXSIZE=256" in big and "BLOCKYSIZE=256" in big
-    for options in (big, creation_options(300, 300)):
-        assert "INTERLEAVE=BAND" in options and "COMPRESS=DEFLATE" in options
-        assert "PREDICTOR=3" in options and "BIGTIFF=IF_SAFER" in options
-    for w, h in ((1023, 4000), (4000, 1023), (300, 300)):
-        small = creation_options(w, h)
-        assert "TILED=NO" in small
-        assert not any(o.startswith("BLOCK") for o in small)
-
-
 def test_a_large_file_is_tiled_and_a_small_one_is_stripped(exportable, tmp_path):
     from dataclasses import replace
 
@@ -1081,7 +1078,7 @@ def test_a_large_file_is_tiled_and_a_small_one_is_stripped(exportable, tmp_path)
     small_path = tmp_path / "small.tif"
     GeoTiffSliceWriter().write_bands(small_path, plan, _bands(plan), clip=PercentileClip())
     big_lattice = SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs)
-    big_plan = replace(plan, lattice=big_lattice)
+    big_plan = replace(plan, lattice=big_lattice, pixel=0.01)
     big_path = tmp_path / "big.tif"
     GeoTiffSliceWriter().write_bands(big_path, big_plan, _bands(big_plan), clip=PercentileClip())
     from osgeo import gdal
@@ -1102,7 +1099,7 @@ def test_overviews_exist_for_a_tiled_file_and_do_not_bleed(exportable, tmp_path)
     from osgeo import gdal
 
     plan = _band_plan(exportable, n=2)
-    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs))
+    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs), pixel=0.01)
     values = np.full((1200, 1100), np.nan, np.float32)
     values[:, :550] = 5.0  # the east half is empty ground
     bands = [ExportBand(values.copy(), {}) for _ in plan.bands]
@@ -1167,19 +1164,17 @@ def test_write_bands_round_trips_values_geotransform_and_metadata(exportable, tm
         ds.Close()
 
 
-def test_write_bands_defaults_the_cell_and_pixel_from_the_frame_and_lattice(exportable, tmp_path):
-    from osgeo import gdal
+def test_write_bands_refuses_a_plan_without_its_export_settings(exportable, tmp_path):
+    from dataclasses import replace
 
     plan = _band_plan(exportable, n=1)
-    path = tmp_path / "d.tif"
-    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
-    ds = gdal.Open(str(path))
-    try:
-        md = ds.GetMetadata()
-        assert float(md["NSGEO_CELL_M"]) == plan.frame.cell
-        assert float(md["NSGEO_PIXEL_M"]) == plan.lattice.pixel
-    finally:
-        ds.Close()
+    for missing in ("lattice", "cell", "pixel"):
+        bare = replace(plan, **{missing: None})
+        with pytest.raises(ValueError, match="export cell and pixel"):
+            GeoTiffSliceWriter().write_bands(
+                tmp_path / f"{missing}.tif", bare, _bands(plan), clip=PercentileClip()
+            )
+        assert not (tmp_path / f"{missing}.tif").exists()
 
 
 def test_a_counts_plan_writes_without_interpolation_keys(exportable, tmp_path):
@@ -1193,7 +1188,9 @@ def test_a_counts_plan_writes_without_interpolation_keys(exportable, tmp_path):
     assert limit == pytest.approx(3.0)
     ds = gdal.Open(str(path))
     try:
-        assert "NSGEO_INTERPOLATION" not in ds.GetMetadata()
+        md = ds.GetMetadata()
+        assert "NSGEO_INTERPOLATION" not in md
+        assert md["NSGEO_RESAMPLING"] == "largest_count"  # counts are not blended
     finally:
         ds.Close()
 
@@ -1323,3 +1320,50 @@ def test_the_worker_thread_write_path_never_uses_catch_warnings():
         slice_export.StretchSample,
     ):
         assert "catch_warnings" not in inspect.getsource(obj), obj
+
+
+def test_a_project_custom_crs_is_written_into_the_file(exportable, tmp_path):
+    from dataclasses import replace
+
+    from osgeo import gdal
+    from qgis.core import QgsApplication, QgsCoordinateReferenceSystem
+
+    custom = QgsCoordinateReferenceSystem()
+    custom.createFromProj("+proj=tmerc +lat_0=0 +lon_0=-87 +k=0.9996 +x_0=500000 +y_0=0 +units=m")
+    registry = QgsApplication.coordinateReferenceSystemRegistry()
+    crs_id = registry.addUserCrs(custom, "nsgeo export test crs")
+    authid = f"USER:{crs_id}"
+    try:
+        assert authid.startswith("USER:")
+        plan = _band_plan(exportable, n=1)
+        lattice = SiteLattice(500.0, 700.0, 0.25, 24, 24, authid)
+        plan = replace(plan, lattice=lattice, pixel=0.25)
+        path = tmp_path / "u.tif"
+        GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+        ds = gdal.Open(str(path))
+        try:
+            assert (
+                "tmerc" in ds.GetProjection().lower() or "transverse" in ds.GetProjection().lower()
+            )
+        finally:
+            ds.Close()
+        bad = SiteLattice(500.0, 700.0, 0.25, 24, 24, "USER:999999")
+        with pytest.raises(ValueError, match="coordinate system"):
+            GeoTiffSliceWriter().write_bands(
+                tmp_path / "v.tif", replace(plan, lattice=bad), _bands(plan), clip=PercentileClip()
+            )
+    finally:
+        registry.removeUserCrs(crs_id)
+
+
+def test_a_stop_during_overviews_raises_and_leaves_the_file_closed(exportable, tmp_path):
+    from dataclasses import replace
+
+    plan = _band_plan(exportable, n=2)
+    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs), pixel=0.01)
+    path = tmp_path / "o.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    with pytest.raises(ExportCancelled):
+        build_overviews(path, should_stop=lambda: True)
+    path.unlink()  # closed: removable (Windows would refuse an open file)
+    assert not path.exists()

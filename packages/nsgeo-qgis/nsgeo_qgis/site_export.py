@@ -102,8 +102,8 @@ class SiteExportPlan:
     grids: tuple[SiteGridRecord, ...]
     #: Ruling F-2: included grids the file does not hold, grid id to state.
     left_out: dict[str, str] = field(default_factory=dict)
-    #: The CRS as WKT, taken on the GUI thread; None lets the writer resolve it itself.
-    crs_wkt: str | None = None
+    #: A counts raster (the coverage companion): its resampling is the largest count.
+    coverage: bool = False
 
 
 def band_window_ns(site_z: ZAxis, window: SliceWindow) -> tuple[float, float]:
@@ -242,7 +242,6 @@ class GeoTiffSiteWriter:
             plan.lattice,
             [band.description for band in plan.bands],
             bands,
-            crs_wkt=plan.crs_wkt,
             clip=clip,
             tag_dataset=tag_dataset,
             tag_band=tag_band,
@@ -311,7 +310,7 @@ def _tag_dataset(dataset: Any, plan: SiteExportPlan) -> None:
         "NSGEO_SITE_NORMALISATION": plan.method,
         "NSGEO_SITE_CELL_M": str(plan.cell_m),
         "NSGEO_SITE_PIXEL_M": str(plan.lattice.pixel),
-        "NSGEO_SITE_RESAMPLING": "bilinear",
+        "NSGEO_SITE_RESAMPLING": "largest_count" if plan.coverage else "bilinear",
         "NSGEO_SITE_Z_UNIT": "ns",
         "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
     }.items():
@@ -429,6 +428,7 @@ def write_site_coverage(site_engine: SiteEngine, path: str | Path, plan: SiteExp
         method="none",
         finish=None,
         grids=tuple(replace(g, gain=1.0) for g in plan.grids),
+        coverage=True,
     )
     GeoTiffSiteWriter().write(out, coverage_plan, [shown])
     return out
