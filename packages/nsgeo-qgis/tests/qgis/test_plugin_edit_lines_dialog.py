@@ -4,6 +4,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo_qgis.line_edit import CHANGED_ELSEWHERE
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.edit_lines_dialog import (
     CHANGED,
@@ -643,3 +644,28 @@ def test_a_pending_fit_uses_the_grid_length_at_ok(table):
     dialog.accept()
     for i in (0, 2, 4):
         assert session.line_for_key(keys[i]).distance_along()[-1] == pytest.approx(14.0, abs=1e-9)
+
+
+def test_a_pending_fit_on_every_row_skips_the_reversed_ones_the_grid_edit_moved(table):
+    from dataclasses import replace
+
+    session, dialog = table
+    dialog.select_keys(dialog.keys())
+    dialog.fit_to_edges()
+    session.replace_grid(replace(GRID5, size_y=14.0))
+    keys = dialog.keys()
+    dialog.accept()
+    skipped = dialog.outcome.skipped
+    assert [s.label for s in skipped] == ["line 2", "line 4", "line 6"]
+    assert {s.reason for s in skipped} == {CHANGED_ELSEWHERE}
+    for i in (0, 2, 4):
+        assert session.line_for_key(keys[i]).distance_along()[-1] == pytest.approx(14.0, abs=1e-9)
+
+
+def test_the_dialog_opens_no_taller_than_the_screen_allows(table):
+    from qgis.PyQt.QtGui import QGuiApplication
+
+    _, dialog = table
+    screen = dialog.screen() or QGuiApplication.primaryScreen()
+    assert screen is not None
+    assert dialog.height() <= 0.9 * screen.availableGeometry().height()

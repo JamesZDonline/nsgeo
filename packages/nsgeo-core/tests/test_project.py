@@ -740,3 +740,13 @@ def test_a_bad_scale_in_the_file_is_a_project_error_naming_the_line(tmp_path, si
     out.write_text(json.dumps(doc))
     with pytest.raises(ProjectError, match="L0.DZT"):
         load_site(out)
+
+
+def test_a_null_placement_in_the_file_is_a_project_error_naming_the_line(tmp_path, site):
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(site, out)
+    doc = json.loads(out.read_text())
+    doc["lines"][0]["placement"] = None
+    out.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="L0.DZT"):
+        load_site(out)

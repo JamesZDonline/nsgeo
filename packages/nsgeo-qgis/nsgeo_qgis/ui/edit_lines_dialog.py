@@ -42,7 +42,7 @@ from nsgeo.geometry import Grid
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -152,8 +152,13 @@ class EditLinesDialog(QDialog):
 
         self.setWindowTitle(f"Edit lines · {grid_id}")
         # The bulk panel grew by two rows, so open taller and let the table take
-        # the extra height (placement corrections plan, Ruling C1).
-        self.resize(1100, 760)
+        # the extra height (placement corrections plan, Ruling C1), but never
+        # taller than 90% of the screen, so OK and Cancel clear a taskbar.
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        wanted = 760
+        if screen is not None:
+            wanted = min(wanted, int(0.9 * screen.availableGeometry().height()))
+        self.resize(1100, wanted)
         layout = QVBoxLayout(self)
         self.header_label = QLabel("")
         layout.addWidget(self.header_label)

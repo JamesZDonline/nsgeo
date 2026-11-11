@@ -578,3 +578,27 @@ def test_fit_at_import_ignores_start_along_and_lands_on_both_edges(tmp_path):
     recompute_offsets(rows, base)
     starts = [ln.distance_along()[0] for ln in rows_to_lines(rows, base)]
     assert starts == pytest.approx([0.5, 10.5])
+
+
+def test_a_big_stretch_or_squeeze_is_named_in_the_fitted_note(tmp_path):
+    short = synthetic_dzt(tmp_path, "FILE__001.DZT", n_traces=420)  # 7 m on a 10 m grid
+    long = synthetic_dzt(tmp_path, "FILE__002.DZT", n_traces=900)  # 15 m on a 10 m grid
+    near = synthetic_dzt(tmp_path, "FILE__003.DZT", n_traces=540)  # 9 m: ~11%
+    options = ImportOptions(
+        grid_id="G", axis="y", spacing=0.5, grid_size_along=10.0, fit_to_grid=True
+    )
+    rows = plan_import([short, long, near], options)
+    for _ in range(2):  # a replan must not duplicate the clause
+        recompute_offsets(rows, options)
+    stretched, squeezed, slight = rows
+    pct = f"{abs(stretched.scale - 1):.0%}"
+    assert stretched.scale > 1.2
+    expected = f"fitted to the grid's 10.00 m (scale ×{stretched.scale:.4f}), stretches it by {pct}"
+    assert expected in stretched.note
+    assert stretched.note.count("stretches it by") == 1
+    assert f"compresses it by {abs(squeezed.scale - 1):.0%}" in squeezed.note
+    assert squeezed.note.count("compresses it by") == 1
+    assert "stretches" not in slight.note and "compresses" not in slight.note
+    off = dataclasses.replace(options, fit_to_grid=False)
+    recompute_offsets(rows, off)
+    assert all("stretches" not in r.note and "compresses" not in r.note for r in rows)

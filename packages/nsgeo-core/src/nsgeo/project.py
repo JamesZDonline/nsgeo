@@ -371,7 +371,7 @@ def load_site(path: str | Path) -> Site:
             from_fit = None
         try:
             placement = _placement_from_dict(entry["placement"])
-        except (KeyError, TypeError, ValueError) as exc:
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid placement for line {entry['path']!r}: {exc}") from exc
         line = Line.open(dzt, placement, velocity=velocity)
         lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))

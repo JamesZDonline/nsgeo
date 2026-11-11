@@ -325,10 +325,17 @@ line read longer or shorter than the grid. **Scale** is the number that corrects
 it: the grid metres for each metre the wheel recorded. Type a value in a row, or
 select lines and press **Fit to grid edges** to put each line's first and last
 trace on the grid's two edges. The recorded file is not touched, so setting
-**Scale** back to 1 undoes it. A fitted line stays fitted when you change the
-grid's length in **Edit grid…**. The **Note** column flags a scale more than 20%
-from 1, so a deliberately short line caught in a selection stands out before you
-click **OK**.
+**Scale** back to 1 undoes the stretch (after **Fit to grid edges**, **Start**
+has moved too, so reset that as well). A fitted line stays fitted when you
+change the grid's length in **Edit grid…**. The **Note** column flags a scale
+more than 20% from 1, so a deliberately short line caught in a selection stands
+out before you click **OK**.
+
+Fit lines before you measure velocity. A velocity fitted on a line before its
+scale changes keeps the value measured at the old spacing, so refit it
+afterwards. Migration still uses the trace spacing recorded in the file, not the
+fitted one. A site with corrections opened in nsgeo 0.3.0 draws the lines
+uncorrected, and drops the corrections if that version saves it.
 
 Stagger shows as a feature that jumps back and forth between lines walked out
 and back. **Destagger (m)** moves every trace of a line forward along that

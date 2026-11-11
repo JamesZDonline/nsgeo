@@ -19,7 +19,7 @@ from nsgeo.geometry import GridPlacement
 from nsgeo.io import DztError, DzxError, DzxInfo, read_dzx, read_header, trace_count
 from nsgeo.model import Line
 
-from nsgeo_qgis.line_edit import fit_scale, span_m
+from nsgeo_qgis.line_edit import SCALE_NOTE, fit_scale, span_m
 
 _TRAILING = re.compile(r"(\d+)\s*$")
 _T = TypeVar("_T")
@@ -49,7 +49,7 @@ class ImportOptions:
     start_along: float = 0.0
     direction_mode: str = "alternate"  # alternate | forward | reverse
     label_source: str = "stem"  # stem | number
-    grid_size_along: float | None = None  # for the over-length warning
+    grid_size_along: float | None = None  # the over-length warning and fitting
     # Stretch or compress each line so its first and last traces sit on the
     # grid's two edges (placement corrections plan, calls 5, 6 and 11).
     fit_to_grid: bool = False
@@ -170,10 +170,11 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
     the slot index, so excluding a redone line pulls the next file into its
     place.
 
-    Also (re)derives four placement-dependent note components -- the
-    unplaceable-row exclusion, the reversed-direction start point, and the
-    over-length warning -- without touching any other note already on the
-    row.
+    Also (re)derives five placement-dependent note components -- the
+    time-triggered exclusion, the reversed-direction start point, the
+    over-length warning, the fitted note (with its stretch clause) and the
+    cannot-be-fitted note -- without touching any other note already on
+    the row.
     """
     slot = 0
     for row in rows:
@@ -233,7 +234,7 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
         row.scale = 1.0
         if options.fit_to_grid:
             # Fitting replaces the over-length warning: a fitted line no
-            # longer exceeds anything. A comma, not "; " -- see _merge_note.
+            # longer exceeds anything.
             if options.grid_size_along is None:
                 unfittable = "cannot be fitted without a known grid length"
             else:
@@ -249,6 +250,11 @@ def recompute_offsets(rows: list[ImportRow], options: ImportOptions) -> None:
                         f"fitted to the grid's {options.grid_size_along:.2f} m "
                         f"(scale ×{row.scale:.4f})"
                     )
+                    change = abs(row.scale - 1)
+                    if change > SCALE_NOTE:
+                        # A comma, not "; " -- see _merge_note.
+                        verb = "stretches" if row.scale > 1 else "compresses"
+                        fitted += f", {verb} it by {change:.0%}"
         elif (
             options.grid_size_along is not None
             and row.length_m is not None

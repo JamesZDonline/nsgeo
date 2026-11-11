@@ -1634,6 +1634,7 @@ def test_a_grid_length_change_keeps_fitted_lines_fitted(session, tmp_path):
         lines.append(Line.open(p, placement))
     session.add_lines(lines)
     keys = session.keys_on_grid("F")
+    original_third = session.line_for_key(keys[2]).placement
     grids, changed = Spy(session.grids_changed), Spy(session.lines_changed)
 
     report = session.replace_grid(dataclasses.replace(session.grid("F"), size_y=11.0))
@@ -1644,12 +1645,34 @@ def test_a_grid_length_change_keeps_fitted_lines_fitted(session, tmp_path):
         ends = sorted([p.start_along, p.start_along + direction * p.scale * 10.0])
         assert ends == [pytest.approx(0.0), pytest.approx(11.0)]
     third = session.line_for_key(keys[2]).placement
-    assert (third.start_along, third.scale) == (0.0, 1.0)
+    assert third == original_third
+    assert report.message() == (
+        "F is now 11.00 m along y; its 2 fitted line(s) were fitted to the new length."
+    )
+    assert len(grids.calls) == 1 and len(changed.calls) == 1
+
+
+def test_a_grid_length_change_names_both_kinds_when_an_unfitted_reversed_line_moves(
+    session, tmp_path
+):
+    session.add_grid(Grid("F", (500.0, 700.0), 0.0, 5.0, 10.5, "EPSG:32616", 0.5))
+    lines = []
+    for i, (start, direction, scale) in enumerate(
+        [(0.0, 1, 1.05), (10.5, -1, 1.05), (10.5, -1, 1.0)]
+    ):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__0{i + 1}.DZT", n_traces=601)
+        placement = GridPlacement("F", "y", i * 0.5, start, direction, p.stem, scale=scale)
+        lines.append(Line.open(p, placement))
+    session.add_lines(lines)
+    keys = session.keys_on_grid("F")
+
+    report = session.replace_grid(dataclasses.replace(session.grid("F"), size_y=11.0))
+
+    assert session.line_for_key(keys[2]).placement.start_along == pytest.approx(11.0)
     assert report.message() == (
         "F is now 11.00 m along y; its 1 reversed line(s) moved with the far edge, "
         "and its 2 fitted line(s) were fitted to the new length."
     )
-    assert len(grids.calls) == 1 and len(changed.calls) == 1
 
 
 def test_a_moved_line_leaves_the_old_grids_remembered_slice_lines(session, tmp_path):

@@ -523,10 +523,12 @@ class SiteSession(QObject):
         so when the grid's length along an axis changes, every reversed line
         on that axis moves with the edge, keeping its inset (line editing
         spec §3 call 6 for the message; the rule itself is decision 4 and
-        §4.3). A fitted line is fitted again to the new length instead
-        (placement corrections plan, call 7). Lines whose offset now lies outside a changed width
-        are reported, not moved. All of it happens before anything is
-        emitted, then one `grids_changed` and one `lines_changed`."""
+        §4.3). A fitted line, of either direction, is fitted again to the
+        new length instead (placement corrections plan, call 7), and is
+        counted once, as refitted, never as moved. Lines whose offset now
+        lies outside a changed width are reported, not moved. All of it
+        happens before anything is emitted, then one `grids_changed` and
+        one `lines_changed`."""
         site = self._require_site()
         for i, g in enumerate(site.grids):
             if g.id == grid.id:
@@ -556,7 +558,7 @@ class SiteSession(QObject):
                     placement = followed_length(line.placement, old_len, new_len, span)
                     if not same_placement(placement, line.placement):
                         self._replace_line(key, dataclasses.replace(line, placement=placement))
-                    count += line.placement.direction == -1
+                    count += line.placement.direction == -1 and not fitted
                     refit += fitted
                 if count:
                     moved.append((axis, new_len, count))
