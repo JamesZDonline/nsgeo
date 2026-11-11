@@ -30,10 +30,12 @@ from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
     SITE_LIMIT_WINDOWS,
     SOLVED_SLICES_KEPT,
+    WEIGHT_BYTES_PER_CELL,
     Resolution,
     SliceFinish,
     SourceChoice,
@@ -648,6 +650,25 @@ def test_the_cache_keeps_at_most_sixteen_and_drops_with_the_plan(sourced, solves
     assert engine.wait_for_preparation(20_000)
 
 
+def test_asking_for_a_solved_slice_s_job_keeps_it_cached(sourced, solves):
+    """A list's stretch windows already solved make no job, and asking marks
+    them recently used: what the list lands then evicts other slices, never
+    the windows it is completing (#120)."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    slices = [engine.slice_at(SliceWindow(k, k + 1)) for k in range(SOLVED_SLICES_KEPT + 1)]
+    for values, coverage in slices[:-1]:
+        engine.finish(values, coverage, MC)
+    assert len(engine._solved) == SOLVED_SLICES_KEPT
+    assert engine.pending_solve(*slices[0], MC) is None  # solved: no job
+    engine.finish(*slices[-1], MC)  # one more evicts the least recently used
+    solved = len(solves)
+    engine.finish(*slices[0], MC)
+    assert len(solves) == solved, "the slice asked for must still be cached"
+    engine.finish(*slices[1], MC)
+    assert len(solves) == solved + 1, "the next oldest went instead"
+
+
 def test_finish_is_slow_follows_the_last_solve(sourced):
     engine, session, _, _ = sourced
     _prepare(engine, session)
@@ -784,6 +805,22 @@ def test_weights_nbytes_counts_the_plan_the_preview_and_the_cache(sourced):
     assert engine.weights_nbytes == plan.nbytes + preview.nbytes + solved.nbytes
     engine.finish(values, coverage, SliceFinish())  # kriging holds its weights alone
     assert engine.weights_nbytes == preview.nbytes
+
+
+def test_the_estimate_counts_the_method_of_the_weights_held(sourced):
+    """#148: once a minimum-curvature plan is held, the status line and the
+    residency choice count it beside its kriging preview. The engine is handed
+    a finish only when it draws, so before that it counts one set of weights."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    one_set = engine.frame.n_cells * WEIGHT_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    plan = engine.frame.n_cells * CURVATURE_PLAN_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set + plan
+    engine.finish(values, coverage, SliceFinish(method="idw"))
+    assert engine.estimate.weights_bytes == one_set
 
 
 def test_provenance_names_the_lines_that_were_actually_prepared(sourced):
@@ -1597,6 +1634,21 @@ def test_a_placement_edit_to_a_prepared_line_re_prepares(sourced):
     line = next(p for p in engine.prepared_lines() if p.key == key)
     expected = session.line_for_key(key).trace_coords(session.site.frames)
     assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
+    assert errors == []
+
+
+def test_a_scale_or_destagger_edit_to_a_prepared_line_re_prepares(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    key = session.keys()[0]
+    for change in ({"scale": 0.95}, {"travel_shift": 0.2}):
+        count = len(prepared)
+        _edit(session, key, **change)
+        assert engine.wait_for_preparation(20_000)
+        assert len(prepared) == count + 1
+        line = next(p for p in engine.prepared_lines() if p.key == key)
+        expected = session.line_for_key(key).trace_coords(session.site.frames)
+        assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
     assert errors == []
 
 

@@ -161,6 +161,7 @@ from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.line_edit import same_placement
 from nsgeo_qgis.slices_plan import (
+    DEFAULT_METHOD,
     LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
     PREVIEW_METHOD,
@@ -505,10 +506,15 @@ class SliceEngine(QObject):
 
     @property
     def estimate(self) -> MemoryEstimate:
+        """The status line's and the residency choice's figures. The weights
+        are counted for the method of those held (#148): the engine is handed
+        a finish only when it draws, so before its first draw on a frame it
+        counts the default method's, one set."""
         samples = sum(int(line.data.size) for line in self._lines)
         n_cells = self._frame.n_cells if self._frame is not None else 0
         nz = self._z.nz if self._z is not None else 0
-        return estimate_memory(samples, n_cells, nz, self._covered_count())
+        method = self._weights[0][1] if self._weights is not None else DEFAULT_METHOD
+        return estimate_memory(samples, n_cells, nz, self._covered_count(), method=method)
 
     def _covered_count(self) -> int:
         """Cells the prepared lines fall in, for the packed cube's size (#113).

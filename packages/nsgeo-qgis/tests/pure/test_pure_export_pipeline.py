@@ -45,6 +45,7 @@ from nsgeo_qgis.export_pipeline import (
     run_export,
 )
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     EXPORT_BUDGET_BYTES,
     WEIGHT_BYTES_PER_CELL,
     estimate_memory,
@@ -379,7 +380,28 @@ def test_the_estimate_counts_a_resident_cube_by_its_covered_cells():
     est = estimate_export(ExportSpec((grid,), lattice, ((0.0, 3.0),), "none", False))
     covered = covered_cells(frame, [xy])
     assert covered == 60
-    assert est.per_band["cubes"] == estimate_memory(8 * n, 3600, z.nz, covered).cube_bytes > 0
+    assert (
+        est.per_band["cubes"]
+        == estimate_memory(8 * n, 3600, z.nz, covered, method="kriging").cube_bytes
+        > 0
+    )
+
+
+def test_a_minimum_curvature_estimate_counts_the_curvature_plan_once():
+    """The export holds one plan a grid; the live engine's kriging preview beside
+    it (`estimate_memory(method="min_curvature")`, #148) is not built here."""
+    frame = CubeFrame((0.0, 0.0), 0.0, 0.1, 60, 60, CRS)
+    xy = np.array([[1.0, 1.0], [2.0, 2.0]])
+    line = PreparedLine("a", np.zeros((8, 2), np.float32), 0.5, 0.0, xy)
+    z = ZAxis.from_range(0.0, 3.0, 0.5)
+    lattice = SiteLattice.covering([slice_extent(frame)], 0.1, CRS)
+    curving = FinishSettings("min_curvature", 0.5 * SPACING, 2.0 * SPACING)
+    grid = ExportGrid("A", (line,), frame, z, curving, SPACING, 1.0)
+    spec = ExportSpec((grid,), lattice, ((0.0, 3.0),), "none", False)
+    weights = estimate_export(spec).per_band["weights"]
+    assert weights == frame.n_cells * CURVATURE_PLAN_BYTES_PER_CELL
+    both = estimate_memory(0, frame.n_cells, z.nz, 2, method="min_curvature")
+    assert weights < both.weights_bytes
 
 
 def test_an_export_over_budget_is_refused_with_the_finest_fit():

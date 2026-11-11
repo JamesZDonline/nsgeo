@@ -1201,3 +1201,27 @@ def test_a_line_opened_while_the_panel_is_hidden_is_showing_when_it_is_shown(doc
     dock.show()
     assert _row_is_showing(dock, dock.item_for_key(KEYS[1]))
     assert message_log == []
+
+
+def test_a_corrected_line_shows_its_scale_and_destagger(dock):
+    from nsgeo_qgis.line_edit import LineEdit
+
+    session, dock = dock
+    keys = session.keys_on_grid("A")
+    session.edit_lines(
+        [
+            LineEdit(
+                keys[1],
+                seen=session.line_for_key(keys[1]).placement,
+                scale=0.954,
+                travel_shift=0.24,
+            )
+        ],
+        grid_id="A",
+    )
+    grid_item = dock.tree.topLevelItem(0).child(0)
+    assert "· ×0.954" in grid_item.child(1).text(0)
+    assert "· destagger +0.24 m" in grid_item.child(1).text(0)
+    for i in (0, 2):
+        text = grid_item.child(i).text(0)
+        assert "×" not in text and "destagger" not in text

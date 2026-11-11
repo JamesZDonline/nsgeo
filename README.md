@@ -40,7 +40,9 @@ the known issues.
   single- or multi-channel, with their DZX marks. Depths use a line's own
   velocity, else its grid's, else the dielectric in the file header. After import, a line's label, offset, direction,
   start and grid can be edited, one line at a time or several together, and
-  lines can be moved to another grid.
+  lines can be moved to another grid. A line can be stretched or compressed so
+  its ends sit on the grid's edges, and destaggered along its direction of
+  travel.
 - **The map and the profile, linked both ways.** Hover a line on the map to
   preview its radargram. Moving along the profile moves a marker along the line
   on the map, and a range selected on the profile lights up on the map.
@@ -68,7 +70,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-10.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-11.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -96,38 +98,36 @@ a milestone merges or the plan changes.
 | | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
 | | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | next release |
 | | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | next release |
+| | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | next release |
+| | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | next release |
+| | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
+| | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
 | | Whole site at fine cells: the export. Both exports ask for an export cell and a finer export pixel, show what will be written and refuse with the reason, run in the background with progress in the task list, and write a style file beside the GeoTIFF ([#108]) | next release |
 
 ### Next, in order
 
-The first five items come before M15. Most are things the next milestones
+The first two items come before M15. Most are things the next milestones
 build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
-1. **Fine cells.** A memory warning that counts what minimum curvature really
-   holds ([#148]).
-2. **The background solver** (the worker items in [#120]). M15 solves its cuts
-   on the same worker.
-3. **This grid and Whole site agree** on a grid's lines and preset ([#100],
-   [#101], [#106], [#103]). A cut shows the cube of whichever scope is on
-   screen.
-4. **Decide the time base** ([#97]): whether samples will ever be shifted so the
+1. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-5. **Line placement corrections:** a destagger shift ([#47]) and stretching or
-   compressing lines to fit the grid ([#3]). Real grids need them now, and
-   M17's GPS lines use the same shift.
-6. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+2. **Measure the destagger shift automatically** ([#159], from [#47]): offer
+   each grid's shift from its own lines, measured on the lines as they are
+   placed (fitting a grid can flip the shift it needs). Real grids need it now,
+   and M17's GPS lines use the same shift.
+3. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-7. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+4. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-8. **How a line is identified** ([#89]), settled before M17 stores GPS
+5. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-9. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+6. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-10. **M18: issue cleanup.** Work through the backlog of open bugs and review
-    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-11. **M19: magnetometer data.** The first instrument other than GPR.
+7. **M18: issue cleanup.** Work through the backlog of open bugs and review
+   follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
+8. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
 M15 brings picking to cuts; and the migration real-data test ([#125]), before
@@ -213,6 +213,7 @@ Grouped by area. The order within a group is not a priority.
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
+[#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 
 ## Why
 

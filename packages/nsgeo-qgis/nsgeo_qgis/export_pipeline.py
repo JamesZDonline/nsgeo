@@ -15,6 +15,9 @@ lines laid like the walkthrough site's: ten 20 m grids at 0.5 m line spacing,
 60 traces a metre, eight of them 4-10 degrees off north and two near 90, in a
 65 x 84 m block. Edge-match normalisation, 3 bands of 5 ns, kriging at 0.75
 line spacings (and minimum curvature at the same distance), no smoothing.
+Minimum curvature's weights term is the curvature plan alone (96 B a cell); the
+export builds no kriging preview beside it, so the estimate column below holds
+after main's #148 as before.
 One thread, 2026-11-11. Peak is `tracemalloc` over the whole run, prepared
 lines excluded (the live engines hold them already; the lines here are 246 MB).
 The first band includes the setup: plans, taps, seams and, for kriging, every
@@ -50,7 +53,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from nsgeo.slices import (
@@ -84,6 +87,7 @@ from nsgeo.slices import (
 )
 
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     EXPORT_BUDGET_BYTES,
     MemoryEstimate,
     choose_residency,
@@ -196,7 +200,14 @@ class ExportBand:
 # ---- sizing -----------------------------------------------------------------
 def _grid_estimate(grid: ExportGrid, n_covered: int) -> MemoryEstimate:
     samples = sum(int(line.data.size) for line in grid.lines)
-    return estimate_memory(samples, grid.frame.n_cells, grid.z.nz, n_covered)
+    est = estimate_memory(samples, grid.frame.n_cells, grid.z.nz, n_covered, method="kriging")
+    if grid.finish.method == "min_curvature":
+        # The export holds the curvature plan alone: `_GridState.finish` plans
+        # one fill per grid and builds no kriging preview beside it. Asking
+        # `estimate_memory` for "min_curvature" would count that preview too
+        # (the live engine's #148 figure), so swap the weights term for the plan's.
+        est = replace(est, weights_bytes=grid.frame.n_cells * CURVATURE_PLAN_BYTES_PER_CELL)
+    return est
 
 
 #: A memo of covered-cell counts for `estimate_export`, owned by whoever calls it repeatedly.
