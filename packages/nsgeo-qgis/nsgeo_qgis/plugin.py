@@ -54,11 +54,21 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
+import numpy as np
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
-from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
+from qgis.core import (
+    Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsCsException,
+    QgsMessageLog,
+    QgsPointXY,
+    QgsRasterLayer,
+    QgsSettings,
+)
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
@@ -78,6 +88,7 @@ from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.lookup import CORNER_ROLES
 from nsgeo_qgis.map_link import MapLink
+from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
@@ -112,6 +123,14 @@ VELOCITY_ON_CUT_TIP = (
     "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
     "and would give a wrong velocity."
 )
+
+OUTSIDE_TEXT = "Start a cut inside a grid."
+TOO_FEW_TEXT = "A cut needs two different points."
+CUT_HINT_TEXT = (
+    "Cut: click to add points; right-click or Enter to finish; "
+    "Backspace removes the last point; Esc cancels."
+)
+CUT_TIP = "Cut tool: draw a path on the map to see the cube's vertical section beneath it."
 
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
@@ -183,6 +202,9 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
+        self.act_cut: QAction | None = None
+        #: The Cut map tool while the toggle is on (cut spec §4.1).
+        self._cut_tool: CutTool | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
         #: and the menu it drops down. See `_build_panels_menu`.
         self.act_panels: QAction | None = None
@@ -244,6 +266,9 @@ class NsgeoPlugin:
         self.act_velocity = self._toolbar_action("Velocity", self._toggle_velocity_fit_mode)
         self.act_velocity.setCheckable(True)
         self.act_velocity.setToolTip(VELOCITY_TIP)
+        self.act_cut = self._toolbar_action("Cut", self._toggle_cut_tool)
+        self.act_cut.setCheckable(True)
+        self.act_cut.setToolTip(CUT_TIP)
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -329,6 +354,7 @@ class NsgeoPlugin:
         self.slice_layer = SliceLayer(self.layers)
         self.cut_sections = CutSections(self.session, self.slices_dock)
         self.profile_dock.set_cut_sections(self.cut_sections)
+        self.map_link.set_sections(self.cut_sections)
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
@@ -367,6 +393,15 @@ class NsgeoPlugin:
         # (see _update_enabled), so it has to be re-evaluated when that
         # changes -- line_opened carries "" when there is none.
         self.session.line_opened.connect(self._update_enabled)
+
+        # Cut mode on the map follows QGIS's current layer (cut spec §4.3,
+        # plan call 10): the cuts layer current means "work on cuts". Synced
+        # when a site opens or closes too, since the layer objects are
+        # replaced then.
+        self.iface.currentLayerChanged.connect(self._on_current_layer_changed)
+        self.session.site_opened.connect(self._sync_cut_mode)
+        self.session.site_closed.connect(self._sync_cut_mode)
+        self.iface.mapCanvas().mapToolSet.connect(self._on_map_tool_set)
 
     def _tabify_slices_dock(self) -> None:
         """Tab Slices onto Processing, once, after QGIS has restored its
@@ -508,6 +543,11 @@ class NsgeoPlugin:
         # disconnecting what was never connected.
         with contextlib.suppress(Exception):
             self.iface.initializationCompleted.disconnect(self._tabify_slices_dock)
+        with contextlib.suppress(Exception):
+            self.iface.currentLayerChanged.disconnect(self._on_current_layer_changed)
+        with contextlib.suppress(Exception):
+            self.iface.mapCanvas().mapToolSet.disconnect(self._on_map_tool_set)
+        self._drop_cut_tool()
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
@@ -612,6 +652,7 @@ class NsgeoPlugin:
         self.act_import = None
         self.act_pick = None
         self.act_velocity = None
+        self.act_cut = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -676,6 +717,12 @@ class NsgeoPlugin:
                 if not has_line and self.act_pick.isChecked():
                     self.act_pick.setChecked(False)
                     self._toggle_pick_mode(False)
+            # Cut needs a site, not a line: it draws a new one (cut spec §4.1).
+            if self.act_cut is not None:
+                self.act_cut.setEnabled(is_open)
+                if not is_open and self.act_cut.isChecked():
+                    self.act_cut.setChecked(False)
+                    self._toggle_cut_tool(False)
             # A fit needs a recorded line: a cut at a slant widens hyperbolas (cut spec §4.3).
             can_fit = has_line and not is_cut_key(self.session.current_key or "")
             if self.act_velocity is not None:
@@ -1269,6 +1316,139 @@ class NsgeoPlugin:
             self.profile_dock.set_velocity_fit_mode(bool(checked))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
+
+    # ---- the Cut tool (cut spec §4.1, decision 11) --------------------------
+    def _toggle_cut_tool(self, checked: bool) -> None:
+        """The Cut toolbar toggle: on sets the map tool and makes the cuts
+        layer current (so the map works on cuts); off unsets the tool."""
+        try:
+            if self.layers is None or self.session is None:
+                return
+            if not checked:
+                self._drop_cut_tool()
+                return
+            if self._cut_tool is not None:
+                return
+            canvas = self.iface.mapCanvas()
+            tool = CutTool(canvas)
+            tool.drawn.connect(self._on_cut_drawn)
+            tool.failed.connect(self._on_cut_failed)
+            self._cut_tool = tool  # before setMapTool: _on_map_tool_set compares against it
+            canvas.setMapTool(tool)
+            # Esc and Enter reach the tool only through the canvas's key events.
+            canvas.setFocus()
+            self._say_pick(CUT_HINT_TEXT)
+            cuts = self.layers.layers.get("cuts")
+            if cuts is not None and not sip.isdeleted(cuts):
+                self.iface.setActiveLayer(cuts)
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(f"could not start the Cut tool: {exc}", Qgis.MessageLevel.Warning)
+
+    def _drop_cut_tool(self) -> None:
+        """Unset and release the Cut tool, if there is one. Safe to repeat."""
+        tool, self._cut_tool = self._cut_tool, None
+        if tool is None or sip.isdeleted(tool):
+            return
+        try:
+            canvas = self.iface.mapCanvas()
+            if not sip.isdeleted(canvas) and canvas.mapTool() is tool:
+                canvas.unsetMapTool(tool)
+        finally:
+            self._pop_pick_message()
+            tool.dispose()
+            tool.deleteLater()
+
+    def _on_map_tool_set(self, new_tool: Any, _old_tool: Any = None) -> None:
+        """Another map tool took the canvas: the Cut toggle follows."""
+        try:
+            if self._cut_tool is None or new_tool is self._cut_tool:
+                return
+            if self.act_cut is not None:
+                self.act_cut.setChecked(False)
+            self._drop_cut_tool()
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the map tool: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_cut_failed(self, reason: str) -> None:
+        self.message(f"drawing a cut failed: {reason}", Qgis.MessageLevel.Critical)
+
+    def _cut_grid_and_vertices(self, points: Sequence[QgsPointXY]) -> tuple[str, list[Any]] | None:
+        """The grid the first point is inside (the first in survey order when
+        several are), and all the points as that grid's metres; None when the
+        first point is in no grid. Points are in the canvas CRS, the grid's
+        metres are in the grid's own CRS, so each point is transformed first
+        (cut spec §4.1)."""
+        assert self.session is not None and self.layers is not None
+        site = self.session.site
+        assert site is not None
+        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        for grid in site.grids:
+            grid_crs = QgsCoordinateReferenceSystem(grid.crs)
+            transform = None
+            if canvas_crs != grid_crs:
+                transform = QgsCoordinateTransform(canvas_crs, grid_crs, self.layers.project)
+                if not transform.isValid():
+                    raise RuntimeError(
+                        f"no coordinate transform from {canvas_crs.authid()} to {grid_crs.authid()}"
+                    )
+            try:
+                mapped = [transform.transform(p) if transform else p for p in points]
+            except QgsCsException:
+                continue  # outside where this grid's CRS works: not in this grid
+            world = np.array([(q.x(), q.y()) for q in mapped], dtype=float)
+            local = grid.to_local(world)
+            x, y = local[0]
+            if 0.0 <= x <= grid.size_x and 0.0 <= y <= grid.size_y:
+                return grid.id, [(float(a), float(b)) for a, b in local]
+        return None
+
+    def _on_cut_drawn(self, points: list[QgsPointXY]) -> None:
+        """A finished path: add the cut to the first grid its first point is
+        in, and open it. The tool stays on for the next one."""
+        try:
+            if self.session is None or not self.session.is_open:
+                return
+            found = self._cut_grid_and_vertices(points)
+            if found is None:
+                self.message(OUTSIDE_TEXT, Qgis.MessageLevel.Warning)
+                return
+            grid_id, vertices = found
+            try:
+                key = self.session.add_cut(grid_id, vertices)
+            except ValueError:
+                self.message(TOO_FEW_TEXT, Qgis.MessageLevel.Warning)
+                return
+            self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not add the cut: {exc}", Qgis.MessageLevel.Critical)
+
+    # ---- the current layer (plan call 10) -----------------------------------
+    def _on_current_layer_changed(self, layer: Any) -> None:
+        try:
+            self._set_cut_mode_for(layer)
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the current layer: {exc}", Qgis.MessageLevel.Warning)
+
+    def _sync_cut_mode(self, *_: Any) -> None:
+        try:
+            self._set_cut_mode_for(self.iface.activeLayer())
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the current layer: {exc}", Qgis.MessageLevel.Warning)
+
+    def _set_cut_mode_for(self, layer: Any) -> None:
+        """Cut mode is on exactly while the cuts layer is current. Layer ids
+        are compared, not objects: a CRS rebuild replaces the layer object."""
+        if self.map_link is None or self.layers is None or self.session is None:
+            return
+        cuts = self.layers.layers.get("cuts")
+        on = (
+            self.session.is_open
+            and layer is not None
+            and cuts is not None
+            and not sip.isdeleted(cuts)
+            and layer.id() == cuts.id()
+        )
+        self.map_link.set_cut_mode(bool(on))
 
     def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
         """Relay a pick from the profile to the session.
