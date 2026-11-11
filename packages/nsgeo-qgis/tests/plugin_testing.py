@@ -521,3 +521,32 @@ class ExportGate:
                 raise AssertionError("the export task never started")
             QCoreApplication.processEvents()
             time.sleep(0.005)
+
+
+def read_bands(path: Any) -> list[Any]:
+    """Every band of a GeoTIFF as arrays, the dataset closed before anything asserts."""
+    from osgeo import gdal
+
+    ds = gdal.Open(str(path))
+    try:
+        return [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+    finally:
+        ds.Close()
+
+
+def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> None:
+    """The layer's ramp is the plugin's own for `palette` over `limit`: the range, and the
+    first and last colour stops of the named colour map."""
+    from nsgeo.render import colormap
+
+    renderer = layer.renderer()
+    assert renderer.type() == "singlebandpseudocolor"
+    assert renderer.classificationMax() == pytest.approx(limit)
+    assert renderer.classificationMin() == pytest.approx(0.0 if unipolar else -limit)
+    items = renderer.shader().rasterShaderFunction().colorRampItemList()
+    lut = colormap(palette)
+    assert len(items) == 256
+    assert items[0].color.getRgb()[:3] == tuple(int(v) for v in lut[0])
+    assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
+    assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
+    assert items[-1].value == pytest.approx(limit)

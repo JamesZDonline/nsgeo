@@ -136,7 +136,14 @@ def test_the_band_count_is_the_specs_formula(exportable):
     from nsgeo_qgis.slice_export import plan_export
 
     engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    plan = plan_export(
+        engine,
+        thickness_levels=10,
+        step_levels=5,
+        velocity=None,
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
     nz = engine.z.nz
     assert len(plan.bands) == (nz - 10) // 5 + 1
 
@@ -402,7 +409,14 @@ def test_an_amplitude_plan_without_a_finish_still_writes_a_blend(exportable, tmp
     from osgeo import gdal
 
     engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    plan = plan_export(
+        engine,
+        thickness_levels=10,
+        step_levels=5,
+        velocity=None,
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
     assert plan.finish is None and not plan.coverage
     bands = _bands(_band_plan(engine, 3), fill=-2.0)
     path = tmp_path / "amp.tif"
@@ -937,7 +951,15 @@ def _band_plan(engine, n=3, lattice=None, **extra):
     from nsgeo.slices import frame_lattice
     from nsgeo_qgis.slice_export import plan_export
 
-    plan = plan_export(engine, 10, 5, None, finish=engine.finish_settings(SliceFinish()))
+    plan = plan_export(
+        engine,
+        10,
+        5,
+        None,
+        finish=engine.finish_settings(SliceFinish()),
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
     lattice = lattice or frame_lattice(plan.frame, plan.frame.cell)
     extra = {"cell": plan.frame.cell, "pixel": lattice.pixel, **extra}
     return replace(plan, bands=plan.bands[:n], lattice=lattice, **extra)

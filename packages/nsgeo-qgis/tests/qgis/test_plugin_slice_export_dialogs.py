@@ -439,18 +439,101 @@ def test_export_geotiff_also_writes_coverage_when_checked(plugin, tmp_path, driv
 def test_the_style_file_carries_the_measured_limit_and_the_panels_colours(
     plugin, tmp_path, drive_dialog
 ):
+    """Values: the limit is the panel's clip over the file's own bands and the ramp is
+    the panel's colour map. Companion: unipolar, one to the largest count, the counts
+    colour map. Both layers are drawn from their style files."""
+    from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
+    from nsgeo.slices import limit_over_slices
+    from plugin_testing import assert_styled_as, read_bands
+
     plugin, s = plugin
     _prepare(plugin)
     dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
     dock.palette_combo.setCurrentText("amp_heat")
     target = tmp_path / "slices" / "cube.tif"
     _export(plugin, drive_dialog, target)
-    layer = _layer_for(plugin, target)
-    renderer = layer.renderer()
-    assert renderer.type() == "singlebandpseudocolor"
-    assert renderer.classificationMax() > 0
-    text = target.with_suffix(".qml").read_text()
-    assert "singlebandpseudocolor" in text
+
+    unipolar = dock.source_unipolar()
+    clip = UnipolarClip() if unipolar else PercentileClip()
+    limit = limit_over_slices(read_bands(target), clip)
+    assert limit > 0
+    assert_styled_as(_layer_for(plugin, target), "amp_heat", limit, unipolar)
+
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    counts = read_bands(coverage)[0]
+    most = max(1.0, float(np.nanmax(counts)))
+    counts_palette = "amp_heat" if "amp_heat" in colormap_names(unipolar=True) else "amp_black_high"
+    assert_styled_as(_layer_for(plugin, coverage), counts_palette, most, True)
+
+
+def test_a_coverage_off_re_export_keeps_the_companions_layer(plugin, tmp_path, drive_dialog):
+    """Replacing cube.tif removes only layers on files this export writes: with the
+    companion off, cube_coverage.tif's layer (its file untouched) stays."""
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    _export(plugin, drive_dialog, target)
+    companion = _layer_for(plugin, coverage)
+    old_id = _layer_for(plugin, target).id()
+    companion_id = companion.id()
+    dock.coverage_check.setChecked(False)
+    _export(plugin, drive_dialog, target, replace=True)
+    assert _layer_for(plugin, coverage) is not None
+    assert _layer_for(plugin, coverage).id() == companion_id
+    new = _layer_for(plugin, target)
+    assert new is not None and new.id() != old_id
+
+
+def _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tmp_path, how):
+    from nsgeo_qgis.slice_export import GeoTiffSliceWriter
+
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    _export(plugin, drive_dialog, target)
+    names = {_layer_for(plugin, target).name(), _layer_for(plugin, coverage).name()}
+    before_bytes = target.read_bytes()
+    levels, disconnect = _levels()
+    try:
+        if how == "cancel":
+            gate = ExportGate(monkeypatch)
+            drive_export_dialog(drive_dialog, path=target, replace=True)
+            dock.export_button.click()
+            gate.wait_entered()
+            running_export().cancel()
+            wait_for_export()
+        else:
+
+            def broken(self, path, plan, bands, **kwargs):
+                raise OSError(28, "No space left on device")
+
+            monkeypatch.setattr(GeoTiffSliceWriter, "write_bands", broken)
+            _export(plugin, drive_dialog, target, replace=True)
+    finally:
+        disconnect()
+    assert target.read_bytes() == before_bytes
+    for path in (target, coverage):
+        layer = _layer_for(plugin, path)
+        assert layer is not None and layer.isValid()
+        assert plugin.layers.group.findLayer(layer.id()) is not None
+    now = {lyr.name() for lyr in plugin.layers.project.mapLayers().values()}
+    assert names <= now
+    assert any("put back as before" in m for m, _lv in levels), levels
+
+
+def test_a_cancelled_replace_puts_the_old_layers_back(plugin, tmp_path, drive_dialog, monkeypatch):
+    _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tmp_path, "cancel")
+
+
+def test_a_failed_replace_puts_the_old_layers_back(plugin, tmp_path, drive_dialog, monkeypatch):
+    _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tmp_path, "fail")
 
 
 def test_a_failed_coverage_companion_does_not_report_the_main_export_as_failed(

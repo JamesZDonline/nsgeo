@@ -358,8 +358,8 @@ def plan_export(
     velocity: VelocityModel | None,
     finish: FinishSettings | None = None,
     *,
-    cell: float | None = None,
-    pixel: float | None = None,
+    cell: float,
+    pixel: float,
 ) -> ExportPlan:
     """The band list a GeoTIFF export would write, without writing anything.
 
@@ -367,17 +367,16 @@ def plan_export(
     its own docstring), so `len(plan.bands)` and the dock's slice count
     are never two agreeing implementations, only one.
 
-    `cell` and `pixel` are the export's own and default to the engine's live
-    cell (pixel = cell). The plan's frame and lattice are the export's:
+    `cell` and `pixel` are the export's own and required: no fallback to the live
+    cell, which would write settings the file was not made with. The plan's frame
+    and lattice are the export's:
     `frame_lattice(frame, pixel)`, never the live frame's. `finish` is only
     what `GeoTiffSliceWriter.write_bands` records as metadata. GUI thread:
     it reads the engine and the session.
     """
-    live, z = engine.frame, engine.z
-    if live is None or z is None:
+    z = engine.z
+    if engine.frame is None or z is None:
         raise RuntimeError("no slice geometry: choose a source and a resolution first")
-    cell = live.cell if cell is None else cell
-    pixel = cell if pixel is None else pixel
     frame = export_frame(engine, cell)
     windows = plan_windows(z, thickness_levels, step_levels)
     bands = tuple(SliceBand(window=w, description=window_label(z, w, velocity)) for w in windows)

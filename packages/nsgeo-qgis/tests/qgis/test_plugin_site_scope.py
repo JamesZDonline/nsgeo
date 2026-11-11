@@ -1394,6 +1394,18 @@ def test_the_coverage_companion_is_written_styled_and_a_failure_of_it_is_its_own
     names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert {"with_coverage", "with_coverage_coverage"} <= set(names)
     assert _metadata(companion)["NSGEO_SITE_RESAMPLING"] == "largest_count"
+    from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
+    from nsgeo.slices import limit_over_slices
+    from plugin_testing import assert_styled_as, read_bands
+
+    palette = dock.palette_combo.currentText()
+    clip = UnipolarClip() if dock.source_unipolar() else PercentileClip()
+    limit = limit_over_slices(read_bands(target), clip)
+    layers = {lyr.name(): lyr for lyr in plugin.layers.project.mapLayers().values()}
+    assert_styled_as(layers["with_coverage"], palette, limit, dock.source_unipolar())
+    most = max(1.0, float(np.nanmax(read_bands(companion)[0])))
+    counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+    assert_styled_as(layers["with_coverage_coverage"], counts_palette, most, True)
 
     real = plugin._add_export_layer
 

@@ -49,6 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,7 +105,7 @@ from nsgeo_qgis.slice_export import (
     window_ns,
 )
 from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
-from nsgeo_qgis.slices_plan import smallest_safe_cell
+from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
@@ -135,6 +136,10 @@ class _ExportJob:
     temporal: Callable[[Any], None]
     #: Included grids the site file does not hold, named in the success message.
     left_out: list[str]
+
+
+def _norm_path(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
 
 
 def _finish_with_pick_tool(tool: PickPointTool) -> None:
@@ -1179,8 +1184,22 @@ class NsgeoPlugin:
             return
         job = build(choice.cell, choice.pixel)
         coverage_target = coverage_path(target) if job.coverage_spec is not None else None
+        # Only the layers on files THIS export writes (values, companion when asked, and
+        # their style files) go; the others stay. What goes is remembered by name and file
+        # (never held as a layer: a held layer keeps its file open) so a cancel or a
+        # failure can add it back from the unchanged file.
+        written = {_norm_path(p) for p in (target, target.with_suffix(".qml"))}
+        if coverage_target is not None:
+            written |= {
+                _norm_path(coverage_target),
+                _norm_path(coverage_target.with_suffix(".qml")),
+            }
+        removed: list[tuple[str, Path]] = []
         for layer in replaced:
-            self.layers.project.removeMapLayer(layer.id())
+            source = layer.source().split("|")[0]
+            if _norm_path(source) in written:
+                removed.append((layer.name(), Path(source)))
+                self.layers.project.removeMapLayer(layer.id())
         epoch = self._export_epoch
         palette = dock.palette_combo.currentText()
         unipolar = dock.source_unipolar()
@@ -1196,6 +1215,7 @@ class NsgeoPlugin:
                 palette=palette,
                 unipolar=unipolar,
                 counts_palette=counts_palette,
+                removed=removed,
             )
 
         task = ExportTask(
@@ -1209,6 +1229,7 @@ class NsgeoPlugin:
             what=task_name,
         )
         if not start_export(task):
+            self._restore_layers(removed)
             self.message(
                 "an export is already running; wait for it to finish, "
                 "or cancel it in the task list.",
@@ -1248,6 +1269,7 @@ class NsgeoPlugin:
         palette: str,
         unipolar: bool,
         counts_palette: str,
+        removed: Sequence[tuple[str, Path]] = (),
     ) -> None:
         """The export task's `on_done`, on the GUI thread; it never raises.
 
@@ -1258,14 +1280,17 @@ class NsgeoPlugin:
         """
         try:
             if result.cancelled:
-                self.message("export cancelled")
+                back = self._restore_layers(removed, epoch)
+                self.message("export cancelled" + (f"; {back}" if back else ""))
                 return
             if not result.ok:
                 QgsMessageLog.logMessage(
                     f"export failed: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
                 )
+                back = self._restore_layers(removed, epoch)
                 self.message(
-                    f"could not export the GeoTIFF: {plain_export_error(result.error)}",
+                    f"could not export the GeoTIFF: {plain_export_error(result.error)}"
+                    + (f"; {back}" if back else ""),
                     Qgis.MessageLevel.Critical,
                 )
                 return
@@ -1327,6 +1352,32 @@ class NsgeoPlugin:
                 "the details are in the QGIS message log.",
                 Qgis.MessageLevel.Critical,
             )
+
+    def _restore_layers(self, removed: Sequence[tuple[str, Path]], epoch: int | None = None) -> str:
+        """Add back the layers an export removed to replace, from their unchanged files.
+
+        Same name; a style file beside the file applies as its default style. Returns a
+        sentence for the message, or "" when nothing was put back (nothing removed, the
+        site has closed since, or the file is gone).
+        """
+        if (
+            not removed
+            or (epoch is not None and epoch != self._export_epoch)
+            or self.session is None
+            or not self.session.is_open
+        ):
+            return ""
+        names = []
+        for name, path in removed:
+            if not path.exists():
+                continue
+            layer = QgsRasterLayer(str(path), name, "gdal")
+            if layer.isValid():
+                self._add_exported_layer(layer)
+                names.append(name)
+        if not names:
+            return ""
+        return f"{name_list(names)} {'was' if len(names) == 1 else 'were'} put back as before"
 
     def _add_export_layer(
         self,
