@@ -3590,34 +3590,76 @@ def test_a_cube_built_with_time_zero_starts_at_zero(docked_zeroed):
     assert dock.z0_spin.value() == 0.0
 
 
-def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
-    dock, session = docked_zeroed
+def _prepared_with_owed_record(dock, session, clear=True, **kw):
     assert dock.engine.wait_for_preparation(20_000)
     dock.flush_debounce()
     assert dock.engine.wait_for_preparation(20_000)
-    _owed_record(dock, session)
-    dock.engine.clear()
+    _owed_record(dock, session, **kw)
+    if clear:
+        dock.engine.clear()
+
+
+def _assert_shifted_once(dock, errors):
+    median = dock.engine.median_zero()
+    assert median is not None
+    assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
+    # The engine, not just the spins: the slice and Save cube read this.
+    assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
+    assert errors.count(old_cube_note(-median)) == 1, errors
+    assert dock._pending_z_shift is False
+
+
+def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
     errors: list[str] = []
     dock.error.connect(errors.append)
 
     dock.restore_cube("A__old")
     assert dock.engine.wait_for_preparation(20_000)
 
-    median = dock.engine.median_zero()
-    assert median is not None
-    assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
-    assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
-    assert errors.count(old_cube_note(-median)) == 1, errors
-    assert dock._pending_z_shift is False
+    _assert_shifted_once(dock, errors)
 
 
-def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
-    dock, session = docked
+def test_an_old_recipe_restores_shifted_when_the_engine_already_holds_its_source(docked_zeroed):
+    """The ordinary case: `prepare()` is a no-op, so no `_on_prepared` follows."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert not dock.engine.is_running
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    dock._grid_prepare_pending = True  # R-P5: a site task is still live
+    dock.restore_cube("A__old")
+    assert dock._pending_z_shift is True
+
+
+def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    next(iter(sorted((tmp_path / "raw").glob("*.DZT")))).rename(tmp_path / "raw" / "gone.x")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
     assert dock.engine.wait_for_preparation(20_000)
-    dock.flush_debounce()
-    assert dock.engine.wait_for_preparation(20_000)
-    _owed_record(dock, session)
-    dock.engine.clear()
+
+    assert dock.engine.line_count == 2
+    _assert_shifted_once(dock, errors)
+
+
+def test_a_marked_record_is_not_shifted(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, time_base="time_zero")
     errors: list[str] = []
     dock.error.connect(errors.append)
 
@@ -3629,13 +3671,23 @@ def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
     assert not [m for m in errors if "first break" in m], errors
 
 
-def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path):
+def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
+    dock, session = docked
+    _prepared_with_owed_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+
+
+def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):
     dock, session = docked_zeroed
-    assert dock.engine.wait_for_preparation(20_000)
-    dock.flush_debounce()
-    assert dock.engine.wait_for_preparation(20_000)
-    _owed_record(dock, session)
-    dock.engine.clear()
+    _prepared_with_owed_record(dock, session)
     for path in (tmp_path / "raw").glob("*.DZT"):
         path.rename(path.with_suffix(".gone"))
     errors: list[str] = []
@@ -3648,13 +3700,16 @@ def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_p
     assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
     assert not [m for m in errors if "first break" in m], errors
     assert dock._pending_z_shift is False
+    assert not [m for m in message_log if "could not" in m], message_log
 
 
 def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
     docked_zeroed, qgis_app
 ):
-    """The band is on the cube clock; the line on screen has no steps (radar
-    clock), so it is drawn at (10 + line_zero, 12 + line_zero)."""
+    """The band is on the cube clock. A line with no steps (radar clock) draws
+    it at (10 + line_zero, 12 + line_zero); a line with the cube's own time-zero
+    step draws it at (10, 12), through `set_slice_band` and through a repaint."""
+    from nsgeo.processing import build_step
     from nsgeo_qgis.ui.profile_dock import ProfileDock
 
     dock, session = docked_zeroed
@@ -3666,15 +3721,22 @@ def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
         zero = dock.line_zero_in_cube(key)
         assert zero is not None
         assert zero != 0.0
+        session.set_profiles(key, session.line_for_key(key).load())
         session.open_line(key)
+        assert profile._shown_radargram is not None
         assert profile.shown_zero_ns() == 0.0
         profile.set_slice_band(10.0, 12.0)
         lo, hi = profile.view._slice_band
         assert lo == pytest.approx(10.0 + zero)
         assert hi == pytest.approx(12.0 + zero)
-        # A repaint keeps it where it is; clearing forgets it.
+
+        # The same line with the cube's own step: shown zero == cube zero.
+        session.append_step(key, build_step("time_zero"))
+        assert profile.shown_zero_ns() == pytest.approx(zero)
+        profile.view._slice_band = None  # a repaint alone must redraw it
         profile._render()
-        assert profile.view._slice_band == pytest.approx((10.0 + zero, 12.0 + zero))
+        assert profile.view._slice_band == pytest.approx((10.0, 12.0))
+
         profile.clear_slice_band()
         profile._render()
         assert profile.view._slice_band is None

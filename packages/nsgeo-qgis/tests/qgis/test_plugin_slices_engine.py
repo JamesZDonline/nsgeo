@@ -251,8 +251,9 @@ def test_shared_limit_measures_the_filled_array_actually_displayed(qgis_app, tmp
         for i in range(4)
     ]
     session.add_lines(lines)
-    # No `time_zero`: it crops rows off the front of the radargram, which
-    # would shrink the line's own t0_ns below the header's raw
+    # No `time_zero`: it crops rows off the front of the radargram and
+    # relabels the axis to read 0 at the first break, so the line's own
+    # t0_ns would no longer equal the header's raw
     # `position_ns` this test seeds `z0` from directly (the dock's own
     # `_seed_dz_z_defaults` formula) -- `dewow`/`background_mean`/
     # `gain_agc` all leave the sample axis untouched, so `header.position_

@@ -3474,3 +3474,25 @@ def test_a_preview_site_export_is_refused_before_any_dialog(plugin, answer_modal
     item = fake_iface.messageBar().currentItem()
     assert item.text() == refusal
     assert item.level() == Qgis.MessageLevel.Warning
+
+
+def test_a_line_zero_is_read_from_the_scope_on_screen(plugin):
+    """Under Whole site every grid's lines answer, not just This grid's (#97)."""
+    dock = plugin.slices_dock
+    assert dock.engine.wait_for_preparation(60_000)
+    here = dock.engine.choice.grid_id
+    session = plugin.session
+    others = [
+        k
+        for k in session.keys()  # noqa: SIM118 -- SiteSession.keys()
+        if session.line_for_key(k).placement.grid_id not in (None, here)
+    ]
+    assert others
+    key = others[0]
+    assert dock.line_zero_in_cube(key) is None  # This grid's engine does not hold it
+
+    whole_site(plugin)
+    zero = dock.line_zero_in_cube(key)
+    assert zero is not None
+    assert zero == dock.site_engine.line_zero(key)
+    assert dock.site_engine.line_zero("no-such-line.dzt") is None

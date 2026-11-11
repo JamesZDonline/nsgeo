@@ -366,7 +366,8 @@ class SlicesDock(QgsDockWidget):
         self._pending_palette: str | None = None
         #: A restored record from before the time-zero clock, whose preset now
         #: sets one: `_on_prepared` moves its z range by the median zero and
-        #: says so. Cleared on every preparation, and by a manual source change.
+        #: says so. Consumed by every `_on_prepared` (which also covers a preparation
+        #: with failed lines), and cleared by a manual source change.
         self._pending_z_shift = False
 
         body = QWidget(self)
@@ -1457,6 +1458,7 @@ class SlicesDock(QgsDockWidget):
             # inherit a palette a still-preparing `restore_cube` owes a
             # DIFFERENT preparation.
             self._pending_palette = None
+            self._pending_z_shift = False
             self._mark_cube_unsaved()
             self._sync_included()
             self._remember_source()
@@ -1549,16 +1551,18 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
-    def _shift_z_by_median_zero(self) -> None:
+    def _shift_z_by_median_zero(self) -> bool:
         """Move both z spins to the time-zero clock for a restored old record.
 
-        The record's range was on the radar clock; each line now reads 0 at
-        its first break, so the same depths sit `median_zero` earlier. With
-        nothing prepared there is no median, so nothing moves and nothing is
-        said. Signal-blocked writes, as `_clamp_z_to_prepared` does."""
+        The record's range was on the radar clock; `retime_ns(t, 0.0, median)`
+        puts a time on the clock of a line whose zero is `median` (the
+        median of the prepared lines' zeros). With nothing prepared there is
+        no median, so nothing moves and nothing is said. Signal-blocked
+        writes, as `_clamp_z_to_prepared` does, so the caller must push the
+        result at the engine (`_apply_resolution`) when this returns True."""
         median = self.engine.median_zero()
         if median is None:
-            return
+            return False
         self._updating += 1
         try:
             for spin in (self.z0_spin, self.z1_spin):
@@ -1570,6 +1574,7 @@ class SlicesDock(QgsDockWidget):
         finally:
             self._updating -= 1
         self.error.emit(old_cube_note(-median))
+        return True
 
     def line_zero_in_cube(self, key: str) -> float | None:
         """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
@@ -1645,12 +1650,11 @@ class SlicesDock(QgsDockWidget):
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
-            if owed_shift:
-                self._shift_z_by_median_zero()
+            shifted = self._shift_z_by_median_zero() if owed_shift else False
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
-            clamped = self._clamp_z_to_prepared()
+            clamped = self._clamp_z_to_prepared() or shifted
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
@@ -1712,7 +1716,6 @@ class SlicesDock(QgsDockWidget):
 
     def _on_engine_error(self, message: str) -> None:
         try:
-            self._pending_z_shift = False  # a failed preparation owes nothing
             self.error.emit(message)
             self._refresh_source_status()
         except Exception:  # noqa: BLE001 -- see the module docstring
@@ -2039,7 +2042,14 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
-                self._pending_z_shift = False
+                # No preparation is coming. If the engine already holds this
+                # source (the usual case: the restored source was the
+                # remembered one), the shift is applied here; a preparation
+                # still owed (R-P5) keeps the flag for its `_on_prepared`.
+                if self._pending_z_shift and not self._grid_prepare_pending:
+                    self._pending_z_shift = False
+                    if self._shift_z_by_median_zero():
+                        self._apply_resolution()
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved

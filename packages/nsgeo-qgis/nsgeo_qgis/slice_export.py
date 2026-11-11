@@ -656,7 +656,8 @@ def cube_record(
 
 @dataclass(frozen=True)
 class CubeRecipe:
-    """A `Site.cubes` record, read back as the three things the dock sets.
+    """A `Site.cubes` record, read back as what the dock sets (choice, resolution,
+    view) plus the clock it was recorded on.
 
     `resolution` and `view` are optional because a record written before
     this milestone carries neither. Absent means UNKNOWN, and the dock
