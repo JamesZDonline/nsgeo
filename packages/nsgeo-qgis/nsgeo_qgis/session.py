@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
-from nsgeo.model import Cut, Line, Profile, Site
+from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
 from nsgeo.processing import Radargram, StepStack
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
@@ -603,11 +603,13 @@ class SiteSession(QObject):
         # (cut spec §4.2). Its picks stay: they are authored data.
         gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
         site.cuts = [c for c in site.cuts if c.grid_id != grid_id]
+        cut_keys_gone = [c.key for c in gone_cuts]
         if grid_id in site.site_view.get("grids", []):
             site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
         dropped = self._drop_lines(keys)
         self._set_dirty(True)
         self._announce_dropped(*dropped)
+        self._forget_cuts(cut_keys_gone)
         self.grids_changed.emit()
         if keys:
             self.lines_changed.emit()
@@ -884,6 +886,8 @@ class SiteSession(QObject):
         self.lines_changed.emit()
 
     def resolved_velocity(self, key: str) -> VelocityModel:
+        if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)
+            return self.cut_velocity(self.cut_for_key(key).grid_id)
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
 
@@ -895,6 +899,30 @@ class SiteSession(QObject):
     def cut_keys_on_grid(self, grid_id: str) -> list[str]:
         """The keys of the cuts drawn on `grid_id`, in drawing order."""
         return [c.key for c in self._require_site().cuts if c.grid_id == grid_id]
+
+    def _require_key(self, key: str) -> None:
+        """`KeyError` unless `key` names a line or a cut."""
+        if is_cut_key(key):
+            self.cut_for_key(key)
+        else:
+            self.line_for_key(key)
+
+    def _forget_cuts(self, keys: Sequence[str]) -> None:
+        """Reset the working and previewed item if it is one of `keys`, then announce.
+
+        Same order as `_announce_dropped`: `line_opened` first, so the profile
+        drops its working key before `preview_changed` asks it to render.
+        """
+        dropped_current = self._current_key in keys
+        dropped_preview = self._preview_key in keys
+        if dropped_current:
+            self._current_key = None
+            self._current_trace = -1
+            self._selection = (-1, -1)
+        if dropped_preview:
+            self._preview_key = None
+            self._preview_trace = -1
+        self._announce_dropped(dropped_current, dropped_preview)
 
     def cut_for_key(self, key: str) -> Cut:
         for cut in self._require_site().cuts:
@@ -938,6 +966,7 @@ class SiteSession(QObject):
         site = self._require_site()
         site.cuts.remove(self.cut_for_key(key))
         self._set_dirty(True)
+        self._forget_cuts([key])
         self.cuts_changed.emit()
 
     def cut_velocity(self, grid_id: str) -> VelocityModel:
@@ -1212,7 +1241,7 @@ class SiteSession(QObject):
 
     # ---- current line, samples, cursor ------------------------------------
     def open_line(self, key: str) -> None:
-        self.line_for_key(key)
+        self._require_key(key)
         if key == self._current_key:
             # Re-selecting the line already open -- reachable in normal
             # use, not just a defensive corner case: Task 5 promotes a
@@ -1278,8 +1307,11 @@ class SiteSession(QObject):
     def set_trace(self, key: str, index: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
-        index = max(0, min(int(index), n - 1))
+        if is_cut_key(key):
+            # The column count belongs to the section, so only the bottom clamps (plan call 4).
+            index = max(-1, int(index))
+        else:
+            index = max(0, min(int(index), self.line_for_key(key).n_traces - 1))
         if index != self._current_trace:
             self._current_trace = index
             self.trace_changed.emit(key, index)
@@ -1287,8 +1319,8 @@ class SiteSession(QObject):
     def set_selection(self, key: str, start: int, end: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
         lo, hi = sorted((int(start), int(end)))
+        n = 1 << 62 if is_cut_key(key) else self.line_for_key(key).n_traces
         # Each end is clamped independently into [0, n - 1]. That means this
         # can never land on (-1, -1): clearing the selection is exclusively
         # clear_selection()'s job, and a caller cannot accidentally forge the
@@ -1482,8 +1514,10 @@ class SiteSession(QObject):
         if key is None:
             self.clear_preview()
             return
-        line = self.line_for_key(key)  # raises KeyError before anything changes
-        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+        self._require_key(key)  # raises KeyError before anything changes
+        index = -1 if trace < 0 else int(trace)
+        if not is_cut_key(key):
+            index = min(index, self.line_for_key(key).n_traces - 1)
         if (key, index) == (self._preview_key, self._preview_trace):
             return  # loop guard: a marker update that round-trips is a no-op
         self._preview_key, self._preview_trace = key, index

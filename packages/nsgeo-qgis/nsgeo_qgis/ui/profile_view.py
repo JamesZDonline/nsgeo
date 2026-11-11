@@ -263,6 +263,12 @@ class ProfileView(QWidget):
         self._image = image
         self.update()
 
+    def set_message(self, text: str | None) -> None:
+        """What the view says where there is no image (a cut with no section,
+        cut spec §4.3). None goes back to the "loading…" `set_axes` leaves."""
+        self._message = "loading…" if text is None else text
+        self.update()
+
     def set_velocity(self, model: VelocityModel | None) -> None:
         self._velocity = model
         self.update()

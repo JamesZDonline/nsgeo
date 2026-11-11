@@ -135,3 +135,60 @@ def test_keys_stay_lines_only(session, tmp_path):
     assert cut not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
     assert not any(is_cut_key(k) for k in session.keys())  # noqa: SIM118
     assert dataclasses.is_dataclass(session.cut_for_key(cut))
+
+
+def test_open_preview_trace_and_selection_accept_cut_keys(session):
+    session.add_grid(GRID)
+    key = session.add_cut("A", V)
+    opened = Spy(session.line_opened)
+    previews = Spy(session.preview_changed)
+    session.set_preview(key, 7)
+    assert previews.calls == [(key, 7)]
+    session.open_line(key)
+    assert opened.calls == [(key,)]
+    assert session.current_key == key
+    session.set_trace(
+        key, 10_000
+    )  # no upper clamp: the column count is the section's (plan call 4)
+    assert session.current_trace == 10_000
+    session.set_trace(key, -5)
+    assert session.current_trace == -1
+    session.set_selection(key, 12, 3)
+    assert session.selection == (3, 12)
+
+
+def test_resolved_velocity_of_a_cut_is_its_grids(session, tmp_path):
+    session.add_grid(GRID)
+    model = VelocityModel.constant(0.09)
+    session.set_grid_velocity("A", model)
+    key = session.add_cut("A", V)
+    assert session.resolved_velocity(key) == model == session.cut_velocity("A")
+
+
+def test_removing_the_working_or_previewed_cut_clears_it(session):
+    session.add_grid(GRID)
+    key = session.add_cut("A", V)
+    other = session.add_cut("A", V)
+    session.open_line(key)
+    opened = Spy(session.line_opened)
+    session.remove_cut(other)  # an unrelated cut leaves the working one alone
+    assert session.current_key == key and opened.calls == []
+    session.remove_cut(key)
+    assert session.current_key is None
+    assert opened.calls == [("",)]
+    previewed = session.add_cut("A", V)
+    session.set_preview(previewed, 3)
+    previews = Spy(session.preview_changed)
+    session.remove_cut(previewed)
+    assert session.preview_key is None
+    assert previews.calls == [("", -1)]
+
+
+def test_removing_a_grid_clears_a_working_cut_on_it(session):
+    session.add_grid(GRID)
+    key = session.add_cut("A", V)
+    session.open_line(key)
+    opened = Spy(session.line_opened)
+    session.remove_grid("A")
+    assert session.current_key is None
+    assert opened.calls == [("",)]

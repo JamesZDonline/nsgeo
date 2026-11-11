@@ -357,6 +357,10 @@ class SurveyDock(QgsDockWidget):
                 if len(named) == 1:
                     return named.pop()
             key = self.session.current_key
+            if key and is_cut_key(key):
+                # An open cut sits on a grid, and importing there is what
+                # the same fallback does for an open line.
+                return self.session.cut_for_key(key).grid_id
             return self._grid_of_line(key) if key else None
         except Exception as exc:  # noqa: BLE001 -- see the module docstring:
             # reached from a toolbar action's slot. No target is the safe
@@ -467,6 +471,7 @@ class SurveyDock(QgsDockWidget):
                 menu.addAction("Remove grid", lambda: self.remove_grid_action(gid))
             elif kind == "cut":
                 cut_key = self.cut_key_of(item) or ""
+                menu.addAction("Open", lambda: self._open_line(cut_key))
                 menu.addAction("Rename cut…", lambda: self.rename_cut_action(cut_key))
                 menu.addSeparator()
                 menu.addAction("Delete cut", lambda: self.remove_cut_action(cut_key))

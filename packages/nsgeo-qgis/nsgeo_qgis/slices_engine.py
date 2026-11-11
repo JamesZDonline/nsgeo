@@ -1327,6 +1327,18 @@ class SliceEngine(QObject):
         self._weights = (self._weights_key(frame, settings), fill, preview)
         return fill, preview
 
+    def section_fills(self, finish: SliceFinish) -> tuple[SliceFill, FillWeights | None]:
+        """The fill a cut's section finishes with, and the kriging stand-in
+        under minimum curvature (cut spec §5).
+
+        What the engine holds when it was built for these settings and this
+        cube's covered cells, which is what the slice's own draw leaves
+        behind; otherwise built through `_fill_for` and held, so a cut never
+        plans weights of its own. Needs a cube: `RuntimeError` without lines.
+        """
+        frame, _ = self._require_geometry()
+        return self._fill_for(self.cube().coverage(), frame, self.finish_settings(finish))
+
     def _keep_solved(self, key: bytes, solved: np.ndarray) -> None:
         """Into the solved-slice cache as the most recent; the least recently
         used go past `SOLVED_SLICES_KEPT` (plan call 8)."""

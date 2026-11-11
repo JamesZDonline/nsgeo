@@ -1800,3 +1800,36 @@ def test_migration_reaches_the_cube_through_the_preset_alone(qgis_app, tmp_path)
     # Each at its own trace count, so one preset really did serve two
     # differently shaped lines.
     assert sorted(a.shape[1] for a in migrated.values()) == [60, 97]
+
+
+def test_section_fills_reuse_the_held_weights(sourced, monkeypatch):
+    """A cut never plans weights of its own (cut spec §5): it takes the engine's."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    cube = engine.cube()
+    krig = SliceFinish(method="kriging", max_distance_spacings=2.0)
+    engine.finish(cube.level(3), cube.coverage(), krig)  # what the dock's draw does
+    held = engine._weights[1]
+    planned = []
+    real = slices_engine.plan_fill
+
+    def counting(*args, **kwargs):
+        planned.append(args[2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", counting)
+    fill, preview = engine.section_fills(krig)
+    assert fill is held and preview is None
+    assert planned == []
+    # Under minimum curvature the second element is the kriging stand-in.
+    mc = dataclasses.replace(krig, method="min_curvature")
+    engine.finish(cube.level(3), cube.coverage(), mc)
+    planned.clear()
+    plan, standin = engine.section_fills(mc)
+    assert isinstance(plan, CurvaturePlan)
+    assert standin is not None and standin is engine._weights[2]
+    assert planned == []
+    # A different finish builds through the engine's own path, and holds it.
+    other = dataclasses.replace(krig, max_distance_spacings=1.0)
+    fill2, _ = engine.section_fills(other)
+    assert fill2 is engine._weights[1]

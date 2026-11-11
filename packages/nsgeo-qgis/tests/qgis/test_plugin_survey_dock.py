@@ -1273,7 +1273,7 @@ def test_rename_cut_asks_for_a_name_and_renames(dock, answer_modal):
     answer_modal(QMenu, "exec", None)
     asked = answer_modal(QInputDialog, "getText", ("Lower line", True))
     menu = _right_click(dock, dock.item_for_key(key))
-    assert _texts(menu) == ["Rename cut…", "Delete cut"]
+    assert _texts(menu) == ["Open", "Rename cut…", "Delete cut"]
     _action(menu, "Rename cut…").trigger()
     assert len(asked) == 1
     assert session.cut_for_key(key).name == "Lower line"
@@ -1425,3 +1425,26 @@ def test_with_only_cuts_selected_delete_deletes_them(dock, answer_modal):
     _press(dock, Qt.Key.Key_Delete)
     assert len(yes) == 1 and "2 cuts" in yes[0][0][2]
     assert session.cut_keys() == [] and session.keys() == KEYS
+
+
+def test_open_on_a_cut_opens_it(dock):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    opened = []
+    session.line_opened.connect(opened.append)
+    _action(_right_click(dock, dock.item_for_key(key)), "Open").trigger()
+    assert session.current_key == key and opened == [key]
+    assert dock.tree.currentItem() is dock.item_for_key(key)
+
+
+def test_the_import_target_falls_back_to_an_open_cuts_grid(dock, message_log):
+    """An open cut is not a line: its grid answers, and nothing is logged (task 2 hand-off)."""
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    session.open_line(key)
+    dock.tree.clearSelection()
+    assert dock.target_grid_id() == "A"
+    session.open_line(KEYS[0])
+    dock.tree.clearSelection()
+    assert dock.target_grid_id() == "A"
+    assert not [m for m in message_log if "could not read the selected grid" in m]

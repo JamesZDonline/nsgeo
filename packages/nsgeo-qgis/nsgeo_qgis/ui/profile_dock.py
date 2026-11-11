@@ -81,8 +81,15 @@ import datetime as _dt
 from typing import Any
 
 import numpy as np
+from nsgeo.model import is_cut_key
 from nsgeo.processing import Radargram, StepStack, build_step
-from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
+from nsgeo.render import (
+    DEFAULT_COLORMAP,
+    colormap,
+    colormap_names,
+    row_envelope,
+    section_rgba8,
+)
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
 from qgis.core import Qgis
@@ -98,12 +105,19 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.cut_sections import CutSection, CutSections
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.render.qimage import RadargramImage
+from nsgeo_qgis.render.qimage import RadargramImage, rgba_to_qimage
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+
+PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
+KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
+KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
+SITE_VIEW_SUFFIX = " · site view, not normalised"
 
 
 def time_param_name(step: Any) -> str | None:
@@ -211,6 +225,10 @@ class ProfileDock(QgsDockWidget):
         # cutoff: see `_cutoff_row` and the module docstring.
         self._selected_row = -1
         self._cutoff_step: Any = None
+        # A cut's section, from the Slices panel's cube (cut spec §4.3). While
+        # one is shown `image` stays None: a section is drawn by `_draw_cut`.
+        self._cut_sections: CutSections | None = None
+        self._cut_shown: CutSection | None = None
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -355,6 +373,20 @@ class ProfileDock(QgsDockWidget):
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
 
+    def set_cut_sections(self, sections: CutSections) -> None:
+        """Where a cut's section comes from. Its `section_changed` redraws the cut on show."""
+        self._cut_sections = sections
+        sections.section_changed.connect(self._on_section_changed)
+
+    def _on_section_changed(self, key: str) -> None:
+        """A shown cut's section moved (a setting, the source, the cut): show it again."""
+        if key != self._key:
+            return
+        try:
+            self._show_line(key, is_preview=self._preview_key is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not redraw cut {key!r}: {exc}", Qgis.MessageLevel.Critical)
+
     # ---- display settings ---------------------------------------------
     @property
     def percentile(self) -> float:
@@ -389,6 +421,12 @@ class ProfileDock(QgsDockWidget):
 
     def _display_changed(self, *_: Any) -> None:
         self.percentile_label.setText(f"{self.percentile:.1f} %")
+        if self._cut_shown is not None:
+            try:
+                self._draw_cut()
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                _log(f"could not apply the display change: {exc}", Qgis.MessageLevel.Critical)
+            return
         if self.image is None:
             return
         try:
@@ -457,7 +495,13 @@ class ProfileDock(QgsDockWidget):
         old_ruler = view.ruler
         old_key = self._axes_key
         self._file_window()
-        ruler = self._ruler_for(self.session.line_for_key(key), distance) if key else None
+        # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
+        # against its own distance along the path (cut spec call 5).
+        ruler = (
+            None
+            if not key or is_cut_key(key)
+            else self._ruler_for(self.session.line_for_key(key), distance)
+        )
         view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
         new = view.transform
         if (
@@ -658,6 +702,10 @@ class ProfileDock(QgsDockWidget):
         in this milestone. The caller already knows which case it is;
         saying so directly is the honest version.
         """
+        if is_cut_key(key):
+            self._show_cut(key, is_preview=is_preview)
+            return
+        self._set_cut_chrome(False)
         line = self.session.line_for_key(key)
         self._shown_placement = line.placement
         label = getattr(line.placement, "label", None) or line.path.stem
@@ -695,6 +743,92 @@ class ProfileDock(QgsDockWidget):
         self._refresh_velocity()
         self._refresh_picks()
 
+    # ---- cuts (cut spec §4.3, §4.4) ---------------------------------------
+    def _set_cut_chrome(self, on: bool) -> None:
+        """What a cut takes away and a line gives back: the palette (a cut uses
+        the Slices panel's, plan call 5), the channels, the cutoff handle and
+        the gain strip."""
+        if not on:
+            self._cut_shown = None
+        self.colormap_combo.setEnabled(not on)
+        self.colormap_combo.setToolTip(PALETTE_ON_CUT_TIP if on else "")
+        if on:
+            self.channel_combo.hide()
+            self._cutoff_step = None
+            self.view.set_cutoff(None)
+            self.gain_strip.set_headroom(None)
+            self.gain_strip.hide()
+
+    def _cut_method_text(self, section: CutSection, *, is_preview: bool) -> str:
+        if not section.standing_in:
+            return METHOD_LABELS[section.method]
+        if is_preview:
+            return KRIGING_PREVIEW_ON_PREVIEW
+        done, total = section.solved
+        if done >= total:
+            return METHOD_LABELS["min_curvature"]
+        return KRIGING_PREVIEW_SOLVING.format(done=done, total=total)
+
+    def _show_cut(self, key: str, *, is_preview: bool) -> None:
+        """Show a cut's section, or the message that stands in for it.
+
+        A preview never builds the grid's cube; opening the cut does, under a
+        wait cursor (cut spec §5). Every time on a cut is on its cube's clock,
+        so the slice band and the axes are drawn as they are.
+        """
+        cut = self.session.cut_for_key(key)
+        sections = self._cut_sections
+        result: CutSection | str = (
+            "" if sections is None else sections.section(key, build_cube=not is_preview)
+        )
+        prefix = "PREVIEW: " if is_preview else ""
+        head = f"nsgeo Profile · {prefix}cut: {cut.name} · {cut.grid_id}"
+        tip = f"Preview: {cut.name} — select it to work on it" if is_preview else ""
+        self._shown_placement = None
+        if isinstance(result, str):
+            self._clear_view_only()
+            self._set_cut_chrome(True)
+            self.setWindowTitle(head)
+            self.setToolTip(tip)
+            self.view.set_message(result)
+            self._refresh_velocity()
+            return
+        section = result
+        self._cut_shown = section
+        self.image = None
+        self._set_cut_chrome(True)
+        suffix = SITE_VIEW_SUFFIX if section.source.scope == "site" else ""
+        method = self._cut_method_text(section, is_preview=is_preview)
+        self.setWindowTitle(f"{head} · {cut.length_m:.1f} m · {method}{suffix}")
+        self.setToolTip(tip)
+        self.view.set_direction(1)
+        z = section.z
+        self._set_axes_holding(
+            key,
+            section.columns.distance_m.size,
+            z.nz,
+            z.t0_ns,
+            z.dz_ns,
+            section.columns.distance_m,
+        )
+        self._draw_cut()
+        self._refresh_velocity()
+        self._refresh_picks()
+
+    def _draw_cut(self) -> None:
+        """Draw the shown section: `section_rgba8` makes blank columns and
+        depths transparent, so the view's hatch shows through them."""
+        section = self._cut_shown
+        if section is None:
+            return
+        rgba = section_rgba8(
+            section.values,
+            self.percentile,
+            colormap(section.source.palette),
+            unipolar=section.source.unipolar,
+        )
+        self.view.set_image(rgba_to_qimage(rgba))
+
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
             return
@@ -731,7 +865,7 @@ class ProfileDock(QgsDockWidget):
         whatever is on screen rather than filtering on one.
         """
         key = self._key
-        if key is None:
+        if key is None or is_cut_key(key):  # a cut's picks are drawn from Task 5
             self.view.set_picks([])
             return
         self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
@@ -790,6 +924,7 @@ class ProfileDock(QgsDockWidget):
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
         self.image = None
+        self._set_cut_chrome(False)
         self.gain_strip.set_headroom(None)
         self.view.clear()
         self.setWindowTitle("nsgeo Profile")
@@ -948,6 +1083,8 @@ class ProfileDock(QgsDockWidget):
         calibration, and for one too short to have a trace spacing."""
         if self._working_key is None:
             raise ValueError("no line is open")
+        if is_cut_key(self._working_key):
+            raise ValueError("a cut has no velocity fit")
         distance = self.session.line_for_key(self._working_key).distance_along()
         if len(distance) < 2:
             raise ValueError("this line has fewer than two traces, so it has no trace spacing")
@@ -979,6 +1116,8 @@ class ProfileDock(QgsDockWidget):
         line with no distance calibration, which could not have been fitted."""
         if self._working_key is None or not self.session.is_open:
             return []
+        if is_cut_key(self._working_key):
+            return []
         fits = self.session.line_for_key(self._working_key).velocity_fits
         try:
             distance, _, _ = self._velocity_axis()
@@ -1004,6 +1143,8 @@ class ProfileDock(QgsDockWidget):
         which follows the line's own fit order; None when it is not on the
         working line."""
         if self._highlighted_fit is None or self._working_key is None:
+            return None
+        if is_cut_key(self._working_key):
             return None
         key, fit_id = self._highlighted_fit
         if key != self._working_key:
@@ -1042,7 +1183,7 @@ class ProfileDock(QgsDockWidget):
             if not self._velocity_points:
                 self.velocity_readout.setText(
                     "Click the hyperbola's apex, then points down both limbs."
-                    if self._working_key is not None
+                    if self._working_key is not None and not is_cut_key(self._working_key)
                     else ""
                 )
             else:
@@ -1097,6 +1238,8 @@ class ProfileDock(QgsDockWidget):
     def _line_has_no_distance_calibration(self) -> bool:
         if self._working_key is None or not self.session.is_open:
             return False
+        if is_cut_key(self._working_key):
+            return False
         try:
             self.session.line_for_key(self._working_key).distance_along()
         except ValueError:
@@ -1105,6 +1248,8 @@ class ProfileDock(QgsDockWidget):
 
     def _working_grid_id(self) -> str | None:
         if self._working_key is None or not self.session.is_open:
+            return None
+        if is_cut_key(self._working_key):
             return None
         grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
         return None if grid is None else str(grid.id)
@@ -1289,6 +1434,9 @@ class ProfileDock(QgsDockWidget):
             self.difference_cleared.emit()
 
     def _render(self) -> None:
+        if self._key is not None and is_cut_key(self._key):
+            self._draw_cut()  # a section has no stack: only the display changes
+            return
         rg = self.current_radargram()
         if rg is None:
             self.view.set_cutoff(None)
@@ -1346,6 +1494,8 @@ class ProfileDock(QgsDockWidget):
         cached: see the module docstring."""
         row = self._selected_row if row is None else row
         if self._preview_key is not None or self._working_key is None or row < 0:
+            return -1
+        if is_cut_key(self._working_key):  # a cut has no stack, so no cutoff
             return -1
         # `close_site` drops the site before it emits `line_opened("")`, so
         # a slot that runs before this dock's own `_open` (the Processing
@@ -1523,11 +1673,17 @@ class ProfileDock(QgsDockWidget):
         if self._key is not None and self.session.is_open:
             try:
                 model: VelocityModel = self.session.resolved_velocity(self._key)
-                label = velocity_source(self.session, self._key)
+                label = (
+                    "cut velocity"
+                    if is_cut_key(self._key)
+                    else velocity_source(self.session, self._key)
+                )
                 self.view.set_velocity(model)
                 self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
             except KeyError:
-                pass
+                if is_cut_key(self._key):  # no velocity on the grid and no line to take one from
+                    self.view.set_velocity(None)
+                    self.velocity_label.setText("")
             except Exception as exc:  # noqa: BLE001 -- see the module docstring
                 _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
         # Every path, the early ones included, resets the strip: a line that

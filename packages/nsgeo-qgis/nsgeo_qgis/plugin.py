@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
+from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
@@ -72,6 +73,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis import build_label, plugin_version
+from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.lookup import CORNER_ROLES
@@ -102,6 +104,14 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
+VELOCITY_TIP = (
+    "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
+    "Right-click a point to remove it."
+)
+VELOCITY_ON_CUT_TIP = (
+    "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
+    "and would give a wrong velocity."
+)
 
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
@@ -159,6 +169,8 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        #: A cut's section, read from the Slices panel's cube (cut spec §4.3).
+        self.cut_sections: CutSections | None = None
         #: Whether this session should still tab Slices onto Processing.
         #: Read from settings in `initGui`; see `_tabify_slices_dock`.
         self._want_tabify = False
@@ -231,10 +243,7 @@ class NsgeoPlugin:
         )
         self.act_velocity = self._toolbar_action("Velocity", self._toggle_velocity_fit_mode)
         self.act_velocity.setCheckable(True)
-        self.act_velocity.setToolTip(
-            "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
-            "Right-click a point to remove it."
-        )
+        self.act_velocity.setToolTip(VELOCITY_TIP)
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -318,6 +327,8 @@ class NsgeoPlugin:
         # concern that outlives any one dock widget and is torn down
         # outside-in in `unload()`, before `self.layers.detach()`.
         self.slice_layer = SliceLayer(self.layers)
+        self.cut_sections = CutSections(self.session, self.slices_dock)
+        self.profile_dock.set_cut_sections(self.cut_sections)
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
@@ -567,6 +578,9 @@ class NsgeoPlugin:
             # The minimum-curvature refine worker before anything else
             # (interpolation spec §7, plan call 6): cancelled and joined, so
             # no solve is still running, or lands, once an engine is gone.
+            if self.cut_sections is not None:
+                self.cut_sections.dispose()
+                self.cut_sections = None
             self.slices_dock.refiner.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
@@ -662,9 +676,14 @@ class NsgeoPlugin:
                 if not has_line and self.act_pick.isChecked():
                     self.act_pick.setChecked(False)
                     self._toggle_pick_mode(False)
+            # A fit needs a recorded line: a cut at a slant widens hyperbolas (cut spec §4.3).
+            can_fit = has_line and not is_cut_key(self.session.current_key or "")
             if self.act_velocity is not None:
-                self.act_velocity.setEnabled(has_line)
-                if not has_line and self.act_velocity.isChecked():
+                self.act_velocity.setEnabled(can_fit)
+                self.act_velocity.setToolTip(
+                    VELOCITY_ON_CUT_TIP if has_line and not can_fit else VELOCITY_TIP
+                )
+                if not can_fit and self.act_velocity.isChecked():
                     self.act_velocity.setChecked(False)
                     self._toggle_velocity_fit_mode(False)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
