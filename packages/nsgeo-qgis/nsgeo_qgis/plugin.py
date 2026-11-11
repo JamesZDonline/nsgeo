@@ -1287,7 +1287,9 @@ class NsgeoPlugin:
         try:
             if self.session is None:
                 return
-            self.session.add_pick(key, trace, time_ns)
+            dock = self.profile_dock
+            shown = 0.0 if dock is None else dock.shown_zero_ns()
+            self.session.add_pick(key, trace, time_ns, zero_ns=shown)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
 

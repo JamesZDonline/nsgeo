@@ -759,10 +759,10 @@ class ProfileDock(QgsDockWidget):
             self.view.set_picks([])
             return
         shown = self.shown_zero_ns()
-        # A stored `time_ns` is on the radar clock until Task 4 gives each
-        # pick its own zero.
+        # Each pick is placed by its radar time, whatever zero it was stored
+        # against.
         self.view.set_picks(
-            [(p.trace, retime_ns(p.time_ns, 0.0, shown)) for p in self.session.picks_for(key)]
+            [(p.trace, retime_ns(p.radar_ns, 0.0, shown)) for p in self.session.picks_for(key)]
         )
 
     def _on_trace_changed(self, key: str, index: int) -> None:
