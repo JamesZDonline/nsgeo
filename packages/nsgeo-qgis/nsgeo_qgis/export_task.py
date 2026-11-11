@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from qgis.core import Qgis, QgsApplication, QgsMessageLog, QgsTask
+from qgis.PyQt.QtCore import pyqtSignal
 
 from nsgeo_qgis.export_pipeline import ExportCancelled, ExportSpec, run_export
 from nsgeo_qgis.site_export import SiteExportPlan
@@ -97,6 +98,11 @@ def start_export(task: ExportTask) -> bool:
 
 
 class ExportTask(QgsTask):
+    #: The description to show, emitted from the worker thread; Qt delivers it on the GUI
+    #: thread, where `_show_description` sets it. (`setProgress` cannot carry it: it emits
+    #: only when the value moves by 0.1%.)
+    describe = pyqtSignal(str)
+
     def __init__(
         self,
         description: str,
@@ -108,7 +114,7 @@ class ExportTask(QgsTask):
         on_done: Callable[[ExportResult], None],
         what: str | None = None,
     ) -> None:
-        super().__init__(description, QgsTask.CanCancel)
+        super().__init__(description, QgsTask.Flag.CanCancel)
         self._spec = spec
         self._writer_plan = writer_plan
         self._target = Path(target)
@@ -120,16 +126,12 @@ class ExportTask(QgsTask):
         self._cancelled = False
         self._limit: float | None = None
         self._coverage_limit: float | None = None
-        # Written by the worker, read by the GUI-thread slot below.
-        self._latest: tuple[str, int, int, str] = (self._what, 0, 0, "")
         self._delivered = False
-        self.progressChanged.connect(self._show_progress)
+        self.describe.connect(self._show_description)
 
     # ---- GUI thread -----------------------------------------------------------
-    def _show_progress(self, _progress: float) -> None:
-        what, k, n, grid = self._latest
-        if n:
-            self.setDescription(f"Exporting {what}: band {k} of {n} · {grid}")
+    def _show_description(self, text: str) -> None:
+        self.setDescription(text)
 
     def deliver_failure(self, message: str) -> None:
         self._error = message
@@ -225,25 +227,23 @@ class ExportTask(QgsTask):
     ) -> float:
         label = what or self._what
         count = [0]
-        in_band = [-1, 0]  # the band last announced, and how many grids it has announced
 
         def overall(fraction: float) -> None:
             self.setProgress(100.0 * (phase + min(fraction, 1.0)) / phases)
 
+        def say(band: int, n_bands: int, where: str) -> None:
+            self.describe.emit(f"Exporting {label}: band {band} of {n_bands} \u00b7 {where}")
+
         def progress(band: int, n_bands: int, grid_id: str) -> None:
             count[0] = n_bands
-            self._latest = (label, band + 1, n_bands, grid_id)
-            if in_band[0] != band:
-                in_band[:] = [band, 0]
-            in_band[1] += 1
-            # `setProgress` emits only when the value changes, and the description follows
-            # the emission, so each grid announced moves the value a hair (less than half
-            # a band, which `band_done` then passes).
-            overall((band + min(0.5, 0.01 * in_band[1])) / n_bands)
+            say(band + 1, n_bands, grid_id)
+            overall(band / n_bands)
 
         def band_done(done: int) -> None:
             if count[0]:
                 overall(done / count[0])
+                if done < count[0]:
+                    say(done + 1, count[0], "binning")
 
         bands = run_export(spec, should_stop=self.isCanceled, progress=progress)
         limit = self._writer_plan.writer.write_bands(

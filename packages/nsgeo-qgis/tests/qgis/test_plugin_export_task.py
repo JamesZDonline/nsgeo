@@ -174,20 +174,47 @@ def test_without_a_companion_only_the_values_file_is_written(qgis_app, tmp_path,
     assert list(tmp_path.glob("*")) == [target]
 
 
-def test_progress_spans_both_files_and_the_description_names_the_band(qgis_app, tmp_path, fake_run):
-    seen: list[tuple[float, str]] = []
+def test_progress_spans_both_files(qgis_app, tmp_path, fake_run):
+    seen: list[float] = []
     results, on_done = _collector()
     task, *_ = _make(tmp_path, on_done, what="site slices")
-    task.progressChanged.connect(lambda p: seen.append((p, task.description())))
-    # Slow the worker at the start of one band of each file so the GUI slot can run.
-    fake_run.hook = lambda spec, k: time.sleep(0.15) if k == 1 else None
+    task.progressChanged.connect(seen.append)
     assert start_export(task)
     _wait(lambda: results, "the export to finish")
-    progresses = [p for p, _ in seen]
-    assert progresses == sorted(progresses) and max(progresses) == 100.0
-    descriptions = [d for _, d in seen if d.startswith("Exporting site slices")]
-    assert any("band 2 of 3 · grid-1" in d for d in descriptions), seen
-    assert any(d.startswith("Exporting coverage: band") for _, d in seen), seen
+    assert seen == sorted(seen) and max(seen) == 100.0
+    assert any(p < 50.0 for p in seen) and any(p > 50.0 for p in seen)
+
+
+def test_the_description_follows_the_band_and_the_grid_in_a_long_export(
+    qgis_app, tmp_path, fake_run
+):
+    """`setProgress` emits per 0.1% only, so a description on it lags in a long export."""
+    fake_run.n = 60
+    stalled, release = threading.Event(), threading.Event()
+    grids = ("g0", "g1", "g2")
+
+    def run(spec, *, should_stop, progress):
+        for k in range(fake_run.n):
+            for grid in grids:
+                progress(k, fake_run.n, grid)
+                if spec == "spec" and (k, grid) == (30, "g2"):
+                    stalled.set()
+                    release.wait(TIMEOUT)
+            yield ExportBand(np.zeros((2, 2), np.float32), {})
+
+    export_task.run_export = run  # restored by the fake_run fixture's monkeypatch teardown
+    results, on_done = _collector()
+    task, *_ = _make(tmp_path, on_done, what="site slices")
+    assert start_export(task)
+    try:
+        assert stalled.wait(TIMEOUT), "the export never reached band 31"
+        _wait(
+            lambda: task.description() == "Exporting site slices: band 31 of 60 \u00b7 g2",
+            "the description to name band 31, grid g2",
+        )
+    finally:
+        release.set()
+    _wait(lambda: results, "the export to finish")
 
 
 def test_cancel_mid_run_leaves_no_partial_and_no_target(qgis_app, tmp_path, fake_run):
@@ -305,7 +332,7 @@ def test_cancelling_a_queued_task_calls_on_done_synchronously(qgis_app, tmp_path
         for event in running:
             assert event.wait(TIMEOUT), "a blocking task never started"
         assert start_export(task)
-        assert task.status() == QgsTask.Queued
+        assert task.status() == QgsTask.TaskStatus.Queued
         task.cancel()
         assert len(results) == 1 and results[0].cancelled and not results[0].ok
         assert running_export() is None
@@ -391,18 +418,77 @@ def test_the_running_export_is_the_held_task_until_it_ends(qgis_app, tmp_path, f
     assert running_export() is None
 
 
-def test_the_worker_never_calls_a_live_engine_and_a_redraw_still_works(
-    qgis_app, tmp_path, fake_run, monkeypatch
+def _pipeline_helpers():
+    """The pure tier's site builder: two grids, one turned, built from core calls."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "pure" / "test_pure_export_pipeline.py"
+    found = importlib.util.spec_from_file_location("_export_pipeline_builders", path)
+    module = importlib.util.module_from_spec(found)
+    found.loader.exec_module(module)
+    return module
+
+
+def test_a_cancel_mid_band_over_the_real_stack_leaves_nothing_and_never_touches_an_engine(
+    qgis_app, tmp_path, monkeypatch
 ):
+    """Minimum curvature at a fine cell through the real pipeline, writer and overviews.
+
+    Cancelled at band 1, grid A (band 0 is already written): no partial remains, no
+    target appears, an existing target is byte-identical, and a live slice redraw on
+    the GUI thread works while the worker is mid-run. Every attribute access on a
+    live `SliceEngine` or `SiteEngine` off the GUI thread is recorded.
+    """
+    import dataclasses
+
     from nsgeo.geometry.grid import Grid
     from nsgeo.geometry.placement import GridPlacement
     from nsgeo.model.survey import Line
+    from nsgeo.render import PercentileClip
+    from nsgeo.slices import FinishSettings, SliceWindow
     from nsgeo_qgis.session import SiteSession
     from nsgeo_qgis.site_engine import SiteEngine
+    from nsgeo_qgis.site_export import (
+        GeoTiffSiteWriter,
+        SiteBand,
+        SiteExportPlan,
+        SiteGridRecord,
+    )
     from nsgeo_qgis.slices_engine import SliceEngine
-    from nsgeo_qgis.slices_plan import Resolution, SourceChoice
+    from nsgeo_qgis.slices_plan import Resolution, SliceFinish, SourceChoice
     from plugin_testing import synthetic_dzt
 
+    helpers = _pipeline_helpers()
+    finish = FinishSettings("min_curvature", 0.25, 1.0, 0.05, 0.05)
+    spec = helpers._site(0.05, "background", finish=finish)
+    coverage_spec = dataclasses.replace(spec, coverage=True)
+    z = helpers.Z
+
+    def plan(coverage: bool) -> SiteExportPlan:
+        bands = tuple(
+            SiteBand(SliceWindow(int(i * 4), int(i * 4 + 4)), f"band {i}", {})
+            for i in range(len(spec.windows))
+        )
+        return SiteExportPlan(
+            lattice=spec.lattice,
+            site_z=z,
+            bands=bands[:1] if coverage else bands,
+            transform="amp_envelope",
+            method="none" if coverage else "background",
+            cell_m=0.05,
+            finish=None if coverage else SliceFinish("min_curvature"),
+            grids=tuple(
+                SiteGridRecord(g.grid_id, "p", None, 1.0, 0.5, g.frame.azimuth, g.frame.crs)
+                for g in spec.grids
+            ),
+            coverage=coverage,
+        )
+
+    writer_plan = WriterPlan(
+        GeoTiffSiteWriter(), plan(False), plan(True), PercentileClip(), PercentileClip()
+    )
+
+    # A live engine the export must never touch.
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
@@ -427,37 +513,51 @@ def test_the_worker_never_calls_a_live_engine_and_a_redraw_still_works(
 
         gui = threading.current_thread()
         off_thread: list[str] = []
-
-        def spy(cls, name):
-            original = getattr(cls, name)
-
-            def wrapper(*args, **kwargs):
-                if threading.current_thread() is not gui:
-                    off_thread.append(f"{cls.__name__}.{name}")
-                return original(*args, **kwargs)
-
-            monkeypatch.setattr(cls, name, wrapper)
-
         for cls in (SliceEngine, SiteEngine):
-            for name, member in list(vars(cls).items()):
-                if callable(member) and not name.startswith("__"):
-                    spy(cls, name)
+            original = cls.__getattribute__
 
-        started, release = threading.Event(), threading.Event()
-        fake_run.hook = lambda spec, k: (started.set(), release.wait(TIMEOUT))
+            def recording(self, name, _original=original, _cls=cls):
+                if threading.current_thread() is not gui and not name.startswith("__"):
+                    off_thread.append(f"{_cls.__name__}.{name}")
+                return _original(self, name)
+
+            monkeypatch.setattr(cls, "__getattribute__", recording)
+
+        out = tmp_path / "out"
+        out.mkdir()
+        target, cov_target = out / "site.tif", out / "site_coverage.tif"
+        target.write_bytes(b"old values")
+        cov_target.write_bytes(b"old counts")
+
+        real_run = export_task.run_export
+        at_band_1, release = threading.Event(), threading.Event()
+
+        def run(spec_, *, should_stop, progress):
+            def watched(band, n_bands, grid_id):
+                progress(band, n_bands, grid_id)
+                if (band, grid_id) == (1, "A"):
+                    at_band_1.set()
+                    release.wait(TIMEOUT)
+
+            return real_run(spec_, should_stop=should_stop, progress=watched)
+
+        monkeypatch.setattr(export_task, "run_export", run)
         results, on_done = _collector()
-        task, *_ = _make(tmp_path, on_done)
+        task = ExportTask(
+            "Exporting site slices", spec, writer_plan, target, coverage_spec, cov_target, on_done
+        )
         assert start_export(task)
-        assert started.wait(TIMEOUT), "the export never started"
-        window = SimpleNamespace()  # redraw: a real slice while the task is mid-band
-        from nsgeo.slices import SliceWindow
-
-        window = SliceWindow(0, 10)
-        shown, _coverage = engine.slice_at(window)
+        assert at_band_1.wait(120), "the export never reached band 1"
+        shown, _coverage = engine.slice_at(SliceWindow(0, 10))  # the live view still draws
         assert shown.size > 0
+        task.cancel()
         release.set()
-        _wait(lambda: results, "the export to finish")
-        assert results[0].ok
+        _wait(lambda: results, "the cancelled export to finish")
+        (result,) = results
+        assert result.cancelled and not result.ok
+        assert sorted(p.name for p in out.glob("*")) == ["site.tif", "site_coverage.tif"]
+        assert target.read_bytes() == b"old values" and cov_target.read_bytes() == b"old counts"
         assert off_thread == []
+        monkeypatch.undo()
     finally:
         engine.dispose()
