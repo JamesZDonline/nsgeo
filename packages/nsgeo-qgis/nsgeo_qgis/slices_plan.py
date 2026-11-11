@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -460,6 +460,109 @@ def export_refusal(
     if finest_pixel is not None:
         text += f" A {finest_pixel:g} m export pixel would fit."
     return text
+
+
+@dataclass(frozen=True)
+class ExportPreview:
+    """What the export dialog's summary shows for one cell and pixel.
+
+    `grids` and `normalisation` are `None` for a single grid's export, which
+    drops those two rows. `held_bytes` is what the export would hold in
+    memory; `file_bytes` is what it would write (the coverage companion
+    included).
+    """
+
+    cell: float
+    pixel: float
+    width_px: int
+    height_px: int
+    bands: int
+    bands_detail: str
+    slices: str
+    grids: tuple[str, ...] | None
+    normalisation: str | None
+    file_bytes: int
+    held_bytes: int
+
+
+def summary_lines(preview: ExportPreview) -> list[tuple[str, str]]:
+    """The rows of the export dialog's "What will be written" group."""
+    bands = str(preview.bands)
+    if preview.bands_detail:
+        bands += f", {preview.bands_detail}"
+    rows = [
+        ("Bands", bands),
+        (
+            "Picture",
+            f"{preview.width_px} \u00d7 {preview.height_px} pixels at {preview.pixel:g} m",
+        ),
+    ]
+    if preview.grids is not None:
+        named = f" ({name_list(preview.grids)})" if 1 < len(preview.grids) <= 4 else ""
+        rows.append(
+            ("Grids", f"{len(preview.grids)} included{named}, rebuilt at {preview.cell:g} m")
+        )
+    rows.append(("Slices", preview.slices))
+    if preview.normalisation is not None:
+        rows.append(
+            (
+                "Normalisation",
+                f"{preview.normalisation}, measured again at {preview.cell:g} m",
+            )
+        )
+    rows.append(
+        ("File", f"about {format_bytes(preview.file_bytes)} before compression, plus a style file")
+    )
+    return rows
+
+
+#: How far past the current cell `finest_fits` looks for a cell that fits.
+FINEST_CELL_REACH = 8
+
+
+def finest_fits(
+    held_at: Callable[[float, float], int], cell: float, pixel: float, budget: int
+) -> tuple[float | None, float | None]:
+    """The finest `(cell, pixel)` that would fit `budget`, each on a 1 mm grid.
+
+    The pixel is searched in `[pixel, cell]` at this cell; it is `None` when
+    the pixel already equals the cell, or nothing fits. The cell is searched
+    above this one with the pixel set to it, by doubling and then bisection,
+    and is `None` past `FINEST_CELL_REACH` times this cell. Both assume the
+    held bytes fall as the cell or the pixel grows, and use O(log) calls of
+    `held_at`, each of which can be slow.
+    """
+    cell_mm = round(cell * 1000)
+    pixel_mm = max(1, math.ceil(pixel * 1000 - 1e-6))
+
+    def fits_pixel(mm: int) -> bool:
+        return held_at(cell, mm / 1000.0) <= budget
+
+    def fits_cell(mm: int) -> bool:
+        return held_at(mm / 1000.0, mm / 1000.0) <= budget
+
+    def smallest(lo: int, hi: int, fits: Callable[[int], bool]) -> int:
+        # `hi` fits; the answer is in (lo, hi] when `lo` does not, else lo.
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if fits(mid):
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
+    finest_pixel: float | None = None
+    if pixel_mm < cell_mm and fits_pixel(cell_mm):
+        finest_pixel = smallest(pixel_mm - 1, cell_mm, fits_pixel) / 1000.0
+
+    finest_cell: float | None = None
+    lo, hi = cell_mm, cell_mm * 2
+    while hi <= cell_mm * FINEST_CELL_REACH:
+        if fits_cell(hi):
+            finest_cell = smallest(lo, hi, fits_cell) / 1000.0
+            break
+        lo, hi = hi, hi * 2
+    return finest_cell, finest_pixel
 
 
 def frame_cells(size_x: float, size_y: float, cell: float) -> int:

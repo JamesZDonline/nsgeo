@@ -621,3 +621,106 @@ def test_the_estimate_matches_the_cube_it_describes():
     n_covered = covered_cells(frame, (ln.coords for ln in lines))
     assert n_covered < frame.n_cells
     assert estimate_memory(0, frame.n_cells, z.nz, n_covered).cube_bytes == cube.nbytes
+
+
+# ---- the export dialog's summary and the finest fit ------------------------
+
+
+def _preview(**over):
+    from nsgeo_qgis.slices_plan import ExportPreview
+
+    base = dict(
+        cell=0.025,
+        pixel=0.0125,
+        width_px=2582,
+        height_px=3035,
+        bands=18,
+        bands_detail="every 2.5 ns from −1.8 to 45 ns, 5 ns thick",
+        slices="kriging, max distance 0.75 × spacing, no smoothing",
+        grids=("A", "B"),
+        normalisation="edge match",
+        file_bytes=600_000_000,
+        held_bytes=1_000_000_000,
+    )
+    base.update(over)
+    return ExportPreview(**base)
+
+
+def test_the_summary_for_a_two_grid_site_is_exact():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    assert summary_lines(_preview()) == [
+        ("Bands", "18, every 2.5 ns from −1.8 to 45 ns, 5 ns thick"),
+        ("Picture", "2582 × 3035 pixels at 0.0125 m"),
+        ("Grids", "2 included (A and B), rebuilt at 0.025 m"),
+        ("Slices", "kriging, max distance 0.75 × spacing, no smoothing"),
+        ("Normalisation", "edge match, measured again at 0.025 m"),
+        ("File", "about 600 MB before compression, plus a style file"),
+    ]
+
+
+def test_the_summary_for_one_grid_drops_the_site_rows():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = summary_lines(_preview(grids=None, normalisation=None))
+    assert [k for k, _ in rows] == ["Bands", "Picture", "Slices", "File"]
+
+
+def test_the_summary_for_a_big_site_counts_grids_without_naming_them():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    names = tuple(f"G{i}" for i in range(10))
+    assert dict(summary_lines(_preview(grids=names)))["Grids"] == (
+        "10 included, rebuilt at 0.025 m"
+    )
+
+
+def _counting(held):
+    calls = []
+
+    def held_at(cell, pixel):
+        calls.append((cell, pixel))
+        return held(cell, pixel)
+
+    return held_at, calls
+
+
+def test_finest_pixel_is_the_smallest_millimetre_that_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held falls as the pixel grows and fits from 15 mm up.
+    held_at, calls = _counting(lambda c, p: 1_500_000_000 * 15 // round(p * 1000))
+    _, pixel = finest_fits(held_at, 0.025, 0.0125, 1_500_000_000)
+    assert pixel == 0.015
+    assert len(calls) < 30
+
+
+def test_finest_pixel_is_none_when_pixel_equals_cell_or_nothing_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.025, 10**9)[1] is None
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.0125, 10**9)[1] is None
+
+
+def test_finest_cell_doubles_then_bisects_to_a_millimetre():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held = k / cell^2 with pixel = cell; fits from a 0.037 m cell up.
+    budget = 10**9
+    k = budget * 0.037**2
+
+    held_at, calls = _counting(lambda c, p: int(k / (c * c)) if p == c else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, budget)
+    assert cell == pytest.approx(0.037)
+    assert len(calls) < 30
+
+
+def test_finest_cell_is_none_past_eight_times_the_current_cell():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits only from 0.25 m; 8 x 0.025 = 0.2.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.25 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] is None
+    # ... and exactly at the reach it is found.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.2 - 1e-9 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] == pytest.approx(0.2)
