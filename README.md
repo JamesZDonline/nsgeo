@@ -154,10 +154,10 @@ Grouped by area. The order within a group is not a priority.
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
-  alone or the max distance is large ([#147]).
-  Whole site at fine cells, the follow-ups: coverage edge lines on coarse
-  previews, averaged previews, a memory estimate for This grid, refusals that
-  stay on screen, and where the preview note sits ([#157]).
+  alone or the max distance is large ([#147]); whole site at fine cells, the
+  follow-ups: coverage edge lines on coarse previews, averaged previews, a
+  memory estimate for This grid, refusals that stay on screen, and where the
+  preview note sits ([#157]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a

@@ -502,8 +502,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    cells at the size you choose (see step 6).
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude. The number in a cell
-   is how many traces fell in it. A blank cell had no line through it, and a low
-   number means only one or two traces, so a slice there rests on little.
+   is how many traces fell in it. A blank cell had no line through it. What counts
+   as a low number depends on the cell size: at a fine cell, one or two traces a
+   cell is normal, because a cell holds only a few traces along the line. Compare a
+   cell with its neighbours, or with the line spacing and the cell size, and
+   look for the cells that stand out as low.
    Use it to spot gaps and thin coverage between lines before you trust a slice
    in that spot. With **Show coverage** ticked, an export also writes the
    counts as a second file beside it, named like the export with
@@ -527,7 +530,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    - If the file, or its style or coverage file, is already open in the project,
      the dialog asks whether to **Replace** it. The old layer comes off the
      map while the export runs. If you cancel the export, or it fails, the old
-     layer is put back from the file, which is untouched.
+     layer is put back from the file, which is untouched, with its time
+     slider setting where the file records it (files from older versions do
+     not, and nsgeo says so). If the picture was written but its coverage file
+     could not be, nsgeo says so, adds the new layer and puts back only the
+     coverage layer.
 
    The export runs in the background. Its progress, the band and the grid it is
    on, shows in QGIS's task list at the bottom right, and you can keep working
