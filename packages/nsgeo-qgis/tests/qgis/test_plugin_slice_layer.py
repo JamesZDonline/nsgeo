@@ -507,7 +507,7 @@ def _drawn(sl):
 
 
 def test_a_rotated_coverage_view_draws_only_whole_counts(mapped):
-    """`counts=True` takes the smallest corner count, never a blend; the
+    """`counts=True` takes the largest corner count, never a blend; the
     same input drawn with counts=False is blended, which is what this pins
     against (a hard-coded False would blend the counts)."""
     sl, _, _, _ = mapped
@@ -523,3 +523,40 @@ def test_a_rotated_coverage_view_draws_only_whole_counts(mapped):
     blended = _drawn(sl)
     blended = blended[np.isfinite(blended) & (blended > -1e30)]
     assert (blended != np.round(blended)).any()
+
+
+def _smooth(layer) -> bool:
+    resampler = layer.resampleFilter().zoomedInResampler()
+    return resampler is not None and resampler.type() == "bilinear"
+
+
+def test_the_slice_layer_is_drawn_smooth_after_every_repoint(mapped):
+    """`setDataSource` can rebuild the pipe, so the resampler is set on
+    every tick, not once when the layer is made."""
+    sl, _, _, _ = mapped
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update(_values(), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+    sl.layer.resampleFilter().setZoomedInResampler(None)  # as a rebuilt pipe would
+    assert not _smooth(sl.layer)
+    sl.update(_values(6.0), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+    sl.update(_values(7.0), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+
+
+def test_the_site_layer_is_drawn_smooth_after_every_repoint(mapped):
+    sl, _, _, _ = mapped
+    kwargs = {
+        "limit": 10.0,
+        "colormap_name": "amp_heat",
+        "unipolar": True,
+        "subtitle": "",
+        "name": SITE_LAYER_NAME,
+    }
+    site = np.full((6, 9), 4.0, dtype=np.float32)
+    sl.update_north_up(site, SITE_GT, "EPSG:32616", **kwargs)
+    assert _smooth(sl.layer)
+    sl.layer.resampleFilter().setZoomedInResampler(None)
+    sl.update_north_up(site + 1, SITE_GT, "EPSG:32616", **kwargs)
+    assert _smooth(sl.layer)

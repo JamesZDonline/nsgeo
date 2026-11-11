@@ -44,6 +44,7 @@ from nsgeo.render import colormap
 from nsgeo.slices import CubeFrame, to_north_up
 from osgeo import gdal
 from qgis.core import (
+    QgsBilinearRasterResampler,
     QgsColorRampShader,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
@@ -92,6 +93,12 @@ def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShad
     shader = QgsRasterShader()
     shader.setRasterShaderFunction(function)
     return shader
+
+
+def apply_smooth_resampling(layer: QgsRasterLayer) -> None:
+    """Draw `layer` smooth when zoomed in: QGIS otherwise shows each pixel as
+    a hard block. Zoomed-out drawing is left as QGIS has it."""
+    layer.resampleFilter().setZoomedInResampler(QgsBilinearRasterResampler())
 
 
 class SliceLayer(QObject):
@@ -310,6 +317,9 @@ class SliceLayer(QObject):
         )
         if not self.layer.isValid():
             raise RuntimeError(f"could not open {path}: {self.layer.error().summary()}")
+        # The renderer survives the repoint, but `_apply_renderer` only runs
+        # when the stretch changes, so the resampler is set here, every tick.
+        apply_smooth_resampling(self.layer)
         self.path = path
 
     def _write(
@@ -402,6 +412,8 @@ class SliceLayer(QObject):
         renderer.setClassificationMin(lo)
         renderer.setClassificationMax(float(limit))
         self.layer.setRenderer(renderer)
+        # After every repoint: `setDataSource` can rebuild the pipe.
+        apply_smooth_resampling(self.layer)
 
     # ---- lifecycle ------------------------------------------------------
     def clear(self) -> None:

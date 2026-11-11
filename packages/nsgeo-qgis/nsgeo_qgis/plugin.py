@@ -87,7 +87,7 @@ from nsgeo_qgis.slice_export import (
     save_cube_npz,
     write_coverage,
 )
-from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer
+from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import LIVE_SOLVE_BUDGET_MS, SliceFinish
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
@@ -1776,6 +1776,7 @@ class NsgeoPlugin:
         """Show an exported GeoTIFF in the site's group, below its tables.
         With the group deleted by the user, on top of the Layers panel
         instead: never in the project with no place in the panel (#68)."""
+        apply_smooth_resampling(layer)
         self.layers.project.addMapLayer(layer, False)
         group = self.layers.group
         if group is not None:

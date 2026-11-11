@@ -901,3 +901,19 @@ def test_the_plugin_draws_a_rotated_coverage_view_as_whole_counts(plugin, qgis_a
     # Smallest-corner sampling only ever returns cell values; a blend does not.
     cells = np.asarray(dock.current_values(), dtype=np.float32)
     assert not np.isin(amplitudes.astype(np.float32), cells).all()
+
+
+def test_an_exported_layer_and_its_coverage_are_drawn_smooth(plugin, tmp_path, answer_modal):
+    plugin, s = plugin
+    _prepare(plugin)
+    dock = plugin.slices_dock
+    dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    dock.export_button.click()
+    sources = {str(target), str(tmp_path / "slices" / "cube_coverage.tif")}
+    found = [v for v in plugin.layers.project.mapLayers().values() if v.source() in sources]
+    assert len(found) == 2
+    for layer in found:
+        assert layer.resampleFilter().zoomedInResampler().type() == "bilinear"

@@ -459,6 +459,11 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    max distance; at a fine cell that can take a few seconds, and it shows a
    wait cursor while it does. Stepping through the slices, the smoothing and
    **dz**, **z0** and **z1** reuse the fill already prepared.
+   Each picture blends the cells around every pixel, so it is drawn smooth when
+   you zoom in. **Whole site** can cover more ground than a fine cell allows at
+   full detail. Past a size it draws a preview at a coarser pixel and says so in
+   the panel. An export needs full detail, and refuses to go ahead at a cell
+   that would not fit.
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
    many traces fell in each cell, rather than the amplitude.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save
