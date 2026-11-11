@@ -96,11 +96,7 @@ a milestone merges or the plan changes.
 | | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
 | | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | next release |
 | | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | next release |
-
-### In progress
-
-- **Whole site at fine cells: the export** ([#108]): an export finer than the
-  preview, streamed to disk in the background. Designed; the plan is next.
+| | Whole site at fine cells: the export. Both exports ask for an export cell and a finer export pixel, show what will be written and refuse with the reason, run in the background with progress in the task list, and write a style file beside the GeoTIFF ([#108]) | next release |
 
 ### Next, in order
 
@@ -159,6 +155,9 @@ Grouped by area. The order within a group is not a priority.
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]).
+  Whole site at fine cells, the follow-ups: coverage edge lines on coarse
+  previews, averaged previews, a memory estimate for This grid, refusals that
+  stay on screen, and where the preview note sits ([#157]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -213,6 +212,7 @@ Grouped by area. The order within a group is not a priority.
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
+[#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 
 ## Why
 
