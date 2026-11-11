@@ -1332,5 +1332,5 @@ def test_removing_a_grid_with_cuts_says_so(dock, answer_modal):
     session.remove_cut(session.cut_keys()[1])
     no.clear()
     _action(_right_click(dock, _grid_item(dock, "A")), "Remove grid").trigger()
-    assert "Its 1 cut are deleted too; their picks stay on the map." in no[0][0][2]
+    assert "Its 1 cut is deleted too; its picks stay on the map." in no[0][0][2]
     assert session.cut_keys() == [one]

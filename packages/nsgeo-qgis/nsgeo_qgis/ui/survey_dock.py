@@ -666,10 +666,12 @@ class SurveyDock(QgsDockWidget):
                 "stay in the picks layer."
             )
         if n_grid_cuts:
-            parts.append(
-                f"Its {n_grid_cuts} cut{'s' if n_grid_cuts != 1 else ''} are deleted too; "
-                "their picks stay on the map."
-            )
+            if n_grid_cuts == 1:
+                parts.append("Its 1 cut is deleted too; its picks stay on the map.")
+            else:
+                parts.append(
+                    f"Its {n_grid_cuts} cuts are deleted too; their picks stay on the map."
+                )
         elif cut_keys:
             parts.append("Picks on a cut stay on the map.")
         parts.append("Nothing is saved to the site file until you choose Save site.")
