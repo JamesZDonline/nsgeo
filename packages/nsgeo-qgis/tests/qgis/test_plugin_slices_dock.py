@@ -2989,7 +2989,7 @@ def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch)
     dock.slice_slider.setValue(20)
     preview = dock.current_values()
     _wait_for_refine(dock)
-    assert seen == ["minimum curvature failed: no convergence"]
+    assert seen == ["minimum curvature failed: ValueError: no convergence"]
     assert dock.provisional, "the preview stays on screen"
     assert dock.current_values() is preview
     assert dock.status_label.text() == dock._grid_status_text()
@@ -3040,7 +3040,7 @@ def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_dr
     dock.error.connect(errors.append)
     dock.stretch_combo.setCurrentText("shared across the cube")
     _wait_for_refine(dock)
-    assert errors == ["minimum curvature failed: no convergence"]
+    assert errors == ["minimum curvature failed: ValueError: no convergence"]
     assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is False
     assert not dock.refiner.busy and not dock._grid_refine.rest.isActive()
 

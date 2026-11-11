@@ -650,6 +650,25 @@ def test_the_cache_keeps_at_most_sixteen_and_drops_with_the_plan(sourced, solves
     assert engine.wait_for_preparation(20_000)
 
 
+def test_asking_for_a_solved_slice_s_job_keeps_it_cached(sourced, solves):
+    """A list's stretch windows already solved make no job, and asking marks
+    them recently used: what the list lands then evicts other slices, never
+    the windows it is completing (#120)."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    slices = [engine.slice_at(SliceWindow(k, k + 1)) for k in range(SOLVED_SLICES_KEPT + 1)]
+    for values, coverage in slices[:-1]:
+        engine.finish(values, coverage, MC)
+    assert len(engine._solved) == SOLVED_SLICES_KEPT
+    assert engine.pending_solve(*slices[0], MC) is None  # solved: no job
+    engine.finish(*slices[-1], MC)  # one more evicts the least recently used
+    solved = len(solves)
+    engine.finish(*slices[0], MC)
+    assert len(solves) == solved, "the slice asked for must still be cached"
+    engine.finish(*slices[1], MC)
+    assert len(solves) == solved + 1, "the next oldest went instead"
+
+
 def test_finish_is_slow_follows_the_last_solve(sourced):
     engine, session, _, _ = sourced
     _prepare(engine, session)
