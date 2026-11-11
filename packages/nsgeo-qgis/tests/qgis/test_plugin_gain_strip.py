@@ -211,6 +211,61 @@ def test_plugin_routes_strip_edits_through_replace_step(fake_iface, tmp_path, an
     plugin.unload()
 
 
+def _plugin_with_time_zero_after_curve(fake_iface, tmp_path):
+    import nsgeo_qgis
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    s = plugin.session
+    s.new_site(tmp_path)
+    s.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    line = Line.open(p, GridPlacement("A", "y", 0.0))
+    s.add_lines([line])
+    key = s.keys()[0]
+    s.set_profiles(key, line.load())
+    s.open_line(key)
+    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    plugin.processing_dock.list.setCurrentRow(0)
+    return plugin, s, key
+
+
+def _step_points(s, key, row):
+    return s.stack_for(key).entries[row][0].params["points"]
+
+
+def test_a_gain_curve_ahead_of_time_zero_is_shown_and_written_on_its_own_clock(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        zero = plugin.profile_dock.shown_zero_ns()
+        assert zero != 0.0
+        strip = plugin.profile_dock.gain_strip
+        assert np.ravel(strip.points()) == pytest.approx([0.0 - zero, 0.0, 40.0 - zero, 12.0])
+        strip.points_changed.emit([[0.0 - zero, 0.0], [30.0 - zero, 12.0]])
+        assert np.ravel(_step_points(s, key, 0)) == pytest.approx([0.0, 0.0, 30.0, 12.0])
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
+def test_an_unmoved_gain_strip_across_clocks_writes_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        assert plugin.profile_dock.shown_zero_ns() != 0.0
+        step = s.stack_for(key).entries[0][0]
+        s._set_dirty(False)
+        strip = plugin.profile_dock.gain_strip
+        strip.points_changed.emit(strip.points())
+        assert s.stack_for(key).entries[0][0] is step
+        assert not s.dirty
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
 def test_plugin_reports_a_bad_curve_edit_instead_of_raising(fake_iface, tmp_path, answer_modal):
     """`points_changed` is a public signal on a public widget: nothing
     stops a payload reaching `_on_gain_points` that `GainStrip` itself

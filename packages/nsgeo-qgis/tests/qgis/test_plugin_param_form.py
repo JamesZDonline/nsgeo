@@ -344,15 +344,16 @@ def test_dock_seeds_a_curve_step_with_the_identity(opened):
 
 
 def test_time_axis_follows_a_preceding_step_that_changes_the_sample_axis(opened):
-    """A `time_zero` step ahead of a new curve step changes both `t0_ns`
-    and `n_samples` (nsgeo.processing.timezero crops the leading rows), so
+    """A `time_zero` step ahead of a new curve step moves the axis to
+    `t0_ns == 0` and changes `n_samples` (nsgeo.processing.timezero
+    crops the leading rows), so
     the axis a step appended now will actually run against is the stack's
     post-crop *result*, not its raw, pre-crop source. Task 18's brief
     parked exactly this mismatch (a gain_curve seeded on the wrong axis
     when a time_zero precedes it) as a design decision for this task; this
     pins the fix directly against ground truth computed independently of
-    `time_axis()` itself: `source.t0_ns + 5 * source.dt_ns`, not a second
-    call to the method under test.
+    `time_axis()` itself: the relabelled axis starts at exactly 0.0, and
+    the row count is the source's minus the 5 cropped.
 
     mode="sample", sample=5 crops exactly 5 rows regardless of the
     synthetic data's own content, so this does not depend on where a
@@ -364,7 +365,7 @@ def test_time_axis_follows_a_preceding_step_that_changes_the_sample_axis(opened)
     t0, dt, n = dock.time_axis()
     assert dt == source.dt_ns
     assert n == source.n_samples - 5
-    assert t0 == pytest.approx(source.t0_ns + 5 * source.dt_ns)
+    assert t0 == 0.0
     # Reverting time_axis() to read stack.source directly (this task's
     # `ProcessingDock.time_axis` before the fix) would report the RAW,
     # pre-crop source's own t0 here instead of the cropped one.

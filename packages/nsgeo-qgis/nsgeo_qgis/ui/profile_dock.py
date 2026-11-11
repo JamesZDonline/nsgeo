@@ -82,6 +82,7 @@ from typing import Any
 
 import numpy as np
 from nsgeo.processing import Radargram, StepStack, build_step
+from nsgeo.processing.base import retime_ns
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
@@ -196,6 +197,7 @@ class ProfileDock(QgsDockWidget):
         self._working_key: str | None = None
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        self._shown_radargram: Radargram | None = None  # what `_render` last drew
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
         # it. A None pair means the whole ruler (metres) or the whole record
         # (time) was showing, so the next line starts from its own fit there.
@@ -464,8 +466,8 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and new is not None
             and key == old_key
-            and (new.n_traces, new.n_samples, new.bounds, new.mirrored)
-            == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
+            and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
+            == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
         ):
             view.transform = old
         elif ruler is not None and ruler.key in self._held:
@@ -474,7 +476,8 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and ruler is None
             and old_ruler is None
-            and (old.n_traces, old.n_samples) == (n_traces, n_samples)
+            and (old.n_traces, old.n_samples, old.t0_ns, old.dt_ns)
+            == (n_traces, n_samples, t0_ns, dt_ns)
         ):
             view.transform = old
         self._axes_key = key
@@ -682,6 +685,7 @@ class ProfileDock(QgsDockWidget):
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
             self._cutoff_step = None
+            self._shown_radargram = None
             self.view.set_cutoff(None)
             self._set_axes_holding(
                 key,
@@ -734,7 +738,12 @@ class ProfileDock(QgsDockWidget):
         if key is None:
             self.view.set_picks([])
             return
-        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
+        shown = self.shown_zero_ns()
+        # A stored `time_ns` is on the radar clock until Task 4 gives each
+        # pick its own zero.
+        self.view.set_picks(
+            [(p.trace, retime_ns(p.time_ns, 0.0, shown)) for p in self.session.picks_for(key)]
+        )
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
@@ -765,6 +774,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        self._shown_radargram = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -789,6 +799,7 @@ class ProfileDock(QgsDockWidget):
     def _clear_view_only(self) -> None:
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
+        self._shown_radargram = None
         self.image = None
         self.gain_strip.set_headroom(None)
         self.view.clear()
@@ -1293,12 +1304,14 @@ class ProfileDock(QgsDockWidget):
         if rg is None:
             self.view.set_cutoff(None)
             self._cutoff_step = None
+            self._shown_radargram = None
             return
         distance = None
         if self._key is not None:
             line = self.session.line_for_key(self._key)
             if rg.n_traces == line.n_traces:
                 distance = self._safe_distance(line)
+        self._shown_radargram = rg
         self._set_axes_holding(
             self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
         )
@@ -1317,7 +1330,29 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self._show_cutoff()
         self._update_velocity_fit()
+        self._refresh_picks()
         self._push_headroom()
+
+    def shown_zero_ns(self) -> float:
+        """The radar-clock time the drawn radargram's axis calls 0 (0.0 when
+        nothing is drawn)."""
+        rg = self._shown_radargram
+        return 0.0 if rg is None else rg.zero_ns
+
+    def step_input_zero_ns(self, row: int) -> float:
+        """The `zero_ns` of what the working stack's step at `row` receives:
+        the step before it, or the source for row 0. 0.0 with no source or
+        when the stack cannot evaluate."""
+        if self._working_key is None or not self.session.is_open:
+            return 0.0
+        stack = self.session.stack_for(self._working_key, insert=False)
+        try:
+            if row == 0:
+                src = stack.source
+                return 0.0 if src is None else src.zero_ns
+            return stack.intermediate(row - 1).zero_ns
+        except ValueError:
+            return 0.0
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
@@ -1368,7 +1403,13 @@ class ProfileDock(QgsDockWidget):
         name = time_param_name(step)
         assert name is not None
         self._cutoff_step = step
-        self.view.set_cutoff(float(step.params[name]))
+        self.view.set_cutoff(
+            float(
+                retime_ns(
+                    float(step.params[name]), self.step_input_zero_ns(row), self.shown_zero_ns()
+                )
+            )
+        )
 
     def set_selected_step(self, row: int) -> None:
         """`ProcessingDock.step_selected`: remember the row, and re-render
@@ -1399,10 +1440,15 @@ class ProfileDock(QgsDockWidget):
             if step is not self._cutoff_step:
                 return
             name = time_param_name(step)
-            if name is None or step.params[name] == end_ns:
+            if name is None:
                 return
+            shown, input_zero = self.shown_zero_ns(), self.step_input_zero_ns(row)
+            drawn = float(retime_ns(float(step.params[name]), input_zero, shown))
+            if end_ns == drawn:
+                return  # an unmoved handle writes nothing, on any clock
+            value = float(retime_ns(end_ns, shown, input_zero))
             try:
-                new = build_step(step.name, **{**step.params, name: end_ns})
+                new = build_step(step.name, **{**step.params, name: value})
             except ValueError as exc:
                 self.error.emit(str(exc))
                 return
