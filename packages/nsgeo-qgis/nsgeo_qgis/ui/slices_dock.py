@@ -89,7 +89,7 @@ from nsgeo_qgis.slices_plan import (
     SliceFinish,
     SourceChoice,
     default_cell,
-    depth_scroll_delta,
+    depth_scroll_steps,
     estimate_memory,
     format_bytes,
     frame_cells,
@@ -3165,6 +3165,9 @@ class CanvasDepthScroll(QObject):
     Without shift the event is not consumed, so plain scrolling remains
     the map's zoom.
 
+    One Step per notch, however many events the wheel splits the notch
+    into (#109, `depth_scroll_steps`).
+
     `eventFilter` is a Qt-invoked virtual, the same hazard class as
     `paintEvent`: an exception escaping it is swallowed locally and
     reaches `qFatal()` in the CI container, so the body is guarded.
@@ -3174,6 +3177,7 @@ class CanvasDepthScroll(QObject):
         super().__init__(parent)
         self._canvas = canvas
         self._dock = dock
+        self._pending = 0  # the part-notch turned so far, in angleDelta units
         canvas.viewport().installEventFilter(self)
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802
@@ -3181,11 +3185,16 @@ class CanvasDepthScroll(QObject):
             if event.type() != QEvent.Type.Wheel:
                 return False
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            delta = depth_scroll_delta(int(event.angleDelta().y()), shift)
-            if delta == 0:
+            angle = int(event.angleDelta().y())
+            if not shift or angle == 0:
+                self._pending = 0
                 return False
-            self._dock.step_slice(delta)
-            return True  # consumed: the map must not also zoom
+            steps, self._pending = depth_scroll_steps(self._pending, angle)
+            if steps:
+                self._dock.step_slice(steps)
+            # Consumed even for a part-notch: the map must not zoom by the
+            # first half of a notch that is moving the depth.
+            return True
         except Exception as exc:  # noqa: BLE001 -- see the class docstring
             _log(f"could not step the slice from the canvas: {exc}")
             return False

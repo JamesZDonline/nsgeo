@@ -483,21 +483,34 @@ def format_status(
     return f"{what}, {format_bytes(held)} · slices redraw in {speed}"
 
 
-def depth_scroll_delta(angle_delta_y: int, shift_held: bool) -> int:
-    """-1, 0 or +1 slice steps for one wheel event.
+#: One notch of an ordinary mouse wheel, in `QWheelEvent.angleDelta()` units
+#: (eighths of a degree, so 15 degrees).
+WHEEL_NOTCH = 120
+
+
+def depth_scroll_steps(pending: int, angle_delta_y: int) -> tuple[int, int]:
+    """`(steps, pending)` for one shift+wheel event: the slice steps to move
+    (+1 deeper per notch turned down) and the part-notch left over, which
+    the caller hands back in with the next event.
+
+    #109: a high-resolution wheel reports one notch as several smaller
+    events, so stepping once per event moved the depth two Steps per notch
+    on the user's mouse. Qt's `angleDelta` documentation says to add the
+    deltas up until they reach a notch. Turning the wheel the other way
+    drops the leftover, so the first notch back still takes effect.
 
     Kept here, away from Qt, for two reasons: the plugin's boundary rule
     keeps arithmetic out of widgets, and `QWheelEvent`'s constructor
     differs between Qt 5 and Qt 6, so a rule pinned only through a
     synthesised event would be pinned only on one of them.
-
-    Without shift this returns 0 and the event is not consumed: plain
-    scrolling stays the map's zoom, because spec 9.3 is explicit that the
-    slice introduces no new tool and takes no gesture away.
     """
-    if not shift_held or angle_delta_y == 0:
-        return 0
-    return 1 if angle_delta_y < 0 else -1
+    if angle_delta_y == 0:
+        return 0, pending
+    if pending and (pending > 0) != (angle_delta_y > 0):
+        pending = 0
+    total = pending + angle_delta_y
+    notches = abs(total) // WHEEL_NOTCH * (1 if total > 0 else -1)
+    return -notches, total - notches * WHEEL_NOTCH
 
 
 # ---- the site view (M12) --------------------------------------------------
