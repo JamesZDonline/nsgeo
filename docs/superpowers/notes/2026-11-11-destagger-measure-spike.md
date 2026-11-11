@@ -20,7 +20,8 @@ committed because they are pictures of the user's site.
   same md5). The two acceptance cases in #159 (Grid 1 unfitted +0.15, the 60-line survey fitted
   −0.15) are therefore one survey seen two ways.
 - **Nashville City Cemetery 2023, Grid 2.** 60 zigzag lines at 0.5 m on a 29.96 m grid. This is an
-  independent case. It is not in `tests/data/local`.
+  independent case. Since 2026-11-11 it is in `tests/data/local/grid2/`, as links to the raw files,
+  for #159's per-line tests.
 
 Recorded line lengths: Grid 1 median 29.57 m (25.98–30.87), so the fit scale is a median of 1.014.
 Grid 2 median 29.43 m (27.50–29.90), fit scale median 1.018.

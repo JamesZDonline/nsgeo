@@ -134,6 +134,8 @@ Real data, spike method (§7), destagger in metres:
 - Lines may each need their own value. Automating per-line values is a main reason for Measure.
 - It measures the lines as they are placed now, and the data decides the sign (#159, and the
   author agreed with the playback of §4).
+- Nashville 2023 Grid 2 joins the local test data as links, so the per-line rules are tuned and
+  tested on its real off lines (§10).
 
 Claude's calls are marked **C1–C14** in §7–§10. The author has not separately confirmed them.
 
@@ -310,6 +312,30 @@ line 1 forward, on a 30 m grid.
   from the data; the spike suggests ≥ 80%.
 - **Unfitted `FILE__011`** is reported as changing partway along, or as no clear match. It must not
   get an own value.
+
+**Real-data tests on Grid 2** (decided by the author, 2026-11-11). Grid 1 has almost no lines that
+need their own value, and Grid 2 has several. The per-line thresholds (§11) are tuned on these
+lines, not only on injected errors.
+- **The data.** `tests/data/local/grid2/` holds links to Nashville 2023 Grid 2's raw files
+  (DZT, DZX and DZG, 60 lines) on `/mnt/DataStorage`, so these tests skip when the drive is not
+  mounted. The links were made on 2026-11-11 in the main checkout. Add a `GRID2_LINES` list to
+  `tests/real_data.py` and the folder to the layout in `tests/data/local/README.md`. Place the
+  lines like Grid 1's: zigzag at 0.5 m, line 1 forward, on a 29.96 m grid. This matches the
+  saved survey.
+- **Grid value:** unfitted +0.165 ± 0.02, fitted −0.059 ± 0.02.
+- **The lines the spike found clearly off get their own values.** Each value corrects in the
+  direction that cancels the line's residual. Residuals are measured in the line's own direction
+  of travel against its neighbours, after the grid value; the spike's figures are in the note.
+  - Unfitted: `FILE__045` (about −0.72 m), and `FILE__027` and `FILE__028` (about −0.52 m each,
+    adjacent).
+  - Fitted: `FILE__051` (about −0.23 m) and `FILE__059` (about +0.23 m).
+  The test pins the sign. The builder pins the size tolerance once the per-line solve exists, and
+  shows it to the author at the C14 checkpoint.
+- **Fitted `FILE__050`** (its halves read −0.18 and +0.96 m, and one hits the search limit) is
+  reported as changing partway along, or as no clear match. It must not get an own value.
+- **Not pinned either way:** the lines whose halves only partly agreed in the spike. Unfitted
+  these are `FILE__044`, `048` and `049`; fitted, `FILE__044`, `045` and `049`.
+- **Most lines keep the grid value**, as on Grid 1.
 
 Synthetic data only where it mirrors the real records (project rule): the injected-error cases
 above use the real lines.
