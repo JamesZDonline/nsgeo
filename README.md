@@ -101,6 +101,9 @@ a milestone merges or the plan changes.
 
 - **Whole site at fine cells: the export** ([#108]): an export finer than the
   preview, streamed to disk in the background. Designed; the plan is next.
+- **Time zero** ([#97]): the Time zero step sets the clock, so the row it lands
+  on reads 0 ns and depths, fits and slices measure from there. Being designed
+  on `nsgeo-time-zero`.
 
 ### Next, in order
 
@@ -114,9 +117,9 @@ build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 3. **This grid and Whole site agree** on a grid's lines and preset ([#100],
    [#101], [#106], [#103]). A cut shows the cube of whichever scope is on
    screen.
-4. **Decide the time base** ([#97]): whether samples will ever be shifted so the
-   first break is at 0 ns. Changing it after M15 and M16 means converting every
-   stored time.
+4. **Time zero** ([#97]): decided on 2026-11-10 that the Time zero step resets
+   the clock, so the first break reads 0 ns. Doing it before M15 and M16 means
+   their cuts and surfaces start on that clock instead of being converted later.
 5. **Line placement corrections:** a destagger shift ([#47]) and stretching or
    compressing lines to fit the grid ([#3]). Real grids need them now, and
    M17's GPS lines use the same shift.
@@ -151,7 +154,8 @@ Grouped by area. The order within a group is not a priority.
   combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
   box around a hyperbola and let the plugin mark it ([#140]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
-  the slice band ([#131]); trace stacking ([#114]); a frequency profile
+  the slice band ([#131]); set time zero by eye, dragging it on the profile
+  ([#158]); trace stacking ([#114]); a frequency profile
   ([#34]); configurable axes ([#11]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
@@ -213,6 +217,7 @@ Grouped by area. The order within a group is not a priority.
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
+[#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 
 ## Why
 

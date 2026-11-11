@@ -78,7 +78,7 @@ The GPS survey's offset is three times the campus one, which makes it the better
 ## 3. Decisions
 
 From the brainstorm on 2026-11-10. Marked **user** where the user decided, **Claude's call** where I
-did. The user said "sounds good" to the calls in the play-back, and was not asked about the rest.
+did. The user said "sounds good" to the calls in the play-back. The rest were not put to them before the hand-over.
 
 1. **The step sets the clock (user).** The row Time zero lands on reads 0 ns, whether the step
    found it (`first_break`) or was given it (`sample`). Every time below is measured from there.
@@ -102,7 +102,11 @@ did. The user said "sounds good" to the calls in the play-back, and was not aske
 7. **Without the step, nothing moves (Claude's call).** Times stay on the radar's clock and depths
    are measured from its zero, as today. The fit strip's note says that plainly instead of
    repeating advice (§7).
-8. **Cubes and everything built on them use the time-zero clock (Claude's call).** A cube has no
+8. **Typing a number is enough for now (user).** Asked whether setting time zero by eye
+   (dragging a line on the profile) belonged in this work, the user said *"typing a number is
+   enough for now, but make an issue for it"*. Filed as #158. The `sample` mode stays the way to
+   set it by hand.
+9. **Cubes and everything built on them use the time-zero clock (Claude's call).** A cube has no
    single radar clock, because each line has its own offset. Its natural clock is "time below each
    line's own zero", and M15's cuts and M16's surfaces inherit that.
 
@@ -177,7 +181,7 @@ whatever clock they need via §4.3.
 - **What the picks table shows (Claude's call).** `time_ns` and `depth_m` stay the user-facing
   values, measured from the zero the line's own stack sets. So the table matches the profile.
   M15's cut picks will write `time_ns` on the cube's clock, which is also time from zero
-  (decision 8), so the column means one thing for both kinds of pick.
+  (decision 9), so the column means one thing for both kinds of pick.
 - **Recording the zero.** A new column records the radar-clock time of that zero (`zero_ns`;
   name the builder's call). NULL means 0, which is right for every row written before this change.
   Adding the column goes through the existing migrate-and-verify path; no time value is rewritten
@@ -250,7 +254,7 @@ step's input axis by §4.3.**
 
 ### 5.4 Cubes, recipes and remembered ranges
 
-- **A cube's z axis is on the time-zero clock** of the preset's stack (decision 8). Each
+- **A cube's z axis is on the time-zero clock** of the preset's stack (decision 9). Each
   `PreparedLine` carries its line's zero under the preset. That lets cube times be taken back to a
   line, for the profile's slice band (§6.3) and for M15.
 - **Cube recipes gain a time-base marker.** A recipe without one was written on the radar's clock.
@@ -403,6 +407,7 @@ The walkthrough covers:
 ## 11. Out of scope
 
 **Non-goals:**
+- **Setting time zero by eye** by dragging on the profile (decision 8, #158).
 - **Antenna-offset correction.** Zero is the first break, not first break minus the transmitter–
   receiver separation over c. It could be a later parameter.
 - **Per-trace time zero.** Aligning each trace's first break to correct drift within a line is a
