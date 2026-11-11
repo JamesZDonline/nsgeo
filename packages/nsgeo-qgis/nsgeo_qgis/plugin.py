@@ -716,12 +716,8 @@ class NsgeoPlugin:
         if step is not self._gain_step:
             self._gain_generation += 1
         self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
-        shown, input_zero = (
-            self.profile_dock.shown_zero_ns(),
-            self.profile_dock.step_input_zero_ns(row),
-        )
         self.profile_dock.show_gain_strip(
-            self._points_on_clock(step.params[name], input_zero, shown), self._gain_owner
+            step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
         )
 
     def _resync_gain_strip(self, key: str) -> None:
@@ -785,13 +781,17 @@ class NsgeoPlugin:
             self.profile_dock.shown_zero_ns(),
             self.profile_dock.step_input_zero_ns(row),
         )
-        # Compared on the shown clock: an unmoved handle writes nothing.
-        if [list(map(float, p)) for p in points] == self._points_on_clock(
-            step.params[name], input_zero, shown
-        ):
+        try:
+            # Compared on the shown clock: an unmoved handle writes nothing.
+            if [[float(a), float(b)] for a, b in points] == self._points_on_clock(
+                step.params[name], input_zero, shown
+            ):
+                return
+            params = dict(step.params)
+            params[name] = self._points_on_clock(points, shown, input_zero)
+        except (TypeError, ValueError) as exc:
+            self.message(f"bad gain curve points: {exc}", Qgis.MessageLevel.Warning)
             return
-        params = dict(step.params)
-        params[name] = self._points_on_clock(points, shown, input_zero)
         if step.params == params:
             # No actual change -- e.g. a plain click on a handle with no
             # movement, which GainStrip.mouseReleaseEvent still emits

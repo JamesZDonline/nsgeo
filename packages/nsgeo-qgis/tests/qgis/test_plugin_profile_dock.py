@@ -2189,3 +2189,12 @@ def test_picks_stay_on_their_sample_when_time_zero_is_added(dock_with_picks):
     zero = dock.shown_zero_ns()
     assert zero != 0.0
     assert dock.view._picks == [(30, pytest.approx(20.0 - zero))]
+
+
+def test_a_relabelled_axis_with_no_ruler_is_not_put_back(opened):
+    session, dock, key, line = opened
+    dock._set_axes_holding("", 100, 200, -11.0, 0.2, None)
+    before = dock.view.transform
+    dock._set_axes_holding("", 100, 200, 0.0, 0.2, None)
+    assert dock.view.transform is not before
+    assert dock.view.transform.t0_ns == 0.0

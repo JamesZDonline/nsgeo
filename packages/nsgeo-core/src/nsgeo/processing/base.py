@@ -92,7 +92,7 @@ def retime_ns(t: Any, from_zero_ns: float, to_zero_ns: float) -> Any:
     """Move time `t` from the axis whose zero is `from_zero_ns` (radar clock)
     to the one whose zero is `to_zero_ns`. The one conversion rule; float or
     array in, same kind out."""
-    return t + from_zero_ns - to_zero_ns
+    return t + (from_zero_ns - to_zero_ns)
 
 
 def nyquist_mhz(dt_ns: float) -> float:

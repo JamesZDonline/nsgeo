@@ -211,7 +211,7 @@ def test_plugin_routes_strip_edits_through_replace_step(fake_iface, tmp_path, an
     plugin.unload()
 
 
-def _plugin_with_time_zero_after_curve(fake_iface, tmp_path):
+def _plugin_with_time_zero_after_curve(fake_iface, tmp_path, points=None, sample=51):
     import nsgeo_qgis
 
     plugin = nsgeo_qgis.classFactory(fake_iface)
@@ -225,8 +225,8 @@ def _plugin_with_time_zero_after_curve(fake_iface, tmp_path):
     key = s.keys()[0]
     s.set_profiles(key, line.load())
     s.open_line(key)
-    s.append_step(key, build_step("gain_curve", points=[[0.0, 0.0], [40.0, 12.0]]))
-    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.append_step(key, build_step("gain_curve", points=points or [[0.0, 0.0], [40.0, 12.0]]))
+    s.append_step(key, build_step("time_zero", mode="sample", sample=sample))
     plugin.processing_dock.list.setCurrentRow(0)
     return plugin, s, key
 
@@ -252,15 +252,69 @@ def test_a_gain_curve_ahead_of_time_zero_is_shown_and_written_on_its_own_clock(
 
 
 def test_an_unmoved_gain_strip_across_clocks_writes_nothing(fake_iface, tmp_path, answer_modal):
-    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    # Times whose round trip (t - z) + z is inexact: only the shown-clock
+    # comparison stops the write.
+    plugin, s, key = _plugin_with_time_zero_after_curve(
+        fake_iface, tmp_path, points=[[0.1, 0.0], [40.3, 12.0]], sample=137
+    )
     try:
-        assert plugin.profile_dock.shown_zero_ns() != 0.0
+        z = plugin.profile_dock.shown_zero_ns()
+        assert (0.1 - z) + z != 0.1
         step = s.stack_for(key).entries[0][0]
         s._set_dirty(False)
         strip = plugin.profile_dock.gain_strip
         strip.points_changed.emit(strip.points())
         assert s.stack_for(key).entries[0][0] is step
         assert not s.dirty
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
+def test_a_strip_deferred_through_a_preview_lands_on_the_working_clock(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        dock = plugin.profile_dock
+        zero = dock.shown_zero_ns()
+        key_b = _add_second_line(s, tmp_path, load=True)
+        s.set_preview(key_b, 0)
+        s.line_loaded.emit(key)  # the working line finishing a load mid-preview
+        s.set_preview(None)
+        assert np.ravel(dock.gain_strip.points()) == pytest.approx(
+            [0.0 - zero, 0.0, 40.0 - zero, 12.0]
+        )
+        step = s.stack_for(key).entries[0][0]
+        s._set_dirty(False)
+        dock.gain_strip.points_changed.emit(dock.gain_strip.points())
+        assert s.stack_for(key).entries[0][0] is step
+        assert not s.dirty
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
+def test_a_failed_render_keeps_the_clock_of_the_image_on_screen(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        dock = plugin.profile_dock
+        zero = dock.shown_zero_ns()
+        assert zero != 0.0
+        s.append_step(key, build_step("bandpass", low_mhz=100.0, high_mhz=5000.0))
+        assert dock.shown_zero_ns() == zero
+    finally:
+        answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+        plugin.unload()
+
+
+@pytest.mark.parametrize("pts", [[[0.0], [40.0, 12.0]], [["a", 0.0], [40.0, 12.0]]])
+def test_a_malformed_strip_payload_is_reported_not_raised(fake_iface, tmp_path, answer_modal, pts):
+    plugin, s, key = _plugin_with_time_zero_after_curve(fake_iface, tmp_path)
+    try:
+        step = s.stack_for(key).entries[0][0]
+        plugin._on_gain_points(pts)
+        assert s.stack_for(key).entries[0][0] is step
     finally:
         answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
         plugin.unload()

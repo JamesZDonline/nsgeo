@@ -207,7 +207,7 @@ class ProfileDock(QgsDockWidget):
         ] = {}
         self._preview_key: str | None = None
         self._strip_was_visible = False
-        self._deferred_strip: tuple[list[list[float]], Any] | None = None
+        self._deferred_strip: tuple[list[list[float]], Any, float | None] | None = None
         # The Processing panel's selected row, and the step object the
         # cutoff line was last read from. Neither says which step is the
         # cutoff: see `_cutoff_row` and the module docstring.
@@ -696,8 +696,8 @@ class ProfileDock(QgsDockWidget):
                 self._safe_distance(line),
             )
             self.view.set_image(None)
+            self._refresh_picks()  # no `_render` on this branch to do it
         self._refresh_velocity()
-        self._refresh_picks()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -1304,7 +1304,6 @@ class ProfileDock(QgsDockWidget):
         if rg is None:
             self.view.set_cutoff(None)
             self._cutoff_step = None
-            self._shown_radargram = None
             return
         distance = None
         if self._key is not None:
@@ -1447,6 +1446,8 @@ class ProfileDock(QgsDockWidget):
             if end_ns == drawn:
                 return  # an unmoved handle writes nothing, on any clock
             value = float(retime_ns(end_ns, shown, input_zero))
+            if value == step.params[name]:
+                return
             try:
                 new = build_step(step.name, **{**step.params, name: value})
             except ValueError as exc:
@@ -1463,7 +1464,12 @@ class ProfileDock(QgsDockWidget):
         if self.view.transform is not None:
             self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-    def show_gain_strip(self, points: list[list[float]] | None, owner: Any = None) -> None:
+    def show_gain_strip(
+        self,
+        points: list[list[float]] | None,
+        owner: Any = None,
+        input_zero_ns: float | None = None,
+    ) -> None:
         """Show the strip editing `points`, or hide it (`points is None`, the
         selected step is not a curve, or nothing has rendered yet so there
         is no axis to share).
@@ -1489,9 +1495,15 @@ class ProfileDock(QgsDockWidget):
         (the working line finishing a load mid-preview) that
         `_exit_preview` must still honour once the preview ends, rather
         than re-showing whatever was on screen before it started.
+
+        `input_zero_ns` says which clock `points` are on: the `zero_ns` of
+        what the curve step receives. They are moved onto the shown clock
+        at the moment they are drawn (so a payload deferred through a
+        preview lands on the working line's clock, not the preview's).
+        None means `points` are already on the shown clock.
         """
         if self._preview_key is not None:
-            self._deferred_strip = None if points is None else (points, owner)
+            self._deferred_strip = None if points is None else (points, owner, input_zero_ns)
             if points is None:
                 # An explicit "hide" that arrives mid-preview is still an
                 # instruction: without this, _exit_preview's
@@ -1504,6 +1516,9 @@ class ProfileDock(QgsDockWidget):
             self.gain_strip.hide()
             return
         self._sync_strip_mapping()
+        if input_zero_ns is not None:
+            shown = self.shown_zero_ns()
+            points = [[float(retime_ns(float(t), input_zero_ns, shown)), g] for t, g in points]
         self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
         self._push_headroom()

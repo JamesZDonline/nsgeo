@@ -346,9 +346,9 @@ def test_dock_seeds_a_curve_step_with_the_identity(opened):
 def test_time_axis_follows_a_preceding_step_that_changes_the_sample_axis(opened):
     """A `time_zero` step ahead of a new curve step moves the axis to
     `t0_ns == 0` and changes `n_samples` (nsgeo.processing.timezero
-    crops the leading rows), so
-    the axis a step appended now will actually run against is the stack's
-    post-crop *result*, not its raw, pre-crop source. Task 18's brief
+    crops the leading rows), so the axis a step appended now will
+    actually run against is the stack's post-crop *result*, not its raw,
+    pre-crop source. Task 18's brief
     parked exactly this mismatch (a gain_curve seeded on the wrong axis
     when a time_zero precedes it) as a design decision for this task; this
     pins the fix directly against ground truth computed independently of

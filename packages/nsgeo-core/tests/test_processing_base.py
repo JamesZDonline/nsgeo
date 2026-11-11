@@ -311,3 +311,8 @@ def test_radar_clock_conversions_are_asymmetric_and_round_trip():
     t = np.array([0.0, 1.0, 2.5])
     np.testing.assert_allclose(rg.from_radar_ns(rg.to_radar_ns(t)), t)
     np.testing.assert_allclose(rg.to_radar_ns(t), t - 1.25)
+
+
+def test_retime_with_equal_nonzero_zeros_is_exact():
+    # Grouped as t + (from - to): equal zeros cancel exactly.
+    assert retime_ns(52.0, 12.345678, 12.345678) == 52.0

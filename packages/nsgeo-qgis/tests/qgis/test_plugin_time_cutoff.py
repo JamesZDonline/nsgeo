@@ -75,11 +75,14 @@ def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(
 def test_an_unmoved_handle_across_clocks_writes_nothing(fake_iface, tmp_path, answer_modal):
     plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
     try:
-        s.append_step(key, build_step("time_cutoff", end_ns=60.0))
-        s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+        # A zero and a time whose round trip (t - z) + z is inexact, so only
+        # the shown-clock comparison stops the write.
+        s.append_step(key, build_step("time_cutoff", end_ns=0.1))
+        s.append_step(key, build_step("time_zero", mode="sample", sample=137))
         plugin.processing_dock.list.setCurrentRow(0)
         dock = plugin.profile_dock
-        assert dock.shown_zero_ns() != 0.0
+        z = dock.shown_zero_ns()
+        assert (0.1 - z) + z != 0.1
         step = s.stack_for(key).entries[0][0]
         s._set_dirty(False)
         dock.view.cutoff_dragged.emit(dock.view.cutoff_ns)
