@@ -27,6 +27,7 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     limit_windows,
+    old_cube_note,
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
@@ -46,8 +47,21 @@ GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
 
 
+TIME_ZERO_PRESET = [{"step": "time_zero", "params": {}, "enabled": True}]
+
+
 @pytest.fixture
 def docked(qgis_app, tmp_path):
+    yield from _docked_with(tmp_path, PRESET)
+
+
+@pytest.fixture
+def docked_zeroed(qgis_app, tmp_path):
+    """The same three lines, prepared with a preset that sets time zero (#97)."""
+    yield from _docked_with(tmp_path, TIME_ZERO_PRESET)
+
+
+def _docked_with(tmp_path, preset):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
@@ -59,7 +73,7 @@ def docked(qgis_app, tmp_path):
         for i in range(3)
     ]
     session.add_lines(lines)
-    session.site.presets["p"] = list(PRESET)
+    session.site.presets["p"] = list(preset)
     session.presets_changed.emit()
     dock = SlicesDock(session)
     yield dock, session
@@ -1528,7 +1542,7 @@ def test_canvas_depth_scroll_moves_one_step_per_notch_of_a_hi_res_wheel(fake_ifa
 # ---- Task 7 fix round 1: restore_cube, driven through the real widgets ----
 
 
-def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
+def _save_cube(dock, session, cube_id: str, view: ViewSettings, time_base: str = "radar") -> dict:
     """Build a record from the dock's own, already-prepared engine and
     drop it straight into `session.site.cubes`, then refresh the combo --
     no `.npz` needs to exist on disk for `restore_cube` to read the
@@ -1541,6 +1555,7 @@ def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
         view,
         session.root / "slices" / f"{cube_id}.npz",
         line_keys=dock.engine.provenance().line_keys,
+        time_base=time_base,
     )
     session.site.cubes[cube_id] = record
     dock.refresh_cube_combo()
@@ -1741,8 +1756,10 @@ def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_ap
     header says, and the dock seeded `z0`/`z1` from that raw header.
 
     On this repo's own real files `time_zero` drops 49 of 512 rows, so a
-    prepared line spans -0.476..99.561 ns while the seeded cube asked for
-    -11.086..99.546 -- and the first slice raised, verbatim:
+    prepared line spanned -0.476..99.561 ns (on the radar clock this was
+    found on; since #97 the same line reads 0 to about 100 ns, measured from its
+    first break) while the seeded cube asked for -11.086..99.546 -- and the
+    first slice raised, verbatim:
 
         line 'FILE__001.DZT' spans -0.476..99.561 ns, which does not cover
         the cube's -11.086..99.546 ns; shrink the z range or exclude the line
@@ -1799,7 +1816,9 @@ def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_ap
 def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path):
     """Three lines whose time-zero lands on a different sample each -- the
     ordinary consequence of antenna coupling changing across a survey, and
-    what `time_zero(mode="first_break")` is for.
+    what `time_zero(mode="first_break")` is for. Each starts at 0 ns, but
+    they END at three different times (each line's first break is cropped
+    off its front), so the shared range is the earliest end.
 
     This repo's ten real DZT files are byte-identical in the sample axis
     (all -11.086..99.561 ns, 512 samples, and all cropped to exactly 463 by
@@ -1847,9 +1866,12 @@ def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path)
         prepared = list(dock.engine.prepared_lines())
         starts = {round(line.t0_ns, 6) for line in prepared}
         ends = {round(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns, 6) for line in prepared}
-        # Without this the test could pass on lines that happen to agree,
-        # which is exactly how the real files hid the bug.
-        assert len(starts) == 3, starts
+        # Every line reads 0 at its own first break (#97), so the starts
+        # agree; what differs is where each line's zero sits on the radar
+        # clock. Without three different zeros the test could pass on lines
+        # that happen to agree, which is exactly how the real files hid it.
+        assert starts == {0.0}, starts
+        assert len({round(line.zero_ns, 6) for line in prepared}) == 3
         assert len(ends) == 3, ends
 
         bounds = dock.engine.prepared_z_bounds()
@@ -3542,3 +3564,120 @@ def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docke
     assert count == [1]
     assert dock.engine.choice.line_keys == tuple(reversed(a_keys))
     assert dock.source_status.text() == "prepared · 3 lines"
+
+
+# ---- #97: cubes on the time-zero clock ------------------------------------
+
+
+def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None):
+    """A record as an earlier build wrote it: no `time_base`, z on the radar clock."""
+    record = _save_cube(
+        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    record.pop("time_base", None)
+    if time_base is not None:
+        record["time_base"] = time_base
+    record["z"] = z or {"t0_ns": 5.0, "t1_ns": 40.0, "dz_ns": 0.5}
+    return record
+
+
+def test_a_cube_built_with_time_zero_starts_at_zero(docked_zeroed):
+    dock, _session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.prepared_z_bounds()[0] == 0.0
+    assert dock.z0_spin.value() == 0.0
+
+
+def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _owed_record(dock, session)
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    median = dock.engine.median_zero()
+    assert median is not None
+    assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
+    assert errors.count(old_cube_note(-median)) == 1, errors
+    assert dock._pending_z_shift is False
+
+
+def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _owed_record(dock, session)
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+
+
+def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path):
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _owed_record(dock, session)
+    dock.engine.clear()
+    for path in (tmp_path / "raw").glob("*.DZT"):
+        path.rename(path.with_suffix(".gone"))
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.median_zero() is None
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+    assert dock._pending_z_shift is False
+
+
+def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
+    docked_zeroed, qgis_app
+):
+    """The band is on the cube clock; the line on screen has no steps (radar
+    clock), so it is drawn at (10 + line_zero, 12 + line_zero)."""
+    from nsgeo_qgis.ui.profile_dock import ProfileDock
+
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    profile = ProfileDock(session)
+    profile.set_cube_zero_lookup(dock.line_zero_in_cube)
+    try:
+        key = session.keys()[0]
+        zero = dock.line_zero_in_cube(key)
+        assert zero is not None
+        assert zero != 0.0
+        session.open_line(key)
+        assert profile.shown_zero_ns() == 0.0
+        profile.set_slice_band(10.0, 12.0)
+        lo, hi = profile.view._slice_band
+        assert lo == pytest.approx(10.0 + zero)
+        assert hi == pytest.approx(12.0 + zero)
+        # A repaint keeps it where it is; clearing forgets it.
+        profile._render()
+        assert profile.view._slice_band == pytest.approx((10.0 + zero, 12.0 + zero))
+        profile.clear_slice_band()
+        profile._render()
+        assert profile.view._slice_band is None
+    finally:
+        profile.hide()
+        profile.deleteLater()

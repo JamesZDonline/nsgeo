@@ -26,6 +26,7 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     format_status,
     name_list,
+    old_cube_note,
     preset_transform_conflict,
     preview_note,
     site_export_refusal,
@@ -654,3 +655,11 @@ def test_the_estimate_matches_the_cube_it_describes():
         estimate_memory(0, frame.n_cells, z.nz, n_covered, method="kriging").cube_bytes
         == cube.nbytes
     )
+
+
+def test_the_old_cube_note_names_the_shift_with_its_sign():
+    assert old_cube_note(-2.4) == (
+        "This cube was saved before times were measured from each line's first break. "
+        "It was rebuilt that way, with its range moved by -2.40 ns."
+    )
+    assert old_cube_note(1.0).endswith("moved by +1.00 ns.")

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import retime_ns, sets_time_zero
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
@@ -93,6 +94,7 @@ from nsgeo_qgis.slices_plan import (
     estimate_memory,
     format_bytes,
     frame_cells,
+    old_cube_note,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
@@ -362,6 +364,10 @@ class SlicesDock(QgsDockWidget):
         #: `_on_prepared` fires and applies a palette that restore no
         #: longer has anything to do with.
         self._pending_palette: str | None = None
+        #: A restored record from before the time-zero clock, whose preset now
+        #: sets one: `_on_prepared` moves its z range by the median zero and
+        #: says so. Cleared on every preparation, and by a manual source change.
+        self._pending_z_shift = False
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -1273,6 +1279,7 @@ class SlicesDock(QgsDockWidget):
         # `_on_source_changed` rather than leaving `_on_prepared` to apply
         # a palette this choice has nothing to do with.
         self._pending_palette = None
+        self._pending_z_shift = False
         self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
@@ -1542,6 +1549,33 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
+    def _shift_z_by_median_zero(self) -> None:
+        """Move both z spins to the time-zero clock for a restored old record.
+
+        The record's range was on the radar clock; each line now reads 0 at
+        its first break, so the same depths sit `median_zero` earlier. With
+        nothing prepared there is no median, so nothing moves and nothing is
+        said. Signal-blocked writes, as `_clamp_z_to_prepared` does."""
+        median = self.engine.median_zero()
+        if median is None:
+            return
+        self._updating += 1
+        try:
+            for spin in (self.z0_spin, self.z1_spin):
+                spin.blockSignals(True)
+                try:
+                    spin.setValue(retime_ns(spin.value(), 0.0, median))
+                finally:
+                    spin.blockSignals(False)
+        finally:
+            self._updating -= 1
+        self.error.emit(old_cube_note(-median))
+
+    def line_zero_in_cube(self, key: str) -> float | None:
+        """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
+        engine = self.site_engine if self._scope == "site" else self.engine
+        return engine.line_zero(key)
+
     def _clamp_z_to_prepared(self) -> bool:
         """Pull `z0`/`z1` inside the range every PREPARED line covers.
 
@@ -1604,12 +1638,15 @@ class SlicesDock(QgsDockWidget):
 
     def _on_prepared(self) -> None:
         try:
+            owed_shift, self._pending_z_shift = self._pending_z_shift, False
             if self._scope == "site":
                 # M12: the Resolution and Display widgets are the site's
                 # now; This grid's clamp and redraw run on the way back.
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
+            if owed_shift:
+                self._shift_z_by_median_zero()
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
@@ -1675,6 +1712,7 @@ class SlicesDock(QgsDockWidget):
 
     def _on_engine_error(self, message: str) -> None:
         try:
+            self._pending_z_shift = False  # a failed preparation owes nothing
             self.error.emit(message)
             self._refresh_source_status()
         except Exception:  # noqa: BLE001 -- see the module docstring
@@ -1921,6 +1959,9 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
+                self._pending_z_shift = recipe.time_base is None and sets_time_zero(
+                    self.session.site.presets.get(recipe.choice.preset, [])
+                )
                 # A line moved to another grid since the cube was saved is left
                 # out: its key still names a line, but it is no longer this
                 # grid's, and `set_source` would refuse it anyway (line
@@ -1998,6 +2039,7 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
+                self._pending_z_shift = False
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
@@ -3055,6 +3097,7 @@ class SlicesDock(QgsDockWidget):
         remembered one, else the first (`site_scope.default_preset`), not
         whatever This grid's preset combo showed for the grid it left."""
         self._pending_palette = None  # a source change, not a restore
+        self._pending_z_shift = False
         self._updating += 1
         try:
             self.grid_combo.setCurrentText(grid_id)

@@ -78,6 +78,7 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -216,6 +217,8 @@ class ProfileDock(QgsDockWidget):
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
         self._shown_radargram: Radargram | None = None  # what `_render` last drew
+        self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
+        self._cube_zero_lookup: Callable[[str], float | None] | None = None
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
         # it. A None pair means the whole ruler (metres) or the whole record
         # (time) was showing, so the next line starts from its own fit there.
@@ -1295,12 +1298,35 @@ class ProfileDock(QgsDockWidget):
         # exception here never reaches `emit()`, it is swallowed locally
         # and reaches `qFatal()` in the CI container.
         try:
-            self.view.set_slice_band(lo_ns, hi_ns)
+            self._slice_band = (lo_ns, hi_ns)
+            self._push_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
 
+    def set_cube_zero_lookup(self, fn: Callable[[str], float | None] | None) -> None:
+        """How to find the zero of a line in the cube on screen (the slices dock's)."""
+        self._cube_zero_lookup = fn
+
+    def _push_slice_band(self) -> None:
+        """Draw the stored cube-clock band on the clock of the line shown.
+
+        The band is in the cube's time; the cube's own zero for the line on
+        screen (else the shown radargram's) moves it onto the axis drawn."""
+        if self._slice_band is None:
+            return
+        shown = self.shown_zero_ns()
+        cube_zero = None
+        if self._cube_zero_lookup is not None and self._key is not None:
+            cube_zero = self._cube_zero_lookup(self._key)
+        source = shown if cube_zero is None else cube_zero
+        lo, hi = self._slice_band
+        self.view.set_slice_band(
+            float(retime_ns(lo, source, shown)), float(retime_ns(hi, source, shown))
+        )
+
     def clear_slice_band(self) -> None:
         try:
+            self._slice_band = None
             self.view.clear_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
@@ -1407,6 +1433,7 @@ class ProfileDock(QgsDockWidget):
         self._show_cutoff()
         self._update_velocity_fit()
         self._refresh_picks()
+        self._push_slice_band()
         self._push_headroom()
 
     def shown_zero_ns(self) -> float:

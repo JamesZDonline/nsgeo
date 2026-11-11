@@ -407,6 +407,14 @@ SITE_MAX_PIXELS = 16_000_000
 SITE_MAX_COVERED_PIXELS = 5_000_000
 
 
+def old_cube_note(shift_ns: float) -> str:
+    """The one line said when a radar-clock cube is rebuilt on the time-zero clock."""
+    return (
+        "This cube was saved before times were measured from each line's first break. "
+        f"It was rebuilt that way, with its range moved by {shift_ns:+.2f} ns."
+    )
+
+
 def name_list(names: Sequence[str]) -> str:
     """`A`, `A and B`, `A, B and C`."""
     names = list(names)

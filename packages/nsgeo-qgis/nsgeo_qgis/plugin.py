@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
-from nsgeo.processing import build_step, retime_ns
+from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
@@ -321,6 +321,7 @@ class NsgeoPlugin:
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
+        self.profile_dock.set_cube_zero_lookup(self.slices_dock.line_zero_in_cube)
         self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
@@ -921,6 +922,7 @@ class NsgeoPlugin:
                 dock.view_settings(),
                 npz_path,
                 line_keys=engine.provenance().line_keys,
+                time_base=time_base_of(engine.provenance().steps),
             )
             cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
             self.session.record_cube(cube_id, record)

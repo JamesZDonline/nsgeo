@@ -334,13 +334,14 @@ def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path, open_
 def test_a_ready_grid_with_no_site_axis_exports_as_absent(
     site3_factory, make_site, tmp_path, open_tif
 ):
-    """R-P3: C ends at ~16.4 ns, so at t0=16 it has no axis (frame and z are None)."""
+    """R-P3: C ends at ~18.84 ns (each line reads 0 at its first break), so at
+    t0=18.5 it has no axis (frame and z are None)."""
     site3 = site3_factory(samples={"C": 128})
     site = SiteEngine(site3.session)
     try:
         site.set_source(site3.source())
         assert site.wait_until_idle(60_000)
-        site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=16.0, t1_ns=60.0))
+        site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=18.5, t1_ns=60.0))
         assert site.engine_for("C").z is None
         path = tmp_path / "r.tif"
         plan = export_site(site, path, 4, 8, **KW)
