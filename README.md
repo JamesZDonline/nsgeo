@@ -107,31 +107,30 @@ a milestone merges or the plan changes.
 
 - **Whole site at fine cells: the export** ([#108]): an export finer than the
   preview, streamed to disk in the background. Designed; the plan is next.
+- **Measure the destagger shift automatically** ([#159], from [#47]): a Measure
+  button in Edit lines works out each grid's shift, and each line's own where it
+  is clearly off, from the lines as they are placed. Design drafted.
 
 ### Next, in order
 
-The first two items come before M15. Most are things the next milestones
+The first item comes before M15. Most are things the next milestones
 build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
 1. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-2. **Measure the destagger shift automatically** ([#159], from [#47]): offer
-   each grid's shift from its own lines, measured on the lines as they are
-   placed (fitting a grid can flip the shift it needs). Real grids need it now,
-   and M17's GPS lines use the same shift.
-3. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-4. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-5. **How a line is identified** ([#89]), settled before M17 stores GPS
+4. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-6. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+5. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-7. **M18: issue cleanup.** Work through the backlog of open bugs and review
+6. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-8. **M19: magnetometer data.** The first instrument other than GPR.
+7. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
 M15 brings picking to cuts; and the migration real-data test ([#125]), before
