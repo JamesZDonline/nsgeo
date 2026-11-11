@@ -71,6 +71,7 @@
 - **Python 3.9 floor for the core:** no `zip(..., strict=...)`, no `match`, no `X | Y` outside annotations, no `dataclass(slots=..., kw_only=...)`.
 - **Slots guard their bodies.** Every slot connected to a Qt signal or timer, and every Qt-invoked map-tool method, guards its own body. It reports through `_log`, a `failed`/`error` signal, or the message bar, and never raises. This includes `CutSections`' slots, `CutTool`'s events, and the plugin's `currentLayerChanged` slot.
 - **No orphan signals.** `tests/pure/test_no_orphan_signals.py` stays green, so every new `pyqtSignal` is connected.
+- **The cube is read only through its read path** (#113): `cube.level(k)` and `cube.slice_levels(k0, k1)` give a (ny, nx) slice, `cube.values_at(cells, k0, k1)` gives (k1 − k0, n) with NaN for −1 and for cells nothing landed in, and `cube.coverage()` gives (ny, nx). Code and tests never index `cube.blocks` or a block's `mean` or `count`. The resident cube stores only covered cells, one block per direction.
 - **Picks are authored data.**
   - Writes go through the loaded layer's provider, as `write_pick` and `follow_lines` do.
   - Nothing here deletes a pick. Deleting a cut or removing a grid leaves its picks where they are.
@@ -190,7 +191,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - `flat_cells(nx: int) -> np.ndarray`
   - `smoothing_reach_cells(settings: FinishSettings, cell: float) -> int`
   - `section_crops(columns: SectionColumns, frame: CubeFrame, margin_cells: int, piece_m: float = SECTION_PIECE_M) -> tuple[SectionCrop, ...]`
-  - `finish_section(levels: np.ndarray, fill: FillWeights, columns: SectionColumns, frame: CubeFrame, settings: FinishSettings) -> np.ndarray`. `levels` is the cube's `mean`, (nz, ny·nx). Returns (nz, n) float32. It raises `TypeError` for a `CurvaturePlan`.
+  - `finish_section(cube: SliceCube, fill: FillWeights, columns: SectionColumns, settings: FinishSettings) -> np.ndarray`. It reads each level with `cube.level(k)`, (ny, nx), and takes the frame from `cube.frame`. Returns (nz, n) float32. It raises `TypeError` for a `CurvaturePlan`.
   - `plan_section_curvature(populated: np.ndarray, crops: Sequence[SectionCrop], cell: float, max_distance_m: float) -> tuple[CurvaturePlan, ...]`
   - `solve_section_level(level: np.ndarray, columns: SectionColumns, crops: Sequence[SectionCrop], plans: Sequence[CurvaturePlan], settings: FinishSettings, cell: float, should_stop: Callable[[], bool] | None = None) -> np.ndarray`. `level` is (ny, nx); returns (n,) float32.
 - Produces, in `nsgeo.render`: `section_rgba8(values: np.ndarray, percentile: float, lut: np.ndarray, *, unipolar: bool) -> np.ndarray`, giving (H, W, 4) uint8.
@@ -235,9 +236,9 @@ These are the inputs most likely to hurt a user that the spec does not spell out
       - every crop's span along the cut is ≤ `SECTION_PIECE_M`;
       - every crop lies within `[0, ny) × [0, nx)`;
       - every column's cell is inside its crop by at least `min(margin, distance to the frame edge)`.
-    - `test_a_cut_along_a_recorded_line_reads_that_lines_cells` (spec test 1, the anchor): method `none`, a path along y = 0.25 + 3 · 0.5 from x = 0 to 20. At every level, the section equals `cube.mean[k][cells]` wherever `count > 0`.
-    - `test_section_equals_the_finished_slice_at_every_level` (parametrised over `none`, `idw`, `kriging`, × smoothing `(0, 0)` and `(0, 0.1)`), on the rotated frame. For each level k, `finish_section(...)[k]` equals `finish_slice(cube.mean[k].reshape(ny, nx), fill, cell, settings).ravel()[cells]`, with `np.testing.assert_allclose(rtol=0, atol=1e-5 * range)` and `equal_nan=True`.
-    - `test_window_average_of_a_section_equals_the_slice_window` (spec test 11) on the same parameters. For each `WINDOWS` entry `(k0, k1)`, `nanmean` over the section's rows `k0:k1` equals `finish_slice(cube.slice_levels(k0, k1)[0], …)` at the cells.
+    - `test_a_cut_along_a_recorded_line_reads_that_lines_cells` (spec test 1, the anchor): method `none`, a path along y = 0.25 + 3 · 0.5 from x = 0 to 20. At every level, the section equals `cube.values_at(columns.cells)[k]` wherever that is finite (a covered cell inside the frame), and at least one column is finite.
+    - `test_section_equals_the_finished_slice_at_every_level` (parametrised over `none`, `idw`, `kriging`, × smoothing `(0, 0)` and `(0, 0.1)`), on the rotated frame. For each level k, `finish_section(...)[k]` equals `finish_slice(cube.level(k), fill, cell, settings).ravel()[cells]`, with `np.testing.assert_allclose(rtol=0, atol=1e-5 * range)` and `equal_nan=True`.
+    - `test_window_average_of_a_section_equals_the_slice_window` (spec test 11) on the same parameters. For each `WINDOWS` entry `(k0, k1)`, `nanmean` over the section's rows `k0:k1` equals `finish_slice(cube.slice_levels(k0, k1), …)` at the cells. (`slice_levels` returns the (ny, nx) slice itself, so there is no `[0]`.)
     - `test_blank_beyond_max_distance_and_outside_the_frame` (spec test 3):
       - a cut along a gap with max distance 0.1 m (below the half gap of 0.25 m) is NaN off the lines;
       - with 0.375 m it is finite;
@@ -251,7 +252,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
     - An all-zero array does not raise.
 - [ ] **Step 8: Run them and see them fail.**
 - [ ] **Step 9: Implement `section.py` and `section_rgba8`.**
-  - `finish_section`:
+  - `finish_section` (where `level_2d = cube.level(k)`):
     - with no smoothing, it calls `fill.apply_at(level_2d, inside_cells)` per level;
     - with smoothing, it works per crop (margin = `smoothing_reach_cells`): `fill.apply_at(level_2d, crop.flat_cells(nx))`, then reshape, then `smooth`, then read the crop's columns.
   - `solve_section_level` runs, per crop, `plans[i].solve(level[r0:r1, c0:c1], should_stop)[0]`, then `smooth` with the settings, then reads the crop's columns. `SolveStopped` propagates.
@@ -429,7 +430,7 @@ These are the inputs most likely to hurt a user that the spec does not spell out
   - **Tests:**
     - `test_this_grid_scope_reads_the_shown_grids_engine` (call 10): a cut on the shown grid gives a `CutSection` with `source.scope == "grid"` and `source.engine is dock.engine`.
     - `test_this_grid_scope_gives_the_message_for_another_grid` (spec test 7): a cut on B while A is shown returns `NO_SOURCE_TEXT.format(name="Cut 1", grid="B")`, even though a site engine for B is still prepared.
-    - `test_whole_site_reads_the_grids_site_engine_without_the_gain`: in site scope, `section.values[k]` equals `engine.finish(cube.mean[k].reshape(...), coverage, site_finish)` at the cut's cells for three levels. This is not `SiteEngine._shown`'s output. Patch `normalise` to return `(2.0, 5.0)` and assert that it does not change the section.
+    - `test_whole_site_reads_the_grids_site_engine_without_the_gain`: in site scope, `section.values[k]` equals `engine.finish(cube.level(k), cube.coverage(), site_finish)` at the cut's cells for three levels. This is not `SiteEngine._shown`'s output. Patch `normalise` to return `(2.0, 5.0)` and assert that it does not change the section.
     - `test_a_preview_never_builds_a_cube`: on a streaming engine (`has_cube` False), `section(key, build_cube=False)` returns `NO_CUBE_TEXT…` and `has_cube` stays False. `build_cube=True` builds it and returns a section.
     - `test_settings_or_source_changes_redraw_an_open_cut` (spec §4.4): after a first `section(...)`, changing the method, the max distance, smoothing, the cell, or the palette, then letting `slice_changed` fire, emits `section_changed(key)` once. The next `section` reflects the change.
     - `test_an_open_cut_shows_the_message_when_its_engine_goes_away` (Review Focus 4): switching the shown grid, switching scope, and closing the site each give the message or an empty result. Nothing reads the old engine: `engine.cube` is patched to raise after `dispose`.
