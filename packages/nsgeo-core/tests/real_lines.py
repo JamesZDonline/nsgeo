@@ -6,8 +6,6 @@ y = 0.25 + 0.5 * i, so the data rows sit 0.5 m apart.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 from nsgeo.io.dzt import read_header, read_samples
@@ -15,10 +13,10 @@ from nsgeo.processing import build_step
 from nsgeo.processing.base import Radargram
 from nsgeo.slices import PreparedLine, ZAxis, plan_line, stream_slice
 
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
+from tests.real_data import CAMPUS_LINES
+
 needs_real_files = pytest.mark.skipif(
-    len(FILES) < 10, reason="needs the ten real DZT files in tests/data/local"
+    len(CAMPUS_LINES) < 10, reason="needs the ten real DZT files in tests/data/local"
 )
 
 CELL = 0.2
@@ -30,7 +28,7 @@ _RADARGRAMS: list = []
 
 def radargrams():
     if not _RADARGRAMS:
-        for path in FILES[:10]:
+        for path in CAMPUS_LINES[:10]:
             header = read_header(path)
             rg = Radargram(
                 data=np.asarray(read_samples(path, header)[0], dtype=float),
