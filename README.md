@@ -40,7 +40,9 @@ the known issues.
   single- or multi-channel, with their DZX marks. Depths use a line's own
   velocity, else its grid's, else the dielectric in the file header. After import, a line's label, offset, direction,
   start and grid can be edited, one line at a time or several together, and
-  lines can be moved to another grid.
+  lines can be moved to another grid. A line can be stretched or compressed so
+  its ends sit on the grid's edges, and destaggered along its direction of
+  travel.
 - **The map and the profile, linked both ways.** Hover a line on the map to
   preview its radargram. Moving along the profile moves a marker along the line
   on the map, and a range selected on the profile lights up on the map.
@@ -68,7 +70,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-10.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-11.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -99,6 +101,7 @@ a milestone merges or the plan changes.
 | | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | next release |
 | | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | next release |
 | | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
+| | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
 
 ### In progress
 
@@ -113,9 +116,10 @@ build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 1. **Decide the time base** ([#97]): whether samples will ever be shifted so the
    first break is at 0 ns. Changing it after M15 and M16 means converting every
    stored time.
-2. **Line placement corrections:** a destagger shift ([#47]) and stretching or
-   compressing lines to fit the grid ([#3]). Real grids need them now, and
-   M17's GPS lines use the same shift.
+2. **Measure the destagger shift automatically** ([#159], from [#47]): offer
+   each grid's shift from its own lines, measured on the lines as they are
+   placed (fitting a grid can flip the shift it needs). Real grids need it now,
+   and M17's GPS lines use the same shift.
 3. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
 4. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
@@ -209,6 +213,7 @@ Grouped by area. The order within a group is not a priority.
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
+[#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 
 ## Why
 

@@ -2419,6 +2419,19 @@ def test_a_pick_follows_its_line_when_the_grid_moves(populated):
     assert f["time_ns"] == pytest.approx(12.5) and "dewow" in f["stack_json"]
 
 
+def test_a_pick_follows_a_destagger_and_a_scale_edit(populated):
+    session, layers, _ = populated
+    key = "raw/FILE__001.DZT"
+    layers.write_pick(_a_pick(trace=30, note="the wall"))
+    placement = session.line_for_key(key).placement
+    session.edit_lines([LineEdit(key, placement, travel_shift=0.24, scale=0.95)])
+    f = _rows(layers)[key]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    assert f["distance_m"] == pytest.approx(session.line_for_key(key).distance_along()[30])
+    assert (f["trace"], f["note"]) == (30, "the wall")
+
+
 def test_a_pick_follows_its_line_through_remove_and_re_import(populated):
     session, layers, _ = populated
     key = "raw/FILE__003.DZT"
