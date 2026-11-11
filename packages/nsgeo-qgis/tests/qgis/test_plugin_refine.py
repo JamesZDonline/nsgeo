@@ -4,8 +4,10 @@ the slices engine; the responsiveness test uses a real solve."""
 
 from __future__ import annotations
 
+import gc
 import threading
 import time
+import weakref
 
 import numpy as np
 import pytest
@@ -156,7 +158,7 @@ def test_a_job_error_is_reported_not_raised(refiner):
     refiner.start([bad, after], landed.append, errors.append)
     _pump_until(lambda: errors)
     _pump_for(0.1)
-    assert errors == ["no good"]
+    assert errors == ["ValueError: no good"]
     assert landed == []
     assert not after.ran
     assert not refiner.busy
@@ -222,6 +224,28 @@ def test_a_start_after_the_parent_is_deleted_is_a_no_op(qgis_app):
     r.shutdown()
 
 
+def test_a_start_after_the_parent_is_deleted_stops_the_running_list(qgis_app, monkeypatch):
+    """With its poll gone, nothing the list solves could land, and each job
+    holds its plan: the ignored start stops it all the same."""
+    logged = []
+    monkeypatch.setattr(refine_module, "_log", logged.append)
+    parent = QObject()
+    r = Refiner(parent)
+    looping = Job("loop", loop=True)
+    r.start([looping], lambda j: None, lambda m: None)
+    assert looping.started.wait(2)
+    sip.delete(parent)
+    r.start([Job("late")], lambda j: None, lambda m: None)
+    assert looping.returned.wait(1)
+    assert looping.stopped_by_request
+    assert not r.busy
+    assert len(logged) == 1 and "deleted" in logged[0]
+    assert "shut down" not in logged[0], "the worker was not shut down"
+    r.shutdown()
+    r.start([Job("later")], lambda j: None, lambda m: None)
+    assert "shut down" in logged[-1]
+
+
 def test_an_unrequested_solve_stop_is_reported(refiner):
     errors, landed = [], []
     refiner.start([Job("s", error=SolveStopped())], landed.append, errors.append)
@@ -239,6 +263,33 @@ def test_an_error_with_no_message_is_reported_by_its_type(refiner):
     assert not refiner.busy
 
 
+def test_an_error_is_reported_with_its_type(refiner):
+    """A KeyError's message is only the key, which names nothing."""
+    errors = []
+    refiner.start([Job("k", error=KeyError("k"))], lambda j: None, errors.append)
+    _pump_until(lambda: errors)
+    assert errors == ["KeyError: 'k'"]
+    assert not refiner.busy
+
+
+class Unprintable(Exception):
+    def __str__(self):
+        raise RuntimeError("no message")
+
+
+def test_an_error_that_cannot_be_printed_still_ends_the_list(refiner):
+    errors, landed = [], []
+    refiner.start([Job("u", error=Unprintable())], landed.append, errors.append)
+    _pump_until(lambda: errors)
+    assert errors == ["Unprintable"]
+    assert not refiner.busy
+    _pump_until(lambda: not refiner._poll.isActive())
+    after = Job("after")
+    refiner.start([after], landed.append, errors.append)
+    _pump_until(lambda: landed)
+    assert landed == [after]
+
+
 class Fatal(BaseException):
     """Not an Exception, as KeyboardInterrupt and SystemExit are not."""
 
@@ -247,13 +298,49 @@ def test_a_base_exception_still_ends_the_list(refiner):
     errors, landed = [], []
     refiner.start([Job("f", error=Fatal("boom"))], landed.append, errors.append)
     _pump_until(lambda: errors)
-    assert errors == ["boom"]
+    assert errors == ["Fatal: boom"]
     assert not refiner.busy
     _pump_until(lambda: not refiner._poll.isActive())
     after = Job("after")
     refiner.start([after], landed.append, errors.append)
     _pump_until(lambda: landed)
     assert landed == [after]
+
+
+def _released(ref):
+    gc.collect()
+    return ref() is None
+
+
+def test_a_job_that_finishes_as_it_is_cancelled_is_let_go(refiner):
+    """It can never land, and a real job holds its values and plan (about
+    220 MB at the frame cap): it must not wait in the queue for the next
+    list."""
+    gate = threading.Event()
+    job = Job("late", gate=gate)  # ignores should_stop: it finishes, not raises
+    ref, returned = weakref.ref(job), job.returned
+    refiner.start([job], lambda j: None, lambda m: None)
+    assert job.started.wait(2)
+    del job
+    refiner.cancel()
+    _pump_for(0.1)  # the poll drains while the job still runs
+    gate.set()
+    assert returned.wait(2)
+    _pump_until(lambda: _released(ref), 2)
+    assert not refiner.busy
+
+
+def test_shutdown_lets_go_of_what_the_stopped_list_queued(refiner):
+    looping = Job("loop", loop=True)  # stops when asked by returning, not raising
+    ref = weakref.ref(looping)
+    refiner.start([looping], lambda j: None, lambda m: None)
+    assert looping.started.wait(2)
+    del looping
+    refiner.shutdown()
+    assert _released(ref)
+
+
+TICK_MS = 10
 
 
 class SolveJob:
@@ -274,11 +361,15 @@ class SolveJob:
 
 
 def test_the_gui_thread_keeps_running_during_a_solve(refiner):
+    """The solve leaves the GIL to the GUI thread (numpy releases it), so a
+    10 ms timer keeps ticking at about its rate. Measured against the time
+    taken, not a fixed count, which a faster solve would make unreachable
+    and a slower one easy (#120)."""
     job = SolveJob()  # planning is not the worker's, so it is outside the timing
     ticks = []
     timer = QTimer()
     timer.timeout.connect(lambda: ticks.append(1))
-    timer.start(10)
+    timer.start(TICK_MS)
     landed, errors = [], []
     t0 = time.monotonic()
     refiner.start([job], landed.append, errors.append)
@@ -286,6 +377,8 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     assert errors == []
     timer.stop()
     elapsed = time.monotonic() - t0
-    print(f"solve {elapsed:.2f} s, {len(ticks)} ticks")
+    expected = elapsed * 1000.0 / TICK_MS
+    print(f"solve {elapsed:.2f} s, {len(ticks)} of {expected:.0f} ticks")
     assert job.result is not None
-    assert len(ticks) >= 10
+    assert expected >= 10, "the solve is too quick to tell anything"
+    assert len(ticks) >= 0.5 * expected
