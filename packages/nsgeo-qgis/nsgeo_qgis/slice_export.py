@@ -85,7 +85,6 @@ from qgis.core import (
     QgsDateTimeRange,
     QgsInterval,
     QgsMessageLog,
-    QgsProject,
     QgsRasterLayer,
     QgsTemporalNavigationObject,
 )
@@ -649,11 +648,18 @@ def fit_temporal_navigation(navigation: QgsTemporalNavigationObject, layer: QgsR
     """Set the Temporal Controller up to step through `layer`'s bands, one band per frame.
 
     The bands are `1 ns -> 1 s` apart, so QGIS's default one-hour frame would cover them
-    all at once and always show the last. The extent becomes the first band's start to one
-    frame per band, the frame the smallest positive gap between band starts (a single band:
-    its own length; never under 1 ms), the mode Animated, the current frame 0. The project's
-    own time settings follow, so a saved project reopens set up. Returns False, touching
-    nothing, when the layer is not in `FixedRangePerBand` mode or has no ranges.
+    all at once and always show the last. The mode becomes Animated, the current frame 0.
+    The frame is the mean step between the band starts (a single band: its own length, at
+    least a second), so the rounding of each start to the millisecond does not add up over
+    hundreds of bands as the smallest gap would. The extent starts 2 ms before the first band
+    and runs one millisecond short of one frame per band. Returns False, touching nothing,
+    when the layer is not in `FixedRangePerBand` mode or has no ranges.
+
+    What QGIS 3.44 does with these (measured): it counts `ceil(extent / frame)` frames; frame
+    k covers `[start + k * frame, start + (k + 1) * frame)` with its times truncated to the
+    millisecond (up to 1 ms early for a fractional-second frame, which the 2 ms lead absorbs);
+    and `bandForTemporalRange` picks the overlapping band with the latest end. Ending the
+    extent on the last band's own end would add spare frames (abutting or overlapping bands).
     """
     props = layer.temporalProperties()
     if props.mode() != Qgis.RasterTemporalMode.FixedRangePerBand:
@@ -661,31 +667,23 @@ def fit_temporal_navigation(navigation: QgsTemporalNavigationObject, layer: QgsR
     ranges = props.fixedRangePerBand()
     if not ranges:
         return False
-    begins = sorted({r.begin().toMSecsSinceEpoch() for r in ranges.values()})
-    gaps = [b - a for a, b in zip(begins, begins[1:], strict=False) if b > a]
-    if gaps:
-        frame_ms = min(gaps)
+    begins = sorted(r.begin().toMSecsSinceEpoch() for r in ranges.values())
+    n = len(begins)
+    if n > 1:
+        frame_ms = (begins[-1] - begins[0]) / (n - 1)
     else:
-        frame_ms = max(
-            r.end().toMSecsSinceEpoch() - r.begin().toMSecsSinceEpoch() for r in ranges.values()
-        )
-    frame_ms = max(frame_ms, 1)
-    seconds = frame_ms / 1000.0
-    # QGIS counts the frames as floor(extent / frame) + 1, so the extent ends one
-    # millisecond short of one frame per band: ending it on the last band's own end
-    # (abutting or overlapping bands) would add a spare frame, and the bands' starts, rounded
-    # to the millisecond, drift off a whole number of frames.
-    start = QDateTime.fromMSecsSinceEpoch(begins[0], Qt.TimeSpec.UTC)
-    end = QDateTime.fromMSecsSinceEpoch(begins[0] + len(begins) * frame_ms - 1, Qt.TimeSpec.UTC)
-    extent = QgsDateTimeRange(start, end)
+        only = next(iter(ranges.values()))
+        frame_ms = max(only.end().toMSecsSinceEpoch() - only.begin().toMSecsSinceEpoch(), 1000)
+    start_ms = begins[0] - 2
+    end_ms = start_ms + math.floor(n * frame_ms) - 1
+    extent = QgsDateTimeRange(
+        QDateTime.fromMSecsSinceEpoch(start_ms, Qt.TimeSpec.UTC),
+        QDateTime.fromMSecsSinceEpoch(end_ms, Qt.TimeSpec.UTC),
+    )
     navigation.setNavigationMode(Qgis.TemporalNavigationMode.Animated)
     navigation.setTemporalExtents(extent)
-    navigation.setFrameDuration(QgsInterval(seconds, Qgis.TemporalUnit.Seconds))
+    navigation.setFrameDuration(QgsInterval(frame_ms / 1000.0, Qgis.TemporalUnit.Seconds))
     navigation.setCurrentFrameNumber(0)
-    settings = QgsProject.instance().timeSettings()
-    settings.setTemporalRange(extent)
-    settings.setTimeStep(seconds)
-    settings.setTimeStepUnit(Qgis.TemporalUnit.Seconds)
     return True
 
 
