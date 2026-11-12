@@ -517,6 +517,14 @@ class SliceEngine(QObject):
         return self._cube_generation
 
     @property
+    def preparation_generation(self) -> int:
+        """Counts every time this engine is pointed at a source again (a
+        preparation dispatched, `clear`, a cancel). A cut remembers a failed
+        cube build against it, so the build is tried again only once the
+        engine has been prepared again."""
+        return self._generation
+
+    @property
     def has_cube(self) -> bool:
         """Whether a resident cube is currently held.
 

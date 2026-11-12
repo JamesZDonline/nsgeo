@@ -20,10 +20,11 @@ from nsgeo_qgis.cut_sections import (
     CutSection,
     CutSections,
 )
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.slices_dock import SlicesDock
 from test_plugin_session import Spy
-from test_plugin_site_scope import _close, _open, whole_site
+from test_plugin_site_scope import _close, _open, settle, whole_site
 from test_plugin_slices_dock import GRID, GRID_B, PRESET, TIME_ZERO_PRESET, _line, _ready
 
 H = [(1.0, 1.0), (5.0, 1.0)]  # along x, 4 m
@@ -371,20 +372,97 @@ def test_a_streaming_engine_over_budget_refuses_to_build_a_cube(shown, monkeypat
     assert key not in sections._streamed
 
 
-def test_a_streaming_engine_under_budget_builds_then_drops_its_cube_for_a_line(shown):
+def test_a_streaming_engine_under_budget_keeps_its_cube_across_a_line_visit(shown):
+    """The cube is dropped when a cut on another engine opens, the cut goes, its source
+    changes or the site closes, never because the working item moved to a line: a visit
+    to a line keeps the cube and the solve (M15 residual B2)."""
     dock, session, sections = shown
     key = session.add_cut("A", H)
     engine = dock.engine
     engine.drop_cube()
     assert engine.mode == "streaming" and engine.estimate.total_bytes < 1_500_000_000
-    assert isinstance(sections.section(key, build_cube=True), CutSection)
-    assert engine.has_cube
-    session.open_line(key)  # the cut stays open: its cube stays
-    assert engine.has_cube
+    mc = dataclasses.replace(dock.grid_finish.value(), method="min_curvature")
+    dock.grid_finish.set_value(mc)
+    dock.refresh_slice()
+    session.open_line(key)
+    first = sections.section(key, build_cube=True)
+    assert isinstance(first, CutSection) and engine.has_cube
+    entry = sections._cache[key]
+    entry.section.values[3] = 7.0  # a solved row, which a restart would overwrite
+    entry.levels.add(3)
+    generation = engine.cube_generation
     line = session.keys()[0]
     session.set_profiles(line, session.line_for_key(line).load())
     session.open_line(line)  # the working item leaves the cut
-    assert not engine.has_cube and sections._streamed == {}
+    assert engine.has_cube and engine.cube_generation == generation
+    assert sections._streamed == {key: engine}
+    session.open_line(key)  # and comes back
+    again = sections.section(key, build_cube=True)
+    assert again is first or again.values is first.values  # the cached section, not a rebuild
+    assert sections._cache[key] is entry and entry.levels == {3}
+    assert sections._working == key and sections._stamp == entry.stamp  # the solve resumes
+    assert sections._cache[key].section.solved == (1, first.z.nz)  # from 1 done, not from 0
+
+
+def test_a_streaming_engine_drops_its_cube_when_a_cut_on_another_engine_opens(site):
+    dock = site.slices_dock
+    session = site.session
+    sections = site.cut_sections
+    key_a = session.add_cut("A", H)
+    key_b = session.add_cut("B", H)
+    whole_site(site)
+    engine_a = dock.site_engine.engine_for("A")
+    engine_b = dock.site_engine.engine_for("B")
+    assert engine_a is not engine_b
+    for engine in (engine_a, engine_b):
+        engine.drop_cube()
+        assert engine.mode == "streaming"
+    session.open_line(key_a)
+    assert isinstance(sections.section(key_a, build_cube=True), CutSection)
+    assert engine_a.has_cube and not engine_b.has_cube
+    session.open_line(key_b)  # a cut on another engine opens
+    assert not engine_a.has_cube
+    assert isinstance(sections.section(key_b, build_cube=True), CutSection)
+    assert engine_b.has_cube and sections._streamed == {key_b: engine_b}
+
+
+def test_a_scope_round_trip_with_a_cut_open_holds_one_cube(site):
+    """This grid -> Whole site -> This grid -> Whole site with the cut open in the
+    profile: after each switch at most one streaming engine holds a cube that a cut
+    built (M15 residual B2; the scratch leak held This grid's cube from the second
+    visit on)."""
+    dock = site.slices_dock
+    session = site.session
+    key = session.add_cut("A", H)
+    grid_engine = dock.engine
+    grid_engine.drop_cube()
+    assert grid_engine.mode == "streaming"
+
+    def held():
+        engines = [dock.engine, *(dock.site_engine.engine_for(g) for g in "ABC")]
+        seen = []
+        for engine in engines:
+            streaming = engine is not None and engine.mode == "streaming" and engine.has_cube
+            if streaming and not any(engine is other for other in seen):
+                seen.append(engine)
+        return seen
+
+    session.open_line(key)  # the profile asks, with build_cube=True
+    assert len(held()) == 1
+    for step in ("site", "grid", "site"):
+        if step == "site":
+            whole_site(site)
+        else:
+            dock.set_scope("grid")
+            dock.engine.wait_for_preparation(20_000)
+            dock.flush_debounce()
+        assert len(held()) <= 1, step
+    assert sections_streamed_ok(site.cut_sections)
+
+
+def sections_streamed_ok(sections):
+    """Every engine a cut recorded is streaming (a resident one is never recorded)."""
+    return all(e.mode == "streaming" for e in sections._streamed.values())
 
 
 def test_a_streaming_engines_cube_goes_when_its_cut_is_deleted_or_the_site_closes(shown):
@@ -445,18 +523,36 @@ def test_a_cut_says_its_grid_is_being_prepared_again_and_redraws_when_ready(show
     assert isinstance(sections.section(key, build_cube=True), CutSection)
 
 
-def test_whole_site_says_the_grid_is_being_prepared_again(site, monkeypatch):
+def test_whole_site_says_a_queued_grid_is_being_prepared(site):
+    """B4: in Whole site scope the site engine's own state says a grid is being prepared,
+    and a grid waiting behind another is too, though its engine is not running. Driven
+    through real queue states: an edit to a B line re-queues B alone, and the cut is asked
+    from inside the site engine's change callback at each state B passes through."""
     dock = site.slices_dock
-    key = site.session.add_cut("B", H)
+    session = site.session
+    key = session.add_cut("B", H)
     whole_site(site)
-    assert isinstance(site.cut_sections.section(key, build_cube=True), CutSection)
-    engine = dock.site_engine.engine_for("B")
-    # While B's engine prepares again the site engine does not list it as ready.
-    monkeypatch.setattr(type(dock.site_engine), "ready_grids", property(lambda _self: ()))
-    monkeypatch.setattr(type(engine), "is_running", property(lambda _self: True))
-    assert site.cut_sections.section(key, build_cube=True) == PREPARING_TEXT.format(
-        name="Cut 1", grid="B"
-    )
+    sections = site.cut_sections
+    assert isinstance(sections.section(key, build_cube=True), CutSection)
+    texts: dict[str, str] = {}
+    inner = dock.site_engine.on_changed
+
+    def record() -> None:
+        state = dock.site_engine.grid_state("B")
+        if state != "ready":
+            texts.setdefault(state, sections.section(key, build_cube=True))
+        if inner is not None:
+            inner()
+
+    dock.site_engine.on_changed = record
+    lines = session.keys()
+    b_line = next(k for k in lines if session.line_for_key(k).placement.grid_id == "B")
+    session.edit_lines([LineEdit(b_line, session.line_for_key(b_line).placement, offset=1.75)])
+    settle(dock)
+    expected = PREPARING_TEXT.format(name="Cut 1", grid="B")
+    assert texts.get("queued") == expected, texts
+    assert all(text == expected for text in texts.values()), texts
+    assert sections._preparing("not-in-the-site") is False  # unknown: not preparing
 
 
 def test_a_cube_that_cannot_be_built_says_why_and_logs_it(shown, message_log, monkeypatch):
@@ -472,7 +568,77 @@ def test_a_cube_that_cannot_be_built_says_why_and_logs_it(shown, message_log, mo
     text = sections.section(key, build_cube=True)
     assert text == BUILD_FAILED_TEXT.format(grid="A", reason="out of memory")
     assert any("out of memory" in m for m in message_log)
-    # It waits like a missing source: announced, so the profile asks again, when one is there.
+
+
+def test_a_build_failure_with_no_message_still_names_its_reason(shown, monkeypatch):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    dock.engine.drop_cube()
+
+    def refuse():
+        raise MemoryError()
+
+    monkeypatch.setattr(dock.engine, "cube", refuse)
+    text = sections.section(key, build_cube=True)
+    assert text == BUILD_FAILED_TEXT.format(grid="A", reason="MemoryError")
+    assert text.endswith(": MemoryError")
+
+
+def test_a_failed_build_is_retried_only_when_its_inputs_change(shown, message_log, monkeypatch):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    calls = []
+
+    def refuse():
+        calls.append(1)
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(engine, "cube", refuse)
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 1
+    warnings = len([m for m in message_log if "could not build" in m])
     changed = Spy(sections.section_changed)
+    for _ in range(3):  # slider ticks
+        dock.refresh_slice()
+    assert len(calls) == 1
+    assert len([m for m in message_log if "could not build" in m]) == warnings
+    assert changed.calls == []  # the profile is not asked again for nothing
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 1  # a profile that asks anyway is told the same, with no build
+    # The engine prepared again: tried once more.
+    engine.clear()
+    dock.prepare()
+    assert engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert (key,) in changed.calls
+    monkeypatch.setattr(engine, "cube", refuse)  # the re-preparation may have dropped it
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 2
+
+
+def test_opening_the_cut_again_retries_a_failed_build(shown, monkeypatch):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    calls = []
+    real = engine.cube
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("out of memory")
+        return real()
+
+    monkeypatch.setattr(engine, "cube", flaky)
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 1
     dock.refresh_slice()
+    assert len(calls) == 1  # a slider tick does not retry
+    changed = Spy(sections.section_changed)
+    session.open_line(key)  # the user opens the cut: the profile is asked again
     assert changed.calls == [(key,)]
+    assert isinstance(sections.section(key, build_cube=True), CutSection)
+    assert len(calls) >= 2  # the build was tried again, and held

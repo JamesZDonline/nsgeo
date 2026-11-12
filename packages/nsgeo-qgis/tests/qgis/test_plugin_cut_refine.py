@@ -438,14 +438,14 @@ def test_up_to_the_threshold_each_depth_solves_on_crops(working, monkeypatch):
     pd, dock, session, sections, key, ran = working
     calls = _spy_paths(monkeypatch)
     base = dock.grid_finish.value()
-    dock.grid_finish.set_value(dataclasses.replace(base, max_distance_spacings=0.75))
+    dock.grid_finish.set_value(dataclasses.replace(base, max_distance_spacings=0.5))
     dock.refresh_slice()
     nz = sections.section(key, build_cube=True).z.nz
     assert spin_until(lambda: _done(sections, key))
     assert (calls.crops, calls.whole) == (nz, 0)
 
 
-@pytest.mark.parametrize("spacings", [1.0, 1.5, 2.0])
+@pytest.mark.parametrize("spacings", [0.75, 1.0, 1.5, 2.0])
 def test_above_the_threshold_each_depth_solves_the_engines_whole_frame_plan(
     working, monkeypatch, spacings
 ):
@@ -490,3 +490,37 @@ def test_a_rested_window_change_recentres_the_solve_on_the_new_band(working):
     want = _reference(final)
     for k in range(z.nz):
         np.testing.assert_array_equal(final.values[k], want[k])
+
+
+def test_a_window_change_that_keeps_the_centre_does_not_restart_the_solve(working):
+    """`window_changed` fires on every slice refresh (a palette change among them), so a
+    running solve is reordered only when the band's centre depth has moved (M15 B3)."""
+    pd, dock, session, sections, key, ran = working
+    ran.pause = 0.03
+    z = sections.section(key, build_cube=True).z
+    assert spin_until(lambda: len(ran.levels) >= 4)
+    starts = []
+    real = sections._refiner.start
+
+    def counting(*a, **k):
+        starts.append(len(ran.levels))
+        return real(*a, **k)
+
+    sections._refiner.start = counting
+    band = sections._band
+    names = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
+    dock.palette_combo.setCurrentText(
+        next(n for n in names if n != dock.palette_combo.currentText())
+    )
+    assert sections._band == band  # the palette change announced the very same band
+    # The same band again, from a redraw and from a re-announce.
+    dock.window_changed.emit(*band)
+    dock.reannounce_window()
+    assert spin_until(lambda: len(ran.levels) >= 8)
+    assert starts == [], "an unchanged centre restarted the solve"
+    # A band whose centre has moved still does.
+    far = z.nz - 9
+    dock.window_changed.emit(*window_times_ns(z, SliceWindow(far - 2, far + 3)))
+    assert spin_until(lambda: bool(starts))
+    ran.pause = 0.0
+    assert spin_until(lambda: _done(sections, key))

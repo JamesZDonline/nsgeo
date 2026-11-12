@@ -537,11 +537,12 @@ when it is ready. A grid whose volume is too large to hold in memory cannot be
 cut: use a coarser cell or a shorter depth range in **nsgeo Slices**.
 
 With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first,
-and the title says so: *Kriging preview · minimum curvature 12 of 463 depths*.
+and the title says so: *Kriging preview · minimum curvature n of N depths*,
+where N is how many depths the section has and n how many are finished so far.
 The finished section replaces it a depth at a time, starting at the slice you
 are looking at, and the title then reads *Minimum curvature*. It can take up to
 a minute or two for a long cut at a fine cell, and longer when **Max distance
-to data** is more than three quarters of the line spacing, because each depth
+to data** is more than half the line spacing, because each depth
 is then solved over the whole grid. Move the slice window and the work turns to
 the new depth once the window has rested. Change a setting while it works and
 it starts again; changing the palette or renaming the cut does not. Only the

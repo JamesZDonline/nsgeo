@@ -2778,8 +2778,10 @@ class SlicesDock(QgsDockWidget):
         have no way to ask. The profile band is the case that needs it:
         it is a property of the slice -- one window, identical on every
         line -- but it lives in per-line view state that
-        `ProfileView.clear()` resets, and `window_changed` only fires
-        when the window CHANGES, which it has not. Walkthrough round 2,
+        `ProfileView.clear()` resets, and the view has no way to ask for it
+        again. (`window_changed` fires on every slice refresh, site redraw and
+        this call, whether or not the window moved, so listeners must compare
+        what they are given.) Walkthrough round 2,
         W8: once the view had been cleared, every line opened afterwards
         showed no band until the slider was nudged.
 

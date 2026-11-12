@@ -300,3 +300,16 @@ def test_a_second_cut_of_equal_length_opens_fitted(profile):
     t = pd.view.transform
     assert (t.trace_lo, t.trace_hi) == tuple(t.trace_bounds)
     assert (t.time_lo, t.time_hi) == (t.t0_ns, t.t_end)
+
+
+def test_showing_a_cut_and_removing_its_grid_logs_nothing_from_the_velocity_fit(
+    profile, message_log
+):
+    """#97's velocity-fit code reads a line's stack; on a cut it must stay out of it."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    pd._update_velocity_fit()
+    session.remove_grid("A", with_lines=True)
+    pd._update_velocity_fit()
+    assert not [m for m in message_log if "velocity fit" in m or "time zero" in m], message_log
