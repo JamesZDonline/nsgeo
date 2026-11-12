@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.3.0. It is **experimental**, so keep
+This guide covers nsgeo 0.4.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.3.0](#5-known-issues-in-030)
+5. [Known issues in 0.4.0](#5-known-issues-in-040)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.3.0.zip` from the
+1. Download `nsgeo_qgis-0.4.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.3.0 · core 0.3.0 · build`, followed by
+   bar above the map should show `plugin 0.4.0 · core 0.4.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.3.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.4.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -68,9 +68,23 @@ QGIS 3.40, QGIS 3.44 and QGIS 4.2 on Linux.
 Install the new zip exactly as above. QGIS replaces the old version. Then
 **restart QGIS** and check **Plugins → nsgeo → About nsgeo** for the new
 version number. Upgrading does not touch your site folders. The first time
-nsgeo 0.3.0 opens a site that has picks, it puts any pick that had drifted off
-its line back onto it, with its depth at the line's current velocity, and the
-message bar says how many picks it updated.
+nsgeo 0.4.0 opens a site, the picks table gains a `zero_ns` column. Nothing is
+converted: a pick with no zero was measured on the radar's clock, and keeps
+reading that way. If the site has picks, it also puts any pick that had drifted
+off its line back onto it, with its depth at the line's current velocity, and
+the message bar says how many picks it updated.
+
+Two things stop an older version reading a site that 0.4.0 has saved:
+
+- **After you open a site in 0.4.0, do not reopen it in 0.3.0.** 0.3.0 drops
+  the picks table's `zero_ns` column. A pick made or moved on a profile that
+  Time zero relabelled would then read 0.5 to 1.5 ns off.
+- **A site with cuts saves as schema version 2, and 0.3.0 refuses to open it.**
+  A site without cuts still saves as version 1.
+
+A cube saved before 0.4.0, whose preset has a Time zero step, comes back
+shifted by the median line zero when you restore it, so its slices sit at the
+depths they showed before, and the Slices panel says so.
 
 ### Uninstalling
 
@@ -438,7 +452,7 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-020) before you do.
+  [Known issues](#5-known-issues-in-040) before you do.
 - A pick follows its line, so dragging it on the map does not move it: it goes
   back onto its line when you save the layer's edits. To move a pick along its
   line, delete it and pick again on the profile.
@@ -703,7 +717,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.3.0
+## 5. Known issues in 0.4.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -764,8 +778,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.3.0 · core
-   0.3.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.4.0 · core
+   0.4.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open
