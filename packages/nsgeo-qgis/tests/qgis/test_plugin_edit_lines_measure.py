@@ -184,6 +184,7 @@ def test_measure_fills_the_selected_rows_and_the_box(make):
     assert "Own values: line 2 +0.250." in dialog.status.text()
     assert dialog.measure_button.text() == "Measure"
     assert len(canned.seen[0]) == N_LINES  # the whole grid is measured, four rows are filled
+    assert "The selection only chooses which rows get filled" in dialog.measure_button.toolTip()
 
 
 def test_measure_uses_the_tables_pending_placement(make):

@@ -249,7 +249,11 @@ Lines whose Grid cell now names another grid are left out. It writes results int
 rows**, matching the bulk panel, which acts on the selection (Ctrl+A for the whole grid). The
 neighbours always come from the whole grid, so a single selected line still gets a value measured
 against its real neighbours. (#159 said "the selected lines, or the whole grid". This reading
-keeps the panel's rule and never measures a line without its neighbours.)
+keeps the panel's rule and never measures a line without its neighbours.) **Confirmed by the
+author at the walkthrough (2026-11-12),** after asking why ten selected lines read the whole
+grid: the tooltip and the guide now say the selection only chooses which rows get filled. A
+"measure the selection on its own" option, for a grid walked in two sessions, would be its own
+follow-up.
 
 **C6 — what it shows.**
 - **The Destagger (m) spin box** gets the grid value, so Set can apply it to any selection

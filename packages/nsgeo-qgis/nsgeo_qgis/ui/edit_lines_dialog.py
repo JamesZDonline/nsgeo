@@ -115,10 +115,11 @@ DESTAGGER_TIP = (
     "behind the same features on lines walked the other way, increase it."
 )
 MEASURE_TIP = (
-    "Works out the destagger from the grid's own data: each line is compared with "
-    "its neighbours walked the other way, over the whole record. Fills the Destagger "
-    "box with the grid's value and each selected row with its line's value. Nothing "
-    "changes until OK."
+    "Works out the destagger from the grid's own data: every line on the grid is "
+    "compared with its neighbours walked the other way, over the whole record, "
+    "whatever is selected. The selection only chooses which rows get filled: the "
+    "Destagger box gets the grid's value and each selected row its line's value. "
+    "Nothing changes until OK."
 )
 MEASURE_PROGRESS_MS = 200
 MEASURE_STOPPED = "Measure stopped. Nothing was changed."
