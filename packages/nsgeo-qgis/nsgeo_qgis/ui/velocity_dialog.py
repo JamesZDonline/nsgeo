@@ -143,6 +143,7 @@ class VelocityDialog(QDialog):
         self._at_zero, self._unusable = fits_at_line_zero(session, key)
         self._cleared = False
         self._selected: str | None = None
+        self._quiet_select = False
         # What last filled the box (spec §7.2): "none", "average" (with the
         # refs ticked at the press and the value it put there) or "pick".
         self._fill_kind = "none"
@@ -223,6 +224,7 @@ class VelocityDialog(QDialog):
         self._validate()
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.cellClicked.connect(self._on_cell_clicked)
         self.all_check.stateChanged.connect(self._on_all_changed)
         self.use_average_button.clicked.connect(self._on_use_average)
         self.clear_button.clicked.connect(self._on_clear)
@@ -468,11 +470,15 @@ class VelocityDialog(QDialog):
             source = VelocitySource.from_fits([self._member(r) for r in self._fill_refs], _now())
             # Unrounded: the box shows 4 dp of it.
             return VelocityModel.constant(source.v_m_ns), source
-        fit_id = self.selected_fit_id()
-        if self._fill_kind == "pick" and fit_id is not None:
-            source = VelocitySource.from_fits([self._member((self.key, fit_id))], _now())
-            # The fit's own velocity, not the spin box's 4-dp rounding of it.
-            return VelocityModel.constant(source.v_m_ns), source
+        if self._fill_kind == "pick":
+            # The pick is remembered with its ref, so selecting another row
+            # (an unusable one, say) does not forget what the box holds.
+            ref = self._fill_refs[0]
+            fit = self._by_ref.get(ref)
+            if fit is not None and ref[1] not in self._unusable and box == round(fit.v_m_ns, 4):
+                source = VelocitySource.from_fits([self._member(ref)], _now())
+                # The fit's own velocity, not the spin box's 4-dp rounding of it.
+                return VelocityModel.constant(source.v_m_ns), source
         line = self.session.line_for_key(self.key)
         current = line.velocity
         if current is not None and box == round(current.surface_velocity, 4):
@@ -493,16 +499,19 @@ class VelocityDialog(QDialog):
         self.table.selectRow(self._refs.index((self.key, fit_id)))
 
     def _select_applied_fit(self) -> bool:
-        """Select the fit behind the line's velocity, if there is one. When
-        the box then already holds the line's velocity, nothing has been
-        filled: an untouched Apply keeps the record."""
+        """Select the fit behind the line's velocity, if there is one, for the
+        highlight and the curve. The box is not filled: it stays on the
+        velocity in force, so an untouched Apply changes nothing (§7.2 rule 1,
+        §7.3). Adopting a re-measured number takes a click on the row."""
         line = self.session.line_for_key(self.key)
         pointer = line.velocity_from_fit
         if pointer is None or (self.key, pointer) not in self._by_ref or line.velocity is None:
             return False
-        self.select_fit(pointer)
-        if round(self.spin.value(), 4) == round(line.velocity.surface_velocity, 4):
-            self._fill_kind = "none"
+        self._quiet_select = True
+        try:
+            self.select_fit(pointer)
+        finally:
+            self._quiet_select = False
         return True
 
     def _on_selection_changed(self) -> None:
@@ -511,11 +520,28 @@ class VelocityDialog(QDialog):
             self.delete_button.setEnabled(bool(rows))
             self._selected = self._refs[rows[0].row()][1] if rows else None
             self.fit_highlighted.emit(self._selected)
-            if self._selected is not None and self._selected not in self._unusable:
-                self.spin.setValue(self._by_ref[(self.key, self._selected)].v_m_ns)
-                self._fill_kind = "pick"
-            elif self._fill_kind == "pick":
-                self._fill_kind = "none"
+            if not self._quiet_select:
+                self._pick(self._selected)
+        except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
+            QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
+
+    def _pick(self, fit_id: str | None) -> None:
+        """Put a usable fit's velocity in the box and remember it as the fill.
+        Anything else leaves the box, and what filled it, alone."""
+        if fit_id is None or fit_id in self._unusable:
+            return
+        ref = (self.key, fit_id)
+        self.spin.setValue(self._by_ref[ref].v_m_ns)
+        self._fill_kind = "pick"
+        self._fill_refs = (ref,)
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        """A click on a row always picks it, even when it is already selected
+        (which fires no selection change): the way to adopt a re-measured
+        number. The tick column is for ticking, not picking."""
+        try:
+            if column != _TICK_COLUMN:
+                self._pick(self._refs[row][1])
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
 
@@ -599,9 +625,9 @@ class VelocityDialog(QDialog):
             self._refresh_average()
             self._refresh_note()
             # Back to how the dialog opened: the fit behind the velocity
-            # selected, else the line's own velocity in the box. Selecting
-            # the deleted fit copied its number there, and it is gone.
-            if not self._select_applied_fit():
-                self.spin.setValue(self.session.resolved_velocity(self.key).surface_velocity)
+            # selected, and the velocity in force in the box. Selecting the
+            # deleted fit copied its number there, and it is gone.
+            self._select_applied_fit()
+            self.spin.setValue(self.session.resolved_velocity(self.key).surface_velocity)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
