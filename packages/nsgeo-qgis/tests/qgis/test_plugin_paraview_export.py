@@ -3,6 +3,7 @@ clock, the fill cache, cancelling and the refusals. Real DZT lines, real files o
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import types
@@ -22,7 +23,7 @@ from nsgeo_qgis.session import Pick, SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import Resolution, SourceChoice, VolumeChoice
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys
-from plugin_testing import REAL_DZT, needs_real_data
+from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
 
 GRID = Grid("Grid A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
 STEPS_ZERO = [
@@ -40,6 +41,15 @@ class Dock:
         self.engine = SliceEngine(session)
         self.site_engine = SliceEngine(session)
         self.transform_combo = types.SimpleNamespace(currentText=lambda: "amp_square")
+        self.registered: list = []
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine):
+        self.registered.append(engine)
+        try:
+            yield
+        finally:
+            self.registered.remove(engine)
 
     def dispose(self):
         self.engine.dispose()
@@ -60,6 +70,25 @@ def site(qgis_app, tmp_path):
         )
         for i in range(4)
     ]
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    dock = Dock(session)
+    yield session, dock, ParaViewExport(session, dock)
+    dock.dispose()
+
+
+@pytest.fixture
+def synth_site(qgis_app, tmp_path):
+    """The same site on synthetic lines: for tests that prepare nothing (they run on CI)."""
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session = SiteSession()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
     session.add_lines(lines)
     session.site.presets["p"] = list(STEPS_ZERO)
     dock = Dock(session)
@@ -209,6 +238,97 @@ def test_a_cancelled_export_leaves_the_previous_one_intact(site):
     assert {p.name: p.read_bytes() for p in folder.iterdir()} == snapshot
 
 
+@needs_real_data
+def test_a_cancel_during_the_write_pass_leaves_the_previous_export_intact(site):
+    session, _, export = site
+    choice = _choice(session)
+    folder = export.run("Grid A", choice, progress=_noop)
+    snapshot = {p.name: p.read_bytes() for p in folder.iterdir()}
+    partial = folder.with_name(folder.name + ".partial")
+    seen = {"partial": False}
+
+    def stop_in_the_write_pass(done, total):
+        if done >= total - 1:  # the last slab of the amplitude pass
+            seen["partial"] = partial.exists()
+            return False
+        return True
+
+    with pytest.raises(ParaViewExportCancelled):
+        export.run("Grid A", _choice(session, stretch=5.0), progress=stop_in_the_write_pass)
+    assert seen["partial"], "the cancel came before .partial existed"
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == snapshot
+    assert not list(folder.parent.glob("*.partial")) and not list(folder.parent.glob("*.old"))
+
+
+@needs_real_data
+def test_cache_bytes_states_what_the_cache_adds_then_zero(site):
+    session, dock, export = site
+    choice = _choice(session)
+    _prepare_panel(session, dock, choice)
+    before = export.cache_bytes("Grid A", choice)
+    export.run("Grid A", choice, progress=_noop)
+    (cache,) = (Path(session.root) / "paraview" / ".cache").glob("Grid_A-*.npy")
+    assert abs(before - cache.stat().st_size) <= 0.01 * before
+    assert export.cache_bytes("Grid A", choice) == 0
+    assert export.cache_bytes("Grid A", _choice(session, dz_ns=0.5)) > 0
+    # With nothing prepared in the panel the figure still reads the cache on disk.
+    dock.engine.set_source(None)
+    assert export.cache_bytes("Grid A", choice) == 0
+
+
+@needs_real_data
+def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
+    """R12: while the export's own engine prepares, the Slices dock's grid engine and the
+    site engine start nothing; what they owed runs once it has finished."""
+    from nsgeo_qgis.slices_plan import SiteSource
+    from nsgeo_qgis.ui.slices_dock import SlicesDock
+
+    session, _, _ = site
+    dock = SlicesDock(session)
+    own = SliceEngine(session)
+    running = {"now": 0, "max": 0}
+    original = slices_engine.SliceEngine._start_task
+
+    def counting(self, *args, **kwargs):
+        running["now"] += 1
+        running["max"] = max(running["max"], running["now"])
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(slices_engine.SliceEngine, "_start_task", counting)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.engine.set_source(None)
+        choice = _choice(session)
+        keys = source_keys(session, "Grid A")
+        source = SourceChoice("Grid A", "p", "amp_square", keys)
+        dock._grid_prepare_pending = False
+        started = running["max"]
+        with dock.foreign_preparation(own):
+            own.set_source(source)
+            assert own.has_live_task
+            dock.prepare()  # the grid engine's turn
+            dock.site_engine.set_source(SiteSource("amp_square", (source,)))  # and the site's
+            assert dock._grid_prepare_pending
+            assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
+            assert running["max"] == started + 1  # only the export's own engine started
+            assert own.wait_for_preparation(60_000)
+            own.dispose()
+        # No deadlock: what was held runs now, and finishes.
+        assert dock.site_engine.wait_until_idle(60_000)
+        assert spin_until(lambda: dock.engine.is_prepared, 60_000)
+        assert dock.site_engine.grid_state("Grid A") == "ready"
+        assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
+        assert dock.refiner is not None and choice
+    finally:
+        dock.refiner.shutdown()
+        dock.site_engine.cancel()
+        dock.site_engine.wait_until_idle(20_000)
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.site_engine.dispose()
+        dock.deleteLater()
+
+
 def _picks_case(session, export, monkeypatch, steps, pick_zero):
     """Find where the cube's strength peaks over a line, store a pick there on another clock,
     export again: the pick must land on that peak (a clock slip of a few ns is 20+ levels)."""
@@ -321,8 +441,8 @@ def test_the_fill_cache_is_reused_and_replaced(site, monkeypatch):
     assert len(now) == 1 and now[0].name != old
 
 
-def test_a_second_preparation_is_refused_while_the_dock_is_preparing(site, monkeypatch):
-    session, dock, export = site
+def test_a_second_preparation_is_refused_while_the_dock_is_preparing(synth_site, monkeypatch):
+    session, dock, export = synth_site
     started: list[int] = []
     monkeypatch.setattr(
         slices_engine.SliceEngine, "set_source", lambda self, source: started.append(1)
@@ -336,8 +456,8 @@ def test_a_second_preparation_is_refused_while_the_dock_is_preparing(site, monke
     assert not (Path(session.root) / "paraview").exists()
 
 
-def test_a_too_fine_cell_is_refused_before_anything_is_prepared_or_written(site, monkeypatch):
-    session, dock, export = site
+def test_a_too_fine_cell_is_refused_before_anything_is_prepared_or_written(synth_site, monkeypatch):
+    session, dock, export = synth_site
     started: list[int] = []
     monkeypatch.setattr(slices_engine.SliceEngine, "set_source", lambda s, c: started.append(1))
     fine = _choice(session, cell=0.001)  # 3 x 12 m at 1 mm: 36 million cells

@@ -54,6 +54,7 @@ from nsgeo.slices import (
     prepare_volume,
 )
 from nsgeo.vtkxml import write_image_data, write_poly_data
+from qgis.PyQt.QtCore import QEventLoop
 
 from nsgeo_qgis.paraview_scene import scene_record, scene_title, write_scene_files
 from nsgeo_qgis.slices_engine import SliceEngine
@@ -111,6 +112,11 @@ def _bounds(lines: Sequence[PreparedLine]) -> tuple[float, float]:
     if not t1 > t0:
         raise ValueError("the lines share no time range, so there is nothing to export")
     return t0, t1
+
+
+def _npy_bytes(shape: tuple[int, int, int]) -> int:
+    """A float32 .npy of `shape` on disk: the data and the 128-byte header."""
+    return 128 + 4 * shape[0] * shape[1] * shape[2]
 
 
 def _slab_levels(cells: int, window: int) -> int:
@@ -184,6 +190,41 @@ class ParaViewExport:
             raise ValueError("the lines have no depth range to export")
         return export_size_bytes(frame.nx, frame.ny, nd)
 
+    def cache_bytes(self, grid_id: str, choice: VolumeChoice) -> int:
+        """The bytes the fill cache will add: 0 when this grid's cache for these settings is
+        already on disk. Cheap, like `estimate`: with the panel's lines the key is exact;
+        without them a cache file of the grid with the shape this export needs counts."""
+        frame = self._frame(grid_id, choice)
+        source = self._source(grid_id, choice)
+        t0, t1 = self._time_range(source)
+        shape = (ZAxis.from_range(t0, t1, choice.dz_ns).nz, frame.ny, frame.nx)
+        cache_dir = paraview_folder(self.session, grid_id).parent / ".cache"
+        found = sorted(cache_dir.glob(f"{_safe(grid_id)}-*.npy")) if cache_dir.is_dir() else []
+        engine = self._panel_engine(source)
+        if engine is not None and found:
+            lines = list(engine.prepared_lines())
+            key = self._cache_key(
+                lines, engine.provenance(), choice, t0, t1, self._finish(grid_id), frame
+            )
+            return (
+                0
+                if any(f.name == f"{_safe(grid_id)}-{key}.npy" for f in found)
+                else _npy_bytes(shape)
+            )
+        for f in found:
+            with contextlib.suppress(Exception):
+                if np.lib.format.open_memmap(f, mode="r").shape == shape:
+                    return 0
+        return _npy_bytes(shape)
+
+    def _finish(self, grid_id: str) -> Any:
+        grid = self.session.grid(grid_id)
+        return (
+            SliceFinish()
+            .updated(self.session.slice_resolution(grid_id))
+            .in_metres(grid.default_spacing)
+        )
+
     def _panel_engine(self, source: SourceChoice) -> SliceEngine | None:
         engine = self.dock.engine
         if source.same_source(engine.choice) and engine.is_prepared and not engine.has_live_task:
@@ -227,21 +268,30 @@ class ParaViewExport:
         engine = self._panel_engine(source)
         if engine is not None:
             return list(engine.prepared_lines()), engine.provenance()
-        if self.dock.engine.has_live_task or self.dock.site_engine.has_live_task:
+        if (
+            self.dock.engine.has_live_task
+            or self.dock.site_engine.has_live_task
+            or self.dock.site_engine.is_running
+        ):
             raise RuntimeError(_BUSY)
         errors: list[str] = []
         own = SliceEngine(self.session, on_error=errors.append)
-        try:
-            own.set_source(source)
-            if not own.wait_for_preparation(timeout_ms=600_000):
-                raise RuntimeError("preparing the lines took too long")
-            lines = list(own.prepared_lines())
-            if not lines:
-                detail = f": {'; '.join(errors)}" if errors else ""
-                raise RuntimeError(f"no lines could be prepared{detail}")
-            return lines, own.provenance()
-        finally:
-            own.dispose()
+        # Registered with the dock for the whole preparation, so neither of its engines can
+        # start one beside it; and the wait takes no user input, so nothing re-enters.
+        with self.dock.foreign_preparation(own):
+            try:
+                own.set_source(source)
+                if not own.wait_for_preparation(
+                    timeout_ms=600_000, flags=QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+                ):
+                    raise RuntimeError("preparing the lines took too long")
+                lines = list(own.prepared_lines())
+                if not lines:
+                    detail = f": {'; '.join(errors)}" if errors else ""
+                    raise RuntimeError(f"no lines could be prepared{detail}")
+                return lines, own.provenance()
+            finally:
+                own.dispose()
 
     # ---- the run -------------------------------------------------------------
     def run(
@@ -264,16 +314,12 @@ class ParaViewExport:
         nd = _depth_levels(z)
         if nd < 2:
             raise ValueError("the lines have no depth range to export")
-        finish = (
-            SliceFinish()
-            .updated(self.session.slice_resolution(grid_id))
-            .in_metres(grid.default_spacing)
-        )
+        finish = self._finish(grid_id)
         velocity = self.session.resolved_velocity(lines[0].key)
         window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
         slab = _slab_levels(frame.n_cells, window)
         spans = _spans(nd, slab)
-        total = z.nz + 2 * len(spans)
+        total = z.nz + 3 * len(spans)
         state = {"done": 0}
 
         def step(n: int = 1) -> None:
@@ -420,55 +466,49 @@ class ParaViewExport:
         spans: list[tuple[int, int]],
         step: Callable[[int], None],
     ) -> float:
-        """cube.vti, deepest slab first. Strength is written first, and the same pass keeps
-        the amplitude in a scratch file for the second array. Returns the amplitude's p99."""
+        """cube.vti, deepest slab first: strength, then amplitude (each recomputed per slab,
+        nothing held on disk beside the file), then true depth. Returns the amplitude's p99."""
         nd = vol.depths_m.size
         ny, nx = frame.ny, frame.nx
         depths = vol.depths_m.astype(np.float32)
         max_depth = float(vol.depths_m[-1])
         depth_step = float(vol.depths_m[1] - vol.depths_m[0])
         s = choice.stretch
-        scratch = folder / "amplitude.tmp"
-        # A one-item list, so that dropping it closes the map before the file is removed.
-        held = [np.memmap(scratch, dtype=np.float32, mode="w+", shape=(nd, ny, nx))]
         samples: list[np.ndarray] = []
         covered = vol.covered
 
         def strength_pass() -> Iterator[np.ndarray]:
             for j0, j1 in reversed(spans):
-                amp, strength = vol.slab(j0, j1)
-                held[0][j0:j1] = amp
+                _, strength = vol.slab(j0, j1)
+                step()
+                yield strength[::-1]
+
+        def amplitude_pass() -> Iterator[np.ndarray]:
+            for j0, j1 in reversed(spans):
+                amp, _ = vol.slab(j0, j1)
                 vals = amp[:, covered].ravel()
                 vals = vals[np.isfinite(vals)]
                 if vals.size:
                     stride = max(1, vals.size // _RANGE_SAMPLE)
                     samples.append(vals[::stride])
                 step()
-                yield strength[::-1]
-
-        def amplitude_pass() -> Iterator[np.ndarray]:
-            for j0, j1 in reversed(spans):
-                yield np.asarray(held[0][j0:j1])[::-1]
+                yield amp[::-1]
 
         def depth_pass() -> Iterator[np.ndarray]:
             for j0, j1 in reversed(spans):
                 yield np.broadcast_to(depths[j0:j1][::-1, None, None], (j1 - j0, ny, nx))
 
-        try:
-            write_image_data(
-                folder / "cube.vti",
-                origin=(choice.cell / 2.0, choice.cell / 2.0, -max_depth * s),
-                spacing=(choice.cell, choice.cell, depth_step * s),
-                shape=(nx, ny, nd),
-                arrays=[
-                    ("strength", strength_pass),
-                    ("amplitude", amplitude_pass),
-                    ("true_depth_m", depth_pass),
-                ],
-            )
-        finally:
-            held.clear()
-            scratch.unlink(missing_ok=True)
+        write_image_data(
+            folder / "cube.vti",
+            origin=(choice.cell / 2.0, choice.cell / 2.0, -max_depth * s),
+            spacing=(choice.cell, choice.cell, depth_step * s),
+            shape=(nx, ny, nd),
+            arrays=[
+                ("strength", strength_pass),
+                ("amplitude", amplitude_pass),
+                ("true_depth_m", depth_pass),
+            ],
+        )
         if not samples:
             return 1.0
         p99 = float(np.percentile(np.concatenate(samples), 99.0))
