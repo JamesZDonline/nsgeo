@@ -44,3 +44,12 @@ class Grid:
             raise ValueError(f"expected (n, 2) local coordinates, got {local.shape}")
         x_hat, y_hat = self.axes()
         return np.asarray(self.origin, dtype=float) + local[:, :1] * x_hat + local[:, 1:] * y_hat
+
+    def to_local(self, world: np.ndarray) -> np.ndarray:
+        """Convert (n, 2) world coordinates to (n, 2) grid-local metres (`to_world`'s inverse)."""
+        world = np.asarray(world, dtype=float)
+        if world.ndim != 2 or world.shape[1] != 2:
+            raise ValueError(f"expected (n, 2) world coordinates, got {world.shape}")
+        x_hat, y_hat = self.axes()
+        rel = world - np.asarray(self.origin, dtype=float)
+        return np.column_stack([rel @ x_hat, rel @ y_hat])

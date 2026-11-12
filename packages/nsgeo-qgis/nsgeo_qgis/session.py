@@ -19,13 +19,14 @@ import dataclasses
 import datetime as _dt
 import json
 import math
+import re
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
-from nsgeo.model import Line, Profile, Site
-from nsgeo.processing import Radargram, StepStack
+from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
+from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
@@ -96,6 +97,14 @@ class Pick:
     created: str
     feature_id: str | None = None
     seq: int | None = None
+    # #97: `time_ns` is measured from this radar-clock time. None means the
+    # radar clock itself (a row written before the column existed).
+    zero_ns: float | None = None
+
+    @property
+    def radar_ns(self) -> float:
+        """The pick's time on the radar clock, the one that never moves."""
+        return retime_ns(self.time_ns, self.zero_ns or 0.0, 0.0)
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -121,6 +130,7 @@ class SiteSession(QObject):
     dirty_changed = pyqtSignal(bool)
     grids_changed = pyqtSignal()
     lines_changed = pyqtSignal()
+    cuts_changed = pyqtSignal()
     line_opened = pyqtSignal(str)  # "" when no line is current
     line_loaded = pyqtSignal(str)
     trace_changed = pyqtSignal(str, int)
@@ -150,6 +160,7 @@ class SiteSession(QObject):
         self._selection: tuple[int, int] = (-1, -1)
         self._preview_key: str | None = None
         self._preview_trace = -1
+        self._open_serial = 0
         # Set by SiteLayers' own constructor (see set_pick_store). None
         # until then, which is the normal state of a session built by a
         # test that has no layers at all.
@@ -597,14 +608,24 @@ class SiteSession(QObject):
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
+        # A cut on a removed grid would make validate() refuse every save
+        # (cut spec §4.2). Its picks stay: they are authored data.
+        gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
+        site.cuts = [c for c in site.cuts if c.grid_id != grid_id]
+        cut_keys_gone = [c.key for c in gone_cuts]
         if grid_id in site.site_view.get("grids", []):
             site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
-        dropped = self._drop_lines(keys)
+        lines_dropped = self._drop_lines(keys)
+        cuts_dropped = self._reset_cuts(cut_keys_gone)
         self._set_dirty(True)
-        self._announce_dropped(*dropped)
+        self._announce_dropped(
+            lines_dropped[0] or cuts_dropped[0], lines_dropped[1] or cuts_dropped[1]
+        )
         self.grids_changed.emit()
         if keys:
             self.lines_changed.emit()
+        if gone_cuts:
+            self.cuts_changed.emit()
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         # The report is empty: a velocity change moves no line.
@@ -876,8 +897,104 @@ class SiteSession(QObject):
         self.lines_changed.emit()
 
     def resolved_velocity(self, key: str) -> VelocityModel:
+        if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)
+            return self.cut_velocity(self.cut_for_key(key).grid_id)
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
+
+    # ---- cuts (cut spec §4.2) ------------------------------------------------
+    def cut_keys(self) -> list[str]:
+        """Every cut's key, in drawing order. `keys()` stays lines-only."""
+        return [c.key for c in self._require_site().cuts]
+
+    def cut_keys_on_grid(self, grid_id: str) -> list[str]:
+        """The keys of the cuts drawn on `grid_id`, in drawing order."""
+        return [c.key for c in self._require_site().cuts if c.grid_id == grid_id]
+
+    def _require_key(self, key: str) -> None:
+        """`KeyError` unless `key` names a line or a cut."""
+        if is_cut_key(key):
+            self.cut_for_key(key)
+        else:
+            self.line_for_key(key)
+
+    def _reset_cuts(self, keys: Sequence[str]) -> tuple[bool, bool]:
+        """Reset the working and previewed item if it is one of `keys`.
+
+        Emits nothing; returns (dropped current, dropped preview) for
+        `_announce_dropped`, like `_drop_lines`. A caller that drops lines
+        and cuts together resets both first and announces once, so
+        `line_opened` always precedes `preview_changed`.
+        """
+        dropped_current = self._current_key in keys
+        dropped_preview = self._preview_key in keys
+        if dropped_current:
+            self._current_key = None
+            self._current_trace = -1
+            self._selection = (-1, -1)
+        if dropped_preview:
+            self._preview_key = None
+            self._preview_trace = -1
+        return dropped_current, dropped_preview
+
+    def cut_for_key(self, key: str) -> Cut:
+        for cut in self._require_site().cuts:
+            if cut.key == key:
+                return cut
+        raise KeyError(f"no cut with key {key!r}")
+
+    def add_cut(self, grid_id: str, vertices: Sequence[tuple[float, float]]) -> str:
+        """Add a cut on `grid_id` (vertices in grid metres) and return its key.
+
+        `KeyError` for an unknown grid, `ValueError` from `Cut.new` for fewer
+        than two different points. The name is `Cut {n}`, one past the highest
+        `Cut <n>` there is, so a deleted name is not handed out again while a
+        higher one stays.
+        """
+        site = self._require_site()
+        self.grid(grid_id)
+        highest = 0
+        for existing in site.cuts:
+            m = re.fullmatch(r"Cut (\d+)", existing.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        cut = Cut.new(grid_id, vertices, f"Cut {highest + 1}")
+        site.cuts.append(cut)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+        return cut.key
+
+    def rename_cut(self, key: str, name: str) -> None:
+        site = self._require_site()
+        name = name.strip()
+        if not name:
+            raise ValueError("a cut needs a name")
+        old = self.cut_for_key(key)
+        site.cuts[site.cuts.index(old)] = dataclasses.replace(old, name=name)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+
+    def remove_cut(self, key: str) -> None:
+        """Delete a cut. Its picks stay where they are (picks are authored data)."""
+        site = self._require_site()
+        site.cuts.remove(self.cut_for_key(key))
+        self._set_dirty(True)
+        self._announce_dropped(*self._reset_cuts([key]))
+        self.cuts_changed.emit()
+
+    def cut_velocity(self, grid_id: str) -> VelocityModel:
+        """The velocity every cut on `grid_id` uses (cut spec call 16): the
+        grid's own, else the HEADER velocity of the grid's first line in
+        survey order. That line's own override is ignored: a line override
+        must never move a cut pick. A cut is not a line, so it has none of
+        its own. `KeyError` when the grid has neither."""
+        grid = self.grid(grid_id)
+        if grid.velocity is not None:
+            return grid.velocity
+        keys = self.keys_on_grid(grid_id)
+        if not keys:
+            raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+        return VelocityModel.from_dielectric(self.line_for_key(keys[0]).header.epsr)
 
     # ---- stacks -----------------------------------------------------------
     def stack_for(self, key: str, *, insert: bool = True) -> StepStack:
@@ -903,6 +1020,35 @@ class SiteSession(QObject):
                 site.stacks[key] = stack
             self._attach_source(key, stack)
         return stack
+
+    def line_zero(self, key: str, *, load: bool = False) -> float | None:
+        """The radar-clock time the line's own stack calls 0.
+
+        0.0 with no enabled time_zero step (nothing is loaded for that). The
+        source's answer once one is attached. With no source, None, unless
+        `load` reads the line and runs a copy of the stack. None on any
+        failure, which is logged: this never raises, and never plants a stack.
+
+        A cut has no zero of its own: its times are on its cube's clock
+        (cut spec call 18), so it answers None at once and logs nothing.
+        """
+        if is_cut_key(key):
+            return None
+        try:
+            stack = self.stack_for(key, insert=False)
+            if not stack.sets_time_zero():
+                return 0.0
+            if stack.source is not None:
+                return float(stack.zero_ns())
+            if not load:
+                return None
+            profiles = self.line_for_key(key).load()
+            probe = StepStack.from_dicts(stack.to_dicts())
+            probe.source = Radargram.from_profile(profiles[self.channel(key)])
+            return float(probe.zero_ns())
+        except Exception as exc:  # noqa: BLE001 -- a read must not raise; the caller falls back
+            _log(f"could not find where line {key} has its time zero: {exc}")
+            return None
 
     def _attach_source(self, key: str, stack: StepStack) -> None:
         profiles = self._profiles.get(key)
@@ -1137,7 +1283,7 @@ class SiteSession(QObject):
 
     # ---- current line, samples, cursor ------------------------------------
     def open_line(self, key: str) -> None:
-        self.line_for_key(key)
+        self._require_key(key)
         if key == self._current_key:
             # Re-selecting the line already open -- reachable in normal
             # use, not just a defensive corner case: Task 5 promotes a
@@ -1161,7 +1307,15 @@ class SiteSession(QObject):
         # drives that render, and ProfileDock clears its own preview on it.
         self._preview_key = None
         self._preview_trace = -1
+        self._open_serial += 1  # before the emit, so every slot of this open reads the same value
         self.line_opened.emit(key)
+
+    @property
+    def open_serial(self) -> int:
+        """Counts the items opened as the working item (`open_line` moving it).
+        Moved before `line_opened` is emitted, so a listener can tell what it did
+        during this open from what it did earlier, whatever order the slots run in."""
+        return self._open_serial
 
     def profiles_for(self, key: str) -> list[Profile] | None:
         return self._profiles.get(key)
@@ -1203,8 +1357,11 @@ class SiteSession(QObject):
     def set_trace(self, key: str, index: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
-        index = max(0, min(int(index), n - 1))
+        if is_cut_key(key):
+            # The column count belongs to the section, so only the bottom clamps (plan call 4).
+            index = max(-1, int(index))
+        else:
+            index = max(0, min(int(index), self.line_for_key(key).n_traces - 1))
         if index != self._current_trace:
             self._current_trace = index
             self.trace_changed.emit(key, index)
@@ -1212,8 +1369,8 @@ class SiteSession(QObject):
     def set_selection(self, key: str, start: int, end: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
         lo, hi = sorted((int(start), int(end)))
+        n = 1 << 62 if is_cut_key(key) else self.line_for_key(key).n_traces
         # Each end is clamped independently into [0, n - 1]. That means this
         # can never land on (-1, -1): clearing the selection is exclusively
         # clear_selection()'s job, and a caller cannot accidentally forge the
@@ -1255,8 +1412,14 @@ class SiteSession(QObject):
         """
         self._pick_store = store
 
-    def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
+    def add_pick(self, key: str, trace: int, time_ns: float, *, zero_ns: float = 0.0) -> Pick:
         """Author one pick on the WORKING line.
+
+        `time_ns` is measured from `zero_ns` (the zero of the view it was
+        clicked on), so its radar time is `time_ns + zero_ns`. That radar time
+        is clamped into the header window, then stored measured from the
+        line's own zero (`line_zero`), with that zero; when the line's zero is
+        unknown it is stored on the radar clock with no zero (#97).
 
         `key` must be `current_key`. This is the same guard `set_trace`
         and `set_selection` carry, and it exists here rather than only in
@@ -1289,6 +1452,8 @@ class SiteSession(QObject):
             raise RuntimeError("no pick store is attached to this session; cannot author a pick")
         if not math.isfinite(time_ns):
             raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
+        if not math.isfinite(zero_ns):
+            raise ValueError(f"a pick needs a finite time zero, not {zero_ns!r}")
         line = self.line_for_key(key)
         index = max(0, min(int(trace), line.n_traces - 1))
         # The view emits a pick for any left click in the widget, and
@@ -1307,12 +1472,15 @@ class SiteSession(QObject):
         t0 = float(line.header.position_ns)
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
-        time = max(lo, min(float(time_ns), hi))
+        radar = max(lo, min(retime_ns(float(time_ns), float(zero_ns), 0.0), hi))
+        zero = self.line_zero(key)
+        time = radar if zero is None else retime_ns(radar, 0.0, zero)
         distance_m, depth_m, velocity_m_ns = self.derived_pick_fields(key, index, time)
         pick = Pick(
             line_key=key,
             trace=index,
             time_ns=time,
+            zero_ns=zero,
             distance_m=distance_m,
             depth_m=depth_m,
             velocity_m_ns=velocity_m_ns,
@@ -1352,6 +1520,74 @@ class SiteSession(QObject):
             float(model.depth_at(times)[0]),
             float(model.velocity_at(times)[0]),
         )
+
+    def add_cut_pick(
+        self, key: str, column: int, distance_m: float, time_ns: float, stack_json: str
+    ) -> Pick:
+        """Author one pick on the WORKING cut (cut spec §4.5, calls 2 and 12).
+
+        A cut pick is a distance along the cut and a time. `column` is the
+        section column it was made on, stored in `trace` for the record
+        only: a column's index changes with the cell size, so nothing ever
+        places the pick by it. The distance is clamped into the cut. The
+        time is on the cube's clock (call 18) and is stored as given,
+        never converted, and never clamped to a line's window since a cut
+        has none. `stack_json` is the section's provenance, in place of a
+        line's stack.
+
+        Refuses like `add_pick`: only the working key, and a raise rather
+        than a silent no-op, since a pick that does not appear is authored
+        data lost. Does not dirty the session, for the reason `add_pick`
+        gives.
+        """
+        if not is_cut_key(key) or key != self._current_key:
+            raise ValueError(
+                f"a cut pick targets the working cut ({self._current_key!r}), not {key!r}; "
+                f"select the cut to work on it"
+            )
+        if self._pick_store is None:
+            raise RuntimeError("no pick store is attached to this session; cannot author a pick")
+        if not math.isfinite(time_ns) or not math.isfinite(distance_m):
+            raise ValueError(
+                f"a pick needs a finite distance and time, not {distance_m!r} and {time_ns!r}"
+            )
+        cut = self.cut_for_key(key)
+        distance = max(0.0, min(float(distance_m), cut.length_m))
+        depth_m, velocity_m_ns = self.derived_cut_pick_fields(key, distance, float(time_ns))
+        pick = Pick(
+            line_key=key,
+            trace=max(0, int(column)),
+            time_ns=float(time_ns),
+            distance_m=distance,
+            depth_m=depth_m,
+            velocity_m_ns=velocity_m_ns,
+            stack_json=stack_json,
+            note="",
+            created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        )
+        self._pick_store.write_pick(pick)
+        self.picks_changed.emit()
+        return pick
+
+    def derived_cut_pick_fields(
+        self, key: str, distance_m: float, time_ns: float
+    ) -> tuple[float | None, float | None]:
+        """`(depth_m, velocity_m_ns)` for a pick on cut `key` at `time_ns`,
+        from the cut's velocity (cut spec call 16), or `(None, None)` when
+        its grid has neither a velocity nor a line to take one from.
+
+        `distance_m` takes no part in the maths (a cut has one velocity):
+        it is in the signature so a caller hands over a pick's whole
+        position, as `derived_pick_fields` takes its trace. `KeyError` for
+        a key that names no cut.
+        """
+        cut = self.cut_for_key(key)
+        try:
+            model = self.cut_velocity(cut.grid_id)
+        except KeyError:
+            return (None, None)
+        times = [time_ns]
+        return (float(model.depth_at(times)[0]), float(model.velocity_at(times)[0]))
 
     @staticmethod
     def _pick_distance(line: Line, index: int) -> float | None:
@@ -1407,8 +1643,10 @@ class SiteSession(QObject):
         if key is None:
             self.clear_preview()
             return
-        line = self.line_for_key(key)  # raises KeyError before anything changes
-        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+        self._require_key(key)  # raises KeyError before anything changes
+        index = -1 if trace < 0 else int(trace)
+        if not is_cut_key(key):
+            index = min(index, self.line_for_key(key).n_traces - 1)
         if (key, index) == (self._preview_key, self._preview_trace):
             return  # loop guard: a marker update that round-trips is a no-op
         self._preview_key, self._preview_trace = key, index

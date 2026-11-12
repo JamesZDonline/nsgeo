@@ -12,7 +12,9 @@ Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
 `NSGEO_SITE_INTERPOLATION` (the method key),
 `NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
 (interpolation spec §8; the coverage companion carries none of the four),
-`NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
+`NSGEO_SITE_Z_UNIT` (always `ns`), `NSGEO_SITE_TIME_BASE` (`time_zero`, `radar` or
+`mixed`: the clock the grids' times are on, #97; each `SiteGridRecord` carries its own
+`time_base`) and `NSGEO_SITE_GRIDS` (compact JSON list of
 `SiteGridRecord`s), and `NSGEO_SITE_LEFT_OUT` (Ruling F-2: a compact JSON object of
 grid id to `SiteEngine.grid_state`, such as `"no lines"` or `"failed: ..."`, for
 each included grid the file does not hold; present only when there is one). Band
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import time_base_of
 from nsgeo.render import Normalizer
 from nsgeo.slices import (
     CubeFrame,
@@ -60,7 +63,7 @@ from qgis.core import (
 from nsgeo_qgis.export_pipeline import ExportBand, ExportGrid, ExportSpec
 from nsgeo_qgis.site_engine import SiteEngine
 from nsgeo_qgis.slice_export import apply_band_windows, write_north_up
-from nsgeo_qgis.slices_plan import SliceFinish
+from nsgeo_qgis.slices_plan import SliceFinish, combined_time_base
 
 _SEPARATORS = (",", ":")
 
@@ -76,6 +79,8 @@ class SiteGridRecord:
     line_spacing_m: float
     azimuth_deg: float
     crs: str
+    #: `time_zero` or `radar`: the clock this grid's times are on (#97).
+    time_base: str
 
 
 @dataclass(frozen=True)
@@ -164,6 +169,7 @@ def plan_site_export(
                 line_spacing_m=float(grid.default_spacing),
                 azimuth_deg=float(grid.azimuth),
                 crs=grid.crs,
+                time_base=time_base_of(engine.provenance().steps),
             )
         )
     bands = []
@@ -296,6 +302,11 @@ def site_export_spec(
     )
 
 
+def site_time_base(grids: Iterable[SiteGridRecord]) -> str:
+    """`time_zero` or `radar` when every grid is on that clock, else `mixed`."""
+    return combined_time_base(g.time_base for g in grids)
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, separators=_SEPARATORS)
 
@@ -412,6 +423,7 @@ def _tag_dataset(dataset: Any, plan: SiteExportPlan) -> None:
         "NSGEO_SITE_PIXEL_M": str(plan.lattice.pixel),
         "NSGEO_SITE_RESAMPLING": "largest_count" if plan.coverage else "bilinear",
         "NSGEO_SITE_Z_UNIT": "ns",
+        "NSGEO_SITE_TIME_BASE": site_time_base(plan.grids),
         "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
     }.items():
         dataset.SetMetadataItem(key, value)

@@ -16,6 +16,7 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_METHOD,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
+    TIME_BASE_MIXED,
     WEIGHT_BYTES_PER_CELL,
     MemoryEstimate,
     Resolution,
@@ -23,10 +24,13 @@ from nsgeo_qgis.slices_plan import (
     SourceChoice,
     bands_detail,
     choose_residency,
+    combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
+    mixed_clock_note,
     name_list,
+    old_cube_note,
     preset_transform_conflict,
     preview_note,
     transform_names,
@@ -802,3 +806,29 @@ def test_the_slices_line_of_the_export_summary():
         )
         == "minimum curvature, max distance 1.5 \u00d7 spacing, smoothing 0.2 \u00d7 0.3 m"
     )
+
+
+def test_the_old_cube_note_names_the_shift_with_its_sign():
+    assert old_cube_note(-2.4) == (
+        "This cube was saved before times were measured from each line's first break. "
+        "It was rebuilt that way, with its range moved by -2.40 ns."
+    )
+    assert old_cube_note(1.0).endswith("moved by +1.00 ns.")
+
+
+def test_mixed_clock_note_names_the_radar_grids():
+    assert mixed_clock_note([]) == ""
+    assert mixed_clock_note(["A"]).startswith("Grid A has no Time zero step")
+    assert mixed_clock_note(["A", "C"]).startswith("Grids A and C have no Time zero step")
+    assert mixed_clock_note(["A"]) == (
+        "Grid A has no Time zero step, so its times are from the radar's own zero "
+        "and will not line up with the other grids."
+    )
+
+
+def test_combined_time_base_is_one_rule_for_a_set_of_grids():
+    assert combined_time_base(["time_zero", "time_zero"]) == "time_zero"
+    assert combined_time_base(["radar"]) == "radar"
+    assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
+    with pytest.raises(ValueError):
+        combined_time_base([])

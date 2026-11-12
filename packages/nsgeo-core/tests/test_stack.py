@@ -360,3 +360,43 @@ def test_the_bypass_memo_holds_the_two_most_recent_sets():
     st.result_bypassing(2)
     assert st.result_bypassing(1) is a
     assert st.result_bypassing(0) is not c
+
+
+def test_zero_ns_runs_only_up_to_the_last_enabled_time_zero(monkeypatch):
+    st = stack_of(("time_zero", {"mode": "sample", "sample": 5}), ("dewow", {}))
+
+    def boom(self, rg):
+        raise AssertionError("a step after time_zero ran")
+
+    monkeypatch.setattr(type(st.entries[1][0]), "apply", boom)
+    src = st.source
+    assert st.sets_time_zero() is True
+    assert st.zero_ns() == pytest.approx(src.t0_ns + 5 * src.dt_ns)
+
+
+def test_zero_ns_is_the_last_enabled_time_zeros():
+    st = stack_of(
+        ("time_zero", {"mode": "sample", "sample": 5}),
+        ("time_zero", {"mode": "sample", "sample": 3}),
+    )
+    st.source = st.source.replace(t0_ns=-2.0, dt_ns=0.5)
+    src = st.source
+    assert st.zero_ns() == st.result().zero_ns
+    assert st.zero_ns() == pytest.approx(src.t0_ns + 8 * src.dt_ns)
+
+
+def test_zero_ns_is_the_sources_without_an_enabled_time_zero():
+    st = stack_of(("time_zero", {"mode": "sample", "sample": 5}))
+    st.set_enabled(0, False)
+    assert st.sets_time_zero() is False
+    assert st.zero_ns() == 0.0
+    st.source = st.source.replace(zero_ns=-0.75)
+    assert st.zero_ns() == -0.75
+
+
+def test_zero_ns_without_a_source_is_an_error_only_when_one_is_needed():
+    st = StepStack()
+    assert st.zero_ns() == 0.0
+    st.append(build_step("time_zero", mode="sample", sample=1))
+    with pytest.raises(ValueError, match="no source"):
+        st.zero_ns()

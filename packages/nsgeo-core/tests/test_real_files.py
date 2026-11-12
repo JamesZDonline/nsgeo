@@ -13,7 +13,7 @@ from nsgeo.io.dzt import read_header, read_samples, trace_count
 from nsgeo.processing import StepStack, build_step
 from nsgeo.processing.base import Radargram
 
-from tests.real_data import CAMPUS_LINES, DATA, GPS_LINES
+from tests.real_data import CAMPUS_LINES, DATA, GPS_LINES, GRID2_LINES
 
 pytestmark = pytest.mark.skipif(not CAMPUS_LINES, reason="no real DZT files in tests/data/local")
 
@@ -33,6 +33,14 @@ def test_the_gps_set_is_the_sixty_with_dzg_lines_each_with_its_dzg():
     assert [p.name for p in GPS_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 61)]
     assert {p.parent for p in GPS_LINES} == {DATA / "with-dzg"}
     assert all(p.with_suffix(".DZG").is_file() for p in GPS_LINES)
+
+
+@pytest.mark.skipif(not GRID2_LINES, reason="no Grid 2 survey in tests/data/local/grid2")
+def test_the_grid2_set_is_the_sixty_grid2_lines_each_with_its_dzg():
+    """Nashville Grid 2 for #159, kept apart from the lines whose names it reuses."""
+    assert [p.name for p in GRID2_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 61)]
+    assert {p.parent for p in GRID2_LINES} == {DATA / "grid2"}
+    assert all(p.with_suffix(".DZG").is_file() for p in GRID2_LINES)
 
 
 @pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
@@ -355,3 +363,25 @@ def test_envelope_late_time_barely_depends_on_the_direct_wave(path):
 
     rms = np.sqrt((out_no_top**2).mean())
     assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.5 * rms
+
+
+def _source_of(path):
+    h = read_header(path)
+    return Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
+def test_the_default_time_zero_puts_each_campus_line_at_its_first_break(path):
+    # Spec 2: the default pick lands on row 49 of every campus line: -0.4764 ns on the radar clock
+    # (header position -11.0864, dt 0.216531; measured 2026-11-10).
+    out = build_step("time_zero").apply(_source_of(path))
+    assert out.zero_ns == pytest.approx(-0.4764, abs=0.001)
+    assert out.t0_ns == 0.0
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="no GPS survey in tests/data/local/with-dzg")
+def test_the_gps_survey_first_breaks_sit_between_minus_1_56_and_minus_1_34_ns():
+    zeros = {round(build_step("time_zero").apply(_source_of(p)).zero_ns, 3) for p in GPS_LINES}
+    assert min(zeros) >= -1.57
+    assert max(zeros) <= -1.34
+    assert len(zeros) <= 2  # -1.559 and -1.3425 measured 2026-11-10: one sample apart

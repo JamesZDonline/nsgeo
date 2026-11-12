@@ -553,6 +553,14 @@ class SiteEngine(QObject):
             self._notify_changed()
             self._dispatch_again = True
 
+    def line_zero(self, key: str) -> float | None:
+        """The first non-None `line_zero` among the grid engines."""
+        for engine in self._engines.values():
+            zero = engine.line_zero(key)
+            if zero is not None:
+                return zero
+        return None
+
     def _on_engine_prepared(self, grid_id: str) -> None:
         """A grid's engine reached a terminal edge: mark it, redraw, go on."""
         try:

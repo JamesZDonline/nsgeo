@@ -528,3 +528,22 @@ def test_a_line_whose_velocity_cannot_be_resolved_still_opens_the_add_dialog(ope
 
     assert not dialog.ok_button.isEnabled()
     assert dialog.form.editors["velocity_m_ns"].text() == ""
+
+
+def test_a_cut_shows_that_processing_does_not_apply(opened):
+    from nsgeo_qgis.ui.processing_dock import PROCESSING_ON_CUT_TEXT
+
+    session, dock, key = opened
+    assert dock.list.count() == 0 or dock.add_button.isEnabled()
+    cut = session.add_cut("A", [(1.0, 1.0), (6.0, 1.0)])
+    session.open_line(cut)
+    assert dock.list.count() == 0
+    assert not dock.list.isEnabled()
+    assert dock.status.text() == PROCESSING_ON_CUT_TEXT
+    assert PROCESSING_ON_CUT_TEXT == "Processing does not apply to a cut."
+    for w in (dock.add_button, dock.apply_button, dock.presets_button, dock.diff_button):
+        assert not w.isEnabled()
+    session.open_line(key)
+    assert dock.list.isEnabled()
+    assert dock.status.text() == ""
+    assert dock.add_button.isEnabled()

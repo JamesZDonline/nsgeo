@@ -448,3 +448,14 @@ def test_a_task_the_manager_refuses_to_schedule_does_not_pin_the_key_forever(
 
     assert not loader.is_loading(key)
     assert errors and errors[0][0] == key
+
+
+def test_opening_or_previewing_a_cut_starts_no_load(session):
+    key = session.add_cut("A", [(1.0, 1.0), (6.0, 1.0)])
+    loader = LineLoader(session)
+    errors = []
+    loader.on_error = lambda k, msg: errors.append((k, msg))
+    session.set_preview(key, 3)
+    session.open_line(key)
+    assert not loader.is_loading(key)
+    assert errors == []

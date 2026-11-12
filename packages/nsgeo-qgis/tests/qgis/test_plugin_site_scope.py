@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 import pytest
+from nsgeo.processing import time_base_of
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     SliceWindow,
@@ -39,6 +40,7 @@ from nsgeo_qgis.slices_plan import (
     default_cell,
     format_bytes,
     limit_windows,
+    mixed_clock_note,
 )
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
@@ -3569,3 +3571,119 @@ def test_export_messages_name_the_cell_and_the_pixel(plugin, drive_dialog, tmp_p
     gcell = dock.engine.frame.cell
     text = plugin.iface.messageBar().currentItem().text()
     assert f"({gcell:g} m cell, {gcell:g} m pixels)" in text, text
+
+
+def test_a_line_zero_is_read_from_the_scope_on_screen(plugin):
+    """Under Whole site every grid's lines answer, not just This grid's (#97)."""
+    dock = plugin.slices_dock
+    assert dock.engine.wait_for_preparation(60_000)
+    here = dock.engine.choice.grid_id
+    session = plugin.session
+    others = [
+        k
+        for k in session.keys()  # noqa: SIM118 -- SiteSession.keys()
+        if session.line_for_key(k).placement.grid_id not in (None, here)
+    ]
+    assert others
+    key = others[0]
+    assert dock.line_zero_in_cube(key) is None  # This grid's engine does not hold it
+
+    whole_site(plugin)
+    zero = dock.line_zero_in_cube(key)
+    assert zero is not None
+    assert zero == dock.site_engine.line_zero(key)
+    assert dock.site_engine.line_zero("no-such-line.dzt") is None
+
+
+# ---- mixed clocks (#97) ------------------------------------------------------------------
+
+
+def _preset_per_grid(session, **presets) -> None:
+    for grid_id in "ABC":
+        session.remember_slice_source(grid_id, preset=presets.get(grid_id, "p"), lines=None)
+
+
+def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, A="radar", B="radar", C="radar")
+    dock = whole_site(plugin)
+    assert "Time zero" not in dock.site_note.text()
+    assert "Time zero" not in dock.site_note.toolTip()
+
+
+def test_grid_time_bases_reads_each_grids_preset(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, C="radar")
+    source = site_scope_module.site_source(session, "ABC", "amp_square")
+    assert site_scope_module.grid_time_bases(session, source) == {
+        "A": "time_zero",
+        "B": "time_zero",
+        "C": "radar",
+    }
+
+
+def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
+    """Ruling R15: saving over a preset does not re-prepare, so the drawn cubes
+    and the export keep the old steps; the note must say what they say."""
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    session.site.presets["radar"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+    _events()
+    engine = dock.site_engine
+    assert time_base_of(engine.engine_for("B").provenance().steps) == "radar"
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
+    session = plugin.session
+    _preset_per_grid(session, B="raw")  # both presets carry time_zero
+    dock = whole_site(plugin)
+    session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    _events()
+    assert time_base_of(dock.site_engine.engine_for("B").provenance().steps) == "time_zero"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
+    session = plugin.session
+    _add_refused_preset(session)
+    _preset_per_grid(session, B="zz_bad")
+    dock = whole_site(plugin)
+    assert dock.site_engine.grid_state("B") != "ready"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugin, monkeypatch):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    scope = dock._site
+    warning = mixed_clock_note(["B"])
+    monkeypatch.setattr(type(scope.engine), "preview_note", property(lambda s: "A preview"))
+    scope.show_note(drawn=True)
+    assert dock.site_note.text() == f"A preview. {warning}"
+    scope.problem = "no depth range"
+    scope.show_note(drawn=False)
+    assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
+    assert dock.site_note.toolTip().endswith(warning)

@@ -33,7 +33,8 @@ from typing import Any
 import numpy as np
 from nsgeo.geometry import Grid
 from nsgeo.io import DzxError, read_dzx
-from nsgeo.model import Line
+from nsgeo.model import Cut, Line, is_cut_key
+from nsgeo.processing import retime_ns
 from qgis.core import (
     NULL,
     Qgis,
@@ -46,6 +47,7 @@ from qgis.core import (
     QgsGeometry,
     QgsLayerTree,
     QgsMessageLog,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
@@ -54,6 +56,7 @@ from qgis.core import (
     QgsSymbol,
     QgsVectorFileWriter,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
     QgsWkbTypes,
 )
 from qgis.PyQt import sip
@@ -101,6 +104,12 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         QgsWkbTypes.Type.Point,
         [("line_key", "str"), ("scan", "int"), ("kind", "str"), ("name", "str")],
     ),
+    # M15 (cut spec §4.8): drawn from `Site.cuts`, so read-only like the other
+    # derived tables. A cut's vertices are grid metres, so it follows its grid.
+    "cuts": (
+        QgsWkbTypes.Type.LineString,
+        [("cut_key", "str"), ("name", "str"), ("grid_id", "str"), ("length_m", "float")],
+    ),
     "picks": (
         QgsWkbTypes.Type.Point,
         [
@@ -108,6 +117,10 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             ("trace", "int"),
             ("distance_m", "float"),
             ("time_ns", "float"),
+            # #97: the radar-clock time `time_ns` is measured from (NULL =
+            # the radar clock). A migration like the M8 one below: every
+            # existing row keeps its values with this NULL.
+            ("zero_ns", "float"),
             ("depth_m", "float"),
             ("velocity_m_ns", "float"),
             ("stack_json", "str"),
@@ -129,12 +142,15 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         ],
     ),
 }
-DERIVED = ("grids", "lines", "marks")
+DERIVED = ("grids", "lines", "marks", "cuts")
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
 # slice preview and exported GeoTIFFs join below them.
-LEGEND_ORDER = ("picks", "marks", "lines", "grids")
+LEGEND_ORDER = ("picks", "marks", "cuts", "lines", "grids")
+
+# One colour for every cut, and none of the grid colours (cut spec §4.8).
+CUT_COLOUR = "#e6550d"
 
 # Dragging a group in the Layers panel does not move the node:
 # QgsLayerTreeModel serialises it, builds a new node at the drop and deletes
@@ -251,6 +267,32 @@ def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
     return coords[max(0, min(trace, len(coords) - 1))]
 
 
+def _stage_point(
+    feature: QgsFeature, point: QgsPointXY, geometry_changes: dict[int, QgsGeometry]
+) -> None:
+    """Queue `point` as the row's geometry unless it already sits there: the
+    "write only what differs" rule of `follow_lines`, for lines and cuts alike."""
+    stored = feature.geometry()
+    if stored.isNull() or stored.isEmpty() or not point.compare(stored.asPoint(), _SAME_COORD):
+        geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+
+
+def _stage_fields(
+    feature: QgsFeature,
+    provider: Any,
+    derived: list[tuple[str, float | None]],
+    attribute_changes: dict[int, dict[int, Any]],
+) -> None:
+    """Queue each `(field, value)` that differs from the row (None writes NULL)."""
+    changed = {
+        provider.fieldNameIndex(name): NULL if value is None else value
+        for name, value in derived
+        if not _same_number(_attr(feature, name), value)
+    }
+    if changed:
+        attribute_changes[feature.id()] = changed
+
+
 def _same_number(stored: Any, value: float | None) -> bool:
     """Whether a stored numeric attribute already holds `value` (within
     `_SAME`); NULL equals only `None`."""
@@ -315,6 +357,11 @@ class SiteLayers(QObject):
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
+        session.cuts_changed.connect(self.refresh)
+        # #97: a pick keeps its sample when its line's time zero moves.
+        session.stack_changed.connect(self._on_stack_changed)
+        session.line_opened.connect(self._on_line_opened)
+        session.line_loaded.connect(self._on_line_loaded)
         # A layer removed from the legend by hand (or any other code) is
         # gone from QGIS but not from the GeoPackage: drop it from our
         # registry so the next refresh reopens it, rather than holding a
@@ -442,7 +489,7 @@ class SiteLayers(QObject):
         deletable, whereas a discarded one is gone.
 
         Every held layer, not just `picks`, so a future writable table
-        gets this for free. The derived three are `setReadOnly(True)`, so
+        gets this for free. The derived tables are `setReadOnly(True)`, so
         in practice they can never be in this state.
 
         If the commit fails there is nothing further to do -- the site is
@@ -563,6 +610,7 @@ class SiteLayers(QObject):
             ("grids", self.refill_grids),
             ("lines", self.refill_lines),
             ("marks", self.refill_marks),
+            ("cuts", self.refill_cuts),
         ):
             try:
                 fn()
@@ -578,7 +626,9 @@ class SiteLayers(QObject):
             _log(f"could not move the picks onto their lines: {exc}", Qgis.MessageLevel.Critical)
             return
         if moved and self._report_follow:
-            self._tell(f"updated {moved} pick(s) to sit on their lines, at the current velocity")
+            self._tell(
+                f"updated {moved} pick(s) to sit on their lines and cuts, at the current velocity"
+            )
 
     def _tell(self, message: str) -> None:
         """Hand `message` to the plugin's `on_info`, if it gave one. The one
@@ -599,8 +649,10 @@ class SiteLayers(QObject):
 
         A pick is a trace and a time on a line; everything else about it is
         a convenience, so a line that moves, or whose velocity changes,
-        takes its picks with it. `trace`, `time_ns`, `stack_json`, `note`,
-        `created`, `feature_id` and `seq` are never touched.
+        takes its picks with it. `trace`, `time_ns`, `zero_ns`, `stack_json`,
+        `note`, `created`, `feature_id` and `seq` are never touched: `time_ns`
+        is measured from the row's own `zero_ns`, and `follow_zero` is the
+        only writer of the time.
 
         `picks` cannot be regenerated, so this writes through the loaded
         layer's data provider -- committed rows only -- and never reads or
@@ -608,6 +660,9 @@ class SiteLayers(QObject):
         (the buffer commits field by field), and a row added in editing mode
         follows once it is saved. Only the rows whose values differ are
         written, so a refresh that changes nothing writes nothing.
+
+        A row on a cut follows the same way (`_follow_cut_pick`): placed from
+        its `distance_m` on the cut, never at its column.
 
         Left exactly as they are: a row whose `line_key` is no site line (a
         removed line's picks wait for it to come back) and a row with no trace
@@ -636,6 +691,7 @@ class SiteLayers(QObject):
             return 0
         provider = layer.dataProvider()
         keys = set(self.session.keys())
+        cut_keys = set(self.session.cut_keys())
         # One computation per line, however many picks it carries. None
         # marks a line with no points to put a pick on (no grid, or no
         # distance axis): its picks still follow its velocity.
@@ -646,6 +702,18 @@ class SiteLayers(QObject):
         for feature in provider.getFeatures():
             key = _as_str(_attr(feature, "line_key"))
             trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
+            if is_cut_key(key):
+                derived_cut = self._cut_pick_derivation(feature, key, cut_keys, failed)
+                if derived_cut is not None:
+                    point, depth, velocity = derived_cut
+                    _stage_point(feature, point, geometry_changes)
+                    _stage_fields(
+                        feature,
+                        provider,
+                        [("depth_m", depth), ("velocity_m_ns", velocity)],
+                        attribute_changes,
+                    )
+                continue
             if key not in keys or trace == NULL or time_ns == NULL:
                 continue
             if key not in placed:
@@ -665,22 +733,9 @@ class SiteLayers(QObject):
                 continue
             derived = [("depth_m", depth), ("velocity_m_ns", velocity)]
             if coords is not None:
-                point = _clamped(coords, int(trace))
-                stored = feature.geometry()
-                if (
-                    stored.isNull()
-                    or stored.isEmpty()
-                    or not point.compare(stored.asPoint(), _SAME_COORD)
-                ):
-                    geometry_changes[feature.id()] = QgsGeometry.fromPointXY(point)
+                _stage_point(feature, _clamped(coords, int(trace)), geometry_changes)
                 derived.insert(0, ("distance_m", distance))
-            changed = {
-                provider.fieldNameIndex(name): NULL if value is None else value
-                for name, value in derived
-                if not _same_number(_attr(feature, name), value)
-            }
-            if changed:
-                attribute_changes[feature.id()] = changed
+            _stage_fields(feature, provider, derived, attribute_changes)
         if geometry_changes and not provider.changeGeometryValues(geometry_changes):
             raise RuntimeError(
                 f"could not move the picks onto their lines: {provider.error().message()}"
@@ -693,6 +748,132 @@ class SiteLayers(QObject):
         if written:
             layer.triggerRepaint()
         return written
+
+    def _cut_pick_derivation(
+        self, feature: QgsFeature, key: str, cut_keys: set[str], failed: set[str]
+    ) -> tuple[QgsPointXY, float | None, float | None] | None:
+        """What `follow_lines` stages for one row on a cut (cut spec §4.8,
+        calls 3, 12, 16): `(point, depth, velocity)`, or None to leave the
+        row alone.
+
+        Position comes from the stored `distance_m`, which is never
+        rewritten: a grid that moves takes the cut, and so the pick, with
+        it, and a pick past a shrunk grid's edge keeps its distance. Depth
+        and velocity come from the cut's velocity. A row whose cut is gone
+        (deleted, never saved, or on a removed grid) or whose distance or
+        time is NULL is left exactly as it is: the pick stays where it was
+        last written. Staging is `follow_lines`', shared with line picks.
+        """
+        distance, time_ns = _attr(feature, "distance_m"), _attr(feature, "time_ns")
+        if key not in cut_keys or key in failed or distance == NULL or time_ns == NULL:
+            return None
+        try:
+            depth, velocity = self.session.derived_cut_pick_fields(
+                key, float(distance), float(time_ns)
+            )
+            point = self._cut_point(self.session.cut_for_key(key), float(distance))
+        except Exception as exc:  # noqa: BLE001 -- one bad cut must not stop the rest
+            _log(f"could not re-derive the picks on {key}: {exc}", Qgis.MessageLevel.Critical)
+            failed.add(key)
+            return None
+        assert point is not None  # the distance is not NULL
+        return point, depth, velocity
+
+    def _on_stack_changed(self, key: str) -> None:
+        """A stack change on any line, previewed or not (a stack change is
+        never a hover): move that line's picks onto its zero, reading the
+        line from disk if no samples are attached. Does nothing when the key
+        has no pick rows or its zero cannot be found."""
+        self._follow_key(key, load=True)
+
+    def _on_line_opened(self, key: str) -> None:
+        """A line became the working line: if it is the current line, move
+        its picks onto its zero when that is known without reading (samples
+        already cached by a hover). When it is not yet known, `line_loaded`
+        follows once the load lands."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _on_line_loaded(self, key: str) -> None:
+        """Samples arrived for `key`: follow only when it is the working
+        line. A preview-only or stale hover load never writes `picks`."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _follow_key(self, key: str, *, load: bool) -> None:
+        """Shared body of the three slots above; guarded, never raises.
+
+        A cut is never followed: its picks are on its cube's clock, which no
+        line's zero moves (cut spec call 18).
+        """
+        if is_cut_key(key):
+            return
+        try:
+            layer = self._picks_layer()
+            if layer is None or not any(
+                _as_str(_attr(f, "line_key")) == key for f in layer.dataProvider().getFeatures()
+            ):
+                return
+            zero = self.session.line_zero(key, load=load)
+            if zero is None:
+                return
+            self.follow_zero(key, zero)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            _log(
+                f"could not move the picks on {key} to its time zero: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
+
+    def follow_zero(self, key: str, zero_ns: float) -> int:
+        """Re-measure the picks of line `key` from `zero_ns`: each row whose
+        stored zero (NULL counts as 0.0) differs gets `time_ns` retimed so it
+        keeps its radar time, `zero_ns` set, and `depth_m` / `velocity_m_ns`
+        derived again from the new time. Returns the number of rows written
+        (#97).
+
+        Written through the data provider only, committed rows, never the
+        edit buffer, as `follow_lines` does. Rows with no trace or time are
+        left alone.
+        """
+        layer = self._picks_layer()
+        if layer is None or self.session.site is None:
+            return 0
+        provider = layer.dataProvider()
+        # A time or zero waiting in the edit buffer was typed against the
+        # old zero; it must not be re-read against the new one. Read only.
+        pending: set[int] = set()
+        buffer = layer.editBuffer()
+        if buffer is not None:
+            names = ("time_ns", "zero_ns")
+            for fid, edits in buffer.changedAttributeValues().items():
+                if any(layer.fields().at(i).name() in names for i in edits):
+                    pending.add(fid)
+        changes: dict[int, dict[int, Any]] = {}
+        for feature in provider.getFeatures():
+            if _as_str(_attr(feature, "line_key")) != key or feature.id() in pending:
+                continue
+            trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
+            if trace == NULL or time_ns == NULL:
+                continue
+            stored = _as_float(_attr(feature, "zero_ns")) or 0.0
+            if abs(stored - zero_ns) <= _SAME:
+                continue
+            new_time = float(retime_ns(float(time_ns), stored, zero_ns))
+            _, depth, velocity = self.session.derived_pick_fields(key, int(trace), new_time)
+            changes[feature.id()] = {
+                provider.fieldNameIndex("time_ns"): new_time,
+                provider.fieldNameIndex("zero_ns"): float(zero_ns),
+                provider.fieldNameIndex("depth_m"): depth,
+                provider.fieldNameIndex("velocity_m_ns"): velocity,
+            }
+        if changes and not provider.changeAttributeValues(changes):
+            raise RuntimeError(
+                f"could not move the picks to the line's time zero: {provider.error().message()}"
+            )
+        if changes:
+            layer.triggerRepaint()
+            self.session.picks_changed.emit()
+        return len(changes)
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
@@ -797,7 +978,7 @@ class SiteLayers(QObject):
         `picks` has no other source of truth, so its rebuild
         (`_rebuild_picks`) never destroys the original until a verified
         copy exists elsewhere. The derived tables are about to be fully
-        refilled by refill_grids/lines/marks right after this returns, so
+        refilled by the derived refills right after this returns, so
         a plain overwrite is safe for them.
 
         Final review, Important 1b: `_table_schema` can now come back
@@ -1496,6 +1677,11 @@ class SiteLayers(QObject):
         site = self.session.site
         if site is None:
             return None
+        if is_cut_key(pick.line_key):
+            # A cut pick sits where its DISTANCE along the cut says, never at
+            # its column (cut spec call 12).
+            cut = self.session.cut_for_key(pick.line_key)
+            return self._cut_point(cut, pick.distance_m)
         line = self.session.line_for_key(pick.line_key)
         grid = self.session.grid_for_line(line)
         if grid is None:
@@ -1504,6 +1690,15 @@ class SiteLayers(QObject):
         if coords is None:
             return None
         return _clamped(coords, pick.trace)
+
+    def _cut_point(self, cut: Cut, distance_m: float | None) -> QgsPointXY | None:
+        """The point `distance_m` along `cut`, in the package CRS; None when
+        the pick has no distance (a hand-digitised row)."""
+        if distance_m is None:
+            return None
+        grid = self.session.grid(cut.grid_id)
+        world = grid.to_world(np.asarray([cut.point_at(float(distance_m))], dtype=float))
+        return self._points(world, grid.crs)[0]
 
     def write_pick(self, pick: Pick) -> None:
         """Write one authored pick through the loaded layer's data
@@ -1545,8 +1740,9 @@ class SiteLayers(QObject):
             # line" before ever calling here, but this method's own
             # contract is "raises RuntimeError on any failure to write";
             # it must not depend on a caller's guard holding to keep it.
+            kind = "cut" if is_cut_key(pick.line_key) else "line"
             raise RuntimeError(
-                f"could not write the pick: no line with key {pick.line_key!r}"
+                f"could not write the pick: no {kind} with key {pick.line_key!r}"
             ) from None
         if point is None:
             # Time is the truth and the pick is authored data with no
@@ -1575,6 +1771,7 @@ class SiteLayers(QObject):
             ("trace", int(pick.trace)),
             ("distance_m", pick.distance_m),
             ("time_ns", float(pick.time_ns)),
+            ("zero_ns", pick.zero_ns),
             ("depth_m", pick.depth_m),
             ("velocity_m_ns", pick.velocity_m_ns),
             ("stack_json", pick.stack_json),
@@ -1660,6 +1857,7 @@ class SiteLayers(QObject):
             created=_as_str(_attr(feature, "created")),
             feature_id=_as_opt_str(_attr(feature, "feature_id")),
             seq=None if seq == NULL else int(seq),
+            zero_ns=_as_float(_attr(feature, "zero_ns")),
         )
 
     # ---- derived tables ---------------------------------------------------
@@ -1746,6 +1944,39 @@ class SiteLayers(QObject):
                 feats.append(f)
         self._refill("marks", feats)
         self._hide_when_lines_crowd("marks")
+
+    def refill_cuts(self) -> None:
+        site = self.session.site
+        assert site is not None
+        feats = []
+        for cut in site.cuts:
+            grid = self.session.grid(cut.grid_id)
+            world = grid.to_world(np.asarray(cut.vertices, dtype=float))
+            f = QgsFeature(self.layers["cuts"].fields())
+            f.setGeometry(QgsGeometry.fromPolylineXY(self._points(world, grid.crs)))
+            f["cut_key"] = cut.key
+            f["name"] = cut.name
+            f["grid_id"] = cut.grid_id
+            f["length_m"] = float(cut.length_m)
+            feats.append(f)
+        self._refill("cuts", feats)
+        self._style_cuts()
+
+    def _style_cuts(self) -> None:
+        # Solid and heavier than the dashed survey lines, in one colour that
+        # no grid colour uses, so a cut reads as something drawn on top of the
+        # survey rather than part of it (cut spec §4.8).
+        layer = self.layers["cuts"]
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(CUT_COLOUR))
+        symbol.setWidth(0.6)
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        settings = QgsPalLayerSettings()
+        settings.fieldName = "name"
+        settings.placement = Qgis.LabelPlacement.Line
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+        layer.triggerRepaint()
 
     def _style_lines(self) -> None:
         site = self.session.site

@@ -308,12 +308,44 @@ def test_the_survey_record_keeps_the_cube_path_relative(exportable_with_session,
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     assert record["array"] == "slices/A__default.npz"
     assert not Path(record["array"]).is_absolute()
-    assert set(record) == {"grid_id", "preset", "transform", "cell", "array", "lines", "z", "view"}
+    assert set(record) == {
+        "grid_id",
+        "preset",
+        "transform",
+        "cell",
+        "array",
+        "lines",
+        "z",
+        "view",
+        "time_base",
+    }
     assert record["z"] == {"t0_ns": 2.0, "t1_ns": 30.0, "dz_ns": 0.5}
     assert record["lines"] == list(engine.provenance().line_keys)
+
+
+def test_a_cube_record_names_its_time_base(exportable_with_session):
+    engine, session = exportable_with_session
+    npz = save_cube_npz(engine, session.root / "slices" / "A__default.npz")
+    record = cube_record(
+        engine.session,
+        engine.choice,
+        engine.frame,
+        engine.z,
+        _VIEW,
+        npz,
+        line_keys=engine.provenance().line_keys,
+        time_base="time_zero",
+    )
+    assert record["time_base"] == "time_zero"
+    assert recipe_from_record(record).time_base == "time_zero"
+    without = {k: v for k, v in record.items() if k != "time_base"}
+    assert recipe_from_record(without).time_base is None
+    with pytest.raises(ValueError):
+        recipe_from_record({**record, "time_base": "sideways"})
 
 
 def test_the_record_lines_are_what_was_actually_binned_not_what_was_asked_for(
@@ -348,6 +380,7 @@ def test_the_record_lines_are_what_was_actually_binned_not_what_was_asked_for(
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     assert "raw/does-not-exist.DZT" not in record["lines"]
     assert record["lines"] == list(engine.provenance().line_keys)
@@ -369,6 +402,7 @@ def test_a_cube_written_outside_the_project_tree_is_refused(exportable_with_sess
             _VIEW,
             npz,
             line_keys=engine.provenance().line_keys,
+            time_base="radar",
         )
 
 
@@ -383,6 +417,7 @@ def test_the_record_survives_a_save_and_reload_of_the_survey(exportable_with_ses
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     session.save()
     reloaded = load_site(session.json_path)
@@ -495,6 +530,50 @@ def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
         assert "NSGEO_FILL_RADIUS_CELLS" not in tags
     finally:
         ds.Close()
+
+
+def test_the_geotiff_names_its_time_base(exportable_with_session, tmp_path):
+    from osgeo import gdal
+
+    engine, session = exportable_with_session
+    path = tmp_path / "zero.tif"
+    export_slices(engine, path, 10, 5, None, SliceFinish())
+    coverage = tmp_path / "zero_cov.tif"
+    write_coverage(engine, coverage)
+    session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    other = SliceEngine(session)
+    other.set_source(
+        SourceChoice(
+            grid_id="A", preset="raw", transform="amp_envelope", line_keys=tuple(session.keys())
+        )
+    )
+    try:
+        assert other.wait_for_preparation(20_000)
+        other.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+        radar = tmp_path / "radar.tif"
+        export_slices(other, radar, 10, 5, None, SliceFinish())
+        radar_cov = tmp_path / "radar_cov.tif"
+        write_coverage(other, radar_cov)
+    finally:
+        other.dispose()
+    found = {}
+    for name, target in (
+        ("zero", path),
+        ("coverage", coverage),
+        ("radar", radar),
+        ("radar_coverage", radar_cov),
+    ):
+        ds = gdal.Open(str(target))
+        try:
+            found[name] = ds.GetMetadata().get("NSGEO_TIME_BASE")
+        finally:
+            ds.Close()
+    assert found == {
+        "zero": "time_zero",
+        "coverage": "time_zero",
+        "radar": "radar",
+        "radar_coverage": "radar",
+    }
 
 
 def test_the_geotiff_metadata_follows_the_chosen_finish(exportable, tmp_path):
@@ -775,6 +854,7 @@ def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_sessio
         view,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     session.site.cubes["A__first"] = record
     session.save()
@@ -814,6 +894,7 @@ def test_a_recipe_restores_the_exact_line_set_not_the_whole_grid(exportable_with
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
 
     recipe = recipe_from_record(record)
@@ -863,6 +944,7 @@ def test_a_recipe_with_no_transform_restores_the_bipolar_choice(exportable_with_
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     assert record["transform"] == "none"
 
@@ -891,6 +973,7 @@ def test_a_one_level_cube_round_trips_through_a_saved_record(exportable_with_ses
         _VIEW,
         npz,
         line_keys=engine.provenance().line_keys,
+        time_base="radar",
     )
     assert record["z"]["t1_ns"] > record["z"]["t0_ns"], (
         "a record naming its own axis must round-trip through Resolution's own validation"

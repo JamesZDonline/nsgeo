@@ -56,12 +56,16 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
-from nsgeo.processing import build_step
+import numpy as np
+from nsgeo.model import is_cut_key
+from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_windows
 from qgis.core import (
     Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsCsException,
     QgsMessageLog,
     QgsPointXY,
     QgsProject,
@@ -82,6 +86,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis import build_label, plugin_version
+from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
 from nsgeo_qgis.export_style import write_style
 from nsgeo_qgis.export_task import (
@@ -94,7 +99,8 @@ from nsgeo_qgis.export_task import (
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.lookup import CORNER_ROLES
-from nsgeo_qgis.map_link import MapLink
+from nsgeo_qgis.map_link import MapLink, crs_transform
+from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import (
@@ -128,6 +134,22 @@ from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
 MENU = "&nsgeo"
+VELOCITY_TIP = (
+    "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
+    "Right-click a point to remove it."
+)
+VELOCITY_ON_CUT_TIP = (
+    "Velocity fitting needs a recorded line: a cut at a slant widens hyperbolas "
+    "and would give a wrong velocity."
+)
+
+OUTSIDE_TEXT = "Start a cut inside a grid."
+TOO_FEW_TEXT = "A cut needs two different points."
+CUT_HINT_TEXT = (
+    "Cut: click to add points; right-click or Enter to finish; "
+    "Backspace removes the last point; Esc cancels."
+)
+CUT_TIP = "Cut tool: draw a path on the map to see the cube's vertical section beneath it."
 
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
@@ -203,6 +225,8 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        #: A cut's section, read from the Slices panel's cube (cut spec §4.3).
+        self.cut_sections: CutSections | None = None
         #: Whether this session should still tab Slices onto Processing.
         #: Read from settings in `initGui`; see `_tabify_slices_dock`.
         self._want_tabify = False
@@ -215,6 +239,9 @@ class NsgeoPlugin:
         self.act_import: QAction | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
+        self.act_cut: QAction | None = None
+        #: The Cut map tool while the toggle is on (cut spec §4.1).
+        self._cut_tool: CutTool | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
         #: and the menu it drops down. See `_build_panels_menu`.
         self.act_panels: QAction | None = None
@@ -269,7 +296,12 @@ class NsgeoPlugin:
         # Constructed here, with `layers`, because it reads the `lines`
         # layer's geometry and must be connected before the first
         # site_opened fires -- same reason SiteLayers is built this early.
-        self.map_link = MapLink(self.session, self.layers, self.iface.mapCanvas())
+        self.map_link = MapLink(
+            self.session,
+            self.layers,
+            self.iface.mapCanvas(),
+            on_info=lambda msg: self.message(msg, Qgis.MessageLevel.Info),
+        )
         main = self.iface.mainWindow()
 
         self.toolbar = self.iface.addToolBar("nsgeo")
@@ -288,10 +320,10 @@ class NsgeoPlugin:
         )
         self.act_velocity = self._toolbar_action("Velocity", self._toggle_velocity_fit_mode)
         self.act_velocity.setCheckable(True)
-        self.act_velocity.setToolTip(
-            "Velocity mode: click a diffraction hyperbola on the profile, apex first. "
-            "Right-click a point to remove it."
-        )
+        self.act_velocity.setToolTip(VELOCITY_TIP)
+        self.act_cut = self._toolbar_action("Cut", self._toggle_cut_tool)
+        self.act_cut.setCheckable(True)
+        self.act_cut.setToolTip(CUT_TIP)
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -375,9 +407,13 @@ class NsgeoPlugin:
         # concern that outlives any one dock widget and is torn down
         # outside-in in `unload()`, before `self.layers.detach()`.
         self.slice_layer = SliceLayer(self.layers)
+        self.cut_sections = CutSections(self.session, self.slices_dock)
+        self.profile_dock.set_cut_sections(self.cut_sections)
+        self.map_link.set_sections(self.cut_sections)
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
+        self.profile_dock.set_cube_zero_lookup(self.slices_dock.line_zero_in_cube)
         self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
@@ -415,6 +451,15 @@ class NsgeoPlugin:
         # (see _update_enabled), so it has to be re-evaluated when that
         # changes -- line_opened carries "" when there is none.
         self.session.line_opened.connect(self._update_enabled)
+
+        # Cut mode on the map follows QGIS's current layer (cut spec §4.3,
+        # plan call 10): the cuts layer current means "work on cuts". Synced
+        # when a site opens or closes too, since the layer objects are
+        # replaced then.
+        self.iface.currentLayerChanged.connect(self._on_current_layer_changed)
+        self.session.site_opened.connect(self._sync_cut_mode)
+        self.session.site_closed.connect(self._sync_cut_mode)
+        self.iface.mapCanvas().mapToolSet.connect(self._on_map_tool_set)
 
     def _tabify_slices_dock(self) -> None:
         """Tab Slices onto Processing, once, after QGIS has restored its
@@ -572,6 +617,12 @@ class NsgeoPlugin:
         # disconnecting what was never connected.
         with contextlib.suppress(Exception):
             self.iface.initializationCompleted.disconnect(self._tabify_slices_dock)
+        with contextlib.suppress(Exception):
+            self.iface.currentLayerChanged.disconnect(self._on_current_layer_changed)
+        with contextlib.suppress(Exception):
+            self.iface.mapCanvas().mapToolSet.disconnect(self._on_map_tool_set)
+        with contextlib.suppress(Exception):
+            self._drop_cut_tool()
         # Fix round 4, Finding 1: GridDialog is modeless (see
         # open_grid_dialog()), so -- unlike the old application-modal
         # exec() it replaced -- unload() can now run while one is still
@@ -642,6 +693,9 @@ class NsgeoPlugin:
             # The minimum-curvature refine worker before anything else
             # (interpolation spec §7, plan call 6): cancelled and joined, so
             # no solve is still running, or lands, once an engine is gone.
+            if self.cut_sections is not None:
+                self.cut_sections.dispose()
+                self.cut_sections = None
             self.slices_dock.refiner.shutdown()
             # M12: the site scope first -- its timers, This grid's move hook
             # and the `SiteEngine`, which cancels and waits out its own task
@@ -673,6 +727,7 @@ class NsgeoPlugin:
         self.act_import = None
         self.act_pick = None
         self.act_velocity = None
+        self.act_cut = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -737,9 +792,20 @@ class NsgeoPlugin:
                 if not has_line and self.act_pick.isChecked():
                     self.act_pick.setChecked(False)
                     self._toggle_pick_mode(False)
+            # Cut needs a site, not a line: it draws a new one (cut spec §4.1).
+            if self.act_cut is not None:
+                self.act_cut.setEnabled(is_open)
+                if not is_open and self.act_cut.isChecked():
+                    self.act_cut.setChecked(False)
+                    self._toggle_cut_tool(False)
+            # A fit needs a recorded line: a cut at a slant widens hyperbolas (cut spec §4.3).
+            can_fit = has_line and not is_cut_key(self.session.current_key or "")
             if self.act_velocity is not None:
-                self.act_velocity.setEnabled(has_line)
-                if not has_line and self.act_velocity.isChecked():
+                self.act_velocity.setEnabled(can_fit)
+                self.act_velocity.setToolTip(
+                    VELOCITY_ON_CUT_TIP if has_line and not can_fit else VELOCITY_TIP
+                )
+                if not can_fit and self.act_velocity.isChecked():
                     self.act_velocity.setChecked(False)
                     self._toggle_velocity_fit_mode(False)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
@@ -790,7 +856,9 @@ class NsgeoPlugin:
         if step is not self._gain_step:
             self._gain_generation += 1
         self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
-        self.profile_dock.show_gain_strip(step.params[name], self._gain_owner)
+        self.profile_dock.show_gain_strip(
+            step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
+        )
 
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
@@ -816,6 +884,11 @@ class NsgeoPlugin:
             self.slices_dock.reannounce_window()
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             self.message(f"could not redraw the slice band: {exc}", Qgis.MessageLevel.Warning)
+
+    @staticmethod
+    def _points_on_clock(points: list, from_zero_ns: float, to_zero_ns: float) -> list:
+        """`[time_ns, gain_db]` points with the times moved between clocks."""
+        return [[float(retime_ns(float(t), from_zero_ns, to_zero_ns)), float(g)] for t, g in points]
 
     def _on_gain_points(self, points: list) -> None:
         if self.session is None or self.processing_dock is None:
@@ -844,8 +917,21 @@ class NsgeoPlugin:
         name = self._curve_param_name(step)
         if name is None:
             return
-        params = dict(step.params)
-        params[name] = points
+        shown, input_zero = (
+            self.profile_dock.shown_zero_ns(),
+            self.profile_dock.step_input_zero_ns(row),
+        )
+        try:
+            # Compared on the shown clock: an unmoved handle writes nothing.
+            if [[float(a), float(b)] for a, b in points] == self._points_on_clock(
+                step.params[name], input_zero, shown
+            ):
+                return
+            params = dict(step.params)
+            params[name] = self._points_on_clock(points, shown, input_zero)
+        except (TypeError, ValueError) as exc:
+            self.message(f"bad gain curve points: {exc}", Qgis.MessageLevel.Warning)
+            return
         if step.params == params:
             # No actual change -- e.g. a plain click on a handle with no
             # movement, which GainStrip.mouseReleaseEvent still emits
@@ -976,6 +1062,7 @@ class NsgeoPlugin:
                 dock.view_settings(),
                 npz_path,
                 line_keys=engine.provenance().line_keys,
+                time_base=time_base_of(engine.provenance().steps),
             )
             cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
             self.session.record_cube(cube_id, record)
@@ -1665,6 +1752,145 @@ class NsgeoPlugin:
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not change the velocity mode: {exc}", Qgis.MessageLevel.Warning)
 
+    # ---- the Cut tool (cut spec §4.1, decision 11) --------------------------
+    def _toggle_cut_tool(self, checked: bool) -> None:
+        """The Cut toolbar toggle: on sets the map tool and makes the cuts
+        layer current (so the map works on cuts); off unsets the tool."""
+        try:
+            if self.layers is None or self.session is None:
+                return
+            if not checked:
+                self._drop_cut_tool()
+                return
+            if self._cut_tool is not None:
+                return
+            canvas = self.iface.mapCanvas()
+            tool = CutTool(canvas)
+            tool.drawn.connect(self._on_cut_drawn)
+            tool.failed.connect(self._on_cut_failed)
+            self._cut_tool = tool  # before setMapTool: _on_map_tool_set compares against it
+            canvas.setMapTool(tool)
+            # Esc and Enter reach the tool only through the canvas's key events.
+            canvas.setFocus()
+            self._say_pick(CUT_HINT_TEXT)
+            cuts = self.layers.layers.get("cuts")
+            if cuts is not None and not sip.isdeleted(cuts):
+                self.iface.setActiveLayer(cuts)
+        except Exception as exc:  # noqa: BLE001 -- a QAction.triggered slot
+            self.message(f"could not start the Cut tool: {exc}", Qgis.MessageLevel.Warning)
+
+    def _drop_cut_tool(self) -> None:
+        """Unset and release the Cut tool, if there is one. Safe to repeat."""
+        tool, self._cut_tool = self._cut_tool, None
+        if tool is None or sip.isdeleted(tool):
+            return
+        try:
+            canvas = self.iface.mapCanvas()
+            if not sip.isdeleted(canvas) and canvas.mapTool() is tool:
+                canvas.unsetMapTool(tool)
+        finally:
+            self._pop_pick_message()
+            tool.dispose()
+            tool.deleteLater()
+
+    def _on_map_tool_set(self, new_tool: Any, _old_tool: Any = None) -> None:
+        """Another map tool took the canvas: the Cut toggle follows."""
+        try:
+            if self._cut_tool is None or new_tool is self._cut_tool:
+                return
+            if self.act_cut is not None:
+                self.act_cut.setChecked(False)
+            self._drop_cut_tool()
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the map tool: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_cut_failed(self, reason: str) -> None:
+        self.message(f"drawing a cut failed: {reason}", Qgis.MessageLevel.Critical)
+
+    def _cut_grid_and_vertices(self, points: Sequence[QgsPointXY]) -> tuple[str, list[Any]] | None:
+        """The grid the FIRST point is inside (the first in survey order when
+        several are), and all the points as that grid's metres; None when the
+        first point is in no grid (cut spec call 6).
+
+        Only the first point chooses the grid; the rest are transformed after,
+        so a later point that will not transform cannot pass over the grid the
+        first click is in (that raises, and the caller says so). Points are in
+        the canvas CRS, the grid's metres are in the grid's own CRS.
+        """
+        assert self.session is not None and self.layers is not None
+        site = self.session.site
+        assert site is not None
+        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        first = points[0]
+        for grid in site.grids:
+            try:
+                transform = crs_transform(
+                    canvas_crs, QgsCoordinateReferenceSystem(grid.crs), self.layers.project
+                )
+                head = transform.transform(first) if transform else first
+            except (RuntimeError, QgsCsException):
+                continue  # this grid's CRS cannot be reached from the click: it is not in this grid
+            x, y = grid.to_local(np.array([[head.x(), head.y()]], dtype=float))[0]
+            if not (0.0 <= x <= grid.size_x and 0.0 <= y <= grid.size_y):
+                continue
+            try:
+                mapped = [transform.transform(p) if transform else p for p in points]
+            except QgsCsException as exc:
+                raise RuntimeError(
+                    f"part of the path cannot be placed on {grid.id}'s coordinate system: {exc}"
+                ) from exc
+            world = np.array([(q.x(), q.y()) for q in mapped], dtype=float)
+            return grid.id, [(float(a), float(b)) for a, b in grid.to_local(world)]
+        return None
+
+    def _on_cut_drawn(self, points: list[QgsPointXY]) -> None:
+        """A finished path: add the cut to the first grid its first point is
+        in, and open it. The tool stays on for the next one."""
+        try:
+            if self.session is None or not self.session.is_open:
+                return
+            found = self._cut_grid_and_vertices(points)
+            if found is None:
+                self.message(OUTSIDE_TEXT, Qgis.MessageLevel.Warning)
+                return
+            grid_id, vertices = found
+            try:
+                key = self.session.add_cut(grid_id, vertices)
+            except ValueError:
+                self.message(TOO_FEW_TEXT, Qgis.MessageLevel.Warning)
+                return
+            self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not add the cut: {exc}", Qgis.MessageLevel.Critical)
+
+    # ---- the current layer (plan call 10) -----------------------------------
+    def _on_current_layer_changed(self, layer: Any) -> None:
+        try:
+            self._set_cut_mode_for(layer)
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the current layer: {exc}", Qgis.MessageLevel.Warning)
+
+    def _sync_cut_mode(self, *_: Any) -> None:
+        try:
+            self._set_cut_mode_for(self.iface.activeLayer())
+        except Exception as exc:  # noqa: BLE001 -- a signal slot: see the module docstring
+            self.message(f"could not follow the current layer: {exc}", Qgis.MessageLevel.Warning)
+
+    def _set_cut_mode_for(self, layer: Any) -> None:
+        """Cut mode is on exactly while the cuts layer is current. Layer ids
+        are compared, not objects: a CRS rebuild replaces the layer object."""
+        if self.map_link is None or self.layers is None or self.session is None:
+            return
+        cuts = self.layers.layers.get("cuts")
+        on = (
+            self.session.is_open
+            and layer is not None
+            and cuts is not None
+            and not sip.isdeleted(cuts)
+            and layer.id() == cuts.id()
+        )
+        self.map_link.set_cut_mode(bool(on))
+
     def _on_pick_requested(self, key: str, trace: int, time_ns: float) -> None:
         """Relay a pick from the profile to the session.
 
@@ -1680,9 +1906,28 @@ class NsgeoPlugin:
         try:
             if self.session is None:
                 return
-            self.session.add_pick(key, trace, time_ns)
+            if is_cut_key(key):
+                self._add_cut_pick(key, trace, time_ns)
+            else:
+                dock = self.profile_dock
+                shown = 0.0 if dock is None else dock.shown_zero_ns()
+                self.session.add_pick(key, trace, time_ns, zero_ns=shown)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
+
+    def _add_cut_pick(self, key: str, column: int, time_ns: float) -> None:
+        """A pick on the open cut: its distance and provenance come from the
+        section on screen (cut spec §4.5). No section means no column to
+        click, so the reason it has none goes on the message bar."""
+        assert self.session is not None
+        section = None if self.profile_dock is None else self.profile_dock.shown_cut_section(key)
+        if section is None:
+            raise RuntimeError("the profile shows no section for this cut, so there is no column")
+        distances = section.columns.distance_m
+        index = max(0, min(int(column), distances.size - 1))
+        self.session.add_cut_pick(
+            key, index, float(distances[index]), time_ns, section.provenance_json
+        )
 
     def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
         """Tell the user something through the message bar, and log it too

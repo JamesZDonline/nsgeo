@@ -69,8 +69,9 @@ class RefineJob(Protocol):
 
 
 class Refiner:
-    def __init__(self, parent: QObject) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=THREAD_NAME_PREFIX)
+    def __init__(self, parent: QObject, *, thread_name_prefix: str = THREAD_NAME_PREFIX) -> None:
+        # A cut's solve has a worker of its own, named apart (cut spec §4.7).
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=thread_name_prefix)
         self._done: queue.SimpleQueue = queue.SimpleQueue()
         self._generation = 0
         self._stop = threading.Event()

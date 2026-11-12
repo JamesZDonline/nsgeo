@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import retime_ns, sets_time_zero
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
@@ -92,6 +93,7 @@ from nsgeo_qgis.slices_plan import (
     estimate_memory,
     format_bytes,
     frame_cells,
+    old_cube_note,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
@@ -361,6 +363,11 @@ class SlicesDock(QgsDockWidget):
         #: `_on_prepared` fires and applies a palette that restore no
         #: longer has anything to do with.
         self._pending_palette: str | None = None
+        #: A restored record from before the time-zero clock, whose preset now
+        #: sets one: `_on_prepared` moves its z range by the median zero and
+        #: says so. Consumed by every `_on_prepared` (which also covers a preparation
+        #: with failed lines), and cleared by a manual source change.
+        self._pending_z_shift = False
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -828,6 +835,8 @@ class SlicesDock(QgsDockWidget):
         for why one was rejected.
         """
         try:
+            # A restore's owed shift belongs to the site it was made in.
+            self._pending_z_shift = False
             self._updating += 1
             try:
                 site = self.session.site
@@ -1272,6 +1281,7 @@ class SlicesDock(QgsDockWidget):
         # `_on_source_changed` rather than leaving `_on_prepared` to apply
         # a palette this choice has nothing to do with.
         self._pending_palette = None
+        self._pending_z_shift = False
         self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
@@ -1449,6 +1459,7 @@ class SlicesDock(QgsDockWidget):
             # inherit a palette a still-preparing `restore_cube` owes a
             # DIFFERENT preparation.
             self._pending_palette = None
+            self._pending_z_shift = False
             self._mark_cube_unsaved()
             self._sync_included()
             self._remember_source()
@@ -1541,6 +1552,60 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
+    def _shift_z_by_median_zero(self) -> bool:
+        """Move both z spins to the time-zero clock for a restored old record.
+
+        The record's range was on the radar clock; `retime_ns(t, 0.0, median)`
+        puts a time on the clock of a line whose zero is `median` (the
+        median of the prepared lines' zeros). With nothing prepared there is
+        no median, so nothing moves and nothing is said. Signal-blocked
+        writes, as `_clamp_z_to_prepared` does, so the caller must push the
+        result at the engine (`_apply_resolution`) when this returns True."""
+        median = self.engine.median_zero()
+        if median is None:
+            return False
+        self._updating += 1
+        try:
+            for spin in (self.z0_spin, self.z1_spin):
+                spin.blockSignals(True)
+                try:
+                    spin.setValue(retime_ns(spin.value(), 0.0, median))
+                finally:
+                    spin.blockSignals(False)
+        finally:
+            self._updating -= 1
+        # The grid remembers the shifted range, not the record's radar-clock
+        # one (the spins were written with signals blocked, so nothing else
+        # would re-remember it). Remembered before the caller's clamp, as
+        # every restore remembers its record's range: the clamp is no edit
+        # (see `_clamp_z_to_prepared`), so the shown end may sit inside it.
+        grid_id = self._last_grid_id
+        if grid_id is not None:
+            self.session.remember_slice_resolution(
+                grid_id, t0_ns=self.z0_spin.value(), t1_ns=self.z1_spin.value()
+            )
+        self.error.emit(old_cube_note(-median))
+        return True
+
+    def _apply_owed_z_shift(self) -> None:
+        """After a `prepare()` that dispatched nothing: apply a shift a restore owes.
+
+        A preparation that IS running consumes the flag in `_on_prepared`
+        instead, so the shift lands exactly once either way."""
+        if self.engine.is_running or not self._pending_z_shift:
+            return
+        self._pending_z_shift = False
+        self._shift_z_by_median_zero()
+        # The shifted end can run past the new prepared bound (lines whose
+        # zeros differ by a sample); clamp as `_on_prepared` does, then push.
+        self._clamp_z_to_prepared()
+        self._apply_resolution()
+
+    def line_zero_in_cube(self, key: str) -> float | None:
+        """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
+        engine = self.site_engine if self._scope == "site" else self.engine
+        return engine.line_zero(key)
+
     def _clamp_z_to_prepared(self) -> bool:
         """Pull `z0`/`z1` inside the range every PREPARED line covers.
 
@@ -1551,9 +1616,11 @@ class SlicesDock(QgsDockWidget):
         DZT header, which is the best estimate available before a
         preparation has run but is only right for a preset that leaves the
         sample axis alone. `time_zero` -- first in the ordinary preset,
-        not an exotic one -- crops rows off the FRONT, and on this repo's
+        not an exotic one -- crops rows off the FRONT (and relabels
+        the axis so the row it lands on reads 0 ns), and on this repo's
         own real files drops 49 of 512, moving the start from -11.086 ns
-        to -0.476 while the header still says -11.086. The cube then asked
+        to the prepared lines' own, much later start while the header
+        still says -11.086. The cube then asked
         for 10.6 ns of two-way time that no prepared line has, and the
         first slice raised `CoverageError` naming the line. Correcting it
         here, against `engine.prepared_z_bounds()`, is the only point
@@ -1609,10 +1676,14 @@ class SlicesDock(QgsDockWidget):
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
+            # Consumed only on This grid: a switch to Whole site within the
+            # preparation window leaves the flag for This grid's preparation.
+            owed_shift, self._pending_z_shift = self._pending_z_shift, False
+            shifted = self._shift_z_by_median_zero() if owed_shift else False
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
-            clamped = self._clamp_z_to_prepared()
+            clamped = self._clamp_z_to_prepared() or shifted or owed_shift
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
@@ -1920,6 +1991,9 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
+                self._pending_z_shift = recipe.time_base is None and sets_time_zero(
+                    self.session.site.presets.get(recipe.choice.preset, [])
+                )
                 # A line moved to another grid since the cube was saved is left
                 # out: its key still names a line, but it is no longer this
                 # grid's, and `set_source` would refuse it anyway (line
@@ -1983,7 +2057,12 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
-            self.flush_debounce()
+            if self._pending_z_shift:
+                # An old record's range is still on the radar clock: nothing
+                # is pushed at the engine until the shift has been applied.
+                self._debounce.stop()
+            else:
+                self.flush_debounce()
             self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
@@ -1997,6 +2076,12 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
+                # No preparation is coming. If the engine already holds this
+                # source (the usual case: the restored source was the
+                # remembered one), the shift is applied here; a preparation
+                # still owed (R-P5) keeps the flag for its `_on_prepared`.
+                if not self._grid_prepare_pending:
+                    self._apply_owed_z_shift()
             if moved:
                 labels = ", ".join(
                     self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
@@ -2665,8 +2750,10 @@ class SlicesDock(QgsDockWidget):
         have no way to ask. The profile band is the case that needs it:
         it is a property of the slice -- one window, identical on every
         line -- but it lives in per-line view state that
-        `ProfileView.clear()` resets, and `window_changed` only fires
-        when the window CHANGES, which it has not. Walkthrough round 2,
+        `ProfileView.clear()` resets, and the view has no way to ask for it
+        again. (`window_changed` fires on every slice refresh, site redraw and
+        this call, whether or not the window moved, so listeners must compare
+        what they are given.) Walkthrough round 2,
         W8: once the view had been cleared, every line opened afterwards
         showed no band until the slider was nudged.
 
@@ -3032,6 +3119,7 @@ class SlicesDock(QgsDockWidget):
         remembered one, else the first (`site_scope.default_preset`), not
         whatever This grid's preset combo showed for the grid it left."""
         self._pending_palette = None  # a source change, not a restore
+        self._pending_z_shift = False
         self._updating += 1
         try:
             self.grid_combo.setCurrentText(grid_id)
@@ -3128,6 +3216,7 @@ class SlicesDock(QgsDockWidget):
                 # grid opened from the site list (#70) still holds the left
                 # grid's, whatever the spins' own change signals did.
                 self._apply_resolution()
+            self._apply_owed_z_shift()  # a restore made while this was owed
             self._sync_grid_slider()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not prepare the slice source: {exc}")

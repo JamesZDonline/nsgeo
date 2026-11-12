@@ -1,8 +1,8 @@
 """Time cutoff: hide every sample at or after a two-way time.
 
 The late-time counterpart of time-zero. Time-zero crops the top of the record
-and moves `t0_ns`; this crops the bottom and leaves `t0_ns` alone, because the
-first kept sample is still the first sample.
+and relabels the clock so its row reads 0 ns; this crops the bottom and leaves
+`t0_ns` alone, because the first kept sample is still the first sample.
 """
 
 from __future__ import annotations

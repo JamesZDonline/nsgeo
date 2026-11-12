@@ -38,10 +38,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid
+from nsgeo.destagger import EnvelopeBins
+from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -59,6 +60,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.destagger_job import JobLine, MeasureJob, box_value, measure_summary
 from nsgeo_qgis.line_edit import (
     SAME_M,
     EditOutcome,
@@ -69,6 +71,7 @@ from nsgeo_qgis.line_edit import (
     span_m,
     width_across,
 )
+from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.session import SiteSession
 
 (
@@ -111,9 +114,35 @@ DESTAGGER_TIP = (
     "travel, kept apart from Start. If features on lines walked one way sit "
     "behind the same features on lines walked the other way, increase it."
 )
+MEASURE_TIP = (
+    "Works out the destagger from the grid's own data: every line on the grid is "
+    "compared with its neighbours walked the other way, over the whole record, "
+    "whatever is selected. The selection only chooses which rows get filled: the "
+    "Destagger box gets the grid's value and each selected row its line's value. "
+    "Nothing changes until OK."
+)
+MEASURE_PROGRESS_MS = 200
+MEASURE_STOPPED = "Measure stopped. Nothing was changed."
+MEASURE_DISCARDED = (
+    "The table changed while measuring, so the results were not used. Press Measure again."
+)
+MEASURE_SITE_CHANGED = "The site changed while measuring, so the results were not used."
+MEASURE_NO_TARGETS = "Select the lines to fill, then press Measure."
 # The background of every cell whose field differs from the placement the
 # table saw, so a change is visible before OK.
 CHANGED = QColor(255, 236, 179)
+
+
+@dataclasses.dataclass
+class _MeasureRun:
+    """What Measure captured on the GUI thread when it was pressed."""
+
+    site: object
+    snapshot: dict[str, GridPlacement]
+    targets: list[str]
+    labels: dict[str, str]
+    job: MeasureJob
+    paths: dict[str, str]  # row key -> resolved file path, the cache's key
 
 
 class EditLinesDialog(QDialog):
@@ -138,6 +167,12 @@ class EditLinesDialog(QDialog):
         self._per_metre: dict[str, float] = {}
         self._picks: dict[str, int] = {}
         self._grid_ids: list[str] = []
+        # Measure (#159): created before the first _refresh, which reads `busy`.
+        self._measurer = Refiner(self)
+        self._bins: dict[str, EnvelopeBins] = {}
+        self._run: _MeasureRun | None = None
+        self._progress = QTimer(self)
+        self._progress.timeout.connect(self._show_progress)
         try:
             self._grid_ids = [g.id for g in session.site.grids] if session.site else []
             for key in session.keys_on_grid(grid_id):
@@ -242,6 +277,10 @@ class EditLinesDialog(QDialog):
         destagger_row.addWidget(destagger_label)
         destagger_row.addWidget(self.destagger_spin)
         destagger_row.addWidget(self.set_destagger_button)
+        self.measure_button = QPushButton("Measure")
+        self.measure_button.setToolTip(MEASURE_TIP)
+        self.measure_button.clicked.connect(self.measure)
+        destagger_row.addWidget(self.measure_button)
         destagger_row.addStretch(1)
         bulk.addLayout(destagger_row)
         offset_row = QHBoxLayout()
@@ -272,6 +311,7 @@ class EditLinesDialog(QDialog):
         layout.addWidget(self.bulk)
 
         self.status = QLabel("")
+        self.status.setWordWrap(True)  # a long summary wraps, not widens the dialog
         layout.addWidget(self.status)
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -354,13 +394,18 @@ class EditLinesDialog(QDialog):
                 )
         self._selection_changed()
 
+    def _say(self, text: str, tooltip: str = "") -> None:
+        """The status line; its tooltip is the full text when the line is capped."""
+        self.status.setText(text)
+        self.status.setToolTip(tooltip)
+
     def _failed(self, exc: Exception) -> None:
         """The last-resort report of a slot: the specific handlers give the
         good messages, this one makes sure nothing is swallowed silently."""
         message = f"unexpected error in Edit lines: {exc}"
         QgsMessageLog.logMessage(message, "nsgeo", Qgis.MessageLevel.Critical)
         with contextlib.suppress(Exception):  # a dying widget must not raise from here
-            self.status.setText(message)
+            self._say(message)
 
     def _selection_changed(self) -> None:
         try:
@@ -372,7 +417,9 @@ class EditLinesDialog(QDialog):
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
         self.bulk.setTitle(f"Change the {len(sel)} selected line{'s' if len(sel) != 1 else ''}")
-        self.bulk.setEnabled(bool(sel))
+        # P8: Stop stays reachable with nothing selected while a measure runs.
+        self.bulk.setEnabled(bool(sel) or self._measurer.busy)
+        self.measure_button.setText("Stop" if self._measurer.busy else "Measure")
         self.up_button.setEnabled(bool(rows) and min(rows) > 0)
         self.down_button.setEnabled(bool(rows) and max(rows) < len(self._order) - 1)
 
@@ -387,7 +434,7 @@ class EditLinesDialog(QDialog):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = change(self._live(edit, frames), frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -395,7 +442,7 @@ class EditLinesDialog(QDialog):
         self._refresh("; ".join(dropped) if dropped else None)
 
     def _drop_note(self, key: str, edit: LineEdit) -> str:
-        label = edit.label or edit.seen.label or Path(key).stem
+        label = self._label_of(key)
         return f"grid {edit.grid_id!r} no longer exists; {label} stays on {edit.seen.grid_id}"
 
     def set_start(self, value: float) -> None:
@@ -420,7 +467,7 @@ class EditLinesDialog(QDialog):
                 span = span_m(self._traces[key], self._per_metre[key])
                 if not span > 0:  # also catches a NaN from a corrupt header
                     skipped.append(
-                        f"{edit.label or edit.seen.label or Path(key).stem} has no "
+                        f"{self._label_of(key)} has no "
                         "recorded length to fit, so it was left as it is"
                     )
                     continue
@@ -428,7 +475,7 @@ class EditLinesDialog(QDialog):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = self._live(edit, frames).fitted(span)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -466,6 +513,149 @@ class EditLinesDialog(QDialog):
         self._refresh()
         self.select_keys(sel)
 
+    # ---- measure ----------------------------------------------------------------
+    def measure(self) -> None:
+        """Start a measure, or stop the one that is running."""
+        try:
+            self._measure()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _measure(self) -> None:
+        if self._measurer.busy:
+            self._measurer.cancel()
+            self._progress.stop()
+            self._run = None
+            self._update_panel()
+            self._say(MEASURE_STOPPED)
+            return
+        problem = self._site_problem()  # the check OK makes, so a stale table refuses too
+        if problem:
+            self._say(problem)
+            return
+        targets = self.selected_keys()
+        if not targets:
+            self._say(MEASURE_NO_TARGETS)
+            return
+        try:
+            frames = self._frames()
+            site = self.session.site
+            snapshot = self._measure_snapshot(frames)
+            lines = []
+            for key, placement in snapshot.items():
+                line = self.session.line_for_key(key)
+                lines.append(JobLine(key, self._label_of(key), line.path, line.header, placement))
+        except (KeyError, ProjectError) as exc:
+            self._say(self._unavailable(exc))
+            return
+        targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
+        if not targets:  # every selected row now sits on another grid: nothing to fill
+            self._say(MEASURE_NO_TARGETS)
+            return
+        labels = {k: self._label_of(k) for k in self._order}
+        # Cached by the file, not the row key: keys repeat from site to site.
+        paths = {ln.key: str(ln.path.resolve()) for ln in lines}
+        cached = {k: self._bins[p] for k, p in paths.items() if p in self._bins}
+        job = MeasureJob(lines, cached)
+        self._run = run = _MeasureRun(site, snapshot, targets, labels, job, paths)
+        self._measurer.start(
+            [job],
+            lambda landed: self._measure_landed(run, landed),
+            lambda message: self._measure_error(run, message),
+        )
+        self._update_panel()
+        self._show_progress()
+        self._progress.start(MEASURE_PROGRESS_MS)
+
+    def _label_of(self, key: str) -> str:
+        edit = self._edits[key]
+        return edit.label or edit.seen.label or Path(key).stem
+
+    def _measure_snapshot(self, frames: Mapping[str, Grid]) -> dict[str, GridPlacement]:
+        """Every row still on this grid, as the table would place it, without
+        the fields a measure ignores or an edit of which must not discard it."""
+        out: dict[str, GridPlacement] = {}
+        for key in self._order:
+            placed = self._live(self._edits[key], frames).placed(frames)
+            if placed.grid_id == self.grid_id:
+                out[key] = dataclasses.replace(placed, travel_shift=0.0, label=None)
+        return out
+
+    def _show_progress(self) -> None:
+        try:
+            run = self._run
+            if run is None or not self._measurer.busy:
+                self._progress.stop()
+                return
+            done, total = run.job.progress
+            if done < total:
+                self._say(f"Measuring… read {done} of {total} lines")
+            else:
+                self._say("Measuring… comparing lines")
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _measure_error(self, run: _MeasureRun, message: str) -> None:
+        try:
+            self._progress.stop()
+            self._run = None
+            self._update_panel()
+            self._say(f"Could not measure: {message}. Nothing was changed.")
+        except Exception as exc:  # noqa: BLE001 -- a callback must not raise
+            self._failed(exc)
+
+    def _measure_landed(self, run: _MeasureRun, job: object) -> None:
+        try:
+            self._progress.stop()
+            self._run = None
+            self._land(run)
+        except Exception as exc:  # noqa: BLE001 -- a callback must not raise
+            self._failed(exc)
+
+    def _land(self, run: _MeasureRun) -> None:
+        job = run.job
+        for key, bins in job.prepared.items():  # whatever happens next, the reads are kept (C8)
+            self._bins[run.paths[key]] = bins
+        self._update_panel()
+        if job.stopped or job.result is None:
+            self._say(MEASURE_STOPPED)
+            return
+        if self.session.site is not run.site:
+            self._say(MEASURE_SITE_CHANGED)
+            return
+        try:
+            frames = self._frames()
+            now = self._measure_snapshot(frames)
+        except (KeyError, ProjectError) as exc:
+            self._say(self._unavailable(exc))
+            return
+        if now != run.snapshot:
+            self._refresh(MEASURE_DISCARDED)
+            return
+        result = job.result
+        for key in run.targets:
+            value = result.lines[key].destagger if key in result.lines else None
+            if value is not None:
+                edit = self._live(self._edits[key], frames)
+                self._edits[key] = dataclasses.replace(edit, travel_shift=round(value, 3))
+        box = box_value(result)
+        if box is not None:
+            self.destagger_spin.setValue(round(box, 3))
+        summary = measure_summary(result, run.targets, job.unreadable, run.labels)
+        self._refresh(summary)
+        # The visible line names at most six per group; the tooltip names them all.
+        full = measure_summary(result, run.targets, job.unreadable, run.labels, limit=None)
+        self.status.setToolTip(full if full != summary else "")
+
+    def done(self, r: int) -> None:
+        # Joins the worker, so nothing lands in a closed dialog and no thread outlives it.
+        try:
+            self._progress.stop()
+            self._measurer.shutdown()
+        except Exception as exc:  # noqa: BLE001 -- closing must not raise
+            self._failed(exc)
+        super().done(r)
+
     # ---- table ------------------------------------------------------------------
     def _refresh(self, note: str | None = None) -> None:
         """Redraw every row and the status line from the edits. `note`, when
@@ -491,14 +681,14 @@ class EditLinesDialog(QDialog):
             self._render(frames, grid)
             n, m = self._counts(frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         if note is not None:
-            self.status.setText(note)
+            self._say(note)
         elif n == 0:
-            self.status.setText("")
+            self._say("")
         else:
-            self.status.setText(
+            self._say(
                 f"{n} line{'s' if n != 1 else ''} changed · "
                 f"{m} pick{'s' if m != 1 else ''} will move with {'them' if n != 1 else 'it'}"
             )
@@ -599,7 +789,7 @@ class EditLinesDialog(QDialog):
             else:
                 self._edits[key] = edit.moved_to(text, frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -672,7 +862,7 @@ class EditLinesDialog(QDialog):
                     edit = edit.flipped(frames)
             self._edits[key] = edit
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -690,25 +880,29 @@ class EditLinesDialog(QDialog):
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
 
-    def _accept(self) -> None:
+    def _site_problem(self) -> str | None:
+        """Why this table can no longer act on the open site, or None."""
         if not self.session.is_open:
-            self.status.setText("no site is open; nothing was changed")
-            return
+            return "no site is open; nothing was changed"
         if self.session.json_path != self._opened_against:
-            self.status.setText(
-                "a different site was opened while the table was open; nothing was changed"
-            )
+            return "a different site was opened while the table was open; nothing was changed"
+        return None
+
+    def _accept(self) -> None:
+        problem = self._site_problem()
+        if problem:
+            self._say(problem)
             return
         try:
             self._grid()
         except KeyError:
-            self.status.setText(f"grid {self.grid_id!r} no longer exists; nothing was changed")
+            self._say(f"grid {self.grid_id!r} no longer exists; nothing was changed")
             return
         try:
             frames = self._frames()
             edits: list[Any] = [e for e in self._edits.values() if self._changes(e, frames)]
             self.outcome = self.session.edit_lines(edits, grid_id=self.grid_id, order=self.keys())
         except (KeyError, ValueError, ProjectError) as exc:
-            self.status.setText(str(exc))
+            self._say(str(exc))
             return
         super().accept()

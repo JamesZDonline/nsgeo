@@ -93,10 +93,11 @@ stay exactly where they are.
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
+| **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…** and **Import DZT…** stay greyed out until a site is
-open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
+site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -350,6 +351,19 @@ stagger itself, so the destagger a grid needs can change sign once its lines
 are fitted. On one real grid, unfitted lines looked best at +0.15 m and the
 same lines fitted at −0.15 m.
 
+**Measure** works the amount out from the data instead. Select the lines to fill
+and press it. Whatever is selected, it compares every line on the grid with its
+neighbours walked the other way, over the whole record: a line is judged against
+the lines beside it, and the grid's value is steadier from all of them. The
+selection only chooses which rows get filled. The first press reads every line,
+about 10 seconds for 60 lines; the dialog keeps what it read, so pressing again is
+quick. The grid's value goes in the Destagger box, and each selected row
+gets its own line's value (a line that changes partway along, or matches nothing,
+gets the grid's value and is named on the status line). Nothing changes until you
+press OK, and the numbers are a starting point: look at the lines, then adjust.
+Lines Measure cannot use are left as they were and named in the status, with the
+reason. While it runs the button reads **Stop**, and pressing it changes nothing.
+
 ### Step 4: Open a line and use the map
 
 Click a line in **nsgeo Survey**, or select it on the map with QGIS's select tool
@@ -576,7 +590,68 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    stretch and smooth drawing when zoomed in. Other GIS software, ArcGIS and
    the rest, reads the values but chooses its own colours.
 
-### Step 8: Save, and next time
+### Step 8: Draw a cut
+
+A line you recorded shows what the radar saw along that one path. A **cut** is
+a line you draw yourself, anywhere on a grid. The profile then shows the
+vertical section beneath it, read from the same volume as the slices. Use it to
+follow a feature across the lines you recorded, or to see a slice's reflection
+from the side.
+
+1. Show the grid in the **nsgeo Slices** panel first (Step 7). A cut reads the
+   panel's volume, and uses the panel's **Interpolation** settings and
+   **Palette**, so it looks like the slice, cut another way. Until the grid is
+   shown the profile tells you which grid to show.
+2. Turn on **Cut** in the toolbar. Click inside a grid to start, click to add
+   points, and right-click or press Enter to finish. Backspace removes the last
+   point, and Esc cancels. The cut goes on the grid you first clicked in. It
+   appears in the **cuts** layer on the map, and under its grid in **nsgeo
+   Survey**, where a right-click renames or deletes it.
+3. The profile opens it. Its title reads **nsgeo Profile · cut:**, followed by
+   the name, the grid and the length. The distance along the cut runs left to
+   right from where you started. The depth axis is the grid's. The pale blue
+   band shows the slice you are looking at in **nsgeo Slices**, so you can see
+   which reflection a slice is made from. Blank stretches are places the cut
+   passes outside the grid, or farther than the **Max distance to data** from
+   any line.
+
+If the grid is being prepared again, the profile says so and redraws the cut
+when it is ready. A grid whose volume is too large to hold in memory cannot be
+cut: use a coarser cell or a shorter depth range in **nsgeo Slices**.
+
+With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first,
+and the title says so: *Kriging preview · minimum curvature n of N depths*,
+where N is how many depths the section has and n how many are finished so far.
+The finished section replaces it a depth at a time, starting at the slice you
+are looking at, and the title then reads *Minimum curvature*. It can take up to
+a minute or two for a long cut at a fine cell, and longer when **Max distance
+to data** is more than half the line spacing, because each depth
+is then solved over the whole grid. Move the slice window and the work turns to
+the new depth once the window has rested. Change a setting while it works and
+it starts again; changing the palette or renaming the cut does not. Only the
+cut you have opened is finished: hovering another one shows its kriging
+preview.
+
+The map works on cuts while the **cuts** layer is the current layer, and on
+lines otherwise. With **cuts** current, moving the pointer along a cut moves the
+profile cursor, and hovering a cut previews it. Selecting a cut with QGIS's
+Select tool opens it, and so does clicking its name in **nsgeo Survey**. Choose
+another layer, and the map goes back to following your recorded lines.
+
+**Pick** works on a cut as it does on a line: click the profile, and the pick
+lands on the cut's path on the map. A pick on a cut records its distance along
+the cut and its time, with a note of how the section was made. If you pick while
+the section is still the kriging preview, the pick says so. Picks on a cut use
+the grid's velocity, or its first line's if the grid has none, and a cut is not
+processed: the steps in **nsgeo Processing** belong to recorded lines.
+
+A cut's times are on the clock of the volume it was cut from. If you turn the
+preset's **Time zero** step on or off after making picks on a cut, those picks
+no longer fit the new section, so the profile leaves them out and its title
+counts them (*1 picks on another clock*). They stay on the map and in the picks
+table, and they come back when you turn the setting back.
+
+### Step 9: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
@@ -590,14 +665,14 @@ Everything for a site lives in its site folder:
 
 | In the site folder | What it holds |
 |---|---|
-| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **marks** and **picks**. |
+| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | your DZT files | Read by nsgeo, never changed. |
 
-**Picks are different from everything else.** nsgeo redraws the grids, lines and
-marks layers from `survey.nsgeo.json` and your DZT and DZX files whenever it
-needs to, so those layers are read-only. The **picks** layer is your own work,
+**Picks are different from everything else.** nsgeo redraws the grids, lines,
+cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
+whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
 
@@ -608,6 +683,18 @@ A few things to know:
   only on a computer where that path exists.
 - **A pick follows its line.** Editing a grid or a line moves its picks too, and
   dragging a pick on the map does not move it.
+- **A cut follows its grid.** Move or turn a grid and its cuts move with it, and
+  so do the picks on them. If you make a grid smaller, a cut that runs past its
+  edge stays, and shows blank where it is outside.
+- **A pick on a deleted cut stays on the map.** Deleting a cut never deletes its
+  picks, so they remain in the **picks** layer, where you can see them and
+  remove them yourself. The pick's note still says which cut it was made on.
+  Removing a grid deletes its cuts too, and asks first.
+- **A site with cuts does not open in nsgeo 0.3.0 or earlier.** Those versions
+  would drop the cuts the next time you saved, so they refuse to open it. They
+  say the site's file declares schema version 2, but that they read version 1.
+  A site with no cuts still opens in them. Update nsgeo on every computer that
+  opens the site.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the

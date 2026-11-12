@@ -541,10 +541,11 @@ def test_a_grid_that_cannot_be_prepared_is_failed_and_the_rest_continue(site3, m
 
 
 def test_a_grid_outside_the_window_is_nodata_and_named(site3_factory, make_site):
-    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    # 128 samples: C's lines end near 18.84 ns, measured from each first break
+    site3 = site3_factory(samples={"C": 128})
     site, errors = prepared(make_site, site3)
     assert (site.site_z.t0_ns, site.site_z.t_end_ns) == (2.0, 60.0)
-    assert site.engine_for("C").z.t_end_ns < 17.0
+    assert site.engine_for("C").z.t_end_ns < 19.0
 
     deep = site.slice_at(30.0, 2.0, **TICK)
     assert deep.windows["C"] is None
@@ -563,11 +564,11 @@ def test_a_grid_overlapping_the_site_by_one_level_is_absent_not_an_error(site3_f
     """R-P3: `Resolution` needs t1 > t0, so a one-level grid axis would
     raise if handed to the engine. Such a grid has no resolution and is
     absent at every window."""
-    site3 = site3_factory(samples={"C": 128})  # C ends at ~16.4 ns
-    one_level = Resolution(cell=0.25, dz_ns=0.5, t0_ns=16.0, t1_ns=60.0)
+    site3 = site3_factory(samples={"C": 128})  # C ends at ~18.84 ns (first break = 0)
+    one_level = Resolution(cell=0.25, dz_ns=0.5, t0_ns=18.5, t1_ns=60.0)
     site, errors = prepared(make_site, site3, resolution=one_level)
     assert site.engine_for("C").z is None
-    drawn = site.slice_at(16.0, 1.0, **TICK)
+    drawn = site.slice_at(18.5, 1.0, **TICK)
     assert drawn.windows["C"] is None
     assert drawn.windows["A"] is not None
     assert errors == [], errors
@@ -800,7 +801,8 @@ def test_the_site_stretch_solves_cover_what_its_shared_limit_measures(site3_fact
     never a grid's own `limit_windows` (C's axis ends early here, so the two
     differ); until they land the stretch is the provisional one over their
     previews, and once they have, the final one, equal to `shared_limit`."""
-    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    # 128 samples: C's lines end near 18.84 ns, measured from each first break
+    site3 = site3_factory(samples={"C": 128})
     site, _ = prepared(make_site, site3)
     clip = UnipolarClip()
     tick = {"finish": MC, "method": "background", "manual": {"A": 1.5}}
@@ -854,7 +856,8 @@ def test_a_grid_with_no_window_at_a_tick_is_not_a_rebuild_there(site3_factory, m
     never builds weights for it. Asked for that window, `weights_cached`
     leaves it out: counted, it made every tick look like a rebuild, so the
     wait cursor showed on each and a running refine was cancelled by each."""
-    site3 = site3_factory(samples={"C": 128})  # C's lines end near 16.4 ns
+    # 128 samples: C's lines end near 18.84 ns, measured from each first break
+    site3 = site3_factory(samples={"C": 128})
     site, _ = prepared(make_site, site3)
     deep, shallow = (40.0, 5.0), (5.0, 2.0)
     assert site.slice_at(*deep, **TICK).windows["C"] is None
