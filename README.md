@@ -143,7 +143,9 @@ Grouped by area. The order within a group is not a priority.
   alone or the max distance is large ([#147]); lines processed differently in
   one cube, such as migration at each line's own velocity ([#178]); the scroll
   wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
-  ([#177]); whole site at fine cells, the follow-ups: coverage edge lines on
+  ([#177]); colour a slice with QGIS's own symbology: a colour ramp, a typed
+  min/max or a cumulative cut, which M19's magnetometer maps will reuse
+  ([#180]); whole site at fine cells, the follow-ups: coverage edge lines on
   coarse previews, averaged previews, a memory estimate for This grid, refusals
   that stay on screen, and where the preview note sits ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
@@ -191,6 +193,7 @@ Grouped by area. The order within a group is not a priority.
 [#176]: https://github.com/JamesZDonline/nsgeo/issues/176
 [#177]: https://github.com/JamesZDonline/nsgeo/issues/177
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
+[#180]: https://github.com/JamesZDonline/nsgeo/issues/180
 
 ## Why
 
