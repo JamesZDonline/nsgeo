@@ -350,6 +350,19 @@ stagger itself, so the destagger a grid needs can change sign once its lines
 are fitted. On one real grid, unfitted lines looked best at +0.15 m and the
 same lines fitted at −0.15 m.
 
+**Measure** works the amount out from the data instead. Select the lines to fill
+and press it. Whatever is selected, it compares every line on the grid with its
+neighbours walked the other way, over the whole record: a line is judged against
+the lines beside it, and the grid's value is steadier from all of them. The
+selection only chooses which rows get filled. The first press reads every line,
+about 10 seconds for 60 lines; the dialog keeps what it read, so pressing again is
+quick. The grid's value goes in the Destagger box, and each selected row
+gets its own line's value (a line that changes partway along, or matches nothing,
+gets the grid's value and is named on the status line). Nothing changes until you
+press OK, and the numbers are a starting point: look at the lines, then adjust.
+Lines Measure cannot use are left as they were and named in the status, with the
+reason. While it runs the button reads **Stop**, and pressing it changes nothing.
+
 ### Step 4: Open a line and use the map
 
 Click a line in **nsgeo Survey**, or select it on the map with QGIS's select tool
