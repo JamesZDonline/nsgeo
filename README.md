@@ -121,8 +121,11 @@ on, so doing them now is cheaper than reworking M15–M17 afterwards.
 2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
    It must read the clock each saved cube records ([#163], item 5).
-3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
-   Being designed.
+3. **M16: 3-D.** Export a grid for ParaView to explore it as a volume (cloud,
+   isosurfaces, slices in any direction), build surfaces from your picks in
+   QGIS, and see them in a simple QGIS 3-D view. Designed
+   ([spec](docs/superpowers/specs/2026-11-11-nsgeo-m16-3d-design.md)); its
+   first three plans don't need M15.
 4. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
 5. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
