@@ -13,6 +13,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
 from nsgeo_qgis.session import SiteSession
@@ -3622,11 +3623,17 @@ def _prepared_with_owed_record(dock, session, clear=True, **kw):
 
 
 def _clock_start_record(dock, session, cube_id="A__old"):
-    """An old record built the way the old clock saved it: z0 the latest-starting
-    line's radar-clock start (below 0), z1 the earliest end, no `time_base`."""
-    zeros = [dock.engine.line_zero(k) for k in dock.engine.choice.line_keys]
+    """An old record built the way the old clock saved it, with no `time_base`:
+    z0 the latest-starting line's radar-clock start (below 0), z1 the radar-clock
+    end every line shares (the line that crops the most rows ends first on the
+    new clock, at `high`), slices one sample apart. Shifted by a median zero
+    below the latest one, its end overshoots `high`, so only the clamp after
+    the shift keeps the cube inside the data (final review residual R-a)."""
+    keys = dock.engine.choice.line_keys
+    zeros = [dock.engine.line_zero(k) for k in keys]
     low, high = dock.engine.prepared_z_bounds()
-    z = {"t0_ns": low + max(zeros), "t1_ns": high + min(zeros), "dz_ns": 0.5}
+    dt = session.line_for_key(keys[0]).header.dt_ns
+    z = {"t0_ns": low + max(zeros), "t1_ns": high + max(zeros), "dz_ns": dt}
     assert z["t0_ns"] < 0.0, z
     return _owed_record(dock, session, cube_id=cube_id, z=z)
 
@@ -3649,7 +3656,7 @@ def test_a_realistic_old_record_restores_inside_the_bounds_when_the_engine_holds
     assert dock.engine.wait_for_preparation(20_000)
     zeros = [dock.engine.line_zero(k) for k in dock.engine.choice.line_keys]
     assert len({round(z, 6) for z in zeros}) == 2, zeros  # one sample apart
-    _clock_start_record(dock, session)
+    record = _clock_start_record(dock, session)
     errors: list[str] = []
     dock.error.connect(errors.append)
 
@@ -3657,10 +3664,17 @@ def test_a_realistic_old_record_restores_inside_the_bounds_when_the_engine_holds
     assert not dock.engine.is_running
 
     _assert_a_clean_old_restore(dock, errors)
-    # The grid remembers the range the cube shows, not the record's radar-clock one.
+    # The grid remembers the record's range moved onto the time-zero clock, not
+    # its radar-clock one. Like any restore it remembers the record's range,
+    # not the clamped one on show: the clamp is no edit (`_clamp_z_to_prepared`),
+    # so a later change that frees the data brings the record's end back.
+    median = dock.engine.median_zero()
     remembered = session.slice_resolution("A")
-    assert remembered["t0_ns"] == pytest.approx(dock.z0_spin.value())
-    assert remembered["t1_ns"] == pytest.approx(dock.z1_spin.value())
+    spin = 5e-4  # the z spins hold three decimals
+    for end in ("t0_ns", "t1_ns"):
+        shifted = retime_ns(record["z"][end], 0.0, median)
+        assert remembered[end] == pytest.approx(shifted, abs=spin)
+    assert dock.z1_spin.value() < remembered["t1_ns"]  # the shifted end overshot
 
 
 def test_a_realistic_old_record_restores_inside_the_bounds_when_a_preparation_runs(

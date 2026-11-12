@@ -1577,7 +1577,9 @@ class SlicesDock(QgsDockWidget):
             self._updating -= 1
         # The grid remembers the shifted range, not the record's radar-clock
         # one (the spins were written with signals blocked, so nothing else
-        # would re-remember it).
+        # would re-remember it). Remembered before the caller's clamp, as
+        # every restore remembers its record's range: the clamp is no edit
+        # (see `_clamp_z_to_prepared`), so the shown end may sit inside it.
         grid_id = self._last_grid_id
         if grid_id is not None:
             self.session.remember_slice_resolution(
