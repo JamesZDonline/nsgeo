@@ -709,9 +709,18 @@ def restore_band_times(layer: QgsRasterLayer, path: str | Path) -> str:
         return "missing"
     try:
         metadata = dataset.GetMetadata()
-        if Path(path).stem.endswith("_coverage") or "largest_count" in (
+        if "largest_count" in (
             metadata.get("NSGEO_RESAMPLING"),
             metadata.get("NSGEO_SITE_RESAMPLING"),
+        ):
+            return "counts"
+        # The first versions tagged a companion `bilinear`. A companion has no interpolation
+        # key (a values file always has one), so the name rule applies only without one:
+        # a values file the user happened to name `*_coverage.tif` is still a values file.
+        if (
+            Path(path).stem.endswith("_coverage")
+            and "NSGEO_INTERPOLATION" not in metadata
+            and "NSGEO_SITE_INTERPOLATION" not in metadata
         ):
             return "counts"
         windows: list[tuple[float, float]] = []

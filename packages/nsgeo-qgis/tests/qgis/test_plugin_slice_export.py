@@ -1356,6 +1356,16 @@ def test_a_companion_from_before_the_counts_tag_is_still_counts(tmp_path):
     assert restore_band_times(layer, path) == "counts"
 
 
+def test_a_windowed_values_file_named_like_a_companion_is_still_timed(exportable, tmp_path):
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    plan = _band_plan(exportable, n=3)
+    path = tmp_path / "full_coverage.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    layer = QgsRasterLayer(str(path), "full_coverage", "gdal")
+    assert restore_band_times(layer, path) == "set"
+
+
 def test_a_values_file_not_named_as_a_companion_is_not_counts(tmp_path):
     from nsgeo_qgis.slice_export import restore_band_times
 

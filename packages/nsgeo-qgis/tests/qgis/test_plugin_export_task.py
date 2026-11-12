@@ -647,22 +647,17 @@ def test_a_stale_statistics_file_that_cannot_be_removed_does_not_fail_the_export
     assert target.read_bytes() == b"values" and cov.exists()
 
 
-def test_the_values_file_in_place_is_reported_when_the_companion_then_fails(
+def test_the_values_file_in_place_is_reported_when_what_follows_the_replace_fails(
     qgis_app, tmp_path, fake_run, monkeypatch
 ):
     """The flag is set at the replace, before the stale files are dealt with."""
     results, on_done = _collector()
     task, target, cov = _make(tmp_path, on_done)
-    (tmp_path / "out.tif.aux.xml").write_text("old statistics")
-    _unlink_refusing(monkeypatch)
-    real = export_task.commit_partial
 
-    def commit(partial, to):
-        if Path(to) == cov:
-            raise PermissionError(13, "in use by another program")
-        real(partial, to)
+    def broken(path):
+        raise RuntimeError("something after the replace failed")
 
-    monkeypatch.setattr(export_task, "commit_partial", commit)
+    monkeypatch.setattr(export_task, "drop_stale_files", broken)
     assert start_export(task)
     _wait(lambda: results, "the half-committed export to finish")
     (result,) = results
