@@ -22,6 +22,7 @@ from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QDialog, QDialogButtonBox
 
 DISK = collections.namedtuple("DISK", "total used free")
+HELD = 1_000_000_000
 
 
 def _preview(cell, pixel, *, grids=("A", "B"), held=1_000_000_000, file_bytes=600_000_000):
@@ -139,6 +140,7 @@ def test_the_summary_for_a_two_grid_site(make):
         ("Grids", "2 included (A and B), rebuilt at 0.025 m"),
         ("Slices", "kriging, max distance 0.75 × spacing, no smoothing"),
         ("Normalisation", "edge match, measured again at 0.025 m"),
+        ("Memory", f"about {format_bytes(HELD)} of the 1.5 GB allowed"),
         ("File", "about 600 MB before compression, plus a style file"),
         ("Disk", "900.0 GB free"),
     ]
@@ -146,7 +148,14 @@ def test_the_summary_for_a_two_grid_site(make):
 
 def test_the_site_rows_are_absent_for_this_grid(make):
     d = make(grids=None)
-    assert [k for k, _ in d.summary_rows()] == ["Bands", "Picture", "Slices", "File", "Disk"]
+    assert [k for k, _ in d.summary_rows()] == [
+        "Bands",
+        "Picture",
+        "Slices",
+        "Memory",
+        "File",
+        "Disk",
+    ]
 
 
 def test_over_budget_disables_export_and_names_the_finest_fit(make):

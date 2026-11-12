@@ -679,8 +679,16 @@ def test_the_summary_for_a_two_grid_site_is_exact():
         ("Grids", "2 included (A and B), rebuilt at 0.025 m"),
         ("Slices", "kriging, max distance 0.75 × spacing, no smoothing"),
         ("Normalisation", "edge match, measured again at 0.025 m"),
+        ("Memory", "about 1.0 GB of the 1.5 GB allowed"),
         ("File", "about 600 MB before compression, plus a style file"),
     ]
+
+
+def test_the_memory_row_stays_when_the_export_is_over_budget():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(held_bytes=2_400_000_000)))
+    assert rows["Memory"] == "about 2.4 GB of the 1.5 GB allowed"
 
 
 def test_the_summary_does_not_say_measured_again_for_no_normalisation():
@@ -694,7 +702,7 @@ def test_the_summary_for_one_grid_drops_the_site_rows():
     from nsgeo_qgis.slices_plan import summary_lines
 
     rows = summary_lines(_preview(grids=None, normalisation=None))
-    assert [k for k, _ in rows] == ["Bands", "Picture", "Slices", "File"]
+    assert [k for k, _ in rows] == ["Bands", "Picture", "Slices", "Memory", "File"]
 
 
 def test_the_summary_for_a_big_site_counts_grids_without_naming_them():

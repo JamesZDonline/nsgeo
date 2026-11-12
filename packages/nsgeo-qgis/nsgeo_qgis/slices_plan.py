@@ -547,6 +547,13 @@ def summary_lines(preview: ExportPreview) -> list[tuple[str, str]]:
         )
         rows.append(("Normalisation", f"{preview.normalisation}{again}"))
     rows.append(
+        (
+            "Memory",
+            f"about {format_bytes(preview.held_bytes)} of the "
+            f"{format_bytes(EXPORT_BUDGET_BYTES)} allowed",
+        )
+    )
+    rows.append(
         ("File", f"about {format_bytes(preview.file_bytes)} before compression, plus a style file")
     )
     return rows

@@ -523,7 +523,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
      and can be finer, never coarser. A finer pixel makes a smoother picture
      when you zoom in, in any GIS, without working out the grids again.
    - **What will be written** lists the bands, the picture size, the grids, how
-     the slices are made, the normalisation and the file size.
+     the slices are made, the normalisation, the memory the export needs (and
+     the most it is allowed) and the file size.
    - **Export** is greyed out, with the reason shown in the box, when the
      export would need more memory than it is allowed, or more free disk space
      than there is. The message says which cell or pixel would fit.
