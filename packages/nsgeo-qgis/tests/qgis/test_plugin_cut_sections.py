@@ -24,21 +24,19 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.slices_dock import SlicesDock
 from test_plugin_session import Spy
 from test_plugin_site_scope import _close, _open, whole_site
-from test_plugin_slices_dock import GRID, GRID_B, PRESET, _line, _ready
+from test_plugin_slices_dock import GRID, GRID_B, PRESET, TIME_ZERO_PRESET, _line, _ready
 
 H = [(1.0, 1.0), (5.0, 1.0)]  # along x, 4 m
 
 
-@pytest.fixture
-def shown(qgis_app, tmp_path):
-    """Grids A and B, A prepared in the Slices panel at cell 0.25, and the service."""
+def _shown_with(tmp_path, preset):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
     session.add_grid(GRID_B)
     session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
     session.add_lines([_line(tmp_path, "B", f"FILE__01{i}", 1.0 + i) for i in range(2)])
-    session.site.presets["p"] = list(PRESET)
+    session.site.presets["p"] = list(preset)
     session.presets_changed.emit()
     dock = SlicesDock(session)
     _ready(dock)
@@ -49,6 +47,18 @@ def shown(qgis_app, tmp_path):
     dock.engine.wait_for_preparation(20_000)
     dock.engine.dispose()
     dock.deleteLater()
+
+
+@pytest.fixture
+def shown(qgis_app, tmp_path):
+    """Grids A and B, A prepared in the Slices panel at cell 0.25, and the service."""
+    yield from _shown_with(tmp_path, PRESET)
+
+
+@pytest.fixture
+def shown_zeroed(qgis_app, tmp_path):
+    """The same, with a preset that sets time zero (#97), so the cube is on that clock."""
+    yield from _shown_with(tmp_path, TIME_ZERO_PRESET)
 
 
 @pytest.fixture

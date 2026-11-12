@@ -1027,7 +1027,12 @@ class SiteSession(QObject):
         source's answer once one is attached. With no source, None, unless
         `load` reads the line and runs a copy of the stack. None on any
         failure, which is logged: this never raises, and never plants a stack.
+
+        A cut has no zero of its own: its times are on its cube's clock
+        (cut spec call 18), so it answers None at once and logs nothing.
         """
+        if is_cut_key(key):
+            return None
         try:
             stack = self.stack_for(key, insert=False)
             if not stack.sets_time_zero():

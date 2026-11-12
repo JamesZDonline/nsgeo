@@ -68,6 +68,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from nsgeo.model import Cut
+from nsgeo.processing import time_base_of
 from nsgeo.slices import (
     CurvaturePlan,
     FinishSettings,
@@ -723,6 +724,9 @@ class CutSections(QObject):
             "grid_id": cut.grid_id,
             "scope": SCOPE_LABELS[source.scope],
             "cube": cube_provenance.to_dict(),
+            # The clock every time on this cut is on (cut spec call 18): a pick
+            # made on another clock is left out of the profile, not converted.
+            "time_base": time_base_of(cube_provenance.steps),
             "resolution": {"cell": cube.frame.cell, "dz_ns": cube.z.dz_ns},
             "finish": {
                 "method": method,

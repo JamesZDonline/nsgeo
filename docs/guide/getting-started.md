@@ -561,6 +561,12 @@ the section is still the kriging preview, the pick says so. Picks on a cut use
 the grid's velocity, or its first line's if the grid has none, and a cut is not
 processed: the steps in **nsgeo Processing** belong to recorded lines.
 
+A cut's times are on the clock of the volume it was cut from. If you turn the
+preset's **Time zero** step on or off after making picks on a cut, those picks
+no longer fit the new section, so the profile leaves them out and its title
+counts them (*1 picks on another clock*). They stay on the map and in the picks
+table, and they come back when you turn the setting back.
+
 ### Step 9: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**

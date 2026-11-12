@@ -12,11 +12,13 @@ import json
 import numpy as np
 import pytest
 from nsgeo.model import is_cut_key
+from nsgeo.processing import time_base_of
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.cut_sections import CutSection
 from nsgeo_qgis.map_link import CUT_GONE_TEXT
 from nsgeo_qgis.session import Pick
 from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsProject
+from qgis.PyQt.QtCore import QVariant
 from qgis.PyQt.QtWidgets import QMessageBox
 from test_plugin_cut_sections import H, site  # noqa: F401 -- fixtures
 
@@ -68,7 +70,11 @@ def test_a_pick_on_a_cut_lands_on_the_cut_and_records_its_provenance(opened):
     assert plugin.layers.layers["picks"].crs().authid() == "EPSG:32616"
     doc = json.loads(row["stack_json"])
     assert doc["kind"] == "cut" and doc["cut_id"] == cut.id
+    assert doc["time_base"] == time_base_of(section.source.engine.provenance().steps)
+    assert doc["time_base"] == "time_zero"  # site3's preset "p" sets time zero
     assert row["time_ns"] == T
+    assert row["zero_ns"] is None or isinstance(row["zero_ns"], QVariant)  # NULL, not 0.0
+    assert [p.zero_ns for p in session.picks_for(key)] == [None]
     velocity = session.cut_velocity("A")
     assert row["depth_m"] == pytest.approx(float(velocity.depth_at([T])[0]))
     assert row["velocity_m_ns"] == pytest.approx(float(velocity.velocity_at([T])[0]))
@@ -285,6 +291,8 @@ def test_the_profile_overlays_cut_picks_at_their_columns(opened):
     first = _pick_at(plugin, key, 12)
     _pick_at(plugin, key, 30, 20.0)
     got = plugin.profile_dock.view._picks
+    # The cube's preset sets a time zero, and still no conversion is applied (call 18).
+    assert plugin.profile_dock.shown_zero_ns() == 0.0
     assert sorted(got) == [
         (plugin.cut_sections.column_at(key, first["distance_m"]), T),
         (plugin.cut_sections.column_at(key, float(section.columns.distance_m[30])), 20.0),
@@ -374,3 +382,79 @@ def test_a_cut_pick_with_a_null_distance_is_left_alone_across_a_grid_move(opened
     assert (point.x(), point.y(), after["depth_m"], after["velocity_m_ns"]) == before
     assert after["distance_m"] == NULL
     assert not [m for m in message_log if "could not" in m or "failed" in m]
+
+
+def _use_preset(plugin, name):
+    """Show preset `name` in the Slices panel, so the cube is prepared again with it."""
+    dock = plugin.slices_dock
+    dock.preset_combo.setCurrentText(name)
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_pick_made_on_another_clock_is_left_out_and_counted(opened):
+    plugin, key = opened
+    session = plugin.session
+    profile = plugin.profile_dock
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    _use_preset(plugin, "radar")
+    session.open_line(session.keys()[0])
+    session.open_line(key)
+    section = plugin.cut_sections.section(key, build_cube=True)
+    assert json.loads(section.provenance_json)["time_base"] == "radar"
+    _pick_at(plugin, key, 12)
+    assert len(profile.view._picks) == 1
+    assert "picks on another clock" not in profile.windowTitle()
+    before = [(r["time_ns"], r["zero_ns"], r["distance_m"], r["stack_json"]) for r in _rows(plugin)]
+    # Time zero is enabled in the preset, so the cube is rebuilt on the other clock.
+    _use_preset(plugin, "p")
+    session.open_line(session.keys()[0])
+    session.open_line(key)
+    section = plugin.cut_sections.section(key, build_cube=True)
+    assert json.loads(section.provenance_json)["time_base"] == "time_zero"
+    assert profile.view._picks == []
+    assert profile.windowTitle().endswith(" · 1 picks on another clock")
+    after = [(r["time_ns"], r["zero_ns"], r["distance_m"], r["stack_json"]) for r in _rows(plugin)]
+    assert after == before  # the row is untouched, and still on the map
+    # Turned off again, the pick comes back.
+    _use_preset(plugin, "radar")
+    session.open_line(session.keys()[0])
+    session.open_line(key)
+    assert len(profile.view._picks) == 1
+    assert "picks on another clock" not in profile.windowTitle()
+
+
+def test_a_pick_with_no_time_base_reads_as_radar(opened):
+    plugin, key = opened
+    session = plugin.session
+    profile = plugin.profile_dock
+    section = plugin.cut_sections.section(key, build_cube=True)
+    doc = json.loads(section.provenance_json)
+    doc.pop("time_base")
+    session.add_cut_pick(key, 5, 1.0, T, json.dumps(doc))  # as made before the clock was recorded
+    assert profile.view._picks == []  # the cube is on "time_zero"
+    assert profile.windowTitle().endswith(" · 1 picks on another clock")
+
+
+def test_a_line_stack_change_never_rezeroes_cut_picks(opened):
+    from nsgeo.processing import build_step
+
+    plugin, key = opened
+    session = plugin.session
+    line_key = session.keys()[0]
+    cut_row = _pick_at(plugin, key, 12)
+    before = (cut_row["time_ns"], cut_row["zero_ns"])
+    session.open_line(line_key)
+    session.set_profiles(line_key, session.line_for_key(line_key).load())
+    session.add_pick(line_key, 5, 20.0)
+    followed = []
+    real = plugin.layers.follow_zero
+    plugin.layers.follow_zero = lambda k, z: (followed.append(k), real(k, z))[1]
+    session.append_step(line_key, build_step("time_zero", mode="sample", sample=51))
+    assert followed == [line_key]  # the line's rows only
+    rows = {r["line_key"]: r for r in _rows(plugin)}
+    assert (rows[key]["time_ns"], rows[key]["zero_ns"]) == before
+    assert rows[line_key]["zero_ns"] == pytest.approx(session.line_zero(line_key))
+    assert rows[line_key]["zero_ns"] != 0.0

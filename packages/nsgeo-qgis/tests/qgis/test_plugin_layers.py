@@ -3074,6 +3074,24 @@ def test_a_moved_grid_moves_its_cuts(populated):
     assert session.cut_for_key(key).vertices == ((1.0, 1.0), (6.0, 1.0))
 
 
+def test_opening_a_cut_runs_no_time_zero_follow(populated, monkeypatch, message_log):
+    """A cut's picks are on its cube's clock, which no line's zero moves (cut spec call 18)."""
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    session.open_line(key)
+    session.add_cut_pick(key, 3, 2.0, 12.0, '{"kind": "cut"}')
+    assert layers.feature_count("picks") == 1
+    followed = []
+    monkeypatch.setattr(layers, "follow_zero", lambda k, z: followed.append((k, z)) or 0)
+    session.open_line(session.keys()[0])
+    session.open_line(key)  # the cut is the working item, with a pick row on it
+    layers._on_stack_changed(key)
+    layers._on_line_loaded(key)
+    assert session.current_key == key
+    assert followed == []
+    assert not [m for m in message_log if "time zero" in m or key in m], message_log
+
+
 def test_a_crs_rebuild_refills_the_cuts(populated):
     session, layers, _ = populated
     key = session.add_cut("A", _CUT)

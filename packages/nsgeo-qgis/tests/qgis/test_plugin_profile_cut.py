@@ -2,26 +2,45 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
+from nsgeo.processing import build_step
 from nsgeo.render import colormap, section_rgba8
 from nsgeo_qgis.cut_sections import NO_CUBE_TEXT, NO_SOURCE_TEXT, CutSection
 from nsgeo_qgis.render.qimage import rgba_to_qimage
 from nsgeo_qgis.ui.profile_dock import PALETTE_ON_CUT_TIP, ProfileDock
 from qgis.PyQt.QtWidgets import QMessageBox
-from test_plugin_cut_sections import H, shown, site, whole_site  # noqa: F401 -- fixtures
+from test_plugin_cut_sections import (  # noqa: F401 -- fixtures
+    H,
+    shown,
+    shown_zeroed,
+    site,
+    whole_site,
+)
 from test_plugin_slices_dock import _ready
 
 
-@pytest.fixture
-def profile(shown):  # noqa: F811
-    dock, session, sections = shown
+def _profile_on(shown_parts):
+    dock, session, sections = shown_parts
     pd = ProfileDock(session)
     pd.set_cut_sections(sections)
     dock.window_changed.connect(pd.set_slice_band)
     yield pd, dock, session, sections
     pd.hide()
     pd.deleteLater()
+
+
+@pytest.fixture
+def profile(shown):  # noqa: F811
+    yield from _profile_on(shown)
+
+
+@pytest.fixture
+def profile_zeroed(shown_zeroed):  # noqa: F811
+    """The same, on a cube whose preset sets time zero (#97)."""
+    yield from _profile_on(shown_zeroed)
 
 
 def _load(session, key=None):
@@ -134,12 +153,45 @@ def test_the_percentile_slider_still_applies_to_a_cut(profile):
     assert pd.view._image == rgba_to_qimage(expected)
 
 
-def test_the_slice_band_shows_on_a_cut(profile):
-    pd, dock, session, sections = profile
+def test_the_slice_band_shows_on_a_cut(profile_zeroed):
+    """A cut is on its cube's clock, so its band is drawn as it is, whatever zero a
+    lookup would give; a line in the same state is converted (#97, cut spec call 18)."""
+    pd, dock, session, sections = profile_zeroed
+    pd.set_cube_zero_lookup(lambda key: 7.5)  # a non-zero zero for any key
     key = session.add_cut("A", H)
     session.open_line(key)
+    assert pd.shown_zero_ns() == 0.0
     dock.window_changed.emit(12.0, 14.0)
-    assert pd.view._slice_band == (12.0, 14.0)  # a cut is on the cube's clock: not converted
+    assert pd.view._slice_band == (12.0, 14.0)  # exactly, not retimed
+    # A line in the same state, with the same lookup and band, is still converted.
+    line_key = _load(session)
+    session.open_line(line_key)
+    pd._push_slice_band()
+    lo, hi = pd.view._slice_band
+    assert (lo, hi) == pytest.approx((12.0 + 7.5, 14.0 + 7.5))
+
+
+def test_a_cut_on_a_time_zero_preset_starts_its_axis_at_the_cubes_t0(profile_zeroed):
+    pd, dock, session, sections = profile_zeroed
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    section = sections.section(key, build_cube=True)
+    assert isinstance(section, CutSection)
+    assert any(s["step"] == "time_zero" and s["enabled"] for s in session.site.presets["p"])
+    assert pd.view.transform.t0_ns == section.z.t0_ns
+    assert json.loads(section.provenance_json)["time_base"] == "time_zero"
+
+
+def test_a_cut_after_a_line_has_no_shown_zero(profile):
+    pd, dock, session, sections = profile
+    line_key = _load(session)
+    session.append_step(line_key, build_step("time_zero", mode="sample", sample=40))
+    session.open_line(line_key)
+    assert pd.shown_zero_ns() != 0.0
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert pd.shown_zero_ns() == 0.0
+    assert pd._shown_radargram is None
 
 
 def test_the_depth_axis_uses_the_cut_velocity(profile):

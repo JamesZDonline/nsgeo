@@ -231,3 +231,12 @@ def test_removing_a_grid_announces_the_dropped_items_in_one_order(
     finally:
         dock.hide()
         dock.deleteLater()
+
+
+def test_line_zero_of_a_cut_is_none_and_logs_nothing(session, message_log):
+    """A cut has no zero of its own: its times are on its cube's clock (cut spec call 18)."""
+    session.add_grid(GRID)
+    key = session.add_cut("A", V)
+    assert session.line_zero(key) is None
+    assert session.line_zero(key, load=True) is None
+    assert not [m for m in message_log if "time zero" in m or key in m], message_log

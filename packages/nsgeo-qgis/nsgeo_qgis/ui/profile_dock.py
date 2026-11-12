@@ -78,12 +78,20 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 from nsgeo.model import is_cut_key
-from nsgeo.processing import Radargram, StepStack, build_step, first_break_ns, retime_ns
+from nsgeo.processing import (
+    TIME_BASE_RADAR,
+    Radargram,
+    StepStack,
+    build_step,
+    first_break_ns,
+    retime_ns,
+)
 from nsgeo.render import (
     DEFAULT_COLORMAP,
     colormap,
@@ -126,6 +134,17 @@ PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
 KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
 SITE_VIEW_SUFFIX = " · site view, not normalised"
+OTHER_CLOCK_SUFFIX = " · {n} picks on another clock"
+
+
+def _time_base_of_provenance(provenance_json: str) -> str:
+    """The clock a cut's provenance JSON names; "radar" when it names none (a
+    pick from before the clock was recorded) or cannot be read."""
+    try:
+        base = json.loads(provenance_json).get("time_base")
+    except (ValueError, AttributeError):
+        return TIME_BASE_RADAR
+    return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
 def time_param_name(step: Any) -> str | None:
@@ -252,6 +271,11 @@ class ProfileDock(QgsDockWidget):
         # one is shown `image` stays None: a section is drawn by `_draw_cut`.
         self._cut_sections: CutSections | None = None
         self._cut_shown: CutSection | None = None
+        #: The shown cut's title without the picks count, and the picks left out
+        #: for being on another clock (cut spec call 18). The title is built in
+        #: `_apply_cut_title` alone.
+        self._cut_title: str | None = None
+        self._cut_other_clock = 0
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -779,6 +803,11 @@ class ProfileDock(QgsDockWidget):
         the gain strip."""
         if not on:
             self._cut_shown = None
+            self._cut_title = None
+        else:
+            # A cut is on its cube's clock, not any line's: no line's radargram
+            # may leave its zero behind (cut spec call 18).
+            self._shown_radargram = None
         self.colormap_combo.setEnabled(not on)
         self.colormap_combo.setToolTip(PALETTE_ON_CUT_TIP if on else "")
         if on:
@@ -817,7 +846,9 @@ class ProfileDock(QgsDockWidget):
         if isinstance(result, str):
             self._clear_view_only()
             self._set_cut_chrome(True)
-            self.setWindowTitle(head)
+            self._cut_title = head
+            self._cut_other_clock = 0
+            self._apply_cut_title()
             self.setToolTip(tip)
             self.view.set_message(result)
             self._refresh_velocity()
@@ -828,7 +859,8 @@ class ProfileDock(QgsDockWidget):
         self._set_cut_chrome(True)
         suffix = SITE_VIEW_SUFFIX if section.source.scope == "site" else ""
         method = self._cut_method_text(section, is_preview=is_preview)
-        self.setWindowTitle(f"{head} · {cut.length_m:.1f} m · {method}{suffix}")
+        self._cut_title = f"{head} · {cut.length_m:.1f} m · {method}{suffix}"
+        self._apply_cut_title()
         self.setToolTip(tip)
         self.view.set_direction(1)
         z = section.z
@@ -843,6 +875,14 @@ class ProfileDock(QgsDockWidget):
         self._draw_cut()
         self._refresh_velocity()
         self._refresh_picks()
+
+    def _apply_cut_title(self) -> None:
+        """The one place a cut's window title is set: the text built for the
+        section, then the picks left out for another clock, when there are any."""
+        if self._cut_title is None:
+            return
+        n = self._cut_other_clock
+        self.setWindowTitle(self._cut_title + (OTHER_CLOCK_SUFFIX.format(n=n) if n else ""))
 
     def _draw_cut(self) -> None:
         """Draw the shown section: `section_rgba8` makes blank columns and
@@ -898,7 +938,11 @@ class ProfileDock(QgsDockWidget):
             self.view.set_picks([])
             return
         if is_cut_key(key):
-            self.view.set_picks(self._cut_pick_points(key))
+            points, other = self._cut_pick_points(key)
+            self.view.set_picks(points)
+            if other != self._cut_other_clock:
+                self._cut_other_clock = other
+                self._apply_cut_title()
             return
         shown = self.shown_zero_ns()
         # Each pick is placed by its radar time, whatever zero it was stored
@@ -914,8 +958,14 @@ class ProfileDock(QgsDockWidget):
         shown = self._cut_shown
         return shown if shown is not None and shown.key == key else None
 
-    def _cut_pick_points(self, key: str) -> list[tuple[int, float]]:
-        """A cut's picks as (column, time) on the section on screen.
+    def _cut_pick_points(self, key: str) -> tuple[list[tuple[int, float]], int]:
+        """A cut's picks as (column, time) on the section on screen, and how
+        many were left out for being on another clock.
+
+        A pick whose provenance `time_base` differs from the shown section's
+        (a missing one reads as "radar") was made on a cube with another zero;
+        its time means nothing on this axis, so it is counted, not drawn, and
+        its row is untouched (cut spec call 18).
 
         A pick is a distance and a time (cut spec call 12), so its column is
         found afresh from the distance under the section's own step; the
@@ -924,16 +974,22 @@ class ProfileDock(QgsDockWidget):
         Nothing is shown when no section is (a message, or no source).
         """
         sections = self._cut_sections
-        if sections is None or self.shown_cut_section(key) is None:
-            return []
+        shown = self.shown_cut_section(key)
+        if sections is None or shown is None:
+            return [], 0
+        base = _time_base_of_provenance(shown.provenance_json)
         points: list[tuple[int, float]] = []
+        other = 0
         for pick in self.session.picks_for(key):
             if pick.distance_m is None:
+                continue
+            if _time_base_of_provenance(pick.stack_json) != base:
+                other += 1
                 continue
             column = sections.column_at(key, pick.distance_m)
             if column is not None:
                 points.append((column, pick.time_ns))
-        return points
+        return points, other
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
@@ -1270,8 +1326,8 @@ class ProfileDock(QgsDockWidget):
         background-removal or gain step can erase the direct wave, and the
         source is what a Time zero step placed first would actually pick."""
         key = self._working_key
-        if key is None or not self.session.is_open:
-            return ""
+        if key is None or not self.session.is_open or is_cut_key(key):
+            return ""  # a cut has no stack, and no velocity fit to explain
         stack = self.session.stack_for(key, insert=False)
         rg = stack.source
         if rg is None or stack.sets_time_zero():
@@ -1493,6 +1549,12 @@ class ProfileDock(QgsDockWidget):
         The band is in the cube's time; the cube's own zero for the line on
         screen (else the shown radargram's) moves it onto the axis drawn."""
         if self._slice_band is None:
+            return
+        if self._key is not None and is_cut_key(self._key):
+            # A cut's axis is the cube's own clock: the band is drawn as it is
+            # (cut spec call 18), whatever the lookup would say for the key.
+            lo, hi = self._slice_band
+            self.view.set_slice_band(float(lo), float(hi))
             return
         shown = self.shown_zero_ns()
         cube_zero = None

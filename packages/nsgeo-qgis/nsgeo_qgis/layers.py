@@ -801,7 +801,13 @@ class SiteLayers(QObject):
             self._follow_key(key, load=False)
 
     def _follow_key(self, key: str, *, load: bool) -> None:
-        """Shared body of the three slots above; guarded, never raises."""
+        """Shared body of the three slots above; guarded, never raises.
+
+        A cut is never followed: its picks are on its cube's clock, which no
+        line's zero moves (cut spec call 18).
+        """
+        if is_cut_key(key):
+            return
         try:
             layer = self._picks_layer()
             if layer is None or not any(
