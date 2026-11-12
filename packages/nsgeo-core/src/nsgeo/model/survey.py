@@ -158,6 +158,14 @@ class Site:
     #: Every key is optional; a missing key is the default.
     site_view: dict[str, Any] = field(default_factory=dict)
 
+    #: How each slice scope is coloured (#180), keyed `"grid"` (This grid)
+    #: and `"site"` (Whole site): `{"own": bool, "style": str}`. `own` is
+    #: True when the slice uses the user's own QGIS symbology rather than
+    #: the plugin's palette and stretch; `style` is that symbology as QGIS
+    #: style XML, kept while `own` is off so switching back restores it.
+    #: Every key is optional; a missing key is the default (plugin colours).
+    slice_colours: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     #: Cuts drawn on the grids, in drawing order. Each is keyed `cut:<id>`
     #: and lives apart from `lines`, so line-only code never sees one.
     cuts: list[Cut] = field(default_factory=list)
