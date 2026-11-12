@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line, Profile, Site, clear_profile_cache
+from nsgeo.velocity_fit import StoredFit
 
 from tests.synthetic import write_dzt
 
@@ -135,3 +138,33 @@ def test_profile_is_hashable_with_identity_equality(tmp_path):
     assert hash(a) == hash(a)
     assert a != Profile(data=a.data, header=a.header)
     assert len({a, a}) == 1
+
+
+def _fit():
+    return StoredFit(
+        t0_ns=18.4,
+        v_m_ns=0.0984,
+        v_stderr_m_ns=0.0041,
+        rms_ns=0.31,
+        apex_trace=412,
+        points=((389, 21.2), (412, 18.6), (437, 21.9)),
+        fitted_at="2026-11-12T00:00:00Z",
+    )
+
+
+def test_a_line_with_stored_fits_is_hashable_with_identity_equality(tmp_path):
+    """#89: the fits dict made the generated hash raise, and a placement holding
+    arrays would make the generated equality raise. A line is the object itself."""
+    line = dataclasses.replace(_line(tmp_path), velocity_fits={"fit-1": _fit()})
+    assert line == line
+    assert hash(line) == hash(line)
+    assert len({line, line}) == 1
+    assert {line: "x"}[line] == "x"
+    assert line != dataclasses.replace(line)  # the same fields, another object
+
+
+def test_index_finds_the_line_it_is_given_not_an_equal_copy(tmp_path):
+    line = _line(tmp_path)
+    copy = dataclasses.replace(line)
+    site = Site(lines=[copy, line])
+    assert site.lines.index(line) == 1
