@@ -191,6 +191,122 @@ max(0.10 m, 30% of the residual), changes partway beyond 0.30 m.
 - Second differences built from pairwise peaks. Each pair has half the data, so the peaks were
   too noisy and lost `FILE__045`.
 
+## Per-line results (built)
+
+Built for #159 in `nsgeo.destagger.per_line` (Task 2, 2026-11-11), measured by
+`measure_destagger` on the test placements (zigzag at 0.5 m, line 1 forward; Grid 1 on
+29.98 m, Grid 2 on 29.96 m). Destagger in metres. In brackets, an own value's distance from
+the grid value.
+
+**How it differs from the prototype.**
+- **Re-measuring shifts curves.** Each pair of neighbours is compared once, per time bin and
+  per half along the line. Correcting a line then shifts its pair curves instead of
+  recomputing profiles. This agrees with recomputing exactly at whole 2 cm steps; at half a
+  step, recomputing itself moves by up to 1.6 cm.
+- **Adjacent candidates are solved by an exact search along the run.** Each line is either
+  left alone or moved by at least 0.15 m, and the lines either side are held. This replaces
+  the prototype's linear solve on peak positions, which goes wrong when the mean of the
+  neighbours is two-peaked.
+- **Every own value is re-checked against its corrected neighbours.** One that fails is
+  dropped for good.
+- **A decisive half that disagrees counts against a line.** "Decisive" means no rival peak
+  above 0.6 of it (C13: a half without a clear peak counts neither way).
+- **The shallow/deep split is where half the grid's evidence lies,** instead of a fixed time:
+  36 ns on Grid 1, 24 ns on Grid 2 unfitted and 28 ns on Grid 2 fitted. At 30 ns (the bin
+  median) `FILE__059` fitted is lost; 20 or 25 ns also work.
+- **Strength is a correlation coefficient,** so a half is not read as half as strong.
+
+**Thresholds** (module constants, tuned on these grids with the cases below). Each was
+varied alone; every real-data test still passes within the range given:
+
+| Constant | Value | Range that passes |
+|---|---|---|
+| `MIN_OWN_M` | 0.15 | 0.12–0.18 (0.20: the skew moves a Grid 1 line across it) |
+| `AGREE_M` | 0.15 | 0.10–0.18 against a line, 0.12–0.25 to confirm |
+| `AGREE_FRACTION` | 0.3 | 0.3–0.4 (0.2 loses `FILE__045`) |
+| `CHANGE_M` | 0.30 | 0.25–0.40 |
+| `DECISIVE_RATIO` | 0.6 | 0.5–0.7 |
+| `OWN_GAIN` | 0.02 | 0–0.05 |
+| `MIN_CORRELATION` (profiles) | 0.10 | 0.06–0.12 per line (0.14 loses `FILE__051`) |
+
+**Results:**
+
+| Grid | Lines | Grid value (± spread) | OWN | CHANGES | NO_MATCH | NOT_MEASURED |
+|---|---|---|---|---|---|---|
+| 1 | unfitted | +0.152 (±0.013) | 4 | 7 | 4 | 0 |
+| 1 | fitted | −0.066 (±0.008) | 0 | 1 | 4 | 0 |
+| 2 | unfitted | +0.162 (±0.019) | 9 | 2 | 7 | 0 |
+| 2 | fitted | −0.061 (±0.010) | 5 | 4 | 1 | 0 |
+
+- **Grid 1 unfitted, own values:** `FILE__013` +0.351 (+0.200), `FILE__015` +0.405 (+0.253),
+  `FILE__047` +0.364 (+0.213) and `FILE__060` −0.065 (−0.217).
+  - Changes partway along: `FILE__002`, `008`, `009`, `024`, `027`, `036` and `048`.
+  - No clear match: `FILE__001`, `011` (the wheel slip), `026` and `028`.
+- **Grid 1 fitted:** no own values.
+  - Changes partway along: `FILE__024`.
+  - No clear match: `FILE__001`, `002`, `028` and `029`.
+  - Lines 8 and 9 read about +0.25 in the second half and about 0 in the first. They stay at
+    the grid value: a single shift would fix one half and move the other the wrong way.
+- **Grid 2 unfitted, own values:**
+  - `FILE__015` −0.011 (−0.173) and `FILE__022` +0.332 (+0.170);
+  - `FILE__028` +0.687 (+0.525) and `FILE__032` +0.489 (+0.327);
+  - `FILE__034` +0.612 (+0.450) and `FILE__042` +0.448 (+0.286);
+  - `FILE__045` +0.884 (+0.722), `FILE__052` +0.329 (+0.166) and `FILE__056` +0.505 (+0.343).
+
+  Changes partway along: `FILE__046` and `060`. No clear match: `FILE__026`, `027`, `043`,
+  `047`, `048`, `049` and `050`.
+- **Grid 2 fitted, own values:**
+  - `FILE__001` −0.214 (−0.152) and `FILE__004` +0.132 (+0.193);
+  - `FILE__045` +0.406 (+0.467) and `FILE__051` +0.173 (+0.234);
+  - `FILE__059` −0.288 (−0.227).
+
+  Changes partway along: `FILE__022`, `027`, `049` and `060`. No clear match: `FILE__050`.
+- **Against the prototype:**
+  - `FILE__045` +0.884 (prototype +0.881) and `FILE__028` +0.687 (+0.687);
+  - `FILE__051` +0.173 (+0.147) and `FILE__059` −0.288 (−0.287).
+
+**`FILE__027` (Grid 2 unfitted) gets no own value,** although the spike and the prototype
+(+0.665) gave it one.
+- The pair `FILE__027`–`FILE__028` reads −0.52 m (searched to ±2 m). If both lines were
+  0.5 m off it would read about −1.04, so they are not both off.
+- A strong compact reflector about 8.8 m along crosses `FILE__027` to `FILE__030`. At the
+  grid value it sits at 8.65 on 027, 9.35 on 028, 8.8 on 029 and 8.75 on 030.
+- With `FILE__028` alone moved (+0.525), all four are within about 0.15 m.
+- The prototype's 027 +0.50 puts the reflector at 9.15 on 027, 0.35 m out of line.
+- Its other neighbour, `FILE__026`, matches nothing clearly, so 027 has no clear match once
+  028 is corrected.
+
+**Injected errors (Grid 1 unfitted, base values above):**
+
+| Move | Line | Gets | Target (base − d) | Off by | Neighbours |
+|---|---|---|---|---|---|
+| `FILE__031` +0.30 | `FILE__031` | −0.200 OWN | −0.148 | −0.052 | 030, 032, 033 stay GRID, ±0.001 |
+| `FILE__031` −0.50 | `FILE__031` | +0.596 OWN | +0.652 | −0.056 | stay GRID, +0.003 |
+| both +0.30 | `FILE__031` | −0.218 OWN | −0.148 | −0.070 | 030, 033 stay GRID, −0.003 |
+| | `FILE__032` | −0.114 OWN | −0.148 | +0.034 | |
+| 031 −0.50, 032 +0.30 | `FILE__031` | +0.578 OWN | +0.652 | −0.074 | stay GRID, +0.002 |
+| | `FILE__032` | −0.114 OWN | −0.148 | +0.034 | |
+| 031 +0.30, 032 −0.50 | `FILE__031` | −0.224 OWN | −0.148 | −0.076 | stay GRID, +0.003 |
+| | `FILE__032` | +0.686 OWN | +0.652 | +0.035 | |
+
+- **Why `FILE__031` misses by about 0.05:** before any move it already sits +0.052 m ahead of
+  its neighbours (all four halves agree: +0.04, +0.09, +0.04 and +0.13). That is below the
+  own-value threshold, so its base value is the grid value. Once it gets an own value, that
+  value corrects the 0.052 m as well. The move itself is recovered to within 0.01 m: the
+  +0.30 and −0.50 results differ by −0.796. This, not the solve, explains the prototype's
+  "−0.43".
+- **The two large opposite moves (−0.50 beside +0.30)**, the prototype's weak case, are
+  recovered either way round, as well as the single moves.
+
+**Skew** (0.02 m × line rank added to every start, Grid 1):
+- Unfitted: the grid value moves +0.0005. The same four lines keep own values, within 0.020
+  of before. No own value is created or removed.
+- Fitted: the grid value moves +0.0008. There are no own values either way.
+
+**Cost.** One 60-line measurement, grid value and per-line values together, takes about
+0.7 s once the files are read; the per-line step is 0.03–0.04 s of it. Peak memory traced on
+Grid 1 is 20 MB (110 MB before lines were streamed).
+
 ## Cost
 
 Processing (read, dewow, background removal, envelope, bin) takes about 0.15 s per line:

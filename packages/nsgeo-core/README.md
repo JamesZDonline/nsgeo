@@ -205,7 +205,7 @@ The destagger a grid's lines need, measured from the lines themselves: each line
 | `MeasureLine` | One line to measure: its bins, its placement as shown now, and its DZT header. |
 | `MeasureStopped` | Raised when the caller's `should_stop` returns True. |
 | `envelope_bins` | Dewow, background removal, analytic envelope, then 8-sample time bins, for one channel's samples. |
-| `measure_destagger` | The grid value per axis (and each line's result) for a set of placed lines. |
+| `measure_destagger` | The grid value per axis, and each line's result, for a set of placed lines: its own value when it is clearly off on its own, otherwise the grid value. |
 
 ### `nsgeo.velocity_fit`
 

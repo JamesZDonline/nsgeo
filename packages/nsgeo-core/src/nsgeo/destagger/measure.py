@@ -14,7 +14,9 @@ destagger already set on a line is ignored (C1): positions are computed with
 gives the same numbers.
 
 A grid value that cannot be measured says why instead of guessing (C10), and a
-line that cannot be measured keeps the reason that stopped it.
+line that cannot be measured keeps the reason that stopped it. Lines clearly off
+on their own then get their own value, and lines that change partway along or
+match nothing are named and left at the grid value (`per_line`, design 7.4).
 """
 
 from __future__ import annotations
@@ -27,16 +29,18 @@ from typing import Callable
 
 import numpy as np
 
+from nsgeo.destagger.per_line import per_line_values
 from nsgeo.destagger.prepare import EnvelopeBins
 from nsgeo.destagger.profiles import (
     END_TRIM_M,
+    PAIR_LAG_FACTOR,
     STEP_M,
     along_axis,
     bin_medians,
     grid_peak,
-    lag_curves,
-    line_profiles,
+    line_curves,
     neighbour_indices,
+    pair_curves,
     search_range_m,
     time_window,
 )
@@ -220,15 +224,36 @@ def _measure_axis(
     longest = max(float(a.max() - a.min()) for a in along_list)
     max_lag = int(round(search_range_m(longest) / STEP_M))
 
-    profiles = np.empty((len(measured), window.size, axis_m.size))
-    for j in range(len(measured)):
+    def check() -> None:
         _check(should_stop)
-        profiles[j], _ = line_profiles(datas[j], along_list[j], axis_m, medians, window)
-    curves = lag_curves(profiles, local_nb, local_dirs, max_lag, lambda: _check(should_stop))
-    _check(should_stop)
-    found = grid_peak(np.array([curves[j] for j in range(len(measured))]), window.size, BOOTSTRAP)
+
+    pairs = pair_curves(
+        datas,
+        along_list,
+        axis_m,
+        medians,
+        window,
+        local_order,
+        local_dirs,
+        PAIR_LAG_FACTOR * max_lag,
+        check,
+    )
+    found = grid_peak(
+        line_curves(pairs, local_nb, local_dirs, max_lag),
+        line_curves(pairs, local_nb, local_dirs, max_lag, normalised=True),
+        BOOTSTRAP,
+    )
     if not found.clear:
         return failed(UNCLEAR)
-    for line in measured:
-        out[line.key] = LineResult(line.key, axis, LineStatus.GRID, found.destagger)
-    return AxisResult(axis, found.destagger, found.spread_m, len(measured)), out
+    grid = float(found.destagger)
+    verdicts = per_line_values(pairs, local_order, local_dirs, local_nb, grid, max_lag, check)
+    for j, line in enumerate(measured):
+        if j in verdicts.own:
+            out[line.key] = LineResult(line.key, axis, LineStatus.OWN, grid + verdicts.own[j])
+        elif j in verdicts.changes:
+            out[line.key] = LineResult(line.key, axis, LineStatus.CHANGES, grid)
+        elif j in verdicts.no_match:
+            out[line.key] = LineResult(line.key, axis, LineStatus.NO_MATCH, grid)
+        else:
+            out[line.key] = LineResult(line.key, axis, LineStatus.GRID, grid)
+    return AxisResult(axis, grid, float(found.spread_m), len(measured)), out

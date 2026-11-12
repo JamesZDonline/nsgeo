@@ -87,15 +87,6 @@ def test_measuring_twice_gives_identical_results(grid1_lines, grid1_unfitted):
 
 
 @needs_grid1
-def test_every_measured_line_gets_the_grid_value(grid1_unfitted):
-    grid = grid1_unfitted.axes["y"].destagger
-    assert len(grid1_unfitted.lines) == 60
-    for line in grid1_unfitted.lines.values():
-        assert line.status is LineStatus.GRID
-        assert line.destagger == grid
-
-
-@needs_grid1
 def test_a_line_without_a_distance_axis_is_not_measured(grid1_lines):
     lines = list(grid1_lines)
     lines[30] = with_header(lines[30], traces_per_metre=0.0)
@@ -190,22 +181,82 @@ def test_each_axis_is_measured_on_its_own():
     assert len(result.lines) == 120
 
 
-# Each of the six per-line loops (no distance, time settings, too short, neighbours,
-# profiles, lag curves) checks once per line, so 60 lines make 360 calls in order.
-# Stopping inside each stage must raise.
-@needs_grid1
-@pytest.mark.parametrize("stage", range(6))
-def test_should_stop_is_honoured_in_every_per_line_stage(grid1_lines, stage):
-    stop_at = 30 + 60 * stage
+# The per-line loops before the per-line solve each check once per line, in this order,
+# so 60 lines make 60 calls per stage: no distance, time settings, too short, neighbours,
+# profiles and pair curves, and the first per-line reading. Stopping inside each must raise.
+FIXED_STAGES = [
+    "no distance",
+    "time settings",
+    "too short",
+    "neighbours",
+    "profiles and pair curves",
+    "first per-line reading",
+]
+
+
+def _stopper(stop_at):
     calls = []
 
     def stop() -> bool:
         calls.append(1)
         return len(calls) >= stop_at
 
+    return stop, calls
+
+
+@needs_grid1
+@pytest.mark.parametrize("stage", range(len(FIXED_STAGES)), ids=FIXED_STAGES)
+def test_should_stop_is_honoured_in_every_per_line_stage(grid1_lines, stage):
+    stop, calls = _stopper(30 + 60 * stage)
     with pytest.raises(MeasureStopped):
         measure_destagger(grid1_lines, should_stop=stop)
-    assert len(calls) == stop_at
+    assert len(calls) == 30 + 60 * stage
+
+
+@needs_grid1
+def test_each_stage_checks_where_the_stage_tests_expect(grid1_lines, monkeypatch):
+    """Pins the stage boundaries the tests above rely on: the four exclusion stages make
+    calls 1-240, the profiles and pair curves 241-300, and the per-line solve the rest,
+    starting with one reading of every line (301-360)."""
+    calls = []
+    marks = {}
+
+    def count() -> bool:
+        calls.append(1)
+        return False
+
+    def marked(name, fn):
+        def inner(*args, **kwargs):
+            marks[name] = [len(calls)]
+            out = fn(*args, **kwargs)
+            marks[name].append(len(calls))
+            return out
+
+        return inner
+
+    monkeypatch.setattr(m, "pair_curves", marked("pairs", m.pair_curves))
+    monkeypatch.setattr(m, "per_line_values", marked("per line", m.per_line_values))
+    measure_destagger(grid1_lines, should_stop=count)
+    assert marks["pairs"] == [240, 300]
+    assert marks["per line"] == [300, len(calls)]
+    assert len(calls) >= 360 + 60
+
+
+@needs_grid1
+def test_should_stop_is_honoured_in_the_per_line_passes(grid1_lines):
+    """After the first reading, each pass of the per-line solve checks once per line it
+    solves, refines or re-reads; how many passes run depends on the data. Stopping at the
+    first and at the very last of those calls must raise."""
+    stop, calls = _stopper(10**9)
+    measure_destagger(grid1_lines, should_stop=stop)
+    fixed = 60 * len(FIXED_STAGES)
+    total = len(calls)
+    assert total >= fixed + 60  # at least one pass re-reads every line
+    for stop_at in (fixed + 1, total):
+        stop, calls = _stopper(stop_at)
+        with pytest.raises(MeasureStopped):
+            measure_destagger(grid1_lines, should_stop=stop)
+        assert len(calls) == stop_at
 
 
 @needs_grid1
