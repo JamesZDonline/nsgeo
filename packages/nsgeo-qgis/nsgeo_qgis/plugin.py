@@ -64,6 +64,7 @@ from qgis.core import (
     Qgis,
     QgsMessageLog,
     QgsPointXY,
+    QgsProject,
     QgsRasterLayer,
     QgsSettings,
     QgsTemporalNavigationObject,
@@ -242,6 +243,14 @@ class NsgeoPlugin:
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
         self.session = SiteSession()
+        self._timed_layer_ids: list[str] = []
+        # Every raster layer added to the project, whoever adds it (an export, a restore,
+        # a project being opened, Layer > Add Raster Layer), gets its band times from its
+        # own file; a project's own saved band times are whole seconds and lose bands.
+        project = QgsProject.instance()
+        project.layersAdded.connect(self._on_layers_added)
+        project.readProject.connect(self._on_project_read)
+        project.cleared.connect(self._forget_timed_layers)
         # Constructed now, before any new_site()/open_site() the user could
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
@@ -538,6 +547,14 @@ class NsgeoPlugin:
             self.message(f"could not show the panels: {exc}", Qgis.MessageLevel.Warning)
 
     def unload(self) -> None:
+        project = QgsProject.instance()
+        for signal, slot in (
+            (project.layersAdded, self._on_layers_added),
+            (project.readProject, self._on_project_read),
+            (project.cleared, self._forget_timed_layers),
+        ):
+            with contextlib.suppress(Exception):
+                signal.disconnect(slot)
         # An export in flight is cancelled and waited for (bounded): a reloaded module
         # starts with no held task, while the old one could still be writing the same
         # partial file.
@@ -1549,6 +1566,57 @@ class NsgeoPlugin:
             self._fit_temporal_controller(layer)
         return None
 
+    def _on_layers_added(self, layers: Sequence[Any]) -> None:
+        """Wire the band times of an added nsgeo export from its own file, and fit the
+        Temporal Controller to it. Never raises: it is a slot, where exceptions vanish.
+
+        Only `gdal` layers on an existing local `.tif`/`.tiff` are read (one GDAL metadata
+        read each); a file with no recorded band windows, or a counts file, is left alone.
+        An export or restore also wires and fits directly after adding (`_add_export_layer`,
+        `_restore_layers`): the second pass gives the same result, so it is harmless.
+        """
+        for layer in layers:
+            try:
+                if not isinstance(layer, QgsRasterLayer) or layer.providerType() != "gdal":
+                    continue
+                path = Path(layer.source().split("|")[0])
+                if path.suffix.lower() not in (".tif", ".tiff") or not path.is_file():
+                    continue
+                if restore_band_times(layer, path) != "set":
+                    continue
+                self._timed_layer_ids.append(layer.id())
+                self._fit_temporal_controller(layer)
+            except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+                QgsMessageLog.logMessage(
+                    f"could not set the band times of an added layer: {exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+
+    def _forget_timed_layers(self) -> None:
+        self._timed_layer_ids.clear()
+
+    def _on_project_read(self, *_args: Any) -> None:
+        """A project was opened: QGIS's Temporal Controller panel restores its own mode from
+        the project once the layers are read, which undoes a fit made while they loaded.
+        Fit again, after that, to the last timed nsgeo layer."""
+        QTimer.singleShot(0, self._refit_after_open)
+
+    def _refit_after_open(self) -> None:
+        try:
+            project = QgsProject.instance()
+            for layer_id in reversed(self._timed_layer_ids):
+                layer = project.mapLayer(layer_id)
+                if isinstance(layer, QgsRasterLayer):
+                    self._fit_temporal_controller(layer)
+                    return
+        except Exception as exc:  # noqa: BLE001 -- a timer slot must never raise
+            QgsMessageLog.logMessage(
+                f"could not set up the Temporal Controller after opening: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
+
     def _fit_temporal_controller(self, layer: QgsRasterLayer) -> None:
         """Set QGIS's Temporal Controller to step through `layer`'s bands, one per frame.
 
@@ -1558,7 +1626,8 @@ class NsgeoPlugin:
         vanish, and the layer is already added.
         """
         try:
-            navigation = self.iface.mapCanvas().temporalController()
+            canvas = self.iface.mapCanvas()
+            navigation = canvas.temporalController() if canvas is not None else None
             if isinstance(navigation, QgsTemporalNavigationObject):
                 fit_temporal_navigation(navigation, layer)
         except Exception as exc:  # noqa: BLE001 -- the layer is added; only the stepping is lost

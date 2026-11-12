@@ -547,15 +547,21 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    so its factors can differ slightly from the ones on screen. Manual
    multipliers carry over as you typed them.
 
-   **Stepping through depths.** After an export nsgeo sets up QGIS's Temporal
-   Controller for the new file, one band to a step. Open it with **View →
-   Panels → Temporal Controller**, or with its clock button, and press play or
-   drag the slider. The times it shows are nanoseconds written as seconds after
-   midnight on 1 January 1970, so 00:00:05 is 5 ns. This replaces whatever the
-   controller was set to. For a file you add by hand in another project, set the
-   controller up the same way: choose the **Animated** mode, press **Set to full
-   range** (from the layers), and make the step equal to the band step in
-   seconds.
+   **Stepping through depths.** With nsgeo installed, an exported file steps one
+   band at a time in QGIS's Temporal Controller, however it gets into the
+   project: straight after an export, when you reopen a saved project, or when
+   you add it yourself with **Layer → Add Layer → Add Raster Layer**. nsgeo reads
+   the band times from the file and sets the controller to match. Open it with
+   **View → Panels → Temporal Controller**, or its clock button, then press play
+   or drag the slider. Adding one of these files replaces whatever the controller
+   was set to.
+
+   The times it shows are nanoseconds written as seconds after midnight on
+   1 January 1970, so 00:00:05 is 5 ns. Times before 0 ns show as the last
+   seconds of 31 December 1969, so -1.8 ns is 23:59:58. Where nsgeo is not
+   installed, the file carries no time setting for QGIS. Step through its bands
+   with the band choice in the layer's **Symbology**, or with another GIS's band
+   list.
 
    Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
    ending. Any QGIS project that opens the file draws it with the same colours,
