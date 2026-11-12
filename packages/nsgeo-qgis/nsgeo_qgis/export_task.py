@@ -45,7 +45,9 @@ from nsgeo_qgis.slice_export import (
     build_overviews,
     commit_partial,
     discard_partial,
+    drop_stale_files,
     partial_path,
+    replace_partial,
 )
 
 _LOG_TAG = "nsgeo"
@@ -204,8 +206,9 @@ class ExportTask(QgsTask):
                 )
             if self.isCanceled():
                 raise ExportCancelled()
-            commit_partial(values, self._target)
+            replace_partial(values, self._target)
             self._values_written = True
+            drop_stale_files(self._target)
             if self._coverage_spec is not None and self._coverage_target is not None:
                 commit_partial(partials[1], self._coverage_target)
             partials.clear()

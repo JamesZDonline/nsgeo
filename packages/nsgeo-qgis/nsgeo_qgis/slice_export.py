@@ -84,6 +84,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsDateTimeRange,
     QgsInterval,
+    QgsMessageLog,
     QgsProject,
     QgsRasterLayer,
     QgsTemporalNavigationObject,
@@ -204,15 +205,38 @@ def coverage_path(target: str | Path) -> Path:
     return target.with_name(f"{target.stem}_coverage.tif")
 
 
-def commit_partial(partial: str | Path, target: str | Path) -> None:
+def replace_partial(partial: str | Path, target: str | Path) -> None:
     """Put a finished partial file on the target name, replacing what was there.
 
-    The old file's `<target>.aux.xml` (statistics) and `<target>.ovr` (an external overview)
-    are dropped too: GDAL would serve them for the new file. (`Create()` used to delete them.)
+    Only the replace: the caller says the new file is in place, then calls
+    `drop_stale_files`.
     """
     os.replace(partial, target)
+
+
+def drop_stale_files(target: str | Path) -> None:
+    """Drop the old file's `<target>.aux.xml` (statistics) and `<target>.ovr` (an external
+    overview): GDAL would serve them for the new file. (`Create()` used to delete them.)
+
+    Best effort: the new file is already in place, so a file that cannot be removed (held
+    open on Windows, say) is logged, never raised.
+    """
     for suffix in (".aux.xml", ".ovr"):
-        Path(f"{target}{suffix}").unlink(missing_ok=True)
+        stale = Path(f"{target}{suffix}")
+        try:
+            stale.unlink(missing_ok=True)
+        except OSError as exc:
+            QgsMessageLog.logMessage(
+                f"could not remove the old {stale.name} beside the new file: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
+
+
+def commit_partial(partial: str | Path, target: str | Path) -> None:
+    """`replace_partial`, then `drop_stale_files`."""
+    replace_partial(partial, target)
+    drop_stale_files(target)
 
 
 def discard_partial(partial: str | Path) -> None:

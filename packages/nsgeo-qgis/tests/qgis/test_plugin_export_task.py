@@ -618,3 +618,69 @@ def test_a_cancel_mid_band_over_the_real_stack_leaves_nothing_and_never_touches_
         monkeypatch.undo()
     finally:
         engine.dispose()
+
+
+def _unlink_refusing(monkeypatch, *, suffixes=(".aux.xml", ".ovr")):
+    """Make unlinking a stale statistics or overview file fail, as a file held open does."""
+    real = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if self.name.endswith(suffixes):
+            raise PermissionError(13, "in use by another program")
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+
+def test_a_stale_statistics_file_that_cannot_be_removed_does_not_fail_the_export(
+    qgis_app, tmp_path, fake_run, monkeypatch
+):
+    results, on_done = _collector()
+    task, target, cov = _make(tmp_path, on_done)
+    (tmp_path / "out.tif.aux.xml").write_text("old statistics")
+    (tmp_path / "out_coverage.tif.ovr").write_bytes(b"old overviews")
+    _unlink_refusing(monkeypatch)
+    assert start_export(task)
+    _wait(lambda: results, "the export to finish")
+    (result,) = results
+    assert result.ok and not result.values_written
+    assert target.read_bytes() == b"values" and cov.exists()
+
+
+def test_the_values_file_in_place_is_reported_when_the_companion_then_fails(
+    qgis_app, tmp_path, fake_run, monkeypatch
+):
+    """The flag is set at the replace, before the stale files are dealt with."""
+    results, on_done = _collector()
+    task, target, cov = _make(tmp_path, on_done)
+    (tmp_path / "out.tif.aux.xml").write_text("old statistics")
+    _unlink_refusing(monkeypatch)
+    real = export_task.commit_partial
+
+    def commit(partial, to):
+        if Path(to) == cov:
+            raise PermissionError(13, "in use by another program")
+        real(partial, to)
+
+    monkeypatch.setattr(export_task, "commit_partial", commit)
+    assert start_export(task)
+    _wait(lambda: results, "the half-committed export to finish")
+    (result,) = results
+    assert not result.ok and result.values_written
+    assert target.read_bytes() == b"values"
+
+
+def test_a_failing_unlink_in_commit_partial_is_logged_not_raised(tmp_path, monkeypatch):
+    from nsgeo_qgis import slice_export
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        slice_export.QgsMessageLog, "logMessage", lambda msg, *a, **k: logged.append(msg)
+    )
+    partial, target = tmp_path / "t.partial.tif", tmp_path / "t.tif"
+    partial.write_bytes(b"new")
+    (tmp_path / "t.tif.aux.xml").write_text("old")
+    _unlink_refusing(monkeypatch)
+    slice_export.commit_partial(partial, target)
+    assert target.read_bytes() == b"new"
+    assert any("t.tif.aux.xml" in m for m in logged)

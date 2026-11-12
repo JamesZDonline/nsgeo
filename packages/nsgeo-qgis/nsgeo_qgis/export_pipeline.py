@@ -103,10 +103,17 @@ from nsgeo_qgis.slices_plan import (
 class ExportCancelled(Exception):
     """The export was cancelled (plan call 11).
 
-    Raised where `should_stop` says so, so a caller can tell a cancel from a failure and
-    report each in its own words: by the pipeline between grids and inside a
-    minimum-curvature solve, and by the writers and the overview build when the task
-    is cancelled.
+    Raised, so a caller can tell a cancel from a failure and report each in its own
+    words, by:
+
+    - `run_export`, where `should_stop` says so: before each grid is gathered, before the
+      seams are found, before each grid's window is binned and before each grid is
+      finished, and inside a minimum-curvature solve;
+    - `slice_export.build_overviews`, when GDAL's overview build fails and the task was
+      cancelled;
+    - `ExportTask.run`, after both files are written and before the first is put in place.
+
+    The writers do not raise it themselves: it reaches them through the band generator.
     """
 
 
