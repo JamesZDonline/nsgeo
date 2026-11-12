@@ -422,28 +422,62 @@ def test_window_mean_of_level_solves_equals_the_slice_view_of_the_window(cell):
 
 
 def test_the_threshold_picks_crops_or_the_whole_frame():
-    assert CROP_MAX_DISTANCE_SPACINGS == 0.75
-    assert uses_crops(0.375, 0.5)  # exactly 0.75 spacings
-    assert uses_crops(0.25, 0.5)
-    assert uses_crops(0.75 * 0.55, 0.55)  # the product rounds the same way the engine's does
-    assert not uses_crops(0.376, 0.5)
+    assert CROP_MAX_DISTANCE_SPACINGS == 0.5
+    assert uses_crops(0.25, 0.5)  # exactly 0.5 spacings
+    assert uses_crops(0.1, 0.5)
+    assert uses_crops(0.5 * 0.55, 0.55)  # the product rounds the same way the engine's does
+    assert not uses_crops(0.26, 0.5)
+    assert not uses_crops(0.375, 0.5)  # 0.75 spacings, the default
     assert not uses_crops(0.5, 0.5)  # one spacing
-    assert not uses_crops(0.75, 0.5)  # 1.5 spacings
 
 
 def _holed_cube(cell, dropped=(3, 4, 5, 6)):
-    """The real lines with some dropped: a 2 m hole between lines 2 and 7."""
+    """The real lines with some dropped: `dropped` are the lines left out."""
     frame = axis_frame(cell)
     lines = prepared_lines([i for i in range(10) if i not in dropped], lambda local: local)
     plans = [plan_line(p, frame, AXIS) for p in lines]
     return build_cube(lines, plans, frame, AXIS, _prov())
 
 
-HOLE_PATHS = {
-    "across the hole": straight((10.2, 0.3), (10.2, 4.7)),
-    "diagonal through the hole": straight((2.0, 0.5), (14.0, 4.5)),
-    "beside the hole": straight((1.0, 1.55), (13.0, 1.55)),
+HOLES = {
+    "1 m": (4, 5),
+    "2 m": (3, 4, 5, 6),
+    "3 m": (2, 3, 4, 5, 6, 7),
 }
+HOLE_PATHS = {
+    "across the hole, x=4.0": straight((4.0, 0.3), (4.0, 4.7)),
+    "across the hole, x=10.2": straight((10.2, 0.3), (10.2, 4.7)),
+    "across the hole, x=17.5": straight((17.5, 0.3), (17.5, 4.7)),
+    "diagonal through the hole": straight((2.0, 0.5), (14.0, 4.5)),
+    # 0.2 m inside the 2 m hole's edge, so it still sees data at 0.5 spacings (0.25 m).
+    "beside the hole": straight((1.0, 1.45), (13.0, 1.45)),
+}
+HOLE_LEVELS = tuple(range(10, 171, 20))
+_HOLED: dict = {}
+
+
+def _hole_cases():
+    """(hole, path, spacings). The set takes about a minute on one thread, so the
+    1 m and 3 m holes drop the 1.5 case and the "beside" path: that path lies in
+    the middle of the 3 m hole (nothing in reach) and is only 0.2 m from a line
+    of the 2 m hole."""
+    cases = []
+    for hole in sorted(HOLES):
+        for path_name in sorted(HOLE_PATHS):
+            for spacings in (0.5, 0.75, 1.5):
+                if hole != "2 m" and (path_name == "beside the hole" or spacings == 1.5):
+                    continue
+                cases.append(
+                    pytest.param(hole, path_name, spacings, id=f"{hole}-{path_name}-{spacings}")
+                )
+    return cases
+
+
+def _held_hole(name, cell=0.05):
+    """The cube for each hole, built once for the whole parametrized set."""
+    if (name, cell) not in _HOLED:
+        _HOLED[(name, cell)] = _holed_cube(cell, HOLES[name])
+    return _HOLED[(name, cell)]
 
 
 def _solve_as_the_plugin_does(cube, columns, settings, spacing, plan, level):
@@ -457,21 +491,21 @@ def _solve_as_the_plugin_does(cube, columns, settings, spacing, plan, level):
 
 
 @needs_real_files
-@pytest.mark.parametrize("spacings", [0.75, 1.5])
-@pytest.mark.parametrize("name", sorted(HOLE_PATHS))
-def test_a_cut_through_a_coverage_hole_agrees_with_the_slice(name, spacings):
-    """Cut spec tests 3 and 12 together: a hole under minimum curvature, crops at
-    the default 0.75 spacings and the whole frame at 1.5, both against the slice
-    view (whole-frame solve, smoothed, sampled)."""
+@pytest.mark.parametrize(("hole", "path_name", "spacings"), _hole_cases())
+def test_a_cut_through_a_coverage_hole_agrees_with_the_slice(hole, path_name, spacings):
+    """Cut spec tests 3 and 12 together (M15 final review, I1): holes of 1, 2 and
+    3 m under minimum curvature, crops at 0.5 spacings and the whole frame at 0.75
+    and 1.5, each against the slice view (whole-frame solve, smoothed, sampled),
+    within 1e-3 of the range at nine levels."""
     cell = 0.05
-    cube = _holed_cube(cell)
-    columns = section_columns(cube.frame, HOLE_PATHS[name])
+    cube = _held_hole(hole, cell)
+    columns = section_columns(cube.frame, HOLE_PATHS[path_name])
     distance = spacings * SPACING
     settings = FinishSettings("min_curvature", distance, distance, smooth_y_m=0.1)
     whole = plan_fill(cube.coverage() > 0, cell, "min_curvature", distance, distance)
     assert isinstance(whole, CurvaturePlan)
-    assert uses_crops(distance, SPACING) == (spacings <= 0.75)
-    for k in (30, 90, 150):
+    assert uses_crops(distance, SPACING) == (spacings <= 0.5)
+    for k in HOLE_LEVELS:
         level = cube.level(k)
         done = _solve_as_the_plugin_does(cube, columns, settings, SPACING, whole, level)
         full = smooth(whole.solve(level)[0], cell, settings.smooth_x_m, settings.smooth_y_m)
@@ -480,10 +514,7 @@ def test_a_cut_through_a_coverage_hole_agrees_with_the_slice(name, spacings):
         assert np.array_equal(np.isnan(done), np.isnan(expected))
         assert np.isfinite(expected).any()
         scale = float(np.nanmax(expected) - np.nanmin(expected))
-        # A cut along y through the hole, on crops at the threshold, measures 1.1e-3 to 1.2e-3:
-        # the x margin truncates the coupling along the hole. Reported in the M15 fix wave.
-        crops_across = spacings <= 0.75 and name == "across the hole"
-        assert float(np.nanmax(np.abs(done - expected))) <= (2e-3 if crops_across else 1e-3) * scale
+        assert float(np.nanmax(np.abs(done - expected))) <= 1e-3 * scale
 
 
 @needs_real_files
