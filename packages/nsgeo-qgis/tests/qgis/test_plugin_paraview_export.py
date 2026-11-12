@@ -42,6 +42,7 @@ class Dock:
         self.site_engine = SliceEngine(session)
         self.transform_combo = types.SimpleNamespace(currentText=lambda: "amp_square")
         self.registered: list = []
+        self.foreign_preparing = False
 
     @contextlib.contextmanager
     def foreign_preparation(self, engine):
@@ -378,6 +379,54 @@ def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_ba
         assert spin_until(lambda: own not in dock._foreign, 20_000)
         assert dock.site_engine.wait_until_idle(60_000)
         assert spin_until(lambda: dock.engine.is_prepared, 60_000)
+    finally:
+        own.dispose()
+        dock.refiner.shutdown()
+        dock.site_engine.cancel()
+        dock.site_engine.wait_until_idle(20_000)
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.site_engine.dispose()
+        dock.deleteLater()
+
+
+@needs_real_data
+def test_a_version_bump_states_the_full_cache_then_writes_it(site, monkeypatch):
+    session, dock, export = site
+    choice = _choice(session)
+    export.run("Grid A", choice, progress=_noop)
+    assert export.cache_bytes("Grid A", choice) == 0
+    monkeypatch.setattr(paraview_export.nsgeo, "__version__", "99.0.0")
+    stated = export.cache_bytes("Grid A", choice)
+    assert stated > 0
+    export.run("Grid A", choice, progress=_noop)
+    (cache,) = (Path(session.root) / "paraview" / ".cache").glob("Grid_A-*.npy")
+    assert abs(stated - cache.stat().st_size) <= 0.01 * stated
+
+
+@needs_real_data
+def test_a_second_export_is_refused_while_the_first_exports_engine_is_live(site, monkeypatch):
+    from nsgeo_qgis.ui.slices_dock import SlicesDock
+
+    session, _, _ = site
+    dock = SlicesDock(session)
+    export = ParaViewExport(session, dock)
+    own = SliceEngine(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.engine.set_source(None)
+        source = SourceChoice("Grid A", "p", "amp_square", source_keys(session, "Grid A"))
+        with dock.foreign_preparation(own):
+            own.set_source(source)
+        assert own.has_live_task and dock.foreign_preparing  # the first export's span is over
+        started: list[int] = []
+        monkeypatch.setattr(slices_engine.SliceEngine, "set_source", lambda s, c: started.append(1))
+        with pytest.raises(RuntimeError, match="Slices are still preparing"):
+            export.run("Grid A", _choice(session), progress=_noop)
+        assert started == []
+        monkeypatch.undo()
+        assert own.wait_for_preparation(60_000)
+        assert spin_until(lambda: not dock.foreign_preparing, 20_000)
     finally:
         own.dispose()
         dock.refiner.shutdown()

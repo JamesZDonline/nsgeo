@@ -290,6 +290,7 @@ class ParaViewExport:
             self.dock.engine.has_live_task
             or self.dock.site_engine.has_live_task
             or self.dock.site_engine.is_running
+            or self.dock.foreign_preparing
         ):
             raise RuntimeError(_BUSY)
         errors: list[str] = []
@@ -404,8 +405,13 @@ class ParaViewExport:
         self, source: SourceChoice, choice: VolumeChoice, finish: Any, frame: CubeFrame
     ) -> str:
         """The part of a cache's name that is known without preparing any line: the lines and
-        where they are placed, the preset, transform, cell, depth step, finish and frame."""
+        where they are placed, the preset, transform, cell, depth step, finish and frame, and the
+        nsgeo version. `_cache_key` adds to this only what comes from prepared lines (their
+        data shape, dt, t0, zero and coordinates, and the shared time range t0..t1); every
+        other input of it is here, so a name that matches on this part alone cannot be stale
+        for any reason `cache_bytes` could see."""
         doc = {
+            "nsgeo": nsgeo.__version__,
             "lines": [
                 [k, repr(self.session.line_for_key(k).placement)] for k in sorted(source.line_keys)
             ],

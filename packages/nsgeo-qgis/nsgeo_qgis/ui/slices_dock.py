@@ -3220,6 +3220,12 @@ class SlicesDock(QgsDockWidget):
     def _foreign_live(self) -> bool:
         return any(e.has_live_task for e in self._foreign)
 
+    @property
+    def foreign_preparing(self) -> bool:
+        """Whether an engine registered through `foreign_preparation` may still be running
+        (a span that ended with its task alive included): a caller must not start another."""
+        return self._foreign_live()
+
     @contextlib.contextmanager
     def foreign_preparation(self, engine: Any) -> Iterator[None]:
         """For the span of a preparation made by an engine this dock does not own, hold both
