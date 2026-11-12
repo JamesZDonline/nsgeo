@@ -82,8 +82,9 @@ Two things stop an older version reading a site that 0.4.0 has saved:
 - **A site with cuts saves as schema version 2, and 0.3.0 refuses to open it.**
   A site without cuts still saves as version 1.
 
-A cube saved before 0.4.0 comes back shifted by the median line zero, so its
-slices sit at the depths they showed before, and the Slices panel says so.
+A cube saved before 0.4.0, whose preset has a Time zero step, comes back
+shifted by the median line zero when you restore it, so its slices sit at the
+depths they showed before, and the Slices panel says so.
 
 ### Uninstalling
 
@@ -451,7 +452,7 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-020) before you do.
+  [Known issues](#5-known-issues-in-040) before you do.
 - A pick follows its line, so dragging it on the map does not move it: it goes
   back onto its line when you save the layer's edits. To move a pick along its
   line, delete it and pick again on the profile.
