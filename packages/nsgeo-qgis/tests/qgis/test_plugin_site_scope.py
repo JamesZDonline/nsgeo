@@ -6,7 +6,6 @@ C, four lines each; the plugin opens it in its own session, as a user would.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import re
@@ -25,9 +24,9 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import site_engine as site_engine_module
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.export_task import running_export
 from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
@@ -46,9 +45,18 @@ from nsgeo_qgis.slices_plan import (
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
-from plugin_testing import LayoutProbe, LoadCounter, layout_width, slow_jobs, spin_until
-from qgis.PyQt.QtCore import QCoreApplication, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from plugin_testing import (
+    ExportGate,
+    LayoutProbe,
+    LoadCounter,
+    drive_export_dialog,
+    layout_width,
+    slow_jobs,
+    spin_until,
+    wait_for_export,
+)
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID_X = {"A": (500.0, 506.0), "B": (506.0, 512.0), "C": (512.0, 518.0)}
 
@@ -73,6 +81,8 @@ def _close(plugin, answer_modal):
         dock.site_engine.wait_until_idle(20_000)
         dock.engine.wait_for_preparation(20_000)
     plugin.unload()
+    # The export dialog is deleted later; see test_plugin_export_dialog's `make`.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture
@@ -113,6 +123,14 @@ def whole_site(plugin):
     assert dock.scope() == "site"
     settle(dock)
     return dock
+
+
+def export_via_dialog(plugin, drive_dialog, target, **options):
+    """Press Export, answer the export dialog as a user would, wait for the task."""
+    shown = drive_export_dialog(drive_dialog, path=target, **options)
+    plugin.slices_dock.export_button.click()
+    wait_for_export()
+    return shown
 
 
 def columns(shown, grid_id):
@@ -1558,17 +1576,18 @@ def test_the_site_view_survives_save_and_reopen(plugin):
 # ---- export -----------------------------------------------------------------------------
 
 
-def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, tmp_path):
+def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, drive_dialog, tmp_path):
     dock = whole_site(plugin)
     dock.normalisation_panel.method_combo.setCurrentIndex(1)
     _events()
     target = tmp_path / "out" / "site.tif"
     target.parent.mkdir()
-    calls = answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
     assert dock.export_button.isEnabled()
-    dock.export_button.click()
+    shown = export_via_dialog(plugin, drive_dialog, target)
 
-    assert calls[0][0][2].endswith("slices/site.tif"), calls[0]
+    assert shown[0].windowTitle() == "Export site GeoTIFF"
+    assert [r for r in shown[0].summary_rows() if r[0] == "Grids"], "the site summary names grids"
+    assert shown[0].path_edit.text() == str(target)
     ds = gdal.Open(str(target))
     try:
         md = ds.GetMetadata()
@@ -1589,11 +1608,11 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
     )
 
 
-def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal, tmp_path):
+def test_the_site_export_writes_the_finish_the_panel_shows(plugin, drive_dialog, tmp_path):
     """The plugin hands the site export the site panel's finish, not the
     default. Set as a user would; the file must record it, and its bands must
-    be the site engine's own slices at that finish (the writer stores
-    `SiteSlice.array` as it comes, already on the site lattice)."""
+    be the site engine's own slices at that finish (the export, at the live cell
+    and pixel, equals them)."""
     dock = whole_site(plugin)
     panel = dock.site_finish
     panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
@@ -1602,8 +1621,7 @@ def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal,
     chosen = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_y_m=0.3)
     assert panel.value() == chosen != SliceFinish()
     target = tmp_path / "finished.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
 
     site = dock.site_engine
@@ -1631,34 +1649,53 @@ def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal,
     assert float(md["NSGEO_SITE_SMOOTH_X_M"]) == 0.0
     assert float(md["NSGEO_SITE_SMOOTH_Y_M"]) == 0.3
     for band, window in zip(bands, windows, strict=True):
-        np.testing.assert_array_equal(band, drawn(chosen, window))
+        np.testing.assert_allclose(
+            band, drawn(chosen, window), atol=1e-5, rtol=1e-5, equal_nan=True
+        )
     # The comparison can tell the two apart.
     assert not np.array_equal(bands[0], drawn(SliceFinish(), windows[0]), equal_nan=True)
 
 
-def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
-    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+def test_the_coverage_companion_is_written_styled_and_a_failure_of_it_is_its_own(
+    plugin, drive_dialog, tmp_path, monkeypatch, fake_iface
 ):
-    """M11's Ruling AH, for the site: the companion follows the coverage
-    toggle, and its failure is reported on its own terms, after the main
-    file has been written and added."""
+    """M11's Ruling AH, for the site: the companion follows the coverage toggle,
+    has its own style file, and a failure adding it is reported on its own terms,
+    after the main file has been written and added."""
     dock = whole_site(plugin)
     dock.coverage_check.setChecked(True)
     _events()
     target = tmp_path / "with_coverage.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert (tmp_path / "with_coverage_coverage.tif").exists()
+    export_via_dialog(plugin, drive_dialog, target)
+    companion = tmp_path / "with_coverage_coverage.tif"
+    assert companion.exists()
+    assert companion.with_suffix(".qml").exists() and target.with_suffix(".qml").exists()
     names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert {"with_coverage", "with_coverage_coverage"} <= set(names)
+    assert _metadata(companion)["NSGEO_SITE_RESAMPLING"] == "largest_count"
+    from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
+    from nsgeo.slices import limit_over_slices
+    from plugin_testing import assert_styled_as, read_bands
 
-    def broken(*args, **kwargs):
-        raise OSError("disk full")
+    palette = dock.palette_combo.currentText()
+    clip = UnipolarClip() if dock.source_unipolar() else PercentileClip()
+    limit = limit_over_slices(read_bands(target), clip)
+    layers = {lyr.name(): lyr for lyr in plugin.layers.project.mapLayers().values()}
+    assert_styled_as(layers["with_coverage"], palette, limit, dock.source_unipolar())
+    most = max(1.0, float(np.nanmax(read_bands(companion)[0])))
+    counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+    assert_styled_as(layers["with_coverage_coverage"], counts_palette, most, True)
 
-    monkeypatch.setattr(plugin_module, "write_site_coverage", broken)
+    real = plugin._add_export_layer
+
+    def broken(path, **kwargs):
+        if path.name.endswith("_coverage.tif"):
+            raise OSError("disk full")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(plugin, "_add_export_layer", broken)
     second = tmp_path / "second.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(second), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, second)
     assert second.exists()
     assert "second" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     texts = [
@@ -1666,7 +1703,28 @@ def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
         for i in range(len(fake_iface.messageBar().items()))
     ]
     assert any("coverage companion" in t and "disk full" in t for t in texts), texts
-    assert not any("could not export the site GeoTIFF" in t for t in texts), texts
+    assert not any("could not export" in t for t in texts), texts
+
+
+def test_a_site_export_fits_the_temporal_controller_to_the_new_file(
+    plugin, drive_dialog, tmp_path, fake_iface
+):
+    from qgis.core import QgsTemporalNavigationObject
+
+    whole_site(plugin)
+    canvas = fake_iface.mapCanvas()
+    navigation = QgsTemporalNavigationObject(canvas)  # the canvas owns it, as in the app
+    canvas.setTemporalController(navigation)
+    target = tmp_path / "stepped.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    layer = next(v for v in plugin.layers.project.mapLayers().values() if v.source() == str(target))
+    n = layer.bandCount()
+    assert n > 1 and navigation.totalFrameCount() == n
+    props = layer.temporalProperties()
+    assert [
+        props.bandForTemporalRange(layer, navigation.dateTimeRangeForFrameNumber(k))
+        for k in range(n)
+    ] == list(range(1, n + 1))
 
 
 def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
@@ -1688,7 +1746,7 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
 
 
 def test_the_export_message_names_a_grid_left_out(
-    plugin, site3, answer_modal, tmp_path, fake_iface
+    plugin, site3, drive_dialog, tmp_path, fake_iface
 ):
     """Ruling T4-a: an included grid with no lines is named in the success message."""
     session = plugin.session
@@ -1701,52 +1759,56 @@ def test_the_export_message_names_a_grid_left_out(
     settle(dock)
     assert dock.site_engine.grid_state("C") == "no lines"
     target = tmp_path / "left_out.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
     text = fake_iface.messageBar().currentItem().text()
     assert "exported" in text and "C (no lines)" in text, text
 
 
-def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, answer_modal, tmp_path):
+def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, drive_dialog, tmp_path):
     """Final review M4 (Ruling F-2): the file itself names an included grid
     it does not hold, with its state, and says nothing when none is left out."""
     session = plugin.session
     dock = whole_site(plugin)
     whole = tmp_path / "whole.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(whole), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, whole)
     assert "NSGEO_SITE_LEFT_OUT" not in _metadata(whole)
     session.set_site_view(grids=("A", "B", "C"))
     session.remove_lines(site3.keys("C"))  # no lines at all (#74)
     session.lines_changed.emit()
     settle(dock)
     part = tmp_path / "part.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(part), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, part)
     left = json.loads(_metadata(part)["NSGEO_SITE_LEFT_OUT"])
     assert left == {"C": dock.site_engine.grid_state("C")} == {"C": "no lines"}
 
 
 def test_a_failed_site_export_leaves_no_file_and_adds_no_layer(
-    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+    plugin, drive_dialog, tmp_path, monkeypatch, fake_iface
 ):
     """Ruling T4-b: a half-written GeoTIFF reads as valid zeros."""
-    dock = whole_site(plugin)
+    from nsgeo_qgis.site_export import GeoTiffSiteWriter
+
+    whole_site(plugin)
     target = tmp_path / "broken.tif"
+    real = GeoTiffSiteWriter.write_bands
 
-    def fail_part_way(site_engine, path, *args, **kwargs):
-        path.write_bytes(b"II*\x00 the first band, then the disk filled")
-        raise OSError("disk full")
+    def fills_up(self, path, plan, bands, **kwargs):
+        def first_only():
+            for index, band in enumerate(bands):
+                if index == 1:
+                    raise OSError(28, "No space left on device")
+                yield band
 
-    monkeypatch.setattr(plugin_module, "export_site", fail_part_way)
+        return real(self, path, plan, first_only(), **kwargs)
+
+    monkeypatch.setattr(GeoTiffSiteWriter, "write_bands", fills_up)
     before = set(plugin.layers.project.mapLayers())
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert not target.exists()
+    export_via_dialog(plugin, drive_dialog, target)
+    assert not target.exists() and not list(tmp_path.glob("*.partial*"))
     assert set(plugin.layers.project.mapLayers()) == before
     text = fake_iface.messageBar().currentItem().text()
-    assert "could not export the site GeoTIFF" in text and "disk full" in text
+    assert "could not export" in text and "free disk space" in text
 
 
 # ---- concurrency (trap 1, ruling R-P5) ------------------------------------------------------
@@ -2944,15 +3006,14 @@ def test_leaving_the_site_cancels_its_refine(plugin, monkeypatch):
     _pump_until(lambda: job.stopped_by_request, 2.0)
 
 
-def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal, tmp_path):
+def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, drive_dialog, tmp_path):
     """Every band is the full result, solved: finite on every cell a line
     crossed, and the site engine's own slice at that window."""
     dock = whole_site(plugin)
     _choose_method(dock.site_finish, "min_curvature")
     _wait_for_refine(dock)
     target = tmp_path / "curvature.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
     assert "curvature" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert _metadata(target)["NSGEO_SITE_INTERPOLATION"] == "min_curvature"
@@ -2985,179 +3046,231 @@ def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal,
                 method=dock.normalisation_panel.method(),
                 manual=dock.site_gains(),
             ).array
-            np.testing.assert_array_equal(band, full)
+            np.testing.assert_allclose(band, full, atol=1e-4, rtol=1e-4, equal_nan=True)
 
 
-# ---- exports: progress, cancel and no partial files (plan call 11) -----------------------
+# ---- exports: the task, cancel and no partial files -----------------------
 
 
-class _FakeProgressDialog:
-    def close(self) -> None:
-        pass
-
-    def deleteLater(self) -> None:  # noqa: N802 -- Qt's name
-        pass
-
-
-def _progress_calling(hook):
-    def make(title, total, **_options):
-        def callback(done, of):
-            return hook(done, of) is not False
-
-        return callback, _FakeProgressDialog()
-
-    return make
-
-
-def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(plugin, answer_modal, tmp_path):
+def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
     from plugin_testing import connect_message_log
     from qgis.core import Qgis
 
     dock = whole_site(plugin)
-    plugin._export_progress = _progress_calling(lambda done, of: done < 1)
+    gate = ExportGate(monkeypatch)
     target = tmp_path / "cancelled.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    drive_export_dialog(drive_dialog, path=target)
     before = set(plugin.layers.project.mapLayers())
     levels: list = []
     disconnect = connect_message_log(lambda msg, tag, level: levels.append((msg, level)))
     try:
         dock.export_button.click()
+        gate.wait_entered()
+        running_export().cancel()  # the task list's Cancel
+        wait_for_export()
     finally:
         disconnect()
-    assert not target.exists()
+    assert not target.exists() and not list(tmp_path.glob("*.partial*"))
     assert set(plugin.layers.project.mapLayers()) == before
     assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
 
 
 def test_a_cancelled_site_export_never_removes_a_file_it_did_not_reach(
-    plugin, answer_modal, tmp_path, monkeypatch
+    plugin, drive_dialog, tmp_path, monkeypatch
 ):
-    from nsgeo_qgis.slice_export import ExportCancelled
-
     dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
     target = tmp_path / "theirs.tif"
     target.write_bytes(b"the user's own file")
-
-    def cancelled_before_writing(*args, **kwargs):
-        raise ExportCancelled()
-
-    monkeypatch.setattr(plugin_module, "export_site", cancelled_before_writing)
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    drive_export_dialog(drive_dialog, path=target)
     dock.export_button.click()
+    gate.wait_entered()
+    running_export().cancel()
+    wait_for_export()
     assert target.read_bytes() == b"the user's own file"
 
 
-def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, monkeypatch):
-    """R13: through the site's flow; the status stops saying "Refining" and,
-    once the export ends with the slice unsolved, the preview stands again with
-    its rest armed."""
+def test_closing_the_site_cancels_the_site_export_and_adds_no_layer(
+    plugin, drive_dialog, tmp_path, monkeypatch, answer_modal
+):
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    target = tmp_path / "closing.tif"
+    drive_export_dialog(drive_dialog, path=target)
+    dock.export_button.click()
+    gate.wait_entered()
+    task = running_export()
+    assert task is not None
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.session.close_site()
+    wait_for_export()
+    assert task.isCanceled()
+    assert not target.exists()
+    assert not any(v.source() == str(target) for v in plugin.layers.project.mapLayers().values())
+
+
+def test_the_site_stays_usable_while_its_export_is_held(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """A slice tick runs while the task is held, and the held export is not a solve on
+    the GUI thread: the live site engine is not called by the task."""
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "held.tif")
+    dock.export_button.click()
+    gate.wait_entered()
+    try:
+        ticks: list[int] = []
+        dock.slice_changed.connect(lambda: ticks.append(1))
+        before = dock.slice_slider.value()
+        dock.slice_slider.setValue(before + 1 if before < dock.slice_slider.maximum() else 0)
+        _events()
+        assert ticks, "a slice tick must run while the export task is held"
+        assert running_export() is not None
+    finally:
+        gate.release.set()
+        wait_for_export()
+
+
+def test_a_site_export_leaves_a_running_refine_alone(plugin, drive_dialog, tmp_path, monkeypatch):
+    """Nothing is solved on this thread by the export, so there is nothing to pause: the
+    site's refine goes on while the task is held."""
     dock = whole_site(plugin)
     job = _Looping()
     monkeypatch.setattr(dock.site_engine, "pending_solves", lambda *args, **kwargs: [job])
     _choose_method(dock.site_finish, "min_curvature")  # a new plan's first tick previews
     _pump_until(job.started.is_set)
     assert dock.refiner.busy
-
-    seen: list[tuple[bool, str]] = []
-
-    def hook(done, of):
-        if done == 0:
-            seen.append((dock.refiner.busy, dock.refine_label.text()))
-        if done == of:  # every band solved; the current slice is unsolved again
-            for grid_id in dock.site_engine.ready_grids:
-                engine = dock.site_engine.engine_for(grid_id)
-                engine._solved.clear()
-                engine._last_solve_ms = 500.0
-
-    plugin._export_progress = _progress_calling(hook)
-    target = tmp_path / "running.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "running.tif")
     dock.export_button.click()
-    assert target.exists()
-    assert job.stopped_by_request
-    busy, text = seen[0]
-    assert busy is False
-    assert not text.startswith("Refining"), text
-    _events(3)
-    _pump_until(lambda: dock._site.provisional, 5.0)
-    assert dock._site.refine.rest.isActive()
-    dock.refiner.cancel()
+    gate.wait_entered()
+    try:
+        _events(3)
+        assert dock.refiner.busy and not job.stopped_by_request
+    finally:
+        gate.release.set()
+        wait_for_export()
+        dock.refiner.cancel()
 
 
-def test_a_site_export_shows_the_wait_cursor_throughout(
-    plugin, answer_modal, tmp_path, monkeypatch
-):
-    """Final review I-1: every band is solved on the GUI thread, a grid at a time."""
+def test_a_preview_site_exports_at_full_detail_through_the_dialog(plugin, drive_dialog, tmp_path):
+    """Milestone A refused this. The site is drawn at a coarser pixel, and the file is
+    written at the export cell and pixel, the full lattice's size."""
     dock = whole_site(plugin)
-    busy: list[int] = []
-    real_cursor = plugin_module.busy_cursor
-
-    @contextlib.contextmanager
-    def counting():
-        busy.append(1)
-        with real_cursor():
-            yield
-        busy.append(-1)
-
-    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
-    during: list[int] = []
-    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
-    target = tmp_path / "busy.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert target.exists()
-    assert during and all(depth == 1 for depth in during), during
-    assert busy == [1, -1]
-
-
-@pytest.mark.parametrize(("last_solve_ms", "shown"), [(30.0, True), (10.0, False), (None, True)])
-def test_a_slow_site_export_shows_its_progress_before_the_first_band(
-    plugin, answer_modal, tmp_path, monkeypatch, last_solve_ms, shown
-):
-    """Final review I-1: a site band solves every grid, so it is slow when the
-    grids' last solves add up to more than the live budget (30 ms each is 90 ms;
-    10 ms each is 30 ms), or one is not timed yet. The dialog is then shown, and
-    painted, before band 0; otherwise plan call 11's 500 ms rule stands."""
-    from qgis.PyQt.QtCore import QTimer
-
-    dock = whole_site(plugin)
-    _choose_method(dock.site_finish, "min_curvature")
-    _pump_until(
-        lambda: not dock._site.finish_debounce.isActive() and not dock._site.tick.isActive()
-    )
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
     site = dock.site_engine
-    assert len(site.ready_grids) == 3
+    assert site.is_preview
+    full = site.full_lattice
+    target = tmp_path / "preview.tif"
+    shown = export_via_dialog(plugin, drive_dialog, target)
+    assert len(shown) == 1, "the dialog opens: no refusal before it"
+    ds = gdal.Open(str(target))
+    try:
+        assert (ds.RasterXSize, ds.RasterYSize) == (full.width, full.height)
+        md = ds.GetMetadata()
+    finally:
+        ds.Close()
+    assert float(md["NSGEO_SITE_PIXEL_M"]) == full.pixel == dock.cell_spin.value()
+
+
+def test_a_site_export_at_a_finer_cell_names_it_and_differs_from_the_live_cell(
+    plugin, drive_dialog, tmp_path
+):
+    dock = whole_site(plugin)
+    live_cell = dock.cell_spin.value()
+    live = tmp_path / "live.tif"
+    fine = tmp_path / "fine.tif"
+    export_via_dialog(plugin, drive_dialog, live)
+    export_via_dialog(plugin, drive_dialog, fine, cell=live_cell / 2)
+    a, b = gdal.Open(str(live)), gdal.Open(str(fine))
+    try:
+        assert (b.RasterXSize, b.RasterYSize) == (2 * a.RasterXSize, 2 * a.RasterYSize)
+        md = b.GetMetadata()
+        assert float(md["NSGEO_SITE_CELL_M"]) == pytest.approx(live_cell / 2)
+        assert float(md["NSGEO_SITE_PIXEL_M"]) == pytest.approx(live_cell / 2)
+        assert md["NSGEO_SITE_RESAMPLING"] == "bilinear"
+        coarse = a.GetRasterBand(1).ReadAsArray()
+        finer = b.GetRasterBand(1).ReadAsArray()
+    finally:
+        a.Close()
+        b.Close()
+    assert np.isfinite(finer).any()
+    assert not np.array_equal(finer[::2, ::2], coarse, equal_nan=True)
+
+
+def test_a_real_site_export_touches_no_live_engine_or_session_off_the_gui_thread(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """Review Focus 2, for the site: a recorder on every live engine, the site engine and
+    the session, then a real export. Nothing is read while the task runs."""
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    session = plugin.session
+    main = threading.current_thread()
+    off_thread: list[str] = []
+
+    def spy(owner, name):
+        real = getattr(owner, name)
+
+        def wrapper(*args, **kwargs):
+            if threading.current_thread() is not main:
+                off_thread.append(f"{type(owner).__name__}.{name}")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapper)
+
     for grid_id in site.ready_grids:
-        site.engine_for(grid_id)._last_solve_ms = last_solve_ms  # once the plans exist
-    real = plugin._export_progress
-    made: dict = {"calls": []}
-
-    def spying(title, total, **kwargs):
-        callback, dialog = real(title, total, **kwargs)
-        made["dialog"] = dialog
-        QTimer.singleShot(0, lambda: made.setdefault("pumped", True))  # an expose, say
-
-        def recorded(done, of):
-            made["calls"].append(done)
-            return callback(done, of)
-
-        return recorded, dialog
-
-    monkeypatch.setattr(plugin, "_export_progress", spying)
-    at_band_0: list[tuple[bool, bool]] = []
-    real_slice_at = site.slice_at
-
-    def first_band(*args, **kwargs):
-        if made["calls"] == [0] and not at_band_0:
-            at_band_0.append((made["dialog"].isVisible(), made.get("pumped", False)))
-        return real_slice_at(*args, **kwargs)
-
-    monkeypatch.setattr(site, "slice_at", first_band)
-    target = tmp_path / "slow.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+        engine = site.engine_for(grid_id)
+        for name in ("slice_at", "finish", "_slice", "cube", "prepared_lines", "finish_settings"):
+            spy(engine, name)
+    for name in ("slice_at", "lattice_at", "engine_for", "_gather", "_site_seams"):
+        spy(site, name)
+    for name in ("grid", "grid_gain"):
+        spy(session, name)
+    gate = ExportGate(monkeypatch)
+    target = tmp_path / "spied.tif"
+    drive_export_dialog(drive_dialog, path=target)
     dock.export_button.click()
+    gate.wait_entered()
+    gate.release.set()
+    wait_for_export()
     assert target.exists()
-    assert at_band_0 == [(shown, shown)]
+    assert off_thread == []
+    assert gate.threads and gate.threads[0] != main.name
+
+
+def test_the_site_export_dialog_gives_every_included_grids_limit_as_the_cell_floor(
+    plugin, drive_dialog
+):
+    from nsgeo_qgis.slices_plan import smallest_safe_cell
+
+    dock = whole_site(plugin)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    dock.export_button.click()
+    floor = max(
+        smallest_safe_cell(plugin.session.grid(g).size_x, plugin.session.grid(g).size_y)
+        for g in dock.site_engine.ready_grids
+    )
+    assert shown[0].cell_spin.minimum() == pytest.approx(floor, abs=0.001)
+    assert shown[0].cell_spin.value() == dock.cell_spin.value()
+    assert shown[0].path_edit.text().replace("\\", "/").endswith("slices/site.tif")
+
+
+def test_the_site_export_dialog_starts_at_the_cell_drawn_not_the_spin_box(plugin, drive_dialog):
+    """After a refused resolution the box can show a cell the picture is not at."""
+    dock = whole_site(plugin)
+    drawn = dock.site_engine.full_lattice.pixel
+    dock.cell_spin.blockSignals(True)
+    dock.cell_spin.setValue(dock.cell_spin.value() * 2)
+    dock.cell_spin.blockSignals(False)
+    assert dock.cell_spin.value() != pytest.approx(drawn)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    dock.export_button.click()
+    assert shown[0].cell_spin.value() == pytest.approx(drawn, abs=0.0005)
 
 
 # ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
@@ -3361,9 +3474,9 @@ def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin)
     assert engine.is_preview and engine.preview_note
     assert dock.site_note.text() == engine.preview_note
     assert dock.site_note.isVisibleTo(dock)
-    # The refusal is in the panel before anyone clicks Export (spec 5.5).
-    assert "can't be exported at full detail" in dock.site_note.toolTip()
-    assert engine.preview_note in dock.site_note.toolTip()
+    # Milestone B exports a preview site at full detail, so the tooltip carries no refusal.
+    assert dock.site_note.toolTip() == engine.preview_note
+    assert "export" not in dock.site_note.toolTip().lower()
 
 
 def test_the_note_clears_when_the_site_fits_again(plugin):
@@ -3436,11 +3549,10 @@ def test_the_site_note_never_widens_the_dock(plugin):
     assert dock.site_note.text() == longest
 
 
-def test_export_messages_name_the_cell_and_the_pixel(plugin, answer_modal, tmp_path):
+def test_export_messages_name_the_cell_and_the_pixel(plugin, drive_dialog, tmp_path):
     dock = whole_site(plugin)
     target = tmp_path / "site.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
     cell = dock.cell_spin.value()
     pixel = dock.site_engine.lattice.pixel
@@ -3454,28 +3566,11 @@ def test_export_messages_name_the_cell_and_the_pixel(plugin, answer_modal, tmp_p
     assert dock.engine.wait_for_preparation(20_000)
     assert dock.engine.is_prepared
     grid_target = tmp_path / "grid.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(grid_target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, grid_target)
     assert grid_target.exists()
     gcell = dock.engine.frame.cell
     text = plugin.iface.messageBar().currentItem().text()
     assert f"({gcell:g} m cell, {gcell:g} m pixels)" in text, text
-
-
-def test_a_preview_site_export_is_refused_before_any_dialog(plugin, answer_modal, fake_iface):
-    from qgis.core import Qgis
-
-    dock = whole_site(plugin)
-    dock.site_engine.max_pixels = 100
-    _nudge_cell(dock)
-    refusal = dock.site_engine.export_refusal
-    assert refusal
-    calls = answer_modal(QFileDialog, "getSaveFileName", ("", ""))
-    dock.export_button.click()
-    assert calls == [], "no save dialog opens for a site that cannot be exported"
-    item = fake_iface.messageBar().currentItem()
-    assert item.text() == refusal
-    assert item.level() == Qgis.MessageLevel.Warning
 
 
 def test_a_line_zero_is_read_from_the_scope_on_screen(plugin):

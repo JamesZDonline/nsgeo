@@ -78,39 +78,36 @@ a milestone merges or the plan changes.
 
 ### Done
 
+One row per milestone, plus one for the smaller work in each release. Each
+release's notes list everything in it.
+
 | Milestone | What | Released in |
 |---|---|---|
-| M0–M3 | The core library: DZT reader, data model, grid geometry, processing steps | 0.1.0 (2026-10-16) |
+| M0–M3 | The core library: DZT reader, data model, grid geometry, processing steps | [0.1.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.1.0) (2026-10-16) |
 | M4–M6 | The QGIS plugin: sites, grids and import, the profile viewer, the processing stack | 0.1.0 |
 | M7–M9 | The map ↔ profile link, picks, and the first release | 0.1.0 |
 | M10–M11 | Time and depth slices, with GeoTIFF export | 0.1.0 |
-| M12 | Whole-site slices | 0.2.0 (2026-10-31) |
+| M12 | Whole-site slices | [0.2.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.2.0) (2026-10-31) |
 | M13 | Velocity from diffraction hyperbolas | 0.2.0 |
-| | Time cutoff, display gain, grid corners from the map, zigzag profiles that all read the same way, the Panels menu, and other field requests | 0.2.0 |
-| | Slice interpolation: kriging, IDW and minimum curvature ([#110], [#122]) | 0.3.0 (2026-11-06) |
-| | A bandpass that no longer wraps the direct wave into the bottom of the trace ([#115]) | 0.3.0 |
-| M14 | Migration (Stolt f-k) ([#123]) | 0.3.0 |
-| | Survey panel grids start collapsed ([#133]) | 0.3.0 |
-| | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
-| | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | 0.4.0 (2026-11-12) |
-| | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | 0.4.0 |
-| | Local real-data tests read one survey at a time, so the GPS lines for M17 no longer break them ([#141]) | tests only |
-| | A cube held in memory stores only the cells its lines cross: 3–8× less memory at fine cells, the same slices. Saved cubes use the compact format, and older saved cubes still load ([#113]) | 0.4.0 |
-| | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | 0.4.0 |
-| | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | 0.4.0 |
-| | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | 0.4.0 |
-| | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | 0.4.0 |
-| | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | 0.4.0 |
-| | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | 0.4.0 |
-| | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | 0.4.0 |
-| | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | 0.4.0 |
-| | Measure the destagger: a Measure button in Edit lines works out each grid's shift from its own lines, and each line's own shift where it is clearly off, as a starting point to adjust before OK ([#159]) | 0.4.0 |
-| M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on Sunnyside Grid 1, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open ([#172]) | 0.4.0 |
+| | Time cutoff, display gain, grid corners from the map, zigzag profiles, the Panels menu | 0.2.0 |
+| M14 | Migration (Stolt f-k) | [0.3.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.3.0) (2026-11-06) |
+| | Slice interpolation (kriging, IDW, minimum curvature) and line editing | 0.3.0 |
+| M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
+| | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
+| | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
+| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]) | next release |
 
 ### In progress
 
-- **Whole site at fine cells: the export** ([#108]): an export finer than the
-  preview, streamed to disk in the background. Designed; the plan is next.
+- **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
+  the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
+  typed min/max, a cumulative cut) as you move through the depths; M19's
+  magnetometer maps will reuse it. Built, awaiting its walkthrough.
+- **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
+  lists every saved fit on the grid's lines, averages the ones you tick, and
+  remembers which fits made the grid's velocity. Slices take their depths
+  from the grid's velocity, as cuts already do. Designed, with a five-task
+  plan.
 
 ### Next, in order
 
@@ -141,11 +138,10 @@ Grouped by area. The order within a group is not a priority.
   ([#130]; the outline and its slice mask come with M17's GPS areas); balancing
   lines walked in different directions (the second half of [#47]); a preset or
   velocity override for a selection of lines at once ([#58]; editing their
-  placement together is done).
-- **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
-  in one dialog ([#127]); Save fit also clears the points ([#128]); average or
-  combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
-  box around a hyperbola and let the plugin mark it ([#140]).
+  placement together is done); the scroll wheel no longer moves a line to
+  another grid in Edit lines ([#176]).
+- **Velocity:** a modifier-click for velocity points ([#88]); draw a box
+  around a hyperbola and let the plugin mark it ([#140]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
@@ -155,7 +151,14 @@ Grouped by area. The order within a group is not a priority.
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
-  alone or the max distance is large ([#147]).
+  alone or the max distance is large ([#147]); lines processed differently in
+  one cube, such as migration at each line's own velocity ([#178]); the scroll
+  wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
+  ([#177]); whole site at fine cells, the follow-ups: coverage edge lines on
+  coarse previews, averaged previews, a memory estimate for This grid, refusals
+  that stay on screen, and where the preview note sits ([#157]); exports of
+  large sites at fine cells, holding one grid at a time so they fit in memory
+  ([#167]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -164,39 +167,17 @@ Grouped by area. The order within a group is not a priority.
   page for each processing step (the first page is built and waiting for a
   walkthrough).
 
-[#3]: https://github.com/JamesZDonline/nsgeo/issues/3
-[#4]: https://github.com/JamesZDonline/nsgeo/issues/4
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
-[#29]: https://github.com/JamesZDonline/nsgeo/issues/29
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
-[#35]: https://github.com/JamesZDonline/nsgeo/issues/35
 [#36]: https://github.com/JamesZDonline/nsgeo/issues/36
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
-[#64]: https://github.com/JamesZDonline/nsgeo/issues/64
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
 [#88]: https://github.com/JamesZDonline/nsgeo/issues/88
 [#89]: https://github.com/JamesZDonline/nsgeo/issues/89
-[#97]: https://github.com/JamesZDonline/nsgeo/issues/97
-[#100]: https://github.com/JamesZDonline/nsgeo/issues/100
-[#101]: https://github.com/JamesZDonline/nsgeo/issues/101
-[#103]: https://github.com/JamesZDonline/nsgeo/issues/103
-[#106]: https://github.com/JamesZDonline/nsgeo/issues/106
-[#107]: https://github.com/JamesZDonline/nsgeo/issues/107
 [#108]: https://github.com/JamesZDonline/nsgeo/issues/108
-[#109]: https://github.com/JamesZDonline/nsgeo/issues/109
-[#110]: https://github.com/JamesZDonline/nsgeo/pull/110
-[#111]: https://github.com/JamesZDonline/nsgeo/issues/111
-[#112]: https://github.com/JamesZDonline/nsgeo/issues/112
-[#113]: https://github.com/JamesZDonline/nsgeo/issues/113
 [#114]: https://github.com/JamesZDonline/nsgeo/issues/114
-[#115]: https://github.com/JamesZDonline/nsgeo/issues/115
-[#116]: https://github.com/JamesZDonline/nsgeo/issues/116
-[#117]: https://github.com/JamesZDonline/nsgeo/issues/117
-[#120]: https://github.com/JamesZDonline/nsgeo/issues/120
-[#122]: https://github.com/JamesZDonline/nsgeo/pull/122
-[#123]: https://github.com/JamesZDonline/nsgeo/issues/123
 [#125]: https://github.com/JamesZDonline/nsgeo/issues/125
 [#126]: https://github.com/JamesZDonline/nsgeo/issues/126
 [#127]: https://github.com/JamesZDonline/nsgeo/issues/127
@@ -205,21 +186,23 @@ Grouped by area. The order within a group is not a priority.
 [#130]: https://github.com/JamesZDonline/nsgeo/issues/130
 [#131]: https://github.com/JamesZDonline/nsgeo/issues/131
 [#132]: https://github.com/JamesZDonline/nsgeo/issues/132
-[#133]: https://github.com/JamesZDonline/nsgeo/issues/133
 [#134]: https://github.com/JamesZDonline/nsgeo/issues/134
 [#138]: https://github.com/JamesZDonline/nsgeo/issues/138
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
-[#141]: https://github.com/JamesZDonline/nsgeo/issues/141
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
-[#148]: https://github.com/JamesZDonline/nsgeo/issues/148
+[#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
-[#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
 [#171]: https://github.com/JamesZDonline/nsgeo/issues/171
-[#172]: https://github.com/JamesZDonline/nsgeo/pull/172
+[#175]: https://github.com/JamesZDonline/nsgeo/pull/175
+[#176]: https://github.com/JamesZDonline/nsgeo/issues/176
+[#177]: https://github.com/JamesZDonline/nsgeo/issues/177
+[#178]: https://github.com/JamesZDonline/nsgeo/issues/178
+[#180]: https://github.com/JamesZDonline/nsgeo/issues/180
 
 ## Why
 

@@ -13,7 +13,7 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
-from nsgeo.velocity_fit import fit_hyperbola
+from nsgeo.velocity_fit import fit_at_zero, fit_hyperbola
 from plugin_testing import send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
@@ -419,22 +419,25 @@ def test_save_fit_stores_it_without_changing_any_velocity(plugin):
 
 
 def test_save_fit_says_where_the_fit_went_and_keeps_the_readout(plugin):
-    dock = _velocity_on(plugin)
+    s, dock = plugin.session, _velocity_on(plugin)
     _click_hyperbola(plugin)
     readout = dock.velocity_readout.text()
     assert readout.startswith("v = ")
     assert "Set velocity override" not in readout
+    v = dock.velocity_fit_result().v_m_ns
+    sigma = dock.velocity_fit_result().v_stderr_m_ns
 
     dock.save_fit_button.click()
 
+    # The points are cleared (#128), so the read-out carries the saved fit's
+    # own numbers rather than the live fit's line.
     text = dock.velocity_readout.text()
-    assert text.startswith(readout)  # the v = ... read-out is undisturbed
-    assert "Fit saved" in text
+    assert text.startswith(f"Fit saved: v = {v:6.4f} ± {sigma:6.4f} m/ns")
     assert "Set velocity override" in text
     assert "Survey panel" in text
-
-    dock.save_fit_button.click()  # saving again does not stack the sentence
-    assert dock.velocity_readout.text().count("Fit saved") == 1
+    assert "next hyperbola" in text
+    assert text.count("Fit saved") == 1
+    assert len(s.line_for_key(s.keys()[0]).velocity_fits) == 1
 
 
 def test_the_next_fit_action_replaces_the_saved_pointer(plugin):
@@ -445,6 +448,7 @@ def test_the_next_fit_action_replaces_the_saved_pointer(plugin):
 
     dock.clear_velocity_button.click()
     assert "Fit saved" not in dock.velocity_readout.text()
+    assert dock.velocity_readout.text().startswith("Click the hyperbola's apex")
 
 
 def test_apply_after_save_names_the_saved_fit_as_the_overrides_source(plugin):
@@ -466,6 +470,7 @@ def test_apply_of_an_unsaved_fit_leaves_no_provenance(plugin):
     dock.apply_line_button.click()
     assert s.line_for_key(key).velocity_from_fit is not None
 
+    _click_hyperbola(plugin)
     _view(plugin).velocity_point_discarded.emit(4)  # a different, unsaved fit
     dock.apply_line_button.click()
 
@@ -482,6 +487,7 @@ def test_save_alone_leaves_the_pointer_on_the_fit_that_drives_the_line(plugin):
     dock.apply_line_button.click()
     (first,) = s.line_for_key(key).velocity_fits
 
+    _click_hyperbola(plugin)
     _view(plugin).velocity_point_discarded.emit(4)
     dock.save_fit_button.click()  # a second fit, stored but not applied
 
@@ -495,6 +501,7 @@ def test_apply_after_saving_a_different_fit_names_the_applied_one(plugin):
     key = s.keys()[0]
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
+    _click_hyperbola(plugin)
     _view(plugin).velocity_point_discarded.emit(4)
     dock.save_fit_button.click()
     dock.apply_line_button.click()
@@ -504,19 +511,190 @@ def test_apply_after_saving_a_different_fit_names_the_applied_one(plugin):
     assert line.velocity_from_fit == second[0]
 
 
-def test_apply_after_the_saved_fit_was_deleted_applies_with_no_provenance(plugin, message_log):
+def test_apply_after_the_saved_fit_was_deleted_applies_nothing_and_names_nothing(
+    plugin, message_log
+):
     s, dock = plugin.session, _velocity_on(plugin)
     key = s.keys()[0]
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
     (fit_id,) = s.line_for_key(key).velocity_fits
-    s.remove_velocity_fit(key, fit_id)
+    s.remove_velocity_fit(key, fit_id)  # deleted from the velocity dialog meanwhile
+
+    assert not dock.apply_line_button.isEnabled()  # the store is asked, not remembered
+    assert not dock.apply_grid_button.isEnabled()
+    assert dock.velocity_readout.text().startswith("Click the hyperbola's apex")
+    assert "Fit saved" not in dock.velocity_readout.text()
+    # The slots themselves, not the disabled buttons (a click on one emits
+    # nothing): the Apply-time store check must hold on its own.
+    dock._apply_velocity_to_line()
+    dock._apply_velocity_to_grid()
+
+    line = s.line_for_key(key)
+    assert line.velocity is None and line.velocity_from_fit is None
+    assert s.grid("A").velocity is None
+    assert message_log == []
+
+
+def _saved(plugin):
+    s, dock = plugin.session, _velocity_on(plugin)
+    key = s.keys()[0]
+    _click_hyperbola(plugin)
+    dock.save_fit_button.click()
+    (fit_id,) = s.line_for_key(key).velocity_fits
+    return s, dock, key, fit_id
+
+
+def test_save_fit_clears_the_working_points_but_the_saved_curve_stays(plugin, message_log):
+    s, dock, key, _ = _saved(plugin)
+    assert dock.velocity_points() == []
+    assert dock.velocity_fit_result() is None
+    v = _view(plugin)
+    assert v._velocity_points == [] and v._velocity_curve == []
+    assert len(v._saved_velocity_curves) == 1
+    assert not dock.save_fit_button.isEnabled()
+    assert message_log == []
+
+
+def test_apply_to_line_after_save_sets_the_saved_fits_velocity_and_names_it(plugin, message_log):
+    s, dock, key, fit_id = _saved(plugin)
+    assert dock.apply_line_button.isEnabled()
 
     dock.apply_line_button.click()
 
     line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(line.velocity_fits[fit_id].v_m_ns)
+    assert line.velocity_from_fit == fit_id
+    assert dock.velocity_readout.text().startswith("Fit saved")  # still the saved state
+    assert message_log == []
+
+
+def test_apply_to_grid_after_save_sets_the_saved_fits_velocity(plugin, message_log):
+    s, dock, key, fit_id = _saved(plugin)
+    assert dock.apply_grid_button.isEnabled()
+
+    dock.apply_grid_button.click()
+
+    assert s.grid("A").velocity.surface_velocity == pytest.approx(
+        s.line_for_key(key).velocity_fits[fit_id].v_m_ns
+    )
+    assert s.line_for_key(key).velocity is None  # the line itself was not overridden
+    assert message_log == []
+
+
+def test_the_next_point_ends_the_saved_state_and_apply_acts_on_the_new_fit(plugin, message_log):
+    s, dock, key, fit_id = _saved(plugin)
+    _click_hyperbola(plugin)  # the next hyperbola
+
+    assert "Fit saved" not in dock.velocity_readout.text()
+    assert dock.save_fit_button.isEnabled()
+    dock.apply_line_button.click()
+    line = s.line_for_key(key)
     assert line.velocity.surface_velocity == pytest.approx(dock.velocity_fit_result().v_m_ns)
-    assert line.velocity_from_fit is None
+    assert message_log == []
+
+
+def test_one_new_point_after_save_leaves_apply_disabled_not_acting_on_the_saved_fit(
+    plugin, message_log
+):
+    s, dock, key, _ = _saved(plugin)
+    _view(plugin).velocity_point_requested.emit(30, _hyperbola_ns(30))
+    assert not dock.apply_line_button.isEnabled()
+    assert not dock.apply_grid_button.isEnabled()
+    dock._apply_velocity_to_line()  # the slot, not the disabled button
+    dock._apply_velocity_to_grid()
+    assert s.line_for_key(key).velocity is None
+    assert s.grid("A").velocity is None
+    assert message_log == []
+
+
+def test_clear_after_save_ends_the_saved_state(plugin, message_log):
+    s, dock, key, _ = _saved(plugin)
+    dock.clear_velocity_button.click()
+    for b in (dock.apply_line_button, dock.apply_grid_button, dock.save_fit_button):
+        assert not b.isEnabled()
+    assert dock.velocity_readout.text().startswith("Click the hyperbola's apex")
+    dock._apply_velocity_to_line()  # the slot, not the disabled button
+    dock._apply_velocity_to_grid()
+    assert s.line_for_key(key).velocity is None
+    assert s.grid("A").velocity is None
+    assert message_log == []
+
+
+def test_switching_line_after_save_ends_the_saved_state(plugin, message_log):
+    s, dock, key, _ = _saved(plugin)
+    other = s.keys()[1]
+    s.open_line(other)
+    for b in (dock.apply_line_button, dock.apply_grid_button, dock.save_fit_button):
+        assert not b.isEnabled()
+    s.open_line(key)  # back again: the saved state did not wait here
+    for b in (dock.apply_line_button, dock.apply_grid_button, dock.save_fit_button):
+        assert not b.isEnabled()
+    assert "Fit saved" not in dock.velocity_readout.text()
+    dock._apply_velocity_to_line()  # the slot, not the disabled button
+    assert s.line_for_key(key).velocity is None and s.line_for_key(other).velocity is None
+    assert message_log == []
+
+
+def test_turning_velocity_mode_off_after_save_ends_the_saved_state(plugin, message_log):
+    s, dock, key, _ = _saved(plugin)
+    plugin.act_velocity.setChecked(False)
+    plugin.act_velocity.triggered.emit(False)
+    plugin.act_velocity.setChecked(True)
+    plugin.act_velocity.triggered.emit(True)
+    assert not dock.apply_line_button.isEnabled()
+    assert "Fit saved" not in dock.velocity_readout.text()
+    dock._apply_velocity_to_line()  # the slot, not the disabled button
+    assert s.line_for_key(key).velocity is None
+    assert message_log == []
+
+
+def test_a_time_zero_added_after_save_measures_the_saved_fit_from_it(plugin, message_log):
+    # Save on the radar's own clock, then add the Time zero step the strip's
+    # note suggests. The read-out and both Applies must give the fit measured
+    # from the new zero -- the number the velocity dialog shows and applies --
+    # not the one it was stored with.
+    s, dock, key, fit_id = _saved(plugin)
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+    s.append_step(key, build_step("time_zero", mode="sample", sample=80))
+    zero = s.line_zero(key)
+    assert zero != pytest.approx(stored.zero_ns)  # the zero really moved
+    expected = fit_at_zero(stored, s.line_for_key(key).distance_along(), zero).v_m_ns
+    assert expected != pytest.approx(stored.v_m_ns, rel=1e-3)  # and the number with it
+
+    assert dock.apply_line_button.isEnabled() and dock.apply_grid_button.isEnabled()
+    assert f"v = {expected:6.4f}" in dock.velocity_readout.text()
+    dock.apply_line_button.click()
+    dock.apply_grid_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(expected, rel=1e-12)
+    assert line.velocity_from_fit == fit_id
+    assert s.grid("A").velocity.surface_velocity == pytest.approx(expected, rel=1e-12)
+    assert message_log == []
+
+
+def test_a_saved_fit_that_cannot_be_measured_at_a_new_time_zero_is_never_applied(
+    plugin, message_log
+):
+    # A zero late enough that the refit fails: the velocity dialog flags the
+    # fit "cannot be fitted at this time zero" and never applies it. The
+    # strip must not apply the stored number behind its back.
+    s, dock, key, fit_id = _saved(plugin)
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+    s.append_step(key, build_step("time_zero", mode="sample", sample=150))
+    with pytest.raises(ValueError):
+        fit_at_zero(stored, s.line_for_key(key).distance_along(), s.line_zero(key))
+
+    assert not dock.apply_line_button.isEnabled()
+    assert not dock.apply_grid_button.isEnabled()
+    assert "Fit saved" not in dock.velocity_readout.text()
+    dock._apply_velocity_to_line()  # the slots, not the disabled buttons
+    dock._apply_velocity_to_grid()
+
+    line = s.line_for_key(key)
+    assert line.velocity is None and line.velocity_from_fit is None
+    assert s.grid("A").velocity is None
     assert message_log == []
 
 
@@ -526,9 +704,10 @@ def test_apply_names_a_stored_fit_with_the_same_points_saved_before_another(plug
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
     (first,) = s.line_for_key(key).velocity_fits
+    _click_hyperbola(plugin)
     _view(plugin).velocity_point_discarded.emit(4)
     dock.save_fit_button.click()  # the dock's last save is now a different fit
-    _view(plugin).velocity_point_requested.emit(55, _hyperbola_ns(55))  # back to the first's points
+    _click_hyperbola(plugin)  # the first's points again
 
     dock.apply_line_button.click()
 
@@ -542,6 +721,7 @@ def test_adding_time_zero_moves_a_saved_fit_exactly_as_shifting_its_points(plugi
     dock.save_fit_button.click()
     (fit_id,) = s.line_for_key(key).velocity_fits
     stored = s.line_for_key(key).velocity_fits[fit_id]
+    _click_hyperbola(plugin)  # the same clicks again: the save cleared the working points
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
     zero = s.line_zero(key)
     distance = s.line_for_key(key).distance_along()
@@ -570,6 +750,7 @@ def test_the_drawn_points_and_saved_curve_follow_the_shown_clock_after_a_time_ze
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
     (stored,) = s.line_for_key(key).velocity_fits.values()
+    _click_hyperbola(plugin)  # the save cleared the working points; draw them again
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
     shown = dock.shown_zero_ns()
     zero = s.line_zero(key)
@@ -633,12 +814,15 @@ def test_working_points_stay_on_their_reflection_across_a_time_zero_change(plugi
     assert dock.velocity_fit_result().v_m_ns == pytest.approx(expected.v_m_ns, rel=1e-9)
 
 
-def test_save_fit_twice_keeps_both_under_distinct_ids(plugin):
+def test_saving_twice_needs_new_points_and_keeps_both_under_distinct_ids(plugin):
     s, dock = plugin.session, _velocity_on(plugin)
     _click_hyperbola(plugin)
     dock.save_fit_button.click()
+    dock.save_fit_button.click()  # disabled: nothing is left to save (#128)
+    assert len(s.line_for_key(s.keys()[0]).velocity_fits) == 1
+    _click_hyperbola(plugin)
     dock.save_fit_button.click()
-    assert len(s.line_for_key(s.keys()[0]).velocity_fits) == 2
+    assert sorted(s.line_for_key(s.keys()[0]).velocity_fits) == ["fit-1", "fit-2"]
 
 
 def test_the_buttons_are_disabled_until_there_is_a_fit(plugin):

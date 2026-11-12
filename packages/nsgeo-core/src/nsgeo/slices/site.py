@@ -48,8 +48,9 @@ def _snap_eps(coords: Iterable[float], pixel: float) -> float:
 class SiteLattice:
     """A north-up pixel lattice in the site's CRS.
 
-    `x0` is the west edge and `y1` the north edge, both whole multiples of
-    `pixel`, so the lattice is stable as grids are included or excluded.
+    `x0` is the west edge and `y1` the north edge. From `covering` both are whole
+    multiples of `pixel`, so the lattice is stable as grids are included or excluded;
+    from `frame_lattice` they are the frame's own north-west corner, not multiples.
     Row 0 is north, matching the geotransform's negative y size.
     """
 

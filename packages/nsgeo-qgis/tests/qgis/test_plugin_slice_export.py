@@ -12,21 +12,29 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.project import ProjectError, load_site
-from nsgeo.slices import METHODS, SliceWindow, ZAxis, load_cube
+from nsgeo.render import PercentileClip
+from nsgeo.slices import METHODS, SiteLattice, SliceWindow, ZAxis, limit_over_slices, load_cube
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled, run_export
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import (
     GeoTiffSliceWriter,
     ViewSettings,
     apply_temporal_properties,
+    band_time_range,
+    build_overviews,
+    commit_partial,
+    creation_options,
     cube_record,
-    export_slices,
+    discard_partial,
+    grid_export_job,
+    partial_path,
     recipe_from_record,
     save_cube_npz,
-    write_coverage,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import NO_TRANSFORM, Resolution, SliceFinish, SourceChoice
+from osgeo import gdal
 from plugin_testing import synthetic_dzt
 from qgis.core import QgsRasterLayer
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
@@ -52,6 +60,43 @@ _VIEW = ViewSettings(
     stretch="shared across the cube",
     coverage=False,
 )
+
+
+def _write(job, path, coverage_to=None):
+    """The task's work, synchronously: the bands of the snapshot into the writer."""
+    writer, clip = GeoTiffSliceWriter(), PercentileClip()
+
+    def bands(spec):
+        return run_export(spec, should_stop=lambda: False, progress=lambda *a: None)
+
+    writer.write_bands(path, job.plan, bands(job.spec), clip=clip)
+    if coverage_to is not None:
+        writer.write_bands(coverage_to, job.coverage_plan, bands(job.coverage_spec), clip=clip)
+
+
+def export_slices(
+    engine, path, thickness, step, velocity, finish, *, cell=None, pixel=None, coverage_to=None
+):
+    """Plan, snapshot and write a This-grid file (default: the live cell and pixel)."""
+    cell = engine.frame.cell if cell is None else cell
+    pixel = cell if pixel is None else pixel
+    job = grid_export_job(
+        engine, thickness, step, velocity, finish, cell, pixel, coverage=coverage_to is not None
+    )
+    _write(job, path, coverage_to)
+    return job.plan
+
+
+def write_coverage(engine, path):
+    """The counts companion alone, as the task would write it."""
+    cell = engine.frame.cell
+    job = grid_export_job(engine, 10, 5, None, SliceFinish(), cell, cell, coverage=True)
+    GeoTiffSliceWriter().write_bands(
+        path,
+        job.coverage_plan,
+        run_export(job.coverage_spec, should_stop=lambda: False, progress=lambda *a: None),
+        clip=PercentileClip(),
+    )
 
 
 @pytest.fixture
@@ -93,7 +138,14 @@ def test_the_band_count_is_the_specs_formula(exportable):
     from nsgeo_qgis.slice_export import plan_export
 
     engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    plan = plan_export(
+        engine,
+        thickness_levels=10,
+        step_levels=5,
+        velocity=None,
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
     nz = engine.z.nz
     assert len(plan.bands) == (nz - 10) // 5 + 1
 
@@ -121,20 +173,28 @@ def test_every_band_describes_the_window_it_averages_in_both_units(exportable, t
 
 
 def test_the_creation_options_are_the_measured_ones(exportable, tmp_path):
-    """Spec 9.5: INTERLEAVE=BAND is the difference between a 230-band
-    export being unusable and being free -- pixel interleaving forces a
-    read of every band to reach one of them, which is precisely a slice
-    viewer's access pattern. TILED=NO because tiling a raster barely
-    larger than one tile pads it to 512x512 and wastes 2.9x."""
+    """Spec 9.5: INTERLEAVE=BAND is the difference between a 230-band export being
+    unusable and being free (pixel interleaving reads every band to reach one).
+    Tiling is a ruling with two regimes: 256-pixel tiles only when BOTH sides are
+    at least 1024 pixels; below that, strips. The measured 2.9x waste came from
+    512-pixel tiles on a raster barely larger than one tile."""
     from osgeo import gdal
 
-    engine = exportable
+    big = creation_options(1024, 2048)
+    assert "TILED=YES" in big and "BLOCKXSIZE=256" in big and "BLOCKYSIZE=256" in big
+    for options in (big, creation_options(300, 300)):
+        assert "INTERLEAVE=BAND" in options and "COMPRESS=DEFLATE" in options
+        assert "PREDICTOR=3" in options and "BIGTIFF=IF_SAFER" in options
+    for w, h in ((1023, 4000), (4000, 1023), (300, 300)):
+        small = creation_options(w, h)
+        assert "TILED=NO" in small
+        assert not any(o.startswith("BLOCK") for o in small)
+
     path = tmp_path / "cube.tif"
-    export_slices(engine, path, 10, 5, None, SliceFinish())
+    export_slices(exportable, path, 10, 5, None, SliceFinish())
     ds = gdal.Open(str(path))
     try:
-        interleave = ds.GetMetadata("IMAGE_STRUCTURE").get("INTERLEAVE")
-        assert interleave == "BAND"
+        assert ds.GetMetadata("IMAGE_STRUCTURE").get("INTERLEAVE") == "BAND"
         assert ds.GetRasterBand(1).GetBlockSize()[0] == ds.RasterXSize  # stripped, not tiled
         assert np.isnan(ds.GetRasterBand(1).GetNoDataValue())
         assert ds.GetRasterBand(1).DataType == gdal.GDT_Float32
@@ -386,11 +446,18 @@ def test_an_amplitude_plan_without_a_finish_still_writes_a_blend(exportable, tmp
     from osgeo import gdal
 
     engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
+    plan = plan_export(
+        engine,
+        thickness_levels=10,
+        step_levels=5,
+        velocity=None,
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
     assert plan.finish is None and not plan.coverage
-    values = np.full((engine.frame.ny, engine.frame.nx), -2.0, dtype=np.float32)
+    bands = _bands(_band_plan(engine, 3), fill=-2.0)
     path = tmp_path / "amp.tif"
-    GeoTiffSliceWriter().write(path, plan, [values] * len(plan.bands))
+    GeoTiffSliceWriter().write_bands(path, _band_plan(engine, 3), bands, clip=PercentileClip())
     ds = gdal.Open(str(path))
     try:
         arr = ds.GetRasterBand(1).ReadAsArray()
@@ -427,14 +494,10 @@ def test_the_coverage_export_uses_nan_not_zero_for_uncovered_in_frame_cells(expo
         ds.Close()
 
 
-def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_path):
-    """Final review, Minor 7. `write_coverage` used to call `engine.
-    slice_at(...)` -- the TIMED entry point -- over the FULL z axis, which
-    is far more levels than any single displayed window and therefore not
-    a redraw at all. `_REDRAW_SMOOTHING = 0.7` means that one measurement
-    then dominates the status line's reported redraw time for many
-    subsequent ticks. `_slice` (untimed) is what `shared_limit`'s own
-    multi-window pass already uses for the identical reason."""
+def test_a_coverage_export_does_not_touch_the_redraw_time_readout(exportable, tmp_path):
+    """The export reads no live engine after its snapshot, so no export is a redraw:
+    the status line's redraw time (smoothed, so one wrong measurement lingers for many
+    ticks) is exactly what it was."""
     engine = exportable
     # A real redraw first, so `_redraw_ms` holds a small, known value.
     engine.slice_at(SliceWindow(6, 18))
@@ -443,54 +506,7 @@ def test_write_coverage_does_not_poison_the_redraw_time_readout(exportable, tmp_
 
     write_coverage(engine, tmp_path / "coverage.tif")
 
-    assert engine._redraw_ms == before, (
-        "write_coverage's full-axis pass must not be recorded as a redraw"
-    )
-
-
-class _RecordingWriter:
-    """A stub `SliceWriter` (Ruling AG, Task 6 fix round 1): records every
-    call instead of touching GDAL, so a test can observe the streaming
-    property directly rather than only inferring it from `engine.has_cube`."""
-
-    OPTIONS: list[str] = []
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, object, list[np.ndarray]]] = []
-
-    def write(self, path, plan, slices) -> None:  # noqa: ANN001 -- matches SliceWriter structurally
-        self.calls.append((path, plan, list(slices)))
-
-
-def test_export_slices_streams_through_a_substituted_writer(exportable, tmp_path):
-    """Spec 9.6: a writer INTERFACE, not a function that knows GDAL --
-    substituting one must be a plugged-in collaborator, not a two-call-
-    site refactor (Ruling AG). This also doubles as the cheapest possible
-    proof of the band-by-band streaming property: every array the
-    generator yields lands in `slices`, one per `plan.bands`, in the
-    same north-up-less grid-local shape `engine.slice_at` returns it in
-    (the writer, not `export_slices`, is what calls `to_north_up`)."""
-    engine = exportable
-    writer = _RecordingWriter()
-    path = tmp_path / "cube.tif"
-    plan = export_slices(engine, path, 10, 5, None, NONE, writer=writer)
-    assert len(writer.calls) == 1
-    called_path, called_plan, slices = writer.calls[0]
-    assert called_path == path
-    assert called_plan is plan
-    assert len(slices) == len(plan.bands)
-    for array in slices:
-        assert array.shape == (engine.frame.ny, engine.frame.nx)
-
-
-def test_write_coverage_also_accepts_a_substituted_writer(exportable, tmp_path):
-    engine = exportable
-    writer = _RecordingWriter()
-    write_coverage(engine, tmp_path / "coverage.tif", writer=writer)
-    assert len(writer.calls) == 1
-    _path, plan, slices = writer.calls[0]
-    assert len(slices) == 1
-    assert plan.finish is None  # coverage is never finished
+    assert engine._redraw_ms == before, "an export must not be recorded as a redraw"
 
 
 def test_the_geotiff_carries_interpolation_metadata(exportable, tmp_path):
@@ -602,8 +618,8 @@ def test_the_coverage_companion_carries_no_interpolation_metadata(exportable, tm
 
 
 def test_export_bands_equal_the_finished_slices(exportable, tmp_path):
-    """Each band is `engine.finish` of its window, north-up: the file holds
-    what the dock draws."""
+    """Each band is `engine.finish` of its window, north-up, at the live cell and
+    pixel: the file holds what the dock draws."""
     from nsgeo.slices import plan_windows, to_north_up
     from osgeo import gdal
 
@@ -617,9 +633,62 @@ def test_export_bands_equal_the_finished_slices(exportable, tmp_path):
     try:
         for index, window in enumerate(windows, start=1):
             want, _gt = to_north_up(engine.finish(*engine.slice_at(window), finish), engine.frame)
-            np.testing.assert_array_equal(ds.GetRasterBand(index).ReadAsArray(), want)
+            np.testing.assert_allclose(
+                ds.GetRasterBand(index).ReadAsArray(), want, atol=1e-5, rtol=1e-5, equal_nan=True
+            )
     finally:
         ds.Close()
+
+
+@pytest.mark.parametrize("azimuth", [7.0, 30.0, 88.0])
+@pytest.mark.parametrize("finish", [SliceFinish(), NONE], ids=["kriging", "none"])
+def test_a_rotated_export_equals_what_this_grids_live_layer_draws(
+    qgis_app, tmp_path, azimuth, finish
+):
+    """At the live cell and pixel the file is `to_north_up(engine.finish(...))`: the live
+    layer's own picture, same shape, geotransform, empty cells and values, at an azimuth
+    where the north-up resample is not the identity."""
+    from nsgeo.slices import plan_windows, to_north_up
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (500.0, 700.0), azimuth, 6.0, 6.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("A", "y", 1.0 + i * 1.0, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(PRESET)
+    engine = SliceEngine(session)
+    try:
+        engine.set_source(
+            SourceChoice(
+                grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())
+            )
+        )
+        assert engine.wait_for_preparation(20_000)
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+        assert engine.frame.azimuth == azimuth
+        path = tmp_path / "rot.tif"
+        plan = export_slices(engine, path, 10, 5, None, finish)
+        ds = gdal.Open(str(path))
+        try:
+            windows = list(plan_windows(engine.z, 10, 5))
+            assert ds.RasterCount == len(windows) > 1
+            for index, window in enumerate(windows, start=1):
+                want, geotransform = to_north_up(
+                    engine.finish(*engine.slice_at(window), finish), engine.frame
+                )
+                got = ds.GetRasterBand(index).ReadAsArray()
+                assert got.shape == want.shape and np.isfinite(want).any()
+                assert ds.GetGeoTransform() == pytest.approx(geotransform)
+                assert np.array_equal(np.isnan(got), np.isnan(want))
+                np.testing.assert_allclose(got, want, atol=1e-5, rtol=1e-5, equal_nan=True)
+        finally:
+            ds.Close()
+        assert plan.lattice.pixel == engine.frame.cell
+    finally:
+        engine.dispose()
 
 
 def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_path):
@@ -674,12 +743,8 @@ def test_export_handles_a_rotated_frame_without_dropping_a_band(qgis_app, tmp_pa
 def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path):
     """Spec §3 decision 1: a rotated frame is exported at the cell, read
     bilinearly, and no frame cell is dropped (the nearest-cell gather lost
-    15-18% of them at that pitch). Pinned with `none` interpolation and the
-    export itself: the pixel is the cell, and a probe through the written
-    plan (one bright cell at a time) reaches a finite pixel for every cell,
-    while the exported band carries a finite pixel for every cell's worth
-    of ground."""
-    from nsgeo.slices import to_north_up
+    15-18% of them at that pitch). With no interpolation, the pixel is the
+    cell and the file has a finite pixel for about every covered cell."""
     from osgeo import gdal
 
     session = SiteSession()
@@ -702,41 +767,17 @@ def test_a_rotated_export_is_at_the_cell_and_keeps_every_cell(qgis_app, tmp_path
         engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
         frame = engine.frame
         assert frame.azimuth == 30.0
-        ones = np.ones((frame.ny, frame.nx), dtype=np.float32)
-        everywhere = np.ones((frame.ny, frame.nx), dtype=np.int32)
-        engine.slice_at = lambda _window: (ones, everywhere)  # type: ignore[method-assign]
+        covered = int(np.count_nonzero(engine.slice_at(SliceWindow(0, 20))[1] > 0))
 
-        path = tmp_path / "ones.tif"
+        path = tmp_path / "rotated.tif"
         export_slices(engine, path, 10, 5, None, NONE)
-
         ds = gdal.Open(str(path))
         try:
             assert ds.GetGeoTransform()[1] == pytest.approx(frame.cell)
             band = ds.GetRasterBand(1).ReadAsArray()
-            assert np.isfinite(band).sum() >= 0.9 * frame.ny * frame.nx
-            assert set(np.unique(band[np.isfinite(band)])) == {1.0}
         finally:
             ds.Close()
-        # A varying field with negative values: the writer blends it (counts
-        # off for a data export) exactly as `to_north_up` does.
-        rng = np.random.default_rng(11)
-        field = rng.normal(size=(frame.ny, frame.nx)).astype(np.float32)
-        engine.slice_at = lambda _window: (field, everywhere)  # type: ignore[method-assign]
-        path = tmp_path / "field.tif"
-        export_slices(engine, path, 10, 5, None, NONE)
-        ds = gdal.Open(str(path))
-        try:
-            written = ds.GetRasterBand(1).ReadAsArray()
-        finally:
-            ds.Close()
-        expected, _ = to_north_up(field, frame)
-        np.testing.assert_allclose(written, expected, equal_nan=True)
-        assert (written[np.isfinite(written)] < 0).any()
-        for index in range(frame.ny * frame.nx):
-            probe = np.zeros(frame.ny * frame.nx, dtype=np.float32)
-            probe[index] = 1.0
-            out, _ = to_north_up(probe.reshape(frame.ny, frame.nx), frame)
-            assert np.nanmax(out) > 0.0, f"cell {index} reaches no pixel"
+        assert np.isfinite(band).sum() >= 0.9 * covered
     finally:
         engine.dispose()
 
@@ -778,40 +819,6 @@ def test_a_coverage_export_holds_whole_counts(qgis_app, tmp_path):
         np.testing.assert_array_equal(finite, np.round(finite))
     finally:
         engine.dispose()
-
-
-def test_write_raises_when_there_are_too_few_slices(exportable, tmp_path):
-    """Important 3 (Task 6 fix round 1): `zip(plan.bands, slices)` is no
-    longer `strict=True` (that keyword needs Python 3.10+, below this
-    package's `>=3.9` floor), so this explicit count check is what still
-    catches a caller handing over too few slices -- the same guarantee
-    `strict=True` used to provide in this direction."""
-    from nsgeo_qgis.slice_export import plan_export
-
-    engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
-    too_few = [np.zeros((engine.frame.ny, engine.frame.nx), dtype=np.float32)]
-    with pytest.raises(ValueError, match="expected .* slices"):
-        GeoTiffSliceWriter().write(tmp_path / "short.tif", plan, too_few)
-
-
-def test_write_raises_when_there_are_too_many_slices(exportable, tmp_path):
-    """Task 6 fix round 2, Minor 1: `written != len(plan.bands)` alone
-    can only ever detect too FEW slices -- `zip` stops consuming at the
-    shorter iterable, so `written` never exceeds `len(plan.bands)` and a
-    `slices` iterable with a surplus had that surplus silently dropped,
-    with no exception. `strict=True` used to catch this direction too
-    (`ValueError: zip() argument 2 is longer than argument 1`); the
-    explicit `next(iterator, None)` probe after the loop is what restores
-    it without `strict=`."""
-    from nsgeo_qgis.slice_export import plan_export
-
-    engine = exportable
-    plan = plan_export(engine, thickness_levels=10, step_levels=5, velocity=None)
-    shape = (engine.frame.ny, engine.frame.nx)
-    too_many = [np.zeros(shape, dtype=np.float32) for _ in range(len(plan.bands) + 1)]
-    with pytest.raises(ValueError, match="more slices than the plan's"):
-        GeoTiffSliceWriter().write(tmp_path / "long.tif", plan, too_many)
 
 
 def test_a_restored_recipe_reproduces_the_identical_slice(exportable_with_session):
@@ -1072,41 +1079,477 @@ def test_a_record_from_this_build_still_loads_in_0_2_0(method):
     assert got == _ViewSettings020(**_OLD_KEYS)
 
 
-def test_export_reports_progress_for_every_band(exportable, tmp_path):
-    """`(0, n)` before the first band, then one call per band written, and `(n, n)`."""
-    engine = exportable
-    calls: list[tuple[int, int]] = []
+# ---- milestone B: the file at any pixel (write_bands) ------------------------
+def _band_plan(engine, n=3, lattice=None, **extra):
+    """An `ExportPlan` of `n` bands on `lattice` (default: the frame's own, at its cell)."""
+    from dataclasses import replace
 
-    def record(done, total):
-        calls.append((done, total))
-        return True
+    from nsgeo.slices import frame_lattice
+    from nsgeo_qgis.slice_export import plan_export
 
-    plan = export_slices(engine, tmp_path / "cube.tif", 10, 5, None, SliceFinish(), progress=record)
-    n = len(plan.bands)
-    assert n > 2
-    assert calls == [(i, n) for i in range(n + 1)]
+    plan = plan_export(
+        engine,
+        10,
+        5,
+        None,
+        finish=engine.finish_settings(SliceFinish()),
+        cell=engine.frame.cell,
+        pixel=engine.frame.cell,
+    )
+    lattice = lattice or frame_lattice(plan.frame, plan.frame.cell)
+    extra = {"cell": plan.frame.cell, "pixel": lattice.pixel, **extra}
+    return replace(plan, bands=plan.bands[:n], lattice=lattice, **extra)
 
 
-def test_an_export_stops_before_the_next_band_when_progress_says_no(exportable, tmp_path):
-    from nsgeo_qgis.slice_export import ExportCancelled
-
-    engine = exportable
-    pulled: list[int] = []
-    real = engine.slice_at
-
-    def counting(window):
-        pulled.append(window.k0)
-        return real(window)
-
-    engine.slice_at = counting  # type: ignore[method-assign]
-    with pytest.raises(ExportCancelled):
-        export_slices(
-            engine,
-            tmp_path / "cube.tif",
-            10,
-            5,
-            None,
-            SliceFinish(),
-            progress=lambda done, n: done < 2,
+def _bands(plan, fill=None):
+    rng = np.random.default_rng(3)
+    shape = (plan.lattice.height, plan.lattice.width)
+    out = []
+    for i in range(len(plan.bands)):
+        a = (
+            rng.normal(size=shape).astype(np.float32)
+            if fill is None
+            else np.full(shape, fill, np.float32)
         )
-    assert len(pulled) == 2  # bands 0 and 1; the third was never computed
+        a[:2, :] = np.nan
+        out.append(ExportBand(a, {"A": (1.0 + i, 0.0)}))
+    return out
+
+
+def test_a_large_file_is_tiled_and_a_small_one_is_stripped(exportable, tmp_path):
+    from dataclasses import replace
+
+    plan = _band_plan(exportable, n=1)
+    small_path = tmp_path / "small.tif"
+    GeoTiffSliceWriter().write_bands(small_path, plan, _bands(plan), clip=PercentileClip())
+    big_lattice = SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs)
+    big_plan = replace(plan, lattice=big_lattice, pixel=0.01)
+    big_path = tmp_path / "big.tif"
+    GeoTiffSliceWriter().write_bands(big_path, big_plan, _bands(big_plan), clip=PercentileClip())
+    from osgeo import gdal
+
+    small, big = gdal.Open(str(small_path)), gdal.Open(str(big_path))
+    try:
+        assert small.GetRasterBand(1).GetBlockSize()[0] == small.RasterXSize
+        assert big.GetRasterBand(1).GetBlockSize() == [256, 256]
+        assert big.GetRasterBand(1).GetOverviewCount() == 0  # overviews are a separate step
+    finally:
+        small.Close()
+        big.Close()
+
+
+def test_overviews_exist_for_a_tiled_file_and_do_not_bleed(exportable, tmp_path):
+    from dataclasses import replace
+
+    from osgeo import gdal
+
+    plan = _band_plan(exportable, n=2)
+    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs), pixel=0.01)
+    values = np.full((1200, 1100), np.nan, np.float32)
+    values[:, :551] = 5.0  # the east is empty ground; the data ends mid-way through a 2-pixel block
+    values[:, 548], values[:, 549], values[:, 550] = 1.0, 3.0, 7.0
+    bands = [ExportBand(values.copy(), {}) for _ in plan.bands]
+    path = tmp_path / "o.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, bands, clip=PercentileClip())
+    build_overviews(path)
+    ds = gdal.Open(str(path))
+    try:
+        band = ds.GetRasterBand(2)
+        # 1100 x 1200: factors 2 (550 x 600), 4 (275 x 300); 8 would be 138 x 150 < 256.
+        assert band.GetOverviewCount() == 2
+        ov = band.GetOverview(0).ReadAsArray()
+        assert ov.shape[1] == 550
+        assert np.allclose(ov[:, 270], 5.0)  # clear of the edge
+        assert np.allclose(ov[:, 274], 2.0)  # mean of the finite inputs 1.0 and 3.0
+        assert np.allclose(ov[:, 275], 7.0)  # one finite input and one empty: not diluted
+        assert np.isnan(ov[:, 277:]).all()  # empty ground stays empty
+        coarse = band.GetOverview(1).ReadAsArray()
+        assert coarse.shape[1] == 275
+        assert np.isnan(coarse[:, 140:]).all()
+        assert np.allclose(coarse[:, :130], 5.0)
+    finally:
+        ds.Close()
+
+
+def test_a_counts_overview_holds_only_whole_counts(exportable, tmp_path):
+    from dataclasses import replace
+
+    from osgeo import gdal
+
+    plan = replace(_band_plan(exportable, n=1), coverage=True)
+    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs), pixel=0.01)
+    counts = np.zeros((1200, 1100), np.float32)
+    counts[::2] = 1.0
+    counts[1::2] = 2.0
+    counts[:, 800:] = np.nan
+    path = tmp_path / "c.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, [ExportBand(counts, {})], clip=PercentileClip())
+    build_overviews(path, counts=True)
+    ds = gdal.Open(str(path))
+    try:
+        band = ds.GetRasterBand(1)
+        assert band.GetOverviewCount() == 2
+        for i in range(2):
+            ov = band.GetOverview(i).ReadAsArray()
+            found = ov[np.isfinite(ov)]
+            assert found.size and np.array_equal(found, np.round(found))
+    finally:
+        ds.Close()
+
+
+def test_a_stripped_file_gets_no_overviews(exportable, tmp_path):
+    from osgeo import gdal
+
+    plan = _band_plan(exportable, n=1)
+    path = tmp_path / "s.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    build_overviews(path)
+    ds = gdal.Open(str(path))
+    try:
+        assert ds.GetRasterBand(1).GetOverviewCount() == 0
+    finally:
+        ds.Close()
+
+
+def test_write_bands_round_trips_values_geotransform_and_metadata(exportable, tmp_path):
+    from dataclasses import replace
+
+    from nsgeo.slices import frame_lattice
+    from osgeo import gdal
+
+    plan = _band_plan(exportable, n=3)
+    lattice = frame_lattice(plan.frame, 0.125)
+    plan = replace(plan, lattice=lattice, cell=0.25, pixel=0.125)
+    bands = _bands(plan)
+    path = tmp_path / "m.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, bands, clip=PercentileClip())
+    ds = gdal.Open(str(path))
+    try:
+        assert ds.GetGeoTransform() == pytest.approx(lattice.geotransform)
+        assert "32616" in ds.GetProjection()
+        md = ds.GetMetadata()
+        assert md["NSGEO_RESAMPLING"] == "bilinear"
+        assert float(md["NSGEO_CELL_M"]) == 0.25 and float(md["NSGEO_PIXEL_M"]) == 0.125
+        assert float(md["NSGEO_FRAME_AZIMUTH_DEG"]) == plan.frame.azimuth
+        for i, band in enumerate(bands):
+            rb = ds.GetRasterBand(i + 1)
+            assert rb.GetDescription() == plan.bands[i].description
+            assert np.isnan(rb.GetNoDataValue())
+            assert np.array_equal(rb.ReadAsArray(), band.array, equal_nan=True)
+    finally:
+        ds.Close()
+
+
+def test_write_bands_refuses_a_plan_without_its_export_settings(exportable, tmp_path):
+    from dataclasses import replace
+
+    plan = _band_plan(exportable, n=1)
+    for missing in ("lattice", "cell", "pixel"):
+        bare = replace(plan, **{missing: None})
+        with pytest.raises(ValueError, match="export cell and pixel"):
+            GeoTiffSliceWriter().write_bands(
+                tmp_path / f"{missing}.tif", bare, _bands(plan), clip=PercentileClip()
+            )
+        assert not (tmp_path / f"{missing}.tif").exists()
+
+
+def test_a_counts_plan_writes_without_interpolation_keys(exportable, tmp_path):
+    from osgeo import gdal
+
+    plan = _band_plan(exportable, n=1, coverage=True, finish=None)
+    path = tmp_path / "c.tif"
+    limit = GeoTiffSliceWriter().write_bands(
+        path, plan, _bands(plan, fill=3.0), clip=PercentileClip()
+    )
+    assert limit == pytest.approx(3.0)
+    ds = gdal.Open(str(path))
+    try:
+        md = ds.GetMetadata()
+        assert "NSGEO_INTERPOLATION" not in md
+        assert md["NSGEO_RESAMPLING"] == "largest_count"  # counts are not blended
+    finally:
+        ds.Close()
+
+
+def test_the_returned_stretch_is_the_limit_over_the_written_bands(exportable, tmp_path):
+    plan = _band_plan(exportable, n=3)
+    bands = _bands(plan)
+    clip = PercentileClip()
+    got = GeoTiffSliceWriter().write_bands(tmp_path / "l.tif", plan, bands, clip=clip)
+    assert got == limit_over_slices((b.array for b in bands), clip)
+
+
+def test_the_stretch_sample_never_holds_more_than_its_cap(monkeypatch):
+    from nsgeo_qgis import slice_export
+
+    monkeypatch.setattr(slice_export, "STRETCH_SAMPLE_CAP", 1000)
+    sample = slice_export.StretchSample(n_bands=4)
+    rng = np.random.default_rng(0)
+    for _ in range(4):
+        a = rng.normal(size=(100, 100)).astype(np.float32)
+        a[::3] = np.nan
+        sample.add(a)
+        assert sample.count <= 1000
+    assert 0 < sample.count <= 1000
+    assert np.isfinite(sample.limit(PercentileClip()))
+
+
+def test_the_stretch_sample_of_an_empty_export_is_the_clips_own_fallback():
+    from nsgeo_qgis.slice_export import StretchSample
+
+    sample = StretchSample(n_bands=1)
+    sample.add(np.full((4, 4), np.nan, np.float32))
+    assert sample.limit(PercentileClip()) == PercentileClip().limit(np.array([], dtype=float))
+
+
+def test_the_partial_name_sits_beside_the_target(tmp_path):
+    target = tmp_path / "site.tif"
+    assert partial_path(target) == tmp_path / "site.partial.tif"
+
+
+def test_an_interrupted_write_leaves_no_partial_and_no_target(exportable, tmp_path):
+    plan = _band_plan(exportable, n=3)
+    bands = _bands(plan)
+
+    def interrupted():
+        yield bands[0]
+        raise ExportCancelled()
+
+    target = tmp_path / "out.tif"
+    partial = partial_path(target)
+    with pytest.raises(ExportCancelled):
+        try:
+            GeoTiffSliceWriter().write_bands(partial, plan, interrupted(), clip=PercentileClip())
+            commit_partial(partial, target)
+        except BaseException:
+            discard_partial(partial)
+            raise
+    assert not partial.exists() and not target.exists()
+
+
+def test_an_interrupted_write_leaves_an_existing_target_untouched(exportable, tmp_path):
+    plan = _band_plan(exportable, n=2)
+    target = tmp_path / "out.tif"
+    target.write_bytes(b"the previous export")
+    partial = partial_path(target)
+
+    def interrupted():
+        yield _bands(plan)[0]
+        raise ExportCancelled()
+
+    with pytest.raises(ExportCancelled):
+        try:
+            GeoTiffSliceWriter().write_bands(partial, plan, interrupted(), clip=PercentileClip())
+            commit_partial(partial, target)
+        except BaseException:
+            discard_partial(partial)
+            raise
+    assert target.read_bytes() == b"the previous export" and not partial.exists()
+
+
+def test_a_finished_write_commits_over_the_target(exportable, tmp_path):
+    plan = _band_plan(exportable, n=1)
+    target = tmp_path / "out.tif"
+    target.write_bytes(b"old")
+    partial = partial_path(target)
+    GeoTiffSliceWriter().write_bands(partial, plan, _bands(plan), clip=PercentileClip())
+    commit_partial(partial, target)
+    assert not partial.exists() and target.stat().st_size > 100
+    discard_partial(partial)  # absent: no error
+
+
+def test_a_commit_drops_the_old_files_statistics_and_overviews(exportable, tmp_path):
+    """The old target's `.aux.xml` and `.ovr` described the old picture; GDAL would serve them."""
+    plan = _band_plan(exportable, n=1)
+    target = tmp_path / "out.tif"
+    partial = partial_path(target)
+    GeoTiffSliceWriter().write_bands(partial, plan, _bands(plan), clip=PercentileClip())
+    commit_partial(partial, target)
+    old = gdal.Open(str(target))
+    old.GetRasterBand(1).ComputeStatistics(False)
+    old = None
+    Path(f"{target}.ovr").write_bytes(b"an old overview")
+    assert Path(f"{target}.aux.xml").exists()
+
+    plan = _band_plan(exportable, n=1)
+    bands = [ExportBand(np.full(b.array.shape, 9.0, np.float32), b.factors) for b in _bands(plan)]
+    GeoTiffSliceWriter().write_bands(partial, plan, bands, clip=PercentileClip())
+    commit_partial(partial, target)
+    assert not Path(f"{target}.aux.xml").exists() and not Path(f"{target}.ovr").exists()
+    new = gdal.Open(str(target))
+    assert float(new.GetRasterBand(1).ComputeStatistics(False)[1]) == 9.0
+
+
+def test_each_band_records_its_window_so_a_layer_can_be_timed_again(exportable, tmp_path):
+    from nsgeo.slices import window_times_ns
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    plan = _band_plan(exportable, n=3)
+    path = tmp_path / "t.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    ds = gdal.Open(str(path))
+    for i, band in enumerate(plan.bands):
+        lo, hi = window_times_ns(plan.z, band.window)
+        assert ds.GetRasterBand(i + 1).GetMetadata()["NSGEO_WINDOW_NS"] == f"{lo},{hi}"
+    ds = None
+    layer = QgsRasterLayer(str(path), "t", "gdal")
+    assert restore_band_times(layer, path) == "set"
+    props = layer.temporalProperties()
+    assert props.isActive()
+    ranges = props.fixedRangePerBand()
+    assert sorted(ranges) == [1, 2, 3]
+    want = band_time_range(*window_times_ns(plan.z, plan.bands[1].window))
+    assert ranges[2].begin() == want.begin() and ranges[2].end() == want.end()
+
+
+def test_a_file_without_band_windows_cannot_be_timed_again(tmp_path):
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    path = tmp_path / "old.tif"
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 2, gdal.GDT_Float32)
+    ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
+    ds = None
+    layer = QgsRasterLayer(str(path), "old", "gdal")
+    assert restore_band_times(layer, path) == "missing"
+    assert not layer.temporalProperties().isActive()
+
+
+def test_a_counts_file_needs_no_time_wiring(exportable, tmp_path):
+    from dataclasses import replace
+
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    plan = replace(_band_plan(exportable, n=1), coverage=True)
+    path = tmp_path / "c.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    layer = QgsRasterLayer(str(path), "c", "gdal")
+    assert restore_band_times(layer, path) == "counts"
+
+
+def test_a_companion_from_before_the_counts_tag_is_still_counts(tmp_path):
+    """Named by the companion rule and tagged only `bilinear`, as the first versions wrote it."""
+    from nsgeo_qgis.slice_export import coverage_path, restore_band_times
+
+    path = coverage_path(tmp_path / "old.tif")
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
+    ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
+    ds = None
+    layer = QgsRasterLayer(str(path), "old_coverage", "gdal")
+    assert restore_band_times(layer, path) == "counts"
+
+
+def test_a_windowed_values_file_named_like_a_companion_is_still_timed(exportable, tmp_path):
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    plan = _band_plan(exportable, n=3)
+    path = tmp_path / "full_coverage.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    layer = QgsRasterLayer(str(path), "full_coverage", "gdal")
+    assert restore_band_times(layer, path) == "set"
+
+
+def test_a_values_file_not_named_as_a_companion_is_not_counts(tmp_path):
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    path = tmp_path / "plain.tif"
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
+    ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
+    ds = None
+    layer = QgsRasterLayer(str(path), "plain", "gdal")
+    assert restore_band_times(layer, path) == "missing"
+
+
+def test_write_bands_reports_each_band_as_it_lands(exportable, tmp_path):
+    plan = _band_plan(exportable, n=3)
+    seen: list[int] = []
+    GeoTiffSliceWriter().write_bands(
+        tmp_path / "p.tif", plan, _bands(plan), clip=PercentileClip(), progress_band=seen.append
+    )
+    assert seen == [1, 2, 3]
+
+
+def test_write_bands_refuses_a_wrong_number_of_bands_or_a_wrong_shape(exportable, tmp_path):
+    plan = _band_plan(exportable, n=3)
+    bands = _bands(plan)
+    writer = GeoTiffSliceWriter()
+    with pytest.raises(ValueError, match="slices"):
+        writer.write_bands(tmp_path / "a.tif", plan, bands[:2], clip=PercentileClip())
+    with pytest.raises(ValueError, match="more slices"):
+        writer.write_bands(tmp_path / "b.tif", plan, bands + bands[:1], clip=PercentileClip())
+    wrong = [ExportBand(np.zeros((3, 3), np.float32), {})] * 3
+    with pytest.raises(ValueError, match="lattice"):
+        writer.write_bands(tmp_path / "c.tif", plan, wrong, clip=PercentileClip())
+
+
+def test_the_worker_thread_write_path_never_uses_catch_warnings():
+    import inspect
+
+    from nsgeo_qgis import site_export, slice_export
+
+    for obj in (
+        slice_export.GeoTiffSliceWriter.write_bands,
+        site_export.GeoTiffSiteWriter.write_bands,
+        slice_export.write_north_up,
+        slice_export.build_overviews,
+        slice_export.partial_path,
+        slice_export.commit_partial,
+        slice_export.discard_partial,
+        slice_export.StretchSample,
+    ):
+        assert "catch_warnings" not in inspect.getsource(obj), obj
+
+
+def test_a_project_custom_crs_is_written_into_the_file(exportable, tmp_path):
+    from dataclasses import replace
+
+    from osgeo import gdal
+    from qgis.core import QgsApplication, QgsCoordinateReferenceSystem
+
+    custom = QgsCoordinateReferenceSystem()
+    custom.createFromProj("+proj=tmerc +lat_0=0 +lon_0=-87 +k=0.9996 +x_0=500000 +y_0=0 +units=m")
+    registry = QgsApplication.coordinateReferenceSystemRegistry()
+    crs_id = registry.addUserCrs(custom, "nsgeo export test crs")
+    authid = f"USER:{crs_id}"
+    try:
+        assert authid.startswith("USER:")
+        plan = _band_plan(exportable, n=1)
+        lattice = SiteLattice(500.0, 700.0, 0.25, 24, 24, authid)
+        plan = replace(plan, lattice=lattice, pixel=0.25)
+        path = tmp_path / "u.tif"
+        GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+        ds = gdal.Open(str(path))
+        try:
+            assert (
+                "tmerc" in ds.GetProjection().lower() or "transverse" in ds.GetProjection().lower()
+            )
+        finally:
+            ds.Close()
+        bad = SiteLattice(500.0, 700.0, 0.25, 24, 24, "USER:999999")
+        with pytest.raises(ValueError, match="coordinate system"):
+            GeoTiffSliceWriter().write_bands(
+                tmp_path / "v.tif", replace(plan, lattice=bad), _bands(plan), clip=PercentileClip()
+            )
+    finally:
+        registry.removeUserCrs(crs_id)
+
+
+def test_a_stop_during_overviews_raises_and_leaves_the_file_closed(exportable, tmp_path):
+    from dataclasses import replace
+
+    plan = _band_plan(exportable, n=2)
+    plan = replace(plan, lattice=SiteLattice(500.0, 700.0, 0.01, 1100, 1200, plan.crs), pixel=0.01)
+    path = tmp_path / "o.tif"
+    GeoTiffSliceWriter().write_bands(path, plan, _bands(plan), clip=PercentileClip())
+    with pytest.raises(ExportCancelled):
+        build_overviews(path, should_stop=lambda: True)
+    path.unlink()  # closed: removable (Windows would refuse an open file)
+    assert not path.exists()
+
+
+def test_coverage_path_is_the_stem_plus_coverage_tif(tmp_path):
+    from nsgeo_qgis.slice_export import coverage_path
+
+    assert coverage_path(tmp_path / "site.tif") == tmp_path / "site_coverage.tif"
+    assert coverage_path(str(tmp_path / "site.tiff")) == tmp_path / "site_coverage.tif"

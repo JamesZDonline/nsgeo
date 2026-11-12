@@ -1059,7 +1059,8 @@ class SiteScope:
     def show_note(self, *, drawn: bool) -> None:
         """The site note: the preview note while drawn, the reason when nothing
         is drawn and one is known, else empty. The tooltip carries the full
-        text, and a preview's export refusal, so it is read before Export.
+        text. A preview site still exports at full detail, so it says nothing
+        about the export.
 
         When the drawn grids are not all on one clock (some have no Time zero
         step) the note ends with `mixed_clock_note`, as its own sentence, in
@@ -1069,8 +1070,7 @@ class SiteScope:
         engine = self.engine
         text = hint = ""
         if drawn and engine.preview_note:
-            text = engine.preview_note
-            hint = f"{text} {engine.export_refusal or ''}".strip()
+            text = hint = engine.preview_note
         elif not drawn and self.problem:
             text = hint = f"Not drawn: {self.problem}"
         source = self.source_sent or self.source()

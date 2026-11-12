@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -107,6 +107,13 @@ MEASURING_STRETCH_INDICATOR = "Colour stretch ({done} of {total})…"
 #: What the plugin will hold before it stops promoting to a resident cube.
 #: A default, never a cap -- spec 7.4 warns and degrades, it does not block.
 DEFAULT_BUDGET_BYTES = 1_500_000_000
+
+#: What one export may hold in memory: every grid's fill weights, its taps and
+#: one band's accumulators, plus any cube it keeps (`export_pipeline`, where
+#: the measurement behind it is recorded). Unlike the live budget it IS a cap:
+#: an export that would hold more is refused before it starts. The live
+#: engines hold up to `DEFAULT_BUDGET_BYTES` in the same process, so it is no more.
+EXPORT_BUDGET_BYTES = DEFAULT_BUDGET_BYTES
 
 
 @dataclass(frozen=True)
@@ -475,22 +482,174 @@ def preview_note(
     return note
 
 
-def site_export_refusal(
-    cell: float,
-    width_m: float,
-    height_m: float,
-    finest: float,
-    stretching: Sequence[str],
+def export_refusal(
+    held_bytes: int, budget: int, finest_cell: float | None, finest_pixel: float | None
 ) -> str:
-    """Why the site cannot be written at full detail."""
+    """Why an export cannot start, and the finest cell or pixel that would fit."""
     text = (
-        f"The site can't be exported at full detail yet: the site "
-        f"({width_m:.0f} \u00d7 {height_m:.0f} m) is too big at a {cell:g} m cell. "
-        f"Choose a cell of {finest:g} m or coarser"
+        f"This export would hold about {format_bytes(held_bytes)} in memory, "
+        f"more than the {format_bytes(budget)} it is allowed."
     )
-    if stretching:
-        text += f", or leave out {name_list(stretching)}"
-    return text + "."
+    if finest_cell is not None:
+        text += f" A {finest_cell:g} m export cell would fit."
+    if finest_pixel is not None:
+        text += f" A {finest_pixel:g} m export pixel would fit."
+    return text
+
+
+_METHOD_WORDS = {
+    "none": "no interpolation",
+    "idw": "inverse distance",
+    "kriging": "kriging",
+    "min_curvature": "minimum curvature",
+}
+
+
+def slices_text(finish: SliceFinish) -> str:
+    """How the slices are made, for the export summary: `kriging, max distance
+    0.75 × spacing, no smoothing`."""
+    parts = [_METHOD_WORDS.get(finish.method, finish.method)]
+    if finish.method != "none":
+        parts.append(f"max distance {finish.max_distance_spacings:g} \u00d7 spacing")
+    if finish.smooth_x_m or finish.smooth_y_m:
+        parts.append(f"smoothing {finish.smooth_x_m:g} \u00d7 {finish.smooth_y_m:g} m")
+    else:
+        parts.append("no smoothing")
+    return ", ".join(parts)
+
+
+def _ns(value: float) -> str:
+    return f"{round(value, 2):g}".replace("-", "\u2212")
+
+
+def bands_detail(windows: Sequence[tuple[float, float]]) -> str:
+    """The bands, for the export summary: `every 2.5 ns from −1.8 to 45 ns, 5 ns thick`.
+
+    `windows` are each band's `(top_ns, thickness_ns)`. One band has no step.
+    """
+    if not windows:
+        return ""
+    first_top, thickness = windows[0]
+    last_top, last_thickness = windows[-1]
+    span = f"from {_ns(first_top)} to {_ns(last_top + last_thickness)} ns"
+    if len(windows) == 1:
+        return f"{span}, {_ns(thickness)} ns thick"
+    step = windows[1][0] - first_top
+    return f"every {_ns(step)} ns {span}, {_ns(thickness)} ns thick"
+
+
+@dataclass(frozen=True)
+class ExportPreview:
+    """What the export dialog's summary shows for one cell and pixel.
+
+    `grids` and `normalisation` are `None` for a single grid's export, which
+    drops those two rows. `held_bytes` is what the export would hold in
+    memory; `file_bytes` is what it would write (the coverage companion
+    included).
+    """
+
+    cell: float
+    pixel: float
+    width_px: int
+    height_px: int
+    bands: int
+    bands_detail: str
+    slices: str
+    grids: tuple[str, ...] | None
+    normalisation: str | None
+    file_bytes: int
+    held_bytes: int
+
+
+def summary_lines(preview: ExportPreview) -> list[tuple[str, str]]:
+    """The rows of the export dialog's "What will be written" group."""
+    bands = str(preview.bands)
+    if preview.bands_detail:
+        bands += f", {preview.bands_detail}"
+    rows = [
+        ("Bands", bands),
+        (
+            "Picture",
+            f"{preview.width_px} \u00d7 {preview.height_px} pixels at {preview.pixel:g} m",
+        ),
+    ]
+    if preview.grids is not None:
+        named = f" ({name_list(preview.grids)})" if 1 < len(preview.grids) <= 4 else ""
+        rows.append(
+            ("Grids", f"{len(preview.grids)} included{named}, rebuilt at {preview.cell:g} m")
+        )
+    rows.append(("Slices", preview.slices))
+    if preview.normalisation is not None:
+        # With no normalisation nothing is measured, so there is nothing to measure again.
+        again = (
+            ""
+            if preview.normalisation.lower() == "none"
+            else f", measured again at {preview.cell:g} m"
+        )
+        rows.append(("Normalisation", f"{preview.normalisation}{again}"))
+    rows.append(
+        (
+            "Memory",
+            f"about {format_bytes(preview.held_bytes)} of the "
+            f"{format_bytes(EXPORT_BUDGET_BYTES)} allowed",
+        )
+    )
+    rows.append(
+        ("File", f"about {format_bytes(preview.file_bytes)} before compression, plus a style file")
+    )
+    return rows
+
+
+#: How far past the current cell `finest_fits` looks for a cell that fits.
+FINEST_CELL_REACH = 8
+
+
+def finest_fits(
+    held_at: Callable[[float, float], int], cell: float, pixel: float, budget: int
+) -> tuple[float | None, float | None]:
+    """The finest `(cell, pixel)` that would fit `budget`, each on a 1 mm grid.
+
+    The pixel is searched in `[pixel, cell]` at this cell; it is `None` when
+    the pixel already equals the cell, or nothing fits. The cell is searched
+    from this one up with the pixel set to it (`None` when this cell already fits),
+    by doubling and then bisection, and is `None` past `FINEST_CELL_REACH` times this
+    cell. Both assume the
+    held bytes fall as the cell or the pixel grows, and use O(log) calls of
+    `held_at`, each of which can be slow.
+    """
+    cell_mm = round(cell * 1000)
+    pixel_mm = max(1, math.ceil(pixel * 1000 - 1e-6))
+
+    def fits_pixel(mm: int) -> bool:
+        return held_at(cell, mm / 1000.0) <= budget
+
+    def fits_cell(mm: int) -> bool:
+        return held_at(mm / 1000.0, mm / 1000.0) <= budget
+
+    def smallest(lo: int, hi: int, fits: Callable[[int], bool]) -> int:
+        # `hi` fits; the answer is in (lo, hi] when `lo` does not, else lo.
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if fits(mid):
+                hi = mid
+            else:
+                lo = mid
+        return hi
+
+    finest_pixel: float | None = None
+    if pixel_mm < cell_mm and fits_pixel(cell_mm):
+        finest_pixel = smallest(pixel_mm - 1, cell_mm, fits_pixel) / 1000.0
+
+    finest_cell: float | None = None
+    # When the current cell already fits at pixel = cell, only the pixel needs to
+    # change, so no finer cell is offered; otherwise search above it.
+    lo, hi = cell_mm, cell_mm * 2
+    while not fits_cell(cell_mm) and hi <= cell_mm * FINEST_CELL_REACH:
+        if fits_cell(hi):
+            finest_cell = smallest(lo, hi, fits_cell) / 1000.0
+            break
+        lo, hi = hi, hi * 2
+    return finest_cell, finest_pixel
 
 
 def frame_cells(size_x: float, size_y: float, cell: float) -> int:
