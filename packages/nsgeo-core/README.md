@@ -197,6 +197,25 @@ Wave velocity and time-to-depth conversion.
 | `VelocityModel` | A layered velocity model; converts time to depth. |
 | `resolve_velocity` | The model for a line: line override, then grid, then header dielectric. |
 
+### `nsgeo.destagger`
+
+The destagger a grid's lines need, measured from the lines themselves: each line is compared with its neighbours walked the other way.
+
+| Name | Purpose |
+|---|---|
+| `AXIS_FAILED` | The reason a line gets when its grid's value could not be measured. |
+| `AxisResult` | One axis's grid value, its 95% spread in metres, the lines used, and the reason when it could not be measured. |
+| `DestaggerResult` | The result per axis and per line. |
+| `EnvelopeBins` | An envelope averaged into time bins, with the time of bin 0 and the bin spacing. |
+| `LineResult` | One line's status, value for its Destagger cell (None when not measured) and reason. |
+| `LineStatus` | Grid value, own value, changes partway along, no clear match, or not measured. |
+| `MeasureLine` | One line to measure: its bins, its placement as shown now, and its DZT header. |
+| `MeasureStopped` | Raised when the caller's `should_stop` returns True. |
+| `NO_NEIGHBOUR` | The reason a line gets when no line walked the other way lies beside it. |
+| `envelope_bins` | Dewow, background removal, analytic envelope, then 8-sample time bins, for one channel's samples. |
+| `measure_destagger` | The grid value per axis, and each line's result, for a set of placed lines: its own value when it is clearly off on its own, otherwise the grid value. |
+| `one_way_result` | What `measure_destagger` gives when no axis was walked both ways, from the placements alone, so no line need be read; None when some axis was. |
+
 ### `nsgeo.velocity_fit`
 
 Radar velocity from a diffraction hyperbola, with its standard error.
