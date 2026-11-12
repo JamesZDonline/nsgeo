@@ -103,7 +103,7 @@ a milestone merges or the plan changes.
 | | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
 | | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
 | | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | next release |
-| M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on Sunnyside Grid 1, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open | next release |
+| M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on Sunnyside Grid 1, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open ([#172]) | next release |
 
 ### In progress
 
@@ -221,6 +221,7 @@ Grouped by area. The order within a group is not a priority.
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
 [#171]: https://github.com/JamesZDonline/nsgeo/issues/171
+[#172]: https://github.com/JamesZDonline/nsgeo/pull/172
 
 ## Why
 
