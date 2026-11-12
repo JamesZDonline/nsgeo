@@ -111,6 +111,11 @@ a milestone merges or the plan changes.
 
 - **Whole site at fine cells: the export** ([#108]): an export finer than the
   preview, streamed to disk in the background. Designed; the plan is next.
+- **Velocity from fits** ([#126], [#128], [#127], [#86]): the Survey panel
+  marks the lines that have saved fits, and Save fit clears the points for
+  the next hyperbola. Built, in review. Next, a grid velocity dialog that
+  averages the fits on a grid's lines and remembers which fits it used, with
+  slices taking their depths from the grid's velocity. Designed.
 
 ### Next, in order
 
@@ -142,10 +147,8 @@ Grouped by area. The order within a group is not a priority.
   lines walked in different directions (the second half of [#47]); a preset or
   velocity override for a selection of lines at once ([#58]; editing their
   placement together is done).
-- **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
-  in one dialog ([#127]); Save fit also clears the points ([#128]); average or
-  combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
-  box around a hyperbola and let the plugin mark it ([#140]).
+- **Velocity:** a modifier-click for velocity points ([#88]); draw a box
+  around a hyperbola and let the plugin mark it ([#140]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
