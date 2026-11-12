@@ -214,6 +214,7 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    paraview_requested = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -696,8 +697,13 @@ class SlicesDock(QgsDockWidget):
         self.export_button = QPushButton("Export GeoTIFF…")
         self.save_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        # The 3-D export prepares its own volume (it needs no prepared source), so it is
+        # on whenever a site is open, in either scope.
+        self.paraview_button = QPushButton("ParaView\u2026")
+        self.paraview_button.setEnabled(session.is_open)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.export_button)
+        button_row.addWidget(self.paraview_button)
         outer.addLayout(button_row)
 
         outer.addStretch(1)
@@ -743,6 +749,7 @@ class SlicesDock(QgsDockWidget):
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
         self.export_button.clicked.connect(lambda: self.export_requested.emit())
+        self.paraview_button.clicked.connect(lambda: self.paraview_requested.emit())
         self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
@@ -867,6 +874,7 @@ class SlicesDock(QgsDockWidget):
             # nothing to choose lines FROM without a site open.
             self.choose_button.setEnabled(self.session.is_open)
             self.site_scope_button.setEnabled(self.session.is_open)
+            self.paraview_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared

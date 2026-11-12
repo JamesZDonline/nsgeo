@@ -56,7 +56,12 @@ from nsgeo.slices import (
 from nsgeo.vtkxml import write_image_data, write_poly_data
 from qgis.PyQt.QtCore import QEventLoop
 
-from nsgeo_qgis.paraview_scene import scene_record, scene_title, write_scene_files
+from nsgeo_qgis.paraview_scene import (
+    ExportSummary,
+    scene_record,
+    scene_title,
+    write_scene_files,
+)
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import (
     MAX_FRAME_CELLS,
@@ -169,7 +174,7 @@ class ParaViewExport:
             self.session.volume_record(grid_id),
             cell_default=float(cell),
             dz_default=float(dz),
-            transform_default=transform_value(self.dock.transform_combo.currentText()),
+            transform_default=transform_value(self.dock.transform_combo.value()),
         )
 
     def _source(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
@@ -204,6 +209,47 @@ class ParaViewExport:
         if nd < 2:
             raise ValueError("the lines have no depth range to export")
         return export_size_bytes(frame.nx, frame.ny, nd)
+
+    def panel_values(self, grid_id: str) -> tuple[float | None, float]:
+        """`(the Slices panel's cell for this grid or None, the files' own depth step in ns)`:
+        what the dialog's hints show beside the 3-D cell and depth step."""
+        cell = self.session.slice_resolution(grid_id).get("cell")
+        keys = source_keys(self.session, grid_id)
+        if not keys:
+            raise ValueError(f"grid {grid_id!r} has no lines to export")
+        dt = float(self.session.line_for_key(keys[0]).header.dt_ns)
+        return (float(cell) if isinstance(cell, float) and cell > 0.0 else None), dt
+
+    def summary(self, grid_id: str, choice: VolumeChoice) -> ExportSummary:
+        """What an export of `choice` would write and what the disk offers. Cheap (as
+        `estimate` and `cache_bytes`, which it uses) and prepares nothing, so a dialog can
+        call it on every edit. Raises the same ValueError as `estimate` for a cell that is
+        too fine, or a grid that cannot be exported."""
+        frame = self._frame(grid_id, choice)
+        source = self._source(grid_id, choice)
+        t0, t1 = self._time_range(source)
+        z = ZAxis.from_range(t0, t1, choice.dz_ns)
+        nd = _depth_levels(z)
+        if nd < 2:
+            raise ValueError("the lines have no depth range to export")
+        velocity = self.session.resolved_velocity(source.line_keys[0])
+        max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
+        folder = paraview_folder(self.session, grid_id)
+        n_picks = sum(len(self.session.picks_for(k)) for k in source.line_keys)
+        return ExportSummary(
+            folder=folder,
+            replaces=folder.is_dir(),
+            nx=frame.nx,
+            ny=frame.ny,
+            nd=nd,
+            max_depth_m=max_depth,
+            fill_method=str(self._finish(grid_id).method),
+            n_picks=n_picks,
+            n_lines=len(source.line_keys),
+            export_bytes=self.estimate(grid_id, choice),
+            cache_bytes=self.cache_bytes(grid_id, choice),
+            free_bytes=int(shutil.disk_usage(Path(self.session.root)).free),
+        )
 
     def cache_bytes(self, grid_id: str, choice: VolumeChoice) -> int:
         """The bytes the fill cache will add: 0 when this grid's cache for these settings is

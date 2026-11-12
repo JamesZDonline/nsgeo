@@ -40,7 +40,7 @@ class Dock:
     def __init__(self, session):
         self.engine = SliceEngine(session)
         self.site_engine = SliceEngine(session)
-        self.transform_combo = types.SimpleNamespace(currentText=lambda: "amp_square")
+        self.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
         self.registered: list = []
         self.foreign_preparing = False
 
@@ -622,3 +622,35 @@ def test_defaults_take_the_panel_values_then_the_record(site):
     again = export.defaults("Grid A")
     assert (again.cell, again.dz_ns, again.stretch) == (0.4, 0.3, 2.0)
     assert session.volume_record("Grid A") == {"dz_ns": 0.3, "stretch": 2.0}
+
+
+# ---- the dialog's summary --------------------------------------------------------------------
+
+
+def test_summary_describes_the_export_without_preparing_anything(synth_site):
+    session, dock, export = synth_site
+    choice = _choice(session)
+    s = export.summary("Grid A", choice)
+    assert s.nx > 0 and s.ny > 0
+    assert s.n_lines == 2 and s.n_picks == 0
+    assert s.export_bytes == export.estimate("Grid A", choice)
+    assert s.cache_bytes == export.cache_bytes("Grid A", choice) > 0
+    assert s.max_depth_m > 0 and s.nd >= 2 and s.free_bytes > 0
+    assert s.folder == paraview_folder(session, "Grid A") and not s.replaces
+    assert not dock.engine.is_prepared  # nothing was prepared to answer
+
+
+def test_summary_refuses_a_too_fine_cell_like_estimate(synth_site):
+    session, _dock, export = synth_site
+    with pytest.raises(ValueError, match="too fine"):
+        export.summary("Grid A", _choice(session, cell=0.002))
+
+
+def test_summary_counts_the_picks_and_sees_a_previous_export(synth_site, monkeypatch):
+    session, _dock, export = synth_site
+    key = source_keys(session, "Grid A")[0]
+    pick = Pick(key, 5, 12.0, None, None, None, "", "", "", zero_ns=None)
+    monkeypatch.setattr(session, "picks_for", lambda k: [pick] if k == key else [])
+    paraview_folder(session, "Grid A").mkdir(parents=True)
+    s = export.summary("Grid A", _choice(session))
+    assert s.n_picks == 1 and s.replaces

@@ -49,6 +49,8 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
+import os
+import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -70,7 +72,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
+from qgis.PyQt.QtCore import QCoreApplication, QProcess, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
@@ -89,6 +91,13 @@ from nsgeo_qgis.lookup import CORNER_ROLES
 from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
+from nsgeo_qgis.paraview_export import ParaViewExport, ParaViewExportCancelled
+from nsgeo_qgis.paraview_scene import (
+    CANCELLED_MESSAGE,
+    exported_message,
+    how_to_open_message,
+    launch_failed_message,
+)
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
 from nsgeo_qgis.slice_export import (
@@ -107,8 +116,10 @@ from nsgeo_qgis.ui.finish_panel import busy_cursor
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
+from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
+from nsgeo_qgis.ui.site_scope import source_keys
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
@@ -134,6 +145,8 @@ CUT_TIP = "Cut tool: draw a path on the map to see the cube's vertical section b
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
 _TABIFIED_KEY = "nsgeo/slicesDockTabified"
+#: The ParaView program the export dialog last used (profile settings, like the key above).
+_PARAVIEW_KEY = "nsgeo/paraviewPath"
 
 
 def _finish_with_pick_tool(tool: PickPointTool) -> None:
@@ -165,6 +178,19 @@ def _finish_with_pick_tool(tool: PickPointTool) -> None:
         return
     tool.dispose()
     tool.deleteLater()
+
+
+def launch_paraview(paraview: str, folder: Path) -> bool:
+    """Start ParaView detached on `folder`'s scene script, working in the folder (open_scene.py
+    finds export.json there when ParaView gives it no `__file__`). False when `paraview` is
+    empty, is not an executable file, or would not start."""
+    if not paraview or not (os.path.isfile(paraview) and os.access(paraview, os.X_OK)):
+        return False
+    started = QProcess.startDetached(
+        paraview, [f"--script={folder / 'open_scene.py'}"], str(folder)
+    )
+    # PyQt5 may return (started, pid) for this overload.
+    return bool(started[0] if isinstance(started, tuple) else started)
 
 
 class NsgeoPlugin:
@@ -305,6 +331,7 @@ class NsgeoPlugin:
         self.slices_dock.choose_lines_requested.connect(self.open_line_choice_dialog)
         self.slices_dock.save_cube_requested.connect(self.save_cube)
         self.slices_dock.export_requested.connect(self.export_geotiff)
+        self.slices_dock.paraview_requested.connect(self.export_paraview)
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.slices_dock)
         # Spec 9.2: tabified with Processing rather than a fourth dock
         # competing for screen space. Processing stays the raised tab --
@@ -1203,6 +1230,76 @@ class NsgeoPlugin:
         with contextlib.suppress(OSError):
             if target.exists() and target.stat().st_mtime_ns != before:
                 target.unlink()
+
+    def export_paraview(self) -> None:
+        """The Slices panel's "ParaView..." button: the dialog, then the export behind the
+        progress dialog, then (when asked) ParaView on the folder (M16 A)."""
+        try:
+            if self.session is None or not self.session.is_open or self.slices_dock is None:
+                return
+            dock = self.slices_dock
+            session = self.session
+            export = ParaViewExport(session, dock)
+            grids = [g.id for g in session.site.grids if source_keys(session, g.id)]
+            if not grids:
+                self.message("no grid has lines to export for ParaView.", Qgis.MessageLevel.Warning)
+                return
+            settings = QgsSettings()
+            dialog = ParaViewExportDialog(
+                grids,
+                dock.grid_combo.currentText(),
+                export.defaults,
+                export.summary,
+                str(settings.value(_PARAVIEW_KEY, "") or ""),
+                hints_for=export.panel_values,
+                parent=self.iface.mainWindow(),
+            )
+            try:
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                grid_id, choice = dialog.grid_id(), dialog.choice()
+                paraview, open_after = dialog.paraview_path(), dialog.open_after()
+            finally:
+                dialog.deleteLater()
+            if not accepted:
+                return
+            session.remember_volume(grid_id, **choice.to_record())
+            settings.setValue(_PARAVIEW_KEY, paraview)
+            title = "Exporting for ParaView"
+            progress, bar = self._export_progress(title, 0, show_now=True)
+            try:
+                # Preparing the lines (when the panel is not on this source) makes no progress
+                # calls for a while and takes no input: say so, and show the dialog at once.
+                bar.setLabelText("Preparing lines\u2026")
+                progress(0, 0)
+
+                def counted(done: int, total: int) -> bool:
+                    if done > 0 and bar.labelText() != title:
+                        bar.setLabelText(title)
+                    return progress(done, total)
+
+                with busy_cursor(), dock.refining_paused():
+                    folder = export.run(grid_id, choice, progress=counted, paraview_path=paraview)
+            except ParaViewExportCancelled:
+                self.message(CANCELLED_MESSAGE)
+                return
+            except (RuntimeError, ValueError) as exc:
+                self.message(str(exc), Qgis.MessageLevel.Warning)
+                return
+            finally:
+                bar.close()
+                bar.deleteLater()
+            windows = sys.platform.startswith("win")
+            if not paraview:
+                self.message(how_to_open_message(grid_id, folder, windows=windows))
+            elif open_after and not launch_paraview(paraview, folder):
+                self.message(
+                    launch_failed_message(grid_id, folder, paraview, windows=windows),
+                    Qgis.MessageLevel.Warning,
+                )
+            else:
+                self.message(exported_message(grid_id, folder))
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not export for ParaView: {exc}", Qgis.MessageLevel.Critical)
 
     def export_site_geotiff(self) -> None:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.

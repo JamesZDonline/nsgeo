@@ -160,3 +160,86 @@ def test_scene_title_names_the_grid_and_states_the_stretch():
 
     assert scene_title("Grid A", 3.0) == "Grid A  ·  depth stretched x3  ·  legend shows true depth"
     assert "x2.5" in scene_title("G", 2.5)
+
+
+# ---- the export dialog's wording ----------------------------------------------------------
+
+
+def _summary(**over):
+    from nsgeo_qgis.paraview_scene import ExportSummary
+
+    fields = dict(
+        folder=Path("/site/paraview/Grid A"),
+        replaces=False,
+        nx=120,
+        ny=48,
+        nd=300,
+        max_depth_m=2.4,
+        fill_method="min_curvature",
+        n_picks=1,
+        n_lines=4,
+        export_bytes=1_500_000_000,
+        cache_bytes=800_000_000,
+        free_bytes=50_000_000_000,
+    )
+    fields.update(over)
+    return ExportSummary(**fields)
+
+
+def test_summary_rows_say_what_will_be_written():
+    from nsgeo_qgis.paraview_scene import summary_rows
+
+    rows = dict(summary_rows(_summary()))
+    assert list(rows) == ["Folder", "Volume", "Fill", "Also", "Size", "Disk"]
+    assert rows["Volume"] == "120 × 48 cells × 300 depths, 0 – 2.40 m"
+    assert rows["Fill"] == "Minimum curvature"
+    assert rows["Also"] == "1 pick, 4 lines"
+    assert rows["Size"] == "about 1.5 GB, plus 800 MB fill kept for quick re-exports"
+    assert rows["Disk"] == "50.0 GB free"
+    assert "replaces" not in rows["Folder"] and "Grid A" in rows["Folder"]
+
+
+def test_a_replaced_export_and_a_kept_fill_are_said():
+    from nsgeo_qgis.paraview_scene import summary_rows
+
+    rows = dict(summary_rows(_summary(replaces=True, cache_bytes=0)))
+    assert rows["Folder"].endswith("(replaces the last export)")
+    assert rows["Size"] == "about 1.5 GB; fill already kept"
+
+
+def test_the_disk_row_warns_below_files_plus_fill_plus_headroom():
+    from nsgeo_qgis.paraview_scene import disk_is_short, disk_text
+
+    need = 1_500_000_000 + 800_000_000 + 500_000_000
+    assert not disk_is_short(_summary(free_bytes=need))
+    short = _summary(free_bytes=need - 1)
+    assert disk_is_short(short)
+    text = disk_text(short)
+    assert text.startswith("only 2.8 GB free") and "needs about 2.8 GB" in text
+    assert "needs about 2.8 GB" in disk_text(_summary(free_bytes=1_000_000_000))
+
+
+def test_messages_name_the_folder_and_the_script():
+    from nsgeo_qgis.paraview_scene import (
+        CANCELLED_MESSAGE,
+        exported_message,
+        how_to_open_message,
+        launch_failed_message,
+    )
+
+    folder = Path("/site/paraview/A")
+    assert exported_message("A", folder) == f"Exported A for ParaView to {folder}"
+    assert "run open.sh there" in how_to_open_message("A", folder)
+    assert "run open.bat there" in how_to_open_message("A", folder, windows=True)
+    assert "could not be started from /usr/bin/pv" in launch_failed_message(
+        "A", folder, "/usr/bin/pv"
+    )
+    assert CANCELLED_MESSAGE == "ParaView export cancelled"
+
+
+def test_the_hints_name_the_panels_cell_and_the_files_step():
+    from nsgeo_qgis.paraview_scene import cell_hint, dt_hint
+
+    assert cell_hint(0.25) == "Slices panel: 0.25 m"
+    assert "not set" in cell_hint(None)
+    assert dt_hint(0.4) == "files: 0.4 ns"
