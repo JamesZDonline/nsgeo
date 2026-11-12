@@ -3974,3 +3974,25 @@ def test_the_colours_choice_needs_an_open_survey(qgis_app):
     finally:
         dock.engine.dispose()
         dock.deleteLater()
+
+
+def test_a_cube_saved_under_the_plugin_colours_keeps_no_style(docked):
+    """Review finding 6: restoring it must not replace a style refined since."""
+    dock, session = docked
+    session.set_slice_colours("grid", own=False, style="<qgis>refined</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("nsgeo", None)
+    dock.apply_view(view, spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>refined</qgis>"}
+
+
+def test_the_symbology_button_is_off_while_coverage_shows(docked):
+    """Review finding 5: an edit on the coverage colours would be lost."""
+    dock, session = docked
+    dock.colours_combo.setCurrentIndex(1)
+    assert dock.symbology_button.isEnabled()
+    dock.coverage_check.setChecked(True)
+    assert not dock.symbology_button.isEnabled()
+    assert "Show coverage" in dock.symbology_button.toolTip()
+    dock.coverage_check.setChecked(False)
+    assert dock.symbology_button.isEnabled()

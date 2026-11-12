@@ -3860,3 +3860,13 @@ def test_the_export_takes_the_users_own_colours(plugin, drive_dialog, tmp_path):
     assert exported.renderer().classificationMin() == pytest.approx(-2.0)
     assert exported.renderer().classificationMax() == pytest.approx(5.0)
     assert exported.temporalProperties().isActive(), "it still steps through the depths"
+
+
+def test_the_legend_follows_an_edit_without_a_redraw(plugin):
+    """Review finding 4: Layer Properties ▸ Apply redraws nothing in the panel."""
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    assert dock.legend_label.text() == "your own colours · -2 – 5"

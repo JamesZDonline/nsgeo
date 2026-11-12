@@ -784,3 +784,82 @@ def test_current_canvas_reads_the_view_it_is_given(mapped):
     _own_tick(sl, _ramp(0.0, 11.0), style=seen[-1])
     assert asked and asked[-1] == "EPSG:32616"
     assert _range(sl) == pytest.approx((0.0, 5.0))
+
+
+def test_leaving_own_colours_puts_back_the_plain_layer(mapped):
+    """Review finding 1: the palette must not be drawn through the user's
+    brightness, saturation or blending."""
+    from qgis.PyQt.QtGui import QPainter
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    sl.layer.brightnessFilter().setBrightness(-80)
+    sl.layer.hueSaturationFilter().setSaturation(-100)
+    sl.layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
+    sl.layer.emitStyleChanged()
+    mine = seen[-1]
+    _update(sl, 1.0)
+    assert sl.layer.brightnessFilter().brightness() == 0
+    assert sl.layer.hueSaturationFilter().saturation() == 0
+    assert sl.layer.blendMode() == QPainter.CompositionMode.CompositionMode_SourceOver
+    assert _range(sl) == (0.0, 10.0) and _smooth(sl.layer)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert sl.layer.brightnessFilter().brightness() == -80
+    assert sl.layer.hueSaturationFilter().saturation() == -100
+
+
+def test_a_scope_without_a_style_starts_its_own(mapped):
+    """Review finding 2: the other scope's own style already on the layer is
+    not this scope's; a style of None seeds afresh, at this scope's limit."""
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), limit=5.0)
+    site = np.tile(np.linspace(-1.0, 3.0, 9, dtype=np.float32), (6, 1))
+    sl.update_north_up(
+        site,
+        SITE_GT,
+        "EPSG:32616",
+        limit=40.0,
+        colormap_name="seismic",
+        unipolar=False,
+        subtitle="",
+        name=SITE_LAYER_NAME,
+        own=True,
+        own_style=None,
+    )
+    assert _range(sl) == (-40.0, 40.0)
+    assert len(seen) == 2 and seen[0] != seen[1]
+
+
+def test_the_limit_is_read_only_when_it_is_needed(mapped):
+    """The shared stretch is a pass over the whole cube: under the user's own
+    colours it is read only to start their style."""
+    sl, _, _, _ = mapped
+    seen, asked = [], []
+
+    def limit():
+        asked.append(1)
+        return 5.0
+
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), limit=limit)
+    assert len(asked) == 1 and _range(sl) == (-5.0, 5.0)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=seen[-1], limit=limit)
+    _own_tick(sl, _ramp(-1.0, 1.0), style=seen[-1], limit=limit)
+    assert len(asked) == 1
+    _update(sl, 1.0, limit=limit)
+    assert len(asked) == 2 and _range(sl) == (0.0, 5.0)
+
+
+def test_an_unreadable_style_starts_again_from_the_real_limit(mapped):
+    """Review finding 3: the plugin sends the limit as a callable, so the
+    fallback seed is drawn at the palette's real limit, not a placeholder."""
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style", limit=lambda: 7.0)
+    assert _range(sl) == (-7.0, 7.0)
+    assert len(seen) == 1

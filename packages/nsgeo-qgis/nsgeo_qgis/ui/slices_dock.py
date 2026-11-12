@@ -812,6 +812,7 @@ class SlicesDock(QgsDockWidget):
         self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
         session.site_opened.connect(self._sync_colours)
         session.site_closed.connect(self._sync_colours)
+        self.coverage_check.toggled.connect(lambda _checked: self._sync_colours())
         self.coverage_check.toggled.connect(lambda _checked: self.refresh_slice())
         # Not wired straight to refresh_slice(): the residency override
         # changes no pixel (spec 11's own property -- streaming and
@@ -1827,8 +1828,10 @@ class SlicesDock(QgsDockWidget):
         else:
             radius_m = finish.max_distance_spacings * (self._grid_spacing() or 0.0)
         # #180: This grid's colours; a cube is only ever saved from This grid.
+        # The style only under own colours, so restoring a cube saved under
+        # the plugin's never replaces a style refined since.
         colours = self.session.slice_colours("grid") if self.session.is_open else {}
-        style = colours.get("style")
+        style = colours.get("style") if colours.get("own") else None
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
@@ -3044,7 +3047,9 @@ class SlicesDock(QgsDockWidget):
     def _sync_colours(self) -> None:
         """Show this scope's colour choice: the combo, Stretch greyed out and
         the Symbology button live under the user's own colours. The Palette
-        stays: it still colours cuts and the coverage view."""
+        stays: it still colours cuts and the coverage view. The button is off
+        while Show coverage draws counts: an edit then would land on the
+        plugin's coverage colours and be lost."""
         own = self.own_colours_on()
         self.colours_combo.blockSignals(True)
         try:
@@ -3053,7 +3058,13 @@ class SlicesDock(QgsDockWidget):
             self.colours_combo.blockSignals(False)
         self.colours_combo.setEnabled(self.session.is_open)
         self.stretch_combo.setEnabled(not own)
-        self.symbology_button.setEnabled(own)
+        coverage = self.coverage_check.isChecked()
+        self.symbology_button.setEnabled(own and not coverage)
+        self.symbology_button.setToolTip(
+            "Untick Show coverage to edit your own colours"
+            if own and coverage
+            else "Open the slice layer's Symbology page"
+        )
         self.palette_combo.setToolTip(
             "Colours cuts and Show coverage. The slice wears your own colours." if own else ""
         )

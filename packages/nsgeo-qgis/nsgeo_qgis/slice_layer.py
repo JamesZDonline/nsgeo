@@ -156,6 +156,8 @@ class SliceLayer(QObject):
         #: 256-stop shader on every tick of the depth slider is waste, and the
         #: renderer is what makes the layer flicker if replaced needlessly.
         self._renderer_key: tuple[Any, ...] | None = None
+        #: A fresh layer's own symbology, kept by `_create_layer` (#180).
+        self._plain_style: str | None = None
         #: Above zero while this class changes the layer itself, so the
         #: layer's own style signals are not taken for the user's edits.
         self._busy = 0
@@ -175,7 +177,7 @@ class SliceLayer(QObject):
         values: np.ndarray,
         frame: CubeFrame,
         *,
-        limit: float,
+        limit: float | Callable[[], float],
         colormap_name: str,
         unipolar: bool,
         subtitle: str,
@@ -208,7 +210,7 @@ class SliceLayer(QObject):
         geotransform: tuple[float, ...],
         crs: str,
         *,
-        limit: float,
+        limit: float | Callable[[], float],
         colormap_name: str,
         unipolar: bool,
         subtitle: str,
@@ -239,6 +241,9 @@ class SliceLayer(QObject):
         palette at `limit`; `None` starts one from the palette and limit and
         reports it through `own_style_changed`. A computed min/max in that
         style is worked out again for this slice (`own_colours.refit`).
+        `limit` may be a callable, read only when the palette is drawn or a
+        style seeded: the shared stretch is a pass over the whole cube, and
+        the user's own colours do not need it.
         """
         self._busy += 1
         try:
@@ -274,9 +279,18 @@ class SliceLayer(QObject):
                     own_style, colormap_name, limit, unipolar, array, tuple(geotransform)
                 )
             else:
-                key = ("nsgeo", colormap_name, float(limit), bool(unipolar))
+                value = float(limit() if callable(limit) else limit)
+                if (
+                    self._renderer_key is not None
+                    and self._renderer_key[0] == "own"
+                    and self._plain_style is not None
+                ):
+                    # Leaving the user's colours: their brightness, saturation,
+                    # blending and resampling go too, not only their renderer.
+                    own_colours.apply_style_text(self.layer, self._plain_style)
+                key = ("nsgeo", colormap_name, value, bool(unipolar))
                 if key != self._renderer_key:
-                    self._apply_renderer(colormap_name, limit, unipolar)
+                    self._apply_renderer(colormap_name, value, unipolar)
                     self._renderer_key = key
             self.layer.setCustomProperty("nsgeo/window", subtitle)
             self.layer.serverProperties().setAbstract(subtitle)
@@ -292,19 +306,22 @@ class SliceLayer(QObject):
         self,
         own_style: str | None,
         colormap_name: str,
-        limit: float,
+        limit: float | Callable[[], float],
         unipolar: bool,
         array: np.ndarray,
         geotransform: tuple[float, ...],
     ) -> str | None:
         """Put the user's style on once, then refit it to this slice. Returns
         the style when it was seeded from the palette here (to report), else
-        None. A saved style QGIS cannot read is logged and replaced by a seed."""
+        None. A saved style QGIS cannot read is logged and replaced by a seed.
+
+        `own_style` None always seeds, even over another scope's own style
+        already on the layer: the seed is reported and stored at once, so the
+        next tick brings it back as this scope's style."""
         assert self.layer is not None
         seeded = None
         if own_style is None:
-            if self._renderer_key is None or self._renderer_key[0] != "own":
-                seeded = self._seed(colormap_name, limit, unipolar)
+            seeded = self._seed(colormap_name, limit, unipolar)
         elif self._renderer_key != ("own", own_style):
             try:
                 own_colours.apply_style_text(self.layer, own_style)
@@ -315,9 +332,10 @@ class SliceLayer(QObject):
         own_colours.refit(self.layer, array, geotransform, self._view())
         return seeded
 
-    def _seed(self, colormap_name: str, limit: float, unipolar: bool) -> str:
+    def _seed(self, colormap_name: str, limit: float | Callable[[], float], unipolar: bool) -> str:
         assert self.layer is not None
-        own_colours.seed_style(self.layer, colormap_name, limit, unipolar)
+        value = float(limit() if callable(limit) else limit)
+        own_colours.seed_style(self.layer, colormap_name, value, unipolar)
         text = own_colours.style_text(self.layer)
         self._renderer_key = ("own", text)
         return text
@@ -545,6 +563,9 @@ class SliceLayer(QObject):
         self._name = name
         # A fresh layer has never had a renderer built for it.
         self._renderer_key = None
+        #: QGIS's own symbology for a fresh layer: what leaving the user's own
+        #: colours (#180) puts back under the palette.
+        self._plain_style = own_colours.style_text(layer)
         self._ensure_group_membership()
 
     def _apply_renderer(self, colormap_name: str, limit: float, unipolar: bool) -> None:

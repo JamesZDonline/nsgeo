@@ -409,7 +409,7 @@ class NsgeoPlugin:
         self.slice_layer = SliceLayer(self.layers)
         # #180: the user's own colours, their edits remembered by the dock,
         # their "Current canvas" min/max read from this map view.
-        self.slice_layer.own_style_changed.connect(self.slices_dock.set_own_style)
+        self.slice_layer.own_style_changed.connect(self._on_own_style_changed)
         self.slice_layer.extent_in = self._canvas_extent_in
         self.slices_dock.symbology_requested.connect(self._open_slice_symbology)
         self.cut_sections = CutSections(self.session, self.slices_dock)
@@ -965,12 +965,13 @@ class NsgeoPlugin:
             dock, layer = self.slices_dock, self.slice_layer
             if dock is None or layer is None:
                 return
-            # #180: counts are always drawn in the plugin's colours. Under the
-            # user's own, the plugin's limit is wanted only to start their
-            # style from what was shown; measuring it is a pass over the cube.
+            # #180: counts are always drawn in the plugin's colours. The limit
+            # goes as a callable: under the user's own colours it is read only
+            # to start their style from what was shown, since measuring it is a
+            # pass over the cube.
             own = dock.own_colours_on() and not dock.coverage_check.isChecked()
             own_style = dock.own_style() if own else None
-            limit = dock.display_limit() if not own or own_style is None else 1.0
+            limit = dock.display_limit
             if dock.scope() == "site":
                 # M12 spec 4.5: one layer over every included grid, already
                 # north-up on the site lattice.
@@ -1010,6 +1011,19 @@ class NsgeoPlugin:
                 dock.show_own_legend(own_colours.legend_text(layer.layer))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_own_style_changed(self, text: str) -> None:
+        """`SliceLayer.own_style_changed`: remember the style for the scope on
+        screen, and say its range on the Legend line at once, since an edit in
+        Layer Properties redraws nothing in the panel (#180). A slot."""
+        try:
+            dock, layer = self.slices_dock, self.slice_layer
+            if dock is None or layer is None:
+                return
+            dock.set_own_style(text)
+            dock.show_own_legend(own_colours.legend_text(layer.layer))
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not remember the slice colours: {exc}", Qgis.MessageLevel.Warning)
 
     def _open_slice_symbology(self) -> None:
         """`SlicesDock.symbology_requested`: the slice layer's Symbology page
