@@ -102,40 +102,35 @@ a milestone merges or the plan changes.
 | | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | next release |
 | | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
 | | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
+| | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | next release |
 
 ### In progress
 
 - **Whole site at fine cells: the export** ([#108]): an export finer than the
   preview, streamed to disk in the background. Designed; the plan is next.
-- **Time zero** ([#97]): the Time zero step sets the clock, so the row it lands
-  on reads 0 ns and depths, fits and slices measure from there. Built on
-  `nsgeo-time-zero`; the walkthrough passed on 2026-11-11 and the merge is
-  next. Follow-ups are in [#162] and [#163].
 
 ### Next, in order
 
-The first two items come before M15. Most are things the next milestones
-build on, so doing them now is cheaper than reworking M15–M17 afterwards.
+The first item comes before M15. Most are things the next milestones build
+on, so doing them now is cheaper than reworking M15–M17 afterwards.
 
-1. **Time zero** ([#97]): decided on 2026-11-10 that the Time zero step resets
-   the clock, so the first break reads 0 ns. Doing it before M15 and M16 means
-   their cuts and surfaces start on that clock instead of being converted later.
-2. **Measure the destagger shift automatically** ([#159], from [#47]): offer
+1. **Measure the destagger shift automatically** ([#159], from [#47]): offer
    each grid's shift from its own lines, measured on the lines as they are
    placed (fitting a grid can flip the shift it needs). Real grids need it now,
    and M17's GPS lines use the same shift.
-3. **M15: cut anywhere.** Draw a line on the map and see the vertical section
+2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
    beneath it, with the same hover, cursor and picks as a survey line. Designed.
-4. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+   It must read the clock each saved cube records ([#163], item 5).
+3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-5. **How a line is identified** ([#89]), settled before M17 stores GPS
+4. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-6. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+5. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-7. **M18: issue cleanup.** Work through the backlog of open bugs and review
+6. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-8. **M19: magnetometer data.** The first instrument other than GPR.
+7. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
 M15 brings picking to cuts; the migration real-data test ([#125]), before M16
