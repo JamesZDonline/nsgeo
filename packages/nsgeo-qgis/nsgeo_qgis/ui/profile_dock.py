@@ -1436,19 +1436,30 @@ class ProfileDock(QgsDockWidget):
             _log(f"could not update the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 
     def _saved_fit_now(self) -> StoredFit | None:
-        """The fit Save fit just stored, if it is still the working line's and
-        still in the store. The store is asked rather than remembered, so a fit
-        deleted from the velocity dialog meanwhile ends the state."""
+        """The fit Save fit just stored, measured from the line's current time
+        zero, if it is still the working line's and still in the store.
+
+        The store is asked rather than remembered, so a fit deleted from the
+        velocity dialog meanwhile ends the state. The zero is asked too: a Time
+        zero step added after the save moves the fit's numbers, and this is the
+        number the read-out shows and Apply applies -- the same one the velocity
+        dialog shows and applies (`fit_at_zero`). A fit that can no longer be
+        measured at the current zero ends the state, as the dialog never applies
+        one."""
         if self._just_saved is None:
             return None
         key, fit_id = self._just_saved
-        if (
-            key == self._working_key
-            and self.session.is_open
-            and not is_cut_key(key)
-            and fit_id in self.session.line_for_key(key).velocity_fits
-        ):
-            return self.session.line_for_key(key).velocity_fits[fit_id]
+        if key == self._working_key and self.session.is_open and not is_cut_key(key):
+            line = self.session.line_for_key(key)
+            stored = line.velocity_fits.get(fit_id)
+            if stored is not None:
+                zero = self.session.line_zero(key)
+                if zero is None:
+                    return stored  # the dialog's rule: an unknown zero shows the fit as stored
+                try:
+                    return fit_at_zero(stored, line.distance_along(), zero)
+                except ValueError:
+                    pass  # not measurable at this zero: never applied
         self._just_saved = None
         return None
 
@@ -1519,7 +1530,8 @@ class ProfileDock(QgsDockWidget):
         saved fit is a measurement, and applying it is a separate choice."""
         try:
             fit = self._velocity_fit
-            if fit is None or self._working_key is None:
+            key = self._working_key  # once: the store call below emits lines_changed
+            if fit is None or key is None:
                 return
             distance, _, _ = self._velocity_axis()
             stored = StoredFit(
@@ -1532,11 +1544,11 @@ class ProfileDock(QgsDockWidget):
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
                 zero_ns=self._line_zero(),
             )
-            fit_id = self.session.add_velocity_fit(self._working_key, stored)
+            fit_id = self.session.add_velocity_fit(key, stored)
             # The points are spent: clear them, ready for the next hyperbola.
             # The read-out says where the fit went (`_update_velocity_fit`).
             self._velocity_points = []
-            self._just_saved = (self._working_key, fit_id)
+            self._just_saved = (key, fit_id)
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)

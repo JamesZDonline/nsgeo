@@ -252,9 +252,15 @@ class SurveyDock(QgsDockWidget):
         tip = str(line.path)
         fits = sorted(line.velocity_fits.values(), key=lambda f: f.t0_ns)
         if fits:
-            # #126: the saved hyperbola fits, shallowest first.
+            # #126: the saved hyperbola fits, shallowest first, with the
+            # numbers they were stored with. The velocity dialog shows them
+            # measured from the line's current time zero, which needs the
+            # line read; a tree rebuild must not read every line, so the
+            # tooltip says which numbers these are.
             text += f" · {len(fits)} fit{'' if len(fits) == 1 else 's'}"
-            tip += f"\n{len(fits)} saved fit{'' if len(fits) == 1 else 's'}:"
+            tip += (
+                f"\n{len(fits)} saved fit{'' if len(fits) == 1 else 's'}, as measured when saved:"
+            )
             for f in fits:
                 tip += f"\n  {f.t0_ns:.1f} ns · {f.v_m_ns:.4f} ± {f.v_stderr_m_ns:.4f} m/ns"
         item = QTreeWidgetItem([text])

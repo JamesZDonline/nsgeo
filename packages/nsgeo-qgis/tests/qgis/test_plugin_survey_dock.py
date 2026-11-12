@@ -164,7 +164,7 @@ def test_line_tooltip_lists_fits_shallowest_first(dock):
     session.add_velocity_fit(key, _fit(16.1, 0.0905, 0.0036))
     path = str(session.line_for_key(key).path)
     assert dock.item_for_key(key).toolTip(0) == (
-        f"{path}\n3 saved fits:\n"
+        f"{path}\n3 saved fits, as measured when saved:\n"
         "  15.6 ns · 0.0898 ± 0.0033 m/ns\n"
         "  16.1 ns · 0.0905 ± 0.0036 m/ns\n"
         "  31.0 ns · 0.0825 ± 0.0022 m/ns"
@@ -176,7 +176,7 @@ def test_line_tooltip_singular(dock):
     key = "raw/FILE__002.DZT"
     session.add_velocity_fit(key, _fit(20.0, 0.09, 0.003))
     tip = dock.item_for_key(key).toolTip(0)
-    assert tip.endswith("\n1 saved fit:\n  20.0 ns · 0.0900 ± 0.0030 m/ns")
+    assert tip.endswith("\n1 saved fit, as measured when saved:\n  20.0 ns · 0.0900 ± 0.0030 m/ns")
 
 
 def test_grid_row_totals_fits_and_lines_with_singulars(dock):
@@ -189,6 +189,20 @@ def test_grid_row_totals_fits_and_lines_with_singulars(dock):
     session.add_velocity_fit("raw/FILE__002.DZT", _fit(25.0))
     session.add_velocity_fit("raw/FILE__003.DZT", _fit(25.0))
     assert _grid_item(dock, "A").text(0).endswith(" · 4 fits on 3 lines")
+
+
+def test_a_grid_row_counts_only_its_own_lines_fits(dock, tmp_path):
+    # A second grid with a fitted line of its own: neither grid's total may
+    # take in the other's, which a count over the whole site would.
+    session, dock = dock
+    session.add_grid(Grid("B", (600.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp_path / "raw", "FILE__004.DZT")
+    session.add_lines([Line.open(p, GridPlacement("B", "y", 0.0, 0.0, 1, p.stem))])
+    session.add_velocity_fit("raw/FILE__001.DZT", _fit(20.0))
+    session.add_velocity_fit("raw/FILE__004.DZT", _fit(20.0))
+    session.add_velocity_fit("raw/FILE__004.DZT", _fit(25.0))
+    assert _grid_item(dock, "A").text(0).endswith(" · 1 fit on 1 line")
+    assert _grid_item(dock, "B").text(0).endswith(" · 2 fits on 1 line")
 
 
 def test_removing_a_fit_updates_line_and_grid_rows(dock):
