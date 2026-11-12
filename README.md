@@ -157,7 +157,8 @@ Grouped by area. The order within a group is not a priority.
   alone or the max distance is large ([#147]); whole site at fine cells, the
   follow-ups: coverage edge lines on coarse previews, averaged previews, a
   memory estimate for This grid, refusals that stay on screen, and where the
-  preview note sits ([#157]).
+  preview note sits ([#157]); exports of large sites at fine cells, holding one
+  grid at a time so they fit in memory ([#167]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -214,6 +215,7 @@ Grouped by area. The order within a group is not a priority.
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#159]: https://github.com/JamesZDonline/nsgeo/issues/159
+[#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 
 ## Why
 
