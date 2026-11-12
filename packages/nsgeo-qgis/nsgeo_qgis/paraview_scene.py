@@ -79,3 +79,8 @@ def write_scene_files(folder: Path, record: dict, paraview_path: str) -> None:
             fh.write(text)
         if name == "open.sh":
             os.chmod(out, out.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def scene_title(grid_name: str, stretch: float) -> str:
+    """The title the scene prints: the grid, the depth stretch, and what the legend means."""
+    return f"{grid_name}  ·  depth stretched x{stretch:g}  ·  legend shows true depth"

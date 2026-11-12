@@ -153,3 +153,10 @@ def test_the_scene_opens_in_pvpython(tmp_path):
     keep = os.environ.get("NSGEO_KEEP_SHOT")
     if keep:
         Path(keep).write_bytes(shot.read_bytes())
+
+
+def test_scene_title_names_the_grid_and_states_the_stretch():
+    from nsgeo_qgis.paraview_scene import scene_title
+
+    assert scene_title("Grid A", 3.0) == "Grid A  ·  depth stretched x3  ·  legend shows true depth"
+    assert "x2.5" in scene_title("G", 2.5)
