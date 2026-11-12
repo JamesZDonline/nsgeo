@@ -1,0 +1,184 @@
+"""Open this nsgeo export in ParaView, set up for exploring.
+
+Run:  paraview --script=open_scene.py   (give its full path), or use open.sh / open.bat.
+
+Every number and name comes from export.json beside this file. Written for ParaView
+6.2; depth is stretched in the files themselves and the depth legend shows TRUE depth.
+"""
+
+import json
+import os
+
+from paraview.simple import *  # noqa: F403
+
+try:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+except NameError:  # the ParaView window runs --script without __file__; open.sh says where
+    HERE = os.environ.get("NSGEO_SCENE_DIR", os.getcwd())
+
+with open(os.path.join(HERE, "export.json"), encoding="utf-8") as fh:
+    INFO = json.load(fh)
+
+STRETCH = float(INFO["stretch"])
+MAX_DEPTH_M = float(INFO["max_depth_m"])
+ISO_LEVEL = float(INFO["iso_level"])
+STRENGTH_RANGE = [float(v) for v in INFO["strength_range"]]
+AMPLITUDE_RANGE = [float(v) for v in INFO["amplitude_range"]]
+CLOUD_RAMP = INFO["cloud_ramp"]  # [[strength, opacity], ...]
+SLICES = INFO["slices"]  # grid-local metres; lines_along is the axis the lines run along
+
+
+def path(name):
+    return os.path.join(HERE, name)
+
+
+def try_set(proxy, **props):
+    """Set properties that differ between ParaView versions, saying which don't exist."""
+    for k, v in props.items():
+        try:
+            setattr(proxy, k, v)
+        except (AttributeError, ValueError) as exc:
+            print(f"open_scene: skipped {k} ({exc})")
+
+
+def apply_preset(lut, *names):
+    """Colour preset names change between ParaView versions; use the first that exists."""
+    for name in names:
+        try:
+            if lut.ApplyPreset(name, True):
+                return
+        except RuntimeError:
+            pass
+    print(f"open_scene: none of the presets {names} exist")
+
+
+view = GetActiveViewOrCreate("RenderView")
+try_set(view, UseColorPaletteForBackground=0)
+try_set(view, Background=[0.12, 0.12, 0.14], OrientationAxesVisibility=1)
+
+# ---------------------------------------------------------------- the cube, shown as a cloud
+cube = XMLImageDataReader(registrationName="Cloud", FileName=[path("cube.vti")])
+cube.PointArrayStatus = ["strength", "amplitude", "true_depth_m"]
+cube.UpdatePipeline()
+x0, x1, y0, y1, z0, z1 = cube.GetDataInformation().GetBounds()
+cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+cloud = Show(cube, view)
+cloud.SetRepresentationType("Volume")
+ColorBy(cloud, ("POINTS", "strength"))
+
+box = Outline(registrationName="Box around the cube", Input=cube)
+box_d = Show(box, view)
+try_set(box_d, AmbientColor=[0.6, 0.6, 0.6], DiffuseColor=[0.6, 0.6, 0.6])
+
+# ---------------------------------------------------------------- isosurface, coloured by true depth
+iso = Contour(registrationName="Isosurface", Input=cube)
+iso.ContourBy = ["POINTS", "strength"]
+iso.Isosurfaces = [ISO_LEVEL]
+try_set(iso, ComputeScalars=0, ComputeNormals=1)
+iso_d = Show(iso, view)
+ColorBy(iso_d, ("POINTS", "true_depth_m"))
+Hide(iso, view)
+
+# A draggable box that keeps the part of the isosurface inside it: the middle half of the
+# grid, from a quarter to three quarters of the depth. Drag its faces to change it.
+cut = Clip(registrationName="Isosurface inside a box", Input=iso)
+cut.ClipType = "Box"
+try_set(
+    cut.ClipType,
+    Position=[x0 + (x1 - x0) / 4.0, y0 + (y1 - y0) / 4.0, z0 + (z1 - z0) / 4.0],
+    Length=[(x1 - x0) / 2.0, (y1 - y0) / 2.0, (z1 - z0) / 2.0],
+)
+try_set(cut, Invert=1)
+cut_d = Show(cut, view)
+ColorBy(cut_d, ("POINTS", "true_depth_m"))
+Hide(cut, view)
+
+# ---------------------------------------------------------------- three slices, coloured like the Slices panel
+
+
+def make_slice(name, normal, origin):
+    s = Slice(registrationName=name, Input=cube)
+    s.SliceType = "Plane"
+    s.SliceType.Origin = origin
+    s.SliceType.Normal = normal
+    d = Show(s, view)
+    ColorBy(d, ("POINTS", "amplitude"))
+    try_set(d, Ambient=1.0, Diffuse=0.0)  # flat colours, no shading
+    Hide(s, view)
+
+
+# The line direction is the grid axis the survey lines run along. "Along a line" stands on
+# the middle line with its normal across the lines; "across the lines" has its normal
+# along them.
+mid_z = (z0 + z1) / 2.0
+x_m, y_m = float(SLICES["x_m"]), float(SLICES["y_m"])
+if SLICES["lines_along"] == "y":
+    along_normal, along_origin = [1, 0, 0], [x_m, cy, mid_z]
+    across_normal, across_origin = [0, 1, 0], [cx, y_m, mid_z]
+else:
+    along_normal, along_origin = [0, 1, 0], [cx, y_m, mid_z]
+    across_normal, across_origin = [1, 0, 0], [x_m, cy, mid_z]
+make_slice("Depth slice", [0, 0, 1], [cx, cy, -float(SLICES["depth_m"]) * STRETCH])
+make_slice("Slice along a line", along_normal, along_origin)
+make_slice("Slice across the lines", across_normal, across_origin)
+
+# ---------------------------------------------------------------- picks and lines
+picks = XMLPolyDataReader(registrationName="Your picks", FileName=[path("picks.vtp")])
+picks_d = Show(picks, view)
+picks_d.SetRepresentationType("Points")
+try_set(picks_d, PointSize=12.0, RenderPointsAsSpheres=1)
+ColorBy(picks_d, ("POINTS", "true_depth_m"))  # same colours as the isosurface
+
+lines = XMLPolyDataReader(registrationName="Survey lines", FileName=[path("lines.vtp")])
+lines_d = Show(lines, view)
+try_set(lines_d, AmbientColor=[0.85, 0.85, 0.85], DiffuseColor=[0.85, 0.85, 0.85], LineWidth=1.5)
+
+# ---------------------------------------------------------------- colours, set last so nothing rescales them
+str_lut = GetColorTransferFunction("strength")
+apply_preset(str_lut, "Inferno", "Inferno (matplotlib)")
+try_set(str_lut, AutomaticRescaleRangeMode="Never")
+str_lut.RescaleTransferFunction(*STRENGTH_RANGE)
+str_pwf = GetOpacityTransferFunction("strength")
+str_pwf.RescaleTransferFunction(*STRENGTH_RANGE)
+# x, opacity, midpoint, sharpness: the ramp comes from export.json.
+ramp = [[STRENGTH_RANGE[0], 0.0]] + [list(p) for p in CLOUD_RAMP]
+str_pwf.Points = [v for x, o in ramp for v in (float(x), float(o), 0.5, 0.0)]
+
+depth_lut = GetColorTransferFunction("true_depth_m")
+apply_preset(depth_lut, "Turbo", "Jet")
+try_set(depth_lut, AutomaticRescaleRangeMode="Never")
+depth_lut.RescaleTransferFunction(0.0, MAX_DEPTH_M)
+depth_lut.InvertTransferFunction()  # shallow = warm, deep = cool
+
+amp_lut = GetColorTransferFunction("amplitude")
+apply_preset(amp_lut, "Grayscale", "X Ray")
+amp_lut.InvertTransferFunction()  # black = strong, like the Slices panel
+try_set(amp_lut, AutomaticRescaleRangeMode="Never")
+amp_lut.RescaleTransferFunction(*AMPLITUDE_RANGE)
+try_set(amp_lut, NanColor=[0.12, 0.12, 0.14], NanOpacity=0.0)  # no data = a hole
+
+# Legends: strength bottom right, depth top right.
+cloud.SetScalarBarVisibility(view, True)
+picks_d.SetScalarBarVisibility(view, True)
+for lut, title, where in (
+    (str_lut, "Strength (x typical at its depth)", "Lower Right Corner"),
+    (depth_lut, "True depth (m)", "Upper Right Corner"),
+):
+    bar = GetScalarBar(lut, view)
+    try_set(bar, Title=title, ComponentTitle="", WindowLocation=where)
+    try_set(bar, TitleFontSize=14, LabelFontSize=12, ScalarBarLength=0.3)
+    try_set(bar, RangeLabelFormat="{:.1f}", LabelFormat="{:.1f}", AutomaticLabelFormat=0)
+
+note = Text(registrationName="Note")
+note.Text = INFO["title"]
+note_d = Show(note, view)
+try_set(note_d, WindowLocation="Upper Left Corner", FontSize=14)
+
+# ---------------------------------------------------------------- camera: from the south, above
+view.CameraFocalPoint = [cx, cy, mid_z]
+view.CameraPosition = [cx, y0 - (y1 - y0) * 0.9, (z1 + (y1 - y0))]
+view.CameraViewUp = [0.0, 0.0, 1.0]
+view.ResetCamera(False)
+GetActiveCamera().Dolly(1.4)
+SetActiveSource(iso)
+Render()

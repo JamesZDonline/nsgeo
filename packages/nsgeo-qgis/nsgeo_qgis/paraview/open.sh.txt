@@ -1,0 +1,5 @@
+#!/bin/sh
+# Open this export in ParaView with the scene set up.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+cd "$HERE" || exit 1
+NSGEO_SCENE_DIR="$HERE" exec "{{PARAVIEW}}" --script="$HERE/open_scene.py"

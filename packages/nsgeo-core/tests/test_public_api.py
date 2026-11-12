@@ -20,6 +20,7 @@ EXPECTED_PUBLIC = {
     "render",
     "velocity",
     "velocity_fit",
+    "vtkxml",
 }
 
 

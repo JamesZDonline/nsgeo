@@ -218,3 +218,13 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
 | `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |
 | `unusable_fit_note` | The text for a stored fit that cannot be fitted again at the line's current time zero, with the reason. |
+
+### `nsgeo.vtkxml`
+
+Streaming VTK XML writers, numpy only, for files ParaView opens directly.
+
+| Name | Purpose |
+|---|---|
+| `write_image_data` | Writes float32 point arrays on a regular grid (`.vti`), each array fed as chunks so a volume never sits in memory whole. Written to a `.part` file and renamed; an array of the wrong length raises `ValueError` and leaves no file. Returns the bytes written. |
+| `write_poly_data` | Writes points, point arrays and vertex, line and polygon cells (`.vtp`). An empty point set is a valid file. Returns the bytes written. |
+| `image_data_bytes` | The exact payload `write_image_data` will write for a shape and array count, plus a fixed 4096-byte header allowance. |
