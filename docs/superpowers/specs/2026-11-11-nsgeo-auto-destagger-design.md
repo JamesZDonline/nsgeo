@@ -258,7 +258,7 @@ keeps the panel's rule and never measures a line without its neighbours.)
 - **The status line** says what happened in a sentence or two. It gives the grid value with how
   sure it is, names the lines with their own values, and names the lines left at the grid value or
   not measured, with the reason. An illustration of the shape, not of the expected results: "Measured
-  +0.152 m from 60 lines (±0.012). FILE__045 and FILE__027 have their own values. FILE__011
+  +0.152 m from 60 lines (±0.012). FILE__045 and FILE__028 have their own values. FILE__011
   changes partway along and is left at +0.152." The exact words are the builder's.
 
 The author then edits any cell, presses Set, or presses Cancel. Measure adds no new column. The
@@ -304,7 +304,12 @@ line 1 forward, on a 30 m grid.
   direction flipped) gives the same values.
 - **An injected single-line error is recovered.** Move one mid-grid line by +0.30 m along its
   direction of travel and, in a second case, by −0.50 m. That line's value comes out within
-  0.05 m of (its value without the injection) − d, and its neighbours keep their values.
+  0.05 m of (the grid value) − (d + r), where r is the line's own residual before the injection,
+  and its neighbours keep their values. A line's own value corrects everything that is off on the
+  line, not only the injection: a line already a few centimetres off (below the own-value
+  threshold, so left at the grid value) is corrected by that much as well once it is moved
+  (decided by the author at C14, 2026-11-11; FILE__031 of Grid 1 sits about +0.05 m ahead of its
+  neighbours). The +0.30 and −0.50 results differ by −0.80 ± 0.01.
 - **Two adjacent injected errors** are both recovered.
 - **An injected skew is ignored.** Add k × 0.02 m to line k's start: no line gets an own value, and
   the grid value moves by less than 0.01 m.
@@ -326,15 +331,17 @@ lines, not only on injected errors.
 - **The lines the spike found clearly off get their own values.** Each value corrects in the
   direction that cancels the line's residual. Residuals are measured in the line's own direction
   of travel against its neighbours, after the grid value; the spike's figures are in the note.
-  - Unfitted: `FILE__045` (about −0.72 m), and `FILE__027` and `FILE__028` (about −0.52 m each,
-    adjacent).
+  - Unfitted: `FILE__045` (about −0.72 m) and `FILE__028` (about −0.52 m).
   - Fitted: `FILE__051` (about −0.23 m) and `FILE__059` (about +0.23 m).
   The test pins the sign. The builder pins the size tolerance once the per-line solve exists, and
   shows it to the author at the C14 checkpoint.
 - **Fitted `FILE__050`** (its halves read −0.18 and +0.96 m, and one hits the search limit) is
   reported as changing partway along, or as no clear match. It must not get an own value.
 - **Not pinned either way:** the lines whose halves only partly agreed in the spike. Unfitted
-  these are `FILE__044`, `048` and `049`; fitted, `FILE__044`, `045` and `049`.
+  these are `FILE__044`, `048` and `049`; fitted, `FILE__044`, `045` and `049`. Unfitted
+  `FILE__027` too: it was pinned with 028 until C14, but the built solve found only 028 off
+  (moving 028 alone lines up the strong reflection on 027–030; moving 027 as well puts it 0.35 m
+  out), and the author dropped the pin (2026-11-11).
 - **Most lines keep the grid value**, as on Grid 1.
 
 Synthetic data only where it mirrors the real records (project rule): the injected-error cases
@@ -349,6 +356,14 @@ author adjusting a starting point, which Measure is for (§1). It is not a failu
 value, which follows the author's own model in §2. A preference that the per-line results look
 worse overall than the grid value alone would send the plan back to the estimator at that
 checkpoint.
+
+**C14 outcome (author, 2026-11-11).** The per-line values make the big sharp features look better.
+The blocks of neighbouring lines that are all off the same way (Grid 2 unfitted 032–034 and
+040–042, Grid 1 unfitted 012–015), where the method moves every other line, look right. The
+FILE__027 pin is dropped and the injected-error target counts the line's own residual (both
+above). "Changes partway along" stays at a 0.30 m difference between a line's halves: 0.40 m would
+name 3 lines on Grid 1 unfitted instead of 7, but would drop lines 8 and 9, which are known to
+change partway along.
 
 **Walkthrough (author, QGIS, deployed profile).**
 - Grid 1, unfitted and fitted: Measure, look at the slice at 14.9–19.7 ns, and judge the wiggle on
