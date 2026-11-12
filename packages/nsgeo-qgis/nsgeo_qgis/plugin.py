@@ -1623,9 +1623,9 @@ class NsgeoPlugin:
         """Set QGIS's Temporal Controller to step through `layer`'s bands, one per frame.
 
         Overrides whatever the controller held: the file was just made, put back, added or
-        reopened, and a GPR project has no other timed layers. Skipped when the canvas has no navigation
-        object (no canvas, or a test stub). Never raises: it runs where an exception would
-        vanish, and the layer is already added.
+        reopened, and a GPR project has no other timed layers. Skipped when the canvas has no
+        navigation object (no canvas, or a test stub). Never raises: it runs where an exception
+        would vanish, and the layer is already added.
         """
         try:
             canvas = self.iface.mapCanvas()
