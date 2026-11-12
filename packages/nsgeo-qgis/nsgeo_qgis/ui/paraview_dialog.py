@@ -16,7 +16,8 @@ from pathlib import Path
 
 from nsgeo.slices import VolumeSettings
 from qgis.core import Qgis, QgsMessageLog
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, QObject, Qt
+from qgis.PyQt.QtGui import QKeyEvent
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
@@ -40,6 +41,8 @@ from nsgeo_qgis.paraview_scene import (
     summary_rows,
 )
 from nsgeo_qgis.slices_plan import VolumeChoice
+from nsgeo_qgis.ui.site_scope import transform_value
+from nsgeo_qgis.ui.transform_combo import NONE as NONE_VALUE
 from nsgeo_qgis.ui.transform_combo import TransformCombo
 
 _WARNING_STYLE = "color: #b3261e;"
@@ -182,20 +185,42 @@ class ParaViewExportDialog(QDialog):
         self.browse_button.clicked.connect(lambda: self._browse())
         self.path_edit.textChanged.connect(lambda _t: self._refresh())
         self.grid_combo.currentTextChanged.connect(lambda _t: self._load_grid())
-        for spin in (
+        for spin in self._spins():
+            spin.valueChanged.connect(lambda _v: self._refresh())
+        self.transform_combo.value_changed.connect(lambda _v: self._refresh())
+        # Enter in a field commits what was typed and shows its size; it never exports
+        # (Export and open is the default button, and a typed value must be seen first).
+        for field in (*self._spins(), self.path_edit):
+            field.installEventFilter(self)
+
+        if current_grid in grid_ids:
+            self.grid_combo.setCurrentText(current_grid)
+        self._load_grid()
+
+    def _spins(self) -> tuple[QDoubleSpinBox, ...]:
+        return (
             self.cell_spin,
             self.dz_spin,
             self.stretch_spin,
             self.period_spin,
             self.blur_spin,
             self.trend_spin,
-        ):
-            spin.valueChanged.connect(lambda _v: self._refresh())
-        self.transform_combo.value_changed.connect(lambda _v: self._refresh())
+        )
 
-        if current_grid in grid_ids:
-            self.grid_combo.setCurrentText(current_grid)
-        self._load_grid()
+    def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:  # noqa: N802
+        try:
+            if (
+                isinstance(event, QKeyEvent)
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and (obj is self.path_edit or obj in self._spins())
+            ):
+                if isinstance(obj, QDoubleSpinBox):
+                    obj.interpretText()  # commits the typed value, which refreshes the size
+                return True
+        except Exception:  # noqa: BLE001 -- an event filter; logged
+            _log()
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _with_hint(field: QWidget, hint: QLabel) -> QWidget:
@@ -214,7 +239,7 @@ class ParaViewExportDialog(QDialog):
         return VolumeChoice(
             cell=self.cell_spin.value(),
             dz_ns=self.dz_spin.value(),
-            transform=self.transform_combo.value(),
+            transform=transform_value(self.transform_combo.value()),
             stretch=self.stretch_spin.value(),
             settings=VolumeSettings(
                 period_ns=self.period_spin.value(),
@@ -241,7 +266,7 @@ class ParaViewExportDialog(QDialog):
                 choice = self._choice_for(grid)
                 self.cell_spin.setValue(choice.cell)
                 self.dz_spin.setValue(choice.dz_ns)
-                self.transform_combo.set_value(choice.transform)
+                self.transform_combo.set_value(choice.transform or NONE_VALUE)
                 self.stretch_spin.setValue(choice.stretch)
                 self.period_spin.setValue(choice.settings.period_ns)
                 self.blur_spin.setValue(choice.settings.blur_m)

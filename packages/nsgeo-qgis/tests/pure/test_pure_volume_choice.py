@@ -52,3 +52,10 @@ def test_the_too_fine_message_names_the_cell_the_grid_and_the_safe_cell():
     text = too_fine_for_export(0.01, "Grid 1", 9_000_000, 0.02)
     assert "too fine" in text and "0.01 m" in text and "Grid 1" in text
     assert "9,000,000" in text and "0.02 m" in text
+
+
+def test_a_stored_none_reads_back_as_no_transform():
+    c = volume_choice(
+        {"transform": "none"}, cell_default=1, dz_default=1, transform_default="amp_square"
+    )
+    assert c.transform == ""

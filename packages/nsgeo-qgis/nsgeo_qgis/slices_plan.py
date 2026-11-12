@@ -763,7 +763,10 @@ def volume_choice(
     return VolumeChoice(
         cell=number("cell", cell_default),
         dz_ns=number("dz_ns", dz_default),
-        transform=transform if isinstance(transform, str) else transform_default,
+        # "none" is how a combo spells no transform; a record that kept it reads as "".
+        transform=(NO_TRANSFORM if transform == "none" else transform)
+        if isinstance(transform, str)
+        else transform_default,
         stretch=number("stretch", DEFAULT_STRETCH),
         settings=VolumeSettings.from_dict(dict(rec)),
     )

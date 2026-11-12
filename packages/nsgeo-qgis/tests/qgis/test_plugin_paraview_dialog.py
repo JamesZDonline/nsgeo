@@ -303,3 +303,94 @@ def test_a_busy_slices_panel_warns_and_writes_nothing(
     _open_dialog(plugin_obj, drive_dialog, lambda d: d.export_button.click())
     assert any("still preparing" in m for m in message_log)
     assert not paraview_folder(s, "A").exists()
+
+
+# ---- fix round 1: transform None, and Enter in a field ----------------------------------------
+
+
+def test_the_dialogs_transform_equals_the_panels_for_every_option(plugin):
+    from nsgeo_qgis.ui.site_scope import transform_value
+
+    plugin_obj, _s = plugin
+    dock = plugin_obj.slices_dock
+    dialog = _make_dialog(plugin_obj)
+    for value in dock.transform_combo.values():
+        dock.transform_combo.set_value(value)
+        fresh = _make_dialog(plugin_obj)
+        assert fresh.choice().transform == transform_value(value)
+        dialog.transform_combo.set_value(value)
+        assert dialog.choice().transform == transform_value(value)
+
+
+def test_none_picked_in_the_dialog_exports(plugin, drive_dialog, message_log):
+    plugin_obj, s = plugin
+
+    def driver(d):
+        d.transform_combo.set_value("none")
+        d.export_button.click()
+
+    _open_dialog(plugin_obj, drive_dialog, driver)
+    assert paraview_folder(s, "A").is_dir(), message_log
+    assert s.volume_record("A")["transform"] == ""
+
+
+def test_the_panel_on_none_gives_a_dialog_default_of_none_that_exports(
+    plugin, drive_dialog, message_log
+):
+    plugin_obj, s = plugin
+    plugin_obj.slices_dock.transform_combo.set_value("none")
+    plugin_obj.slices_dock.engine.wait_for_preparation(20_000)
+    seen = []
+
+    def driver(d):
+        seen.append((d.choice().transform, d.transform_combo.value()))
+        d.export_button.click()
+
+    _open_dialog(plugin_obj, drive_dialog, driver)
+    assert seen == [("", "none")]
+    assert paraview_folder(s, "A").is_dir(), message_log
+
+
+def test_a_record_that_kept_none_heals(plugin):
+    plugin_obj, s = plugin
+    s.remember_volume("A", transform="none")
+    assert _make_dialog(plugin_obj).choice().transform == ""
+
+
+def test_switching_grids_shows_each_grids_own_transform(plugin):
+    from nsgeo_qgis.slices_plan import VolumeChoice
+
+    plugin_obj, s = plugin
+    export = ParaViewExport(s, plugin_obj.slices_dock)
+    own = {
+        "A": VolumeChoice(0.2, 0.2, "amp_square"),
+        "B": VolumeChoice(0.2, 0.2, ""),
+        "C": VolumeChoice(0.2, 0.2, "amp_envelope"),
+    }
+    dialog = ParaViewExportDialog(
+        ["A", "B", "C"], "A", lambda g: own[g], export.summary, "", hints_for=None
+    )
+    for grid in ("B", "C", "A", "B"):
+        dialog.grid_combo.setCurrentText(grid)
+        assert dialog.choice().transform == own[grid].transform
+
+
+def test_enter_in_a_spin_commits_and_refreshes_but_does_not_export(plugin):
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtTest import QTest
+
+    dialog = _make_dialog(plugin[0])
+    dialog.path_edit.setText("/bin/true")
+    dialog.show()
+    before = dialog.size_label.text()
+    dialog.cell_spin.setFocus()
+    dialog.cell_spin.selectAll()
+    QTest.keyClicks(dialog.cell_spin, "0.1")
+    assert dialog.size_label.text() == before  # nothing committed yet
+    QTest.keyClick(dialog.cell_spin, Qt.Key.Key_Return)
+    assert dialog.result() == 0 and dialog.isVisible() and not dialog.open_after()
+    assert dialog.cell_spin.value() == pytest.approx(0.1)
+    assert dialog.size_label.text() != before
+    QTest.keyClick(dialog.path_edit, Qt.Key.Key_Return)
+    assert dialog.isVisible()
+    dialog.close()
