@@ -1343,6 +1343,31 @@ def test_a_counts_file_needs_no_time_wiring(exportable, tmp_path):
     assert restore_band_times(layer, path) == "counts"
 
 
+def test_a_companion_from_before_the_counts_tag_is_still_counts(tmp_path):
+    """Named by the companion rule and tagged only `bilinear`, as the first versions wrote it."""
+    from nsgeo_qgis.slice_export import coverage_path, restore_band_times
+
+    path = coverage_path(tmp_path / "old.tif")
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
+    ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
+    ds = None
+    layer = QgsRasterLayer(str(path), "old_coverage", "gdal")
+    assert restore_band_times(layer, path) == "counts"
+
+
+def test_a_values_file_not_named_as_a_companion_is_not_counts(tmp_path):
+    from nsgeo_qgis.slice_export import restore_band_times
+
+    path = tmp_path / "plain.tif"
+    ds = gdal.GetDriverByName("GTiff").Create(str(path), 4, 4, 1, gdal.GDT_Float32)
+    ds.SetGeoTransform((0.0, 1.0, 0.0, 4.0, 0.0, -1.0))
+    ds.SetMetadata({"NSGEO_RESAMPLING": "bilinear"})
+    ds = None
+    layer = QgsRasterLayer(str(path), "plain", "gdal")
+    assert restore_band_times(layer, path) == "missing"
+
+
 def test_write_bands_reports_each_band_as_it_lands(exportable, tmp_path):
     plan = _band_plan(exportable, n=3)
     seen: list[int] = []

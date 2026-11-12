@@ -575,6 +575,48 @@ def test_a_replace_that_could_not_rename_the_companion_adds_the_new_values_layer
     assert "coverage" in said[0] and "cube was put back" not in said[0]
     assert "cube_coverage was put back" in said[0]
     assert not any(m.startswith("could not export the GeoTIFF") for m, _lv in levels)
+    _assert_no_stray_punctuation(said[0])
+
+
+def _assert_no_stray_punctuation(text):
+    for stray in (".;", ". .", "..", ";;", "; ."):
+        assert stray not in text, f"{stray!r} in {text!r}"
+
+
+def test_the_half_written_message_reads_cleanly_with_a_style_note(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    from nsgeo_qgis import export_task
+    from nsgeo_qgis import plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    plugin.slices_dock.coverage_check.setChecked(True)
+    target = tmp_path / "slices" / "cube.tif"
+    coverage = tmp_path / "slices" / "cube_coverage.tif"
+    _export(plugin, drive_dialog, target)
+    real = export_task.commit_partial
+
+    def commit(partial, to):
+        if str(to) == str(coverage):
+            raise PermissionError(13, "in use by another program")
+        real(partial, to)
+
+    def broken(*args, **kwargs):
+        raise OSError("read-only folder")
+
+    monkeypatch.setattr(export_task, "commit_partial", commit)
+    monkeypatch.setattr(plugin_module, "write_style", broken)
+    levels, disconnect = _levels()
+    try:
+        _export(plugin, drive_dialog, target, replace=True)
+    finally:
+        disconnect()
+    said = [m for m, lv in levels if "GeoTIFF was written" in m]
+    assert said, levels
+    assert "style file for cube.tif could not be written" in said[0]
+    assert "cube_coverage was put back" in said[0]
+    _assert_no_stray_punctuation(said[0])
 
 
 def test_a_style_file_that_cannot_be_written_is_not_left_stale(

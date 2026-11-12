@@ -1415,13 +1415,13 @@ class NsgeoPlugin:
             f"the GeoTIFF was written to {result.target}, but the coverage file could not be: "
             f"{plain_export_error(result.error)}"
         )
+        style_notes: list[str] = []
         if (
             epoch == self._export_epoch
             and self.session is not None
             and self.session.is_open
             and self.slices_dock is not None
         ):
-            style_notes: list[str] = []
             problem = self._add_export_layer(
                 result.target,
                 limit=float(result.limit or 1.0),
@@ -1431,9 +1431,11 @@ class NsgeoPlugin:
                 notes=style_notes,
             )
             text += "; the new layer was added" if problem is None else f"; {problem}"
-            text += "".join(f". {n}" for n in style_notes)
         if note:
             text += f"; {note}"
+        # Style notes are whole sentences ending in a full stop: they go last.
+        if style_notes:
+            text += ". " + " ".join(style_notes)
         self.message(text, Qgis.MessageLevel.Warning)
 
     def _restore_layers(

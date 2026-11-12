@@ -698,7 +698,9 @@ def restore_band_times(layer: QgsRasterLayer, path: str | Path) -> str:
     """Wire `layer` to the band windows its own file records (`NSGEO_WINDOW_NS`).
 
     For a layer put back from an export's file. GUI thread. Returns `"set"`; `"counts"`
-    for a coverage file, which has no time axis to follow; or `"missing"` when the file
+    for a coverage file (tagged `largest_count`, or named by the companion rule
+    `<stem>_coverage.tif`, as the first versions wrote it untagged), which has no time
+    axis to follow; or `"missing"` when the file
     does not record every band's window (one written before the key existed) and the
     layer is left as QGIS made it.
     """
@@ -707,7 +709,7 @@ def restore_band_times(layer: QgsRasterLayer, path: str | Path) -> str:
         return "missing"
     try:
         metadata = dataset.GetMetadata()
-        if "largest_count" in (
+        if Path(path).stem.endswith("_coverage") or "largest_count" in (
             metadata.get("NSGEO_RESAMPLING"),
             metadata.get("NSGEO_SITE_RESAMPLING"),
         ):
