@@ -38,10 +38,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid
+from nsgeo.destagger import EnvelopeBins
+from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -59,6 +60,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.destagger_job import JobLine, MeasureJob, box_value, measure_summary
 from nsgeo_qgis.line_edit import (
     SAME_M,
     EditOutcome,
@@ -69,6 +71,7 @@ from nsgeo_qgis.line_edit import (
     span_m,
     width_across,
 )
+from nsgeo_qgis.refine import Refiner
 from nsgeo_qgis.session import SiteSession
 
 (
@@ -111,9 +114,33 @@ DESTAGGER_TIP = (
     "travel, kept apart from Start. If features on lines walked one way sit "
     "behind the same features on lines walked the other way, increase it."
 )
+MEASURE_TIP = (
+    "Works out the destagger from the grid's own data: each line is compared with "
+    "its neighbours walked the other way, over the whole record. Fills the Destagger "
+    "box with the grid's value and each selected row with its line's value. Nothing "
+    "changes until OK."
+)
+MEASURE_PROGRESS_MS = 200
+MEASURE_STOPPED = "Measure stopped. Nothing was changed."
+MEASURE_DISCARDED = (
+    "The table changed while measuring, so the results were not used. Press Measure again."
+)
+MEASURE_SITE_CHANGED = "The site changed while measuring, so the results were not used."
+MEASURE_NO_TARGETS = "Select the lines to fill, then press Measure."
 # The background of every cell whose field differs from the placement the
 # table saw, so a change is visible before OK.
 CHANGED = QColor(255, 236, 179)
+
+
+@dataclasses.dataclass
+class _MeasureRun:
+    """What Measure captured on the GUI thread when it was pressed."""
+
+    site: object
+    snapshot: dict[str, GridPlacement]
+    targets: list[str]
+    labels: dict[str, str]
+    job: MeasureJob
 
 
 class EditLinesDialog(QDialog):
@@ -138,6 +165,12 @@ class EditLinesDialog(QDialog):
         self._per_metre: dict[str, float] = {}
         self._picks: dict[str, int] = {}
         self._grid_ids: list[str] = []
+        # Measure (#159): created before the first _refresh, which reads `busy`.
+        self._measurer = Refiner(self)
+        self._bins: dict[str, EnvelopeBins] = {}
+        self._run: _MeasureRun | None = None
+        self._progress = QTimer(self)
+        self._progress.timeout.connect(self._show_progress)
         try:
             self._grid_ids = [g.id for g in session.site.grids] if session.site else []
             for key in session.keys_on_grid(grid_id):
@@ -242,6 +275,10 @@ class EditLinesDialog(QDialog):
         destagger_row.addWidget(destagger_label)
         destagger_row.addWidget(self.destagger_spin)
         destagger_row.addWidget(self.set_destagger_button)
+        self.measure_button = QPushButton("Measure")
+        self.measure_button.setToolTip(MEASURE_TIP)
+        self.measure_button.clicked.connect(self.measure)
+        destagger_row.addWidget(self.measure_button)
         destagger_row.addStretch(1)
         bulk.addLayout(destagger_row)
         offset_row = QHBoxLayout()
@@ -372,7 +409,9 @@ class EditLinesDialog(QDialog):
         sel = self.selected_keys()
         rows = [self._order.index(k) for k in sel]
         self.bulk.setTitle(f"Change the {len(sel)} selected line{'s' if len(sel) != 1 else ''}")
-        self.bulk.setEnabled(bool(sel))
+        # P8: Stop stays reachable with nothing selected while a measure runs.
+        self.bulk.setEnabled(bool(sel) or self._measurer.busy)
+        self.measure_button.setText("Stop" if self._measurer.busy else "Measure")
         self.up_button.setEnabled(bool(rows) and min(rows) > 0)
         self.down_button.setEnabled(bool(rows) and max(rows) < len(self._order) - 1)
 
@@ -465,6 +504,135 @@ class EditLinesDialog(QDialog):
             self._order[r], self._order[r + delta] = self._order[r + delta], self._order[r]
         self._refresh()
         self.select_keys(sel)
+
+    # ---- measure ----------------------------------------------------------------
+    def measure(self) -> None:
+        """Start a measure, or stop the one that is running."""
+        try:
+            self._measure()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _measure(self) -> None:
+        if self._measurer.busy:
+            self._measurer.cancel()
+            self._progress.stop()
+            self._run = None
+            self._update_panel()
+            self.status.setText(MEASURE_STOPPED)
+            return
+        targets = self.selected_keys()
+        if not targets:
+            self.status.setText(MEASURE_NO_TARGETS)
+            return
+        try:
+            frames = self._frames()
+            site = self.session.site
+            snapshot = self._measure_snapshot(frames)
+            lines = []
+            for key, placement in snapshot.items():
+                line = self.session.line_for_key(key)
+                lines.append(JobLine(key, placement.label or "", line.path, line.header, placement))
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
+            return
+        targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
+        labels = {k: self._label_of(k) for k in self._order}
+        job = MeasureJob(lines, self._bins)
+        self._run = run = _MeasureRun(site, snapshot, targets, labels, job)
+        self._measurer.start(
+            [job],
+            lambda landed: self._measure_landed(run, landed),
+            lambda message: self._measure_error(run, message),
+        )
+        self._update_panel()
+        self._show_progress()
+        self._progress.start(MEASURE_PROGRESS_MS)
+
+    def _label_of(self, key: str) -> str:
+        edit = self._edits[key]
+        return edit.label or edit.seen.label or Path(key).stem
+
+    def _measure_snapshot(self, frames: Mapping[str, Grid]) -> dict[str, GridPlacement]:
+        """Every row still on this grid, as the table would place it, without
+        the fields a measure ignores or an edit of which must not discard it."""
+        out: dict[str, GridPlacement] = {}
+        for key in self._order:
+            placed = self._live(self._edits[key], frames).placed(frames)
+            if placed.grid_id == self.grid_id:
+                out[key] = dataclasses.replace(placed, travel_shift=0.0, label=None)
+        return out
+
+    def _show_progress(self) -> None:
+        try:
+            run = self._run
+            if run is None or not self._measurer.busy:
+                self._progress.stop()
+                return
+            done, total = run.job.progress
+            if done < total:
+                self.status.setText(f"Measuring… read {done} of {total} lines")
+            else:
+                self.status.setText("Measuring… comparing lines")
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
+
+    def _measure_error(self, run: _MeasureRun, message: str) -> None:
+        try:
+            self._progress.stop()
+            self._run = None
+            self._update_panel()
+            self.status.setText(f"Could not measure: {message}. Nothing was changed.")
+        except Exception as exc:  # noqa: BLE001 -- a callback must not raise
+            self._failed(exc)
+
+    def _measure_landed(self, run: _MeasureRun, job: object) -> None:
+        try:
+            self._progress.stop()
+            self._run = None
+            self._land(run)
+        except Exception as exc:  # noqa: BLE001 -- a callback must not raise
+            self._failed(exc)
+
+    def _land(self, run: _MeasureRun) -> None:
+        job = run.job
+        self._bins.update(job.prepared)  # whatever happens next, the reads are kept (C8)
+        self._update_panel()
+        if job.stopped or job.result is None:
+            self.status.setText(MEASURE_STOPPED)
+            return
+        if self.session.site is not run.site:
+            self.status.setText(MEASURE_SITE_CHANGED)
+            return
+        try:
+            frames = self._frames()
+            now = self._measure_snapshot(frames)
+        except (KeyError, ProjectError) as exc:
+            self.status.setText(self._unavailable(exc))
+            return
+        if now != run.snapshot:
+            self._refresh(MEASURE_DISCARDED)
+            return
+        result = job.result
+        for key in run.targets:
+            value = result.lines[key].destagger if key in result.lines else None
+            if value is not None:
+                edit = self._live(self._edits[key], frames)
+                self._edits[key] = dataclasses.replace(edit, travel_shift=round(value, 3))
+        box = box_value(result)
+        if box is not None:
+            self.destagger_spin.setValue(round(box, 3))
+        summary = measure_summary(result, run.targets, job.unreadable, run.labels)
+        self._refresh(summary)
+
+    def done(self, r: int) -> None:
+        # Joins the worker, so nothing lands in a closed dialog and no thread outlives it.
+        try:
+            self._progress.stop()
+            self._measurer.shutdown()
+        except Exception as exc:  # noqa: BLE001 -- closing must not raise
+            self._failed(exc)
+        super().done(r)
 
     # ---- table ------------------------------------------------------------------
     def _refresh(self, note: str | None = None) -> None:

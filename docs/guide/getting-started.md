@@ -344,6 +344,13 @@ the same features on lines walked the other way, increase it. Set it on every
 line first (select all, type an amount, press **Set**), then adjust single
 lines. Start is not changed: it stays where the line was recorded to begin.
 
+**Measure** works the amount out from the data instead. Select the lines to fill
+and press it: each line is compared with its neighbours walked the other way, over
+the whole record. The grid's value goes in the Destagger box, and each selected row
+gets its own line's value (a line that changes partway along, or matches nothing,
+gets the grid's value and is named on the status line). Nothing changes until you
+press OK, and the numbers are a starting point: look at the lines, then adjust.
+
 Fit a grid's lines before you destagger them. Fitting removes the squeeze a
 wheel that reads short or long puts on each line, and that squeeze looks like
 stagger itself, so the destagger a grid needs can change sign once its lines

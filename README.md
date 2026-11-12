@@ -42,7 +42,7 @@ the known issues.
   start and grid can be edited, one line at a time or several together, and
   lines can be moved to another grid. A line can be stretched or compressed so
   its ends sit on the grid's edges, and destaggered along its direction of
-  travel.
+  travel, by an amount typed or measured from the data.
 - **The map and the profile, linked both ways.** Hover a line on the map to
   preview its radargram. Moving along the profile moves a marker along the line
   on the map, and a range selected on the profile lights up on the map.
