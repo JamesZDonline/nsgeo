@@ -31,6 +31,17 @@ Run by the author on 2026-11-11 (evening), on a copy of the ten-grid survey, pro
 | Z1 120 m sites | pass | Accepted: follow-up #167 filed, spec decision A amended, README Wishlist line. |
 | Z2 format keys | pass | `largest_count` and `NSGEO_WINDOW_NS` kept. |
 
+### Stage T, after the fix rounds (2026-11-12)
+
+Run by the author on the same profile, restarted on the branch at 111e999.
+
+| Check | Result |
+|---|---|
+| T1 the Memory row | pass |
+| T2 export: the Temporal Controller is on, one frame per band, in order | pass |
+| T3 save, close, reopen: it steps the same, first band included | pass |
+| T4 Add Raster Layer in a new project: it steps | pass |
+
 ## Findings
 
 - **B2 is not a bug.** The 2.8 GB the author saw was the File row: 2,582 × 3,035 pixels at 0.025 m
