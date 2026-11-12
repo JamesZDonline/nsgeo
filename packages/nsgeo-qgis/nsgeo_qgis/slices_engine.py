@@ -1316,12 +1316,6 @@ class SliceEngine(QObject):
         held = fill.nbytes + (0 if preview is None else preview.nbytes)
         return held + sum(solved.nbytes for solved in self._solved.values())
 
-    @property
-    def last_solve_ms(self) -> float | None:
-        """How long the last minimum-curvature solve on the plan held now
-        took; None before one has run on it, and after it is dropped."""
-        return self._last_solve_ms
-
     @staticmethod
     def _weights_key(frame: CubeFrame, settings: FinishSettings) -> tuple[Any, ...]:
         # Smoothing is applied after the weights and is not part of them.

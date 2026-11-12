@@ -38,7 +38,8 @@ it can be measured and its shape judged, and making publication-quality figures.
 in QGIS, and files may be shared with ArcGIS or other GIS users.
 
 **Sites will grow.** The author expects sites up to about 120 × 120 m. Setting up at a coarse cell
-and exporting at a fine one has to work at that size.
+and exporting at a fine one has to work at that size. (Milestone B meets this only in part; see decision A's
+amendment.)
 
 **Amplitudes are compared relatively, never as absolute values** (author, 2026-11-06). A pixel
 holding a blend of neighbouring cells loses nothing that matters.
@@ -121,6 +122,11 @@ Settled after the builder check (author, 2026-11-10):
   coarser cell, with the plain reason and the finest cell that fits. Lifting the limit would need
   chunked interpolation of very large grids, which is not part of this work. A 120 × 120 m site
   works as long as its grids each fit.
+  *Amended at milestone B's walkthrough (author, 2026-11-11):* the export runs band by band
+  within 1.5 GB, and it holds every included grid's taps and fill weights at once. A fully
+  surveyed 120 × 120 m site therefore exports no finer than about a 0.041 m cell, and a 0.05 m
+  cell with a 0.025 m pixel is refused there, with the reason and the finest that fits. An
+  export that holds one grid at a time is #167.
 - **B. Hosting is a follow-up.** One cloud-optimised GeoTIFF per depth band is #146. #108's "COG
   option" moves there.
 

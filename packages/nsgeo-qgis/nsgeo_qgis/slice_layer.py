@@ -105,6 +105,16 @@ def apply_smooth_resampling(layer: QgsRasterLayer) -> None:
     layer.setResamplingStage(Qgis.RasterResamplingStage.ResampleFilter)
 
 
+def apply_renderer(layer: QgsRasterLayer, colormap_name: str, limit: float, unipolar: bool) -> None:
+    """The slice look on `layer`: pseudocolour ramp over band 1 at `limit`, smooth zoomed in."""
+    shader = build_shader(colormap(colormap_name), limit, unipolar)
+    renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
+    renderer.setClassificationMin(0.0 if unipolar else -float(limit))
+    renderer.setClassificationMax(float(limit))
+    layer.setRenderer(renderer)
+    apply_smooth_resampling(layer)
+
+
 class SliceLayer(QObject):
     """The one live raster layer showing the dock's current slice.
 
@@ -382,7 +392,7 @@ class SliceLayer(QObject):
                 finally:
                     # Cheap cluster (final review): `dataset.Close()`,
                     # then the local set to `None` -- `slice_export.py`'s
-                    # `GeoTiffSliceWriter.write` already uses `Close()` on
+                    # `write_north_up` already uses `Close()` on
                     # this same GDAL build (>= 3.7), which surfaces a
                     # write error at close time instead of leaving it
                     # silent until garbage collection, where a SWIG
@@ -410,16 +420,9 @@ class SliceLayer(QObject):
 
     def _apply_renderer(self, colormap_name: str, limit: float, unipolar: bool) -> None:
         assert self.layer is not None
-        provider = self.layer.dataProvider()
-        shader = build_shader(colormap(colormap_name), limit, unipolar)
-        renderer = QgsSingleBandPseudoColorRenderer(provider, 1, shader)
-        lo = 0.0 if unipolar else -float(limit)
-        renderer.setClassificationMin(lo)
-        renderer.setClassificationMax(float(limit))
-        self.layer.setRenderer(renderer)
         # A fresh layer's first draw, and any new renderer. Each tick's
-        # repoint sets it again in `_repoint`.
-        apply_smooth_resampling(self.layer)
+        # repoint sets the resampling again in `_repoint`.
+        apply_renderer(self.layer, colormap_name, limit, unipolar)
 
     # ---- lifecycle ------------------------------------------------------
     def clear(self) -> None:

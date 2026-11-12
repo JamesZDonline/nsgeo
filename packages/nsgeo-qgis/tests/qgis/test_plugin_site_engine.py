@@ -1055,7 +1055,6 @@ def test_grids_too_far_apart_draw_a_coarser_preview_and_say_why(site3, make_site
     assert site.lattice.n_pixels <= site.max_pixels
     assert site.full_lattice.pixel == RES.cell
     assert "Leaving out C" in site.preview_note
-    assert site.export_refusal is not None
     drawn = site.slice_at(20.0, 5.0, **TICK)
     assert drawn.lattice == site.lattice
     assert drawn.array.shape == (site.lattice.height, site.lattice.width)
@@ -1071,7 +1070,6 @@ def test_covered_pixels_alone_force_the_preview(site3, make_site):
     assert site.full_lattice.n_pixels <= site.max_pixels
     assert site.is_preview
     assert site.lattice.pixel >= 2 * RES.cell
-    assert site.export_refusal is not None
     site.max_covered = 10**9
     site.set_resolution(RES)
     assert not site.is_preview and site.lattice.pixel == RES.cell
@@ -1090,8 +1088,6 @@ def test_the_covered_limit_note_gives_the_finest_cell_and_names_no_useless_grid(
     assert fitting_lattice(boxes, finest, "EPSG:32616", site.max_pixels, 1_000).pixel == finest
     assert f"It draws in full at a {finest:g} m cell or coarser." in site.preview_note
     assert "Leaving out" not in site.preview_note
-    assert f"Choose a cell of {finest:g} m or coarser." in site.export_refusal
-    assert "leave out" not in site.export_refusal
 
 
 def test_a_previews_coverage_is_max_pooled_so_no_line_hides(site3, make_site):
@@ -1125,14 +1121,23 @@ def test_leaving_the_outlier_out_returns_to_full_detail(site3, make_site):
     site.set_resolution(RES)
     assert not site.is_preview
     assert site.lattice.pixel == RES.cell
-    assert site.preview_note is None and site.export_refusal is None
+    assert site.preview_note is None
+
+
+def test_an_export_lattice_is_the_full_one_whether_or_not_the_site_is_a_preview(site3, make_site):
+    site, _ = prepared(make_site, site3)
+    site.max_pixels = 100
+    site.set_resolution(RES)
+    assert site.is_preview
+    assert site.lattice_at(RES.cell, RES.cell) == site.full_lattice
+    fine = site.lattice_at(RES.cell, RES.cell / 2)
+    assert fine.pixel == RES.cell / 2 and fine.width == 2 * site.full_lattice.width
 
 
 def test_a_site_that_fits_is_not_a_preview(site3, make_site):
     site, _ = prepared(make_site, site3)
     assert not site.is_preview
     assert site.preview_note is None
-    assert site.export_refusal is None
     assert site.lattice == site.full_lattice
 
 

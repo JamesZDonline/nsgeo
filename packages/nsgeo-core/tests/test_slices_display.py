@@ -10,6 +10,7 @@ from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices.cube import Provenance, SliceCube
 from nsgeo.slices.display import (
     SliceWindow,
+    frame_lattice,
     limit_over_slices,
     plan_windows,
     shared_limit,
@@ -302,6 +303,29 @@ def test_north_up_of_an_axis_aligned_frame_has_exactly_the_frames_shape():
         out, _ = to_north_up(values, frame)
         assert out.shape == (ny, nx), f"{nx}x{ny} at cell={cell} gained a phantom row/column"
         np.testing.assert_allclose(out, values[::-1])
+
+
+def test_frame_lattice_at_the_cell_reproduces_an_axis_aligned_grid():
+    """The lattice `to_north_up` writes through: the frame's own shape, anchored
+    at its north-west corner, so each pixel centre is a cell centre."""
+    for nx, ny, cell in ((29, 12, 0.1), (23, 19, 0.05), (7, 3, 0.2)):
+        frame = CubeFrame((500000.0, 4500000.0), 0.0, cell, nx, ny, "EPSG:32633")
+        lat = frame_lattice(frame, cell)
+        assert (lat.width, lat.height, lat.pixel, lat.crs) == (nx, ny, cell, "EPSG:32633")
+        assert (lat.x0, lat.y1) == pytest.approx((500000.0, 4500000.0 + ny * cell))
+        values = np.arange(ny * nx, dtype=float).reshape(ny, nx)
+        out, gt = to_north_up(values, frame)
+        assert gt == (lat.x0, lat.pixel, 0.0, lat.y1, 0.0, -lat.pixel)
+        assert out.shape == (lat.height, lat.width)
+
+
+def test_frame_lattice_at_half_the_cell_doubles_the_pixels():
+    frame = CubeFrame((500000.0, 4500000.0), 0.0, 0.1, 29, 12, "EPSG:32633")
+    lat = frame_lattice(frame, 0.05)
+    assert (lat.width, lat.height) == (58, 24)
+    assert (lat.x0, lat.y1) == pytest.approx((500000.0, 4500000.0 + 1.2))
+    with pytest.raises(ValueError):
+        frame_lattice(frame, 0.0)
 
 
 def _frame(azimuth, nx=40, ny=25, cell=0.2):
