@@ -88,13 +88,20 @@ def test_a_layer_without_ranges_is_left_alone(qgis_app, tmp_path):
 
 # ---- long exports: the frame must not drift off the bands ----------------------------
 
-_LAYERS: dict[int, QgsRasterLayer] = {}
 
+@pytest.fixture(scope="module")
+def sweep_layers(qgis_app, tmp_path_factory):
+    """One layer per band count, shared by the sweep and released before the application
+    exits (a layer that outlives `exitQgis()` crashes the process on the way out)."""
+    layers: dict[int, QgsRasterLayer] = {}
 
-def _sweep_layer(tmp_path_factory, n_bands: int) -> QgsRasterLayer:
-    if n_bands not in _LAYERS:
-        _LAYERS[n_bands] = _layer(tmp_path_factory.mktemp(f"sweep{n_bands}"), n_bands)
-    return _LAYERS[n_bands]
+    def get(n_bands: int) -> QgsRasterLayer:
+        if n_bands not in layers:
+            layers[n_bands] = _layer(tmp_path_factory.mktemp(f"sweep{n_bands}"), n_bands)
+        return layers[n_bands]
+
+    yield get
+    layers.clear()
 
 
 @pytest.mark.parametrize("n", [17, 200, 460])
@@ -106,9 +113,9 @@ def _sweep_layer(tmp_path_factory, n_bands: int) -> QgsRasterLayer:
     ids=["one-level", "one-level-step", "abut", "overlap", "gap"],
 )
 def test_one_frame_per_band_at_any_length_and_step(
-    qgis_app, tmp_path_factory, n, dz, t0, step_levels, thickness_levels
+    qgis_app, sweep_layers, n, dz, t0, step_levels, thickness_levels
 ):
-    layer = _sweep_layer(tmp_path_factory, n)
+    layer = sweep_layers(n)
     # The windows as `window_times_ns` makes them: a thickness of one level is zero long.
     windows = [
         (
