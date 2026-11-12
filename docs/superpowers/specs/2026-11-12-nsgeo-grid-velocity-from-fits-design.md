@@ -11,7 +11,15 @@ Fixes a slice-depth defect found while designing this (§10), not yet filed.
 
 Comes after two other branches, which both touch files this one changes:
 - **Piece 1** (`nsgeo-fit-marks`: #126 fit counts in the Survey panel, #128 Save fit clears the
-  points). Its Apply-after-Save behaviour is what §7.4 extends.
+  points). Its Apply-after-Save behaviour is what §7.4 extends. The contract it is built to:
+  - after **Save fit**, the working points clear;
+  - the profile dock keeps the id `add_velocity_fit` returned;
+  - **Apply to line** and **Apply to grid** stay enabled and act on that saved fit;
+  - before applying, the store is checked. If the fit has been deleted meanwhile, nothing is
+    applied from it or named;
+  - the next velocity click, Clear, a line switch or velocity mode off ends that state.
+
+  Read the merged code before planning Task 4. This is the agreed behaviour, not its API.
 - **Fine-cell export** (`nsgeo-fine-cells-export`), which moves the export's velocity call in
   `plugin.py`.
 
@@ -67,6 +75,15 @@ should still say where a grid's velocity came from.
   (immediate, confirmed), Apply / Clear override / Cancel. Picking a row puts that fit's
   velocity in the box. `selected_fit_id()` is the picked fit unless the box has moved off its
   velocity (compared to 4 dp).
+- **The dialog shows fits at the line's current time zero.** Since #97, `_fits_at_line_zero`
+  re-measures every stored fit from the line's current zero with `fit_at_zero`. The zero comes
+  from `SiteSession.line_zero(key, load=True)`, which reads the DZT when the line is not open and
+  its stack has a Time zero step. The re-measured numbers are what the table shows and what a
+  picked fit applies.
+  - A fit whose refit fails is flagged with `unusable_fit_note` and is never applied.
+  - `applied_fit_note` flags a line velocity that no longer matches the fit behind it.
+  - So a stored fit is never edited, but the number it gives can change when the line's time zero
+    changes.
 - **A grid's Set velocity…** (Survey panel) emits `grid_velocity_requested`, which `plugin.py`
   connects to `open_grid_dialog`: the whole Edit grid dialog. Its velocity box keeps the stored
   model when the value is unchanged to 4 dp (`GridDialog._result_velocity`).
@@ -132,6 +149,16 @@ Title `Velocity · <grid id>`. Top to bottom:
    - Clicking a row selects it and puts that fit's velocity in the box, as the line dialog does.
      If the selected fit's line is the one open in the Profile panel, its curve is highlighted
      there, as the line dialog does.
+   - **Numbers are at each line's current time zero**, exactly as the line dialog shows them
+     (§2). The table shows them, the average uses them, the comparisons use them, and the
+     record copies them. A fit that cannot be re-measured at its line's zero keeps the line
+     dialog's flag, and its tick box is disabled, so it can never be averaged or applied.
+     *My call:* both dialogs must show one number per fit. That is why each line's own zero is
+     used, rather than the zero of the preset that slices use. A follow-up notes the case where
+     those two differ (§16).
+   - **Opening must not freeze QGIS.** The zeros are found once when the dialog opens, and only
+     for lines that have fits. Measure on real Grid 2 before choosing how. If it takes more than
+     about a second, show a busy cursor at least.
 4. **Delete fit**, for the selected row. It acts at once and asks for confirmation, as in the line
    dialog. When the fit is a member of this grid's remembered velocity, or of any line's, the
    confirmation says so and adds that the velocity stays as it is.
@@ -177,10 +204,13 @@ starred-lines note. Its Apply and Clear override work as now, plus §7.
 ### 7.1 What is remembered
 
 A **velocity source** record says where a line's or a grid's velocity came from. It holds:
-- **The member fits**, each as (line key, fit id).
-- **A copy of each member's numbers as they were** when applied: t0, v, σ and `zero_ns`, plus the
-  line's label at the time. This is what makes the record reproducible after a member fit is
-  deleted, or its line is removed or moved.
+- **The member fits.** A member is identified by its line key, its fit id **and its stored
+  `fitted_at`**. *My call:* a line removed and imported again keeps its key, but its fits and its
+  id counter start over. Without `fitted_at`, a new `fit-1` would pass for the old one.
+- **A copy of each member's numbers as they were used:** t0, v and σ at the time zero they were
+  measured from, that `zero_ns`, and the line's label at the time. This is what makes the record
+  reproducible after a member fit is deleted, its line is removed or moved, or its line's time
+  zero changes.
 - **How the velocity was made:** `weighted mean` (Use average, one or more fits) or `fit`
   (a single picked fit).
 - **The result:** v and σ.
@@ -197,39 +227,58 @@ averaged into another combination.
 
 ### 7.2 What Apply records
 
-At Apply, the box's value (to 4 dp) decides, in this order:
-1. It equals the **average of the ticked fits**: record those fits, made by `weighted mean`. The
-   velocity applied is the unrounded average, not the box's 4-dp rounding. This mirrors how
-   `VelocityDialog.velocity()` applies a fit's own velocity.
-2. It equals the **selected fit's** velocity: record that fit, made by `fit`, as today.
-3. It equals the velocity already in force, untouched: keep the existing record as it is.
-4. Anything else is a typed number: the velocity is set, and any record is dropped.
+*My call, after the builder check:* the record follows **the last thing that filled the box**,
+and only while the box still holds that value (to 4 dp):
+1. **Nothing filled it.** The box still holds the velocity in force when the dialog opened, and
+   no row was picked and Use average was not pressed. Keep the existing record as it is. Do not
+   rewrite it with a new date or fresh copies. An untouched Apply changes nothing.
+2. **Use average filled it.** Record the fits ticked when Use average was pressed, made by
+   `weighted mean`. The velocity applied is the unrounded average, not the box's 4-dp rounding,
+   as `VelocityDialog.velocity()` does for a fit. If exactly one fit was ticked, record it as
+   `fit`.
+3. **A row pick filled it.** Record that fit, made by `fit`, as today.
+4. **Anything else**, including a number typed over either of those, or ticks changed after Use
+   average with no second press: the velocity is set as a typed number, and any record is
+   dropped.
 
 Clear grid velocity, and Clear override on a line, drop the record with the velocity.
 
-Edit grid: an unchanged velocity keeps the record, and a changed one drops it (rule 3 and 4).
+**Edit grid.** It is modeless and holds the grid as it was when it opened. Its velocity box is
+compared at OK with **the value the box opened with**, not with the grid now.
+- **Unchanged:** Edit grid leaves the grid's velocity and record exactly as they are at OK. It
+  writes neither. This includes a velocity set from the grid dialog, or Apply to grid, while Edit
+  grid was open.
+- **Changed:** the new number is written, and the record is dropped.
+
+*My call:* without this, OK in an Edit grid opened earlier would quietly put back the old
+velocity, or pair it with the new record.
 
 ### 7.3 When a member changes
 
-Fits are never edited, so a member can only go away. That can happen in three ways:
+Stored fits are never edited, but a member can still change in four ways:
 - the fit is **deleted**;
-- its line is **removed** from the survey;
-- for a grid's record, its line is **moved to another grid**.
+- its line is **removed** from the survey (or removed and imported again, §7.1);
+- for a grid's record, its line is **moved to another grid**;
+- its line's **time zero changes**. The member then gives a different number (§2), or cannot be
+  re-measured at all.
 
-In all three cases the velocity and the record stay as they are, with the copied numbers. This
+In every case the velocity and the record stay as they are, with the copied numbers. This
 follows `remove_velocity_fit`'s rule for a single fit: the velocity was applied deliberately.
 What changes is how the dialog describes the record.
 
 **The note in the dialog** says where the velocity came from, under the average group:
-- All members present: *This velocity is the average of 6 fits (applied 2026-11-12).*
-  For a single fit: *This velocity is FILE__003's fit at 15.6 ns.*
-- Some gone: *This velocity is the average of 6 fits (applied 2026-11-12). 1 of them is no longer
-  on this grid: FILE__003's fit at 31.0 ns (deleted).* The reason is one of deleted, line
-  removed, or moved to grid X. The average group still shows the average of whatever is ticked
-  now, so the old and new numbers sit side by side.
+- Every member present and unchanged: *This velocity is the average of 6 fits (applied
+  2026-11-12).* For a single fit: *This velocity is FILE__003's fit at 15.6 ns.*
+- Otherwise, the same sentence, then each member that changed and how:
+  - *FILE__003's fit at 31.0 ns: deleted* (or *line removed*, or *line moved to grid X*);
+  - *FILE__006's fit at 12.3 ns now gives 0.0921 (time zero changed)*;
+  - *… cannot be measured at the current time zero*.
 
-**Reopening the dialog** ticks the record's members that are still present, and unticks the
-rest. With no record, every fit is ticked.
+  The average group still shows the average of whatever is ticked now, so the old and new
+  numbers sit side by side.
+
+**Reopening the dialog** ticks the record's members that are still present and usable, and
+unticks the rest. With no record, every usable fit is ticked.
 
 **Deleting a member** keeps the record, unlike today, where `remove_velocity_fit` clears
 `velocity_from_fit`. The copied numbers are what the author asked to keep.
@@ -249,7 +298,9 @@ piece 1, on the fit just saved.
 - **Survey panel, line row:** the existing `v 0.089*` marker, unchanged.
 - **Profile velocity source label:** `Grid G2, average of 6 fits`, `Grid G2, fit on FILE__003`,
   `line override, average of 3 fits`, `line override (fit at 15.6 ns)` as now.
-- **Slices panel velocity label:** it reads `velocity_source`, so it follows (§10).
+- **Slices panel velocity label:** it needs a new grid-level label (§10). Today it passes the
+  first prepared line to `velocity_source`, which works per line and names that line's override
+  first.
 - **Exports:** the velocity number only, as now.
 
 ## 8. Fit ids are never reused
@@ -279,20 +330,30 @@ without one start from one past the highest existing number.
 
 ## 10. Slices use the grid's velocity
 
-**The defect.** A slice's depths come from the first line of the grid, through
+**The defect.** A slice's depths come from the first prepared line of the slice source, through
 `SiteSession.resolved_velocity(first_key)`. That resolves the line's override first. With
 overrides set on lines from their fits, a slice's depth labels and its export follow whichever
-line happens to be first in survey order, not the grid's velocity. Three places:
+line happens to be prepared first, not the grid's velocity. Three places:
 - `SliceEngine.provenance()` (`slices_engine.py`, the `for line in self._lines` loop): the
   velocity recorded in cubes and exports.
 - `SlicesDock._resolved_velocity` (`ui/slices_dock.py`): the readout and the velocity label.
 - `site_scope.grid_velocity` (`ui/site_scope.py`): each grid in Whole site.
 
 **The fix.** All three use the rule cuts already use (`cut_velocity`): the grid's velocity, else
-the header dielectric of the grid's first line. A line's override never reaches a slice. Rename
-or generalise `cut_velocity`, so slices and cuts share one rule and one name. The Slices panel's
-label names the grid as its source, e.g. `v = 0.090 m/ns (Grid G2, average of 6 fits)`, or
-`(header ε 9, FILE__001)` when the grid has no velocity.
+the header dielectric of the grid's first line in survey order (`keys_on_grid(grid_id)[0]`). A
+line's override never reaches a slice. Rename or generalise `cut_velocity`, so slices and cuts
+share one rule and one name.
+
+*My call:* the fallback follows the cut rule, so it may name a different line than today's
+first prepared line when the source leaves the grid's first line out. Header dielectrics
+normally agree across a grid. When they don't, one rule for slices and cuts beats two.
+
+**The label.** The Slices panel gets a grid-level label function, next to `velocity_source`
+(which stays per line for the profile). It reads:
+- `v = 0.090 m/ns (Grid G2, average of 6 fits)`;
+- `(Grid G2, fit on FILE__003)`;
+- `(Grid G2)`;
+- `(header ε 9, FILE__001)` when the grid has no velocity.
 
 **Why it belongs here.** It is what makes the grid dialog's hint true, and it is the reason the
 author wants a grid number at all.
@@ -346,7 +407,13 @@ KeyError handling in both places stays).
   - Survey panel grid row text;
   - profile source label;
   - the strip's Apply after Save records the fit, and Apply of an unsaved fit records none;
-  - Edit grid keeps the record on an unchanged value and drops it on a changed one.
+  - Edit grid keeps the record on an unchanged value and drops it on a changed one;
+  - Edit grid opened, the velocity set from the grid dialog, then Edit grid OK unchanged: the
+    new velocity and its record survive;
+  - a time zero added to a member's line: the table shows the re-measured number, the note
+    names the change, and the record keeps its copy;
+  - an unusable fit cannot be ticked;
+  - a line removed and imported again: its new `fit-1` is not taken for the record's old one.
 - Assert `message_log == []` in slot-driven tests, as the suite does elsewhere.
 
 ## 13. Walkthrough
@@ -390,3 +457,6 @@ merges.
 - Exports could carry the velocity source (a summary of the record) in their metadata, if the
   author wants reproducibility to reach the GeoTIFF too.
 - Dix conversion from fits at several depths (velocity spec §11), if a layered site needs it.
+- Fits measured on a line's own clock while slices use the preset's clock (§4). The numbers
+  differ when the line's own stack and the grid's preset disagree about Time zero. This belongs
+  with #163's site-clock warning.
