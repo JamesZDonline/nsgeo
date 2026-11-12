@@ -129,7 +129,7 @@ It also suggests doing #36 (edit or delete a pick from the profile) early, befor
     - **Any other layer current:** survey lines behave exactly as today.
     - **Why it costs nothing to learn:** QGIS's Select tool already selects only in the current layer, so opening a cut by selection needs the cuts layer current anyway.
     - **Helpers:** turning the **Cut** tool on makes the cuts layer current. The profile title always says whether a cut or a line is showing.
-12. **Minimum curvature on a cut shows kriging at once.** Minimum curvature is then solved near the cut in the background and replaces it (§4.7). This was Claude's recommendation, and the user took it on 2026-11-06. The user plans to work on the solver speed-up (#111) soon. Nothing in M15 waits for it.
+12. **Minimum curvature on a cut shows kriging at once.** Minimum curvature is then solved near the cut in the background and replaces it (§4.7). This was Claude's recommendation, and the user took it on 2026-11-06. The solver speed-up (#111, multigrid) merged before M15 was built, so the times in §4.7 already include it.
 13. **A cut moves with its grid, and its picks follow it,** as line picks follow their line under line editing (§4.8). The user agreed on 2026-11-06.
 
 ### Calls made by Claude (check these)
@@ -279,7 +279,7 @@ On real single levels, kriging is not a close stand-in. In the gaps between line
 - **Fair to the slices.** A cut's solve must not hold the slice's own refinement back by more than one level's solve. Whether the two share `refine.py`'s thread is the builder's call.
 - **Exports** are not affected: there is no cut export in M15.
 - **Picks** may be made while kriging stands in. Call 2 records that they were.
-- **A faster solver** (#111, which the user plans to take on) would shorten the wait without changing any of this. The solve goes through `CurvaturePlan`, so a faster plan speeds cuts and slices alike.
+- **A faster solver** would shorten the wait without changing any of this. #111's multigrid is already in, and the ~100 s for Grid 1 is measured with it. The solve goes through `CurvaturePlan`, so any later speed-up reaches cuts and slices alike.
 
 **Not chosen:**
 
