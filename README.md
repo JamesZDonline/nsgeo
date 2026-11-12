@@ -99,6 +99,9 @@ release's notes list everything in it.
 
 ### In progress
 
+- **How a line is identified** ([#89]): a line is the object itself, so lines
+  can be cached and put in sets again, and M17's GPS fixes cannot break how
+  lines are compared. Built on `nsgeo-line-identity`, CI running.
 - **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
   the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
   typed min/max, a cumulative cut) as you move through the depths; M19's
@@ -116,14 +119,12 @@ than reworking M16–M17 afterwards.
 
 1. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-2. **How a line is identified** ([#89]), settled before M17 stores GPS
-   coordinates in it.
-3. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-4. **M18: issue cleanup.** Work through the backlog of open bugs and review
+3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-5. **M19: magnetometer data.** The first instrument other than GPR.
+4. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; the migration real-data test ([#125]), before M16
