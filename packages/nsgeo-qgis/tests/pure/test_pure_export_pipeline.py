@@ -156,12 +156,18 @@ def _live(spec: ExportSpec) -> list[tuple[np.ndarray, dict]]:
     return out
 
 
+def _flat(factors: dict) -> list[float]:
+    """The factors as one flat list (pytest 9.2's `approx` refuses nested dicts)."""
+    return [x for key in sorted(factors) for x in factors[key]]
+
+
 def _same(band: ExportBand, array: np.ndarray, factors: dict) -> None:
     assert band.array.dtype == np.float32
     assert band.array.shape == array.shape
     np.testing.assert_array_equal(np.isnan(band.array), np.isnan(array))
     np.testing.assert_allclose(band.array, array, rtol=0, atol=1e-5, equal_nan=True)
-    assert band.factors == pytest.approx(factors)
+    assert sorted(band.factors) == sorted(factors)
+    assert _flat(band.factors) == pytest.approx(_flat(factors))
 
 
 # ---- the composition --------------------------------------------------------
@@ -192,7 +198,7 @@ def test_export_at_a_finer_cell_measures_normalisation_again():
     (fine_band, *_) = _run(fine)
     fine_live = _live(fine)[0]
     _same(fine_band, *fine_live)
-    assert fine_band.factors != pytest.approx(coarse_band.factors, rel=1e-6)
+    assert _flat(fine_band.factors) != pytest.approx(_flat(coarse_band.factors), rel=1e-6)
 
 
 def test_manual_gains_are_carried_as_typed():
