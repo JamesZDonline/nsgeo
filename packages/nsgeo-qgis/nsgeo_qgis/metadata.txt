@@ -4,9 +4,17 @@ qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Near-surface geophysics: GPR profiles in map context
-about=Process GPR surveys in their map context. Import GSSI DZT files into grids placed from corners typed, picked on the map or read from a polygon, and fix a line's placement afterwards. Hover a line on the map to see its profile, with the profile cursor drawn back onto the map. Process each profile with steps you choose (time-zero, dewow, background removal, bandpass, gains, migration); nothing runs unless you add it. Pick reflections into a point layer, and build time and depth slices across a grid, shown on the map and exportable as a GeoTIFF. The plugin is GPL-2.0-or-later; the bundled nsgeo core library is MIT.
-version=0.3.0
-changelog=0.3.0 - experimental
+about=Process GPR surveys in their map context. Import GSSI DZT files into grids placed from corners typed, picked on the map or read from a polygon, and fix, fit and destagger a line's placement afterwards, measuring the destagger from the data. Hover a line on the map to see its profile, with the profile cursor drawn back onto the map. Process each profile with steps you choose (time-zero, dewow, background removal, bandpass, gains, migration); nothing runs unless you add it. Pick reflections into a point layer, and build time and depth slices across a grid, shown on the map and exportable as a GeoTIFF. Cut a vertical section along any line you draw on a grid. The plugin is GPL-2.0-or-later; the bundled nsgeo core library is MIT.
+version=0.4.0
+changelog=0.4.0 - experimental
+    - Cut: draw a line anywhere on a grid and see the vertical section beneath it, with picks; cuts move with their grid
+    - Edit lines: fit lines to the grid's edges, destagger them, and Measure the destagger from the data
+    - Time zero now sets the clock: the first break reads 0 ns, and picks, fits, cubes and GeoTIFFs record the zero they used
+    - Slices: Whole site never refuses a fine cell, minimum curvature is 4-5x faster, cubes use less memory, and This grid and Whole site read a grid's lines alike
+    - Grid velocity is optional (lines fall back to their headers); envelope and bandpass leaks fixed; Shift+scroll moves one Step per notch
+    - Sites with cuts need 0.4.0 to open, and don't reopen a site in 0.3.0 after opening it in 0.4.0 (see the release notes)
+    - Release notes: https://github.com/JamesZDonline/nsgeo/blob/v0.4.0/docs/releases/0.4.0.md
+    0.3.0 - experimental
     - Edit lines: fix a line's label, offset, direction, start or grid after import, one line or several at once, and move lines to another grid
     - Picks follow their line when a grid or line is edited, and their depth follows the line's velocity
     - A grid that gets shorter or longer takes its reversed lines with the far edge
