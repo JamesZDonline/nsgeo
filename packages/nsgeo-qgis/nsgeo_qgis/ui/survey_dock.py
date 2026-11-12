@@ -191,6 +191,13 @@ class SurveyDock(QgsDockWidget):
             )
             if not lines:
                 text += " · empty"
+            n_fits = sum(len(line.velocity_fits) for _, line in lines)
+            if n_fits:
+                n_lines = sum(1 for _, line in lines if line.velocity_fits)
+                text += (
+                    f" · {n_fits} fit{'' if n_fits == 1 else 's'}"
+                    f" on {n_lines} line{'' if n_lines == 1 else 's'}"
+                )
             g_item = QTreeWidgetItem([text])
             g_item.setData(0, ROLE_KIND, "grid")
             g_item.setData(0, ROLE_ID, grid.id)
@@ -242,10 +249,18 @@ class SurveyDock(QgsDockWidget):
             text += f" · destagger {shift:+.2f} m"
         if line.velocity is not None:
             text += f" · v {line.velocity.surface_velocity:.3f}*"
+        tip = str(line.path)
+        fits = sorted(line.velocity_fits.values(), key=lambda f: f.t0_ns)
+        if fits:
+            # #126: the saved hyperbola fits, shallowest first.
+            text += f" · {len(fits)} fit{'' if len(fits) == 1 else 's'}"
+            tip += f"\n{len(fits)} saved fit{'' if len(fits) == 1 else 's'}:"
+            for f in fits:
+                tip += f"\n  {f.t0_ns:.1f} ns · {f.v_m_ns:.4f} ± {f.v_stderr_m_ns:.4f} m/ns"
         item = QTreeWidgetItem([text])
         item.setData(0, ROLE_KIND, "line")
         item.setData(0, ROLE_ID, key)
-        item.setToolTip(0, str(line.path))
+        item.setToolTip(0, tip)
         return item
 
     def _cut_item(self, key: str) -> QTreeWidgetItem:
