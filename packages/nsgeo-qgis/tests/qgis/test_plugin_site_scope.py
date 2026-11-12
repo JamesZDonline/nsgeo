@@ -3687,3 +3687,176 @@ def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugi
     scope.show_note(drawn=False)
     assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
     assert dock.site_note.toolTip().endswith(warning)
+
+
+# ---- #180: the slice coloured with the user's own QGIS symbology -------------------------
+
+
+def _own(dock):
+    dock.colours_combo.setCurrentIndex(1)
+    _events()
+
+
+def _range(plugin):
+    from nsgeo_qgis.own_colours import style_range
+
+    return style_range(plugin.slice_layer.layer)
+
+
+def test_the_display_section_offers_the_users_own_colours(plugin):
+    dock = plugin.slices_dock
+    assert [dock.colours_combo.itemText(i) for i in range(2)] == [
+        "nsgeo colours",
+        "my own colours",
+    ]
+    assert dock.colours_combo.currentIndex() == 0
+    assert dock.stretch_combo.isEnabled() and not dock.symbology_button.isEnabled()
+    _own(dock)
+    assert not dock.stretch_combo.isEnabled() and dock.symbology_button.isEnabled()
+    assert dock.palette_combo.isEnabled(), "the palette still colours cuts and coverage"
+    assert plugin.session.slice_colours("grid")["own"] is True
+    assert plugin.session.slice_colours("site") == {}
+
+
+def test_own_colours_start_from_what_was_shown_and_the_style_is_remembered(plugin):
+    from nsgeo_qgis.own_colours import style_text
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    dock = plugin.slices_dock
+    before = _range(plugin)
+    _own(dock)
+    layer = plugin.slice_layer.layer
+    assert _range(plugin) == pytest.approx(before)
+    assert layer.renderer().minMaxOrigin().limits() == QgsRasterMinMaxOrigin.Limits.NotSet
+    assert plugin.session.slice_colours("grid")["style"] == style_text(layer)
+    assert dock.legend_label.text().startswith("your own colours · ")
+
+
+def test_typed_numbers_hold_as_the_depth_slider_moves(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)  # as Layer Properties ▸ Apply would
+    dock.slice_slider.setValue(dock.slice_slider.value() + 5)
+    _events()
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+    assert dock.legend_label.text() == "your own colours · -2 – 5"
+
+
+def test_a_computed_range_follows_each_slice(plugin):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    dock = plugin.slices_dock
+    _own(dock)
+    layer = plugin.slice_layer.layer
+    shown = layer.renderer()
+    renderer = shown.clone()
+    renderer.setClassificationMin(shown.classificationMin())
+    renderer.setClassificationMax(shown.classificationMax())
+    origin = renderer.minMaxOrigin()
+    origin.setLimits(QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    origin.setStatAccuracy(QgsRasterMinMaxOrigin.StatAccuracy.Exact)
+    renderer.setMinMaxOrigin(origin)
+    layer.setRenderer(renderer)
+    ranges = []
+    for step in (3, 9):
+        dock.slice_slider.setValue(step)
+        _events()
+        values = dock.current_values()
+        finite = values[np.isfinite(values)]
+        assert _range(plugin) == pytest.approx((finite.min(), finite.max()), rel=1e-4)
+        ranges.append(_range(plugin))
+    assert ranges[0] != ranges[1]
+
+
+def test_coverage_keeps_the_plugin_colours_and_off_brings_the_users_back(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    dock.coverage_check.setChecked(True)
+    _events()
+    assert _range(plugin)[0] == 0.0, "counts are drawn in the plugin's colours"
+    assert dock.legend_label.text().endswith("traces per cell · blank = no line crossed")
+    dock.coverage_check.setChecked(False)
+    _events()
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+
+
+def test_the_symbology_button_opens_the_slice_layers_symbology_page(plugin, fake_iface):
+    dock = plugin.slices_dock
+    _own(dock)
+    dock.symbology_button.click()
+    assert fake_iface.layer_properties == [(plugin.slice_layer.layer, "mOptsPage_Style")]
+
+
+def test_each_scope_keeps_its_own_colours(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    whole_site(plugin)
+    assert dock.colours_combo.currentIndex() == 0
+    assert dock.stretch_combo.isEnabled()
+    assert _range(plugin) != pytest.approx((-2.0, 5.0))
+    _own(dock)
+    set_range(plugin.slice_layer.layer, 0.0, 9.0)
+    assert plugin.session.slice_colours("site")["own"] is True
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    assert dock.colours_combo.currentIndex() == 1
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+    whole_site(plugin)
+    assert _range(plugin) == pytest.approx((0.0, 9.0))
+    assert dock.legend_label.text() == "your own colours · 0 – 9"
+
+
+def test_switching_back_to_nsgeo_colours_keeps_the_style_for_later(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    dock.colours_combo.setCurrentIndex(0)
+    _events()
+    assert dock.stretch_combo.isEnabled()
+    assert _range(plugin) != pytest.approx((-2.0, 5.0))
+    _own(dock)
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+
+
+def test_the_colours_come_back_with_a_reopened_survey(fake_iface, site3, answer_modal):
+    from nsgeo_qgis.own_colours import set_range
+
+    first = _open(fake_iface, site3, answer_modal)
+    _own(first.slices_dock)
+    set_range(first.slice_layer.layer, -2.0, 5.0)
+    first.session.save()
+    _close(first, answer_modal)
+    again = _open(fake_iface, site3, answer_modal)
+    try:
+        _events()
+        assert again.slices_dock.colours_combo.currentIndex() == 1
+        assert _range(again) == pytest.approx((-2.0, 5.0))
+    finally:
+        _close(again, answer_modal)
+
+
+def test_the_export_takes_the_users_own_colours(plugin, drive_dialog, tmp_path):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    target = tmp_path / "mine.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    exported = next(
+        lyr for lyr in plugin.layers.project.mapLayers().values() if lyr.name() == "mine"
+    )
+    assert exported.renderer().classificationMin() == pytest.approx(-2.0)
+    assert exported.renderer().classificationMax() == pytest.approx(5.0)
+    assert exported.temporalProperties().isActive(), "it still steps through the depths"

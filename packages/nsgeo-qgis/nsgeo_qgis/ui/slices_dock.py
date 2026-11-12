@@ -213,6 +213,8 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    #: #180: open the slice layer's Symbology page (the plugin has `iface`).
+    symbology_requested = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -629,6 +631,23 @@ class SlicesDock(QgsDockWidget):
         self.display_group = QGroupBox("Display")
         display_form = QFormLayout(self.display_group)
 
+        # #180: the plugin's palette and stretch, or the user's own QGIS
+        # symbology on the slice layer. Each scope keeps its own choice, in
+        # the session (`SiteSession.slice_colours`); `_sync_colours` shows it.
+        self.colours_combo = QComboBox()
+        self.colours_combo.addItems(["nsgeo colours", "my own colours"])
+        self.colours_combo.setToolTip(
+            "nsgeo colours: the Palette and Stretch below.\n"
+            "My own colours: whatever you set in the slice layer's\n"
+            "Layer Properties ▸ Symbology stays as you move through the slices."
+        )
+        self.symbology_button = QPushButton("Symbology…")
+        self.symbology_button.setToolTip("Open the slice layer's Symbology page")
+        colours_row = QHBoxLayout()
+        colours_row.addWidget(self.colours_combo, 1)
+        colours_row.addWidget(self.symbology_button)
+        display_form.addRow("Colours", colours_row)
+
         self.stretch_combo = QComboBox()
         self.stretch_combo.addItems(["shared across the cube", "this slice"])
         display_form.addRow("Stretch", self.stretch_combo)
@@ -709,6 +728,7 @@ class SlicesDock(QgsDockWidget):
         # refills it with the real answer once a source actually exists.
         self._refill_palette_combo()
         self._update_resident_check_label()
+        self._sync_colours()
 
         # `transform_combo` filled itself when it was built, before the
         # connects just below: its options are the registry, not the site,
@@ -788,6 +808,10 @@ class SlicesDock(QgsDockWidget):
         # recomputes `_values` and re-emits `slice_changed`.
         self.stretch_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
         self.palette_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
+        self.colours_combo.currentIndexChanged.connect(self._on_colours_changed)
+        self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
+        session.site_opened.connect(self._sync_colours)
+        session.site_closed.connect(self._sync_colours)
         self.coverage_check.toggled.connect(lambda _checked: self.refresh_slice())
         # Not wired straight to refresh_slice(): the residency override
         # changes no pixel (spec 11's own property -- streaming and
@@ -1802,6 +1826,9 @@ class SlicesDock(QgsDockWidget):
             radius_m = 0.0
         else:
             radius_m = finish.max_distance_spacings * (self._grid_spacing() or 0.0)
+        # #180: This grid's colours; a cube is only ever saved from This grid.
+        colours = self.session.slice_colours("grid") if self.session.is_open else {}
+        style = colours.get("style")
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
@@ -1813,6 +1840,8 @@ class SlicesDock(QgsDockWidget):
             palette=self.palette_combo.currentText(),
             stretch=self.stretch_combo.currentText(),
             coverage=self.coverage_check.isChecked(),
+            colours="own" if colours.get("own") else "nsgeo",
+            style=style if isinstance(style, str) else None,
         )
 
     def apply_view(self, view: ViewSettings, *, spacing_m: float) -> None:
@@ -1875,9 +1904,13 @@ class SlicesDock(QgsDockWidget):
             if view.stretch in stretch_names:
                 self.stretch_combo.setCurrentText(view.stretch)
             self.coverage_check.setChecked(view.coverage)
+            # #180: a record from before the colours were kept leaves them be.
+            if view.colours is not None and self.session.is_open:
+                self.session.set_slice_colours("grid", own=view.colours == "own", style=view.style)
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
+        self._sync_colours()
 
     def restore_cube(self, cube_id: str) -> None:
         """Bring every control back to the state that produced `cube_id`'s
@@ -2704,8 +2737,10 @@ class SlicesDock(QgsDockWidget):
                 if job is not None:
                     current.append(job)
             stretch: list[PendingSolve] = []
-            if self.stretch_combo.currentText() != "this slice" and not refine.stretch_final(
-                self._stretch_key(window, finish)
+            if (
+                self.stretch_combo.currentText() != "this slice"
+                and not self.own_colours_on()  # #180: no shared stretch to measure
+                and not refine.stretch_final(self._stretch_key(window, finish))
             ):
                 stretch = self.engine.stretch_solves(window.n_levels, finish)
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
@@ -2855,6 +2890,12 @@ class SlicesDock(QgsDockWidget):
         self.velocity_label.setText(f"v = {velocity.surface_velocity:.3f} m/ns ({source})")
 
     def _update_legend_label(self) -> None:
+        if self.own_colours_on() and not self.coverage_check.isChecked():
+            # #180: no limit of the plugin's applies, and measuring one would
+            # cost a pass over the cube. The plugin names the style's range
+            # once it has drawn (`show_own_legend`).
+            self.legend_label.setText("your own colours")
+            return
         limit = self.display_limit()
         if self.coverage_check.isChecked():
             # Ruling AB: a count map's legend states a count scale, not
@@ -2960,6 +3001,63 @@ class SlicesDock(QgsDockWidget):
             return self._site.unipolar()
         return self.engine.output_unipolar
 
+    # ---- #180: the slice coloured with the user's own QGIS symbology -------
+    def own_colours_on(self) -> bool:
+        """Whether this scope's slice wears the user's own QGIS colours."""
+        if not self.session.is_open:
+            return False
+        return bool(self.session.slice_colours(self._scope).get("own", False))
+
+    def own_style(self) -> str | None:
+        """This scope's remembered own style (QGIS style XML), or None before
+        one exists: the slice layer then starts one from the palette."""
+        if not self.session.is_open:
+            return None
+        style = self.session.slice_colours(self._scope).get("style")
+        return style if isinstance(style, str) else None
+
+    def set_own_style(self, text: str) -> None:
+        """`SliceLayer.own_style_changed`: remember the user's edited (or newly
+        seeded) style for the scope on screen. A slot: never raises."""
+        try:
+            if self.session.is_open and self.own_colours_on():
+                self.session.set_slice_colours(self._scope, style=text)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            _log(f"could not remember the slice colours: {exc}")
+
+    def show_own_legend(self, text: str) -> None:
+        """The Legend line under the user's own colours, which only the slice
+        layer can describe; the plugin calls this after each draw."""
+        if self.own_colours_on() and not self.coverage_check.isChecked():
+            self.legend_label.setText(text)
+
+    def _on_colours_changed(self, index: int) -> None:
+        """`colours_combo`: remember the choice for this scope, then redraw."""
+        try:
+            if self.session.is_open:
+                self.session.set_slice_colours(self._scope, own=index == 1)
+            self._sync_colours()
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- a slot on currentIndexChanged
+            self.error.emit(f"could not change the slice colours: {exc}")
+
+    def _sync_colours(self) -> None:
+        """Show this scope's colour choice: the combo, Stretch greyed out and
+        the Symbology button live under the user's own colours. The Palette
+        stays: it still colours cuts and the coverage view."""
+        own = self.own_colours_on()
+        self.colours_combo.blockSignals(True)
+        try:
+            self.colours_combo.setCurrentIndex(1 if own else 0)
+        finally:
+            self.colours_combo.blockSignals(False)
+        self.colours_combo.setEnabled(self.session.is_open)
+        self.stretch_combo.setEnabled(not own)
+        self.symbology_button.setEnabled(own)
+        self.palette_combo.setToolTip(
+            "Colours cuts and Show coverage. The slice wears your own colours." if own else ""
+        )
+
     # ---- M12: the scope switch (spec 4.1) ----------------------------------
     #
     # Whole site drives the same Position, Resolution and Display widgets
@@ -3013,6 +3111,7 @@ class SlicesDock(QgsDockWidget):
             # preparation, rather than re-preparing beside the site's.
             self.engine.on_grid_moved = self._mark_grid_stale
             site_scope.show_scope_widgets(self)
+            self._sync_colours()
             self._site.enter(top)
         else:
             self._scope = "grid"  # first: the site's cancel spins the event loop
@@ -3022,6 +3121,7 @@ class SlicesDock(QgsDockWidget):
             # whose bounded wait gave up leaves the site's task reading, and
             # M11's self re-preparation on a move would start beside it.
             site_scope.show_scope_widgets(self)
+            self._sync_colours()
             self._resume_grid(top)
         self.show_refine()
 
