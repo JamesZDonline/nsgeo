@@ -135,6 +135,62 @@ neighbours.)
   "straightened". By the same token, a baseline that is not square (each line's start a little
   further along than the last) is invisible to it.
 
+## Per-line prototype (planning, 2026-11-11)
+
+Written while planning #159, to give the per-line task a starting method:
+[`per_line_block.py`](2026-11-11-destagger-measure-spike/per_line_block.py) with
+[`per_line_common.py`](2026-11-11-destagger-measure-spike/per_line_common.py). It is throwaway, and its
+thresholds are first guesses: clear peak ratio 0.25, own value at least 0.10 m, halves agree within
+max(0.10 m, 30% of the residual), changes partway beyond 0.30 m.
+
+**Method.**
+1. Apply the grid value.
+2. Measure each line's residual against the mean of its two neighbours, from the whole record and
+   from four halves: shallow (4–25 ns), deep (25–70 ns), first half along and second half along.
+3. Classify each line:
+   - *No clear match:* the whole-record peak is not clear.
+   - *Changes partway along:* both along halves are clear and differ by more than 0.30 m.
+   - *Candidate:* the residual is at least 0.10 m, and one pair of halves (shallow/deep or
+     first/second) is clear and agrees.
+4. Solve each run of adjacent candidates jointly with the second-difference model:
+   `x_k − mean(x_neighbours) = r_k`, in grid coordinates, on the run's own rows. Re-measure with the
+   candidates corrected, solve for the increment, and repeat 3 times.
+5. A candidate whose solved value stays under 0.10 m keeps the grid value. It was dragged by a bad
+   neighbour.
+
+**What it gets right.**
+- Grid 2 unfitted: `FILE__045` +0.881 (residual −0.72), and `FILE__027` +0.665 and `FILE__028`
+  +0.687 together.
+- Grid 2 fitted: `FILE__051` +0.147 and `FILE__059` −0.287. `FILE__050` changes partway along.
+- Grid 1 unfitted: `FILE__011` changes partway along.
+- Injected into Grid 1 unfitted:
+  - `FILE__031` moved +0.30 m comes back as +0.31. Its neighbours keep the grid value.
+  - `FILE__031` and `FILE__032`, both moved +0.30 m, come back as +0.31 and +0.30.
+- The re-measure loop converges in 2–3 passes (the last change is under 1.3 cm).
+
+**What it gets wrong.**
+- **A large move is under-measured.** `FILE__031` moved −0.50 m comes back as −0.43. With
+  `FILE__032` also moved +0.30, they come back as −0.42 and +0.25. On fitted Grid 1, a −0.50 move
+  of `FILE__022` beside a +0.30 move of `FILE__021` comes back as −0.34, and `FILE__021` loses its
+  clear match.
+- **Lines near the threshold come and go.** Adding a 0.02 m × rank skew changes which lines
+  around ±0.10–0.20 m get own values (Grid 1 unfitted: 6 own values before, 6 after, but only 3
+  are the same lines). Values of 0.5 m and more are stable.
+- **Many own values.** Grid 2 unfitted gets 15 own values (25% of lines). Grid 1 gets 6
+  unfitted and 2 fitted.
+- **The mean of the neighbours goes two-peaked** when a neighbour is far off: half its energy
+  matches each neighbour. A single correlation then reads 0 or the far neighbour's shift, not the
+  linear model's half-way value. The re-measure loop helps only once the far neighbour is
+  corrected.
+
+**Tried and dropped.**
+- Greedy coordinate ascent on pairwise neighbour curves. It moves the first of two adjacent off
+  lines by their joint residual, then cannot find the second.
+- An L1-sparse joint solve over all lines, iterated. It diverged next to a line with no clear
+  match (Grid 2 fitted, `FILE__049` to `FILE__051`).
+- Second differences built from pairwise peaks. Each pair has half the data, so the peaks were
+  too noisy and lost `FILE__045`.
+
 ## Cost
 
 Processing (read, dewow, background removal, envelope, bin) takes about 0.15 s per line:
@@ -154,6 +210,7 @@ destagger_spike.py <cache.npz> --dir <dzt folder> <length m>      # zigzag at 0.
 grid_measure.py    <cache.npz> <survey.nsgeo.json> <grid id>     # depth x along-third table
 local_measure.py   <cache.npz> <survey.nsgeo.json> <grid id>     # box and weighting variants
 perline.py         <cache.npz> <survey.nsgeo.json> <grid id>     # per-line repeatability
+per_line_block.py  <cache.npz> <survey.nsgeo.json> <grid id> [k:d ...] [skew]   # per-line prototype
 destagger_panels.py <cache.npz> <survey> <grid> <t0> <t1> <out.png> "label:fit:shift" ...  # line strips (CROP=a0,a1,c0,c1)
 ```
 
