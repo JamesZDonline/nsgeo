@@ -108,6 +108,7 @@ from nsgeo.velocity_fit import (
     hyperbola_time,
     radar_clock_note,
 )
+from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -213,6 +214,9 @@ def velocity_source(session: SiteSession, key: str) -> str:
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
         # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        record = line.velocity_source
+        if record is not None and record.method == METHOD_WEIGHTED_MEAN:
+            return f"line override, {record.summary()}"
         fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
         if fit is not None:
             return f"line override (fit at {_fit_t0_at_line_zero(session, key, line, fit):.1f} ns)"

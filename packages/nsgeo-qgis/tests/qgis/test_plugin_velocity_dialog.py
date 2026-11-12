@@ -12,6 +12,7 @@ from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, fit_hyperbola
 from plugin_testing import synthetic_dzt
 from qgis.core import Qgis
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -775,7 +776,7 @@ def test_the_dialog_lists_each_fit_at_the_lines_current_zero(plugin):
 
     dialog = _dialog(plugin)
 
-    cell = dialog.table.item(0, 1).text()
+    cell = dialog.table.item(0, 2).text()
     assert cell.startswith(f"{moved.v_m_ns:.4f}")
     assert not cell.startswith(f"{stored.v_m_ns:.4f}")
 
@@ -817,7 +818,7 @@ def test_the_dialog_shows_stored_values_when_the_line_cannot_be_read(plugin):
     finally:
         disconnect()
 
-    assert dialog.table.item(0, 1).text().startswith(f"{stored.v_m_ns:.4f}")
+    assert dialog.table.item(0, 2).text().startswith(f"{stored.v_m_ns:.4f}")
     assert not [m for m, level in logged if level == Qgis.MessageLevel.Critical]
 
 
@@ -833,7 +834,7 @@ def test_a_line_with_no_cached_profiles_is_read_for_the_refit(plugin):
 
     dialog = _dialog(plugin)
 
-    assert dialog.table.item(0, 1).text().startswith(f"{moved.v_m_ns:.4f}")
+    assert dialog.table.item(0, 2).text().startswith(f"{moved.v_m_ns:.4f}")
 
 
 def test_an_unrefittable_fit_is_listed_but_never_applied(plugin, drive_dialog):
@@ -853,7 +854,7 @@ def test_an_unrefittable_fit_is_listed_but_never_applied(plugin, drive_dialog):
     dialog.select_fit(fit_id)
 
     assert "cannot be fitted at this time zero" in dialog.flag_text(0)
-    assert dialog.table.item(0, 1).text().startswith(f"{bad.v_m_ns:.4f}")  # stored values shown
+    assert dialog.table.item(0, 2).text().startswith(f"{bad.v_m_ns:.4f}")  # stored values shown
     assert dialog.delete_button.isEnabled()
     assert dialog.highlighted_fit_id() == fit_id
     assert dialog.selected_fit_id() is None
@@ -865,3 +866,301 @@ def test_an_unrefittable_fit_is_listed_but_never_applied(plugin, drive_dialog):
     line = s.line_for_key(key)
     assert line.velocity == VelocityModel.constant(0.09)
     assert line.velocity_from_fit is None
+
+
+# ---- tick boxes, the weighted average and what Apply records -------------------
+
+_THREE = ((9.8, 0.0900, 0.002), (15.0, 0.0910, 0.002), (22.4, 0.0920, 0.003))
+
+
+def _save_three(plugin, fits=_THREE):
+    s, key = plugin.session, plugin.session.keys()[0]
+    return [s.add_velocity_fit(key, _stored(t0, v, sg)) for t0, v, sg in fits]
+
+
+def _refs(plugin, ids, key=None):
+    key = key or plugin.session.keys()[0]
+    return [(key, i) for i in ids]
+
+
+def _apply(plugin, dialog, key=None):
+    key = key or plugin.session.keys()[0]
+    plugin.session.apply_line_velocity(key, dialog.velocity(), dialog.chosen_source())
+
+
+def _expected_mean(fits=_THREE):
+    from nsgeo.velocity_source import weighted_mean
+
+    return weighted_mean([(v, sg) for _, v, sg in fits])
+
+
+def test_every_usable_fit_is_ticked_when_there_is_no_record(plugin):
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    assert dialog.ticked_refs() == _refs(plugin, ids)
+    assert dialog.all_check.checkState() == Qt.CheckState.Checked
+
+
+def test_an_unusable_fit_cannot_be_ticked(plugin):
+    import dataclasses
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    good = _hyperbola_fit(plugin)
+    bad = dataclasses.replace(
+        good, points=tuple((tr, 0.1 + 0.01 * i) for i, (tr, _) in enumerate(good.points))
+    )
+    fit_id = s.add_velocity_fit(key, bad)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    dialog = _dialog(plugin)
+
+    item = dialog.table.item(0, 0)
+    assert not item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert dialog.ticked_refs() == []
+    dialog.all_check.setCheckState(Qt.CheckState.Checked)
+    dialog.set_ticked([(key, fit_id)])
+    assert dialog.ticked_refs() == []
+
+
+def test_the_average_reads_weighted_mean_count_and_depth_range(plugin):
+    _save_three(plugin)
+    dialog = _dialog(plugin)
+    v, sg = _expected_mean()
+    assert dialog.average_text() == f"{v:.4f} ± {sg:.4f} m/ns"
+    assert dialog.average_meta_text() == "3 fits · t0 from 9.8 to 22.4 ns"
+    assert dialog.use_average_button.isEnabled()
+    assert dialog.average_warning_text() == ""
+
+
+def test_unticking_all_reads_no_fits_ticked_and_disables_use_average(plugin):
+    _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.all_check.setCheckState(Qt.CheckState.Unchecked)
+    assert dialog.ticked_refs() == []
+    assert dialog.average_text() == "No fits ticked"
+    assert not dialog.use_average_button.isEnabled()
+    dialog.all_check.setCheckState(Qt.CheckState.Checked)
+    assert len(dialog.ticked_refs()) == 3
+
+
+def test_a_partly_ticked_table_shows_the_all_box_partly_checked(plugin):
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.set_ticked(_refs(plugin, ids[:2]))
+    assert dialog.all_check.checkState() == Qt.CheckState.PartiallyChecked
+    assert dialog.average_meta_text() == "2 fits · t0 from 9.8 to 15.0 ns"
+
+
+def test_disagreeing_ticked_fits_show_the_warning_and_agreeing_ones_do_not(plugin):
+    warning = (
+        "Some ticked fits disagree with each other. The ground may be layered, "
+        "and one number may not suit every depth."
+    )
+    ids = _save_three(plugin, ((10.0, 0.090, 0.002), (20.0, 0.091, 0.002), (30.0, 0.140, 0.002)))
+    dialog = _dialog(plugin)
+    assert dialog.average_warning_text() == warning
+    dialog.set_ticked(_refs(plugin, ids[:2]))
+    assert dialog.average_warning_text() == ""
+    assert dialog.use_average_button.isEnabled()  # a warning never blocks
+
+
+def test_a_zero_sigma_fit_ticked_shows_why_and_disables_use_average(plugin):
+    _save_three(plugin, ((10.0, 0.090, 0.002), (20.0, 0.091, 0.0)))
+    dialog = _dialog(plugin)
+    assert "cannot be weighted" in dialog.average_text()
+    assert "20.0 ns" in dialog.average_text()
+    assert not dialog.use_average_button.isEnabled()
+
+
+def test_opening_the_dialog_computes_the_average_once(plugin, monkeypatch):
+    from nsgeo_qgis.ui import velocity_dialog
+
+    _save_three(plugin)
+    real = velocity_dialog.weighted_mean
+    calls = []
+
+    def counting(values):
+        calls.append(list(values))
+        return real(values)
+
+    monkeypatch.setattr(velocity_dialog, "weighted_mean", counting)
+    _dialog(plugin)
+    assert len(calls) == 1
+
+
+def test_use_average_then_apply_records_the_ticked_fits_unrounded(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.use_average_button.click()
+    assert dialog.spin.value() == pytest.approx(_expected_mean()[0], abs=5e-5)
+    _apply(plugin, dialog)
+
+    line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(_expected_mean()[0], rel=1e-12)
+    from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN
+
+    assert line.velocity_source.method == METHOD_WEIGHTED_MEAN
+    assert [(m.line_key, m.fit_id) for m in line.velocity_source.members] == _refs(plugin, ids)
+    assert line.velocity_source.applied_at is not None
+
+
+def test_use_average_with_one_tick_records_a_fit(plugin):
+    from nsgeo.velocity_source import METHOD_FIT
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.set_ticked(_refs(plugin, ids[1:2]))
+    dialog.use_average_button.click()
+    _apply(plugin, dialog)
+    line = s.line_for_key(key)
+    assert line.velocity_source.method == METHOD_FIT
+    assert line.velocity_from_fit == ids[1]
+    assert line.velocity == VelocityModel.constant(0.091)
+
+
+def test_a_picked_row_then_apply_records_that_fit(plugin):
+    from nsgeo.velocity_source import METHOD_FIT
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.select_fit(ids[2])
+    _apply(plugin, dialog)
+    line = s.line_for_key(key)
+    assert line.velocity_source.method == METHOD_FIT
+    assert line.velocity_from_fit == ids[2]
+    assert line.velocity == VelocityModel.constant(0.092)
+
+
+def _record_of(plugin, ids, applied_at="2026-11-01T00:00:00Z"):
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    line = s.line_for_key(key)
+    members = [SourceFit.of(key, i, line.path.stem, line.velocity_fits[i]) for i in ids]
+    record = VelocitySource.from_fits(members, applied_at=applied_at)
+    s.apply_line_velocity(key, VelocityModel.constant(record.v_m_ns), record)
+    return record
+
+
+def test_an_untouched_apply_keeps_the_record_as_it_was(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    record = _record_of(plugin, ids[:2])
+    drive_dialog(QDialog, "exec", lambda d: d.accept())
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity_source == record
+    assert line.velocity == VelocityModel.constant(record.v_m_ns)  # not rounded to the box
+
+
+def test_a_number_typed_over_the_average_drops_the_record(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.use_average_button.click()
+    dialog.spin.setValue(0.0777)
+    _apply(plugin, dialog)
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.0777)
+    assert line.velocity_source is None
+
+
+def test_ticks_changed_after_use_average_without_a_second_press_drop_the_record(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.use_average_button.click()
+    dialog.set_ticked(_refs(plugin, ids[:2]))
+    _apply(plugin, dialog)
+    assert s.line_for_key(key).velocity_source is None
+    dialog = _dialog(plugin)
+    dialog.set_ticked(_refs(plugin, ids[:2]))
+    dialog.use_average_button.click()
+    _apply(plugin, dialog)  # a second press records the two
+    assert len(s.line_for_key(key).velocity_source.members) == 2
+
+
+def test_reopening_ticks_the_records_members(plugin):
+    ids = _save_three(plugin)
+    _record_of(plugin, ids[:2])
+    dialog = _dialog(plugin)
+    assert dialog.ticked_refs() == _refs(plugin, ids[:2])
+
+
+def test_the_note_names_a_deleted_member_and_a_time_zero_change(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    first = s.add_velocity_fit(key, stored)
+    second = s.add_velocity_fit(key, stored)
+    _record_of(plugin, [first, second])
+    assert "(applied 2026-11-01)" in _dialog(plugin).source_note_text()
+    s.remove_velocity_fit(key, second)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    moved = fit_at_zero(stored, s.line_for_key(key).distance_along(), s.line_zero(key))
+
+    note = _dialog(plugin).source_note_text()
+
+    assert "This velocity is the average of 2 fits" in note
+    assert "deleted" in note
+    assert f"now gives {moved.v_m_ns:.4f}" in note
+
+
+def test_a_record_with_every_member_unchanged_has_no_change_lines(plugin):
+    ids = _save_three(plugin)
+    _record_of(plugin, ids)
+    note = _dialog(plugin).source_note_text()
+    assert note == "This velocity is the average of 3 fits (applied 2026-11-01)."
+    assert _dialog_without_record(plugin) is not None
+
+
+def _dialog_without_record(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    dialog = _dialog(plugin)
+    assert dialog.source_note_text() == ""
+    return dialog
+
+
+def test_clear_override_drops_velocity_and_record(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    _record_of(plugin, ids)
+    drive_dialog(QDialog, "exec", lambda d: d.clear_button.click())
+    plugin.open_velocity_dialog(key)
+    line = s.line_for_key(key)
+    assert line.velocity is None and line.velocity_source is None
+
+
+def test_deleting_a_member_says_so_in_the_confirmation_and_keeps_the_velocity(plugin, answer_modal):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    record = _record_of(plugin, ids[:2])
+    asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
+    dialog = _dialog(plugin)
+    dialog.select_fit(ids[0])
+
+    dialog.delete_button.click()
+
+    (args, _), *_ = asked
+    assert "average of 2 fits" in args[2] and "stays as it is" in args[2]
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(record.v_m_ns)
+    assert line.velocity_source == record
+    assert "deleted" in dialog.source_note_text()
+    assert dialog.ticked_refs() == _refs(plugin, ids[1:2])
+
+
+def test_the_profile_label_names_an_average_on_the_line(plugin):
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    _record_of(plugin, ids)
+    assert velocity_source(s, key) == "line override, average of 3 fits"
+    _record_of(plugin, ids[:1])
+    assert velocity_source(s, key) == "line override (fit at 9.8 ns)"

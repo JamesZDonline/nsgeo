@@ -2585,9 +2585,10 @@ class NsgeoPlugin:
         saved fit. Modal: it is a short question about one line, and the answer
         is applied the moment it closes.
 
-        `velocity_from_fit` names the fit that produced the override, so every
-        route here keeps it true: applying a fit points at it, a typed number
-        clears it, and clearing the override clears both."""
+        The line's velocity source says which fits produced the override, so
+        every route here keeps it true (grid velocity spec §7.2): applying a
+        fit or an average records them, a typed number drops the record, and
+        clearing the override clears both."""
         try:
             dialog = VelocityDialog(self.session, key, parent=self.iface.mainWindow())
         except (KeyError, ProjectError) as exc:
@@ -2609,11 +2610,7 @@ class NsgeoPlugin:
                 dock.highlight_saved_fit(key, dialog.highlighted_fit_id())
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            model = dialog.velocity()
-            self.session.set_line_velocity(key, model)
-            self.session.set_velocity_from_fit(
-                key, dialog.selected_fit_id() if model is not None else None
-            )
+            self.session.apply_line_velocity(key, dialog.velocity(), dialog.chosen_source())
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
         finally:
