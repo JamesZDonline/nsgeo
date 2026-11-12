@@ -6,6 +6,8 @@ agree with on Grid 1 unfitted. Real files only: a skipped test validated nothing
 
 from __future__ import annotations
 
+import sys
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -181,82 +183,85 @@ def test_each_axis_is_measured_on_its_own():
     assert len(result.lines) == 120
 
 
-# The per-line loops before the per-line solve each check once per line, in this order,
-# so 60 lines make 60 calls per stage: no distance, time settings, too short, neighbours,
-# profiles and pair curves, and the first per-line reading. Stopping inside each must raise.
-FIXED_STAGES = [
-    "no distance",
-    "time settings",
-    "too short",
-    "neighbours",
-    "profiles and pair curves",
-    "first per-line reading",
+# Every loop over the lines calls should_stop once per line. The four exclusion stages are
+# loops in `_measure_axis` itself, 60 calls each on Grid 1, in this order.
+EXCLUSION_STAGES = ["no distance", "time settings", "too short", "neighbours"]
+# Every later loop is its own function and calls should_stop through `check`, so the
+# function that called `check` names the loop. In order of first use:
+PER_LINE_LOOPS = [
+    "pair_curves",  # profiles and pair curves
+    "line_curves",  # each line against its neighbours, for the grid value
+    "_depth_split",  # where shallow ends and deep begins
+    "_cache_curves",  # each pair's curves for the per-line readings
+    "classify_all",  # reading every line: first, then after each pass
+    "runs",  # grouping candidates into runs of neighbours
+    "solve_run",  # the search along a run
+    "refine",  # moving each own value to its line's peak
 ]
+
+
+def _loop_of_caller() -> str:
+    """Called from a should_stop function: the function whose loop called it, past
+    `_check` and `check`."""
+    frame = sys._getframe(2)
+    while frame.f_code.co_name in ("_check", "check"):
+        frame = frame.f_back
+    return frame.f_code.co_name
 
 
 def _stopper(stop_at):
     calls = []
 
     def stop() -> bool:
-        calls.append(1)
+        calls.append(_loop_of_caller())
         return len(calls) >= stop_at
 
     return stop, calls
 
 
+@pytest.fixture(scope="module")
+def check_calls(grid1_lines):
+    """The loop behind each should_stop call of one whole Grid 1 measurement."""
+    stop, calls = _stopper(10**9)
+    measure_destagger(grid1_lines, should_stop=stop)
+    return calls
+
+
 @needs_grid1
-@pytest.mark.parametrize("stage", range(len(FIXED_STAGES)), ids=FIXED_STAGES)
-def test_should_stop_is_honoured_in_every_per_line_stage(grid1_lines, stage):
+@pytest.mark.parametrize("stage", range(len(EXCLUSION_STAGES)), ids=EXCLUSION_STAGES)
+def test_should_stop_is_honoured_in_every_exclusion_stage(grid1_lines, stage):
     stop, calls = _stopper(30 + 60 * stage)
     with pytest.raises(MeasureStopped):
         measure_destagger(grid1_lines, should_stop=stop)
     assert len(calls) == 30 + 60 * stage
+    assert calls[-1] == "_measure_axis"
 
 
 @needs_grid1
-def test_each_stage_checks_where_the_stage_tests_expect(grid1_lines, monkeypatch):
-    """Pins the stage boundaries the tests above rely on: the four exclusion stages make
-    calls 1-240, the profiles and pair curves 241-300, and the per-line solve the rest,
-    starting with one reading of every line (301-360)."""
-    calls = []
-    marks = {}
-
-    def count() -> bool:
-        calls.append(1)
-        return False
-
-    def marked(name, fn):
-        def inner(*args, **kwargs):
-            marks[name] = [len(calls)]
-            out = fn(*args, **kwargs)
-            marks[name].append(len(calls))
-            return out
-
-        return inner
-
-    monkeypatch.setattr(m, "pair_curves", marked("pairs", m.pair_curves))
-    monkeypatch.setattr(m, "per_line_values", marked("per line", m.per_line_values))
-    measure_destagger(grid1_lines, should_stop=count)
-    assert marks["pairs"] == [240, 300]
-    assert marks["per line"] == [300, len(calls)]
-    assert len(calls) >= 360 + 60
+def test_every_loop_checks_once_per_line_in_order(check_calls):
+    """60 lines: 60 checks per loop that runs once, then each pass of the per-line solve
+    groups and re-reads every line, and checks once per line it solves or refines."""
+    once = ["pair_curves", "line_curves", "_depth_split", "_cache_curves", "classify_all"]
+    assert check_calls[:240] == ["_measure_axis"] * 240
+    assert check_calls[240:540] == [loop for loop in once for _ in range(60)]
+    passes = Counter(check_calls[540:])
+    assert set(passes) == {"runs", "solve_run", "refine", "classify_all"}
+    assert passes["runs"] == passes["classify_all"] > 0
+    assert passes["runs"] % 60 == 0
+    assert passes["refine"] >= 4  # Grid 1 unfitted has 4 own values
 
 
 @needs_grid1
-def test_should_stop_is_honoured_in_the_per_line_passes(grid1_lines):
-    """After the first reading, each pass of the per-line solve checks once per line it
-    solves, refines or re-reads; how many passes run depends on the data. Stopping at the
-    first and at the very last of those calls must raise."""
-    stop, calls = _stopper(10**9)
-    measure_destagger(grid1_lines, should_stop=stop)
-    fixed = 60 * len(FIXED_STAGES)
-    total = len(calls)
-    assert total >= fixed + 60  # at least one pass re-reads every line
-    for stop_at in (fixed + 1, total):
-        stop, calls = _stopper(stop_at)
-        with pytest.raises(MeasureStopped):
-            measure_destagger(grid1_lines, should_stop=stop)
-        assert len(calls) == stop_at
+@pytest.mark.parametrize("loop", PER_LINE_LOOPS)
+def test_should_stop_is_honoured_in_every_per_line_loop(grid1_lines, check_calls, loop):
+    """Stopping at a loop's first check raises there. A loop that lost its check is
+    missing from `check_calls`, and this fails."""
+    stop_at = check_calls.index(loop) + 1
+    stop, calls = _stopper(stop_at)
+    with pytest.raises(MeasureStopped):
+        measure_destagger(grid1_lines, should_stop=stop)
+    assert len(calls) == stop_at
+    assert calls[-1] == loop
 
 
 @needs_grid1

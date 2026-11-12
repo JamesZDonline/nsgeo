@@ -117,14 +117,7 @@ class _Solver:
         self.pos = {k: p for p, k in enumerate(self.order)}
         self.grid_lags = np.arange(-pairs.lags, pairs.lags + 1, dtype=float)
         self.own_lags = np.arange(-max_lag, max_lag + 1, dtype=float)
-        split = self._depth_split()
-        self.curves: dict[tuple[int, int, str], np.ndarray] = {}
-        for a, b in pairs.by_bin:
-            self.curves[(a, b, "full")] = pairs.normalised(a, b)
-            self.curves[(a, b, "shallow")] = pairs.normalised(a, b, slice(0, split))
-            self.curves[(a, b, "deep")] = pairs.normalised(a, b, slice(split, None))
-            self.curves[(a, b, "first")] = pairs.normalised(a, b, half=0)
-            self.curves[(a, b, "second")] = pairs.normalised(a, b, half=1)
+        self.curves = self._cache_curves(self._depth_split())
         smallest = int(np.ceil(MIN_OWN_M / STEP_M - 1e-9))
         steps = np.arange(-max_lag, max_lag + 1)
         self.states = np.concatenate([[0], steps[np.abs(steps) >= smallest]])
@@ -140,7 +133,12 @@ class _Solver:
         p = self.pairs
         n_bins = p.energy.shape[1]
         evidence = np.zeros(n_bins)
-        for (a, b), curves in p.by_bin.items():
+        for pos, a in enumerate(self.order):
+            self.check()
+            if not self._linked(pos):
+                continue
+            b = self.order[pos + 1]
+            curves = p.by_bin[(a, b)]
             at = -self.dirs[a] * 2 * self.grid / STEP_M
             value = np.array([np.interp(at, self.grid_lags, c) for c in curves])
             scale = np.sqrt(p.energy[a] * p.energy[b])
@@ -150,6 +148,21 @@ class _Solver:
             return max(1, n_bins // 2)
         split = int(np.searchsorted(np.cumsum(evidence) / evidence.sum(), 0.5))
         return min(max(split, 1), n_bins - 1)
+
+    def _cache_curves(self, split: int) -> dict[tuple[int, int, str], np.ndarray]:
+        """Each pair's normalised curve for the whole record and the four halves."""
+        out: dict[tuple[int, int, str], np.ndarray] = {}
+        for pos, a in enumerate(self.order):
+            self.check()
+            if not self._linked(pos):
+                continue
+            b = self.order[pos + 1]
+            out[(a, b, "full")] = self.pairs.normalised(a, b)
+            out[(a, b, "shallow")] = self.pairs.normalised(a, b, slice(0, split))
+            out[(a, b, "deep")] = self.pairs.normalised(a, b, slice(split, None))
+            out[(a, b, "first")] = self.pairs.normalised(a, b, half=0)
+            out[(a, b, "second")] = self.pairs.normalised(a, b, half=1)
+        return out
 
     def _pair(self, a: int, b: int, part: str) -> np.ndarray:
         """a's normalised curve against b over grid lags (a shifted along the axis)."""
@@ -215,12 +228,15 @@ class _Solver:
         penalty = np.where(st == 0, 0.0, OWN_GAIN)
         first, last = self.pos[run[0]], self.pos[run[-1]]
         score = -penalty
-        if first > 0 and self._linked(first - 1):
-            left = self.order[first - 1]
-            score = score + self._match(left, run[0], own[left] / STEP_M + st)
         back = []
-        for prev, k in zip(run, run[1:]):
+        for t, k in enumerate(run):
             self.check()
+            if t == 0:
+                if first > 0 and self._linked(first - 1):
+                    left = self.order[first - 1]
+                    score = score + self._match(left, k, own[left] / STEP_M + st)
+                continue
+            prev = run[t - 1]
             if self._linked(self.pos[prev]):
                 step = self._match(prev, k, st[:, None] + st[None, :])
             else:
@@ -237,7 +253,6 @@ class _Solver:
             choice.append(int(best[choice[-1]]))
         out = own.copy()
         for k, i in zip(run, reversed(choice)):
-            self.check()
             out[k] = st[i] * STEP_M
         return out
 
@@ -245,6 +260,7 @@ class _Solver:
         """Candidates grouped into runs of neighbours, in offset order."""
         out: list[list[int]] = []
         for p, k in enumerate(self.order):
+            self.check()
             if k not in candidates:
                 continue
             if out and out[-1][-1] == self.order[p - 1] and self._linked(p - 1):
@@ -258,10 +274,24 @@ class _Solver:
         own = np.zeros(len(self.dirs))
         for run in self.runs(candidates):
             own = self.solve_run(run, own)
+        return self.refine(own)
+
+    def refine(self, own: np.ndarray) -> np.ndarray:
+        """Each own value moved to the peak of its line's curve against the others, in
+        offset order (one Gauss-Seidel sweep)."""
+        own = own.copy()
         for k in sorted(np.flatnonzero(own), key=lambda k: self.pos[int(k)]):
             self.check()
             own[k] = -peak(self.curve(int(k), "full", own))[0] * STEP_M
         return own
+
+    def _failing(self, own: np.ndarray, kinds: dict[int, str]) -> set[int]:
+        """Own lines that no longer qualify against the others' corrections."""
+        return {
+            int(k)
+            for k in np.flatnonzero(own)
+            if kinds[int(k)] != "candidate" or abs(own[k]) < MIN_OWN_M
+        }
 
     def run(self) -> LineVerdicts:
         own = np.zeros(len(self.dirs))
@@ -271,11 +301,7 @@ class _Solver:
         for _ in range(MAX_PASSES):
             own = self.solve(candidates)
             kinds = self.classify_all(own)
-            bad = {
-                int(k)
-                for k in np.flatnonzero(own)
-                if kinds[int(k)] != "candidate" or abs(own[k]) < MIN_OWN_M
-            }
+            bad = self._failing(own, kinds)
             new = {k for k, kind in kinds.items() if kind == "candidate"}
             new -= candidates | rejected
             if not bad and not new:
@@ -283,11 +309,14 @@ class _Solver:
             rejected |= bad
             candidates = (candidates - bad) | new
         else:
-            # Did not settle: keep only the own values that held on the last pass.
-            for k in np.flatnonzero(own):
-                if int(k) in bad:
-                    own[k] = 0.0
-            kinds = self.classify_all(own)
+            # Did not settle. Drop the own values that failed, re-fit the rest without them
+            # (they were solved together) and read again, until every one left qualifies.
+            # Each round drops at least one line, so this ends.
+            while bad:
+                own[sorted(bad)] = 0.0
+                own = self.refine(own)
+                kinds = self.classify_all(own)
+                bad = self._failing(own, kinds)
         return LineVerdicts(
             own={int(k): float(own[k]) for k in np.flatnonzero(own)},
             changes=frozenset(k for k, kind in kinds.items() if kind == "changes" and own[k] == 0),

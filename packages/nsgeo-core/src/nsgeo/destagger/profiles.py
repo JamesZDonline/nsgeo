@@ -13,7 +13,10 @@ Pair curves are kept per time bin and for each half along the axis, so the
 per-line step can measure a line from independent halves, and re-measure it
 after its neighbours are corrected by shifting the curves instead of
 recomputing the profiles. Lines are visited in offset order and only two
-lines' transforms are held at once, so memory does not grow with the grid.
+lines' transforms are held at once. What is kept grows with the grid, but
+slowly: n_bins x (6 x search range + 1) values per pair of lines (about 5 MB
+for Nashville Grid 1's 60 lines, about 30 MB for 200 lines of 50 m), against
+every line's whole transform before.
 """
 
 from __future__ import annotations
@@ -167,10 +170,14 @@ class PairCurves:
         return self.by_bin[(b, a)][bins].sum(axis=0)[::-1]
 
     def normalised(
-        self, a: int, b: int, bins: slice = slice(None), half: int | None = None
+        self, a: int, b: int, bins: slice | None = None, half: int | None = None
     ) -> np.ndarray:
-        """a's curve against b as a correlation coefficient, over `bins` or one `half`."""
+        """a's curve against b as a correlation coefficient, over `bins` (all by default) or
+        one `half` along the axis (0 first, 1 second; halves always use every bin)."""
+        if bins is not None and half is not None:
+            raise ValueError("give bins or a half along the axis, not both")
         if half is None:
+            bins = slice(None) if bins is None else bins
             curve = self.raw(a, b, bins)
             scale = float(self.energy[a, bins].sum() * self.energy[b, bins].sum())
         else:
@@ -233,21 +240,25 @@ def line_curves(
     neighbours: dict[int, list[int]],
     directions: Sequence[int],
     max_lag: int,
-    normalised: bool = False,
-) -> np.ndarray:
+    check: Callable[[], None] = lambda: None,
+) -> tuple[np.ndarray, np.ndarray]:
     """Each line's curve against the mean of its neighbours, over -max_lag..+max_lag steps.
 
-    One row per line in `neighbours`, in index order. The curve reads as a shift of the
-    line in its own direction of travel: the lag axis is reversed for direction -1, so both
-    directions add up instead of cancelling. `normalised` gives correlation coefficients.
+    Returned twice, (n_lines, n_lags) each: unnormalised, as the grid value is measured,
+    and as correlation coefficients. One row per line in `neighbours`, in index order. The
+    curve reads as a shift of the line in its own direction of travel: the lag axis is
+    reversed for direction -1, so both directions add up instead of cancelling. `check`
+    is called once per line.
     """
     centre = slice(pairs.lags - max_lag, pairs.lags + max_lag + 1)
-    rows = []
+    raw: list[np.ndarray] = []
+    normalised: list[np.ndarray] = []
     for k in sorted(neighbours):
-        each = [pairs.normalised(k, j) if normalised else pairs.raw(k, j) for j in neighbours[k]]
-        c = np.mean(each, axis=0)[centre]
-        rows.append(c[::-1] if directions[k] < 0 else c)
-    return np.array(rows)
+        check()
+        for rows, curve in ((raw, pairs.raw), (normalised, pairs.normalised)):
+            c = np.mean([curve(k, j) for j in neighbours[k]], axis=0)[centre]
+            rows.append(c[::-1] if directions[k] < 0 else c)
+    return np.array(raw), np.array(normalised)
 
 
 def peak(curve: np.ndarray) -> tuple[float, float]:

@@ -238,11 +238,8 @@ def _measure_axis(
         PAIR_LAG_FACTOR * max_lag,
         check,
     )
-    found = grid_peak(
-        line_curves(pairs, local_nb, local_dirs, max_lag),
-        line_curves(pairs, local_nb, local_dirs, max_lag, normalised=True),
-        BOOTSTRAP,
-    )
+    raw, normalised = line_curves(pairs, local_nb, local_dirs, max_lag, check)
+    found = grid_peak(raw, normalised, BOOTSTRAP)
     if not found.clear:
         return failed(UNCLEAR)
     grid = float(found.destagger)
