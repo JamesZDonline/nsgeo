@@ -60,7 +60,14 @@ from nsgeo.processing import build_step
 from nsgeo.project import ProjectError, line_key
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_windows
-from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
+from qgis.core import (
+    Qgis,
+    QgsMessageLog,
+    QgsPointXY,
+    QgsRasterLayer,
+    QgsSettings,
+    QgsTemporalNavigationObject,
+)
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer
@@ -100,6 +107,7 @@ from nsgeo_qgis.slice_export import (
     apply_temporal_properties,
     coverage_path,
     cube_record,
+    fit_temporal_navigation,
     grid_export_job,
     restore_band_times,
     save_cube_npz,
@@ -1458,8 +1466,11 @@ class NsgeoPlugin:
                     raise OSError(f"{path} is missing or cannot be read as a layer")
                 self._add_exported_layer(layer)
                 back.append(name)
-                if restore_band_times(layer, path) == "missing":
+                restored = restore_band_times(layer, path)
+                if restored == "missing":
                     untimed.append(name)
+                elif restored == "set":
+                    self._fit_temporal_controller(layer)
             except Exception as exc:  # noqa: BLE001 -- the others still go back
                 QgsMessageLog.logMessage(
                     f"could not put the layer {name} back from {path}: {exc}",
@@ -1532,7 +1543,27 @@ class NsgeoPlugin:
         self._add_exported_layer(layer)
         if temporal is not None:
             temporal(layer)
+            self._fit_temporal_controller(layer)
         return None
+
+    def _fit_temporal_controller(self, layer: QgsRasterLayer) -> None:
+        """Set QGIS's Temporal Controller to step through `layer`'s bands, one per frame.
+
+        Overrides whatever the controller held: the file was just made or put back, and a
+        GPR project has no other timed layers. Skipped when the canvas has no navigation
+        object (no canvas, or a test stub). Never raises: it runs where an exception would
+        vanish, and the layer is already added.
+        """
+        try:
+            navigation = self.iface.mapCanvas().temporalController()
+            if isinstance(navigation, QgsTemporalNavigationObject):
+                fit_temporal_navigation(navigation, layer)
+        except Exception as exc:  # noqa: BLE001 -- the layer is added; only the stepping is lost
+            QgsMessageLog.logMessage(
+                f"could not set up the Temporal Controller for {layer.name()}: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
 
     def _toggle_pick_mode(self, checked: bool) -> None:
         """The Pick toolbar toggle. Drives the dock, never the view

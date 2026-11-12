@@ -79,7 +79,15 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from osgeo import gdal
-from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsDateTimeRange, QgsRasterLayer
+from qgis.core import (
+    Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsDateTimeRange,
+    QgsInterval,
+    QgsProject,
+    QgsRasterLayer,
+    QgsTemporalNavigationObject,
+)
 from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime
 
 from nsgeo_qgis.export_pipeline import ExportBand, ExportCancelled, ExportGrid, ExportSpec
@@ -611,6 +619,50 @@ def apply_band_windows(layer: QgsRasterLayer, windows: Sequence[tuple[float, flo
     )
     props.setMode(Qgis.RasterTemporalMode.FixedRangePerBand)
     props.setIsActive(True)
+
+
+def fit_temporal_navigation(navigation: QgsTemporalNavigationObject, layer: QgsRasterLayer) -> bool:
+    """Set the Temporal Controller up to step through `layer`'s bands, one band per frame.
+
+    The bands are `1 ns -> 1 s` apart, so QGIS's default one-hour frame would cover them
+    all at once and always show the last. The extent becomes the first band's start to one
+    frame per band, the frame the smallest positive gap between band starts (a single band:
+    its own length; never under 1 ms), the mode Animated, the current frame 0. The project's
+    own time settings follow, so a saved project reopens set up. Returns False, touching
+    nothing, when the layer is not in `FixedRangePerBand` mode or has no ranges.
+    """
+    props = layer.temporalProperties()
+    if props.mode() != Qgis.RasterTemporalMode.FixedRangePerBand:
+        return False
+    ranges = props.fixedRangePerBand()
+    if not ranges:
+        return False
+    begins = sorted({r.begin().toMSecsSinceEpoch() for r in ranges.values()})
+    gaps = [b - a for a, b in zip(begins, begins[1:], strict=False) if b > a]
+    if gaps:
+        frame_ms = min(gaps)
+    else:
+        frame_ms = max(
+            r.end().toMSecsSinceEpoch() - r.begin().toMSecsSinceEpoch() for r in ranges.values()
+        )
+    frame_ms = max(frame_ms, 1)
+    seconds = frame_ms / 1000.0
+    # QGIS counts the frames as floor(extent / frame) + 1, so the extent ends one
+    # millisecond short of one frame per band: ending it on the last band's own end
+    # (abutting or overlapping bands) would add a spare frame, and the bands' starts, rounded
+    # to the millisecond, drift off a whole number of frames.
+    start = QDateTime.fromMSecsSinceEpoch(begins[0], Qt.TimeSpec.UTC)
+    end = QDateTime.fromMSecsSinceEpoch(begins[0] + len(begins) * frame_ms - 1, Qt.TimeSpec.UTC)
+    extent = QgsDateTimeRange(start, end)
+    navigation.setNavigationMode(Qgis.TemporalNavigationMode.Animated)
+    navigation.setTemporalExtents(extent)
+    navigation.setFrameDuration(QgsInterval(seconds, Qgis.TemporalUnit.Seconds))
+    navigation.setCurrentFrameNumber(0)
+    settings = QgsProject.instance().timeSettings()
+    settings.setTemporalRange(extent)
+    settings.setTimeStep(seconds)
+    settings.setTimeStepUnit(Qgis.TemporalUnit.Seconds)
+    return True
 
 
 def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:

@@ -666,6 +666,104 @@ def test_a_re_add_that_raises_still_restores_the_other_layer(
     assert not any("could not be added to the map" in m for m, _lv in levels)
 
 
+def _navigation(plugin):
+    """A real navigation object on the canvas, the way the QGIS app has one."""
+    from qgis.core import QgsTemporalNavigationObject
+
+    canvas = plugin.iface.mapCanvas()
+    navigation = QgsTemporalNavigationObject(canvas)  # the canvas owns it, as in the app
+    canvas.setTemporalController(navigation)
+    return navigation
+
+
+def _steps_one_band_per_frame(navigation, layer):
+    n = layer.bandCount()
+    assert n > 1
+    assert navigation.totalFrameCount() == n
+    props = layer.temporalProperties()
+    bands = [
+        props.bandForTemporalRange(layer, navigation.dateTimeRangeForFrameNumber(k))
+        for k in range(n)
+    ]
+    assert bands == list(range(1, n + 1))
+
+
+def test_an_export_fits_the_temporal_controller_to_the_new_file(plugin, tmp_path, drive_dialog):
+    plugin, s = plugin
+    _prepare(plugin)
+    navigation = _navigation(plugin)
+    target = tmp_path / "slices" / "cube.tif"
+    _export(plugin, drive_dialog, target)
+    _steps_one_band_per_frame(navigation, _layer_for(plugin, target))
+
+
+def test_a_cancelled_replace_fits_the_temporal_controller_to_the_restored_layer(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    plugin, target, coverage = _held_replace(plugin, drive_dialog, monkeypatch, tmp_path)
+    navigation = _navigation(plugin)
+    running_export().cancel()
+    wait_for_export()
+    _steps_one_band_per_frame(navigation, _layer_for(plugin, target))
+
+
+def test_a_controller_that_cannot_be_fitted_does_not_stop_the_layer(
+    plugin, tmp_path, drive_dialog, monkeypatch, message_log
+):
+    from nsgeo_qgis import plugin as plugin_module
+
+    plugin, s = plugin
+    _prepare(plugin)
+    _navigation(plugin)
+
+    def broken(navigation, layer):
+        raise RuntimeError("the controller is gone")
+
+    monkeypatch.setattr(plugin_module, "fit_temporal_navigation", broken)
+    target = tmp_path / "slices" / "cube.tif"
+    _export(plugin, drive_dialog, target)
+    layer = _layer_for(plugin, target)
+    assert layer is not None and layer.temporalProperties().isActive()
+    assert any("the controller is gone" in m for m in message_log)
+    assert not any("could not be added to the map" in m for m in message_log)
+
+
+def test_a_canvas_without_a_navigation_object_is_skipped_quietly(
+    plugin, tmp_path, drive_dialog, message_log
+):
+    plugin, s = plugin
+    _prepare(plugin)
+    assert plugin.iface.mapCanvas().temporalController() is None
+    target = tmp_path / "slices" / "cube.tif"
+    _export(plugin, drive_dialog, target)
+    assert _layer_for(plugin, target) is not None
+    assert not any("temporal" in m.lower() for m in message_log)
+
+
+def test_a_cancelled_replace_names_a_layer_without_the_time_slider(
+    plugin, tmp_path, drive_dialog, monkeypatch
+):
+    """A file written before the band windows were recorded comes back, and the message says so."""
+    from osgeo import gdal
+
+    plugin, target, coverage = _held_replace(plugin, drive_dialog, monkeypatch, tmp_path)
+    running = running_export()
+    # The replaced layer was removed when the export started; its file is the old one,
+    # as an earlier version wrote it: no window on the first band.
+    dataset = gdal.Open(str(target), gdal.GA_Update)
+    dataset.GetRasterBand(1).SetMetadataItem("NSGEO_WINDOW_NS", "")
+    dataset = None
+    levels, disconnect = _levels()
+    try:
+        running.cancel()
+        wait_for_export()
+    finally:
+        disconnect()
+    said = [m for m, lv in levels if m.startswith("export cancelled")]
+    assert said, levels
+    assert "cube is back without the time slider setting" in said[0]
+
+
 def test_a_cancelled_replace_puts_the_old_layers_back(plugin, tmp_path, drive_dialog, monkeypatch):
     _replace_ends_with_the_old_layers_back(plugin, drive_dialog, monkeypatch, tmp_path, "cancel")
 

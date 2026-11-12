@@ -1704,6 +1704,27 @@ def test_the_coverage_companion_is_written_styled_and_a_failure_of_it_is_its_own
     assert not any("could not export" in t for t in texts), texts
 
 
+def test_a_site_export_fits_the_temporal_controller_to_the_new_file(
+    plugin, drive_dialog, tmp_path, fake_iface
+):
+    from qgis.core import QgsTemporalNavigationObject
+
+    whole_site(plugin)
+    canvas = fake_iface.mapCanvas()
+    navigation = QgsTemporalNavigationObject(canvas)  # the canvas owns it, as in the app
+    canvas.setTemporalController(navigation)
+    target = tmp_path / "stepped.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    layer = next(v for v in plugin.layers.project.mapLayers().values() if v.source() == str(target))
+    n = layer.bandCount()
+    assert n > 1 and navigation.totalFrameCount() == n
+    props = layer.temporalProperties()
+    assert [
+        props.bandForTemporalRange(layer, navigation.dateTimeRangeForFrameNumber(k))
+        for k in range(n)
+    ] == list(range(1, n + 1))
+
+
 def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
     """Ruling T4-a: the file must not silently leave out a grid still preparing."""
     LoadCounter(monkeypatch, delay=0.05)
