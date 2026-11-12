@@ -7,7 +7,7 @@ cut can be read against the mag along the same ground.
 
 Brainstormed 2026-11-05 and 2026-11-12. The roadmap places M19 after M18 (issue cleanup). It is
 built in three chunks, M19a, M19b and M19c (§7). **#180** (slice colours from QGIS's own
-symbology) is built before M19 and is what gives mag its min/max in nT (§4, decision 8).
+symbology) is built before M19 and is what gives mag its min/max in nT (§4, decision 7).
 
 ---
 
@@ -157,7 +157,13 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
    - **two-colour fill:** red above zero, blue below.
 9. **Deeper integration waits for the author's reading** (Conyers on GPR and magnetometry).
    M19 builds the mag strip and leaves a placeholder (§6.7).
-10. **No reason to go back to TerraSurveyor** is the bar (§9, anti-goals).
+10. **No reason to go back to TerraSurveyor** is the bar (§8, anti-goals).
+11. **Despike is never applied by default.** *"Lets not do anything as default, but let the user
+    choose how/when to apply despike."* (Answered 2026-11-12, after the builder check showed that
+    the pinned readings are clipped anomaly peaks, §3.)
+12. **example1–3 are taken to be neighbours** for testing. *"I think you're right that 1,2,and 3
+    are neighbors. I'd have to check to be sure and I can't access that for now. go with it."*
+    The author will bring data from a site with GPR over mag for the walkthroughs.
 
 ### Calls made by Claude (check these)
 
@@ -200,12 +206,14 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     which physical sensor is which. **Zero each traverse** is a second option for grids where
     traverses wander individually. It is not the default, because it erases real features that run
     along the traverses (the reason #47's design dropped per-line brightness matching).
-12. **Despike** compares each reading with the median of a window along its traverse. A reading
-    further than a threshold from that median, measured in median absolute deviations, is replaced
-    by the median. The window and threshold can be changed. **What despike is for is the author's
-    call (§5):** removing glitches while keeping iron anomalies whole, or suppressing iron. §3
-    shows that pinned readings are clipped anomaly peaks, not spikes, so the first draft's rule
-    (always replace pinned readings) would notch real anomalies and is withdrawn.
+12. **Despike, when the author turns it on** (decision 11), compares each reading with the median
+    of a window along its traverse. A reading further than a threshold from that median, measured
+    in median absolute deviations, is replaced by the median. The author sets the window and the
+    threshold, per site recipe or per grid (call 9). Pinned readings get no special rule: they are
+    readings like any other. **The starting values** shown when it is first turned on remove
+    single-reading glitches and leave the clipped anomaly peaks of §3 alone, so turning it on never
+    notches an anomaly by surprise. Widening the window is how the author suppresses iron. The
+    builder sets and records the starting values from the real files.
 13. **Normalise across grids is additive.** The same seams (`find_seams`) and the same
     weighted least squares over them as `edge_match_solve`, solving one **offset** per grid in nT
     instead of one gain. It is off by default and is a Mag panel choice, like the GPR Whole site
@@ -242,12 +250,6 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
 
 ## 5. Not decided (the author's)
 
-- **What despike is for** (call 12): glitches only, keeping iron whole, or suppressing iron.
-  Asked 2026-11-12.
-- **Where example1–6 lie, and which real survey has a GPR grid over a mag grid** (§10). Asked
-  2026-11-12. The builder check's edge test suggests example1–3 are neighbours (example2's
-  traverse ends match example3's starts, r = 0.8; example1's last traverses match example2's
-  first, r = 0.46).
 - Whether mag traverses should be drawn on the map after all (call 7).
 - The Mag panel's layout. A lavish mockup is reviewed before M19a is planned (call 8).
 
@@ -294,7 +296,7 @@ The recipe runs in this order, on readings, before binning:
 
 1. **Zero the grid** (on): grid median to 0 nT.
 2. **Destripe** (off): each sensor-and-direction group to median 0, or each traverse to median 0.
-3. **Despike** (default and behaviour per the author's answer to call 12).
+3. **Despike** (off; the author turns it on and sets it, call 12).
 
 Destagger is not a recipe step. It is placement, in Edit lines (6.4). Resampling and smoothing are
 the finish (6.2). Normalisation is a site choice (6.5). That matches the author's order (decision
@@ -380,8 +382,8 @@ both go through it.
 - Mag code paths that copy GPR ones. Interpolation, smoothing, export, edge match, destagger and
   colouring that behave differently for the two instruments, without a reason.
 - Real 0.00 readings silently thrown away, or dummy zeros silently drawn as data.
-- Destripe on by default, or zeroing each traverse by default (it erases features along the
-  traverses).
+- Destripe or despike on by default, or zeroing each traverse by default (it erases features along
+  the traverses).
 - Raw files edited in place.
 - GPR panels that start listing mag grids, or the reverse.
 
@@ -402,11 +404,15 @@ data). The six `.dat` files, in the local real-data tests, skipped when absent:
 - example3's trailing runs and example4's and example6's interior 12-zero blocks become no data,
   while every run of 1–2 zeros stays as data;
 - after destripe, the spread of the four `row mod 4` group medians falls to near 0;
-- despike behaves as the author's answer to call 12 says, checked on the clipped peaks and
-  example5's dipole that §3 names;
+- despike is off until turned on; its starting values remove the few single-reading glitches and
+  leave the clipped peaks of §3 (example3 row 14, example6 row 32, example2 row 24) and example5's
+  dipole unchanged; a wide window removes example5's dipole;
 - Measure on each grid finds a destagger near ±0.25 m, and after it is applied, neighbouring rows'
   best lag (§3's method) falls to about 0;
-- a mosaic of two grids placed side by side has a seam the additive edge match closes.
+- example1–3 placed as neighbours (decision 12): example1's last traverses beside example2's
+  first, and example2's traverse ends against example3's starts. The additive edge match closes
+  both seams. The layout is the builder check's inference, which the author has not yet
+  confirmed, so a test that fails only because of it is reported, not forced to pass.
 
 The real files live only in the main checkout's `packages/nsgeo-core/tests/data/local/`, which a
 worktree does not have. The plan links them into the build worktree, and the real-data tests are
@@ -416,8 +422,8 @@ Synthetic fixtures only for what the files do not contain: a parallel-walked gri
 file that does not fit its grid.
 
 **Walkthrough** per chunk, deployed to a fresh QGIS profile before any merge decision. M19c's
-walkthrough needs a GPR grid lying over a mag grid from the same site. **Open: which real survey
-provides that** (to ask the author).
+walkthrough needs a GPR grid lying over a mag grid from the same site. The author has such data
+and will bring it in for the walkthrough (decision 12).
 
 ## 11. Left to the builder
 
