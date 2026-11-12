@@ -48,10 +48,30 @@ SYMBOLOGY_PAGE = "mOptsPage_Style"
 #: QGIS's sample size when the min/max accuracy is "Estimate (faster)".
 _ESTIMATE_SAMPLES = 250_000
 
+
+def _member(enum: Any, *names: str) -> Any:
+    """An enum member by its name in QGIS 3.42 and later, or by the one QGIS
+    3.40 (the oldest this plugin supports) gave it."""
+    for name in names:
+        if hasattr(enum, name):
+            return getattr(enum, name)
+    raise AttributeError(f"{enum!r} has no member named any of {names}")
+
+
+_LIMITS = QgsRasterMinMaxOrigin.Limits
+_EXTENT = QgsRasterMinMaxOrigin.Extent
+LIMIT_TYPED = _member(_LIMITS, "NotSet", "None_")  # "User defined"
+LIMIT_MIN_MAX = _member(_LIMITS, "MinimumMaximum", "MinMax")
+LIMIT_CUT = _member(_LIMITS, "CumulativeCut")
+LIMIT_STD_DEV = _member(_LIMITS, "StdDev")
+EXTENT_CANVAS = _member(_EXTENT, "FixedCanvas", "CurrentCanvas")  # "Current canvas"
+EXTENT_UPDATED = _member(_EXTENT, "UpdatedCanvas")
+_EXACT = _member(QgsRasterMinMaxOrigin.StatAccuracy, "Exact")
+
 _KINDS = {
-    QgsRasterMinMaxOrigin.Limits.MinimumMaximum: "minimum_maximum",
-    QgsRasterMinMaxOrigin.Limits.CumulativeCut: "cumulative_cut",
-    QgsRasterMinMaxOrigin.Limits.StdDev: "std_dev",
+    LIMIT_MIN_MAX: "minimum_maximum",
+    LIMIT_CUT: "cumulative_cut",
+    LIMIT_STD_DEV: "std_dev",
 }
 
 Extent = tuple[float, float, float, float]
@@ -84,7 +104,7 @@ def seed_style(layer: QgsRasterLayer, colormap_name: str, limit: float, unipolar
     renderer.setClassificationMin(lo)
     renderer.setClassificationMax(hi)
     origin = renderer.minMaxOrigin()
-    origin.setLimits(QgsRasterMinMaxOrigin.Limits.NotSet)
+    origin.setLimits(LIMIT_TYPED)
     renderer.setMinMaxOrigin(origin)
     layer.setRenderer(renderer)
     apply_smooth_resampling(layer)
@@ -130,12 +150,12 @@ def refit(
         return False
     origin = renderer.minMaxOrigin()
     kind = _KINDS.get(origin.limits())
-    if kind is None or origin.extent() == QgsRasterMinMaxOrigin.Extent.UpdatedCanvas:
+    if kind is None or origin.extent() == EXTENT_UPDATED:
         return False
     values = array
-    if origin.extent() == QgsRasterMinMaxOrigin.Extent.FixedCanvas and canvas_extent is not None:
+    if origin.extent() == EXTENT_CANVAS and canvas_extent is not None:
         values = crop(array, geotransform, canvas_extent)
-    exact = origin.statAccuracy() == QgsRasterMinMaxOrigin.StatAccuracy.Exact
+    exact = origin.statAccuracy() == _EXACT
     fitted = display_range(
         values,
         kind,
@@ -216,7 +236,7 @@ def legend_text(layer: QgsRasterLayer | None) -> str:
     if layer is None or layer.renderer() is None:
         return base
     origin = layer.renderer().minMaxOrigin()
-    if origin.limits() in _KINDS and origin.extent() == QgsRasterMinMaxOrigin.Extent.UpdatedCanvas:
+    if origin.limits() in _KINDS and origin.extent() == EXTENT_UPDATED:
         return f"{base} · fitted to the map view"
     shown = style_range(layer)
     if shown is None:
