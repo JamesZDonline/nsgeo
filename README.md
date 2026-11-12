@@ -105,7 +105,7 @@ a milestone merges or the plan changes.
 | | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | next release |
 | | Measure the destagger: a Measure button in Edit lines works out each grid's shift from its own lines, and each line's own shift where it is clearly off, as a starting point to adjust before OK ([#159]) | next release |
 | M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on a 30 m survey grid, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open ([#172]) | next release |
-| | Whole site at fine cells: the export. Both exports ask for an export cell and a finer export pixel, show what will be written and refuse with the reason, run in the background with progress in the task list, and write a style file beside the GeoTIFF ([#108]) | next release |
+| | Whole site at fine cells: the export. Both exports ask for an export cell and a finer export pixel, show what will be written and refuse with the reason, run in the background with progress in the task list, and write a style file beside the GeoTIFF ([#108], [#175]) | next release |
 
 ### Next, in order
 
@@ -221,6 +221,7 @@ Grouped by area. The order within a group is not a priority.
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
 [#171]: https://github.com/JamesZDonline/nsgeo/issues/171
 [#172]: https://github.com/JamesZDonline/nsgeo/pull/172
+[#175]: https://github.com/JamesZDonline/nsgeo/pull/175
 
 ## Why
 
