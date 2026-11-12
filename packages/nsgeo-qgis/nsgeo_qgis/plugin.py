@@ -49,7 +49,9 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterable, Sequence
+import os
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,7 @@ import numpy as np
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
+from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import plan_windows
 from qgis.core import (
     Qgis,
@@ -65,24 +68,34 @@ from qgis.core import (
     QgsCsException,
     QgsMessageLog,
     QgsPointXY,
+    QgsProject,
     QgsRasterLayer,
     QgsSettings,
+    QgsTemporalNavigationObject,
 )
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QCoreApplication, Qt, QTimer
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
     QFileDialog,
     QMenu,
     QMessageBox,
-    QProgressDialog,
     QToolButton,
 )
 
 from nsgeo_qgis import build_label, plugin_version
 from nsgeo_qgis.cut_sections import CutSections
+from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
+from nsgeo_qgis.export_style import write_style
+from nsgeo_qgis.export_task import (
+    ExportResult,
+    ExportTask,
+    WriterPlan,
+    running_export,
+    start_export,
+)
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.loader import LineLoader
 from nsgeo_qgis.lookup import CORNER_ROLES
@@ -90,20 +103,27 @@ from nsgeo_qgis.map_link import MapLink, crs_transform
 from nsgeo_qgis.maptools.cut_tool import CutTool
 from nsgeo_qgis.maptools.pick_tool import PickPointTool
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
-from nsgeo_qgis.site_export import apply_site_temporal_properties, export_site, write_site_coverage
+from nsgeo_qgis.site_export import (
+    GeoTiffSiteWriter,
+    apply_site_temporal_properties,
+    band_window_ns,
+    site_export_job,
+)
 from nsgeo_qgis.slice_export import (
-    ExportCancelled,
+    GeoTiffSliceWriter,
     apply_temporal_properties,
+    coverage_path,
     cube_record,
-    export_slices,
+    fit_temporal_navigation,
+    grid_export_job,
+    restore_band_times,
     save_cube_npz,
-    write_coverage,
+    window_ns,
 )
 from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
-from nsgeo_qgis.slices_engine import SliceEngine
-from nsgeo_qgis.slices_plan import LIVE_SOLVE_BUDGET_MS, SliceFinish
+from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
-from nsgeo_qgis.ui.finish_panel import busy_cursor
+from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
@@ -134,6 +154,24 @@ CUT_TIP = "Cut tool: draw a path on the map to see the cube's vertical section b
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
 _TABIFIED_KEY = "nsgeo/slicesDockTabified"
+
+
+@dataclass(frozen=True, eq=False)
+class _ExportJob:
+    """What an export hands the task and what it needs when the task ends."""
+
+    spec: Any
+    coverage_spec: Any
+    writer_plan: WriterPlan
+    n_bands: int
+    #: Sets the Temporal Controller up on the added values layer.
+    temporal: Callable[[Any], None]
+    #: Included grids the site file does not hold, named in the success message.
+    left_out: list[str]
+
+
+def _norm_path(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
 
 
 def _finish_with_pick_tool(tool: PickPointTool) -> None:
@@ -225,10 +263,23 @@ class NsgeoPlugin:
         self._gain_owner: tuple[str, int, int] | None = None
         self._gain_step: Any = None
         self._gain_generation = 0
+        #: Moves when the site closes or the plugin unloads, so an export that
+        #: started on an earlier site knows it ended on another (`_finish_export`).
+        self._export_epoch = 0
 
     # ---- QGIS entry points ------------------------------------------------
     def initGui(self) -> None:  # noqa: N802
         self.session = SiteSession()
+        self._timed_layer_ids: list[str] = []
+        # Every raster layer added to the project, whoever adds it (an export, a restore,
+        # a project being opened, Layer > Add Raster Layer), gets its band times from its
+        # own file; a project's own saved band times are whole seconds and lose bands.
+        project = QgsProject.instance()
+        project.layersAdded.connect(self._on_layers_added)
+        project.readProject.connect(self._on_project_read)
+        project.cleared.connect(self._forget_timed_layers)
+        # The plugin enabled with a project already open: its layers are not "added" again.
+        self._on_layers_added(list(project.mapLayers().values()))
         # Constructed now, before any new_site()/open_site() the user could
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
@@ -394,6 +445,8 @@ class NsgeoPlugin:
         self._update_enabled()
         self.session.site_opened.connect(self._update_enabled)
         self.session.site_closed.connect(self._update_enabled)
+        # Closing the site cancels an export in flight: no layer is added to a closed site.
+        self.session.site_closed.connect(self._on_site_closed_for_export)
         # The pick action follows the WORKING LINE, not merely the site
         # (see _update_enabled), so it has to be re-evaluated when that
         # changes -- line_opened carries "" when there is none.
@@ -541,6 +594,22 @@ class NsgeoPlugin:
             self.message(f"could not show the panels: {exc}", Qgis.MessageLevel.Warning)
 
     def unload(self) -> None:
+        project = QgsProject.instance()
+        for signal, slot in (
+            (project.layersAdded, self._on_layers_added),
+            (project.readProject, self._on_project_read),
+            (project.cleared, self._forget_timed_layers),
+        ):
+            with contextlib.suppress(Exception):
+                signal.disconnect(slot)
+        # An export in flight is cancelled and waited for (bounded): a reloaded module
+        # starts with no held task, while the old one could still be writing the same
+        # partial file.
+        self._cancel_export()
+        held = running_export()
+        if held is not None:
+            with contextlib.suppress(Exception):
+                held.waitForFinished(5000)
         # Connected in initGui() and owned by `iface`, which outlives this
         # plugin: left connected, a later startup signal would reach a
         # method on a torn-down plugin. Suppressed because the connection
@@ -1010,313 +1079,652 @@ class NsgeoPlugin:
             self.message(f"could not save the cube: {exc}", Qgis.MessageLevel.Critical)
 
     def export_geotiff(self) -> None:
-        """`SlicesDock.export_requested`: write the multi-band GeoTIFF and
-        add it to the map.
+        """`SlicesDock.export_requested`: the export dialog, then the export in the
+        background, for This grid or for the whole site.
 
-        `thickness_step_levels()` converts the dock's own ns spin boxes
-        into levels with the same rounding rule its live navigation
-        already uses, and `_resolved_velocity()` is the same velocity the
-        readout labels its window with -- both reused rather than
-        re-derived, so the exported bands' descriptions cannot disagree
-        with what the dock was showing when Export was clicked.
-
-        Two additions from Task 6 fix round 1:
-
-        * Ruling AE, reworked by the interpolation spec §8: a rotated frame
-          is resampled north-up at half its cell, so no frame cell is
-          dropped and the success message is always plain. The file carries
-          how its values were made -- `NSGEO_INTERPOLATION`,
-          `NSGEO_MAX_DISTANCE_M`, `NSGEO_SMOOTH_X_M`, `NSGEO_SMOOTH_Y_M` --
-          and the frame's `NSGEO_FRAME_AZIMUTH_DEG` as dataset metadata (see
-          `slice_export.GeoTiffSliceWriter.write`). The finish is the
-          dock's `slice_finish()`, applied at the engine's own cell.
-        * Ruling AH: spec 9.4 says coverage exports as a companion
-          single-band raster "when asked" -- wired here to the control
-          that already asks for exactly that, the dock's own coverage
-          toggle, rather than adding a second button nobody requested.
-          Its write sits in its OWN `try/except` (Task 6 fix round 2,
-          Minor 2): by the time it runs, the main GeoTIFF has already
-          been written and added to the map, so a failure writing the
-          companion is reported at `Warning`, naming the companion file,
-          rather than reaching the outer handler's Critical "could not
-          export the GeoTIFF" -- which would misreport a fully successful
-          main export as a failure.
+        The dialog sets the file, the export cell and the export pixel and refuses
+        what does not fit; everything else comes from the panel as it is now
+        (`thickness_step_levels`, `_resolved_velocity`, the finish, the
+        normalisation, the gains, the coverage toggle). Nothing is solved here: a
+        snapshot of the engines is taken on this thread (`grid_export_job`,
+        `site_export_job`) and an `ExportTask` makes the bands off it, so the live
+        view stays usable. `_finish_export` adds the layers when it ends.
         """
         assert self.session is not None
         try:
             if not self.session.is_open or self.slices_dock is None:
                 return
-            dock = self.slices_dock
-            if dock.scope() == "site":
-                self.export_site_geotiff()
-                return
-            engine = dock.engine
-            if not engine.is_prepared:
-                self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
-                return
-            default_path = self.session.root / "slices" / "cube.tif"
-            path, _ = QFileDialog.getSaveFileName(
-                self.iface.mainWindow(),
-                "Export GeoTIFF",
-                str(default_path),
-                "GeoTIFF (*.tif *.tiff)",
-            )
-            if not path:
-                return
-            target = Path(path)
-            thickness_levels, step_levels = dock.thickness_step_levels()
-            _key, velocity = dock._resolved_velocity()
-            total = len(plan_windows(engine.z, thickness_levels, step_levels))
-            before = self._mtime_ns(target)
-            finish = dock.slice_finish()
-            progress, dialog = self._export_progress(
-                "Export GeoTIFF", total, show_now=self._bands_are_slow([engine], finish)
-            )
-            try:
-                # Every band is solved here, on the GUI thread: say so.
-                with busy_cursor(), dock.refining_paused():
-                    plan = export_slices(
-                        engine,
-                        target,
-                        thickness_levels,
-                        step_levels,
-                        velocity,
-                        finish,
-                        progress=progress,
-                    )
-            except ExportCancelled:
-                self._remove_partial(target, before)
-                self.message("export cancelled")
-                return
-            except Exception:
-                self._remove_partial(target, before)
-                raise
-            finally:
-                dialog.close()
-                dialog.deleteLater()
-            layer = QgsRasterLayer(path, Path(path).stem, "gdal")
-            if not layer.isValid():
+            if running_export() is not None:
                 self.message(
-                    f"the exported GeoTIFF at {path} could not be reopened as a layer",
+                    "an export is already running; wait for it to finish, "
+                    "or cancel it in the task list.",
                     Qgis.MessageLevel.Warning,
                 )
                 return
-            apply_temporal_properties(layer, plan)
-            self._add_exported_layer(layer)
-
-            parts = [
-                f"exported {len(plan.bands)} bands to {path} "
-                f"({plan.frame.cell:g} m cell, {plan.frame.cell:g} m pixels)"
-            ]
-            if dock.coverage_check.isChecked():
-                coverage_path = Path(path).with_name(f"{Path(path).stem}_coverage.tif")
-                try:
-                    write_coverage(engine, coverage_path)
-                    coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
-                    if not coverage_layer.isValid():
-                        raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
-                    self._add_exported_layer(coverage_layer)
-                    parts.append(f"coverage to {coverage_path}")
-                except Exception as exc:  # noqa: BLE001 -- Task 6 fix round 2, Minor 2: the
-                    # main GeoTIFF above has already been written, its temporal properties
-                    # applied, and its layer added to `layers.group` -- a companion failure
-                    # here (a full disk, a locked file) must be reported on its own terms, at
-                    # Warning, naming the companion specifically, rather than reaching the
-                    # outer handler's Critical "could not export the GeoTIFF", which would
-                    # read as the main export having failed when it plainly did not.
-                    self.message(
-                        f"the GeoTIFF exported, but the coverage companion at {coverage_path} "
-                        f"could not be written: {exc}",
-                        Qgis.MessageLevel.Warning,
-                    )
-            self.message(", ".join(parts))
+            if self.slices_dock.scope() == "site":
+                self._export_site()
+            else:
+                self._export_grid()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export the GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
 
-    def _export_progress(
-        self, title: str, total: int, *, show_now: bool = False
-    ) -> tuple[Callable[[int, int], bool], Any]:
-        """A cancellable progress dialog and the callback an exporter calls.
+    def _export_grid(self) -> None:
+        """`export_geotiff` for This grid (see there)."""
+        assert self.session is not None and self.slices_dock is not None
+        dock = self.slices_dock
+        engine = dock.engine
+        if not engine.is_prepared or engine.frame is None or engine.z is None:
+            self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
+            return
+        thickness_levels, step_levels = dock.thickness_step_levels()
+        _key, velocity = dock._resolved_velocity()
+        finish = dock.slice_finish()
+        coverage = dock.coverage_check.isChecked()
+        z = engine.z
+        windows = tuple(
+            window_ns(z, window) for window in plan_windows(z, thickness_levels, step_levels)
+        )
+        grid = self.session.grid(engine.choice.grid_id)  # type: ignore[union-attr]
+        live_cell = engine.frame.cell
 
-        Window-modal, so the map stays alive but the dock cannot be driven
-        mid-export, and shown only after 500 ms, so a quick export flashes
-        nothing (plan call 11). It is shown, never `exec()`'d: the export runs
-        on the GUI thread, so nothing paints and no Cancel is heard except
-        when the callback processes events. `setValue` alone is not enough
-        (final review I-1): the band-0 call only starts a show timer, which
-        cannot fire while a band solves; the call that first shows the dialog
-        processes nothing; only later calls do. So the callback processes
-        events itself whenever the dialog is visible, from the call that
-        shows it on. `show_now` (`_bands_are_slow`) shows it at the band-0
-        call, before the first slow band, rather than after it.
+        def build(cell: float, pixel: float) -> _ExportJob:
+            job = grid_export_job(
+                engine,
+                thickness_levels,
+                step_levels,
+                velocity,
+                finish,
+                cell,
+                pixel,
+                coverage=coverage,
+            )
+            return _ExportJob(
+                spec=job.spec,
+                coverage_spec=job.coverage_spec,
+                writer_plan=WriterPlan(
+                    GeoTiffSliceWriter(),
+                    job.plan,
+                    job.coverage_plan,
+                    self._clip(dock.source_unipolar()),
+                    CountsClip(),
+                ),
+                n_bands=len(job.plan.bands),
+                temporal=lambda layer: apply_temporal_properties(layer, job.plan),
+                left_out=[],
+            )
 
-        The callback returns False once the user has cancelled. The caller
-        closes the dialog, in a `finally`.
-        """
-        dialog = QProgressDialog(title, "Cancel", 0, total, self.iface.mainWindow())
-        dialog.setWindowTitle(title)
-        dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(500)
-        dialog.setAutoClose(False)
-        dialog.setAutoReset(False)
+        self._export_dialog(
+            title="Export GeoTIFF",
+            task_name="GeoTIFF",
+            default=self.session.root / "slices" / "cube.tif",
+            preview=grid_preview(engine, windows, finish=finish, coverage=coverage),
+            floor=smallest_safe_cell(grid.size_x, grid.size_y),
+            live_cell=live_cell,
+            build=build,
+            dock=dock,
+            coverage=coverage,
+        )
 
-        def callback(done: int, of: int) -> bool:
-            if of != dialog.maximum():
-                dialog.setMaximum(of)
-            if show_now and done == 0:
-                dialog.show()
-            dialog.setValue(done)
-            if dialog.isVisible():
-                QCoreApplication.processEvents()  # paint, and hear a Cancel
-            return not dialog.wasCanceled()
-
-        return callback, dialog
-
-    @staticmethod
-    def _bands_are_slow(engines: Iterable[SliceEngine], finish: SliceFinish) -> bool:
-        """Whether an export's first band may take long enough that its
-        progress must show before it (final review I-1): minimum curvature,
-        with the engines' last solves together over `LIVE_SOLVE_BUDGET_MS`
-        (a band solves each engine's grid once), or one not timed yet. Plan
-        call 5's "slow", for a band; anything quicker shows on its own after
-        500 ms."""
-        if finish.method != "min_curvature":
-            return False
-        times = [engine.last_solve_ms for engine in engines]
-        if any(ms is None for ms in times):
-            return True
-        return sum(ms for ms in times if ms is not None) > LIVE_SOLVE_BUDGET_MS
-
-    @staticmethod
-    def _mtime_ns(target: Path) -> int | None:
-        """`target`'s modification time, or None when it does not exist yet."""
-        return target.stat().st_mtime_ns if target.exists() else None
-
-    @staticmethod
-    def _remove_partial(target: Path, before: int | None) -> None:
-        """Ruling T4-b, shared by both exports: a half-written GeoTIFF reads as
-        valid zeros, so a cancelled or failed export removes what it wrote.
-
-        A file the dialog chose to replace is the user's until the export has
-        written over it (`before` is its mtime when the export began); only
-        then is what is left ours."""
-        with contextlib.suppress(OSError):
-            if target.exists() and target.stat().st_mtime_ns != before:
-                target.unlink()
-
-    def export_site_geotiff(self) -> None:
+    def _export_site(self) -> None:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.
 
-        M12 spec 4.7, following M11's `export_geotiff`: a path defaulting to
-        `slices/site.tif`, the dock's own thickness and step levels,
-        normalisation, the site's Interpolation panel (`dock.site_finish`),
-        gains and velocities, then the layer in the site group with
-        its bands on the Temporal Controller, and -- when the coverage toggle
-        is on -- the companion in its own `try` (Ruling AH).
+        Ruling T4-a: no grid is left out silently. The button is disabled while an
+        included grid prepares (the dock), and the message names any included grid
+        the file does not hold, and so does the file (Ruling F-2,
+        `NSGEO_SITE_LEFT_OUT`). A preview site exports at full detail: the export has
+        its own lattice at the export cell.
+        """
+        assert self.session is not None and self.slices_dock is not None
+        dock = self.slices_dock
+        site = dock.site_engine
+        if not site.ready_grids or site.lattice is None or site.site_z is None:
+            self.message("prepare the site's grids before exporting.", Qgis.MessageLevel.Warning)
+            return
+        thickness_levels, step_levels = dock.thickness_step_levels()
+        transform = dock.site_panel.transform()
+        method = dock.normalisation_panel.method()
+        finish = dock.site_finish.value()
+        gains = dock.site_gains()
+        velocities = dock.site_velocities()
+        left_out_states = dock.site_left_out_states()
+        left_out = dock.site_left_out()
+        coverage = dock.coverage_check.isChecked()
+        site_z = site.site_z
+        windows = tuple(
+            band_window_ns(site_z, window)
+            for window in plan_windows(site_z, thickness_levels, step_levels)
+        )
+        grids = [self.session.grid(g) for g in site.ready_grids]
+        # The site's own picture pixel, which is the cell it is drawn at. Not the Cell size
+        # box: that can still show a value a refused resolution left behind.
+        full = site.full_lattice
+        live_cell = full.pixel if full is not None else dock.cell_spin.value()
 
-        Ruling T4-a: no grid is left out silently. The button is disabled
-        while an included grid prepares (the dock), and the message names
-        any included grid the file does not hold, and so does the file
-        (Ruling F-2, `NSGEO_SITE_LEFT_OUT`). Ruling T4-b: a failed export
-        removes what it had written, and adds no layer.
+        def build(cell: float, pixel: float) -> _ExportJob:
+            job = site_export_job(
+                site,
+                thickness_levels,
+                step_levels,
+                cell,
+                pixel,
+                transform=transform,
+                method=method,
+                finish=finish,
+                gains=gains,
+                velocities=velocities,
+                left_out=left_out_states,
+                coverage=coverage,
+            )
+            return _ExportJob(
+                spec=job.spec,
+                coverage_spec=job.coverage_spec,
+                writer_plan=WriterPlan(
+                    GeoTiffSiteWriter(),
+                    job.plan,
+                    job.coverage_plan,
+                    self._clip(dock.source_unipolar()),
+                    CountsClip(),
+                ),
+                n_bands=len(job.plan.bands),
+                temporal=lambda layer: apply_site_temporal_properties(layer, job.plan),
+                left_out=left_out,
+            )
+
+        self._export_dialog(
+            title="Export site GeoTIFF",
+            task_name="site GeoTIFF",
+            default=self.session.root / "slices" / "site.tif",
+            preview=site_preview(
+                site,
+                windows,
+                method=method,
+                finish=finish,
+                gains=gains,
+                coverage=coverage,
+                normalisation=dock.normalisation_panel.method_combo.currentText().lower(),
+            ),
+            floor=max(smallest_safe_cell(g.size_x, g.size_y) for g in grids),
+            live_cell=live_cell,
+            build=build,
+            dock=dock,
+            coverage=coverage,
+        )
+
+    @staticmethod
+    def _clip(unipolar: bool) -> Any:
+        """The stretch rule of the panel's own view (`display_limit`)."""
+        return UnipolarClip() if unipolar else PercentileClip()
+
+    def _export_dialog(
+        self,
+        *,
+        title: str,
+        task_name: str,
+        default: Path,
+        preview: Callable[[float, float], Any],
+        floor: float,
+        live_cell: float,
+        build: Callable[[float, float], _ExportJob],
+        dock: SlicesDock,
+        coverage: bool,
+    ) -> None:
+        """Ask for the file, the export cell and the pixel; then start the task.
+
+        Modal (`exec()`), `deleteLater` in a `finally`. A layer the target (or its
+        style file or companion) is already open as is removed here, BEFORE the
+        task starts (Windows locks open files) and added again by `_finish_export`.
         """
         assert self.session is not None
+        dialog = ExportDialog(
+            preview,
+            cell_floor=floor,
+            live_cell=live_cell,
+            default_path=str(default),
+            project=self.layers.project,
+            parent=self.iface.mainWindow(),
+            writes_coverage=coverage,
+        )
+        dialog.setWindowTitle(title)
         try:
-            if not self.session.is_open or self.slices_dock is None:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            dock = self.slices_dock
-            site = dock.site_engine
-            if not site.ready_grids or site.lattice is None or site.site_z is None:
+            choice = dialog.result_settings()
+            replaced = dialog.layers_to_replace()
+        finally:
+            dialog.deleteLater()
+        target = choice.path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QgsMessageLog.logMessage(
+                f"could not create {target.parent}: {exc}", "nsgeo", Qgis.MessageLevel.Warning
+            )
+            self.message(
+                f"could not create the folder {target.parent}; choose another place to save.",
+                Qgis.MessageLevel.Critical,
+            )
+            return
+        job = build(choice.cell, choice.pixel)
+        coverage_target = coverage_path(target) if job.coverage_spec is not None else None
+        # Only the layers on files THIS export writes (values, companion when asked, and
+        # their style files) go; the others stay. What goes is remembered by name and file
+        # (never held as a layer: a held layer keeps its file open) so a cancel or a
+        # failure can add it back from the unchanged file.
+        written = {_norm_path(p) for p in (target, target.with_suffix(".qml"))}
+        if coverage_target is not None:
+            written |= {
+                _norm_path(coverage_target),
+                _norm_path(coverage_target.with_suffix(".qml")),
+            }
+        removed: list[tuple[str, Path]] = []
+        for layer in replaced:
+            source = layer.source().split("|")[0]
+            if _norm_path(source) in written:
+                removed.append((layer.name(), Path(source)))
+                self.layers.project.removeMapLayer(layer.id())
+        epoch = self._export_epoch
+        palette = dock.palette_combo.currentText()
+        unipolar = dock.source_unipolar()
+        counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+
+        def on_done(result: ExportResult) -> None:
+            self._finish_export(
+                result,
+                job,
+                epoch=epoch,
+                cell=choice.cell,
+                pixel=choice.pixel,
+                palette=palette,
+                unipolar=unipolar,
+                counts_palette=counts_palette,
+                removed=removed,
+            )
+
+        task = ExportTask(
+            f"Export {task_name}",
+            job.spec,
+            job.writer_plan,
+            target,
+            job.coverage_spec,
+            coverage_target,
+            on_done,
+            what=task_name,
+        )
+        if not start_export(task):
+            note = self._restore_note(*self._restore_layers(removed))
+            self.message(
+                "an export is already running; wait for it to finish, "
+                "or cancel it in the task list." + (f" {note}." if note else ""),
+                Qgis.MessageLevel.Warning,
+            )
+            return
+        self.message(
+            f"exporting {task_name}: you can keep working; "
+            "it is in the task list at the bottom right."
+        )
+
+    def _on_site_closed_for_export(self) -> None:
+        try:
+            self._cancel_export()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self.message(f"could not cancel the export: {exc}", Qgis.MessageLevel.Warning)
+
+    def _cancel_export(self) -> None:
+        """Stop the export in flight: the site closed or the plugin unloads.
+
+        The epoch moves first: cancelling a task still queued runs its `on_done`
+        at once, inside this call, and it must see the site is gone.
+        """
+        self._export_epoch += 1
+        task = running_export()
+        if task is not None:
+            task.cancel()
+
+    def _finish_export(
+        self,
+        result: ExportResult,
+        job: _ExportJob,
+        *,
+        epoch: int,
+        cell: float,
+        pixel: float,
+        palette: str,
+        unipolar: bool,
+        counts_palette: str,
+        removed: Sequence[tuple[str, Path]] = (),
+    ) -> None:
+        """The export task's `on_done`, on the GUI thread; it never raises.
+
+        Re-entrant (a queued task cancelled in `_cancel_export` lands here at once)
+        and re-checks that the site it started on is still open: a cancel landing
+        after the task's last check still commits, and then the files stay on disk
+        and nothing is added to a closed site.
+        """
+        try:
+            if result.cancelled:
+                note = self._restore_note(*self._restore_layers(removed, epoch))
                 self.message(
-                    "prepare the site's grids before exporting.", Qgis.MessageLevel.Warning
+                    "export cancelled" + (f"; {note}" if note else ""),
+                    Qgis.MessageLevel.Warning if "could not" in note else Qgis.MessageLevel.Info,
                 )
                 return
-            if site.export_refusal:
-                self.message(site.export_refusal, Qgis.MessageLevel.Warning)
+            if not result.ok and result.values_written:
+                self._finish_half_written(
+                    result,
+                    job,
+                    epoch=epoch,
+                    palette=palette,
+                    unipolar=unipolar,
+                    removed=removed,
+                )
                 return
-            default_path = self.session.root / "slices" / "site.tif"
-            path, _ = QFileDialog.getSaveFileName(
-                self.iface.mainWindow(),
-                "Export site GeoTIFF",
-                str(default_path),
-                "GeoTIFF (*.tif *.tiff)",
-            )
-            if not path:
-                return
-            target = Path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            thickness_levels, step_levels = dock.thickness_step_levels()
-            total = len(plan_windows(site.site_z, thickness_levels, step_levels))
-            before = self._mtime_ns(target)
-            finish = dock.site_finish.value()
-            engines = [site.engine_for(grid_id) for grid_id in site.ready_grids]
-            solving = [engine for engine in engines if engine is not None]
-            progress, dialog = self._export_progress(
-                "Export site GeoTIFF", total, show_now=self._bands_are_slow(solving, finish)
-            )
-            try:
-                # Every band is solved here, grid by grid, on the GUI thread: say so.
-                with busy_cursor(), dock.refining_paused():
-                    plan = export_site(
-                        site,
-                        target,
-                        thickness_levels,
-                        step_levels,
-                        transform=dock.site_panel.transform(),
-                        method=dock.normalisation_panel.method(),
-                        finish=finish,
-                        gains=dock.site_gains(),
-                        velocities=dock.site_velocities(),
-                        left_out=dock.site_left_out_states(),
-                        progress=progress,
-                    )
-            except ExportCancelled:
-                self._remove_partial(target, before)
-                self.message("export cancelled")
-                return
-            except Exception:
-                self._remove_partial(target, before)
-                raise
-            finally:
-                dialog.close()
-                dialog.deleteLater()
-            layer = QgsRasterLayer(path, target.stem, "gdal")
-            if not layer.isValid():
+            if not result.ok:
+                QgsMessageLog.logMessage(
+                    f"export failed: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
+                )
+                note = self._restore_note(*self._restore_layers(removed, epoch))
                 self.message(
-                    f"the exported site GeoTIFF at {path} could not be reopened as a layer",
+                    f"could not export the GeoTIFF: {plain_export_error(result.error)}"
+                    + (f"; {note}" if note else ""),
+                    Qgis.MessageLevel.Critical,
+                )
+                return
+            if (
+                epoch != self._export_epoch
+                or self.session is None
+                or not self.session.is_open
+                or self.slices_dock is None
+            ):
+                self.message(
+                    "the export finished after the site was closed; "
+                    f"the file is at {result.target}",
                     Qgis.MessageLevel.Warning,
                 )
                 return
-            apply_site_temporal_properties(layer, plan)
-            self._add_exported_layer(layer)
-
             parts = [
-                f"exported {len(plan.bands)} bands to {path} "
-                f"({plan.cell_m:g} m cell, {plan.lattice.pixel:g} m pixels)"
+                f"exported {job.n_bands} bands to {result.target} "
+                f"({cell:g} m cell, {pixel:g} m pixels)"
             ]
-            if dock.coverage_check.isChecked():
-                coverage_path = target.with_name(f"{target.stem}_coverage.tif")
+            style_notes: list[str] = []
+            problem = self._add_export_layer(
+                result.target,
+                limit=float(result.limit or 1.0),
+                palette=palette,
+                unipolar=unipolar,
+                temporal=job.temporal,
+                notes=style_notes,
+            )
+            if problem is not None:
+                self.message(problem, Qgis.MessageLevel.Warning)
+            if result.coverage_target is not None:
+                # Ruling AH: the companion in its own try, reported on its own terms.
                 try:
-                    write_site_coverage(site, target, plan)
-                    coverage_layer = QgsRasterLayer(str(coverage_path), coverage_path.stem, "gdal")
-                    if not coverage_layer.isValid():
-                        raise RuntimeError(f"{coverage_path} could not be reopened as a layer")
-                    self._add_exported_layer(coverage_layer)
-                    parts.append(f"coverage to {coverage_path}")
-                except Exception as exc:  # noqa: BLE001 -- Ruling AH, as in export_geotiff
+                    problem = self._add_export_layer(
+                        result.coverage_target,
+                        limit=float(result.coverage_limit or 1.0),
+                        palette=counts_palette,
+                        unipolar=True,
+                        temporal=None,
+                        notes=style_notes,
+                    )
+                    if problem is not None:
+                        raise RuntimeError(problem)
+                    parts.append(f"coverage to {result.coverage_target}")
+                except Exception as exc:  # noqa: BLE001 -- the values file is already added
                     self.message(
-                        f"the site GeoTIFF exported, but the coverage companion at "
-                        f"{coverage_path} could not be written: {exc}",
+                        f"the GeoTIFF exported, but the coverage companion at "
+                        f"{result.coverage_target} could not be added: {exc}",
                         Qgis.MessageLevel.Warning,
                     )
-            left_out = dock.site_left_out()
-            if left_out:
-                parts.append(f"left out {', '.join(left_out)}")
-                self.message(", ".join(parts), Qgis.MessageLevel.Warning)
+            if job.left_out:
+                parts.append(f"left out {', '.join(job.left_out)}")
+            text = ", ".join(parts)
+            if style_notes:
+                text += ". " + " ".join(style_notes)
+            if job.left_out or style_notes:
+                self.message(text, Qgis.MessageLevel.Warning)
             else:
-                self.message(", ".join(parts))
-        except Exception as exc:  # noqa: BLE001 -- see the module docstring
-            self.message(f"could not export the site GeoTIFF: {exc}", Qgis.MessageLevel.Critical)
+                self.message(text)
+        except Exception as exc:  # noqa: BLE001 -- invisible in a task's finished()
+            QgsMessageLog.logMessage(
+                f"could not finish the export: {exc}", "nsgeo", Qgis.MessageLevel.Critical
+            )
+            self.message(
+                "the export was written, but could not be added to the map; "
+                "the details are in the QGIS message log.",
+                Qgis.MessageLevel.Critical,
+            )
+
+    def _finish_half_written(
+        self,
+        result: ExportResult,
+        job: _ExportJob,
+        *,
+        epoch: int,
+        palette: str,
+        unipolar: bool,
+        removed: Sequence[tuple[str, Path]],
+    ) -> None:
+        """The values file replaced its target but the companion could not be written.
+
+        Says so. The old layer on the values file is not put back (it would read the new
+        file with the old style); the new one is added. Layers on the other files, which
+        are as they were, are put back.
+        """
+        QgsMessageLog.logMessage(
+            f"export half written: {result.error}", "nsgeo", Qgis.MessageLevel.Warning
+        )
+        written = _norm_path(result.target)
+        note = self._restore_note(
+            *self._restore_layers([r for r in removed if _norm_path(r[1]) != written], epoch)
+        )
+        text = (
+            f"the GeoTIFF was written to {result.target}, but the coverage file could not be: "
+            f"{plain_export_error(result.error)}"
+        )
+        style_notes: list[str] = []
+        if (
+            epoch == self._export_epoch
+            and self.session is not None
+            and self.session.is_open
+            and self.slices_dock is not None
+        ):
+            problem = self._add_export_layer(
+                result.target,
+                limit=float(result.limit or 1.0),
+                palette=palette,
+                unipolar=unipolar,
+                temporal=job.temporal,
+                notes=style_notes,
+            )
+            text += "; the new layer was added" if problem is None else f"; {problem}"
+        if note:
+            text += f"; {note}"
+        # Style notes are whole sentences ending in a full stop: they go last.
+        if style_notes:
+            text += ". " + " ".join(style_notes)
+        self.message(text, Qgis.MessageLevel.Warning)
+
+    def _restore_layers(
+        self, removed: Sequence[tuple[str, Path]], epoch: int | None = None
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Add back the layers an export removed to replace, from their files.
+
+        Each re-add is on its own `try`, so one failure never stops the rest. Same name; a
+        style file beside the file applies as its default style, and the temporal
+        properties come from the band windows the file records (`restore_band_times`);
+        the layer's place in the group is not reapplied. Returns the names put back, the
+        names that could not be (a file gone or unreadable, or an error, logged raw) and
+        the names put back without their time slider (a file written before the windows
+        were recorded). All are empty when nothing was removed or the site has closed since.
+        """
+        if (
+            not removed
+            or (epoch is not None and epoch != self._export_epoch)
+            or self.session is None
+            or not self.session.is_open
+        ):
+            return [], [], []
+        back: list[str] = []
+        lost: list[str] = []
+        untimed: list[str] = []
+        for name, path in removed:
+            try:
+                layer = QgsRasterLayer(str(path), name, "gdal") if path.exists() else None
+                if layer is None or not layer.isValid():
+                    raise OSError(f"{path} is missing or cannot be read as a layer")
+                self._add_exported_layer(layer)
+                back.append(name)
+                restored = restore_band_times(layer, path)
+                if restored == "missing":
+                    untimed.append(name)
+                elif restored == "set":
+                    self._fit_temporal_controller(layer)
+            except Exception as exc:  # noqa: BLE001 -- the others still go back
+                QgsMessageLog.logMessage(
+                    f"could not put the layer {name} back from {path}: {exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+                lost.append(name)
+        return back, lost, untimed
+
+    @staticmethod
+    def _restore_note(back: Sequence[str], lost: Sequence[str], untimed: Sequence[str] = ()) -> str:
+        """The words for a cancel or failure that removed layers: what is back, and what is not."""
+        parts = []
+        if back:
+            parts.append(f"{name_list(back)} {'was' if len(back) == 1 else 'were'} put back")
+        if lost:
+            parts.append(f"{name_list(lost)} could not be put back; add it again from its file")
+        if untimed:
+            parts.append(
+                f"{name_list(untimed)} {'is' if len(untimed) == 1 else 'are'} back without "
+                "the time slider setting, which this older file does not record"
+            )
+        return "; ".join(parts)
+
+    def _add_export_layer(
+        self,
+        path: Path,
+        *,
+        limit: float,
+        palette: str,
+        unipolar: bool,
+        temporal: Callable[[Any], None] | None,
+        notes: list[str] | None = None,
+    ) -> str | None:
+        """Style file, then the layer, then its temporal properties; None when it worked.
+
+        The `.qml` is written first, so QGIS picks it up as the file's default
+        style when the layer is made. The temporal properties go on after the layer
+        is added (the style file stores them switched off). When the style file cannot be
+        written, the previous export's one is removed (QGIS would apply its stretch to
+        this file) and a sentence about it is appended to `notes`.
+        """
+        try:
+            write_style(path, limit=limit, colormap_name=palette, unipolar=unipolar)
+        except Exception as exc:  # noqa: BLE001 -- the file is good; QGIS just draws it plainly
+            QgsMessageLog.logMessage(
+                f"could not write the style file for {path}: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
+            stale_gone = True
+            try:
+                path.with_suffix(".qml").unlink(missing_ok=True)
+            except OSError as unlink_exc:
+                stale_gone = False
+                QgsMessageLog.logMessage(
+                    f"could not remove the old style file beside {path}: {unlink_exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+            if notes is not None:
+                notes.append(
+                    f"The style file for {path.name} could not be written, so it is drawn "
+                    "in QGIS's own colours."
+                    + ("" if stale_gone else " An older style file beside it could not be removed.")
+                )
+        layer = QgsRasterLayer(str(path), path.stem, "gdal")
+        if not layer.isValid():
+            return f"the exported GeoTIFF at {path} could not be reopened as a layer"
+        self._add_exported_layer(layer)
+        if temporal is not None:
+            temporal(layer)
+            self._fit_temporal_controller(layer)
+        return None
+
+    def _on_layers_added(self, layers: Sequence[Any]) -> None:
+        """Wire the band times of an added nsgeo export from its own file, and fit the
+        Temporal Controller to it. Never raises: it is a slot, where exceptions vanish.
+
+        Only `gdal` layers on an existing local `.tif`/`.tiff` are read (one GDAL metadata
+        read each); a file with no recorded band windows, or a counts file, is left alone.
+        An export or restore also wires and fits directly after adding (`_add_export_layer`,
+        `_restore_layers`): the second pass gives the same result, so it is harmless.
+        """
+        for layer in layers:
+            try:
+                if not isinstance(layer, QgsRasterLayer) or layer.providerType() != "gdal":
+                    continue
+                path = Path(layer.source().split("|")[0])
+                if path.suffix.lower() not in (".tif", ".tiff") or not path.is_file():
+                    continue
+                if restore_band_times(layer, path) != "set":
+                    continue
+                self._timed_layer_ids.append(layer.id())
+                self._fit_temporal_controller(layer)
+            except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+                QgsMessageLog.logMessage(
+                    f"could not set the band times of an added layer: {exc}",
+                    "nsgeo",
+                    Qgis.MessageLevel.Warning,
+                )
+
+    def _forget_timed_layers(self) -> None:
+        self._timed_layer_ids.clear()
+
+    def _on_project_read(self, *_args: Any) -> None:
+        """A project was opened: QGIS's Temporal Controller panel restores its own mode from
+        the project once the layers are read, which undoes a fit made while they loaded.
+        Fit again, after that, to the last timed nsgeo layer."""
+        QTimer.singleShot(0, self._refit_after_open)
+
+    def _refit_after_open(self) -> None:
+        try:
+            project = QgsProject.instance()
+            for layer_id in reversed(self._timed_layer_ids):
+                layer = project.mapLayer(layer_id)
+                if isinstance(layer, QgsRasterLayer):
+                    self._fit_temporal_controller(layer)
+                    return
+        except Exception as exc:  # noqa: BLE001 -- a timer slot must never raise
+            QgsMessageLog.logMessage(
+                f"could not set up the Temporal Controller after opening: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
+
+    def _fit_temporal_controller(self, layer: QgsRasterLayer) -> None:
+        """Set QGIS's Temporal Controller to step through `layer`'s bands, one per frame.
+
+        Overrides whatever the controller held: the file was just made, put back, added or
+        reopened, and a GPR project has no other timed layers. Skipped when the canvas has no
+        navigation object (no canvas, or a test stub). Never raises: it runs where an exception
+        would vanish, and the layer is already added.
+        """
+        try:
+            canvas = self.iface.mapCanvas()
+            navigation = canvas.temporalController() if canvas is not None else None
+            if isinstance(navigation, QgsTemporalNavigationObject):
+                fit_temporal_navigation(navigation, layer)
+        except Exception as exc:  # noqa: BLE001 -- the layer is added; only the stepping is lost
+            QgsMessageLog.logMessage(
+                f"could not set up the Temporal Controller for {layer.name()}: {exc}",
+                "nsgeo",
+                Qgis.MessageLevel.Warning,
+            )
 
     def _toggle_pick_mode(self, checked: bool) -> None:
         """The Pick toolbar toggle. Drives the dock, never the view

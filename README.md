@@ -94,11 +94,7 @@ release's notes list everything in it.
 | | Slice interpolation (kriging, IDW, minimum curvature) and line editing | 0.3.0 |
 | M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
-
-### In progress
-
-- **Whole site at fine cells: the export** ([#108]): an export finer than the
-  preview, streamed to disk in the background. Designed; the plan is next.
+| | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
 
 ### Next, in order
 
@@ -149,7 +145,11 @@ Grouped by area. The order within a group is not a priority.
   wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
   ([#177]); colour a slice with QGIS's own symbology: a colour ramp, a typed
   min/max or a cumulative cut, which M19's magnetometer maps will reuse
-  ([#180]).
+  ([#180]); whole site at fine cells, the follow-ups: coverage edge lines on
+  coarse previews, averaged previews, a memory estimate for This grid, refusals
+  that stay on screen, and where the preview note sits ([#157]); exports of
+  large sites at fine cells, holding one grid at a time so they fit in memory
+  ([#167]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -182,11 +182,14 @@ Grouped by area. The order within a group is not a priority.
 [#140]: https://github.com/JamesZDonline/nsgeo/issues/140
 [#146]: https://github.com/JamesZDonline/nsgeo/issues/146
 [#147]: https://github.com/JamesZDonline/nsgeo/issues/147
+[#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
 [#171]: https://github.com/JamesZDonline/nsgeo/issues/171
+[#175]: https://github.com/JamesZDonline/nsgeo/pull/175
 [#176]: https://github.com/JamesZDonline/nsgeo/issues/176
 [#177]: https://github.com/JamesZDonline/nsgeo/issues/177
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
