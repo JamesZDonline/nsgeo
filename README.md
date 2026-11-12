@@ -108,8 +108,9 @@ a milestone merges or the plan changes.
 - **Whole site at fine cells: the export** ([#108]): an export finer than the
   preview, streamed to disk in the background. Designed; the plan is next.
 - **Time zero** ([#97]): the Time zero step sets the clock, so the row it lands
-  on reads 0 ns and depths, fits and slices measure from there. Being built on
-  `nsgeo-time-zero`.
+  on reads 0 ns and depths, fits and slices measure from there. Built on
+  `nsgeo-time-zero`; the walkthrough passed on 2026-11-11 and the merge is
+  next. Follow-ups are in [#162] and [#163].
 
 ### Next, in order
 
@@ -137,8 +138,9 @@ build on, so doing them now is cheaper than reworking M15–M17 afterwards.
 8. **M19: magnetometer data.** The first instrument other than GPR.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), before
-M15 brings picking to cuts; and the migration real-data test ([#125]), before
-M16 builds on migrated cubes.
+M15 brings picking to cuts; the migration real-data test ([#125]), before M16
+builds on migrated cubes; and the three ways a restored cube can still come
+back on the wrong clock without a note ([#162]).
 
 ### Wishlist, not yet scheduled
 
@@ -219,6 +221,8 @@ Grouped by area. The order within a group is not a priority.
 [#148]: https://github.com/JamesZDonline/nsgeo/issues/148
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#159]: https://github.com/JamesZDonline/nsgeo/issues/159
+[#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 
 ## Why
 
