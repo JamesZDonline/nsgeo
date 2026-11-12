@@ -22,6 +22,7 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    bands_detail,
     choose_residency,
     combined_time_base,
     estimate_memory,
@@ -32,7 +33,6 @@ from nsgeo_qgis.slices_plan import (
     old_cube_note,
     preset_transform_conflict,
     preview_note,
-    site_export_refusal,
     transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data
@@ -604,15 +604,6 @@ def test_preview_note_is_exact_copy():
     )
 
 
-def test_site_export_refusal_is_exact_copy():
-    base = (
-        "The site can't be exported at full detail yet: the site "
-        "(1234 \u00d7 568 m) is too big at a 0.05 m cell. Choose a cell of 0.12 m or coarser"
-    )
-    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, []) == base + "."
-    assert site_export_refusal(0.05, 1234.4, 567.6, 0.12, ["C"]) == base + ", or leave out C."
-
-
 def test_the_estimate_matches_the_cube_it_describes():
     """The figure the checkbox shows is the cube's real size (#113)."""
     from nsgeo.slices import (
@@ -657,6 +648,163 @@ def test_the_estimate_matches_the_cube_it_describes():
     assert (
         estimate_memory(0, frame.n_cells, z.nz, n_covered, method="kriging").cube_bytes
         == cube.nbytes
+    )
+
+
+# ---- the export dialog's summary and the finest fit ------------------------
+
+
+def _preview(**over):
+    from nsgeo_qgis.slices_plan import ExportPreview
+
+    base = dict(
+        cell=0.025,
+        pixel=0.0125,
+        width_px=2582,
+        height_px=3035,
+        bands=18,
+        bands_detail="every 2.5 ns from −1.8 to 45 ns, 5 ns thick",
+        slices="kriging, max distance 0.75 × spacing, no smoothing",
+        grids=("A", "B"),
+        normalisation="edge match",
+        file_bytes=600_000_000,
+        held_bytes=1_000_000_000,
+    )
+    base.update(over)
+    return ExportPreview(**base)
+
+
+def test_the_summary_for_a_two_grid_site_is_exact():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    assert summary_lines(_preview()) == [
+        ("Bands", "18, every 2.5 ns from −1.8 to 45 ns, 5 ns thick"),
+        ("Picture", "2582 × 3035 pixels at 0.0125 m"),
+        ("Grids", "2 included (A and B), rebuilt at 0.025 m"),
+        ("Slices", "kriging, max distance 0.75 × spacing, no smoothing"),
+        ("Normalisation", "edge match, measured again at 0.025 m"),
+        ("Memory", "about 1.0 GB of the 1.5 GB allowed"),
+        ("File", "about 600 MB before compression, plus a style file"),
+    ]
+
+
+def test_the_memory_row_stays_when_the_export_is_over_budget():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(held_bytes=2_400_000_000)))
+    assert rows["Memory"] == "about 2.4 GB of the 1.5 GB allowed"
+
+
+def test_the_summary_does_not_say_measured_again_for_no_normalisation():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(normalisation="none")))
+    assert rows["Normalisation"] == "none"
+
+
+def test_the_summary_for_one_grid_drops_the_site_rows():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = summary_lines(_preview(grids=None, normalisation=None))
+    assert [k for k, _ in rows] == ["Bands", "Picture", "Slices", "Memory", "File"]
+
+
+def test_the_summary_for_a_big_site_counts_grids_without_naming_them():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    names = tuple(f"G{i}" for i in range(10))
+    assert dict(summary_lines(_preview(grids=names)))["Grids"] == (
+        "10 included, rebuilt at 0.025 m"
+    )
+
+
+def _counting(held):
+    calls = []
+
+    def held_at(cell, pixel):
+        calls.append((cell, pixel))
+        return held(cell, pixel)
+
+    return held_at, calls
+
+
+def test_finest_pixel_is_the_smallest_millimetre_that_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held falls as the pixel grows and fits from 15 mm up.
+    held_at, calls = _counting(lambda c, p: 1_500_000_000 * 15 // round(p * 1000))
+    _, pixel = finest_fits(held_at, 0.025, 0.0125, 1_500_000_000)
+    assert pixel == 0.015
+    assert len(calls) < 30
+
+
+def test_finest_pixel_is_none_when_pixel_equals_cell_or_nothing_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.025, 10**9)[1] is None
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.0125, 10**9)[1] is None
+
+
+def test_finest_cell_doubles_then_bisects_to_a_millimetre():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held = k / cell^2 with pixel = cell; fits from a 0.037 m cell up.
+    budget = 10**9
+    k = budget * 0.037**2
+
+    held_at, calls = _counting(lambda c, p: int(k / (c * c)) if p == c else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, budget)
+    assert cell == pytest.approx(0.037)
+    assert len(calls) < 30
+
+
+def test_finest_cell_is_none_past_eight_times_the_current_cell():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits only from 0.25 m; 8 x 0.025 = 0.2.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.25 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] is None
+    # ... and exactly at the reach it is found.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.2 - 1e-9 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] == pytest.approx(0.2)
+
+
+def test_finest_cell_is_none_when_the_current_cell_already_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits from a 20 mm pixel; at pixel = cell the 25 mm cell is well inside budget.
+    budget = 10**9
+    held_at, _ = _counting(lambda c, p: int(budget * 0.02 / p))
+    assert finest_fits(held_at, 0.025, 0.0125, budget) == (None, 0.02)
+
+
+def test_finest_cell_is_still_offered_when_the_current_cell_does_not_fit():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.03 - 1e-9 else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, 10**9)
+    assert cell == pytest.approx(0.03)
+
+
+def test_the_bands_line_of_the_export_summary():
+    windows = [(-1.8 + 2.5 * k, 5.0) for k in range(18)]
+    assert bands_detail(windows) == "every 2.5 ns from \u22121.8 to 45.7 ns, 5 ns thick"
+    assert bands_detail([(10.0, 5.0)]) == "from 10 to 15 ns, 5 ns thick"
+    assert bands_detail([]) == ""
+
+
+def test_the_slices_line_of_the_export_summary():
+    from nsgeo_qgis.slices_plan import SliceFinish, slices_text
+
+    assert slices_text(SliceFinish()) == "kriging, max distance 0.75 \u00d7 spacing, no smoothing"
+    assert slices_text(SliceFinish(method="none")) == "no interpolation, no smoothing"
+    assert (
+        slices_text(
+            SliceFinish(
+                method="min_curvature", max_distance_spacings=1.5, smooth_x_m=0.2, smooth_y_m=0.3
+            )
+        )
+        == "minimum curvature, max distance 1.5 \u00d7 spacing, smoothing 0.2 \u00d7 0.3 m"
     )
 
 

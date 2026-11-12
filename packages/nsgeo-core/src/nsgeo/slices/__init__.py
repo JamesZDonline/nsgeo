@@ -19,6 +19,7 @@ from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.curvature import CurvaturePlan, SolveStopped, plan_curvature
 from nsgeo.slices.display import (
     SliceWindow,
+    frame_lattice,
     limit_over_slices,
     plan_windows,
     shared_limit,
@@ -139,6 +140,7 @@ __all__ = [
     "finish_slice",
     "fitting_lattice",
     "footprint",
+    "frame_lattice",
     "grid_axis",
     "limit_over_slices",
     "load_cube",

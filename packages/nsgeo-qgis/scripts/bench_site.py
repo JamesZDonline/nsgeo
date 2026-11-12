@@ -3,7 +3,8 @@
 Ten grids, 20 m and 50 m on a side, 0.5 m line spacing, at M11's default
 resolution: cell = min(0.5, spacing / 2), dz = the native sample interval,
 the z range the prepared lines share, thickness 5 ns, the default interpolation
-(kriging, 0.5 line spacings, no smoothing). Runs offscreen in `.venv-qgis` with
+(kriging, 0.5 line spacings, no smoothing; `--export-smooth` sets the export
+rows' smoothing). Runs offscreen in `.venv-qgis` with
 no plugin and no iface:
 
     QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python \\
@@ -21,6 +22,15 @@ behind `SITE_MAX_PIXELS`. The site limit is lifted for it.
 laid at 30 degrees at a 0.05 m cell, sized so their windows hold about C
 million pixels together (`SITE_MAX_COVERED_PIXELS`): compose median, peak
 transient memory under `tracemalloc`, and the gathers' bytes.
+
+`--export CELL PIXEL` (repeatable) measures the export pipeline (`export_pipeline`), in
+core only (no QGIS): the walkthrough site's geometry -- ten 20 m grids at 0.5 m line
+spacing, eight of them 4-10 degrees off north and two near 90 -- binned at CELL and
+written at PIXEL, band by band, normalised by edge match, finished by kriging and by
+minimum curvature. For each: the peak memory of the whole run under `tracemalloc`
+(prepared lines excluded: the live engines already hold them), the time per band
+(timed apart from the trace), and the estimate (`estimate_export`) beside it.
+`--export-bands N` sets the bands (default 3, 5 ns thick, abutting).
 
 Each site is timed north-up and laid at each further bearing (final review
 I1): the lattice pixel is the cell at any bearing, but a rotated grid samples
@@ -394,6 +404,123 @@ def dense_rows(targets_m: list[float]) -> list[dict]:
     return rows
 
 
+EXPORT_GRIDS = 10
+EXPORT_SIZE_M = 20.0
+EXPORT_STEP_M = 21.0
+EXPORT_COLUMNS = 3
+#: Eight grids 4-10 degrees off north and two (5 and 8) near 90, as the walkthrough site is.
+EXPORT_AZIMUTHS = (4.0, 5.0, 6.0, 7.0, 90.0, 8.0, 9.0, 90.0, 10.0, 4.0)
+
+
+def export_site_lines(samples: int, tpm: float) -> list[tuple]:
+    """`[(grid_id, origin, azimuth, lines), ...]`: synthetic lines laid like real ones.
+
+    Lines run along each grid's y at 0.5 m, `tpm` traces a metre, a smooth
+    field under noise. Each grid is turned about its own origin, then moved so
+    its extent starts at its cell of a three-column block.
+    """
+    from nsgeo.slices import CubeFrame, PreparedLine, slice_extent
+
+    rng = np.random.default_rng(0)
+    n_traces = int(round(EXPORT_SIZE_M * tpm))
+    depth = np.linspace(1.0, 2.0, samples)[:, None]
+    dt = 110.864 / 512
+    out = []
+    for g in range(EXPORT_GRIDS):
+        azimuth = EXPORT_AZIMUTHS[g]
+        probe = CubeFrame((0.0, 0.0), azimuth, 0.1, 200, 200, "EPSG:32616")
+        x0, y0, _, _ = slice_extent(probe)
+        col, row = g % EXPORT_COLUMNS, g // EXPORT_COLUMNS
+        origin = (
+            500_000.0 + col * EXPORT_STEP_M - x0,
+            4_000_000.0 + row * EXPORT_STEP_M - y0,
+        )
+        x_hat, y_hat = CubeFrame(origin, azimuth, 0.1, 1, 1, "EPSG:32616").axes()
+        along = np.linspace(0.01, EXPORT_SIZE_M - 0.01, n_traces)
+        lines = []
+        for i in range(int(round(EXPORT_SIZE_M / SPACING))):
+            across = SPACING / 2 + i * SPACING
+            coords = np.asarray(origin) + across * x_hat + along[:, None] * y_hat
+            field = np.sin(0.5 * along + g)[None, :] + 0.1 * across
+            data = depth * field + 0.5 * rng.normal(size=(samples, n_traces))
+            lines.append(PreparedLine(f"G{g}-{i}", data.astype(np.float32), dt, 0.0, coords))
+        out.append((f"G{g}", origin, azimuth, tuple(lines)))
+    return out
+
+
+def export_spec(
+    layout: list[tuple], cell: float, pixel: float, method: str, n_bands: int, smooth: float = 0.0
+):
+    import math
+
+    from nsgeo.slices import CubeFrame, FinishSettings, SiteLattice, ZAxis, slice_extent
+    from nsgeo_qgis.export_pipeline import ExportGrid, ExportSpec
+    from nsgeo_qgis.slices_plan import DEFAULT_MAX_DISTANCE_SPACINGS, SEARCH_RADIUS_SPACINGS
+
+    crs = "EPSG:32616"
+    finish = FinishSettings(
+        method,
+        DEFAULT_MAX_DISTANCE_SPACINGS * SPACING,
+        SEARCH_RADIUS_SPACINGS * SPACING,
+        smooth,
+        smooth,
+    )
+    grids = []
+    for grid_id, origin, azimuth, lines in layout:
+        n = int(math.ceil(EXPORT_SIZE_M / cell))
+        frame = CubeFrame(origin, azimuth, cell, n, n, crs)
+        samples = lines[0].data.shape[0]
+        z = ZAxis.from_range(1.0, (samples - 2) * lines[0].dt_ns, lines[0].dt_ns)
+        grids.append(ExportGrid(grid_id, lines, frame, z, finish, SPACING, 1.0))
+    lattice = SiteLattice.covering([slice_extent(g.frame) for g in grids], pixel, crs)
+    windows = tuple((2.0 + THICKNESS_NS * k, THICKNESS_NS) for k in range(n_bands))
+    return ExportSpec(tuple(grids), lattice, windows, "edge", False)
+
+
+def export_rows(
+    settings: list[tuple[float, float]], samples: int, tpm: float, n_bands: int, smooth: float = 0.0
+):
+    import tracemalloc
+
+    from nsgeo_qgis.export_pipeline import estimate_export, run_export
+
+    layout = export_site_lines(samples, tpm)
+    rows = []
+    for cell, pixel in settings:
+        for method in ("kriging", "min_curvature"):
+            spec = export_spec(layout, cell, pixel, method, n_bands, smooth)
+            estimate = estimate_export(spec)
+            stamps = [time.perf_counter()]
+            for _ in run_export(spec, should_stop=lambda: False, progress=lambda *_: None):
+                stamps.append(time.perf_counter())
+            setup_ms = ms(stamps[1] - stamps[0]) if len(stamps) > 1 else 0.0
+            per_band = [ms(b - a) for a, b in zip(stamps[1:], stamps[2:])]
+            tracemalloc.start()
+            for _ in run_export(spec, should_stop=lambda: False, progress=lambda *_: None):
+                pass
+            peak = tracemalloc.get_traced_memory()[1]
+            tracemalloc.stop()
+            rows.append(
+                {
+                    "cell": cell,
+                    "pixel": pixel,
+                    "method": method,
+                    "lattice": f"{spec.lattice.width} x {spec.lattice.height}",
+                    "pixels": spec.lattice.n_pixels,
+                    "cells": sum(g.frame.n_cells for g in spec.grids),
+                    "first_band_ms": ms(stamps[1] - stamps[0]),
+                    "band_ms": statistics.median(per_band) if per_band else float("nan"),
+                    "peak_mb": peak / 1e6,
+                    "held_mb": estimate.held_bytes / 1e6,
+                    "parts": {k: v / 1e6 for k, v in estimate.per_band.items()},
+                    "file_mb": estimate.file_bytes / 1e6,
+                    "setup_ms": setup_ms,
+                }
+            )
+            print(f"done: export {cell:g} / {pixel:g} {method}", file=sys.stderr, flush=True)
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--samples", type=int, default=128, help="samples per trace (default 128)")
@@ -416,8 +543,47 @@ def main() -> int:
         default=None,
         help="covered pixels (millions): compose cost with grids filling the lattice at 30 deg",
     )
+    ap.add_argument(
+        "--export",
+        type=float,
+        nargs=2,
+        action="append",
+        metavar=("CELL", "PIXEL"),
+        default=None,
+        help="measure the export pipeline at this cell and pixel (metres); repeatable",
+    )
+    ap.add_argument(
+        "--export-smooth",
+        type=float,
+        default=0.0,
+        help="smoothing (metres, both axes) for the export rows (default 0, none)",
+    )
+    ap.add_argument("--export-bands", type=int, default=3, help="bands per export (default 3)")
     ap.add_argument("--workdir", type=Path, default=None, help="where to write the lines")
     args = ap.parse_args()
+
+    if args.export:
+        rows = export_rows(
+            [(c, p) for c, p in args.export],
+            args.samples,
+            args.tpm,
+            args.export_bands,
+            args.export_smooth,
+        )
+        print(
+            "| cell (m) | pixel (m) | method | lattice | grid cells (M) "
+            "| first band incl. setup (s) | band, median (s) | peak (MB) | estimate (MB) "
+            "| estimate parts (MB) |"
+        )
+        print("|---|---|---|---|---|---|---|---|---|---|")
+        for r in rows:
+            parts = ", ".join(f"{k} {v:.0f}" for k, v in r["parts"].items() if k != "lines")
+            print(
+                f"| {r['cell']:g} | {r['pixel']:g} | {r['method']} | {r['lattice']} "
+                f"| {r['cells'] / 1e6:.1f} | {r['first_band_ms'] / 1000:.1f} "
+                f"| {r['band_ms'] / 1000:.1f} | {r['peak_mb']:.0f} | {r['held_mb']:.0f} | {parts} |"
+            )
+        return 0
 
     if args.dense:
         print("| covered (M) | lattice (M) | compose (ms) | transient (MB) | gathers (MB) |")

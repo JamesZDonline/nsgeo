@@ -526,13 +526,83 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
    full detail. Past a size it draws a preview at a coarser pixel and says so in
-   the panel. An export needs full detail, and refuses to go ahead at a cell
-   that would not fit.
+   the panel. An export is not limited by the preview: it works out its own
+   cells at the size you choose (see step 6).
 5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
-   many traces fell in each cell, rather than the amplitude.
+   many traces fell in each cell, rather than the amplitude. The number in a cell
+   is how many traces fell in it. A blank cell had no line through it. What counts
+   as a low number depends on the cell size: at a fine cell, one or two traces a
+   cell is normal, because a cell holds only a few traces along the line. Compare a
+   cell with its neighbours, or with the line spacing and the cell size, and
+   look for the cells that stand out as low.
+   Use it to spot gaps and thin coverage between lines before you trust a slice
+   in that spot. With **Show coverage** ticked, an export also writes the
+   counts as a second file beside it, named like the export with
+   `_coverage` added (`name_coverage.tif`), and adds it to the map.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save
    site** afterwards so the site remembers it). **Export GeoTIFF…** writes every
-   slice as one multi-band GeoTIFF and adds it to the map.
+   slice as one multi-band GeoTIFF and adds it to the map. It works for **This
+   grid** and for **Whole site**, and opens a dialog first:
+   - **Save to** is the file. **…** lets you browse for it.
+   - **Export cell** is how finely nsgeo works out each grid for the file. It
+     starts at the cell you are viewing and can go no finer than every grid
+     allows. A finer cell gives more detail, and more memory and time.
+   - **Export pixel** is how finely the file is written. It starts at the cell
+     and can be finer, never coarser. A finer pixel makes a smoother picture
+     when you zoom in, in any GIS, without working out the grids again.
+   - **What will be written** lists the bands, the picture size, the grids, how
+     the slices are made, the normalisation, the memory the export needs (and
+     the most it is allowed) and the file size.
+   - **Export** is greyed out, with the reason shown in the box, when the
+     export would need more memory than it is allowed, or more free disk space
+     than there is. The message says which cell or pixel would fit.
+   - If the file, or its style or coverage file, is already open in the project,
+     the dialog asks whether to **Replace** it. The old layer comes off the
+     map while the export runs. If you cancel the export, or it fails, the old
+     layer is put back from the file, which is untouched, with its time
+     slider setting where the file records it (files from older versions do
+     not, and nsgeo says so). If the picture was written but its coverage file
+     could not be, nsgeo says so, adds the new layer and puts back only the
+     coverage layer.
+
+   The export runs in the background. Its progress, the band and the grid it is
+   on, shows in QGIS's task list at the bottom right, and you can keep working
+   meanwhile. Cancel it from the task list. A cancelled or failed export leaves
+   any file already there as it was. Only one export runs at a time, and closing
+   the site cancels the one running.
+
+   At a finer cell, normalisation is measured again on the export's own data,
+   so its factors can differ slightly from the ones on screen. Manual
+   multipliers carry over as you typed them.
+
+   **Stepping through depths.** With nsgeo installed and enabled, an exported
+   file steps one band at a time in QGIS's Temporal Controller, however it gets
+   into the project: straight after an export, when you reopen a saved project,
+   or when you add it yourself with **Layer → Add Layer → Add Raster Layer**.
+   Layers already in the project when you enable nsgeo are set up too. nsgeo
+   reads the band times from the file and sets the controller to match. Open it
+   with **View → Panels → Temporal Controller**, or its clock button, then press
+   play or drag the slider. Adding one of these files replaces whatever the
+   controller was set to.
+
+   If you point a layer at its file again after opening a project (**Handle
+   Unavailable Layers**, or **Change Data Source**), it picks its band times up
+   the next time you open the project, or when you remove it and add it again.
+
+   The times it shows are nanoseconds written as seconds after midnight on
+   1 January 1970, so 00:00:05 is 5 ns. Times before 0 ns show as the last
+   seconds of 31 December 1969, so -1.8 ns is 23:59:58.
+
+   Where nsgeo is not installed and enabled, the file carries no time setting
+   for QGIS. A project saved with nsgeo and opened without it keeps QGIS's own
+   band times, rounded to whole seconds, so the controller there skips some
+   bands and repeats others. In both cases step through the bands with the band
+   choice in the layer's **Symbology**, or with another GIS's band list.
+
+   Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
+   ending. Any QGIS project that opens the file draws it with the same colours,
+   stretch and smooth drawing when zoomed in. Other GIS software, ArcGIS and
+   the rest, reads the values but chooses its own colours.
 
 ### Step 8: Draw a cut
 

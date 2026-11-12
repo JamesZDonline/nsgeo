@@ -134,7 +134,6 @@ from nsgeo_qgis.slices_plan import (
     format_bytes,
     limit_windows,
     preview_note,
-    site_export_refusal,
 )
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
@@ -248,7 +247,6 @@ class SiteEngine(QObject):
         self._lattice: SiteLattice | None = None
         self._full_lattice: SiteLattice | None = None
         self._preview_note: str | None = None
-        self._export_refusal: str | None = None
         #: The most pixels the site is drawn at; past it, a coarser preview.
         self.max_pixels: int = SITE_MAX_PIXELS
         #: The most pixels the grids' windows hold together at the drawn pitch.
@@ -290,16 +288,13 @@ class SiteEngine(QObject):
 
     @property
     def is_preview(self) -> bool:
-        return self._export_refusal is not None
+        """Whether the drawn lattice is a coarser stand-in for the full one."""
+        lattice, full = self._lattice, self._full_lattice
+        return lattice is not None and full is not None and lattice.pixel != full.pixel
 
     @property
     def preview_note(self) -> str | None:
         return self._preview_note
-
-    @property
-    def export_refusal(self) -> str | None:
-        """Why the site cannot be exported, set exactly when it is a preview."""
-        return self._export_refusal
 
     @property
     def ready_grids(self) -> tuple[str, ...]:
@@ -677,7 +672,7 @@ class SiteEngine(QObject):
         """Store the site resolution and re-derive the geometry.
 
         A lattice over `max_pixels` is drawn at a coarser pixel instead
-        (`is_preview`), and the site refuses to export until it fits.
+        (`is_preview`); an export has its own lattice (`lattice_at`).
         """
         self._resolution = resolution
         try:
@@ -698,7 +693,6 @@ class SiteEngine(QObject):
         self._lattice = None
         self._full_lattice = None
         self._preview_note = None
-        self._export_refusal = None
         res = self._resolution
         ready = self.ready_grids
         if res is None or not ready or not self.session.is_open:
@@ -709,7 +703,6 @@ class SiteEngine(QObject):
         full = SiteLattice.covering(boxes, res.cell, site_crs)
         lattice = full
         note: str | None = None
-        refusal: str | None = None
         if full.n_pixels > self.max_pixels or covered_pixels(boxes, res.cell) > self.max_covered:
             lattice = fitting_lattice(boxes, res.cell, site_crs, self.max_pixels, self.max_covered)
             width_m, height_m = full.width * full.pixel, full.height * full.pixel
@@ -720,7 +713,6 @@ class SiteEngine(QObject):
                 extents, res.cell, site_crs, self.max_pixels, self.max_covered
             )
             note = preview_note(lattice.pixel, res.cell, width_m, height_m, finest, stretching)
-            refusal = site_export_refusal(res.cell, width_m, height_m, finest, stretching)
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
             [b for b in bounds.values() if b is not None], res.t0_ns, res.t1_ns, res.dz_ns
@@ -741,7 +733,6 @@ class SiteEngine(QObject):
         self._lattice = lattice
         self._full_lattice = full
         self._preview_note = note
-        self._export_refusal = refusal
 
     def _apply_resolution(self, grid_id: str, want: Resolution | None) -> None:
         """Give an engine its resolution, unless it is already binned at exactly it.
@@ -761,6 +752,18 @@ class SiteEngine(QObject):
         if engine.frame == frame and engine.z == z:
             return
         engine.set_resolution(want)
+
+    def lattice_at(self, cell: float, pixel: float) -> SiteLattice:
+        """The lattice an export at `cell` and `pixel` writes on: the ready grids'
+        frames at `cell`, in the site's CRS, anchored on multiples of `pixel`.
+
+        At the live cell and pixel of a site that is not a preview it is the
+        drawn lattice. Raises when no grid is ready."""
+        ready = self.ready_grids
+        if not ready:
+            raise RuntimeError("no site geometry: prepare the grids first")
+        extents = self._grid_extents(ready, cell)
+        return SiteLattice.covering(list(extents.values()), pixel, self._site_crs())
 
     def _site_crs(self) -> str:
         """Spec 4.7: the site's CRS is the one its GeoPackage uses, `grids[0].crs`."""
@@ -1392,7 +1395,6 @@ class SiteEngine(QObject):
         self._lattice = None
         self._full_lattice = None
         self._preview_note = None
-        self._export_refusal = None
         self._drop_caches()
         self._seen = {}
         self._redraw_ms = None
