@@ -54,12 +54,22 @@ What M19 can reuse, and what it cannot.
   `nsgeo/destagger/`) finds the destagger from the data. It compares each line with the mean of
   its opposite-direction neighbours. Its input, `MeasureLine`, carries GPR envelope bins and a
   `DztHeader`. `traces_per_metre` comes from the `DztHeader`, so placement is GPR-shaped at the
-  type level, though not in its maths.
-- **Slices.** `PreparedLine` (`nsgeo/slices/binning.py`) is `(n_samples, n_traces)` data plus
-  `(n_traces, 2)` world coordinates. Binning, interpolation (`interpolate.py`, `curvature.py`:
-  None, IDW, kriging, minimum curvature, with a max distance), directional smoothing (`smooth.py`),
-  `finish_slice`, the pixel rule (`resample.py`) and north-up GeoTIFF export (`slice_export.py`)
-  all work on a 2-D field of cells. None of them cares what the numbers are.
+  type level, though not in its maths. Measure's front end is GPR-specific beyond `MeasureLine`:
+  it excludes lines by `traces_per_metre` and groups them by time settings (`measure.py`), keeps
+  only bins after 4 ns and wants 8 of them (`profiles.time_window`), divides each bin by its median
+  over all lines (`profiles.py`, which is about 0 on a zeroed mag grid), reads DZT samples
+  (`destagger_job.py`), and has `MIN_CORRELATION` and `CLEAR_RATIO` tuned on GPR. Its core
+  (`pair_curves`, `line_curves`, `grid_peak`) carries over as it is.
+- **Slices.** Binning is 3-D: `PreparedLine` (`nsgeo/slices/binning.py`) is `(n_samples, n_traces)`
+  data with `dt_ns`/`t0_ns` plus `(n_traces, 2)` world coordinates, and `plan_line(line, frame, z)`
+  resamples in time onto a `ZAxis`. GeoTIFF export lives in the plugin (`nsgeo_qgis/slice_export.py`,
+  `site_export.py`): it takes a `SliceEngine` or `SiteEngine` and writes time-window bands with
+  temporal metadata. What is truly 2-D, and indifferent to what the numbers are: interpolation
+  (`interpolate.py`, `curvature.py`: None, IDW, kriging, minimum curvature, with a max distance),
+  directional smoothing (`smooth.py`), `finish_slice`, the pixel rule (`resample.py`) and
+  `display.to_north_up`. So mag reuses the finish and the pixel rule as they are. It needs its own
+  2-D binning (or a one-level use of the 3-D one), and a one-band GeoTIFF writer factored out of
+  the export code rather than copied (this counts in M19a's size).
 - **Whole site** (`nsgeo/slices/site.py`, `site_engine.py`) composes grids onto one lattice and
   can normalise them: `find_seams` finds where grids meet, and `edge_match_solve` solves one gain
   per grid by weighted least squares over the seams. The solve is in log gains, so it is
@@ -103,13 +113,16 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
 - **Missing data is written as 0.00.**
   - example3 was only partly walked. Every row ends in a run of zeros, 82 to 222 readings long.
   - example4 and example6 have interior runs of exactly 12 zeros (1.5 m) on both rows of one pass.
-  - Genuine 0.00 readings also occur, as single readings where the field crosses zero: 3 to 34 per
-    grid, and never more than 2 in a row.
-- **Saturation.** The instrument was on its 100 nT range, and the limit is not symmetric. Negative
-  readings pin at exactly −100.00 (example3 and example6 once each, example5 13 times). Positive
-  readings top out just above 99: example5 has 12 at 99.16–99.17, and example2 has 99.00 and 99.01.
-  example5's 25 pinned readings include a run of 8 (1 m) along one traverse, which is an iron
-  object.
+  - Genuine 0.00 readings also occur where the field crosses zero: 3 to 15 per grid, and never
+    more than 2 in a row.
+- **Saturation.** The instrument was on its 100 nT range. Negative readings pin at exactly
+  −100.00. Positive readings clip a little below 100, and the level differs between grids: 99.0
+  in example2, 99.1–99.2 in example5.
+- **No pinned reading is a lone spike.** Every one is the clipped peak of a real anomaly about
+  1 m wide: example3 row 14 runs −20.5, −72.5, **−100**, −92.2, −45.9; example6 row 32 and
+  example2 row 24 are the same shape. All 25 of example5's are one iron dipole across four
+  traverses (rows 48–51, columns 220–232): runs of 4 and 8 pinned at +99.1–99.2, then 6 and 7
+  at −100. The builder check found only about 5 genuine single-reading spikes in all six files.
 
 ## 4. Decisions
 
@@ -189,10 +202,10 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     along the traverses (the reason #47's design dropped per-line brightness matching).
 12. **Despike** compares each reading with the median of a window along its traverse. A reading
     further than a threshold from that median, measured in median absolute deviations, is replaced
-    by the median. The window and threshold can be changed, with defaults the builder sets from the
-    real files. Readings pinned at the range limit (−100.00 nT, and about +99.2 nT on the positive
-    side, on the 100 nT range; §3) are always replaced when the window can span them. A saturated run longer than the window, such as
-    example5's 1 m iron object, stays as data, and the colour range clips it.
+    by the median. The window and threshold can be changed. **What despike is for is the author's
+    call (§5):** removing glitches while keeping iron anomalies whole, or suppressing iron. §3
+    shows that pinned readings are clipped anomaly peaks, not spikes, so the first draft's rule
+    (always replace pinned readings) would notch real anomalies and is withdrawn.
 13. **Normalise across grids is additive.** The same seams (`find_seams`) and the same
     weighted least squares over them as `edge_match_solve`, solving one **offset** per grid in nT
     instead of one gain. It is off by default and is a Mag panel choice, like the GPR Whole site
@@ -212,9 +225,29 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     as before.
 18. **Raw files are read where they are,** stored relative to the survey file like DZT paths. They
     are never rewritten. The cleanup is a recipe, not an edited copy.
+19. **One file per mag grid.** A Grad601 grid downloads as one file, and zero-the-grid, destripe
+    groups and Measure all assume one sitting. "An existing mag grid" at import means one laid out
+    in advance and still empty. Importing onto a grid that already has a file asks, then replaces
+    it. Reassigning a file moves it to an empty mag grid only.
+20. **The setup can be changed after import** (TerraSurveyor's "orient the grids", which the
+    author named). **Change setup…** on a mag file re-derives every traverse's placement from the
+    new setup. Typed destagger and stretch stay with their traverse (destagger is measured along
+    the traverse's own travel, so it keeps its meaning when the start corner changes). The survey
+    file therefore stores each file's setup plus per-traverse corrections, not only finished
+    placements.
+21. **Mag settings belong to the site, and the mag engine to the session.** The recipe, finish and
+    normalisation are saved in the survey file from M19a. The mag strip reads every mag grid with
+    its saved settings, whether or not the Mag panel is open and whichever grids the panel's
+    preview shows.
 
-## 5. Not decided (the author's, when it comes up)
+## 5. Not decided (the author's)
 
+- **What despike is for** (call 12): glitches only, keeping iron whole, or suppressing iron.
+  Asked 2026-11-12.
+- **Where example1–6 lie, and which real survey has a GPR grid over a mag grid** (§10). Asked
+  2026-11-12. The builder check's edge test suggests example1–3 are neighbours (example2's
+  traverse ends match example3's starts, r = 0.8; example1's last traverses match example2's
+  first, r = 0.46).
 - Whether mag traverses should be drawn on the map after all (call 7).
 - The Mag panel's layout. A lavish mockup is reviewed before M19a is planned (call 8).
 
@@ -261,7 +294,7 @@ The recipe runs in this order, on readings, before binning:
 
 1. **Zero the grid** (on): grid median to 0 nT.
 2. **Destripe** (off): each sensor-and-direction group to median 0, or each traverse to median 0.
-3. **Despike** (on, defaults from the real files): see call 12.
+3. **Despike** (default and behaviour per the author's answer to call 12).
 
 Destagger is not a recipe step. It is placement, in Edit lines (6.4). Resampling and smoothing are
 the finish (6.2). Normalisation is a site choice (6.5). That matches the author's order (decision
@@ -275,9 +308,11 @@ never changed.
 
 - Edit lines on a mag grid lists its traverses (call 4). A typed grid value and per-traverse values
   work from M19a, because they are placement.
-- **Measure** (M19b) needs the mag readings in place of GPR envelope bins. The comparison itself is
-  unchanged: each traverse against the mean of its opposite-direction neighbours. Measure's
-  "neighbours" are adjacent traverses. With two sensors, adjacent rows come from different passes
+- **Measure** (M19b) gets a mag front end: line selection, the comparison profile (readings in
+  place of GPR envelope bins, with no time window and no per-bin median normalisation), and its
+  thresholds re-tuned on the real files. The core (`pair_curves`, `line_curves`, `grid_peak`) is
+  reused, so the comparison is still each traverse against the mean of its opposite-direction
+  neighbours. Measure's "neighbours" are adjacent traverses. With two sensors, adjacent rows come from different passes
   walked in opposite directions (§3), so the existing rule applies as it is. The builder checks
   that Measure on the real files finds about ±0.25 m per traverse (§3's ±4 readings between
   neighbours, halved).
@@ -318,7 +353,9 @@ one profile axis) that later integration can build on.
 | **M19b** | Cleanup recipe (zero, destripe, despike); Measure on mag; additive normalisation across grids | M |
 | **M19c** | The mag strip in the Profile panel | M |
 
-Each chunk gets its own plan, build, walkthrough and merge.
+Each chunk gets its own plan, build, walkthrough and merge. M19a is planned after #180 merges,
+against #180's real interface, because the mag layer's colours and the strip's nT range (call 16)
+both go through it.
 
 ## 8. Goals, non-goals, anti-goals
 
@@ -365,11 +402,15 @@ data). The six `.dat` files, in the local real-data tests, skipped when absent:
 - example3's trailing runs and example4's and example6's interior 12-zero blocks become no data,
   while every run of 1–2 zeros stays as data;
 - after destripe, the spread of the four `row mod 4` group medians falls to near 0;
-- despike removes isolated pinned readings, and example5's 8-reading run survives at the default
-  window;
+- despike behaves as the author's answer to call 12 says, checked on the clipped peaks and
+  example5's dipole that §3 names;
 - Measure on each grid finds a destagger near ±0.25 m, and after it is applied, neighbouring rows'
   best lag (§3's method) falls to about 0;
 - a mosaic of two grids placed side by side has a seam the additive edge match closes.
+
+The real files live only in the main checkout's `packages/nsgeo-core/tests/data/local/`, which a
+worktree does not have. The plan links them into the build worktree, and the real-data tests are
+confirmed to have run, not skipped, before a chunk is called green.
 
 Synthetic fixtures only for what the files do not contain: a parallel-walked grid, one sensor, a
 file that does not fit its grid.
