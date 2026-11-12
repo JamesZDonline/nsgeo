@@ -439,6 +439,20 @@ class SliceEngine(QObject):
         what the next `_ensure_plans()` will plan."""
         return tuple(self._lines)
 
+    def line_zero(self, key: str) -> float | None:
+        """The radar-clock time a prepared line's axis calls 0, or None if
+        that line is not prepared here."""
+        for line in self._lines:
+            if line.key == key:
+                return line.zero_ns
+        return None
+
+    def median_zero(self) -> float | None:
+        """The median of the prepared lines' zeros, or None with nothing prepared."""
+        if not self._lines:
+            return None
+        return float(np.median([line.zero_ns for line in self._lines]))
+
     def prepared_z_bounds(self) -> tuple[float, float] | None:
         """The two-way time range EVERY prepared line covers, or None.
 
@@ -854,6 +868,7 @@ class SliceEngine(QObject):
                             dt_ns=result.dt_ns,
                             t0_ns=result.t0_ns,
                             coords=coords,
+                            zero_ns=float(result.zero_ns),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 -- one bad line must not

@@ -124,6 +124,23 @@ class StepStack:
             step, enabled = self._entries[i]
             self._cache.append(step.apply(previous) if enabled else previous)
 
+    def _time_zero_indices(self) -> list[int]:
+        return [i for i, (step, on) in enumerate(self._entries) if on and step.name == "time_zero"]
+
+    def sets_time_zero(self) -> bool:
+        """Whether an enabled `time_zero` is in the stack."""
+        return bool(self._time_zero_indices())
+
+    def zero_ns(self) -> float:
+        """The radar-clock time `result()` calls 0.
+
+        Runs only up to the last enabled `time_zero`; the steps after it never
+        run. Without one it is the source's, or 0.0 with no source."""
+        indices = self._time_zero_indices()
+        if not indices:
+            return self._source.zero_ns if self._source is not None else 0.0
+        return self.intermediate(indices[-1]).zero_ns
+
     def result(self) -> Radargram:
         if self._source is None:
             raise ValueError("stack has no source radargram")

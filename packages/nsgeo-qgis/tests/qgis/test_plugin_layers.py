@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import sys
 from pathlib import Path
 
 import nsgeo_qgis.layers as layers_module
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 from nsgeo_qgis.layers import (
@@ -2093,6 +2096,291 @@ def test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact(
     assert [f["seq"] for f in got] == [NULL, NULL]
     assert not got[0].geometry().isNull()
     layers2.detach()
+
+
+def test_a_pre_time_zero_picks_table_migrates_with_its_rows_intact(qgis_app, tmp_path, message_log):
+    """#97 adds `zero_ns` to `picks`, the one table that cannot be
+    regenerated: the two authored rows keep every value, with `zero_ns` NULL
+    (the radar clock), and opening the site does not dirty it."""
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    old_spec = [(name, kind) for name, kind in TABLES["picks"][1] if name != "zero_ns"]
+    assert len(old_spec) == len(TABLES["picks"][1]) - 1
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    rows = []
+    for i, (trace, time_ns) in enumerate([(4, 11.0), (33, 26.5)]):
+        f = QgsFeature(old.fields())
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0 + i, 700.0 + i)))
+        f["line_key"] = "raw/FILE__001.DZT"
+        f["trace"] = trace
+        f["time_ns"] = time_ns
+        f["depth_m"] = 0.5 + i
+        f["note"] = f"note {i}"
+        rows.append(f)
+    assert old.dataProvider().addFeatures(rows)[0]
+    del old
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert names == [name for name, _ in TABLES["picks"][1]]
+    assert names[names.index("time_ns") + 1] == "zero_ns"
+    got = sorted(layers2.layers["picks"].getFeatures(), key=lambda f: f["trace"])
+    assert [(f["trace"], f["time_ns"], f["note"]) for f in got] == [
+        (4, 11.0, "note 0"),
+        (33, 26.5, "note 1"),
+    ]
+    assert [f["zero_ns"] for f in got] == [NULL, NULL]
+    assert not got[0].geometry().isNull()
+    assert [p.zero_ns for p in again.picks_for("raw/FILE__001.DZT")] == [None, None]
+    assert [p.time_ns for p in again.picks_for("raw/FILE__001.DZT")] == [11.0, 26.5]
+    assert not again.dirty
+    assert not _criticals(message_log)
+    layers2.detach()
+
+
+def _criticals(message_log):
+    return [m for m in message_log if "could not move the picks" in str(m)]
+
+
+KEY1 = "raw/FILE__001.DZT"
+KEY2 = "raw/FILE__002.DZT"
+
+
+def _loaded_pick(session, key=KEY1, trace=30, time_ns=20.0):
+    """Open `key`, load its profiles and author a pick on the radar clock."""
+    session.open_line(key)
+    session.set_profiles(key, session.line_for_key(key).load())
+    return session.add_pick(key, trace, time_ns)
+
+
+def test_adding_time_zero_moves_a_rows_time_but_not_its_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    zero = session.line_zero(KEY1)
+    assert zero != 0.0
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] == pytest.approx(20.0 - zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+    model = session.resolved_velocity(KEY1)
+    assert row["depth_m"] == pytest.approx(model.depth_at([20.0 - zero])[0])
+    assert layers.follow_zero(KEY1, zero) == 0  # nothing left to move
+
+
+def test_changing_the_threshold_keeps_picks_on_their_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.replace_step(KEY1, 0, build_step("time_zero", mode="sample", sample=60))
+    zero = session.line_zero(KEY1)
+    assert zero == pytest.approx(-11.0864 + 60 * 0.216531, abs=1e-3)
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+
+
+def test_disabling_the_time_zero_step_keeps_a_pick_on_its_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert session.line_zero(KEY1) != 0.0
+    session.set_step_enabled(KEY1, 0, False)
+    assert session.line_zero(KEY1) == 0.0
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+    assert row["time_ns"] == pytest.approx(20.0 - row["zero_ns"])
+    model = session.resolved_velocity(KEY1)
+    assert row["depth_m"] == pytest.approx(model.depth_at([row["time_ns"]])[0])
+    assert row["time_ns"] == pytest.approx(20.0)  # the radar clock again
+
+
+def test_applying_a_stack_to_the_grid_moves_picks_on_lines_not_open(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))  # radar clock, zero NULL
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")
+    zero = session.line_zero(KEY2, load=True)
+    assert zero == pytest.approx(-0.0433, abs=1e-3)
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] == pytest.approx(15.0 - zero)
+
+
+def test_a_hover_load_never_rewrites_picks(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.append_step(KEY2, build_step("time_zero", mode="sample", sample=51))
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    before = [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ]
+    session.set_preview(KEY2, 5)
+    assert session.preview_key == KEY2 != session.current_key
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())
+    after = [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ]
+    assert after == before
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    # a stale hover load: the pointer left (preview cleared) before it landed
+    session.set_preview(KEY2, 5)
+    session.clear_preview()
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())
+    assert [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ] == before
+
+
+def test_promoting_a_hover_loaded_line_follows_its_zero(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.append_step(KEY2, build_step("time_zero", mode="sample", sample=51))
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())  # the hover load
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    session.open_line(KEY2)  # samples cached: no second load
+    zero = session.line_zero(KEY2)
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_applying_a_stack_to_a_previewed_line_moves_its_picks(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(session.line_zero(KEY2, load=True))
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_a_time_typed_in_edit_mode_is_not_shifted_by_a_new_zero(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, picks.fields().indexOf("time_ns"), 25.0)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert picks.commitChanges()
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] == 25.0
+    assert row["zero_ns"] == pytest.approx(0.0)  # still measured from its stored zero
+
+
+def test_a_channel_switch_moves_picks_to_the_new_channels_zero(populated):
+    session, layers, _ = populated
+    p0 = session.line_for_key(KEY1).load()[0]
+    p1 = dataclasses.replace(p0, data=np.roll(p0.data, 10, axis=0))
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, [p0, p1])
+    session.append_step(KEY1, build_step("time_zero", mode="first_break", threshold=0.25))
+    pick = session.add_pick(KEY1, 30, 20.0)
+    radar = pick.radar_ns
+    first = _rows(layers)[KEY1]["zero_ns"]
+    session.set_channel(KEY1, 1)
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(first + 10 * 0.216531, abs=1e-3)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(radar)
+
+
+def test_a_line_that_cannot_be_read_leaves_its_picks_alone(populated, message_log):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    path = session.line_for_key(KEY2).path
+    path.rename(path.with_suffix(".gone"))
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")  # must not raise
+    row = _rows(layers)[KEY2]
+    assert (row["time_ns"], row["zero_ns"]) == (15.0, NULL)
+    assert not _criticals(message_log)
+
+
+def test_follow_zero_skips_rows_with_no_trace_or_time(populated):
+    session, layers, _ = populated
+    _add_row(layers, 1.0, 2.0, line_key=KEY1, time_ns=5.0)  # no trace
+    _add_row(layers, 1.0, 2.0, line_key=KEY1, trace=3)  # no time
+    assert layers.follow_zero(KEY1, -0.5) == 0
+    rows = list(layers.layers["picks"].getFeatures())
+    assert sorted(str(f["time_ns"]) for f in rows) == sorted([str(NULL), "5.0"])
+    assert all(f["zero_ns"] == NULL for f in rows)
+
+
+@needs_real_data
+def test_on_a_real_line_adding_time_zero_moves_a_pick_by_its_first_break(qgis_app, tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        session.add_grid(Grid("A", (530000.0, 4300000.0), 0.0, 5.0, 12.0, "EPSG:32616", 0.5))
+        session.add_lines([Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, 1))])
+        key = session.keys()[0]
+        session.open_line(key)
+        session.set_profiles(key, session.line_for_key(key).load())
+        trace = session.line_for_key(key).n_traces // 2
+        session.add_pick(key, trace, 20.0)
+        old = _rows(layers)[key]
+        old_depth = old["depth_m"]
+        session.append_step(key, build_step("time_zero"))
+        row = _rows(layers)[key]
+        assert row["time_ns"] == pytest.approx(20.0 + 0.4764, abs=1e-3)
+        assert row["zero_ns"] == pytest.approx(-0.4764, abs=1e-3)
+        assert row["depth_m"] > old_depth
+    finally:
+        layers.detach()
+        project.clear()
 
 
 def test_the_layers_register_themselves_as_the_sessions_pick_store(populated):

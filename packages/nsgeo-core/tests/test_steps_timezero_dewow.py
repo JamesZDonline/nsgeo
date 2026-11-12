@@ -5,6 +5,7 @@ import nsgeo.processing.timezero  # noqa: F401
 import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, build_step
+from nsgeo.processing.timezero import first_break_ns, first_break_row, sets_time_zero, time_base_of
 
 
 def make(n_samples=100, n_traces=20, dt_ns=0.2, t0_ns=0.0, fill=0.0):
@@ -19,12 +20,14 @@ def test_time_zero_by_sample_crops_rows():
     assert out.n_samples == 83
 
 
-def test_time_zero_updates_t0_consistently_with_dropped_rows():
-    """The invariant that makes returning a whole Radargram worthwhile."""
+def test_time_zero_makes_its_row_read_zero_and_records_its_radar_time():
     rg = make(n_samples=100, dt_ns=0.25, t0_ns=1.0)
     out = build_step("time_zero", mode="sample", sample=8).apply(rg)
-    assert out.t0_ns == pytest.approx(1.0 + 8 * 0.25)
-    assert out.times_ns()[0] == pytest.approx(3.0)
+    assert out.n_samples == 92
+    assert out.t0_ns == 0.0
+    assert out.times_ns()[0] == 0.0
+    assert out.zero_ns == pytest.approx(1.0 + 8 * 0.25)
+    assert out.zero_set is True
 
 
 def test_time_zero_first_break_finds_the_onset():
@@ -45,11 +48,49 @@ def test_time_zero_first_break_ignores_leading_zero_traces():
     assert out.n_samples == 160
 
 
-def test_time_zero_sample_zero_is_a_no_op():
+def test_time_zero_at_sample_zero_still_sets_the_clock():
     rg = make(n_samples=50, t0_ns=2.0)
     out = build_step("time_zero", mode="sample", sample=0).apply(rg)
     assert out.n_samples == 50
-    assert out.t0_ns == pytest.approx(2.0)
+    assert out.t0_ns == 0.0
+    assert out.zero_ns == pytest.approx(2.0)
+    assert out.zero_set is True
+
+
+def test_every_kept_row_keeps_its_radar_time():
+    rg = make(n_samples=100, dt_ns=0.25, t0_ns=-2.0).replace(zero_ns=1.5)
+    out = build_step("time_zero", mode="sample", sample=12).apply(rg)
+    np.testing.assert_allclose(out.to_radar_ns(out.times_ns()), rg.to_radar_ns(rg.times_ns())[12:])
+
+
+def test_a_second_time_zero_changes_nothing():
+    data = np.zeros((200, 20))
+    data[40:, :] = 100.0
+    rg = make(n_samples=200).replace(data=data)
+    once = build_step("time_zero", threshold=0.5).apply(rg)
+    twice = build_step("time_zero", threshold=0.5).apply(once)
+    assert twice.n_samples == once.n_samples
+    assert twice.zero_ns == pytest.approx(once.zero_ns)
+    assert twice.t0_ns == 0.0
+
+
+def test_first_break_row_is_the_steps_own_pick():
+    data = np.zeros((200, 20))
+    data[40:, :] = 100.0
+    rg = make(n_samples=200).replace(data=data)
+    assert first_break_row(rg, 0.5) == 40
+    assert build_step("time_zero", threshold=0.5).apply(rg).n_samples == 200 - first_break_row(
+        rg, 0.5
+    )
+
+
+def test_sets_time_zero_reads_enabled_entries_only():
+    assert sets_time_zero([{"step": "time_zero", "params": {}, "enabled": True}])
+    assert sets_time_zero([{"step": "time_zero", "params": {}}])
+    assert not sets_time_zero([{"step": "time_zero", "params": {}, "enabled": False}])
+    assert not sets_time_zero([{"step": "dewow", "params": {}, "enabled": True}])
+    assert time_base_of([]) == "radar"
+    assert time_base_of([{"step": "time_zero", "params": {}, "enabled": True}]) == "time_zero"
 
 
 def test_time_zero_rejects_cropping_everything():
@@ -102,3 +143,11 @@ def test_dewow_rejects_window_shorter_than_one_sample():
 def test_step_params_are_declared_for_the_ui():
     step = build_step("dewow", window_ns=6.0)
     assert step.params == {"window_ns": 6.0}
+
+
+def test_first_break_ns_is_the_picked_rows_time_on_the_axis():
+    data = np.zeros((200, 20))
+    data[40:, :] = 100.0
+    rg = make(n_samples=200).replace(data=data)
+    assert first_break_ns(rg, 0.5) == pytest.approx(rg.t0_ns + 40 * rg.dt_ns)
+    assert first_break_ns(rg, 0.5) == pytest.approx(rg.times_ns()[40])

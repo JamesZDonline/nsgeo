@@ -432,10 +432,17 @@ def test_shutdown_lets_go_of_what_the_stopped_list_queued(refiner):
 
 
 TICK_MS = 10
+SOLVE_S = 0.3  # how long the job keeps solving: 30 ticks, whatever the machine
 
 
 class SolveJob:
-    """A real minimum-curvature solve, about half a second."""
+    """A real minimum-curvature solve, run again until `SOLVE_S` has passed.
+
+    One solve of this grid took about half a second when the test was
+    written. Since multigrid (#111) it takes 0.08 s on a fast CI runner,
+    below the 10 ticks the test needs to tell anything. So the job's length
+    is set by time, not by the grid's size, and a faster solver cannot make
+    the test fail again."""
 
     def __init__(self):
         n = 500
@@ -446,9 +453,15 @@ class SolveJob:
         self.values = (np.sin(xx * 0.02) + np.cos(yy * 0.03)).astype(np.float32)
         self.plan = plan_curvature(pop, cell, 0.375)
         self.result = None
+        self.solves = 0
 
     def run(self, should_stop):
-        self.result = self.plan.solve(self.values, should_stop)
+        start = time.monotonic()
+        while True:
+            self.result = self.plan.solve(self.values, should_stop)
+            self.solves += 1
+            if should_stop() or time.monotonic() - start >= SOLVE_S:
+                return
 
 
 def test_the_gui_thread_keeps_running_during_a_solve(refiner):
@@ -471,7 +484,7 @@ def test_the_gui_thread_keeps_running_during_a_solve(refiner):
     timer.stop()
     elapsed = time.monotonic() - t0
     expected = elapsed * 1000.0 / TICK_MS
-    print(f"solve {elapsed:.2f} s, {len(ticks)} of {expected:.0f} ticks")
+    print(f"{job.solves} solves in {elapsed:.2f} s, {len(ticks)} of {expected:.0f} ticks")
     assert job.result is not None
     assert expected >= 10, "the solve is too quick to tell anything"
     assert len(ticks) >= 0.75 * expected

@@ -54,6 +54,44 @@ def _unload(plugin, answer_modal):
     plugin.unload()
 
 
+def test_a_cutoff_ahead_of_time_zero_is_drawn_and_dragged_on_its_own_clock(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    try:
+        s.append_step(key, build_step("time_cutoff", end_ns=60.0))
+        s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+        plugin.processing_dock.list.setCurrentRow(0)
+        dock = plugin.profile_dock
+        zero = dock.shown_zero_ns()
+        assert zero == pytest.approx(-0.0433, abs=1e-3)
+        assert dock.view.cutoff_ns == pytest.approx(60.0 - zero)
+        dock.view.cutoff_dragged.emit(40.0)
+        assert s.stack_for(key).entries[0][0].params["end_ns"] == pytest.approx(40.0 + zero)
+    finally:
+        _unload(plugin, answer_modal)
+
+
+def test_an_unmoved_handle_across_clocks_writes_nothing(fake_iface, tmp_path, answer_modal):
+    plugin, s, key = _plugin_with_line(fake_iface, tmp_path)
+    try:
+        # A zero and a time whose round trip (t - z) + z is inexact, so only
+        # the shown-clock comparison stops the write.
+        s.append_step(key, build_step("time_cutoff", end_ns=0.1))
+        s.append_step(key, build_step("time_zero", mode="sample", sample=137))
+        plugin.processing_dock.list.setCurrentRow(0)
+        dock = plugin.profile_dock
+        z = dock.shown_zero_ns()
+        assert (0.1 - z) + z != 0.1
+        step = s.stack_for(key).entries[0][0]
+        s._set_dirty(False)
+        dock.view.cutoff_dragged.emit(dock.view.cutoff_ns)
+        assert s.stack_for(key).entries[0][0] is step
+        assert not s.dirty
+    finally:
+        _unload(plugin, answer_modal)
+
+
 def test_selecting_the_cutoff_row_in_the_processing_panel_shows_the_line(
     fake_iface, tmp_path, answer_modal
 ):

@@ -18,7 +18,7 @@ from nsgeo_qgis.site_export import (
     write_site_coverage,
 )
 from nsgeo_qgis.slice_export import GeoTiffSliceWriter, band_time_range
-from nsgeo_qgis.slices_plan import Resolution, SliceFinish
+from nsgeo_qgis.slices_plan import Resolution, SiteSource, SliceFinish
 from osgeo import gdal
 from qgis.core import QgsRasterLayer
 
@@ -334,13 +334,14 @@ def test_every_band_is_nodata_nan_on_read_back(site3, make_site, tmp_path, open_
 def test_a_ready_grid_with_no_site_axis_exports_as_absent(
     site3_factory, make_site, tmp_path, open_tif
 ):
-    """R-P3: C ends at ~16.4 ns, so at t0=16 it has no axis (frame and z are None)."""
+    """R-P3: C ends at ~18.84 ns (each line reads 0 at its first break), so at
+    t0=18.5 it has no axis (frame and z are None)."""
     site3 = site3_factory(samples={"C": 128})
     site = SiteEngine(site3.session)
     try:
         site.set_source(site3.source())
         assert site.wait_until_idle(60_000)
-        site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=16.0, t1_ns=60.0))
+        site.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=18.5, t1_ns=60.0))
         assert site.engine_for("C").z is None
         path = tmp_path / "r.tif"
         plan = export_site(site, path, 4, 8, **KW)
@@ -434,3 +435,38 @@ def test_exporting_a_preview_site_refuses_and_writes_nothing(site3, make_site, t
     with pytest.raises(RuntimeError, match="can't be exported at full detail"):
         export_site(site, path, 8, 24, **KW)
     assert not path.exists()
+
+
+def test_a_mixed_site_records_each_grids_time_base_and_its_own(site3, tmp_path, open_tif):
+    site3.session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    site = SiteEngine(site3.session)
+    try:
+        site.set_source(
+            SiteSource(
+                transform="amp_envelope",
+                grids=(site3.choice("A", "p"), site3.choice("B", "raw")),
+            )
+        )
+        assert site.wait_until_idle(60_000)
+        site.set_resolution(RES)
+        path = tmp_path / "mixed.tif"
+        plan = export_site(site, path, 8, 24, **KW)
+        companion = open_tif(write_site_coverage(site, path, plan)).GetMetadata()
+    finally:
+        site.wait_until_idle(20_000)
+        site.dispose()
+    assert {g.grid_id: g.time_base for g in plan.grids} == {"A": "time_zero", "B": "radar"}
+    assert companion["NSGEO_SITE_TIME_BASE"] == "mixed"
+    ds = open_tif(path)
+    md = ds.GetMetadata()
+    assert md["NSGEO_SITE_TIME_BASE"] == "mixed"
+    assert {g["grid_id"]: g["time_base"] for g in json.loads(md["NSGEO_SITE_GRIDS"])} == {
+        "A": "time_zero",
+        "B": "radar",
+    }
+
+
+def test_a_uniform_site_records_its_one_time_base(site3, make_site, tmp_path, open_tif):
+    site, plan, path = exported(make_site, site3, tmp_path)
+    ds = open_tif(path)
+    assert ds.GetMetadata()["NSGEO_SITE_TIME_BASE"] == "time_zero"

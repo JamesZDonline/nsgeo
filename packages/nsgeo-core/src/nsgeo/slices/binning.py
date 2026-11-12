@@ -41,6 +41,8 @@ class PreparedLine:
     dt_ns: float
     t0_ns: float
     coords: np.ndarray
+    #: Radar-clock time the axis calls 0 (`Radargram.zero_ns`); 0.0 on the radar clock.
+    zero_ns: float = 0.0
 
     def __post_init__(self) -> None:
         if self.data.ndim != 2:

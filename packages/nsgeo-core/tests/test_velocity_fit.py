@@ -1,6 +1,14 @@
 import numpy as np
 import pytest
-from nsgeo.velocity_fit import fit_hyperbola
+from nsgeo.velocity_fit import (
+    StoredFit,
+    applied_fit_note,
+    fit_at_zero,
+    fit_hyperbola,
+    radar_clock_note,
+    refit,
+    unusable_fit_note,
+)
 
 
 def test_points_on_an_analytic_hyperbola_recover_its_parameters():
@@ -163,3 +171,93 @@ def test_the_reported_sigma_is_calibrated_over_many_noise_draws():
         sigmas.append(fit.v_stderr_m_ns)
     ratio = np.mean(sigmas) / np.std(vs)
     assert 0.9 < ratio < 1.1
+
+
+def _stored_on_the_radar_clock(zero_ns=-0.5):
+    """A 9-point hyperbola (t0 20 ns, v 0.1) fitted on its own clock, stored with its
+    times on the radar clock (each plus zero_ns). Traces are 1 cm apart."""
+    traces = np.arange(0, 90, 10)
+    distance = np.arange(100) * 0.01
+    x = distance[traces]
+    t = np.sqrt(20.0**2 + (4.0 / 0.1**2) * (x - x[4]) ** 2)
+    fitted = fit_hyperbola(x, t, x[0])
+    stored = StoredFit(
+        fitted.t0_ns,
+        fitted.v_m_ns,
+        fitted.v_stderr_m_ns,
+        fitted.rms_ns,
+        4,
+        tuple((int(tr), float(ti + zero_ns)) for tr, ti in zip(traces, t)),
+        "2026-11-10T00:00:00+00:00",
+        zero_ns,
+    )
+    return stored, distance, x, t
+
+
+def test_refit_at_the_fits_own_zero_reproduces_it():
+    stored, distance, _, _ = _stored_on_the_radar_clock()
+    again = refit(stored, distance, -0.5)
+    assert again.v_m_ns == pytest.approx(stored.v_m_ns, rel=1e-12)
+    assert again.t0_ns == pytest.approx(stored.t0_ns, rel=1e-12)
+
+
+def test_refit_at_a_moved_zero_equals_a_fresh_fit_of_the_shifted_points():
+    stored, distance, x, _ = _stored_on_the_radar_clock()
+    moved = refit(stored, distance, -2.0)
+    radar_t = np.array([t for _, t in stored.points])
+    fresh = fit_hyperbola(x, radar_t - (-2.0), x[0])
+    assert moved.v_m_ns == pytest.approx(fresh.v_m_ns, rel=1e-12)
+    assert moved.t0_ns == pytest.approx(fresh.t0_ns, rel=1e-12)
+
+
+def test_fit_at_zero_returns_the_stored_fit_when_the_zero_is_unchanged():
+    stored, distance, _, _ = _stored_on_the_radar_clock()
+    assert fit_at_zero(stored, distance, stored.zero_ns) is stored
+    moved = fit_at_zero(stored, distance, -2.0)
+    assert moved.zero_ns == -2.0
+    assert moved.points == stored.points
+    assert moved.apex_trace == int(
+        np.argmin(np.abs(distance - refit(stored, distance, -2.0).apex_x_m))
+    )
+
+
+def test_an_old_fit_reads_as_the_radar_clock():
+    doc = {
+        "t0_ns": 18.4,
+        "v_m_ns": 0.0984,
+        "v_stderr_m_ns": 0.0041,
+        "rms_ns": 0.31,
+        "apex_trace": 412,
+        "points": [[389, 21.2], [412, 18.6], [437, 21.9]],
+        "fitted_at": "2026-10-22T14:02:11Z",
+    }
+    assert StoredFit.from_dict(doc).zero_ns == 0.0
+
+
+@pytest.mark.parametrize(
+    "fb, quiet", [(-0.10, True), (0.108, True), (-0.48, False), (-11.0, False)]
+)
+def test_radar_clock_note_is_quiet_within_half_a_sample(fb, quiet):
+    assert (radar_clock_note(fb, 0.2165, None, None) == "") is quiet
+
+
+def test_radar_clock_note_names_the_first_break_and_the_corrected_velocity():
+    text = radar_clock_note(-0.48, 0.2165, 0.0703, 0.0712)
+    assert "first break is at -0.5 ns" in text
+    assert "0.0712 m/ns (+1.3%)" in text
+    assert text.endswith("Add a Time zero step to measure from it.")
+
+
+def test_radar_clock_note_without_velocities_has_no_middle_sentence():
+    assert "Measured from" not in radar_clock_note(-0.48, 0.2165, None, 0.07)
+
+
+def test_applied_fit_note_is_quiet_when_the_velocities_agree_at_4dp():
+    assert applied_fit_note(0.07031, 0.07034) == ""
+    assert applied_fit_note(0.0703, 0.0712) == (
+        "applied 0.0703; measured from the current time zero 0.0712"
+    )
+
+
+def test_unusable_fit_note_carries_the_reason():
+    assert unusable_fit_note("too flat") == "cannot be fitted at this time zero: too flat"

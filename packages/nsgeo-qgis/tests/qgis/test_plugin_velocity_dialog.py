@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
-from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, fit_hyperbola
 from plugin_testing import synthetic_dzt
+from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 GRID = Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
@@ -734,3 +737,125 @@ def test_a_lit_saved_curve_shows_over_a_working_curve_on_the_same_line(plugin):
     # makes on its own: antialiased edges peeking out from under the working
     # curve are not "visible".
     assert _ink(lit, unlit) > _ink(lit_alone, none) / 3
+
+
+def _hyperbola_fit(plugin, key=None):
+    """A real hyperbola (t0 20 ns, v 0.1) saved on the radar clock with no step."""
+    key = key or plugin.session.keys()[0]
+    distance = plugin.session.line_for_key(key).distance_along()
+    traces = (30, 15, 45, 5, 55)
+    x = np.array([distance[t] for t in traces])
+    t = np.sqrt(400.0 + (4.0 / 0.01) * (x - x[0]) ** 2)
+    fitted = fit_hyperbola(x, t, x[0])
+    return StoredFit(
+        fitted.t0_ns,
+        fitted.v_m_ns,
+        fitted.v_stderr_m_ns,
+        fitted.rms_ns,
+        30,
+        tuple((tr, float(ti)) for tr, ti in zip(traces, t, strict=True)),
+        "2026-11-10T00:00:00+00:00",
+    )
+
+
+def test_the_dialog_lists_each_fit_at_the_lines_current_zero(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    s.add_velocity_fit(key, stored)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    distance = s.line_for_key(key).distance_along()
+    moved = fit_at_zero(stored, distance, s.line_zero(key))
+    assert moved.v_m_ns != pytest.approx(stored.v_m_ns, abs=1e-5)
+
+    dialog = _dialog(plugin)
+
+    cell = dialog.table.item(0, 1).text()
+    assert cell.startswith(f"{moved.v_m_ns:.4f}")
+    assert not cell.startswith(f"{stored.v_m_ns:.4f}")
+
+
+def test_the_dialog_flags_an_applied_velocity_its_fit_no_longer_measures(plugin, drive_dialog):
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    fit_id = s.add_velocity_fit(key, stored)
+    s.set_line_velocity(key, VelocityModel.constant(stored.v_m_ns))
+    s.set_velocity_from_fit(key, fit_id)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    distance = s.line_for_key(key).distance_along()
+    current = fit_at_zero(stored, distance, s.line_zero(key)).v_m_ns
+
+    dialog = _dialog(plugin)
+
+    assert applied_fit_note(stored.v_m_ns, current) in dialog.flag_text(0)
+    drive_dialog(QDialog, "exec", lambda d: d.accept())
+    plugin.open_velocity_dialog(key)
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(current)
+    assert line.velocity_from_fit == fit_id
+
+
+def test_the_dialog_shows_stored_values_when_the_line_cannot_be_read(plugin):
+    from plugin_testing import connect_message_log
+
+    logged = []
+    disconnect = connect_message_log(lambda msg, tag, level: logged.append((msg, level)))
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    s.add_velocity_fit(key, stored)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    s.set_profiles(key, [])  # no source attached: the dialog must read the file
+    s.line_for_key(key).path.rename(s.line_for_key(key).path.with_suffix(".gone"))
+
+    try:
+        dialog = _dialog(plugin)
+    finally:
+        disconnect()
+
+    assert dialog.table.item(0, 1).text().startswith(f"{stored.v_m_ns:.4f}")
+    assert not [m for m, level in logged if level == Qgis.MessageLevel.Critical]
+
+
+def test_a_line_with_no_cached_profiles_is_read_for_the_refit(plugin):
+    s, key = plugin.session, plugin.session.keys()[0]
+    stored = _hyperbola_fit(plugin)
+    s.add_velocity_fit(key, stored)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    distance = s.line_for_key(key).distance_along()
+    moved = fit_at_zero(stored, distance, s.line_zero(key))
+    s.set_profiles(key, [])  # nothing cached: the dialog loads the file itself
+    assert s.line_zero(key) is None
+
+    dialog = _dialog(plugin)
+
+    assert dialog.table.item(0, 1).text().startswith(f"{moved.v_m_ns:.4f}")
+
+
+def test_an_unrefittable_fit_is_listed_but_never_applied(plugin, drive_dialog):
+    import dataclasses
+
+    s, key = plugin.session, plugin.session.keys()[0]
+    good = _hyperbola_fit(plugin)
+    # Times so early that the zero at sample 51 leaves them non-positive.
+    bad = dataclasses.replace(
+        good, points=tuple((tr, 0.1 + 0.01 * i) for i, (tr, _) in enumerate(good.points))
+    )
+    fit_id = s.add_velocity_fit(key, bad)
+    s.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    dialog = _dialog(plugin)
+    seeded = dialog.spin.value()
+    dialog.select_fit(fit_id)
+
+    assert "cannot be fitted at this time zero" in dialog.flag_text(0)
+    assert dialog.table.item(0, 1).text().startswith(f"{bad.v_m_ns:.4f}")  # stored values shown
+    assert dialog.delete_button.isEnabled()
+    assert dialog.highlighted_fit_id() == fit_id
+    assert dialog.selected_fit_id() is None
+    assert dialog.spin.value() == seeded  # its stored v was not loaded
+
+    s.set_line_velocity(key, VelocityModel.constant(0.09))
+    drive_dialog(QDialog, "exec", lambda d: (d.select_fit(fit_id), d.accept()))
+    plugin.open_velocity_dialog(key)
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09)
+    assert line.velocity_from_fit is None

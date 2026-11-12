@@ -355,3 +355,25 @@ def test_envelope_late_time_barely_depends_on_the_direct_wave(path):
 
     rms = np.sqrt((out_no_top**2).mean())
     assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.5 * rms
+
+
+def _source_of(path):
+    h = read_header(path)
+    return Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
+def test_the_default_time_zero_puts_each_campus_line_at_its_first_break(path):
+    # Spec 2: the default pick lands on row 49 of every campus line: -0.4764 ns on the radar clock
+    # (header position -11.0864, dt 0.216531; measured 2026-11-10).
+    out = build_step("time_zero").apply(_source_of(path))
+    assert out.zero_ns == pytest.approx(-0.4764, abs=0.001)
+    assert out.t0_ns == 0.0
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="no GPS survey in tests/data/local/with-dzg")
+def test_the_gps_survey_first_breaks_sit_between_minus_1_56_and_minus_1_34_ns():
+    zeros = {round(build_step("time_zero").apply(_source_of(p)).zero_ns, 3) for p in GPS_LINES}
+    assert min(zeros) >= -1.57
+    assert max(zeros) <= -1.34
+    assert len(zeros) <= 2  # -1.559 and -1.3425 measured 2026-11-10: one sample apart
