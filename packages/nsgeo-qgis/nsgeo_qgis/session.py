@@ -904,23 +904,6 @@ class SiteSession(QObject):
         self.lines_changed.emit()
         return fit_id
 
-    def set_velocity_from_fit(self, key: str, fit_id: str | None) -> None:
-        site = self._require_site()
-        line = self.line_for_key(key)
-        if fit_id is not None and fit_id not in line.velocity_fits:
-            raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
-        source = None
-        if fit_id is not None:
-            label = line.placement.label or line.path.stem
-            member = SourceFit.of(key, fit_id, label, line.velocity_fits[fit_id])
-            applied_at = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            source = VelocitySource.from_fits([member], applied_at=applied_at)
-        new_line = dataclasses.replace(line, velocity_source=source)
-        site.lines[site.lines.index(line)] = new_line
-        self._lines_by_key[key] = new_line
-        self._set_dirty(True)
-        self.lines_changed.emit()
-
     def remove_velocity_fit(self, key: str, fit_id: str) -> None:
         """Delete a stored fit. A velocity it set stays, and so does the record
         of it: the record copies the fit's numbers, so it stays reproducible

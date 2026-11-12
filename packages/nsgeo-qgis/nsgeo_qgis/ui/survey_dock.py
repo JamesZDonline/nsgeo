@@ -184,7 +184,12 @@ class SurveyDock(QgsDockWidget):
             grid_id = getattr(line.placement, "grid_id", None)
             by_grid.get(grid_id, loose).append((key, line))
         for grid in site.grids:
-            v = f" · v {grid.velocity.surface_velocity:.3f}" if grid.velocity else ""
+            v = ""
+            if grid.velocity is not None:
+                v = f" · v {grid.velocity.surface_velocity:.3f}"
+                if grid.velocity_source is not None:
+                    # Where the number came from (grid velocity spec §7.5).
+                    v += f" ({grid.velocity_source.summary()})"
             lines = by_grid[grid.id]
             text = (
                 f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · {grid.default_spacing:g} m{v}"

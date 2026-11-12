@@ -36,6 +36,21 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     return path
 
 
+def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None) -> Any:
+    """Set line `key`'s velocity from its stored fit `fit_id`, with a
+    one-member record of it: what the strip's Apply to line does after Save
+    fit. Returns the record."""
+    from nsgeo.velocity import VelocityModel
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+
+    line = session.line_for_key(key)
+    fit = line.velocity_fits[fit_id]
+    member = SourceFit.of(key, fit_id, line.placement.label or line.path.stem, fit)
+    record = VelocitySource.from_fits([member], applied_at=applied_at)
+    session.apply_line_velocity(key, VelocityModel.constant(fit.v_m_ns), record)
+    return record
+
+
 def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None) -> None:
     """A mouse move sent *while a button is logically held* (between a
     `QTest.mousePress` and the matching `mouseRelease`) is not reliably

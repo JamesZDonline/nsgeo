@@ -13,8 +13,8 @@ from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
-from nsgeo.velocity_fit import fit_at_zero, fit_hyperbola
-from plugin_testing import send_move_while_pressed, synthetic_dzt
+from nsgeo.velocity_fit import StoredFit, fit_at_zero, fit_hyperbola
+from plugin_testing import apply_fit, send_move_while_pressed, synthetic_dzt
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtTest import QTest
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -582,6 +582,119 @@ def test_apply_to_grid_after_save_sets_the_saved_fits_velocity(plugin, message_l
     assert message_log == []
 
 
+def test_strip_apply_to_grid_after_save_records_the_saved_fit(plugin, message_log):
+    from nsgeo.velocity_source import METHOD_FIT
+
+    s, dock, key, fit_id = _saved(plugin)
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+
+    dock.apply_grid_button.click()
+
+    grid = s.grid("A")
+    assert grid.velocity == VelocityModel.constant(stored.v_m_ns)
+    record = grid.velocity_source
+    assert record.method == METHOD_FIT and record.applied_at is not None
+    (member,) = record.members
+    assert (member.line_key, member.fit_id, member.line_label) == (key, fit_id, "FILE__001")
+    assert member.names(fit_id, stored)
+    assert member.v_m_ns == stored.v_m_ns and member.zero_ns == stored.zero_ns
+    assert s.line_for_key(key).velocity_source is None  # the line got nothing
+    assert message_log == []
+
+
+def test_strip_apply_to_grid_of_an_unsaved_fit_records_nothing(plugin, message_log):
+    s, dock, key, _ = _saved(plugin)
+    dock.apply_grid_button.click()
+    assert s.grid("A").velocity_source is not None
+    _click_hyperbola(plugin)
+    _view(plugin).velocity_point_discarded.emit(4)  # a different fit, not saved
+
+    dock.apply_grid_button.click()
+
+    grid = s.grid("A")
+    assert grid.velocity == VelocityModel.constant(dock.velocity_fit_result().v_m_ns)
+    assert grid.velocity_source is None  # a bare number beats a false record
+    assert message_log == []
+
+
+def test_strip_apply_to_grid_of_unsaved_points_a_stored_fit_shares_records_nothing(
+    plugin, message_log
+):
+    # The line's same-points rule is not extended to the grid (task 4 brief).
+    s, dock, key, _ = _saved(plugin)
+    _click_hyperbola(plugin)  # the saved fit's points again, unsaved
+
+    dock.apply_grid_button.click()
+
+    assert s.grid("A").velocity is not None and s.grid("A").velocity_source is None
+    assert message_log == []
+
+
+def test_strip_apply_to_line_after_save_records_the_fit_at_the_lines_zero(plugin, message_log):
+    s, dock, key, fit_id = _saved(plugin)
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+    s.append_step(key, build_step("time_zero", mode="sample", sample=80))
+    zero = s.line_zero(key)
+    moved = fit_at_zero(stored, s.line_for_key(key).distance_along(), zero)
+    assert moved.v_m_ns != pytest.approx(stored.v_m_ns, rel=1e-3)
+
+    dock.apply_line_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(moved.v_m_ns)
+    (member,) = line.velocity_source.members
+    assert (member.line_key, member.fit_id, member.line_label) == (key, fit_id, "FILE__001")
+    assert member.v_m_ns == moved.v_m_ns and member.t0_ns == moved.t0_ns
+    assert member.zero_ns == pytest.approx(zero)
+    assert line.velocity_from_fit == fit_id
+    assert message_log == []
+
+
+def test_strip_apply_to_line_of_points_a_stored_fit_shares_records_it_at_the_lines_zero(
+    plugin, message_log
+):
+    s, dock, key, fit_id = _saved(plugin)
+    stored = s.line_for_key(key).velocity_fits[fit_id]
+    _click_hyperbola(plugin)  # the same clicks again, unsaved
+    s.append_step(key, build_step("time_zero", mode="sample", sample=80))
+    zero = s.line_zero(key)
+    moved = fit_at_zero(stored, s.line_for_key(key).distance_along(), zero)
+    assert dock.velocity_fit_result().v_m_ns == pytest.approx(moved.v_m_ns, rel=1e-12)
+
+    dock.apply_line_button.click()
+
+    line = s.line_for_key(key)
+    assert line.velocity.surface_velocity == pytest.approx(moved.v_m_ns, rel=1e-12)
+    (member,) = line.velocity_source.members
+    assert member.fit_id == fit_id and member.v_m_ns == moved.v_m_ns
+    assert member.zero_ns == pytest.approx(zero)
+    assert message_log == []
+
+
+def test_profile_label_names_the_grids_source(plugin, message_log):
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+    from nsgeo_qgis.ui.profile_dock import velocity_source
+
+    s = plugin.session
+    key = s.keys()[0]
+    fits = [
+        StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t"),
+        StoredFit(41.0, 0.10, 0.004, 0.2, 20, ((20, 41.0), (10, 42.0)), "t"),
+    ]
+    ids = [s.add_velocity_fit(key, f) for f in fits]
+    members = [SourceFit.of(key, i, "FILE__001", f) for i, f in zip(ids, fits, strict=True)]
+    average = VelocitySource.from_fits(members, applied_at=None)
+    s.apply_grid_velocity("A", VelocityModel.constant(average.v_m_ns), average)
+    assert velocity_source(s, key) == "Grid A, average of 2 fits"
+    assert "Grid A, average of 2 fits" in plugin.profile_dock.velocity_label.text()
+    one = VelocitySource.from_fits(members[:1], applied_at=None)
+    s.apply_grid_velocity("A", VelocityModel.constant(0.09), one)
+    assert velocity_source(s, key) == "Grid A, fit on FILE__001"
+    s.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert velocity_source(s, key) == "Grid A"
+    assert message_log == []
+
+
 def test_the_next_point_ends_the_saved_state_and_apply_acts_on_the_new_fit(plugin, message_log):
     s, dock, key, fit_id = _saved(plugin)
     _click_hyperbola(plugin)  # the next hyperbola
@@ -781,8 +894,7 @@ def test_the_fit_label_uses_the_refit_t0_after_a_zero_change(plugin):
     dock.save_fit_button.click()
     (fit_id,) = s.line_for_key(key).velocity_fits
     stored = s.line_for_key(key).velocity_fits[fit_id]
-    s.set_line_velocity(key, VelocityModel.constant(stored.v_m_ns))
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     # Sample 52 puts the zero 0.17 ns after the radar's: enough to change the
     # label's one decimal.
     s.append_step(key, build_step("time_zero", mode="sample", sample=52))
@@ -884,7 +996,7 @@ def test_a_line_collected_against_the_axis_still_fits_and_draws_at_the_right_tra
     assert tr == pytest.approx(APEX_TRACE, abs=0.5)
 
 
-def test_add_velocity_fit_and_set_velocity_from_fit_dirty_and_announce(plugin):
+def test_add_velocity_fit_and_applying_it_dirty_and_announce(plugin):
     from nsgeo.velocity_fit import StoredFit
 
     s = plugin.session
@@ -901,9 +1013,9 @@ def test_add_velocity_fit_and_set_velocity_from_fit_dirty_and_announce(plugin):
     assert s.line_for_key(key).velocity_fits[fit_id] == stored
     assert s.dirty and heard == [1]
     heard.clear()
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     assert s.line_for_key(key).velocity_from_fit == fit_id and heard == [1]
-    s.set_velocity_from_fit(key, None)
+    s.set_line_velocity(key, VelocityModel.constant(0.1))  # a typed number drops the record
     assert s.line_for_key(key).velocity_from_fit is None
     assert s.add_velocity_fit(key, stored) != fit_id
 
@@ -959,14 +1071,6 @@ def test_point_collection_resumes_once_the_preview_ends(plugin):
     assert len(dock.velocity_points()) == 1
 
 
-def test_set_velocity_from_fit_rejects_an_unknown_fit_id(plugin):
-    s = plugin.session
-    key = s.keys()[0]
-    with pytest.raises(KeyError):
-        s.set_velocity_from_fit(key, "no-such-fit")
-    assert s.line_for_key(key).velocity_from_fit is None
-
-
 def _two_saved_fits(s, key):
     from nsgeo.velocity_fit import StoredFit
 
@@ -995,8 +1099,7 @@ def test_removing_the_fit_that_set_the_velocity_keeps_the_velocity_but_not_the_c
     s = plugin.session
     key = s.keys()[0]
     id_a, _, _, _ = _two_saved_fits(s, key)
-    s.set_line_velocity(key, VelocityModel.constant(0.09))
-    s.set_velocity_from_fit(key, id_a)
+    apply_fit(s, key, id_a)
 
     s.remove_velocity_fit(key, id_a)
 
@@ -1010,8 +1113,7 @@ def test_removing_another_fit_leaves_the_pointer_alone(plugin):
     s = plugin.session
     key = s.keys()[0]
     id_a, _, id_b, _ = _two_saved_fits(s, key)
-    s.set_line_velocity(key, VelocityModel.constant(0.09))
-    s.set_velocity_from_fit(key, id_a)
+    apply_fit(s, key, id_a)
 
     s.remove_velocity_fit(key, id_b)
 

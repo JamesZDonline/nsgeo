@@ -10,7 +10,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, fit_hyperbola
-from plugin_testing import synthetic_dzt
+from plugin_testing import apply_fit, synthetic_dzt
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
@@ -156,8 +156,7 @@ def test_typing_a_velocity_with_no_fit_selected_still_applies_and_leaves_no_poin
 ):
     s, key = plugin.session, plugin.session.keys()[0]
     fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
-    s.set_line_velocity(key, VelocityModel.constant(0.09))
-    s.set_velocity_from_fit(key, fit_id)  # the override came from the fit...
+    apply_fit(s, key, fit_id)  # the override came from the fit...
     drive_dialog(QDialog, "exec", lambda d: (d.spin.setValue(0.0850), d.accept()))
 
     plugin.open_velocity_dialog(key)  # ...and then the user types a different number
@@ -195,7 +194,7 @@ def test_a_measured_line_velocity_names_the_fit_it_came_from(plugin):
     fit_id = s.add_velocity_fit(key, _stored(18.4, 0.09))
     s.set_line_velocity(key, VelocityModel.constant(0.09))
     assert velocity_source(s, key) == "line override"  # typed: no pointer yet
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     assert velocity_source(s, key) == "line override (fit at 18.4 ns)"
     assert "fit at 18.4 ns" in plugin.profile_dock.velocity_label.text()
 
@@ -224,8 +223,7 @@ def test_clear_override_removes_the_line_velocity_and_the_pointer(plugin, drive_
 
     s, key = plugin.session, plugin.session.keys()[0]
     fit_id = s.add_velocity_fit(key, _stored(18.0, 0.09))
-    s.set_line_velocity(key, VelocityModel.constant(0.09))
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     assert velocity_source(s, key) == "line override (fit at 18.0 ns)"
     drive_dialog(QDialog, "exec", lambda d: d.clear_button.click())
 
@@ -493,8 +491,7 @@ def test_deleting_the_fit_behind_the_velocity_says_the_velocity_stays(plugin, an
 
     s, key = plugin.session, plugin.session.keys()[0]
     fit_id = s.add_velocity_fit(key, _stored(18.0, 0.0900))
-    s.set_line_velocity(key, VelocityModel.constant(0.09))
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     asked = _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
     dialog = _dialog(plugin)  # opens with the applied fit selected
 
@@ -590,8 +587,7 @@ def test_the_fit_behind_the_velocity_is_lit_as_the_dialog_opens(plugin, drive_di
     view = plugin.profile_dock.view
     s.add_velocity_fit(key, _stored(18.0, 0.09, apex=30))
     applied = s.add_velocity_fit(key, _stored(41.0, 0.12, apex=20))
-    s.set_line_velocity(key, VelocityModel.constant(0.12))
-    s.set_velocity_from_fit(key, applied)
+    apply_fit(s, key, applied)
     seen = []
     drive_dialog(QDialog, "exec", lambda d: (seen.append(_highlighted_apex(view)), d.reject()))
 
@@ -672,8 +668,7 @@ def test_deleting_another_fit_leaves_the_applied_fit_selected_so_apply_keeps_it(
     s, key = plugin.session, plugin.session.keys()[0]
     applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
     other = s.add_velocity_fit(key, _stored(41.0, 0.15))
-    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
-    s.set_velocity_from_fit(key, applied)
+    apply_fit(s, key, applied)
     _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
     drive_dialog(
         QDialog,
@@ -693,8 +688,7 @@ def test_apply_after_deleting_the_fit_behind_the_velocity_keeps_the_velocity_exa
 ):
     s, key = plugin.session, plugin.session.keys()[0]
     applied = s.add_velocity_fit(key, _stored(18.0, 0.09123456))
-    s.set_line_velocity(key, VelocityModel.constant(0.09123456))
-    s.set_velocity_from_fit(key, applied)
+    apply_fit(s, key, applied)
     _answer_delete(answer_modal, QMessageBox.StandardButton.Yes)
     drive_dialog(QDialog, "exec", lambda d: (d.delete_button.click(), d.accept()))
 
@@ -789,8 +783,7 @@ def test_the_dialog_flags_an_applied_velocity_its_fit_no_longer_measures(
     s, key = plugin.session, plugin.session.keys()[0]
     stored = _hyperbola_fit(plugin)
     fit_id = s.add_velocity_fit(key, stored)
-    s.set_line_velocity(key, VelocityModel.constant(stored.v_m_ns))
-    s.set_velocity_from_fit(key, fit_id)
+    apply_fit(s, key, fit_id)
     before = s.line_for_key(key)
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
     distance = s.line_for_key(key).distance_along()
@@ -886,13 +879,32 @@ def test_a_pick_is_kept_when_an_unusable_row_is_then_selected(plugin, message_lo
     bad_id = s.add_velocity_fit(key, bad)
     s.append_step(key, build_step("time_zero", mode="sample", sample=51))
     dialog = _dialog(plugin)
-    assert bad_id in dialog._unusable
+    assert (key, bad_id) in dialog._unusable  # keyed by line too: every line has a fit-1
     dialog.select_fit(good)
     held = dialog.spin.value()
     dialog.select_fit(bad_id)
     assert dialog.spin.value() == held  # still A's value
     _apply(plugin, dialog)
     assert s.line_for_key(key).velocity_from_fit == good
+    assert message_log == []
+
+
+def test_a_click_on_a_tick_cell_does_not_turn_the_average_into_a_pick(plugin, message_log):
+    s, key = plugin.session, plugin.session.keys()[0]
+    ids = _save_three(plugin)
+    dialog = _dialog(plugin)
+    dialog.use_average_button.click()
+    held = dialog.spin.value()
+
+    dialog.table.cellClicked.emit(2, 0)  # the tick cell of the 0.0920 fit
+
+    assert dialog.spin.value() == held
+    _apply(plugin, dialog)
+    record = s.line_for_key(key).velocity_source
+    assert [m.fit_id for m in record.members] == ids  # the average, not a pick
+    dialog = _dialog(plugin)
+    dialog.table.cellClicked.emit(2, 2)  # any other cell does pick
+    assert dialog.spin.value() == pytest.approx(0.0920)
     assert message_log == []
 
 
