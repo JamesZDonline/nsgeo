@@ -53,9 +53,9 @@ class _FakeSignal:
         else:
             self._slots.remove(slot)  # raises if never connected, as Qt does
 
-    def emit(self) -> None:
+    def emit(self, *args) -> None:
         for slot in list(self._slots):
-            slot()
+            slot(*args)
 
 
 class FakeIface:
@@ -65,6 +65,9 @@ class FakeIface:
         #: QGIS emits this when startup -- INCLUDING restoring the saved
         #: window layout -- is over. See `_tabify_slices_dock`.
         self.initializationCompleted = _FakeSignal()
+        #: QGIS emits this with the new current layer (or None).
+        self.currentLayerChanged = _FakeSignal()
+        self._active_layer = None
         from qgis.gui import QgsMapCanvas, QgsMessageBar
         from qgis.PyQt.QtWidgets import QMainWindow
 
@@ -84,6 +87,15 @@ class FakeIface:
 
     def messageBar(self):
         return self._bar
+
+    def activeLayer(self):
+        return self._active_layer
+
+    def setActiveLayer(self, layer):
+        """As QGIS: a change of layer announces itself."""
+        if layer is not self._active_layer:
+            self._active_layer = layer
+            self.currentLayerChanged.emit(layer)
 
     def addToolBar(self, name):
         from qgis.PyQt.QtWidgets import QToolBar

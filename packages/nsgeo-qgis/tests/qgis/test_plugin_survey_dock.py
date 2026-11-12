@@ -9,13 +9,27 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
-from nsgeo_qgis.ui.survey_dock import ROLE_ID, ROLE_KIND, SurveyDock
+from nsgeo_qgis.ui.survey_dock import (
+    CUT_ONE_PICK_TEXT,
+    CUT_PICKS_TEXT,
+    DELETE_CUT_TEXT,
+    ROLE_ID,
+    ROLE_KIND,
+    SurveyDock,
+)
 from plugin_testing import synthetic_dzt
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QPoint, Qt
 from qgis.PyQt.QtGui import QKeyEvent
 from qgis.PyQt.QtTest import QTest
-from qgis.PyQt.QtWidgets import QAbstractItemView, QApplication, QFileDialog, QMenu, QMessageBox
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QFileDialog,
+    QInputDialog,
+    QMenu,
+    QMessageBox,
+)
 
 GRID = Grid(
     "A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5, velocity=VelocityModel.constant(0.08)
@@ -1225,3 +1239,228 @@ def test_a_corrected_line_shows_its_scale_and_destagger(dock):
     for i in (0, 2):
         text = grid_item.child(i).text(0)
         assert "×" not in text and "destagger" not in text
+
+
+# --- M15, cut spec §4.2 and plan call 12: cuts in the tree -----------------
+
+_CUT = [(1.0, 1.0), (6.0, 1.0)]
+
+
+def test_a_grid_with_cuts_lists_them_under_a_cuts_item_before_its_lines(dock):
+    session, dock = dock
+    root = dock.tree.topLevelItem(0)
+    assert all(dock.kind_of(root.child(0).child(i)) == "line" for i in range(3))  # none yet
+    first = session.add_cut("A", _CUT)
+    second = session.add_cut("A", _CUT)
+    grid_item = _grid_item(dock, "A")
+    assert grid_item.childCount() == 4
+    cuts_item = grid_item.child(0)
+    assert dock.kind_of(cuts_item) == "cuts" and cuts_item.text(0) == "Cuts"
+    assert [dock.kind_of(cuts_item.child(i)) for i in range(2)] == ["cut", "cut"]
+    assert [cuts_item.child(i).data(0, ROLE_ID) for i in range(2)] == [first, second]
+    assert [cuts_item.child(i).text(0) for i in range(2)] == ["Cut 1", "Cut 2"]
+    assert dock.kind_of(grid_item.child(1)) == "line"
+    assert dock.item_for_key(second) is cuts_item.child(1)
+    assert dock.item_for_key(KEYS[0]) is grid_item.child(1)
+    session.remove_cut(first)
+    session.remove_cut(second)
+    assert _grid_item(dock, "A").childCount() == 3  # no Cuts item once none are left
+
+
+def test_rename_cut_asks_for_a_name_and_renames(dock, answer_modal):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    answer_modal(QMenu, "exec", None)
+    asked = answer_modal(QInputDialog, "getText", ("Lower line", True))
+    menu = _right_click(dock, dock.item_for_key(key))
+    assert _texts(menu) == ["Open", "Rename cut…", "Delete cut"]
+    _action(menu, "Rename cut…").trigger()
+    assert len(asked) == 1
+    assert session.cut_for_key(key).name == "Lower line"
+    assert dock.item_for_key(key).text(0) == "Lower line"
+    asked.clear()
+    answer_modal(QInputDialog, "getText", ("   ", True))
+    _action(_right_click(dock, dock.item_for_key(key)), "Rename cut…").trigger()
+    assert session.cut_for_key(key).name == "Lower line"
+    answer_modal(QInputDialog, "getText", ("Other", False))
+    _action(_right_click(dock, dock.item_for_key(key)), "Rename cut…").trigger()
+    assert session.cut_for_key(key).name == "Lower line"
+
+
+def test_delete_cut_asks_and_says_its_picks_stay(dock, answer_modal, monkeypatch):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    answer_modal(QMenu, "exec", None)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    _action(_right_click(dock, dock.item_for_key(key)), "Delete cut").trigger()
+    assert no[0][0][2] == DELETE_CUT_TEXT.format(name="Cut 1")
+    assert session.cut_keys() == [key]
+
+    monkeypatch.setattr(session, "picks_for", lambda k: [object(), object()] if k == key else [])
+    no.clear()
+    _action(_right_click(dock, dock.item_for_key(key)), "Delete cut").trigger()
+    assert no[0][0][2] == DELETE_CUT_TEXT.format(name="Cut 1") + CUT_PICKS_TEXT.format(n=2)
+    assert session.cut_keys() == [key]
+
+    monkeypatch.setattr(session, "picks_for", lambda k: [object()])
+    no.clear()
+    _action(_right_click(dock, dock.item_for_key(key)), "Delete cut").trigger()
+    assert no[0][0][2] == DELETE_CUT_TEXT.format(name="Cut 1") + CUT_ONE_PICK_TEXT
+
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _action(_right_click(dock, dock.item_for_key(key)), "Delete cut").trigger()
+    assert len(yes) == 1
+    assert session.cut_keys() == []
+
+
+def test_the_delete_key_on_a_cut_deletes_it_after_the_same_prompt(dock, answer_modal):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    _unfold(dock.item_for_key(key))
+    _select(dock, dock.item_for_key(key))
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    _press(dock, Qt.Key.Key_Delete)
+    assert no[0][0][2] == DELETE_CUT_TEXT.format(name="Cut 1") and session.cut_keys() == [key]
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+    assert yes[0][0][2] == DELETE_CUT_TEXT.format(name="Cut 1")
+    assert session.cut_keys() == [] and session.keys() == KEYS
+
+
+def _remove_grid_prompt(dock, answer_modal, grid_id="A"):
+    answer_modal(QMenu, "exec", None)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    _action(_right_click(dock, _grid_item(dock, grid_id)), "Remove grid").trigger()
+    return no[0][0][2]
+
+
+def test_removing_a_grid_with_cuts_says_so(dock, answer_modal, monkeypatch):
+    session, dock = dock
+    session.add_cut("A", _CUT)
+    session.add_cut("A", _CUT)
+    # Zero picks: the sentence ends at the cuts, inside the grid question.
+    text = _remove_grid_prompt(dock, answer_modal)
+    assert text.startswith(
+        "Remove grid A and its 3 lines from the site? Its 2 cuts are deleted too.\n\n"
+    )
+    # Several picks, several cuts.
+    monkeypatch.setattr(session, "picks_for", lambda k: [object(), object()])
+    text = _remove_grid_prompt(dock, answer_modal)
+    assert "from the site? Its 2 cuts are deleted too; their 4 picks stay on the map." in text
+    monkeypatch.setattr(
+        session, "picks_for", lambda k: [object()] if k == session.cut_keys()[0] else []
+    )
+    text = _remove_grid_prompt(dock, answer_modal)
+    assert "Its 2 cuts are deleted too; their 1 pick stays on the map." in text
+    # One cut: singular throughout.
+    one = session.cut_keys()[0]
+    session.remove_cut(session.cut_keys()[1])
+    monkeypatch.setattr(session, "picks_for", lambda k: [object(), object(), object()])
+    text = _remove_grid_prompt(dock, answer_modal)
+    assert "Its 1 cut is deleted too; its 3 picks stay on the map." in text
+    monkeypatch.setattr(session, "picks_for", lambda k: [object()])
+    text = _remove_grid_prompt(dock, answer_modal)
+    assert "Its 1 cut is deleted too; its 1 pick stays on the map." in text
+    assert session.cut_keys() == [one]
+
+
+def test_removing_several_grids_with_cuts_says_their(dock, tmp_path, answer_modal, monkeypatch):
+    session, dock = dock
+    _add_grid_b_with_a_line(session, tmp_path)
+    session.add_cut("A", _CUT)
+    session.add_cut("B", _CUT)
+    monkeypatch.setattr(session, "picks_for", lambda k: [object()])
+    _select(dock, _grid_item(dock, "A"), _grid_item(dock, "B"))
+    answer_modal(QMenu, "exec", None)
+    no = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    dock.remove_selected_action()
+    text = no[0][0][2]
+    assert "Their 2 cuts are deleted too; their 2 picks stay on the map." in text
+    assert "Its 2" not in text
+
+
+def test_a_range_of_lines_never_sweeps_in_the_cuts_it_crosses(dock, tmp_path, answer_modal):
+    session, dock = dock
+    _add_grid_b_with_a_line(session, tmp_path)
+    cut = session.add_cut("B", _CUT)
+    b_line = session.keys_on_grid("B")[0]
+    # (a) a range from A's second line into B, whose Cuts item it passes.
+    _unfold(dock.item_for_key(cut))
+    dock.tree.clearSelection()
+    _click(dock, dock.item_for_key(KEYS[1]))
+    _click(dock, dock.item_for_key(b_line), Qt.KeyboardModifier.ShiftModifier)
+    grids, keys = dock._selected_targets()
+    assert grids == [] and cut not in keys and b_line in keys
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, dock.item_for_key(b_line))
+    assert _texts(menu)[-2:] == ["Move 3 lines to grid", "Remove 3 lines from site"]
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+    assert "Cut 1" not in yes[0][0][2]
+    assert session.cut_keys() == [cut]
+    assert b_line not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+
+
+def test_a_fresh_shift_click_on_a_line_beside_a_cut_removes_lines_only(dock, answer_modal):
+    session, dock = dock
+    cut = session.add_cut("A", _CUT)
+    _unfold(dock.item_for_key(cut))
+    dock.tree.clearSelection()
+    _click(dock, dock.item_for_key(KEYS[0]), Qt.KeyboardModifier.ShiftModifier)
+    assert dock.item_for_key(cut).isSelected()  # the range does cross the cut
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+    assert "Cut 1" not in yes[0][0][2]
+    assert session.cut_keys() == [cut]
+    assert KEYS[0] not in session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+
+
+def test_with_only_cuts_selected_delete_deletes_them(dock, answer_modal):
+    session, dock = dock
+    first = session.add_cut("A", _CUT)
+    second = session.add_cut("A", _CUT)
+    _unfold(dock.item_for_key(first))
+    _select(dock, dock.item_for_key(first), dock.item_for_key(second))
+    yes = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    _press(dock, Qt.Key.Key_Delete)
+    assert len(yes) == 1 and "2 cuts" in yes[0][0][2]
+    assert session.cut_keys() == [] and session.keys() == KEYS
+
+
+def test_open_on_a_cut_opens_it(dock):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    opened = []
+    session.line_opened.connect(opened.append)
+    _action(_right_click(dock, dock.item_for_key(key)), "Open").trigger()
+    assert session.current_key == key and opened == [key]
+    assert dock.tree.currentItem() is dock.item_for_key(key)
+
+
+def test_the_import_target_falls_back_to_an_open_cuts_grid(dock, message_log):
+    """An open cut is not a line: its grid answers, and nothing is logged (task 2 hand-off)."""
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    session.open_line(key)
+    dock.tree.clearSelection()
+    assert dock.target_grid_id() == "A"
+    session.open_line(KEYS[0])
+    dock.tree.clearSelection()
+    assert dock.target_grid_id() == "A"
+    assert not [m for m in message_log if "could not read the selected grid" in m]
+
+
+def test_a_plain_click_on_a_cut_opens_it_and_a_ctrl_click_does_not(dock, message_log):
+    session, dock = dock
+    key = session.add_cut("A", _CUT)
+    other = session.add_cut("A", _CUT)
+    opened = []
+    session.line_opened.connect(opened.append)
+    _click(dock, dock.item_for_key(key))
+    assert session.current_key == key and opened == [key]
+    assert dock.tree.currentItem() is dock.item_for_key(key)
+    _click(dock, dock.item_for_key(other), Qt.KeyboardModifier.ControlModifier)
+    assert opened == [key]  # building a selection opens nothing
+    _click(dock, dock.item_for_key(other))
+    assert session.current_key == other and opened == [key, other]
+    assert message_log == []

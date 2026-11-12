@@ -8,9 +8,17 @@ import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing import StepStack, build_step
-from nsgeo.project import ProjectError, line_key, load_site, save_site
+from nsgeo.project import (
+    CUTS_SCHEMA_VERSION,
+    READABLE_SCHEMA_VERSIONS,
+    ProjectError,
+    line_key,
+    load_site,
+    save_site,
+)
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 
@@ -110,9 +118,9 @@ def test_rejects_future_schema_version(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 99
+    doc["schema_version"] = 3
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 99"):
+    with pytest.raises(ProjectError, match="schema version 3"):
         load_site(out)
 
 
@@ -760,3 +768,86 @@ def test_a_null_placement_in_the_file_is_a_project_error_naming_the_line(tmp_pat
     out.write_text(json.dumps(doc))
     with pytest.raises(ProjectError, match="L0.DZT"):
         load_site(out)
+
+
+def _cut_site(cuts=True):
+    site = _two_grid_site()
+    if cuts:
+        site.cuts = [
+            Cut(id="c1", name="Cut 1", grid_id="A", vertices=((0.0, 0.0), (3.0, 0.0), (3.0, 4.5))),
+            Cut(id="c2", name="Cut 2", grid_id="B", vertices=((1.0, 1.0), (2.0, 5.0))),
+        ]
+    return site
+
+
+def test_cuts_round_trip_and_bump_the_schema_only_when_present(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    site = _cut_site()
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    assert doc["schema_version"] == CUTS_SCHEMA_VERSION == 2
+    assert load_site(path).cuts == site.cuts
+    save_site(_cut_site(cuts=False), path)
+    doc = json.loads(path.read_text())
+    assert doc["schema_version"] == 1
+    assert "cuts" not in doc
+    assert load_site(path).cuts == []
+
+
+def test_loads_schema_1_and_2_and_refuses_3(tmp_path):
+    assert READABLE_SCHEMA_VERSIONS == (1, 2)
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_cut_site(), path)
+    doc = json.loads(path.read_text())
+    for version, ok in ((1, True), (2, True), (3, False)):
+        doc["schema_version"] = version
+        path.write_text(json.dumps(doc))
+        if ok:
+            load_site(path)
+        else:
+            with pytest.raises(ProjectError, match="schema version 3"):
+                load_site(path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"id": "c", "name": "n", "grid_id": "A"},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], [1]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], [1, 2, 3]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], [1e999, 1]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0], ["a", 1]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": [[0, 0]]},
+        {"id": "c", "name": "n", "grid_id": "A", "vertices": "oops"},
+        "not an object",
+    ],
+)
+def test_a_malformed_cut_entry_is_a_project_error(tmp_path, entry):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_cut_site(), path)
+    doc = json.loads(path.read_text())
+    doc["cuts"] = [entry]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="cut"):
+        load_site(path)
+
+
+def test_a_cut_on_an_unknown_grid_is_a_project_error(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_cut_site(), path)
+    doc = json.loads(path.read_text())
+    doc["cuts"][0]["grid_id"] = "nowhere"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="nowhere"):
+        load_site(path)
+
+
+def test_duplicate_cut_ids_fail_validate():
+    site = _cut_site()
+    site.cuts.append(dataclasses.replace(site.cuts[0], name="Again"))
+    with pytest.raises(ValueError, match="duplicate cut ids"):
+        site.validate()
+    site = _cut_site()
+    site.cuts[0] = dataclasses.replace(site.cuts[0], grid_id="zzz")
+    with pytest.raises(ValueError, match="unknown grid"):
+        site.validate()

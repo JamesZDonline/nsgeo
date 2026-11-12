@@ -84,6 +84,10 @@ SHADOWED = {
     # open_line_choice_dialog) and SiteSourcePanel's own, carrying the grid
     # id (slices_dock.py connects it to re-emit the dock's). Both consumed.
     "choose_lines_requested": {"declared": 2, "connects": 2},
+    # M15 Task 4: PickPointTool.failed and CutTool.failed (a Qt-invoked method
+    # raised). plugin.py connects each tool's `failed` where it builds the tool
+    # (`_arm_pick` and `_toggle_cut_tool`), so both declarations are consumed.
+    "failed": {"declared": 2, "connects": 2},
     # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
     # connects This grid's panel (Task 4); Task 5 connects the site's, raising
     # connects to 3.

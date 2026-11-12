@@ -26,6 +26,7 @@ __all__ = [
     "colormap_names",
     "decimate_columns",
     "row_envelope",
+    "section_rgba8",
     "to_index8",
     "to_index8_unipolar",
     "to_rgb8",
@@ -286,6 +287,26 @@ def to_rgba8(data: np.ndarray, limit: float, lut: np.ndarray, *, unipolar: bool)
         alpha = np.full(values.shape, 255, dtype=np.uint8)
     rgb = lut.take(index, axis=0)
     return np.ascontiguousarray(np.concatenate([rgb, alpha[..., None]], axis=-1))
+
+
+def section_rgba8(
+    values: np.ndarray, percentile: float, lut: np.ndarray, *, unipolar: bool
+) -> np.ndarray:
+    """(H, W, 4) uint8 for a section: blank columns and depths are transparent.
+
+    The limit is the percentile of the finite values, as the slice panel
+    takes it, falling back to 1.0 when it is not positive and finite (an empty
+    or all-zero section). Alpha is 0 wherever a value is not finite, in either
+    polarity: unlike a radargram, a section has real nodata (cut spec §3).
+    """
+    values = np.asarray(values, dtype=float)
+    norm = UnipolarClip(percentile) if unipolar else PercentileClip(percentile)
+    limit = norm.limit(values)
+    if not (math.isfinite(limit) and limit > 0.0):
+        limit = 1.0
+    rgba = to_rgba8(values, limit, lut, unipolar=unipolar)
+    rgba[..., 3] = np.where(np.isfinite(values), rgba[..., 3], 0)
+    return rgba
 
 
 def decimate_columns(data: np.ndarray, max_width: int) -> np.ndarray:
