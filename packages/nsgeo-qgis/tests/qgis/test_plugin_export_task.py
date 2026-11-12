@@ -535,7 +535,9 @@ def test_a_cancel_mid_band_over_the_real_stack_leaves_nothing_and_never_touches_
             cell_m=0.05,
             finish=None if coverage else SliceFinish("min_curvature"),
             grids=tuple(
-                SiteGridRecord(g.grid_id, "p", None, 1.0, 0.5, g.frame.azimuth, g.frame.crs)
+                SiteGridRecord(
+                    g.grid_id, "p", None, 1.0, 0.5, g.frame.azimuth, g.frame.crs, "time_zero"
+                )
                 for g in spec.grids
             ),
             coverage=coverage,
