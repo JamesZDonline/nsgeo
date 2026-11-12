@@ -562,3 +562,225 @@ def test_the_site_layer_is_drawn_smooth_after_every_repoint(mapped):
     sl.layer.resampleFilter().setZoomedInResampler(None)
     sl.update_north_up(site + 1, SITE_GT, "EPSG:32616", **kwargs)
     assert _smooth(sl.layer)
+
+
+# ---- #180: the user's own colours ------------------------------------------------------
+
+
+def _ramp(fill_from, fill_to):
+    values = np.tile(np.linspace(fill_from, fill_to, FRAME.nx, dtype=np.float32), (FRAME.ny, 1))
+    values[0, :] = np.nan
+    return values
+
+
+def _own_tick(sl, values, style=None, palette="seismic", limit=5.0, unipolar=False):
+    sl.update(
+        values,
+        FRAME,
+        limit=limit,
+        colormap_name=palette,
+        unipolar=unipolar,
+        subtitle="",
+        own=True,
+        own_style=style,
+    )
+
+
+def _range(sl):
+    from nsgeo_qgis.own_colours import style_range
+
+    return style_range(sl.layer)
+
+
+def _computed(sl, limits, extent=None):
+    """As if the user picked a computed min/max in Layer Properties."""
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    shown = sl.layer.renderer()
+    renderer = shown.clone()
+    # As the Symbology page builds it: with its range (a clone drops it).
+    renderer.setClassificationMin(shown.classificationMin())
+    renderer.setClassificationMax(shown.classificationMax())
+    origin = renderer.minMaxOrigin()
+    origin.setLimits(limits)
+    origin.setExtent(extent or QgsRasterMinMaxOrigin.Extent.WholeRaster)
+    origin.setStatAccuracy(QgsRasterMinMaxOrigin.StatAccuracy.Exact)
+    renderer.setMinMaxOrigin(origin)
+    sl.layer.setRenderer(renderer)
+
+
+def test_own_colours_start_from_the_plugin_palette_and_report_the_style(mapped):
+    from nsgeo_qgis.own_colours import style_text
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    renderer = sl.layer.renderer()
+    assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+    assert renderer.minMaxOrigin().limits() == QgsRasterMinMaxOrigin.Limits.NotSet
+    assert _range(sl) == (-5.0, 5.0)
+    assert seen == [style_text(sl.layer)]
+
+
+def test_a_given_style_is_applied_and_kept_across_ticks(mapped):
+    from nsgeo_qgis.own_colours import seed_style, style_text
+
+    sl, _, _, _ = mapped
+    _update(sl, 1.0, limit=8.0)
+    seed_style(sl.layer, "amp_heat", 2.5, True)
+    mine = style_text(sl.layer)
+    _update(sl, 1.0)  # the plugin's colours again, at a new limit
+    assert _range(sl) == (0.0, 10.0)
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(0.0, 9.0), style=mine)
+    assert _range(sl) == (0.0, 2.5)
+    _own_tick(sl, _ramp(0.0, 4.0), style=mine)
+    assert _range(sl) == (0.0, 2.5)
+    assert seen == [], "applying the user's own style is not an edit"
+
+
+def test_a_computed_range_is_worked_out_on_every_new_slice(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    _computed(sl, QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    style = seen[-1]
+    _own_tick(sl, _ramp(-1.0, 7.0), style=style)
+    assert _range(sl) == pytest.approx((-1.0, 7.0))
+    _own_tick(sl, _ramp(2.0, 4.0), style=style)
+    assert _range(sl) == pytest.approx((2.0, 4.0))
+
+
+def test_the_users_edit_is_reported_once_and_not_undone(mapped):
+    from nsgeo_qgis.own_colours import set_range, style_text
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    assert len(seen) == 1
+    set_range(sl.layer, -2.0, 5.0)  # as Layer Properties ▸ Apply would
+    assert seen[-1] == style_text(sl.layer)
+    edited = seen[-1]
+    _own_tick(sl, _ramp(-9.0, 9.0), style=edited)
+    _own_tick(sl, _ramp(-9.0, 9.0), style=edited)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+    assert seen.count(edited) == 1 and len(seen) == 2
+
+
+def test_the_plugin_colours_do_not_report_edits(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _update(sl, 1.0)
+    set_range(sl.layer, -2.0, 5.0)
+    _update(sl, 2.0)
+    assert seen == []
+
+
+def test_switching_back_to_own_colours_restores_the_style(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    set_range(sl.layer, -2.0, 5.0)
+    mine = seen[-1]
+    _update(sl, 1.0)  # Show coverage, or the plugin's colours
+    assert _range(sl) == (0.0, 10.0)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+
+
+def test_a_recreated_layer_gets_the_style_back(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, project = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    set_range(sl.layer, -2.0, 5.0)
+    mine = seen[-1]
+    project.removeMapLayer(sl.layer.id())
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+    set_range(sl.layer, -1.0, 1.0)
+    assert seen[-1] != mine, "the new layer's edits are heard too"
+
+
+def test_an_unreadable_saved_style_falls_back_to_the_plugin_palette(mapped):
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style")
+    assert _range(sl) == (-5.0, 5.0)
+    assert len(seen) == 1 and seen[0] != "<not a style"
+
+
+def test_the_users_resampling_survives_a_tick(mapped):
+    from qgis.core import QgsCubicRasterResampler
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    sl.layer.resampleFilter().setZoomedInResampler(QgsCubicRasterResampler())
+    sl.layer.emitStyleChanged()  # Layer Properties applies, then says so
+    _own_tick(sl, _ramp(-3.0, 3.0), style=seen[-1])
+    assert sl.layer.resampleFilter().zoomedInResampler().type() == "cubic"
+
+
+def test_the_site_path_takes_own_colours_too(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    kwargs = {"limit": 4.0, "colormap_name": "seismic", "unipolar": False, "subtitle": ""}
+    site = np.tile(np.linspace(-1.0, 3.0, 9, dtype=np.float32), (6, 1))
+    sl.update_north_up(site, SITE_GT, "EPSG:32616", name=SITE_LAYER_NAME, own=True, **kwargs)
+    assert _range(sl) == (-4.0, 4.0)
+    _computed(sl, QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    sl.update_north_up(
+        site * 2,
+        SITE_GT,
+        "EPSG:32616",
+        name=SITE_LAYER_NAME,
+        own=True,
+        own_style=seen[-1],
+        **kwargs,
+    )
+    assert _range(sl) == pytest.approx((-2.0, 6.0))
+
+
+def test_current_canvas_reads_the_view_it_is_given(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    asked = []
+
+    def view(crs):
+        asked.append(crs.authid())
+        return (500.0, 700.0, 503.0, 706.0)  # the frame's west half
+
+    sl.extent_in = view
+    _own_tick(sl, _ramp(0.0, 11.0))
+    _computed(
+        sl,
+        QgsRasterMinMaxOrigin.Limits.MinimumMaximum,
+        QgsRasterMinMaxOrigin.Extent.FixedCanvas,
+    )
+    _own_tick(sl, _ramp(0.0, 11.0), style=seen[-1])
+    assert asked and asked[-1] == "EPSG:32616"
+    assert _range(sl) == pytest.approx((0.0, 5.0))

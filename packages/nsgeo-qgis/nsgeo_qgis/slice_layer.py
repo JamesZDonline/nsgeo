@@ -37,7 +37,9 @@ import os
 import shutil
 import tempfile
 import warnings
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from nsgeo.render import colormap
@@ -54,9 +56,10 @@ from qgis.core import (
     QgsSingleBandPseudoColorRenderer,
 )
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QObject
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
+from nsgeo_qgis import own_colours
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.log import log as _log
 
@@ -123,7 +126,19 @@ class SliceLayer(QObject):
     docstring for why. Every public method guards its own body: `update`
     is reached from a slider slot, and an exception escaping a slot
     aborts the CI container (see `plugin.py`'s module docstring).
+
+    #180: with `own=True` the layer wears the user's own QGIS symbology
+    instead of the plugin's palette and stretch (`own_colours`). The plugin
+    then never replaces the renderer: it puts the user's style on once, and
+    on each new slice only works a computed min/max out again. An edit the
+    user makes in Layer Properties is reported through `own_style_changed`
+    with the new style, so the dock can remember it; the plugin's own changes
+    to the layer are not edits, and are not reported.
     """
+
+    #: The user's own style (QGIS style XML) changed: they edited it in Layer
+    #: Properties, or the plugin seeded it from its palette (#180).
+    own_style_changed = pyqtSignal(str)
 
     def __init__(self, layers: SiteLayers, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -135,11 +150,19 @@ class SliceLayer(QObject):
         self.path = self._dir / "slice-000000.tif"
         self._serial = 0
         self.layer: QgsRasterLayer | None = None
-        #: `(colormap_name, limit, unipolar)` the current renderer was
-        #: built for, or `None` before the first one. Rebuilding a 256-stop
-        #: shader on every tick of the depth slider is waste, and the
+        #: `("nsgeo", colormap_name, limit, unipolar)` the current renderer
+        #: was built for, `("own", style)` while the layer wears the user's
+        #: own style (#180), or `None` before the first one. Rebuilding a
+        #: 256-stop shader on every tick of the depth slider is waste, and the
         #: renderer is what makes the layer flicker if replaced needlessly.
-        self._renderer_key: tuple[str, float, bool] | None = None
+        self._renderer_key: tuple[Any, ...] | None = None
+        #: Above zero while this class changes the layer itself, so the
+        #: layer's own style signals are not taken for the user's edits.
+        self._busy = 0
+        #: The map view in a given CRS, as (xmin, ymin, xmax, ymax), for a
+        #: style whose min/max is computed over the "Current canvas"; set by
+        #: the plugin, which has the canvas. None: the whole slice.
+        self.extent_in: Callable[[QgsCoordinateReferenceSystem], Any] | None = None
         #: The name this class last gave the layer (`LAYER_NAME` or
         #: `SITE_LAYER_NAME`), or `None` before the first. Compared with the
         #: requested name rather than `layer.name()`, so a user's rename is
@@ -157,9 +180,12 @@ class SliceLayer(QObject):
         unipolar: bool,
         subtitle: str,
         counts: bool = False,
+        own: bool = False,
+        own_style: str | None = None,
     ) -> None:
         """One grid's slice: resampled north-up, then drawn by `update_north_up`.
-        `counts=True` is for the coverage view: counts are taken, never blended."""
+        `counts=True` is for the coverage view: counts are taken, never blended,
+        and always drawn in the plugin's colours."""
         try:
             array, geotransform = to_north_up(values, frame, counts=counts)
             self.update_north_up(
@@ -170,6 +196,8 @@ class SliceLayer(QObject):
                 colormap_name=colormap_name,
                 unipolar=unipolar,
                 subtitle=subtitle,
+                own=own and not counts,
+                own_style=own_style,
             )
         except Exception as exc:  # noqa: BLE001 -- reached from a slider slot
             _log(f"could not draw the slice layer: {exc}")
@@ -185,6 +213,8 @@ class SliceLayer(QObject):
         unipolar: bool,
         subtitle: str,
         name: str = LAYER_NAME,
+        own: bool = False,
+        own_style: str | None = None,
     ) -> None:
         """Draw an array that is already north-up on `geotransform` (M12: the
         site lattice, spec 4.5). Every path to the map comes through here, so
@@ -204,7 +234,13 @@ class SliceLayer(QObject):
         another CRS shares this layer. `setDataSource` moves both itself
         (measured on QGIS 3.44.7), so the checks are a guard that costs
         nothing: each is a no-op whenever the layer already agrees.
+
+        `own` (#180): wear the user's own style `own_style` rather than the
+        palette at `limit`; `None` starts one from the palette and limit and
+        reports it through `own_style_changed`. A computed min/max in that
+        style is worked out again for this slice (`own_colours.refit`).
         """
+        self._busy += 1
         try:
             self._serial += 1
             new_path = self._dir / f"slice-{self._serial:06d}.tif"
@@ -232,15 +268,103 @@ class SliceLayer(QObject):
             wanted = QgsCoordinateReferenceSystem(crs)
             if wanted.isValid() and self.layer.crs() != wanted:
                 self.layer.setCrs(wanted)
-            key = (colormap_name, float(limit), bool(unipolar))
-            if key != self._renderer_key:
-                self._apply_renderer(colormap_name, limit, unipolar)
-                self._renderer_key = key
+            seeded = None
+            if own:
+                seeded = self._apply_own(
+                    own_style, colormap_name, limit, unipolar, array, tuple(geotransform)
+                )
+            else:
+                key = ("nsgeo", colormap_name, float(limit), bool(unipolar))
+                if key != self._renderer_key:
+                    self._apply_renderer(colormap_name, limit, unipolar)
+                    self._renderer_key = key
             self.layer.setCustomProperty("nsgeo/window", subtitle)
             self.layer.serverProperties().setAbstract(subtitle)
             self.layer.triggerRepaint()
+            if seeded is not None:
+                self.own_style_changed.emit(seeded)
         except Exception as exc:  # noqa: BLE001 -- reached from a slider slot
             _log(f"could not draw the slice layer: {exc}")
+        finally:
+            self._busy -= 1
+
+    def _apply_own(
+        self,
+        own_style: str | None,
+        colormap_name: str,
+        limit: float,
+        unipolar: bool,
+        array: np.ndarray,
+        geotransform: tuple[float, ...],
+    ) -> str | None:
+        """Put the user's style on once, then refit it to this slice. Returns
+        the style when it was seeded from the palette here (to report), else
+        None. A saved style QGIS cannot read is logged and replaced by a seed."""
+        assert self.layer is not None
+        seeded = None
+        if own_style is None:
+            if self._renderer_key is None or self._renderer_key[0] != "own":
+                seeded = self._seed(colormap_name, limit, unipolar)
+        elif self._renderer_key != ("own", own_style):
+            try:
+                own_colours.apply_style_text(self.layer, own_style)
+                self._renderer_key = ("own", own_style)
+            except ValueError as exc:
+                _log(f"could not use the saved slice colours, so the palette's are used: {exc}")
+                seeded = self._seed(colormap_name, limit, unipolar)
+        own_colours.refit(self.layer, array, geotransform, self._view())
+        return seeded
+
+    def _seed(self, colormap_name: str, limit: float, unipolar: bool) -> str:
+        assert self.layer is not None
+        own_colours.seed_style(self.layer, colormap_name, limit, unipolar)
+        text = own_colours.style_text(self.layer)
+        self._renderer_key = ("own", text)
+        return text
+
+    def _view(self) -> Any:
+        """The map view in the layer's CRS for a "Current canvas" min/max."""
+        if self.extent_in is None or self.layer is None:
+            return None
+        try:
+            return self.extent_in(self.layer.crs())
+        except Exception as exc:  # noqa: BLE001 -- the whole slice will do
+            _log(f"could not read the map view for the slice colours: {exc}")
+            return None
+
+    def _on_style_signal(self) -> None:
+        """The layer's style changed: an edit by the user, when the layer
+        wears their own colours and this class is not the one changing it.
+        Reported only when the style is really different. A slot: never raises."""
+        try:
+            if self._busy or self.layer is None or sip.isdeleted(self.layer):
+                return
+            key = self._renderer_key
+            if key is None or key[0] != "own":
+                return
+            text = own_colours.style_text(self.layer)
+            if text == key[1]:
+                return
+            self._renderer_key = ("own", text)
+            self.own_style_changed.emit(text)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            _log(f"could not read the slice layer's new colours: {exc}")
+
+    def shows_own_colours(self) -> bool:
+        """Whether the layer is alive and wears the user's own style."""
+        return (
+            not self._layer_gone()
+            and self._renderer_key is not None
+            and self._renderer_key[0] == "own"
+        )
+
+    def own_style_now(self) -> str | None:
+        """The user's style as the layer shows it now (with this slice's
+        computed range), or None when it shows the plugin's colours."""
+        if not self.shows_own_colours():
+            return None
+        assert self.layer is not None
+        return own_colours.style_text(self.layer)
 
     def _layer_gone(self) -> bool:
         """Whether `self.layer` needs replacing rather than reused.
@@ -334,7 +458,9 @@ class SliceLayer(QObject):
         # The renderer survives the repoint, but `_apply_renderer` only runs
         # when the stretch changes. QGIS 3.44 restores the resampler from the
         # saved style on `setDataSource`, so this per-tick call is a guard.
-        apply_smooth_resampling(self.layer)
+        # Not over the user's own colours (#180): their resampling is theirs.
+        if self._renderer_key is None or self._renderer_key[0] != "own":
+            apply_smooth_resampling(self.layer)
         self.path = path
 
     def _write(
@@ -407,6 +533,9 @@ class SliceLayer(QObject):
 
     def _create_layer(self, path: Path, name: str = LAYER_NAME) -> None:
         layer = QgsRasterLayer(str(path), name, "gdal")
+        # #180: the user's edits in Layer Properties arrive as these.
+        layer.rendererChanged.connect(self._on_style_signal)
+        layer.styleChanged.connect(self._on_style_signal)
         # addToLegend=False: this is a scratch preview, not a durable
         # artefact, and it joins the site's own group below like every
         # other layer here -- it does not sit unparented at legend root.
