@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import nsgeo_qgis.destagger_job as job_module
 import numpy as np
@@ -11,6 +12,7 @@ from nsgeo.destagger import (
     LineStatus,
     envelope_bins,
 )
+from nsgeo.destagger.measure import ONE_WAY
 from nsgeo.geometry import GridPlacement
 from nsgeo.io.dzt import read_header, read_samples
 from nsgeo_qgis.destagger_job import JobLine, MeasureJob, box_value, measure_summary
@@ -93,6 +95,28 @@ def test_a_stop_between_reads_ends_the_job_quietly(tmp_path):
     assert len(job.prepared) == 1
 
 
+def test_a_grid_walked_one_way_is_not_read(tmp_path, monkeypatch):
+    """Nothing on it can be measured whatever the data, so the job says so at once
+    instead of reading every file first (walkthrough D1)."""
+    lines = [
+        JobLine(ln.key, ln.label, ln.path, ln.header, replace(ln.placement, direction=-1))
+        for ln in _job_lines(tmp_path)
+    ]
+    calls = _count_reads(monkeypatch)
+    job = MeasureJob(lines, {})
+    assert job.progress == (0, 0)
+    job.run(lambda: False)
+    assert calls == []
+    assert job.result is not None
+    assert job.result.axes["y"].reason == ONE_WAY
+    assert not job.stopped
+    labels = {ln.key: ln.label for ln in lines}
+    assert measure_summary(job.result, list(labels), {}, labels) == (
+        "Could not measure: every line was walked the same way, so there is no stagger "
+        "to measure. Nothing was changed."
+    )
+
+
 def test_a_multi_channel_file_is_measured_on_its_first_channel(tmp_path, monkeypatch):
     from tests.synthetic import write_dzt
 
@@ -102,8 +126,10 @@ def test_a_multi_channel_file_is_measured_on_its_first_channel(tmp_path, monkeyp
     write_dzt(path, data, n_channels=2)
     header = read_header(path)
     line = JobLine("TWO", "two", path, header, GridPlacement("G", "y", 0.25, 0.0, 1))
+    # A neighbour walked back, so the grid is worth reading (a lone line is not).
+    (back,) = _job_lines(tmp_path, n=2)[1:]
     monkeypatch.setattr(job_module, "measure_destagger", lambda ls, stop: DestaggerResult({}, {}))
-    job = MeasureJob([line], {})
+    job = MeasureJob([line, back], {})
     job.run(lambda: False)
     expected = envelope_bins(read_samples(path, header)[0], header.dt_ns, header.position_ns)
     got = job.prepared["TWO"]

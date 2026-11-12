@@ -12,6 +12,7 @@ from nsgeo.destagger.measure import (
     MeasureLine,
     MeasureStopped,
     measure_destagger,
+    one_way_result,
 )
 from nsgeo.destagger.prepare import EnvelopeBins, envelope_bins
 
@@ -27,4 +28,5 @@ __all__ = [
     "NO_NEIGHBOUR",
     "envelope_bins",
     "measure_destagger",
+    "one_way_result",
 ]

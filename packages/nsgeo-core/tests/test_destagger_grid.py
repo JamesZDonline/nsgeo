@@ -173,6 +173,47 @@ def test_lines_all_walked_one_way_measure_nothing(grid1_lines):
     )
 
 
+def _same_result(got, expected):
+    """DestaggerResults equal field by field: a failed axis's spread is nan."""
+    assert got is not None
+    assert list(got.axes) == list(expected.axes)
+    for axis, a in expected.axes.items():
+        b = got.axes[axis]
+        assert (b.destagger, b.lines_used, b.reason) == (a.destagger, a.lines_used, a.reason)
+        assert np.isnan(b.spread_m) and np.isnan(a.spread_m)
+    assert got.lines == expected.lines
+    assert list(got.lines) == list(expected.lines)
+
+
+@needs_grid1
+@pytest.mark.parametrize("direction", [1, -1])
+def test_a_one_way_grid_is_known_from_its_placements_alone(grid1_lines, direction):
+    """`one_way_result` gives what reading and measuring every line gives, so a grid
+    walked one way need not be read (walkthrough D1)."""
+    lines = [
+        replace(ln, placement=replace(ln.placement, direction=direction)) for ln in grid1_lines
+    ]
+    got = m.one_way_result({ln.key: ln.placement for ln in lines})
+    _same_result(got, measure_destagger(lines))
+
+
+@needs_grid1
+def test_a_lone_line_is_known_from_its_placement_alone(grid1_lines):
+    got = m.one_way_result({grid1_lines[0].key: grid1_lines[0].placement})
+    _same_result(got, measure_destagger(grid1_lines[:1]))
+
+
+@needs_grid1
+def test_a_grid_walked_both_ways_must_be_read(grid1_lines):
+    assert m.one_way_result({ln.key: ln.placement for ln in grid1_lines}) is None
+    # One axis walked both ways is enough, even beside an axis walked one way.
+    x = [
+        replace(ln, key=f"x{k}", placement=replace(ln.placement, axis="x", direction=1))
+        for k, ln in enumerate(grid1_lines[:4])
+    ]
+    assert m.one_way_result({ln.key: ln.placement for ln in grid1_lines + x}) is None
+
+
 @needs_grid1
 def test_a_line_with_no_opposite_neighbour_is_not_measured(grid1_lines):
     lines = list(grid1_lines)

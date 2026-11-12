@@ -341,7 +341,15 @@ def test_measuring_twice_reads_each_file_once_and_gives_the_same_values(make, mo
     assert dialog.destagger_spin.value() == box
 
 
-def test_a_one_way_grid_says_there_is_nothing_to_measure(make):
+def test_a_one_way_grid_says_there_is_nothing_to_measure(make, monkeypatch):
+    calls: list = []
+    real = job_module.read_samples
+
+    def counting(path, header=None):
+        calls.append(path)
+        return real(path, header)
+
+    monkeypatch.setattr(job_module, "read_samples", counting)
     session, dialog = make(long=True, shape=[(1, 0.0)] * N_LINES)
     dialog.select_keys(dialog.keys())
     dialog.measure()
@@ -351,6 +359,7 @@ def test_a_one_way_grid_says_there_is_nothing_to_measure(make):
         "to measure. Nothing was changed."
     )
     assert [_shift(dialog, r) for r in range(6)] == [None] * 6
+    assert calls == []  # known from the directions alone, so no file is read (D1)
 
 
 def test_two_axes_fill_each_row_from_its_own_axis(qgis_app, tmp_path, monkeypatch):
@@ -521,16 +530,30 @@ def test_measure_on_the_real_survey(qgis_app, tmp_path):
         lines.append(Line.open(path, placement))
     session.add_lines(lines)
     dialog = EditLinesDialog(session, "G")
+    before = dialog.minimumSizeHint().width()
     try:
         dialog.table.selectAll()
         dialog.measure()
         assert spin_until(lambda: not dialog._measurer.busy, 120_000), dialog.status.text()
         assert dialog.destagger_spin.value() == pytest.approx(0.15, abs=0.02), dialog.status.text()
         assert all(_shift(dialog, r) is not None for r in range(60))
+        assert dialog.minimumSizeHint().width() <= before  # the long summary wraps (A2)
     finally:
         dialog._measurer.shutdown()
         dialog.hide()
         dialog.deleteLater()
+
+
+def test_a_long_summary_wraps_instead_of_widening_the_dialog(make):
+    """The walkthrough's summary on a real grid pushed OK off the screen (A2)."""
+    values = {i: (LineStatus.OWN, 0.2 + i / 100) for i in range(8)}
+    session, dialog = make(Canned(values), n=8)
+    before = dialog.minimumSizeHint().width()
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    _finish(dialog)
+    assert len(dialog.status.text()) > 120
+    assert dialog.minimumSizeHint().width() <= before
 
 
 def test_the_tooltip_names_every_line_the_status_caps(make):

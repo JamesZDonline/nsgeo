@@ -22,7 +22,7 @@ match nothing are named and left at the grid value (`per_line`, design 7.4).
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Callable
@@ -55,6 +55,7 @@ __all__ = [
     "MeasureLine",
     "MeasureStopped",
     "measure_destagger",
+    "one_way_result",
 ]
 
 BOOTSTRAP = 300
@@ -128,6 +129,29 @@ def measure_destagger(
         axes[axis], axis_lines = _measure_axis(axis, group, should_stop)
         results.update(axis_lines)
     return DestaggerResult(axes, {ln.key: results[ln.key] for ln in lines})
+
+
+def one_way_result(placements: Mapping[str, GridPlacement]) -> DestaggerResult | None:
+    """What `measure_destagger` gives when no axis among the lines was walked both
+    ways, worked out from the placements alone, so no line need be read; None when
+    some axis was, and the lines must be read and measured.
+
+    With every line on an axis walked the same way, no line has one walked the other
+    way beside it: each is NO_NEIGHBOUR and the axis ONE_WAY (TOO_FEW for a lone line),
+    whatever its data. Reading the files could only name lines that are also too
+    short, unreadable or recorded differently, on a grid where nothing can be measured.
+    """
+    axes: dict[str, AxisResult] = {}
+    results: dict[str, LineResult] = {}
+    for axis in sorted({p.axis for p in placements.values()}):
+        group = [key for key, p in placements.items() if p.axis == axis]
+        if len({placements[key].direction for key in group}) > 1:
+            return None
+        reason = ONE_WAY if len(group) >= 2 else TOO_FEW
+        axes[axis] = AxisResult(axis, None, math.nan, 0, reason)
+        for key in group:
+            results[key] = LineResult(key, axis, LineStatus.NOT_MEASURED, None, NO_NEIGHBOUR)
+    return DestaggerResult(axes, {key: results[key] for key in placements})
 
 
 def _check(should_stop: Callable[[], bool]) -> None:

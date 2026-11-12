@@ -310,6 +310,7 @@ class EditLinesDialog(QDialog):
         layout.addWidget(self.bulk)
 
         self.status = QLabel("")
+        self.status.setWordWrap(True)  # a long summary wraps, not widens the dialog
         layout.addWidget(self.status)
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

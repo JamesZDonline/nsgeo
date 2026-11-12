@@ -25,6 +25,7 @@ from nsgeo.destagger import (
     MeasureStopped,
     envelope_bins,
     measure_destagger,
+    one_way_result,
 )
 from nsgeo.geometry import GridPlacement
 from nsgeo.io import DztError, DztHeader, read_samples
@@ -49,11 +50,18 @@ class MeasureJob:
         self.unreadable: dict[str, str] = {}
         self.result: DestaggerResult | None = None
         self.stopped = False
+        # A grid walked one way cannot be measured whatever its data, so it is not read.
+        self._one_way = one_way_result({ln.key: ln.placement for ln in self._lines})
         todo = sum(1 for ln in self._lines if ln.key not in self.prepared)
+        if self._one_way is not None:
+            todo = 0
         #: (lines read, lines to read); replaced whole by the worker, read by the GUI.
         self.progress: tuple[int, int] = (0, todo)
 
     def run(self, should_stop: Callable[[], bool]) -> None:
+        if self._one_way is not None:
+            self.result = self._one_way
+            return
         todo = [ln for ln in self._lines if ln.key not in self.prepared]
         for i, line in enumerate(todo):
             if should_stop():

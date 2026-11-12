@@ -214,6 +214,7 @@ The destagger a grid's lines need, measured from the lines themselves: each line
 | `NO_NEIGHBOUR` | The reason a line gets when no line walked the other way lies beside it. |
 | `envelope_bins` | Dewow, background removal, analytic envelope, then 8-sample time bins, for one channel's samples. |
 | `measure_destagger` | The grid value per axis, and each line's result, for a set of placed lines: its own value when it is clearly off on its own, otherwise the grid value. |
+| `one_way_result` | What `measure_destagger` gives when no axis was walked both ways, from the placements alone, so no line need be read; None when some axis was. |
 
 ### `nsgeo.velocity_fit`
 
