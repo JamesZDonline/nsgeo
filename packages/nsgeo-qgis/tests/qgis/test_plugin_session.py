@@ -1787,3 +1787,89 @@ def test_move_lines_leaves_lines_already_there_alone(session, tmp_path):
     assert [(s.key, s.label, s.reason) for s in gone.skipped] == [("raw/GONE.DZT", "GONE", REMOVED)]
     with pytest.raises(KeyError):
         session.move_lines([a[0]], "nope")
+
+
+def test_line_zero_is_zero_without_a_time_zero_step_and_loads_nothing(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    assert key not in session.site.stacks
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))  # nothing could be loaded
+
+    assert session.line_zero(key) == 0.0
+    assert session.line_zero(key, load=True) == 0.0
+    assert key not in session.site.stacks  # reading planted no stack
+
+
+def test_line_zero_loads_the_line_only_when_asked(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) is None
+    assert session.line_zero(key, load=True) == pytest.approx(-0.0433, abs=1e-3)
+    assert session.stack_for(key).source is None  # the probe ran on a copy
+
+
+def test_line_zero_follows_the_attached_source(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.set_profiles(key, lines[0].load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) == pytest.approx(-0.0433, abs=1e-3)
+
+
+def test_line_zero_is_none_not_an_error_when_the_line_cannot_be_read(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))
+
+    assert session.line_zero(key, load=True) is None
+
+
+def test_a_pick_made_on_a_relabelled_view_is_stored_from_the_lines_zero(pickable):
+    session, _, keys = pickable
+    key = keys[0]
+    session.set_profiles(key, session.line_for_key(key).load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    zero = session.line_zero(key)
+    assert zero == pytest.approx(-0.0433, abs=1e-3)
+    written = []
+
+    class _Store:
+        def write_pick(self, pick):
+            written.append(pick)
+
+    session.set_pick_store(_Store())
+    on_view = session.add_pick(key, 30, 5.0, zero_ns=zero)
+    on_radar = session.add_pick(key, 30, 5.0 + zero)
+
+    assert on_view.time_ns == pytest.approx(5.0)
+    assert on_view.zero_ns == pytest.approx(zero)
+    assert on_view.radar_ns == pytest.approx(5.0 + zero)
+    for field in ("time_ns", "zero_ns", "depth_m", "velocity_m_ns", "distance_m"):
+        assert getattr(on_radar, field) == pytest.approx(getattr(on_view, field)), field
+    assert written == [on_view, on_radar]
+    # the depth comes from the stored time, measured from the line's zero
+    assert on_view.depth_m == pytest.approx(
+        session.derived_pick_fields(key, 30, on_view.time_ns)[1]
+    )
+
+
+def test_a_pick_on_a_line_whose_zero_is_unknown_is_stored_on_the_radar_clock(pickable):
+    session, _, keys = pickable
+    key = keys[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    assert session.line_zero(key) is None  # a zero is set but nothing is attached
+    session.set_pick_store(type("S", (), {"write_pick": lambda self, p: None})())
+    pick = session.add_pick(key, 30, 5.0, zero_ns=-0.04)
+    assert pick.zero_ns is None
+    assert pick.time_ns == pytest.approx(5.0 - 0.04)

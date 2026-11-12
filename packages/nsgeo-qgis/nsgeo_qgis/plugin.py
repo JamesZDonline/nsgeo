@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any
 
 import nsgeo
-from nsgeo.processing import build_step
+from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
 from nsgeo.slices import plan_windows
 from qgis.core import Qgis, QgsMessageLog, QgsPointXY, QgsRasterLayer, QgsSettings
@@ -321,6 +321,7 @@ class NsgeoPlugin:
         self.slices_dock.slice_changed.connect(self._on_slice_changed)
         self.slices_dock.window_changed.connect(self.profile_dock.set_slice_band)
         self.slices_dock.window_cleared.connect(self.profile_dock.clear_slice_band)
+        self.profile_dock.set_cube_zero_lookup(self.slices_dock.line_zero_in_cube)
         self.depth_scroll = CanvasDepthScroll(self.iface.mapCanvas(), self.slices_dock)
 
         self.processing_dock.step_selected.connect(self._sync_gain_strip)
@@ -715,7 +716,9 @@ class NsgeoPlugin:
         if step is not self._gain_step:
             self._gain_generation += 1
         self._gain_owner, self._gain_step = (key, row, self._gain_generation), step
-        self.profile_dock.show_gain_strip(step.params[name], self._gain_owner)
+        self.profile_dock.show_gain_strip(
+            step.params[name], self._gain_owner, self.profile_dock.step_input_zero_ns(row)
+        )
 
     def _resync_gain_strip(self, key: str) -> None:
         """Re-run `_sync_gain_strip` once `key`'s profiles finish loading.
@@ -741,6 +744,11 @@ class NsgeoPlugin:
             self.slices_dock.reannounce_window()
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
             self.message(f"could not redraw the slice band: {exc}", Qgis.MessageLevel.Warning)
+
+    @staticmethod
+    def _points_on_clock(points: list, from_zero_ns: float, to_zero_ns: float) -> list:
+        """`[time_ns, gain_db]` points with the times moved between clocks."""
+        return [[float(retime_ns(float(t), from_zero_ns, to_zero_ns)), float(g)] for t, g in points]
 
     def _on_gain_points(self, points: list) -> None:
         if self.session is None or self.processing_dock is None:
@@ -769,8 +777,21 @@ class NsgeoPlugin:
         name = self._curve_param_name(step)
         if name is None:
             return
-        params = dict(step.params)
-        params[name] = points
+        shown, input_zero = (
+            self.profile_dock.shown_zero_ns(),
+            self.profile_dock.step_input_zero_ns(row),
+        )
+        try:
+            # Compared on the shown clock: an unmoved handle writes nothing.
+            if [[float(a), float(b)] for a, b in points] == self._points_on_clock(
+                step.params[name], input_zero, shown
+            ):
+                return
+            params = dict(step.params)
+            params[name] = self._points_on_clock(points, shown, input_zero)
+        except (TypeError, ValueError) as exc:
+            self.message(f"bad gain curve points: {exc}", Qgis.MessageLevel.Warning)
+            return
         if step.params == params:
             # No actual change -- e.g. a plain click on a handle with no
             # movement, which GainStrip.mouseReleaseEvent still emits
@@ -901,6 +922,7 @@ class NsgeoPlugin:
                 dock.view_settings(),
                 npz_path,
                 line_keys=engine.provenance().line_keys,
+                time_base=time_base_of(engine.provenance().steps),
             )
             cube_id = f"{engine.choice.grid_id}__{npz_path.stem}"
             self.session.record_cube(cube_id, record)
@@ -1266,7 +1288,9 @@ class NsgeoPlugin:
         try:
             if self.session is None:
                 return
-            self.session.add_pick(key, trace, time_ns)
+            dock = self.profile_dock
+            shown = 0.0 if dock is None else dock.shown_zero_ns()
+            self.session.add_pick(key, trace, time_ns, zero_ns=shown)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not author the pick: {exc}", Qgis.MessageLevel.Critical)
 

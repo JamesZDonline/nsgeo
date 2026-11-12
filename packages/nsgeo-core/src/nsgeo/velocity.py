@@ -5,8 +5,9 @@ is the derived quantity. A constant velocity is the one-layer case, which is
 all the v1 UI exposes, but the shape is a list from the start so adding
 layers later changes no file format.
 
-Depth is measured from time zero. Times before zero (a real SIR-4000 file
-starts at -11.09 ns) give negative depths, which is correct.
+Depth is measured from 0 on the radargram's own clock: the first break after
+a Time zero step, the radar's zero without one. Times before zero (a real
+SIR-4000 file starts at -11.09 ns) give negative depths, which is correct.
 """
 
 from __future__ import annotations

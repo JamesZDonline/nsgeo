@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
+from nsgeo.processing import TIME_BASE_RADAR, TIME_BASE_TIME_ZERO, time_base_of
 from nsgeo.project import line_key
 from nsgeo.slices import (
     CubeFrame,
@@ -292,6 +293,9 @@ class GeoTiffSliceWriter:
                                     dataset.SetMetadataItem(key, value)
                             dataset.SetMetadataItem(
                                 "NSGEO_FRAME_AZIMUTH_DEG", str(plan.frame.azimuth)
+                            )
+                            dataset.SetMetadataItem(
+                                "NSGEO_TIME_BASE", time_base_of(plan.provenance.steps)
                             )
                         elif array.shape != shape:
                             raise ValueError(
@@ -591,6 +595,7 @@ def cube_record(
     npz_path: Path,
     *,
     line_keys: Sequence[str],
+    time_base: str,
 ) -> dict[str, Any]:
     """One `Site.cubes` record: the whole recipe, with its path made portable.
 
@@ -643,6 +648,8 @@ def cube_record(
         "transform": choice.transform or "none",
         "cell": float(frame.cell),
         "lines": list(line_keys),
+        # which clock `z` is on: "time_zero" (each line reads 0 at its first break) or "radar"
+        "time_base": time_base,
         "z": {"t0_ns": z.t0_ns, "t1_ns": t1_ns, "dz_ns": z.dz_ns},
         "array": line_key(npz_path, root),
         # --- how it was BEING READ: changes nothing in the array ---
@@ -652,7 +659,8 @@ def cube_record(
 
 @dataclass(frozen=True)
 class CubeRecipe:
-    """A `Site.cubes` record, read back as the three things the dock sets.
+    """A `Site.cubes` record, read back as what the dock sets (choice, resolution,
+    view) plus the clock it was recorded on.
 
     `resolution` and `view` are optional because a record written before
     this milestone carries neither. Absent means UNKNOWN, and the dock
@@ -663,6 +671,8 @@ class CubeRecipe:
     choice: SourceChoice
     resolution: Resolution | None
     view: ViewSettings | None
+    #: None means the record predates the marker (a radar-clock-era cube).
+    time_base: str | None = None
 
 
 def recipe_from_record(record: Mapping[str, Any]) -> CubeRecipe:
@@ -717,4 +727,8 @@ def recipe_from_record(record: Mapping[str, Any]) -> CubeRecipe:
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"cube record has invalid view settings: {exc}") from exc
 
-    return CubeRecipe(choice=choice, resolution=resolution, view=view)
+    time_base = record.get("time_base")
+    if time_base is not None and time_base not in (TIME_BASE_TIME_ZERO, TIME_BASE_RADAR):
+        raise ValueError(f"cube record has an unknown time base: {time_base!r}")
+
+    return CubeRecipe(choice=choice, resolution=resolution, view=view, time_base=time_base)

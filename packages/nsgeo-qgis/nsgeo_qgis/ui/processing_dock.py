@@ -560,7 +560,7 @@ class ProcessingDock(QgsDockWidget):
         """(t0_ns, dt_ns, n_samples) of the input a step appended right now
         would actually receive: the stack's own `result()` when it
         evaluates cleanly, so a step already in the stack that changes the
-        axis (`time_zero` crops both `t0_ns` and `n_samples` -- see
+        axis (`time_zero` crops `n_samples` and relabels `t0_ns` -- see
         `nsgeo.processing.timezero`) is accounted for, exactly as the new
         step's own `apply()` will see it. Only used today to seed a new
         curve step's identity default (see `add_step_with_dialog`), so the
