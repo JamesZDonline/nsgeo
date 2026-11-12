@@ -271,9 +271,32 @@ def test_cache_bytes_states_what_the_cache_adds_then_zero(site):
     assert abs(before - cache.stat().st_size) <= 0.01 * before
     assert export.cache_bytes("Grid A", choice) == 0
     assert export.cache_bytes("Grid A", _choice(session, dz_ns=0.5)) > 0
-    # With nothing prepared in the panel the figure still reads the cache on disk.
+    # With nothing prepared in the panel the figure still reads the cache on disk...
     dock.engine.set_source(None)
     assert export.cache_bytes("Grid A", choice) == 0
+    # ...but only for these settings: another transform writes a whole new cache.
+    other = _choice(session, transform="amp_abs")
+    stated = export.cache_bytes("Grid A", other)
+    assert stated > 0
+    export.run("Grid A", other, progress=_noop)
+    (cache,) = (Path(session.root) / "paraview" / ".cache").glob("Grid_A-*.npy")
+    assert abs(stated - cache.stat().st_size) <= 0.01 * stated
+
+
+@needs_real_data
+def test_one_grids_cache_cleanup_leaves_another_grids_alone(site):
+    session, dock, export = site
+    other = Grid("Grid A-2", (50.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(other)
+    cache = Path(session.root) / "paraview" / ".cache"
+    cache.mkdir(parents=True)
+    neighbour = cache / "Grid_A-2-0123456789abcdef-fedcba9876543210.npy"
+    neighbour.write_bytes(b"x")
+    export.run("Grid A", _choice(session), progress=_noop)
+    export.run("Grid A", _choice(session, dz_ns=0.5), progress=_noop)  # replaces its own
+    assert neighbour.read_bytes() == b"x"
+    own = [f for f in cache.glob("Grid_A-*.npy") if not f.name.startswith("Grid_A-2-")]
+    assert len(own) == 1
 
 
 @needs_real_data
@@ -286,12 +309,11 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
     session, _, _ = site
     dock = SlicesDock(session)
     own = SliceEngine(session)
-    running = {"now": 0, "max": 0}
+    started_tasks: list[int] = []
     original = slices_engine.SliceEngine._start_task
 
     def counting(self, *args, **kwargs):
-        running["now"] += 1
-        running["max"] = max(running["max"], running["now"])
+        started_tasks.append(1)
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(slices_engine.SliceEngine, "_start_task", counting)
@@ -302,7 +324,7 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
         keys = source_keys(session, "Grid A")
         source = SourceChoice("Grid A", "p", "amp_square", keys)
         dock._grid_prepare_pending = False
-        started = running["max"]
+        started = len(started_tasks)
         with dock.foreign_preparation(own):
             own.set_source(source)
             assert own.has_live_task
@@ -310,9 +332,8 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
             dock.site_engine.set_source(SiteSource("amp_square", (source,)))  # and the site's
             assert dock._grid_prepare_pending
             assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
-            assert running["max"] == started + 1  # only the export's own engine started
+            assert len(started_tasks) == started + 1  # only the export's own engine started
             assert own.wait_for_preparation(60_000)
-            own.dispose()
         # No deadlock: what was held runs now, and finishes.
         assert dock.site_engine.wait_until_idle(60_000)
         assert spin_until(lambda: dock.engine.is_prepared, 60_000)
@@ -320,6 +341,7 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
         assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
         assert dock.refiner is not None and choice
     finally:
+        own.dispose()
         dock.refiner.shutdown()
         dock.site_engine.cancel()
         dock.site_engine.wait_until_idle(20_000)
@@ -327,6 +349,76 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
         dock.engine.dispose()
         dock.site_engine.dispose()
         dock.deleteLater()
+
+
+@needs_real_data
+def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_back(site):
+    """R15: leaving `foreign_preparation` with a task still alive keeps it registered."""
+    from nsgeo_qgis.slices_plan import SiteSource
+    from nsgeo_qgis.ui.slices_dock import SlicesDock
+
+    session, _, _ = site
+    dock = SlicesDock(session)
+    own = SliceEngine(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.engine.set_source(None)
+        source = SourceChoice("Grid A", "p", "amp_square", source_keys(session, "Grid A"))
+        dock._grid_prepare_pending = False
+        with dock.foreign_preparation(own):
+            own.set_source(source)
+            assert own.has_live_task
+        # The span is over, the task is not: both gates are still shut.
+        assert own.has_live_task and own in dock._foreign
+        dock.prepare()
+        dock.site_engine.set_source(SiteSource("amp_square", (source,)))
+        assert dock._grid_prepare_pending
+        assert not dock.engine.has_live_task and not dock.site_engine.has_live_task
+        assert own.wait_for_preparation(60_000)
+        assert spin_until(lambda: own not in dock._foreign, 20_000)
+        assert dock.site_engine.wait_until_idle(60_000)
+        assert spin_until(lambda: dock.engine.is_prepared, 60_000)
+    finally:
+        own.dispose()
+        dock.refiner.shutdown()
+        dock.site_engine.cancel()
+        dock.site_engine.wait_until_idle(20_000)
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.site_engine.dispose()
+        dock.deleteLater()
+
+
+@needs_real_data
+def test_the_export_registers_its_engine_and_waits_without_user_input(site, monkeypatch):
+    from qgis.PyQt.QtCore import QEventLoop
+
+    session, dock, export = site
+    seen: list[tuple[int, object]] = []
+    original = slices_engine.SliceEngine.wait_for_preparation
+
+    def spy(self, timeout_ms=20_000, flags=QEventLoop.ProcessEventsFlag.AllEvents):
+        if self is not dock.engine and self is not dock.site_engine:
+            seen.append((len(dock.registered), flags))
+        return original(self, timeout_ms, flags)
+
+    monkeypatch.setattr(slices_engine.SliceEngine, "wait_for_preparation", spy)
+    export.run("Grid A", _choice(session), progress=_noop)
+    assert seen and all(n == 1 for n, _ in seen)  # registered for the whole wait
+    assert all(f == QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents for _, f in seen)
+    assert dock.registered == []
+
+
+def test_a_site_engine_with_grids_queued_refuses_the_export(synth_site, monkeypatch):
+    session, dock, export = synth_site
+    started: list[int] = []
+    monkeypatch.setattr(slices_engine.SliceEngine, "set_source", lambda s, c: started.append(1))
+    monkeypatch.setattr(
+        type(dock.site_engine), "is_running", property(lambda self: self is dock.site_engine)
+    )
+    with pytest.raises(RuntimeError, match="Slices are still preparing"):
+        export.run("Grid A", _choice(session), progress=_noop)
+    assert started == []
 
 
 def _picks_case(session, export, monkeypatch, steps, pick_zero):

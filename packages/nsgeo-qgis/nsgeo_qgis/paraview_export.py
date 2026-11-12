@@ -114,6 +114,21 @@ def _bounds(lines: Sequence[PreparedLine]) -> tuple[float, float]:
     return t0, t1
 
 
+_HEX16 = "[0-9a-f]{16}"
+
+
+def _cache_name(grid_id: str, settings_key: str, full_key: str) -> str:
+    return f"{_safe(grid_id)}-{settings_key}-{full_key}.npy"
+
+
+def _cache_files(cache_dir: Path, grid_id: str) -> list[Path]:
+    """This grid's cache files and no other grid's (`A` must not match `A-2`)."""
+    if not cache_dir.is_dir():
+        return []
+    pattern = re.compile(rf"{re.escape(_safe(grid_id))}-{_HEX16}-{_HEX16}\.npy")
+    return sorted(f for f in cache_dir.iterdir() if pattern.fullmatch(f.name))
+
+
 def _npy_bytes(shape: tuple[int, int, int]) -> int:
     """A float32 .npy of `shape` on disk: the data and the 128-byte header."""
     return 128 + 4 * shape[0] * shape[1] * shape[2]
@@ -199,23 +214,26 @@ class ParaViewExport:
         t0, t1 = self._time_range(source)
         shape = (ZAxis.from_range(t0, t1, choice.dz_ns).nz, frame.ny, frame.nx)
         cache_dir = paraview_folder(self.session, grid_id).parent / ".cache"
-        found = sorted(cache_dir.glob(f"{_safe(grid_id)}-*.npy")) if cache_dir.is_dir() else []
+        found = _cache_files(cache_dir, grid_id)
+        full = _npy_bytes(shape)
+        skey = self._settings_key(source, choice, self._finish(grid_id), frame)
         engine = self._panel_engine(source)
-        if engine is not None and found:
+        if engine is not None:
+            # The exact name is known from the panel's prepared lines.
             lines = list(engine.prepared_lines())
-            key = self._cache_key(
+            full_key = self._cache_key(
                 lines, engine.provenance(), choice, t0, t1, self._finish(grid_id), frame
             )
-            return (
-                0
-                if any(f.name == f"{_safe(grid_id)}-{key}.npy" for f in found)
-                else _npy_bytes(shape)
-            )
+            name = _cache_name(grid_id, skey, full_key)
+            return 0 if any(f.name == name for f in found) else full
+        # Without prepared lines only the settings are known: a file made from these settings
+        # and this shape is this run's cache. Anything else, the run writes anew.
         for f in found:
-            with contextlib.suppress(Exception):
-                if np.lib.format.open_memmap(f, mode="r").shape == shape:
-                    return 0
-        return _npy_bytes(shape)
+            if f.name.startswith(f"{_safe(grid_id)}-{skey}-"):
+                with contextlib.suppress(Exception):
+                    if np.lib.format.open_memmap(f, mode="r").shape == shape:
+                        return 0
+        return full
 
     def _finish(self, grid_id: str) -> Any:
         grid = self.session.grid(grid_id)
@@ -337,8 +355,9 @@ class ParaViewExport:
         cache_part: Path | None = None
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
+            skey = self._settings_key(source, choice, finish, frame)
             key = self._cache_key(lines, prov, choice, t0, t1, finish, frame)
-            cache = cache_dir / f"{_safe(grid_id)}-{key}.npy"
+            cache = cache_dir / _cache_name(grid_id, skey, key)
             shape = (z.nz, frame.ny, frame.nx)
             if cache.exists():
                 step(z.nz)
@@ -347,7 +366,7 @@ class ParaViewExport:
                 self._fill(lines, prov, frame, z, finish, shape, cache_part, step)
                 os.replace(cache_part, cache)
                 cache_part = None
-                for old in cache_dir.glob(f"{_safe(grid_id)}-*.npy"):
+                for old in _cache_files(cache_dir, grid_id):
                     if old != cache:
                         old.unlink(missing_ok=True)
             filled = np.lib.format.open_memmap(cache, mode="r")
@@ -381,6 +400,30 @@ class ParaViewExport:
         return folder
 
     # ---- the pieces ----------------------------------------------------------
+    def _settings_key(
+        self, source: SourceChoice, choice: VolumeChoice, finish: Any, frame: CubeFrame
+    ) -> str:
+        """The part of a cache's name that is known without preparing any line: the lines and
+        where they are placed, the preset, transform, cell, depth step, finish and frame."""
+        doc = {
+            "lines": [
+                [k, repr(self.session.line_for_key(k).placement)] for k in sorted(source.line_keys)
+            ],
+            "steps": list(self.session.site.presets.get(source.preset, [])),
+            "transform": choice.transform,
+            "cell": choice.cell,
+            "dz_ns": choice.dz_ns,
+            "finish": [
+                finish.method,
+                finish.max_distance_m,
+                finish.search_radius_m,
+                finish.smooth_x_m,
+                finish.smooth_y_m,
+            ],
+            "frame": [list(frame.origin), frame.azimuth, frame.cell, frame.nx, frame.ny],
+        }
+        return hashlib.sha1(json.dumps(doc, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
     @staticmethod
     def _cache_key(
         lines: Sequence[PreparedLine],

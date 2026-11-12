@@ -272,6 +272,13 @@ class SlicesDock(QgsDockWidget):
         #: Preparations that are not this dock's (the ParaView export's engine): held
         #: against like the site's, for the span of `foreign_preparation`.
         self._foreign: list[Any] = []
+        #: Foreign engines whose span ended with a task still alive: kept registered (as the
+        #: site engine keeps its `_retiring`) until `_reap_foreign` sees the task end.
+        self._foreign_retiring: list[Any] = []
+        self._foreign_reaper = QTimer(self)
+        self._foreign_reaper.setSingleShot(True)
+        self._foreign_reaper.setInterval(50)
+        self._foreign_reaper.timeout.connect(self._reap_foreign)
         #: #70: a grid switch left the engine on the grid that was left; its
         #: resolution is the spins' to apply once the new grid is prepared.
         self._resolution_owed = False
@@ -3223,11 +3230,30 @@ class SlicesDock(QgsDockWidget):
         try:
             yield
         finally:
-            self.site_engine.remove_exclusive(engine)
-            if engine in self._foreign:
-                self._foreign.remove(engine)
-            if self._grid_prepare_pending and self._scope == "grid":
-                self._grid_retry.start()
+            if engine.has_live_task:
+                # An abandoned task may still be reading: stay registered until it ends.
+                self._foreign_retiring.append(engine)
+                self._foreign_reaper.start()
+            else:
+                self._unregister_foreign(engine)
+
+    def _unregister_foreign(self, engine: Any) -> None:
+        self.site_engine.remove_exclusive(engine)
+        if engine in self._foreign:
+            self._foreign.remove(engine)
+        if self._grid_prepare_pending and self._scope == "grid":
+            self._grid_retry.start()
+
+    def _reap_foreign(self) -> None:
+        """The reaper timer's slot: unregister retired foreign engines whose task has ended."""
+        try:
+            for engine in [e for e in self._foreign_retiring if not e.has_live_task]:
+                self._foreign_retiring.remove(engine)
+                self._unregister_foreign(engine)
+            if self._foreign_retiring:
+                self._foreign_reaper.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            _log(f"could not release a foreign preparation: {exc}")
 
     def _run_pending_grid_prepare(self) -> None:
         """Run the owed This-grid preparation once no site task is live, else
