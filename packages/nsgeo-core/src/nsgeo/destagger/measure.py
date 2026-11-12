@@ -154,6 +154,7 @@ def _measure_axis(
     # Exclusions, in order: no distance axis, other time settings, too short, no neighbour.
     remaining = []
     for line in group:
+        _check(should_stop)
         if line.header.traces_per_metre > 0:
             remaining.append(line)
         else:
@@ -162,6 +163,7 @@ def _measure_axis(
         dt, t0 = _common_time_settings(remaining)
         kept = []
         for line in remaining:
+            _check(should_stop)
             if (
                 abs(line.bins.dt_ns - dt) <= TIME_TOLERANCE
                 and abs(line.bins.t0_ns - t0) <= TIME_TOLERANCE
@@ -188,6 +190,7 @@ def _measure_axis(
     directions = [ln.placement.direction for ln in remaining]
     neighbours = neighbour_indices(by_offset, directions)
     for i, line in enumerate(remaining):
+        _check(should_stop)
         if i not in neighbours:
             exclude(line, NO_NEIGHBOUR)
     measured = [remaining[i] for i in sorted(neighbours)]
@@ -198,7 +201,7 @@ def _measure_axis(
         return AxisResult(axis, None, math.nan, len(measured), reason), out
 
     if not measured:
-        return failed(ONE_WAY if len(remaining) >= 2 else TOO_FEW)[0], out
+        return failed(ONE_WAY if len(remaining) >= 2 else TOO_FEW)
     if len(measured) < MIN_LINES:
         return failed(TOO_FEW)
 
@@ -221,7 +224,7 @@ def _measure_axis(
     for j in range(len(measured)):
         _check(should_stop)
         profiles[j], _ = line_profiles(datas[j], along_list[j], axis_m, medians, window)
-    curves = lag_curves(profiles, local_nb, local_dirs, max_lag)
+    curves = lag_curves(profiles, local_nb, local_dirs, max_lag, lambda: _check(should_stop))
     _check(should_stop)
     found = grid_peak(np.array([curves[j] for j in range(len(measured))]), window.size, BOOTSTRAP)
     if not found.clear:

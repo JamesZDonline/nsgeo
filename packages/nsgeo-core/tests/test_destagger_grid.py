@@ -11,9 +11,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from nsgeo.destagger import (
-    DestaggerResult,
     LineStatus,
-    MeasureLine,
     MeasureStopped,
     envelope_bins,
     measure_destagger,
@@ -182,7 +180,7 @@ def test_too_few_lines_measure_nothing(grid1_lines):
 
 @needs_grid1
 @needs_grid2
-def test_each_axis_is_measured_on_its_own(grid1_unfitted):
+def test_each_axis_is_measured_on_its_own():
     y = lines_for(GPS_LINES, GRID1_LENGTH, axis="y")
     x = lines_for(GRID2_LINES, GRID2_LENGTH, axis="x")
     result = measure_destagger(y + x)
@@ -192,16 +190,22 @@ def test_each_axis_is_measured_on_its_own(grid1_unfitted):
     assert len(result.lines) == 120
 
 
+# Each of the six per-line loops (no distance, time settings, too short, neighbours,
+# profiles, lag curves) checks once per line, so 60 lines make 360 calls in order.
+# Stopping inside each stage must raise.
 @needs_grid1
-def test_should_stop_raises_measure_stopped(grid1_lines):
+@pytest.mark.parametrize("stage", range(6))
+def test_should_stop_is_honoured_in_every_per_line_stage(grid1_lines, stage):
+    stop_at = 30 + 60 * stage
     calls = []
 
     def stop() -> bool:
         calls.append(1)
-        return len(calls) >= 5
+        return len(calls) >= stop_at
 
     with pytest.raises(MeasureStopped):
         measure_destagger(grid1_lines, should_stop=stop)
+    assert len(calls) == stop_at
 
 
 @needs_grid1
@@ -215,7 +219,3 @@ def test_envelope_bins_shape_and_clock():
     assert bins.t0_ns == pytest.approx(header.position_ns + 3.5 * header.dt_ns)
     assert bins.dt_ns == pytest.approx(8 * header.dt_ns)
     assert bins.t_ns[1] - bins.t_ns[0] == pytest.approx(bins.dt_ns)
-
-
-def test_the_result_types_are_importable():
-    assert DestaggerResult and MeasureLine

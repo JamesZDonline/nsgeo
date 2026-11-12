@@ -14,7 +14,7 @@ the per-line step can measure the same line from independent halves.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -139,6 +139,7 @@ def lag_curves(
     neighbours: dict[int, list[int]],
     directions: Sequence[int],
     max_lag: int,
+    check: Callable[[], None] = lambda: None,
 ) -> dict[int, np.ndarray]:
     """Per line, its lag curve against the mean of its neighbours, summed over bins.
 
@@ -146,6 +147,7 @@ def lag_curves(
     steps and reads as a shift of the line in its own direction of travel: the lag axis is
     reversed for direction -1, so both directions add up instead of cancelling. The sum
     over bins is taken before the inverse FFT (it is linear), so one transform per line.
+    `check` is called once per line, so a caller can stop the work by raising.
     """
     n = profiles.shape[-1]
     nfft = 1 << int(np.ceil(np.log2(2 * n)))
@@ -158,6 +160,7 @@ def lag_curves(
 
     out = {}
     for k, nb in neighbours.items():
+        check()
         g = np.mean([fft_of(j) for j in nb], axis=0)
         x = np.fft.irfft((fft_of(k) * np.conj(g)).sum(axis=0), nfft)
         c = np.concatenate([x[-max_lag:], x[: max_lag + 1]]) / n

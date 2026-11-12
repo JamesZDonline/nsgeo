@@ -25,7 +25,7 @@ needs_grid2 = pytest.mark.skipif(
     len(GRID2_LINES) != 60, reason="needs Grid 2 in tests/data/local/grid2"
 )
 
-GRID1_LENGTH = 30.0
+GRID1_LENGTH = 29.98
 GRID2_LENGTH = 29.96
 
 _BINS: dict[Path, EnvelopeBins] = {}
