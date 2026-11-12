@@ -62,6 +62,14 @@ from nsgeo.slices.site import (
 )
 from nsgeo.slices.smooth import smooth
 from nsgeo.slices.store import CubeStoreError, load_cube, npz_path, save_cube
+from nsgeo.slices.volume import (
+    PreparedVolume,
+    VolumeSettings,
+    VolumeStopped,
+    depth_axis,
+    fill_levels,
+    prepare_volume,
+)
 
 __all__ = [
     "BACKGROUND_FRACTION",
@@ -79,6 +87,7 @@ __all__ = [
     "NEIGHBOURS_PER_QUADRANT",
     "NORMALISATION_METHODS",
     "PreparedLine",
+    "PreparedVolume",
     "Provenance",
     "SEAM_WIDTH_SPACINGS",
     "Seam",
@@ -88,6 +97,8 @@ __all__ = [
     "SliceWindow",
     "SolveStopped",
     "Taps",
+    "VolumeSettings",
+    "VolumeStopped",
     "ZAxis",
     "background_level",
     "bilinear_taps",
@@ -95,7 +106,9 @@ __all__ = [
     "compose_footprints",
     "covered_cells",
     "covered_pixels",
+    "depth_axis",
     "edge_match_solve",
+    "fill_levels",
     "find_seams",
     "finest_fitting_cell",
     "finish_slice",
@@ -111,6 +124,7 @@ __all__ = [
     "plan_fill",
     "plan_line",
     "plan_windows",
+    "prepare_volume",
     "sample",
     "sample_counts",
     "save_cube",
