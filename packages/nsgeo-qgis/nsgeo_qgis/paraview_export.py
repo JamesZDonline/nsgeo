@@ -27,6 +27,7 @@ import math
 import os
 import re
 import shutil
+import traceback
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,9 @@ from qgis.PyQt.QtCore import QEventLoop
 
 from nsgeo_qgis.paraview_scene import (
     ExportSummary,
+    export_refusal,
+    fill_refusal,
+    in_use_message,
     scene_record,
     scene_title,
     write_scene_files,
@@ -126,11 +130,12 @@ def _cache_name(grid_id: str, settings_key: str, full_key: str) -> str:
     return f"{_safe(grid_id)}-{settings_key}-{full_key}.npy"
 
 
-def _cache_files(cache_dir: Path, grid_id: str) -> list[Path]:
-    """This grid's cache files and no other grid's (`A` must not match `A-2`)."""
+def _cache_files(cache_dir: Path, grid_id: str, suffix: str = ".npy") -> list[Path]:
+    """This grid's cache files (or, with suffix ".npy.part", its unfinished ones) and no
+    other grid's (`A` must not match `A-2`)."""
     if not cache_dir.is_dir():
         return []
-    pattern = re.compile(rf"{re.escape(_safe(grid_id))}-{_HEX16}-{_HEX16}\.npy")
+    pattern = re.compile(rf"{re.escape(_safe(grid_id))}-{_HEX16}-{_HEX16}{re.escape(suffix)}")
     return sorted(f for f in cache_dir.iterdir() if pattern.fullmatch(f.name))
 
 
@@ -154,6 +159,11 @@ class ParaViewExport:
         self.session = session
         self.dock = dock
         self._zero_probes: dict[tuple[str, str], float] = {}
+        # picks_for scans every pick of the site, so a grid's count is read once for as long
+        # as this object lives (the dialog's lifetime).
+        self._pick_counts: dict[str, int] = {}
+        #: Lines of the last `run` that could not be prepared and so are not in its export.
+        self.skipped_lines: list[str] = []
 
     # ---- settings ----------------------------------------------------------
     def defaults(self, grid_id: str) -> VolumeChoice:
@@ -235,7 +245,11 @@ class ParaViewExport:
         velocity = self.session.resolved_velocity(source.line_keys[0])
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
-        n_picks = sum(len(self.session.picks_for(k)) for k in source.line_keys)
+        if grid_id not in self._pick_counts:
+            self._pick_counts[grid_id] = sum(
+                len(self.session.picks_for(k)) for k in source.line_keys
+            )
+        n_picks = self._pick_counts[grid_id]
         return ExportSummary(
             folder=folder,
             replaces=folder.is_dir(),
@@ -373,7 +387,14 @@ class ParaViewExport:
         grid = self.session.grid(grid_id)
         frame = self._frame(grid_id, choice)  # before anything is prepared or written
         source = self._source(grid_id, choice)
+        folder = paraview_folder(self.session, grid_id)
+        # What a crash or a full disk left of this grid's fill: nothing else reads it.
+        for stale in _cache_files(folder.parent / ".cache", grid_id, ".npy.part"):
+            with contextlib.suppress(OSError):
+                stale.unlink()
         lines, prov = self._prepared(source)
+        got = {line.key for line in lines}
+        self.skipped_lines = sorted(k for k in source.line_keys if k not in got)
         t0, t1 = _bounds(lines)
         z = ZAxis.from_range(t0, t1, choice.dz_ns)
         nd = _depth_levels(z)
@@ -396,7 +417,6 @@ class ParaViewExport:
             step()
             return True
 
-        folder = paraview_folder(self.session, grid_id)
         cache_dir = folder.parent / ".cache"
         partial = folder.with_name(folder.name + ".partial")
         cache_part: Path | None = None
@@ -409,6 +429,11 @@ class ParaViewExport:
             if cache.exists():
                 step(z.nz)
             else:
+                # The cache is a sparse, memory-mapped file: a disk that fills under it ends the
+                # program (SIGBUS), so refuse before it exists rather than fail in it.
+                reason = fill_refusal(_npy_bytes(shape), shutil.disk_usage(cache_dir).free)
+                if reason:
+                    raise ValueError(reason)
                 cache_part = cache.with_name(cache.name + ".part")
                 self._fill(lines, prov, frame, z, finish, shape, cache_part, step)
                 os.replace(cache_part, cache)
@@ -426,6 +451,11 @@ class ParaViewExport:
                 slab_levels=slab,
                 progress=lambda done, n: tick_trend(),
             )
+            reason = export_refusal(
+                export_size_bytes(frame.nx, frame.ny, nd), shutil.disk_usage(cache_dir).free
+            )
+            if reason:
+                raise ValueError(reason)
             if partial.exists():
                 shutil.rmtree(partial)
             partial.mkdir(parents=True)
@@ -435,14 +465,21 @@ class ParaViewExport:
             record = self._record(
                 grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks
             )
+            record["skipped_lines"] = list(self.skipped_lines)
             write_scene_files(partial, record, paraview_path)
             self._swap(partial, folder)
-        except VolumeStopped as exc:
-            raise ParaViewExportCancelled(str(exc)) from exc
-        except BaseException:
+        except BaseException as exc:
+            # The traceback keeps the finished fill's frames, and with them its memory map,
+            # alive; Windows will not delete a file that is mapped. Let go of them first,
+            # and never let a failed delete replace the cancel or the error being raised
+            # (the next run deletes what is left).
+            traceback.clear_frames(exc.__traceback__)
             shutil.rmtree(partial, ignore_errors=True)
             if cache_part is not None:
-                cache_part.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    cache_part.unlink(missing_ok=True)
+            if isinstance(exc, VolumeStopped):
+                raise ParaViewExportCancelled(str(exc)) from exc
             raise
         return folder
 
@@ -745,7 +782,10 @@ class ParaViewExport:
             shutil.rmtree(old)
         had = folder.exists()
         if had:
-            folder.rename(old)
+            try:
+                folder.rename(old)
+            except PermissionError as exc:  # Windows: a program has the folder open
+                raise RuntimeError(in_use_message(folder)) from exc
         try:
             partial.rename(folder)
         except BaseException:

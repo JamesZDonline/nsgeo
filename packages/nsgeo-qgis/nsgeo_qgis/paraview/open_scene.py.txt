@@ -127,7 +127,16 @@ picks = XMLPolyDataReader(registrationName="Your picks", FileName=[path("picks.v
 picks_d = Show(picks, view)
 picks_d.SetRepresentationType("Points")
 try_set(picks_d, PointSize=12.0, RenderPointsAsSpheres=1)
-ColorBy(picks_d, ("POINTS", "true_depth_m"))  # same colours as the isosurface
+if INFO["n_picks"] > 0:
+    ColorBy(picks_d, ("POINTS", "true_depth_m"))  # same colours as the isosurface
+else:
+    # Nothing to rescale the colours to: ColorBy would make ParaView log "Could not
+    # determine array range". Name the array and its colours without rescaling.
+    try_set(
+        picks_d,
+        ColorArrayName=["POINTS", "true_depth_m"],
+        LookupTable=GetColorTransferFunction("true_depth_m"),
+    )
 
 lines = XMLPolyDataReader(registrationName="Survey lines", FileName=[path("lines.vtp")])
 lines_d = Show(lines, view)

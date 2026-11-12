@@ -5,7 +5,8 @@ It holds widgets and nothing else. The numbers and the words come from outside:
 `choice_for(grid)` gives a grid's remembered `VolumeChoice`, `summary_for(grid, choice)`
 gives an `ExportSummary` (raising ValueError for a cell too fine to export), and
 `paraview_scene.summary_rows` says it in words. The summary is cheap, so it is refreshed on
-every edit; a spin box announces only a finished edit.
+every edit of a setting (not of the ParaView path, which only changes the buttons); a spin box
+announces only a finished edit.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from nsgeo_qgis.paraview_scene import (
     ExportSummary,
     cell_hint,
     disk_is_short,
+    disk_refusal,
     dt_hint,
     summary_rows,
 )
@@ -95,6 +97,7 @@ class ParaViewExportDialog(QDialog):
         self._hints_for = hints_for
         self._open_after = False
         self._loading = False
+        self._can_export = False  # the settings, and the disk, allow an export
 
         outer = QVBoxLayout(self)
         top = QFormLayout()
@@ -183,7 +186,7 @@ class ParaViewExportDialog(QDialog):
         self.export_button.clicked.connect(lambda: self._finish(False))
         self.open_button.clicked.connect(lambda: self._finish(True))
         self.browse_button.clicked.connect(lambda: self._browse())
-        self.path_edit.textChanged.connect(lambda _t: self._refresh())
+        self.path_edit.textChanged.connect(lambda _t: self._update_buttons())
         self.grid_combo.currentTextChanged.connect(lambda _t: self._load_grid())
         for spin in self._spins():
             spin.valueChanged.connect(lambda _v: self._refresh())
@@ -295,10 +298,11 @@ class ParaViewExportDialog(QDialog):
             for label, text in summary_rows(summary):
                 self._row_labels[label].setText(text)
                 self._row_labels[label].setStyleSheet("")
-            short = disk_is_short(summary)
+            refused = bool(disk_refusal(summary))  # also says why, in the Disk row
+            short = refused or disk_is_short(summary)
             self.disk_label.setStyleSheet(_WARNING_STYLE if short else "")
             self.disk_label.setProperty("warning", short)
-            self._set_buttons(True)
+            self._set_buttons(not refused)
         except Exception as exc:  # noqa: BLE001 -- a slot; shown, and logged
             _log()
             self._show_problem(str(exc))
@@ -311,7 +315,15 @@ class ParaViewExportDialog(QDialog):
         self.disk_label.setProperty("warning", False)
         self._set_buttons(False)
 
+    def _update_buttons(self) -> None:
+        """The ParaView path changed: only the buttons depend on it, so nothing is recomputed."""
+        try:
+            self._set_buttons(self._can_export)
+        except Exception:  # noqa: BLE001 -- a slot; logged
+            _log()
+
     def _set_buttons(self, ok: bool) -> None:
+        self._can_export = ok
         has_path = bool(self.paraview_path())
         self.export_button.setEnabled(ok)
         self.open_button.setEnabled(ok and has_path)

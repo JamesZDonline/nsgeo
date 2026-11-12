@@ -4,12 +4,15 @@ dialog's size and refusals, what is remembered, launching ParaView, and cancelli
 from __future__ import annotations
 
 import shutil
+import time
+import types
 from pathlib import Path
 
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo_qgis import paraview_export
 from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis.paraview_export import ParaViewExport, paraview_folder
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
@@ -132,18 +135,16 @@ def test_with_no_paraview_path_only_export_is_enabled(plugin):
     assert dialog.open_button.isEnabled()
 
 
-def test_a_short_disk_warns_and_says_how_much_is_needed_but_still_exports(plugin, monkeypatch):
+def test_a_very_short_disk_says_how_much_is_needed_and_stops_the_export(plugin, monkeypatch):
     dialog = _make_dialog(plugin[0])
-    export_bytes = dialog._summary_for("A", dialog.choice()).export_bytes
     usage = shutil._ntuple_diskusage(10**12, 10**12 - 1000, 1000)
     monkeypatch.setattr(shutil, "disk_usage", lambda p: usage)
     dialog.cell_spin.setValue(dialog.cell_spin.value() * 1.01)  # an edit refreshes
     text = dialog.disk_label.text()
-    assert text.startswith("only 1000 bytes free") or text.startswith("only 1 MB free")
-    assert "needs about" in text
+    assert "only 1 MB is free" in text
+    assert "it needs" in text
     assert dialog.disk_label.property("warning") is True
-    assert dialog.export_button.isEnabled()
-    assert export_bytes > 0
+    assert not dialog.export_button.isEnabled()
 
 
 # ---- what accepting does ---------------------------------------------------------------------
@@ -182,13 +183,33 @@ def _fake_paraview(tmp_path) -> Path:
     return exe
 
 
+def _spy_launch(monkeypatch) -> list[tuple]:
+    """Replace `QProcess.startDetached`: records (program, arguments, working directory,
+    NSGEO_SCENE_DIR) of each launch."""
+    spied: list[tuple] = []
+
+    def fake(self):
+        env = self.processEnvironment()
+        spied.append(
+            (
+                self.program(),
+                self.arguments(),
+                self.workingDirectory(),
+                env.value("NSGEO_SCENE_DIR"),
+            )
+        )
+        return True
+
+    monkeypatch.setattr(QProcess, "startDetached", fake)
+    return spied
+
+
 def test_export_and_open_launches_paraview_with_the_folder(
     plugin, drive_dialog, monkeypatch, tmp_path
 ):
     plugin_obj, s = plugin
     exe = _fake_paraview(tmp_path)
-    spied: list[tuple] = []
-    monkeypatch.setattr(QProcess, "startDetached", staticmethod(lambda *a: spied.append(a) or True))
+    spied = _spy_launch(monkeypatch)
 
     def driver(d):
         d.path_edit.setText(str(exe))
@@ -196,14 +217,17 @@ def test_export_and_open_launches_paraview_with_the_folder(
 
     _open_dialog(plugin_obj, drive_dialog, driver)
     folder = paraview_folder(s, "A")
-    assert spied == [(str(exe), [f"--script={folder / 'open_scene.py'}"], str(folder))]
+    # Worked in the folder's parent (Windows cannot rename a folder that is a working
+    # directory), and told the folder through the environment.
+    assert spied == [
+        (str(exe), [f"--script={folder / 'open_scene.py'}"], str(folder.parent), str(folder))
+    ]
 
 
 def test_plain_export_does_not_launch(plugin, drive_dialog, monkeypatch, tmp_path):
     plugin_obj, _s = plugin
     exe = _fake_paraview(tmp_path)
-    spied: list[tuple] = []
-    monkeypatch.setattr(QProcess, "startDetached", staticmethod(lambda *a: spied.append(a) or True))
+    spied = _spy_launch(monkeypatch)
 
     def driver(d):
         d.path_edit.setText(str(exe))
@@ -394,3 +418,123 @@ def test_enter_in_a_spin_commits_and_refreshes_but_does_not_export(plugin):
     QTest.keyClick(dialog.path_edit, Qt.Key.Key_Return)
     assert dialog.isVisible()
     dialog.close()
+
+
+def test_paraview_really_starts_in_the_parent_with_the_scene_dir_in_its_environment(tmp_path):
+    exe = tmp_path / "fakeparaview"
+    out = tmp_path / "seen.txt"
+    exe.write_text(f'#!/bin/sh\n{{ pwd; echo "$NSGEO_SCENE_DIR"; echo "$1"; }} > "{out}"\n')
+    exe.chmod(0o755)
+    folder = tmp_path / "site" / "paraview" / "A"
+    folder.mkdir(parents=True)
+    assert plugin_module.launch_paraview(str(exe), folder)
+    deadline = time.monotonic() + 10
+    while not (out.exists() and out.read_text().count("\n") >= 3) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    cwd, scene_dir, arg = out.read_text().splitlines()
+    assert Path(cwd).resolve() == folder.parent.resolve()
+    assert scene_dir == str(folder) and arg == f"--script={folder / 'open_scene.py'}"
+
+
+def test_the_button_refuses_while_a_geotiff_export_runs(
+    plugin, drive_dialog, message_log, monkeypatch
+):
+    plugin_obj, s = plugin
+    with monkeypatch.context() as m:  # undone before the fixture unloads the plugin
+        m.setattr(plugin_module, "running_export", lambda: object())
+        calls = _open_dialog(plugin_obj, drive_dialog, lambda d: d.reject())
+    assert calls == []
+    assert any("an export is already running" in m for m in message_log)
+    assert not paraview_folder(s, "A").exists()
+
+
+def test_skipped_lines_are_named_in_the_message(plugin, drive_dialog, message_log, monkeypatch):
+    plugin_obj, s = plugin
+    original = ParaViewExport._prepared
+
+    def drop_one(self, source):
+        lines, prov = original(self, source)
+        return lines[:-1], prov
+
+    monkeypatch.setattr(ParaViewExport, "_prepared", drop_one)
+    _open_dialog(plugin_obj, drive_dialog, lambda d: d.export_button.click())
+    assert any(
+        "Exported A for ParaView" in m and "1 line could not be prepared:" in m for m in message_log
+    )
+
+
+# ---- the disk, in the dialog -------------------------------------------------------------------
+
+
+def _sizes(plugin_obj):
+    export = ParaViewExport(plugin_obj.session, plugin_obj.slices_dock)
+    summary = export.summary("A", export.defaults("A"))
+    return summary.cache_bytes, summary.export_bytes
+
+
+def test_a_disk_that_cannot_hold_the_fill_and_the_export_turns_both_buttons_off(
+    plugin, monkeypatch
+):
+    free = types.SimpleNamespace(total=1_000, used=0, free=1_000)
+    monkeypatch.setattr(paraview_export.shutil, "disk_usage", lambda p: free)
+    dialog = _make_dialog(plugin[0])
+    dialog.path_edit.setText("/bin/true")
+    assert not dialog.export_button.isEnabled() and not dialog.open_button.isEnabled()
+    assert "not enough free disk space for the fill" in dialog.disk_label.text()
+    assert dialog.disk_label.property("warning")
+    assert "about" in dialog.size_label.text()  # the rest of the summary is still shown
+
+
+def test_a_merely_tight_disk_warns_and_leaves_export_on(plugin, monkeypatch):
+    cache, export = _sizes(plugin[0])
+    tight = cache + 500_000_000 + export // 2  # fits with its margins, under the headroom
+    monkeypatch.setattr(
+        paraview_export.shutil, "disk_usage", lambda p: types.SimpleNamespace(free=tight)
+    )
+    dialog = _make_dialog(plugin[0])
+    dialog.path_edit.setText("/bin/true")
+    assert dialog.export_button.isEnabled() and dialog.open_button.isEnabled()
+    assert dialog.disk_label.text().startswith("only ")
+    assert dialog.disk_label.property("warning")
+
+
+def test_a_disk_with_room_for_the_files_but_not_the_fill_is_refused_too(plugin, monkeypatch):
+    cache, _export = _sizes(plugin[0])
+    monkeypatch.setattr(
+        paraview_export.shutil,
+        "disk_usage",
+        lambda p: types.SimpleNamespace(free=cache + 400_000_000),
+    )
+    dialog = _make_dialog(plugin[0])
+    assert not dialog.export_button.isEnabled()
+
+
+# ---- what an edit recomputes -------------------------------------------------------------------
+
+
+def test_edits_read_each_lines_picks_once_and_a_path_edit_recomputes_nothing(plugin, monkeypatch):
+    plugin_obj, s = plugin
+    asked: list[str] = []
+    original = s.picks_for
+    monkeypatch.setattr(s, "picks_for", lambda k: asked.append(k) or original(k))
+    export = ParaViewExport(s, plugin_obj.slices_dock)
+    summaries: list[int] = []
+
+    def counting(grid, choice):
+        summaries.append(1)
+        return export.summary(grid, choice)
+
+    dialog = ParaViewExportDialog(
+        ["A"], "A", export.defaults, counting, "", hints_for=export.panel_values
+    )
+    dialog.cell_spin.setValue(dialog.cell_spin.value() / 2)
+    dialog.cell_spin.setValue(dialog.cell_spin.value() / 2)
+    assert len(asked) <= 3  # three lines, however many edits
+    before = len(summaries)
+    dialog.path_edit.setText("/bin/true")
+    dialog.path_edit.setText("")
+    dialog.path_edit.setText("/bin/false")
+    assert len(summaries) == before
+    assert dialog.open_button.isEnabled()  # but the buttons follow the path
+    dialog.path_edit.setText("")
+    assert not dialog.open_button.isEnabled() and dialog.export_button.isEnabled()

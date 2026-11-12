@@ -14,7 +14,7 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.slices import CubeFrame, VolumeSettings
+from nsgeo.slices import CubeFrame, VolumeSettings, VolumeStopped
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export, slices_engine
 from nsgeo_qgis.paraview_export import ParaViewExport, ParaViewExportCancelled, paraview_folder
@@ -300,14 +300,13 @@ def test_one_grids_cache_cleanup_leaves_another_grids_alone(site):
     assert len(own) == 1
 
 
-@needs_real_data
-def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
+def test_the_standalone_engine_holds_both_dock_engines_back(synth_site, monkeypatch):
     """R12: while the export's own engine prepares, the Slices dock's grid engine and the
     site engine start nothing; what they owed runs once it has finished."""
     from nsgeo_qgis.slices_plan import SiteSource
     from nsgeo_qgis.ui.slices_dock import SlicesDock
 
-    session, _, _ = site
+    session, _, _ = synth_site
     dock = SlicesDock(session)
     own = SliceEngine(session)
     started_tasks: list[int] = []
@@ -352,13 +351,12 @@ def test_the_standalone_engine_holds_both_dock_engines_back(site, monkeypatch):
         dock.deleteLater()
 
 
-@needs_real_data
-def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_back(site):
+def test_an_engine_whose_task_outlives_its_span_still_holds_both_dock_engines_back(synth_site):
     """R15: leaving `foreign_preparation` with a task still alive keeps it registered."""
     from nsgeo_qgis.slices_plan import SiteSource
     from nsgeo_qgis.ui.slices_dock import SlicesDock
 
-    session, _, _ = site
+    session, _, _ = synth_site
     dock = SlicesDock(session)
     own = SliceEngine(session)
     try:
@@ -404,11 +402,10 @@ def test_a_version_bump_states_the_full_cache_then_writes_it(site, monkeypatch):
     assert abs(stated - cache.stat().st_size) <= 0.01 * stated
 
 
-@needs_real_data
-def test_a_second_export_is_refused_while_the_first_exports_engine_is_live(site, monkeypatch):
+def test_a_second_export_is_refused_while_the_first_exports_engine_is_live(synth_site, monkeypatch):
     from nsgeo_qgis.ui.slices_dock import SlicesDock
 
-    session, _, _ = site
+    session, _, _ = synth_site
     dock = SlicesDock(session)
     export = ParaViewExport(session, dock)
     own = SliceEngine(session)
@@ -438,11 +435,10 @@ def test_a_second_export_is_refused_while_the_first_exports_engine_is_live(site,
         dock.deleteLater()
 
 
-@needs_real_data
-def test_the_export_registers_its_engine_and_waits_without_user_input(site, monkeypatch):
+def test_the_export_registers_its_engine_and_waits_without_user_input(synth_site, monkeypatch):
     from qgis.PyQt.QtCore import QEventLoop
 
-    session, dock, export = site
+    session, dock, export = synth_site
     seen: list[tuple[int, object]] = []
     original = slices_engine.SliceEngine.wait_for_preparation
 
@@ -654,3 +650,147 @@ def test_summary_counts_the_picks_and_sees_a_previous_export(synth_site, monkeyp
     paraview_folder(session, "Grid A").mkdir(parents=True)
     s = export.summary("Grid A", _choice(session))
     assert s.n_picks == 1 and s.replaces
+
+
+# ---- review fixes: the disk, Windows, the cache leftovers, skipped lines, picks ----------------
+
+
+def _free(monkeypatch, *values):
+    """`shutil.disk_usage(...).free` answers each value in turn, then the last one."""
+    left = list(values)
+
+    def usage(_path):
+        free = left.pop(0) if len(left) > 1 else left[0]
+        return types.SimpleNamespace(total=free, used=0, free=free)
+
+    monkeypatch.setattr(paraview_export.shutil, "disk_usage", usage)
+
+
+def test_a_disk_too_full_for_the_fill_is_refused_before_any_part_file(synth_site, monkeypatch):
+    session, _, export = synth_site
+    choice = _choice(session)
+    need = export.cache_bytes("Grid A", choice)
+    _free(monkeypatch, need + 400_000_000)  # fits the fill, but not with half a gigabyte to spare
+    with pytest.raises(ValueError, match="not enough free disk space for the fill"):
+        export.run("Grid A", choice, progress=_noop)
+    cache = Path(session.root) / "paraview" / ".cache"
+    assert not list(cache.glob("*.part")) and not list(cache.glob("*.npy"))
+    assert not paraview_folder(session, "Grid A").exists()
+    assert not list(paraview_folder(session, "Grid A").parent.glob("*.partial"))
+
+
+def test_a_disk_too_full_for_the_files_is_refused_and_the_old_export_stays(synth_site, monkeypatch):
+    session, _, export = synth_site
+    folder = export.run("Grid A", _choice(session), progress=_noop)
+    snapshot = {p.name: p.read_bytes() for p in folder.iterdir()}
+    _free(monkeypatch, 1_000)  # the fill is kept (no check), the files then do not fit
+    with pytest.raises(ValueError, match="not enough free disk space for the export"):
+        export.run("Grid A", _choice(session, stretch=5.0), progress=_noop)
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == snapshot
+    assert not list(folder.parent.glob("*.partial"))
+
+
+def test_a_cancel_in_the_first_fill_survives_an_unlink_that_fails(synth_site, monkeypatch):
+    """Windows will not delete a mapped file: the failed delete must not replace the cancel."""
+    session, _, export = synth_site
+    calls = {"n": 0}
+
+    def stop_after_three(done, total):
+        calls["n"] += 1
+        return calls["n"] <= 3
+
+    real_unlink = Path.unlink
+
+    def refusing(self, *args, **kwargs):
+        if self.name.endswith(".npy.part"):
+            raise PermissionError("[WinError 32] the file is in use")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refusing)
+    with pytest.raises(ParaViewExportCancelled):
+        export.run("Grid A", _choice(session), progress=stop_after_three)
+    monkeypatch.undo()
+    cache = Path(session.root) / "paraview" / ".cache"
+    assert list(cache.glob("*.npy.part"))  # left behind, as the platform would...
+    export.run("Grid A", _choice(session), progress=_noop)  # ...and cleared by the next run
+    assert not list(cache.glob("*.npy.part")) and len(list(cache.glob("Grid_A-*.npy"))) == 1
+
+
+def test_a_stale_part_file_of_this_grid_is_removed_and_another_grids_is_not(synth_site):
+    session, _, export = synth_site
+    cache = Path(session.root) / "paraview" / ".cache"
+    cache.mkdir(parents=True)
+    mine = cache / "Grid_A-0123456789abcdef-fedcba9876543210.npy.part"
+    neighbour = cache / "Grid_A-2-0123456789abcdef-fedcba9876543210.npy.part"
+    unrelated = cache / "notes.npy.part"
+    for f in (mine, neighbour, unrelated):
+        f.write_bytes(b"x")
+    export.run("Grid A", _choice(session), progress=_noop)
+    assert not mine.exists()
+    assert neighbour.read_bytes() == b"x" and unrelated.read_bytes() == b"x"
+
+
+def test_a_volume_stopped_after_the_folder_began_cleans_up_like_any_failure(
+    synth_site, monkeypatch
+):
+    session, _, export = synth_site
+
+    def stop(*args, **kwargs):
+        raise VolumeStopped("stopped")
+
+    monkeypatch.setattr(ParaViewExport, "_write_cube", staticmethod(stop))
+    with pytest.raises(ParaViewExportCancelled):
+        export.run("Grid A", _choice(session), progress=_noop)
+    root = Path(session.root) / "paraview"
+    assert not list(root.glob("*.partial")) and not (root / "Grid_A").exists()
+
+
+def test_a_folder_in_use_is_said_so_and_the_previous_export_stays(synth_site, monkeypatch):
+    session, _, export = synth_site
+    folder = export.run("Grid A", _choice(session), progress=_noop)
+    snapshot = {p.name: p.read_bytes() for p in folder.iterdir()}
+    real_rename = Path.rename
+
+    def busy(self, target):
+        if self == folder:  # Windows: ParaView has the folder as its working directory
+            raise PermissionError("[WinError 32] the process cannot access the file")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", busy)
+    with pytest.raises(RuntimeError) as info:
+        export.run("Grid A", _choice(session, stretch=5.0), progress=_noop)
+    assert str(info.value) == (
+        f"{folder} is in use, probably by ParaView; close it and export again"
+    )
+    monkeypatch.undo()
+    assert {p.name: p.read_bytes() for p in folder.iterdir()} == snapshot
+    assert not list(folder.parent.glob("*.partial")) and not list(folder.parent.glob("*.old"))
+
+
+def test_lines_that_fail_to_prepare_are_skipped_named_and_recorded(synth_site):
+    session, _, export = synth_site
+    keys = sorted(source_keys(session, "Grid A"))
+    session.line_for_key(keys[1]).path.write_bytes(b"not a dzt file")  # fails when prepared
+    folder = export.run("Grid A", _choice(session), progress=_noop)
+    assert export.skipped_lines == [keys[1]]
+    record = json.loads((folder / "export.json").read_text())
+    assert record["skipped_lines"] == [keys[1]] and record["source"]["lines"] == 1
+    export.run("Grid A", _choice(session, stretch=4.0), progress=_noop)
+    assert export.skipped_lines == [keys[1]]
+
+
+def test_a_clean_export_skips_nothing(synth_site):
+    session, _, export = synth_site
+    folder = export.run("Grid A", _choice(session), progress=_noop)
+    assert export.skipped_lines == []
+    assert json.loads((folder / "export.json").read_text())["skipped_lines"] == []
+
+
+def test_summary_counts_a_grids_picks_once_however_often_it_is_asked(synth_site, monkeypatch):
+    session, _dock, export = synth_site
+    asked: list[str] = []
+    original = session.picks_for
+    monkeypatch.setattr(session, "picks_for", lambda k: asked.append(k) or original(k))
+    for dz in (0.5, 0.6, 0.7):
+        export.summary("Grid A", _choice(session, dz_ns=dz))
+    assert len(asked) == len(source_keys(session, "Grid A"))

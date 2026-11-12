@@ -76,7 +76,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMessageBarItem
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QCoreApplication, QProcess, Qt, QTimer
+from qgis.PyQt.QtCore import QCoreApplication, QProcess, QProcessEnvironment, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
@@ -220,15 +220,22 @@ def _finish_with_pick_tool(tool: PickPointTool) -> None:
 
 
 def launch_paraview(paraview: str, folder: Path) -> bool:
-    """Start ParaView detached on `folder`'s scene script, working in the folder (open_scene.py
-    finds export.json there when ParaView gives it no `__file__`). False when `paraview` is
-    empty, is not an executable file, or would not start."""
+    """Start ParaView detached on `folder`'s scene script. It works in the folder's PARENT and
+    is told the folder by NSGEO_SCENE_DIR (open_scene.py reads it when ParaView gives it no
+    `__file__`): Windows will not rename a folder that a program has as its working
+    directory, and a re-export swaps the folder. False when `paraview` is empty, is not an
+    executable file, or would not start."""
     if not paraview or not (os.path.isfile(paraview) and os.access(paraview, os.X_OK)):
         return False
-    started = QProcess.startDetached(
-        paraview, [f"--script={folder / 'open_scene.py'}"], str(folder)
-    )
-    # PyQt5 may return (started, pid) for this overload.
+    process = QProcess()
+    process.setProgram(paraview)
+    process.setArguments([f"--script={folder / 'open_scene.py'}"])
+    process.setWorkingDirectory(str(Path(folder).parent))
+    env = QProcessEnvironment.systemEnvironment()
+    env.insert("NSGEO_SCENE_DIR", str(folder))
+    process.setProcessEnvironment(env)
+    started = process.startDetached()
+    # PyQt5 and PyQt6 return (started, pid) for this overload.
     return bool(started[0] if isinstance(started, tuple) else started)
 
 
@@ -1196,22 +1203,21 @@ class NsgeoPlugin:
     def _export_progress(
         self, title: str, total: int, *, show_now: bool = False
     ) -> tuple[Callable[[int, int], bool], Any]:
-        """A cancellable progress dialog and the callback an exporter calls.
+        """A cancellable progress dialog and the callback an exporter calls (the ParaView
+        export's, which passes `show_now`).
 
-        Window-modal, so the map stays alive but the dock cannot be driven
-        mid-export, and shown only after 500 ms, so a quick export flashes
-        nothing (plan call 11). It is shown, never `exec()`'d: the export runs
-        on the GUI thread, so nothing paints and no Cancel is heard except
-        when the callback processes events. `setValue` alone is not enough
-        (final review I-1): the band-0 call only starts a show timer, which
-        cannot fire while a band solves; the call that first shows the dialog
-        processes nothing; only later calls do. So the callback processes
-        events itself whenever the dialog is visible, from the call that
-        shows it on. `show_now` (`_bands_are_slow`) shows it at the band-0
-        call, before the first slow band, rather than after it.
+        Window-modal, so the map stays alive but the dock cannot be driven mid-export. It is
+        shown, never `exec()`'d: the export runs on the GUI thread, so nothing paints and no
+        Cancel is heard except when the callback processes events. `setValue` alone is not
+        enough: the dialog's own show timer cannot fire while the GUI thread is busy. So with
+        `show_now` the callback shows the dialog at its first call (`done == 0`), before
+        anything slow, and from then on processes events itself whenever the dialog is
+        visible, which paints it and hears a Cancel. Without `show_now` the dialog shows
+        only after the 500 ms minimum duration, so a quick export flashes nothing; the
+        callback processes events from the call that shows it on.
 
-        The callback returns False once the user has cancelled. The caller
-        closes the dialog, in a `finally`.
+        The callback returns False once the user has cancelled. The caller closes the
+        dialog, in a `finally`.
         """
         dialog = QProgressDialog(title, "Cancel", 0, total, self.iface.mainWindow())
         dialog.setWindowTitle(title)
@@ -1237,6 +1243,13 @@ class NsgeoPlugin:
         progress dialog, then (when asked) ParaView on the folder (M16 A)."""
         try:
             if self.session is None or not self.session.is_open or self.slices_dock is None:
+                return
+            if running_export() is not None:
+                self.message(
+                    "an export is already running; wait for it to finish, "
+                    "or cancel it in the task list.",
+                    Qgis.MessageLevel.Warning,
+                )
                 return
             dock = self.slices_dock
             session = self.session
@@ -1290,15 +1303,21 @@ class NsgeoPlugin:
                 bar.close()
                 bar.deleteLater()
             windows = sys.platform.startswith("win")
+            skipped = list(export.skipped_lines)
+            level = Qgis.MessageLevel.Warning if skipped else Qgis.MessageLevel.Info
             if not paraview:
-                self.message(how_to_open_message(grid_id, folder, windows=windows))
+                self.message(
+                    how_to_open_message(grid_id, folder, windows=windows, skipped=skipped), level
+                )
             elif open_after and not launch_paraview(paraview, folder):
                 self.message(
-                    launch_failed_message(grid_id, folder, paraview, windows=windows),
+                    launch_failed_message(
+                        grid_id, folder, paraview, windows=windows, skipped=skipped
+                    ),
                     Qgis.MessageLevel.Warning,
                 )
             else:
-                self.message(exported_message(grid_id, folder))
+                self.message(exported_message(grid_id, folder, skipped), level)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export for ParaView: {exc}", Qgis.MessageLevel.Critical)
 

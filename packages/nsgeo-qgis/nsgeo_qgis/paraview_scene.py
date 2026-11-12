@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,7 @@ _DEFAULTS = {
     "cloud_ramp": [[1.8, 0.0], [5.0, 0.6]],
     "strength_range": [0.0, 5.0],
     "paraview_checked": "6.2.1",
+    "skipped_lines": [],
 }
 _REQUIRED = (
     "grid",
@@ -48,7 +50,7 @@ _SLICE_KEYS = {"depth_m", "x_m", "y_m", "lines_along"}
 
 
 def scene_record(**fields: object) -> dict:
-    """The content of export.json. Every key must be given except the four with defaults.
+    """The content of export.json. Every key must be given except the five with defaults.
 
     Raises TypeError for an unknown or missing key and ValueError for a bad `slices`.
     """
@@ -113,6 +115,51 @@ class ExportSummary:
     free_bytes: int
 
 
+def fill_margin_bytes(cache_bytes: int) -> int:
+    """Free space to leave beyond the fill cache: its file is sparse and memory-mapped, so a
+    disk that fills while it is written kills the program (SIGBUS) rather than raising."""
+    return max(HEADROOM_BYTES, cache_bytes // 10)
+
+
+def export_margin_bytes(export_bytes: int) -> int:
+    """Free space to leave beyond the export's files (an ordinary write fails cleanly)."""
+    return max(50_000_000, min(export_bytes // 10, 250_000_000))
+
+
+def fill_refusal(cache_bytes: int, free_bytes: int) -> str:
+    """Why the fill cache cannot be written, or "" when it fits with its margin."""
+    if cache_bytes <= 0:
+        return ""
+    need = cache_bytes + fill_margin_bytes(cache_bytes)
+    if free_bytes >= need:
+        return ""
+    return (
+        f"not enough free disk space for the fill kept for quick re-exports: it needs "
+        f"{format_bytes(need)} and only {format_bytes(free_bytes)} is free"
+    )
+
+
+def export_refusal(export_bytes: int, free_bytes: int) -> str:
+    """Why the export's files cannot be written, or "" when they fit with their margin."""
+    need = export_bytes + export_margin_bytes(export_bytes)
+    if free_bytes >= need:
+        return ""
+    return (
+        f"not enough free disk space for the export: it needs {format_bytes(need)} "
+        f"and only {format_bytes(free_bytes)} is free"
+    )
+
+
+def disk_refusal(summary: ExportSummary) -> str:
+    """Why this export cannot go ahead on this disk, or "": the fill, then (the fill being
+    written first) the export's files in what is left. `ParaViewExport.run` refuses on the
+    same two grounds, so a dialog that disables its buttons here never meets them."""
+    reason = fill_refusal(summary.cache_bytes, summary.free_bytes)
+    if reason:
+        return reason
+    return export_refusal(summary.export_bytes, summary.free_bytes - max(0, summary.cache_bytes))
+
+
 def disk_needed_bytes(summary: ExportSummary) -> int:
     """Free space the export asks for: its files, the fill it will keep, and some headroom."""
     return summary.export_bytes + summary.cache_bytes + HEADROOM_BYTES
@@ -130,6 +177,9 @@ def size_text(summary: ExportSummary) -> str:
 
 
 def disk_text(summary: ExportSummary) -> str:
+    refusal = disk_refusal(summary)
+    if refusal:
+        return f"{refusal}; free some space, or choose a coarser cell or depth step"
     free = format_bytes(summary.free_bytes)
     if not disk_is_short(summary):
         return f"{free} free"
@@ -170,26 +220,54 @@ def dt_hint(native_dt_ns: float) -> str:
     return f"files: {native_dt_ns:.4g} ns"
 
 
-def exported_message(grid_id: str, folder: Path) -> str:
-    return f"Exported {grid_id} for ParaView to {folder}"
+_SKIPPED_SHOWN = 3
 
 
-def how_to_open_message(grid_id: str, folder: Path, *, windows: bool = False) -> str:
+def skipped_text(keys: Sequence[str]) -> str:
+    """ "N lines could not be prepared: a, b, c" (the first few and a count when many), or ""."""
+    if not keys:
+        return ""
+    shown = ", ".join(keys[:_SKIPPED_SHOWN])
+    more = len(keys) - _SKIPPED_SHOWN
+    if more > 0:
+        shown += f", and {more} more"
+    noun = "line" if len(keys) == 1 else "lines"
+    return f"{len(keys)} {noun} could not be prepared: {shown}"
+
+
+def exported_message(grid_id: str, folder: Path, skipped: Sequence[str] = ()) -> str:
+    text = f"Exported {grid_id} for ParaView to {folder}"
+    note = skipped_text(skipped)
+    return f"{text}. {note}" if note else text
+
+
+def how_to_open_message(
+    grid_id: str, folder: Path, *, windows: bool = False, skipped: Sequence[str] = ()
+) -> str:
     script = "open.bat" if windows else "open.sh"
     return (
-        f"{exported_message(grid_id, folder)}. To open it, run {script} there, "
+        f"{exported_message(grid_id, folder, skipped)}. To open it, run {script} there, "
         "or set ParaView in the export dialog."
     )
 
 
 def launch_failed_message(
-    grid_id: str, folder: Path, paraview: str, *, windows: bool = False
+    grid_id: str,
+    folder: Path,
+    paraview: str,
+    *,
+    windows: bool = False,
+    skipped: Sequence[str] = (),
 ) -> str:
     script = "open.bat" if windows else "open.sh"
     return (
-        f"{exported_message(grid_id, folder)}, but ParaView could not be started from "
+        f"{exported_message(grid_id, folder, skipped)}, but ParaView could not be started from "
         f"{paraview}. Run {script} there, or fix the ParaView path in the export dialog."
     )
 
 
 CANCELLED_MESSAGE = "ParaView export cancelled"
+
+
+def in_use_message(folder: Path) -> str:
+    return f"{folder} is in use, probably by ParaView; close it and export again"

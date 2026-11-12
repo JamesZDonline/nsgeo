@@ -94,7 +94,8 @@ SaveScreenshot({shot!r}, GetActiveView(), ImageResolution=[400, 300])
 
 
 @pytest.mark.skipif(not os.environ.get("NSGEO_PVPYTHON"), reason="set NSGEO_PVPYTHON to a pvpython")
-def test_the_scene_opens_in_pvpython(tmp_path):
+@pytest.mark.parametrize("n_picks", [0, 3])
+def test_the_scene_opens_in_pvpython(tmp_path, n_picks):
     nx, ny, nz = 20, 16, 30
     zz, yy, xx = np.meshgrid(np.arange(nz), np.arange(ny), np.arange(nx), indexing="ij")
     blob = 5.0 * np.exp(-(((xx - 10) / 4.0) ** 2 + ((yy - 8) / 4.0) ** 2 + ((zz - 15) / 5.0) ** 2))
@@ -113,10 +114,15 @@ def test_the_scene_opens_in_pvpython(tmp_path):
             ("true_depth_m", chunks(np.ascontiguousarray(depth))),
         ],
     )
+    picks_at = np.array([[2.0, 3.0, -1.0], [4.0, 3.0, -2.0], [6.0, 3.0, -3.0]])[:n_picks]
     write_poly_data(
         tmp_path / "picks.vtp",
-        np.empty((0, 3)),
-        {"true_depth_m": np.empty(0, np.float32), "line": np.empty(0, np.int32)},
+        picks_at.reshape(-1, 3),
+        {
+            "true_depth_m": np.array([0.3, 0.6, 0.9], np.float32)[:n_picks],
+            "line": np.zeros(n_picks, np.int32),
+        },
+        verts=[[i] for i in range(n_picks)],
     )
     write_poly_data(
         tmp_path / "lines.vtp",
@@ -124,7 +130,7 @@ def test_the_scene_opens_in_pvpython(tmp_path):
         {},
         lines=[[0, 1]],
     )
-    write_scene_files(tmp_path, scene_record(**FIELDS), "paraview")
+    write_scene_files(tmp_path, scene_record(**{**FIELDS, "n_picks": n_picks}), "paraview")
     shot = tmp_path / "shot.png"
     check = tmp_path / "check_scene.py"
     check.write_text(_CHECK.format(folder=str(tmp_path), shot=str(shot)), encoding="utf-8")
@@ -136,6 +142,11 @@ def test_the_scene_opens_in_pvpython(tmp_path):
     )
     assert run.returncode == 0, run.stderr
     assert "Traceback" not in run.stderr and "Traceback" not in run.stdout
+    # ParaView logs a warning (and may open its Output Messages window) when a colour range
+    # cannot be read, as from an empty picks file; the scene prints "open_scene:" for a
+    # setting this ParaView lacks.
+    assert "WARN|" not in run.stderr and "ERR|" not in run.stderr, run.stderr
+    assert "open_scene:" not in run.stdout, run.stdout
     names = next(ln for ln in run.stdout.splitlines() if ln.startswith("NAMES:"))[6:].split("|")
     for want in (
         "Cloud",
@@ -216,7 +227,7 @@ def test_the_disk_row_warns_below_files_plus_fill_plus_headroom():
     assert disk_is_short(short)
     text = disk_text(short)
     assert text.startswith("only 2.8 GB free") and "needs about 2.8 GB" in text
-    assert "needs about 2.8 GB" in disk_text(_summary(free_bytes=1_000_000_000))
+    assert "needs about 2.8 GB" in disk_text(_summary(free_bytes=2_500_000_000))
 
 
 def test_messages_name_the_folder_and_the_script():
@@ -243,3 +254,57 @@ def test_the_hints_name_the_panels_cell_and_the_files_step():
     assert cell_hint(0.25) == "Slices panel: 0.25 m"
     assert "not set" in cell_hint(None)
     assert dt_hint(0.4) == "files: 0.4 ns"
+
+
+def test_the_disk_refuses_only_what_cannot_fit_with_its_margin():
+    from nsgeo_qgis.paraview_scene import (
+        disk_is_short,
+        disk_refusal,
+        disk_text,
+        export_margin_bytes,
+        fill_margin_bytes,
+    )
+
+    assert fill_margin_bytes(800_000_000) == 500_000_000  # half a gigabyte...
+    assert fill_margin_bytes(20_000_000_000) == 2_000_000_000  # ...or a tenth of the fill
+    assert export_margin_bytes(1_500_000_000) == 150_000_000
+    # Tight (under files + fill + half a gigabyte) but it fits: a warning, no refusal.
+    tight = _summary(free_bytes=2_500_000_000)
+    assert disk_is_short(tight) and disk_refusal(tight) == ""
+    # The fill alone needs 800 MB + 500 MB; one byte less is refused, and says how much.
+    fill_short = _summary(free_bytes=1_299_999_999)
+    assert "fill" in disk_refusal(fill_short) and "1.3 GB" in disk_refusal(fill_short)
+    assert disk_refusal(fill_short) in disk_text(fill_short)
+    # The fill fits but the export's files do not fit after it.
+    after = _summary(free_bytes=800_000_000 + 1_650_000_000 - 1)
+    assert "export" in disk_refusal(after) and "fill" not in disk_refusal(after)
+    assert disk_refusal(_summary(free_bytes=800_000_000 + 1_650_000_000)) == ""
+    # A kept fill asks nothing of the disk.
+    assert disk_refusal(_summary(cache_bytes=0, free_bytes=1_650_000_000)) == ""
+
+
+def test_skipped_lines_are_named_with_a_count_when_many():
+    from nsgeo_qgis.paraview_scene import exported_message, skipped_text
+
+    assert skipped_text([]) == ""
+    assert skipped_text(["a"]) == "1 line could not be prepared: a"
+    assert skipped_text(["a", "b"]) == "2 lines could not be prepared: a, b"
+    assert skipped_text(list("abcde")) == "5 lines could not be prepared: a, b, c, and 2 more"
+    folder = Path("/s/p/A")
+    assert exported_message("A", folder) == f"Exported A for ParaView to {folder}"
+    assert exported_message("A", folder, ["x"]).endswith(". 1 line could not be prepared: x")
+
+
+def test_the_windows_launcher_does_not_hold_the_folder_and_keeps_crlf(tmp_path):
+    write_scene_files(tmp_path, scene_record(**FIELDS), "C:\\pv\\paraview.exe")
+    raw = (tmp_path / "open.bat").read_bytes()
+    text = raw.decode()
+    assert "cd " not in text and "\n" not in text.replace("\r\n", "")
+    assert text.count("\r\n") == len(text.splitlines())
+    assert 'start "" "C:\\pv\\paraview.exe" --script="%HERE%open_scene.py"' in text
+    assert 'set "NSGEO_SCENE_DIR=%HERE%"' in text
+
+
+def test_skipped_lines_are_recorded_in_the_scene_record():
+    assert scene_record(**FIELDS)["skipped_lines"] == []
+    assert scene_record(**FIELDS, skipped_lines=["a"])["skipped_lines"] == ["a"]

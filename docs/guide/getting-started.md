@@ -693,7 +693,11 @@ what the Slices panel shows.
      lines go with it. **Size** gives the export's size and the fill it keeps for
      quick re-exports. **Disk** gives the free space. When the free space is less
      than the export and its fill plus half a gigabyte to spare, the line turns
-     red and says how much is needed. **Export** stays on, so you decide.
+     red and says how much is needed, and **Export** stays on, so you decide.
+     When the fill and the export would not fit at all (the fill needs its size
+     plus half a gigabyte or a tenth, whichever is more, free), the line says so
+     and both **Export** buttons are off: a disk that fills while the fill is
+     written can close QGIS.
    - **ParaView** is the program, if you want nsgeo to start it. Use **Browse…**.
      nsgeo remembers it for next time.
 2. Click **Export** to write the folder, or **Export and open** to write it and
@@ -716,9 +720,11 @@ The folder is `paraview/<grid>/` in the site folder. It holds:
 To open an export later, run `open.sh` (macOS and Linux) or `open.bat`
 (Windows) in the folder, or use **Export and open** again. They start ParaView
 with the scene set up. The fill, which is the slow part, is kept in
-`paraview/.cache/`, so exporting again with a different stretch, blur or balance
-takes a fraction of the time. Changing the cell, depth step, transform, preset or
+`paraview/.cache/`, so exporting again with a different stretch, wave period, blur or
+balance takes a fraction of the time. Changing the cell, depth step, transform, preset or
 fill changes the fill, and so it is made again.
+On Windows, close ParaView before exporting the same grid again: it holds the
+folder, and nsgeo says so rather than replace it.
 
 **Where the volume starts.** It starts from the grid's own preset: its whole
 processing stack, gain steps included, and the transform you chose. The depth
