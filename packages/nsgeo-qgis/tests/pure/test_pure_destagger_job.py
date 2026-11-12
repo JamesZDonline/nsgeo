@@ -201,3 +201,28 @@ def test_summary_names_at_most_six_per_group():
     text = measure_summary(result, list(lines), {}, LABELS)
     assert text.endswith("L5 +0.250, and 3 more.")
     assert "L6" not in text
+
+
+def test_box_value_of_a_single_axis():
+    assert box_value(DestaggerResult({"x": _axis("x", 0.3, used=3)}, {})) == 0.3
+
+
+def test_the_cap_applies_to_the_semicolon_groups_too():
+    lines = {
+        f"k{i}": _line(f"k{i}", "y", LineStatus.CHANGES if i % 2 else LineStatus.NO_MATCH, 0.1)
+        for i in range(8)
+    }
+    result = DestaggerResult({"y": _axis("y", 0.1, used=8, spread=0.01)}, lines)
+    text = measure_summary(result, list(lines), {}, LABELS)
+    assert text.endswith("L5 changes partway along; and 2 more.")
+    assert "L6" not in text
+
+
+def test_when_no_line_could_be_read_the_summary_says_so():
+    result = DestaggerResult({}, {})
+    text = measure_summary(result, ["k0", "k1"], {"k0": "gone", "k1": "bad"}, LABELS)
+    assert text == (
+        "Could not measure: no line could be read. Nothing was changed. "
+        "Not measured, left as they were: L0 (could not be read: gone); "
+        "L1 (could not be read: bad)."
+    )

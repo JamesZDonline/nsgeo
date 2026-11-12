@@ -9,6 +9,7 @@ luck of real data. The tests that need the real measurement say so.
 from __future__ import annotations
 
 import threading
+import time
 
 import nsgeo_qgis.destagger_job as job_module
 import numpy as np
@@ -19,22 +20,24 @@ from nsgeo.destagger import (
     LineResult,
     LineStatus,
     MeasureLine,
+    MeasureStopped,
 )
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo_qgis.destagger_job import box_value, measure_summary
+from nsgeo_qgis.destagger_job import measure_summary
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.edit_lines_dialog import (
     CHANGED,
     COL_DESTAGGER,
     COL_START,
     MEASURE_DISCARDED,
+    MEASURE_NO_TARGETS,
     MEASURE_SITE_CHANGED,
     MEASURE_STOPPED,
     EditLinesDialog,
 )
-from plugin_testing import synthetic_dzt
+from plugin_testing import spin_until, synthetic_dzt
 from tests.real_data import GPS_LINES
 
 GRID5 = Grid("Grid5", (500.0, 700.0), 0.0, 15.0, 15.0, "EPSG:32616", 0.5)
@@ -43,31 +46,31 @@ N_LINES = 6
 LONG = 480  # 8 m at 60 traces/m: long enough that the end trims leave something
 
 
-def spin_until(predicate, timeout_ms: int = 20_000) -> bool:
-    from plugin_testing import spin_until as spin
-
-    return spin(predicate, timeout_ms)
+STAGGER_TRACES = 9  # 0.15 m at 60 traces/m, injected into every shared-field line
 
 
-def _shared_field_dzt(folder, name, backward, n_traces=LONG):
+def _shared_field_dzt(folder, name, backward, index, n_traces=LONG):
     """A line whose traces come from one field over the grid, so lines walked
-    opposite ways see the same features at the same places."""
+    opposite ways see the same features at the same places, except that each
+    is displaced `STAGGER_TRACES` along its own direction of travel: the
+    stagger the measurement should find."""
     from tests.synthetic import write_dzt
 
     rng = np.random.default_rng(7)  # the same field for every line
     cells = rng.normal(size=(n_traces // 6, 512))
-    field = np.repeat(cells, 6, axis=0).T  # (512, n_traces)
-    noise = np.random.default_rng(abs(hash(name)) % 1000 + 1).normal(size=field.shape) * 0.05
-    data = field + noise
+    field = np.repeat(cells, 6, axis=0).T  # (512, n_traces), in grid order
+    noise = np.random.default_rng(100 + index).normal(size=field.shape) * 0.05
+    # Recorded order: a backward line is read from the far end.
+    data = np.roll(field, STAGGER_TRACES, axis=1) + noise
     if backward:
-        data = data[:, ::-1]
+        data = np.roll(field, -STAGGER_TRACES, axis=1)[:, ::-1] + noise
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / name
     write_dzt(path, (data * 1e6).astype(np.int32))
     return path
 
 
-def _open(tmp_path, long=False, shape=None):
+def _open(tmp_path, long=False, shape=None, axes=None):
     """A site with six lines on Grid5 (and a second grid)."""
     session = SiteSession()
     session.new_site(tmp_path)
@@ -77,10 +80,11 @@ def _open(tmp_path, long=False, shape=None):
     for i in range(N_LINES):
         d, start = shape[i] if shape else ((1, 0.0) if i % 2 == 0 else (-1, 8.0))
         if long:
-            path = _shared_field_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", d == -1)
+            path = _shared_field_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", d == -1, i)
         else:
             path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
-        placement = GridPlacement("Grid5", "y", 0.25 + 0.5 * i, start, d, f"line {i + 1}")
+        axis = axes[i] if axes else "y"
+        placement = GridPlacement("Grid5", axis, 0.25 + 0.5 * i, start, d, f"line {i + 1}")
         lines.append(Line.open(path, placement))
     session.add_lines(lines)
     return session
@@ -89,8 +93,11 @@ def _open(tmp_path, long=False, shape=None):
 class Canned:
     """A stand-in for `measure_destagger`."""
 
-    def __init__(self, values=None, gate=False, axes=None):
+    def __init__(self, values=None, gate=False, axes=None, loop=False, boom=None):
         self.values = values
+        self.loop = loop
+        self.boom = boom
+        self.stopped_by_request = False
         self.axes = axes
         self.gate = threading.Event() if gate else None
         self.seen: list[list[MeasureLine]] = []
@@ -102,6 +109,16 @@ class Canned:
 
     def __call__(self, lines, should_stop):
         self.seen.append(list(lines))
+        if self.boom is not None:
+            raise self.boom
+        if self.loop:  # runs until it is asked to stop, like a long measure
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                if should_stop():
+                    self.stopped_by_request = True
+                    raise MeasureStopped()
+                time.sleep(0.005)
+            raise AssertionError("the measure was never asked to stop")
         if self.gate is not None:
             assert self.gate.wait(30), "the test never released the measure"
         results = {}
@@ -227,14 +244,14 @@ def test_stop_changes_nothing(make):
 
 
 def test_closing_the_dialog_stops_the_measure(make):
-    canned = Canned(gate=True)
+    canned = Canned(loop=True)  # never ends unless asked: reject() must cancel it
     before = _refine_threads()
     session, dialog = make(canned)
     dialog.select_keys(dialog.keys())
     dialog.measure()
     assert spin_until(lambda: bool(canned.seen))
-    canned.release()  # shutdown joins the worker, which must be able to end
     dialog.reject()
+    assert canned.stopped_by_request
     assert _refine_threads() == before
     spin_until(lambda: False, 300)
     assert [_shift(dialog, r) for r in range(6)] == [None] * 6
@@ -313,6 +330,7 @@ def test_measuring_twice_reads_each_file_once_and_gives_the_same_values(make, mo
     first = [_shift(dialog, r) for r in range(6)]
     box = dialog.destagger_spin.value()
     assert all(v is not None for v in first), dialog.status.text()
+    assert abs(box) == pytest.approx(0.15, abs=0.04), dialog.status.text()
     dialog.measure()
     _finish(dialog)
     assert len(calls) == N_LINES
@@ -332,7 +350,7 @@ def test_a_one_way_grid_says_there_is_nothing_to_measure(make):
     assert [_shift(dialog, r) for r in range(6)] == [None] * 6
 
 
-def test_two_axes_fill_each_row_from_its_own_axis(make, tmp_path, monkeypatch):
+def test_two_axes_fill_each_row_from_its_own_axis(qgis_app, tmp_path, monkeypatch):
     def run(lines, should_stop):
         results = {
             ln.key: LineResult(
@@ -349,17 +367,7 @@ def test_two_axes_fill_each_row_from_its_own_axis(make, tmp_path, monkeypatch):
         }
         return DestaggerResult(axes, results)
 
-    session = SiteSession()
-    session.new_site(tmp_path)
-    session.add_grid(GRID5)
-    lines = []
-    for i in range(N_LINES):
-        axis = "x" if i < 2 else "y"
-        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
-        lines.append(
-            Line.open(path, GridPlacement("Grid5", axis, 0.25 + 0.5 * i, 0.0, 1, f"line {i + 1}"))
-        )
-    session.add_lines(lines)
+    session = _open(tmp_path, axes=["x", "x", "y", "y", "y", "y"])
     monkeypatch.setattr(job_module, "measure_destagger", run)
     dialog = EditLinesDialog(session, "Grid5")
     try:
@@ -369,11 +377,97 @@ def test_two_axes_fill_each_row_from_its_own_axis(make, tmp_path, monkeypatch):
         assert [_shift(dialog, r) for r in range(6)] == [0.30, 0.30, 0.10, 0.10, 0.10, 0.10]
         assert dialog.destagger_spin.value() == pytest.approx(0.10)  # y has more lines (C11)
         assert dialog.status.text().startswith("Along x: measured +0.300 m from 3 lines")
-        assert box_value(DestaggerResult({"x": AxisResult("x", 0.3, 0.0, 3)}, {})) == 0.3
     finally:
         dialog._measurer.shutdown()
         dialog.hide()
         dialog.deleteLater()
+
+
+def test_results_land_in_the_rows_selected_when_measure_was_pressed(make):
+    canned = Canned({1: (LineStatus.OWN, 0.25)}, gate=True)
+    session, dialog = make(canned)
+    keys = dialog.keys()
+    dialog.select_keys(keys[:4])
+    dialog.measure()
+    assert spin_until(lambda: bool(canned.seen))
+    dialog.table.clearSelection()
+    dialog.select_keys(keys[4:])
+    canned.release()
+    _finish(dialog)
+    assert [_shift(dialog, r) for r in range(6)] == [0.12, 0.25, 0.12, 0.12, None, None]
+    assert dialog.selected_keys() == keys[4:]
+
+
+def test_values_are_rounded_to_the_boxs_precision(make):
+    axes = {"y": AxisResult("y", 0.12345, 0.011, 6)}
+    canned = Canned({0: (LineStatus.OWN, 0.12345)}, axes=axes)
+    session, dialog = make(canned)
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    _finish(dialog)
+    assert _shift(dialog, 0) == 0.123
+    assert dialog.destagger_spin.value() == 0.123
+
+
+def test_an_error_in_the_measure_is_reported_and_changes_nothing(make):
+    canned = Canned(boom=RuntimeError("boom"))
+    session, dialog = make(canned)
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    _finish(dialog)
+    assert dialog.status.text() == "Could not measure: RuntimeError: boom. Nothing was changed."
+    assert dialog.measure_button.text() == "Measure"
+    assert [_shift(dialog, r) for r in range(6)] == [None] * 6
+
+
+def test_measure_with_nothing_selected_says_what_to_do(make):
+    canned = Canned()
+    session, dialog = make(canned)
+    dialog.table.clearSelection()
+    dialog.measure()
+    assert dialog.status.text() == MEASURE_NO_TARGETS
+    assert not dialog._measurer.busy
+    assert canned.seen == []
+
+
+def test_progress_names_the_lines_read_and_then_the_comparison(make, monkeypatch):
+    read_gate = threading.Event()
+    reads: list = []
+    real = job_module.read_samples
+
+    def gated(path, header=None):
+        reads.append(path)
+        if len(reads) == 3:
+            assert read_gate.wait(30), "the test never released the read"
+        return real(path, header)
+
+    monkeypatch.setattr(job_module, "read_samples", gated)
+    canned = Canned(gate=True)
+    session, dialog = make(canned)
+    try:
+        dialog.select_keys(dialog.keys())
+        dialog.measure()
+        assert spin_until(lambda: dialog.status.text() == "Measuring… read 2 of 6 lines")
+        read_gate.set()
+        assert spin_until(lambda: dialog.status.text() == "Measuring… comparing lines")
+        assert canned.seen
+    finally:
+        read_gate.set()
+
+
+def test_a_site_replaced_while_measuring_is_not_written_to(make, tmp_path):
+    canned = Canned(gate=True)
+    session, dialog = make(canned)
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    assert spin_until(lambda: bool(canned.seen))
+    session.close_site()
+    (tmp_path / "other").mkdir()
+    session.new_site(tmp_path / "other")
+    canned.release()
+    _finish(dialog)
+    assert dialog.status.text() == MEASURE_SITE_CHANGED
+    assert [_shift(dialog, r) for r in range(6)] == [None] * 6
 
 
 @pytest.mark.skipif(len(GPS_LINES) != 60, reason="needs Grid 1 in tests/data/local/with-dzg")

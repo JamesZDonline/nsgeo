@@ -434,7 +434,7 @@ class EditLinesDialog(QDialog):
         self._refresh("; ".join(dropped) if dropped else None)
 
     def _drop_note(self, key: str, edit: LineEdit) -> str:
-        label = edit.label or edit.seen.label or Path(key).stem
+        label = self._label_of(key)
         return f"grid {edit.grid_id!r} no longer exists; {label} stays on {edit.seen.grid_id}"
 
     def set_start(self, value: float) -> None:
@@ -459,7 +459,7 @@ class EditLinesDialog(QDialog):
                 span = span_m(self._traces[key], self._per_metre[key])
                 if not span > 0:  # also catches a NaN from a corrupt header
                     skipped.append(
-                        f"{edit.label or edit.seen.label or Path(key).stem} has no "
+                        f"{self._label_of(key)} has no "
                         "recorded length to fit, so it was left as it is"
                     )
                     continue
@@ -532,7 +532,7 @@ class EditLinesDialog(QDialog):
             lines = []
             for key, placement in snapshot.items():
                 line = self.session.line_for_key(key)
-                lines.append(JobLine(key, placement.label or "", line.path, line.header, placement))
+                lines.append(JobLine(key, self._label_of(key), line.path, line.header, placement))
         except (KeyError, ProjectError) as exc:
             self.status.setText(self._unavailable(exc))
             return

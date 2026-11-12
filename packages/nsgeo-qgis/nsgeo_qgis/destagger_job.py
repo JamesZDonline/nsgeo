@@ -103,6 +103,8 @@ def measure_summary(
     parts: list[str] = []
     axes = list(result.axes.values())
     one = len(axes) == 1
+    if not axes:  # every file was unreadable, so there was nothing to measure
+        parts.append("Could not measure: no line could be read. Nothing was changed.")
     for a in axes:
         if a.destagger is not None:
             numbers = f"{a.destagger:+.3f} m from {a.lines_used} lines (±{a.spread_m:.3f} m)."
