@@ -95,6 +95,15 @@ release's notes list everything in it.
 | M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
+| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]) | next release |
+
+### In progress
+
+- **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
+  lists every saved fit on the grid's lines, averages the ones you tick, and
+  remembers which fits made the grid's velocity. Slices take their depths
+  from the grid's velocity, as cuts already do. Designed, with a five-task
+  plan.
 
 ### Next, in order
 
@@ -127,10 +136,8 @@ Grouped by area. The order within a group is not a priority.
   velocity override for a selection of lines at once ([#58]; editing their
   placement together is done); the scroll wheel no longer moves a line to
   another grid in Edit lines ([#176]).
-- **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
-  in one dialog ([#127]); Save fit also clears the points ([#128]); average or
-  combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
-  box around a hyperbola and let the plugin mark it ([#140]).
+- **Velocity:** a modifier-click for velocity points ([#88]); draw a box
+  around a hyperbola and let the plugin mark it ([#140]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
