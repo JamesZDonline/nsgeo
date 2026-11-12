@@ -141,7 +141,8 @@ Grouped by area. The order within a group is not a priority.
   ([#130]; the outline and its slice mask come with M17's GPS areas); balancing
   lines walked in different directions (the second half of [#47]); a preset or
   velocity override for a selection of lines at once ([#58]; editing their
-  placement together is done).
+  placement together is done); the scroll wheel no longer moves a line to
+  another grid in Edit lines ([#176]).
 - **Velocity:** show which lines have saved fits ([#126]); all of a grid's fits
   in one dialog ([#127]); Save fit also clears the points ([#128]); average or
   combine fits ([#86]); a modifier-click for velocity points ([#88]); draw a
@@ -155,7 +156,10 @@ Grouped by area. The order within a group is not a priority.
   cell size ([#138]). Whether several sites will ever be open at once is worth
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
-  alone or the max distance is large ([#147]).
+  alone or the max distance is large ([#147]); lines processed differently in
+  one cube, such as migration at each line's own velocity ([#178]); the scroll
+  wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
+  ([#177]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -220,6 +224,9 @@ Grouped by area. The order within a group is not a priority.
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
 [#171]: https://github.com/JamesZDonline/nsgeo/issues/171
 [#172]: https://github.com/JamesZDonline/nsgeo/pull/172
+[#176]: https://github.com/JamesZDonline/nsgeo/issues/176
+[#177]: https://github.com/JamesZDonline/nsgeo/issues/177
+[#178]: https://github.com/JamesZDonline/nsgeo/issues/178
 
 ## Why
 
