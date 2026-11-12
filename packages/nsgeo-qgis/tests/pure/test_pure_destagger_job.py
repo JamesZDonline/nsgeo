@@ -126,10 +126,15 @@ def _line(key, axis, status, value=None, reason=""):
 def test_box_value_takes_the_axis_with_more_lines():
     result = DestaggerResult({"x": _axis("x", 0.1, used=5), "y": _axis("y", 0.2, used=9)}, {})
     assert box_value(result) == 0.2
+    # Ruling 14: the larger axis failed, so the smaller one that measured sets the box.
     failed = DestaggerResult(
         {"x": _axis("x", 0.1, used=5), "y": _axis("y", None, used=9, reason="r")}, {}
     )
-    assert box_value(failed) is None
+    assert box_value(failed) == 0.1
+    none = DestaggerResult(
+        {"x": _axis("x", None, reason="a"), "y": _axis("y", None, reason="b")}, {}
+    )
+    assert box_value(none) is None
     assert box_value(DestaggerResult({}, {})) is None
 
 
@@ -226,3 +231,46 @@ def test_when_no_line_could_be_read_the_summary_says_so():
         "Not measured, left as they were: L0 (could not be read: gone); "
         "L1 (could not be read: bad)."
     )
+
+
+def test_when_every_axis_failed_the_excluded_lines_are_still_named():
+    reason = "none of the grid's lines could be measured"
+    lines = {
+        "k0": _line("k0", "y", LineStatus.NOT_MEASURED, None, "too short to measure"),
+        "k1": _line("k1", "y", LineStatus.NOT_MEASURED, None, "too short to measure"),
+        "k2": _line(
+            "k2", "y", LineStatus.NOT_MEASURED, None, "no line walked the other way beside it"
+        ),
+        "k3": _line(
+            "k3", "y", LineStatus.NOT_MEASURED, None, "its grid's value could not be measured"
+        ),
+    }
+    result = DestaggerResult({"y": _axis("y", None, used=0, reason=reason)}, lines)
+    text = measure_summary(result, ["k0", "k1", "k2", "k3", "k4"], {"k4": "gone"}, LABELS)
+    assert text == (
+        f"Could not measure: {reason}. Nothing was changed. "
+        "Not measured, left as they were: L0 (too short to measure); "
+        "L1 (too short to measure); L4 (could not be read: gone)."
+    )
+
+
+def test_a_one_way_summary_is_only_the_failure_sentence():
+    reason = "every line was walked the same way, so there is no stagger to measure"
+    lines = {
+        f"k{i}": _line(
+            f"k{i}", "y", LineStatus.NOT_MEASURED, None, "no line walked the other way beside it"
+        )
+        for i in range(4)
+    }
+    result = DestaggerResult({"y": _axis("y", None, reason=reason)}, lines)
+    assert measure_summary(result, list(lines), {}, LABELS) == (
+        f"Could not measure: {reason}. Nothing was changed."
+    )
+
+
+def test_no_limit_names_every_line():
+    lines = {f"k{i}": _line(f"k{i}", "y", LineStatus.OWN, 0.2 + i / 100) for i in range(9)}
+    result = DestaggerResult({"y": _axis("y", 0.1, used=9, spread=0.01)}, lines)
+    text = measure_summary(result, list(lines), {}, LABELS, limit=None)
+    assert "more" not in text
+    assert text.endswith("L8 +0.280.")

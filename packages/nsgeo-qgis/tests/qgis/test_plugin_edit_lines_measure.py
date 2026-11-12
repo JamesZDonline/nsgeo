@@ -71,14 +71,14 @@ def _shared_field_dzt(folder, name, backward, index, n_traces=LONG):
     return path
 
 
-def _open(tmp_path, long=False, shape=None, axes=None):
+def _open(tmp_path, long=False, shape=None, axes=None, n=N_LINES):
     """A site with six lines on Grid5 (and a second grid)."""
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID5)
     session.add_grid(GRID_B)
     lines = []
-    for i in range(N_LINES):
+    for i in range(n):
         d, start = shape[i] if shape else ((1, 0.0) if i % 2 == 0 else (-1, 8.0))
         if long:
             path = _shared_field_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", d == -1, i)
@@ -531,3 +531,34 @@ def test_measure_on_the_real_survey(qgis_app, tmp_path):
         dialog._measurer.shutdown()
         dialog.hide()
         dialog.deleteLater()
+
+
+def test_the_tooltip_names_every_line_the_status_caps(make):
+    values = {i: (LineStatus.OWN, 0.2 + i / 100) for i in range(8)}
+    session, dialog = make(Canned(values), n=8)
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    _finish(dialog)
+    assert "and 2 more" in dialog.status.text()
+    assert "line 8 +0.270" not in dialog.status.text()
+    tip = dialog.status.toolTip()
+    assert "more" not in tip
+    assert "line 7 +0.260, line 8 +0.270." in tip
+    dialog.set_destagger(0.5)  # any other status text carries no tooltip
+    assert dialog.status.toolTip() == ""
+
+
+def test_a_dialog_for_a_closed_site_does_not_measure_another(make, tmp_path):
+    canned = Canned()
+    session, dialog = make(canned)
+    dialog.select_keys(dialog.keys())
+    session.close_site()
+    (tmp_path / "other").mkdir()
+    session.new_site(tmp_path / "other")
+    dialog.measure()
+    assert dialog.status.text() == (
+        "a different site was opened while the table was open; nothing was changed"
+    )
+    assert not dialog._measurer.busy
+    assert canned.seen == []
+    assert [_shift(dialog, r) for r in range(6)] == [None] * 6

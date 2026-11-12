@@ -141,6 +141,7 @@ class _MeasureRun:
     targets: list[str]
     labels: dict[str, str]
     job: MeasureJob
+    paths: dict[str, str]  # row key -> resolved file path, the cache's key
 
 
 class EditLinesDialog(QDialog):
@@ -391,13 +392,18 @@ class EditLinesDialog(QDialog):
                 )
         self._selection_changed()
 
+    def _say(self, text: str, tooltip: str = "") -> None:
+        """The status line; its tooltip is the full text when the line is capped."""
+        self.status.setText(text)
+        self.status.setToolTip(tooltip)
+
     def _failed(self, exc: Exception) -> None:
         """The last-resort report of a slot: the specific handlers give the
         good messages, this one makes sure nothing is swallowed silently."""
         message = f"unexpected error in Edit lines: {exc}"
         QgsMessageLog.logMessage(message, "nsgeo", Qgis.MessageLevel.Critical)
         with contextlib.suppress(Exception):  # a dying widget must not raise from here
-            self.status.setText(message)
+            self._say(message)
 
     def _selection_changed(self) -> None:
         try:
@@ -426,7 +432,7 @@ class EditLinesDialog(QDialog):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = change(self._live(edit, frames), frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -467,7 +473,7 @@ class EditLinesDialog(QDialog):
                     dropped.append(self._drop_note(key, edit))
                 self._edits[key] = self._live(edit, frames).fitted(span)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -519,11 +525,15 @@ class EditLinesDialog(QDialog):
             self._progress.stop()
             self._run = None
             self._update_panel()
-            self.status.setText(MEASURE_STOPPED)
+            self._say(MEASURE_STOPPED)
+            return
+        problem = self._site_problem()  # the check OK makes, so a stale table refuses too
+        if problem:
+            self._say(problem)
             return
         targets = self.selected_keys()
         if not targets:
-            self.status.setText(MEASURE_NO_TARGETS)
+            self._say(MEASURE_NO_TARGETS)
             return
         try:
             frames = self._frames()
@@ -534,15 +544,18 @@ class EditLinesDialog(QDialog):
                 line = self.session.line_for_key(key)
                 lines.append(JobLine(key, self._label_of(key), line.path, line.header, placement))
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
         if not targets:  # every selected row now sits on another grid: nothing to fill
-            self.status.setText(MEASURE_NO_TARGETS)
+            self._say(MEASURE_NO_TARGETS)
             return
         labels = {k: self._label_of(k) for k in self._order}
-        job = MeasureJob(lines, self._bins)
-        self._run = run = _MeasureRun(site, snapshot, targets, labels, job)
+        # Cached by the file, not the row key: keys repeat from site to site.
+        paths = {ln.key: str(ln.path.resolve()) for ln in lines}
+        cached = {k: self._bins[p] for k, p in paths.items() if p in self._bins}
+        job = MeasureJob(lines, cached)
+        self._run = run = _MeasureRun(site, snapshot, targets, labels, job, paths)
         self._measurer.start(
             [job],
             lambda landed: self._measure_landed(run, landed),
@@ -574,9 +587,9 @@ class EditLinesDialog(QDialog):
                 return
             done, total = run.job.progress
             if done < total:
-                self.status.setText(f"Measuring… read {done} of {total} lines")
+                self._say(f"Measuring… read {done} of {total} lines")
             else:
-                self.status.setText("Measuring… comparing lines")
+                self._say("Measuring… comparing lines")
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
 
@@ -585,7 +598,7 @@ class EditLinesDialog(QDialog):
             self._progress.stop()
             self._run = None
             self._update_panel()
-            self.status.setText(f"Could not measure: {message}. Nothing was changed.")
+            self._say(f"Could not measure: {message}. Nothing was changed.")
         except Exception as exc:  # noqa: BLE001 -- a callback must not raise
             self._failed(exc)
 
@@ -599,19 +612,20 @@ class EditLinesDialog(QDialog):
 
     def _land(self, run: _MeasureRun) -> None:
         job = run.job
-        self._bins.update(job.prepared)  # whatever happens next, the reads are kept (C8)
+        for key, bins in job.prepared.items():  # whatever happens next, the reads are kept (C8)
+            self._bins[run.paths[key]] = bins
         self._update_panel()
         if job.stopped or job.result is None:
-            self.status.setText(MEASURE_STOPPED)
+            self._say(MEASURE_STOPPED)
             return
         if self.session.site is not run.site:
-            self.status.setText(MEASURE_SITE_CHANGED)
+            self._say(MEASURE_SITE_CHANGED)
             return
         try:
             frames = self._frames()
             now = self._measure_snapshot(frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         if now != run.snapshot:
             self._refresh(MEASURE_DISCARDED)
@@ -627,6 +641,9 @@ class EditLinesDialog(QDialog):
             self.destagger_spin.setValue(round(box, 3))
         summary = measure_summary(result, run.targets, job.unreadable, run.labels)
         self._refresh(summary)
+        # The visible line names at most six per group; the tooltip names them all.
+        full = measure_summary(result, run.targets, job.unreadable, run.labels, limit=None)
+        self.status.setToolTip(full if full != summary else "")
 
     def done(self, r: int) -> None:
         # Joins the worker, so nothing lands in a closed dialog and no thread outlives it.
@@ -662,14 +679,14 @@ class EditLinesDialog(QDialog):
             self._render(frames, grid)
             n, m = self._counts(frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         if note is not None:
-            self.status.setText(note)
+            self._say(note)
         elif n == 0:
-            self.status.setText("")
+            self._say("")
         else:
-            self.status.setText(
+            self._say(
                 f"{n} line{'s' if n != 1 else ''} changed · "
                 f"{m} pick{'s' if m != 1 else ''} will move with {'them' if n != 1 else 'it'}"
             )
@@ -770,7 +787,7 @@ class EditLinesDialog(QDialog):
             else:
                 self._edits[key] = edit.moved_to(text, frames)
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -843,7 +860,7 @@ class EditLinesDialog(QDialog):
                     edit = edit.flipped(frames)
             self._edits[key] = edit
         except (KeyError, ProjectError) as exc:
-            self.status.setText(self._unavailable(exc))
+            self._say(self._unavailable(exc))
             return
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
@@ -861,25 +878,29 @@ class EditLinesDialog(QDialog):
         except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
             self._failed(exc)
 
-    def _accept(self) -> None:
+    def _site_problem(self) -> str | None:
+        """Why this table can no longer act on the open site, or None."""
         if not self.session.is_open:
-            self.status.setText("no site is open; nothing was changed")
-            return
+            return "no site is open; nothing was changed"
         if self.session.json_path != self._opened_against:
-            self.status.setText(
-                "a different site was opened while the table was open; nothing was changed"
-            )
+            return "a different site was opened while the table was open; nothing was changed"
+        return None
+
+    def _accept(self) -> None:
+        problem = self._site_problem()
+        if problem:
+            self._say(problem)
             return
         try:
             self._grid()
         except KeyError:
-            self.status.setText(f"grid {self.grid_id!r} no longer exists; nothing was changed")
+            self._say(f"grid {self.grid_id!r} no longer exists; nothing was changed")
             return
         try:
             frames = self._frames()
             edits: list[Any] = [e for e in self._edits.values() if self._changes(e, frames)]
             self.outcome = self.session.edit_lines(edits, grid_id=self.grid_id, order=self.keys())
         except (KeyError, ValueError, ProjectError) as exc:
-            self.status.setText(str(exc))
+            self._say(str(exc))
             return
         super().accept()

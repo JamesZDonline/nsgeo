@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from nsgeo.destagger.measure import (
+    AXIS_FAILED,
+    NO_NEIGHBOUR,
     AxisResult,
     DestaggerResult,
     LineResult,
@@ -14,6 +16,7 @@ from nsgeo.destagger.measure import (
 from nsgeo.destagger.prepare import EnvelopeBins, envelope_bins
 
 __all__ = [
+    "AXIS_FAILED",
     "AxisResult",
     "DestaggerResult",
     "EnvelopeBins",
@@ -21,6 +24,7 @@ __all__ = [
     "LineStatus",
     "MeasureLine",
     "MeasureStopped",
+    "NO_NEIGHBOUR",
     "envelope_bins",
     "measure_destagger",
 ]

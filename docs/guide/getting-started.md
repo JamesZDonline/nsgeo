@@ -356,6 +356,8 @@ the whole record. The grid's value goes in the Destagger box, and each selected 
 gets its own line's value (a line that changes partway along, or matches nothing,
 gets the grid's value and is named on the status line). Nothing changes until you
 press OK, and the numbers are a starting point: look at the lines, then adjust.
+Lines Measure cannot use are left as they were and named in the status, with the
+reason. While it runs the button reads **Stop**, and pressing it changes nothing.
 
 ### Step 4: Open a line and use the map
 

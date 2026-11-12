@@ -60,6 +60,7 @@
   - `TOO_FEW = "too few lines walked in opposite directions to measure"` (fewer than `MIN_LINES = 4` lines with a neighbour)
   - `UNCLEAR = "no clear match between lines walked in opposite directions"`
   - `AXIS_FAILED = "its grid's value could not be measured"`
+  - `NO_LINES = "none of the grid's lines could be measured"` (no line survived the exclusions)
 - **Copy (exact), plugin:**
   - Button: `Measure`; while running, `Stop`.
   - `MEASURE_TIP = "Works out the destagger from the grid's own data: each line is compared with its neighbours walked the other way, over the whole record. Fills the Destagger box with the grid's value and each selected row with its line's value. Nothing changes until OK."`
@@ -77,7 +78,7 @@
     - `Left at the grid value: {label} changes partway along; {label} has no clear match.`
     - `Not measured, left as they were: {label} ({reason}); {label} ({reason}).`
     - An unreadable file's reason: `could not be read: {error}`.
-    - When every axis failed, the summary is only the failure sentence or sentences. The groups describe only the `filled` rows (P6).
+    - When every axis failed, the summary is the failure sentence or sentences, then the not-measured group, without NO_NEIGHBOUR or AXIS_FAILED lines (the axis reason covers them); if nothing is left, it is the failure sentence alone. The groups describe only the `filled` rows (P6).
 - **Never commit site data:** never commit pictures of the site or coordinates. `tests/data/local/` is git-ignored; never `git add -f` from it.
 - **Shared-worktree safety:** reviewers and any mutation probes work on a scratch copy, never this worktree. Set `PYTHONDONTWRITEBYTECODE=1` for every run.
 - **Commits:** end each message with a `Co-Authored-By:` line naming the model that wrote it. Push each commit to `origin nsgeo-auto-destagger` as it is made. Touch no other worktree.

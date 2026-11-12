@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from nsgeo.destagger import (
     LineStatus,
+    MeasureLine,
     MeasureStopped,
     envelope_bins,
     measure_destagger,
@@ -80,6 +81,46 @@ def test_mirrored_lines_give_the_same_values(grid1_unfitted):
     mirrored = measure_destagger(lines_for(GPS_LINES, GRID1_LENGTH, mirrored=True))
     assert mirrored.axes["y"].destagger == pytest.approx(
         grid1_unfitted.axes["y"].destagger, abs=0.005
+    )
+    flipped = [
+        k for k, ln in grid1_unfitted.lines.items() if mirrored.lines[k].status is not ln.status
+    ]
+    assert len(flipped) <= 2  # borderline lines may cross a threshold
+    for key, ln in grid1_unfitted.lines.items():
+        other = mirrored.lines[key]
+        if ln.status is LineStatus.OWN and other.status is LineStatus.OWN:
+            assert other.destagger == pytest.approx(ln.destagger, abs=0.02)
+
+
+@needs_grid1
+def test_the_input_order_does_not_change_the_result(grid1_unfitted):
+    reverse = measure_destagger(list(reversed(lines_for(GPS_LINES, GRID1_LENGTH))))
+    assert reverse.axes == grid1_unfitted.axes  # the destagger and the spread, exactly
+    assert reverse.lines == grid1_unfitted.lines
+
+
+def test_when_every_line_is_too_short_the_axis_says_none_could_be_measured(tmp_path):
+    from nsgeo.geometry import GridPlacement
+
+    from tests.synthetic import write_dzt
+
+    lines = []
+    for i in range(6):
+        path = tmp_path / f"F{i}.DZT"
+        rng = np.random.default_rng(i)
+        write_dzt(path, (rng.normal(size=(512, 300)) * 1e6).astype(np.int32))  # 5 m
+        header = read_header(path)
+        bins = envelope_bins(read_samples(path, header)[0], header.dt_ns, header.position_ns)
+        placement = GridPlacement(
+            "G", "y", 0.25 + 0.5 * i, 0.0 if i % 2 == 0 else 5.0, 1 - 2 * (i % 2)
+        )
+        lines.append(MeasureLine(path.name, bins, placement, header))
+    result = measure_destagger(lines)
+    assert result.axes["y"].destagger is None
+    assert result.axes["y"].reason == m.NO_LINES
+    assert all(
+        ln.status is LineStatus.NOT_MEASURED and ln.reason == m.TOO_SHORT
+        for ln in result.lines.values()
     )
 
 

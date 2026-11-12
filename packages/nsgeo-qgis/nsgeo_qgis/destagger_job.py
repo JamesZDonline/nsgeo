@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Callable
 
 from nsgeo.destagger import (
+    AXIS_FAILED,
+    NO_NEIGHBOUR,
     DestaggerResult,
     EnvelopeBins,
     LineStatus,
@@ -78,17 +80,20 @@ class MeasureJob:
 
 
 def box_value(result: DestaggerResult) -> float | None:
-    """The grid value of the axis with more lines behind it (C11); None if it failed."""
-    if not result.axes:
+    """The grid value of the axis with more lines behind it among the axes that
+    measured (C11, Ruling 14); None only when no axis measured."""
+    measured = [a for a in result.axes.values() if a.destagger is not None]
+    if not measured:
         return None
-    best = max(result.axes.values(), key=lambda a: a.lines_used)
-    return best.destagger
+    return max(measured, key=lambda a: a.lines_used).destagger
 
 
-def _names(items: Sequence[str], sep: str) -> str:
-    shown = list(items[:MAX_NAMES])
-    if len(items) > MAX_NAMES:
-        shown.append(f"and {len(items) - MAX_NAMES} more")
+def _names(items: Sequence[str], sep: str, limit: int | None) -> str:
+    if limit is None:
+        return sep.join(items)
+    shown = list(items[:limit])
+    if len(items) > limit:
+        shown.append(f"and {len(items) - limit} more")
     return sep.join(shown)
 
 
@@ -97,9 +102,11 @@ def measure_summary(
     filled: Sequence[str],
     unreadable: Mapping[str, str],
     labels: Mapping[str, str],
+    limit: int | None = MAX_NAMES,
 ) -> str:
     """The status line after a measure. The groups describe only `filled`, the
-    rows that were selected (P6)."""
+    rows that were selected (P6). Each group names at most `limit` lines (P12);
+    `None` names them all, for the tooltip (Ruling 15)."""
     parts: list[str] = []
     axes = list(result.axes.values())
     one = len(axes) == 1
@@ -113,8 +120,10 @@ def measure_summary(
             parts.append(f"Could not measure: {a.reason}. Nothing was changed.")
         else:
             parts.append(f"Along {a.axis}: could not measure ({a.reason}); nothing changed there.")
-    if axes and all(a.destagger is None for a in axes):
-        return " ".join(parts)
+    # When every axis failed, the axis reasons already cover the lines that had no
+    # neighbour or that went with their grid; the others are still named (Ruling 12).
+    all_failed = bool(axes) and all(a.destagger is None for a in axes)
+    covered = (NO_NEIGHBOUR, AXIS_FAILED) if all_failed else ()
 
     own: list[str] = []
     left: list[str] = []
@@ -131,12 +140,12 @@ def measure_summary(
             left.append(f"{label} changes partway along")
         elif line.status is LineStatus.NO_MATCH:
             left.append(f"{label} has no clear match")
-        elif line.status is LineStatus.NOT_MEASURED:
+        elif line.status is LineStatus.NOT_MEASURED and line.reason not in covered:
             skipped.append(f"{label} ({line.reason})")
     if own:
-        parts.append(f"Own values: {_names(own, ', ')}.")
+        parts.append(f"Own values: {_names(own, ', ', limit)}.")
     if left:
-        parts.append(f"Left at the grid value: {_names(left, '; ')}.")
+        parts.append(f"Left at the grid value: {_names(left, '; ', limit)}.")
     if skipped:
-        parts.append(f"Not measured, left as they were: {_names(skipped, '; ')}.")
+        parts.append(f"Not measured, left as they were: {_names(skipped, '; ', limit)}.")
     return " ".join(parts)

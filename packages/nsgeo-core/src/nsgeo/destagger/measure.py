@@ -70,6 +70,7 @@ ONE_WAY = "every line was walked the same way, so there is no stagger to measure
 TOO_FEW = "too few lines walked in opposite directions to measure"
 UNCLEAR = "no clear match between lines walked in opposite directions"
 AXIS_FAILED = "its grid's value could not be measured"
+NO_LINES = "none of the grid's lines could be measured"
 
 
 class LineStatus(Enum):
@@ -151,6 +152,9 @@ def _measure_axis(
     axis: str, group: Sequence[MeasureLine], should_stop: Callable[[], bool]
 ) -> tuple[AxisResult, dict[str, LineResult]]:
     out: dict[str, LineResult] = {}
+    # The same lines in any order give the same numbers: the bootstrap resamples
+    # curve rows, so the rows are always in offset order.
+    group = sorted(group, key=lambda ln: (ln.placement.offset, ln.key))
 
     def exclude(line: MeasureLine, reason: str) -> None:
         out[line.key] = LineResult(line.key, axis, LineStatus.NOT_MEASURED, None, reason)
@@ -204,6 +208,8 @@ def _measure_axis(
             exclude(line, AXIS_FAILED)
         return AxisResult(axis, None, math.nan, len(measured), reason), out
 
+    if not remaining:  # every line was excluded above, each with its own reason
+        return failed(NO_LINES)
     if not measured:
         return failed(ONE_WAY if len(remaining) >= 2 else TOO_FEW)
     if len(measured) < MIN_LINES:
