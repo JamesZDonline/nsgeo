@@ -1089,7 +1089,8 @@ class NsgeoPlugin:
             for window in plan_windows(site_z, thickness_levels, step_levels)
         )
         grids = [self.session.grid(g) for g in site.ready_grids]
-        # The cell the picture is drawn at (the box can show one a refused resolution left).
+        # The site's own picture pixel, which is the cell it is drawn at. Not the Cell size
+        # box: that can still show a value a refused resolution left behind.
         full = site.full_lattice
         live_cell = full.pixel if full is not None else dock.cell_spin.value()
 

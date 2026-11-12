@@ -8,7 +8,8 @@ band by band, never a resident cube beyond what the memory budget allows.
 What the file records (Ruling 6; the key names are part of the format).
 Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
 `NSGEO_SITE_CELL_M` (the export cell), `NSGEO_SITE_PIXEL_M` (the export pixel),
-`NSGEO_SITE_RESAMPLING` (always `bilinear`), `NSGEO_SITE_INTERPOLATION` (the method key),
+`NSGEO_SITE_RESAMPLING` (`bilinear`; `largest_count` for the coverage companion),
+`NSGEO_SITE_INTERPOLATION` (the method key),
 `NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
 (interpolation spec §8; the coverage companion carries none of the four),
 `NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of

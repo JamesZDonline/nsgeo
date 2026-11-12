@@ -3,7 +3,8 @@
 Ten grids, 20 m and 50 m on a side, 0.5 m line spacing, at M11's default
 resolution: cell = min(0.5, spacing / 2), dz = the native sample interval,
 the z range the prepared lines share, thickness 5 ns, the default interpolation
-(kriging, 0.5 line spacings, no smoothing). Runs offscreen in `.venv-qgis` with
+(kriging, 0.5 line spacings, no smoothing; `--export-smooth` re-runs the export rows
+with smoothing). Runs offscreen in `.venv-qgis` with
 no plugin and no iface:
 
     QT_QPA_PLATFORM=offscreen .venv-qgis/bin/python \\
