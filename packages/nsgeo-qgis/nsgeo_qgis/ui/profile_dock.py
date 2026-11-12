@@ -242,6 +242,10 @@ class ProfileDock(QgsDockWidget):
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
+        # (line key, fit id) of the fit Save fit just stored, while the working
+        # points are empty after it (#128). Apply to line / grid act on that
+        # fit; every reset of `_velocity_points` ends it too.
+        self._just_saved: tuple[str, str] | None = None
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
         # (line key, fit id) the velocity dialog has selected, drawn bold.
@@ -667,6 +671,7 @@ class ProfileDock(QgsDockWidget):
         # hyperbola cannot span two lines, and a stale point would be fitted
         # as if it belonged here.
         self._velocity_points = []
+        self._just_saved = None
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
@@ -1054,6 +1059,7 @@ class ProfileDock(QgsDockWidget):
         self.setToolTip("")
         self.velocity_label.setText("")
         self._velocity_points = []
+        self._just_saved = None
         self._update_velocity_fit()
         self.channel_combo.hide()
 
@@ -1152,6 +1158,8 @@ class ProfileDock(QgsDockWidget):
         """Turn the profile's velocity-fit mode on or off, and show or hide
         the strip with it."""
         self._velocity_mode = bool(flag)
+        if not self._velocity_mode:
+            self._just_saved = None
         self.view.set_velocity_fit_mode(self._velocity_mode)
         self.velocity_strip.setVisible(self._velocity_mode)
         self._update_velocity_fit()
@@ -1179,6 +1187,7 @@ class ProfileDock(QgsDockWidget):
         try:
             if self._refuse_velocity_edit_on_preview():
                 return
+            self._just_saved = None
             self._velocity_points.append(
                 (int(trace), float(retime_ns(float(time_ns), self.shown_zero_ns(), 0.0)))
             )
@@ -1352,12 +1361,21 @@ class ProfileDock(QgsDockWidget):
             self._velocity_fit = None
             curve: list[tuple[float, float]] = []
             zero = self._line_zero()  # once per repaint: a broken stack logs once
+            saved = None if self._velocity_points else self._saved_fit_now()
             if not self._velocity_points:
-                self.velocity_readout.setText(
-                    "Click the hyperbola's apex, then points down both limbs."
-                    if self._working_key is not None and not is_cut_key(self._working_key)
-                    else ""
-                )
+                if saved is not None:
+                    self.velocity_readout.setText(
+                        f"Fit saved: v = {saved.v_m_ns:6.4f} ± {saved.v_stderr_m_ns:6.4f} m/ns."
+                        " Find it in the line's Set velocity override\u2026 dialog"
+                        " (right-click the line in the Survey panel)."
+                        " Click the profile to start the next hyperbola."
+                    )
+                else:
+                    self.velocity_readout.setText(
+                        "Click the hyperbola's apex, then points down both limbs."
+                        if self._working_key is not None and not is_cut_key(self._working_key)
+                        else ""
+                    )
             else:
                 try:
                     x_m, t_ns = self.velocity_points_in_metres(zero)
@@ -1410,11 +1428,29 @@ class ProfileDock(QgsDockWidget):
             else:
                 self.view.set_saved_velocity_fits([])
             fit_ok = self._velocity_fit is not None
-            self.apply_line_button.setEnabled(fit_ok)
+            can_apply = fit_ok or saved is not None
+            self.apply_line_button.setEnabled(can_apply)
             self.save_fit_button.setEnabled(fit_ok)
-            self.apply_grid_button.setEnabled(fit_ok and self._working_grid_id() is not None)
+            self.apply_grid_button.setEnabled(can_apply and self._working_grid_id() is not None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not update the velocity fit: {exc}", Qgis.MessageLevel.Critical)
+
+    def _saved_fit_now(self) -> StoredFit | None:
+        """The fit Save fit just stored, if it is still the working line's and
+        still in the store. The store is asked rather than remembered, so a fit
+        deleted from the velocity dialog meanwhile ends the state."""
+        if self._just_saved is None:
+            return None
+        key, fit_id = self._just_saved
+        if (
+            key == self._working_key
+            and self.session.is_open
+            and not is_cut_key(key)
+            and fit_id in self.session.line_for_key(key).velocity_fits
+        ):
+            return self.session.line_for_key(key).velocity_fits[fit_id]
+        self._just_saved = None
+        return None
 
     def _line_has_no_distance_calibration(self) -> bool:
         if self._working_key is None or not self.session.is_open:
@@ -1437,6 +1473,14 @@ class ProfileDock(QgsDockWidget):
 
     def _apply_velocity_to_line(self, *_: Any) -> None:
         try:
+            saved = None if self._velocity_points else self._saved_fit_now()
+            if saved is not None and self._just_saved is not None:
+                # Just saved: the working points are gone, the stored fit is
+                # the one being applied, and its id is the provenance.
+                key, fit_id = self._just_saved
+                self.session.set_line_velocity(key, VelocityModel.constant(saved.v_m_ns))
+                self.session.set_velocity_from_fit(key, fit_id)
+                return
             fit = self._velocity_fit
             if fit is not None and self._working_key is not None:
                 self.session.set_line_velocity(
@@ -1461,10 +1505,12 @@ class ProfileDock(QgsDockWidget):
 
     def _apply_velocity_to_grid(self, *_: Any) -> None:
         try:
+            saved = None if self._velocity_points else self._saved_fit_now()
             fit = self._velocity_fit
+            v = saved.v_m_ns if saved is not None else (None if fit is None else fit.v_m_ns)
             grid_id = self._working_grid_id()
-            if fit is not None and grid_id is not None:
-                self.session.set_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns))
+            if v is not None and grid_id is not None:
+                self.session.set_grid_velocity(grid_id, VelocityModel.constant(v))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
 
@@ -1486,20 +1532,19 @@ class ProfileDock(QgsDockWidget):
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
                 zero_ns=self._line_zero(),
             )
-            self.session.add_velocity_fit(self._working_key, stored)
-            # A saved fit goes quietly into the line's record; say where to
-            # find it. The next fit action rewrites the read-out.
-            self.velocity_readout.setText(
-                self.velocity_readout.text().split(" Fit saved:")[0]
-                + " Fit saved: find it in the line's Set velocity override\u2026 dialog"
-                " (right-click the line in the Survey panel)."
-            )
+            fit_id = self.session.add_velocity_fit(self._working_key, stored)
+            # The points are spent: clear them, ready for the next hyperbola.
+            # The read-out says where the fit went (`_update_velocity_fit`).
+            self._velocity_points = []
+            self._just_saved = (self._working_key, fit_id)
+            self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 
     def _clear_velocity_points(self, *_: Any) -> None:
         try:
             self._velocity_points = []
+            self._just_saved = None
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)
