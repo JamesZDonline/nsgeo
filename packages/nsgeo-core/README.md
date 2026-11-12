@@ -40,10 +40,14 @@ The survey data model.
 
 | Name | Purpose |
 |---|---|
+| `CUT_KEY_PREFIX` | The prefix (`cut:`) of a cut's key, which no line key can have. |
+| `Cut` | A path drawn on a grid, in grid metres, whose vertical section the cube gives. |
 | `Line` | One collected survey line; headers are eager, samples are lazy. |
 | `Profile` | One channel of one radargram; its data is raw and never mutated. |
 | `Site` | The grids, lines, step stacks, presets, saved cubes, slice sources and site view of a survey. |
 | `clear_profile_cache` | Drop the cached profiles. |
+| `cut_key` | A cut's key from its id. |
+| `is_cut_key` | Whether a key names a cut rather than a line. |
 
 ### `nsgeo.geometry`
 
@@ -110,7 +114,12 @@ several grids' slices into one site view.
 | `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
+| `CROP_MAX_DISTANCE_SPACINGS` | The most a section's max distance may be, in line spacings, for its minimum curvature to be solved on crops; above it the whole frame is solved. |
+| `SECTION_MARGIN_SPACINGS` | How far a section's curvature crops reach round the cut, in line spacings. |
+| `SECTION_PIECE_M` | The most of a cut one crop covers, in metres. |
 | `Seam` | Two grids' facing strips, where their levels are compared. |
+| `SectionColumns` | Where a section's columns sit along a cut and among the frame's cells, with their taps. |
+| `SectionCrop` | A box of cells round one piece of a cut, and the columns it serves. |
 | `SiteLattice` | A north-up pixel lattice in the site's CRS. |
 | `SliceCube` | Binned amplitude over a frame and a z axis. |
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
@@ -126,11 +135,13 @@ several grids' slices into one site view.
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
+| `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
 | `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
 | `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |
+| `finish_section` | Every level of a cube, finished and read along a section's columns, as the slice picture would show it. |
 | `finish_slice` | Interpolate a slice's gaps, then smooth it. |
 | `fitting_lattice` | The site lattice at the cell, doubled until it fits both a lattice-pixel limit and a covered-pixel limit. |
 | `footprint` | The tight window around the inside points of a block of taps. |
@@ -143,19 +154,27 @@ several grids' slices into one site view.
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
 | `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
+| `plan_section_curvature` | One minimum-curvature plan per crop of a cut, built once for every level. |
 | `plan_windows` | Every window of a thickness, at a step. |
 | `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
 | `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
 | `seam_masks` | The cells of each of two frames within a width of the other's footprint. |
+| `column_distances` | Distances of a section's columns along a path: 0, step, ... and the length. |
+| `section_columns` | Columns half a cell apart along a path, with the pixel rule's taps. |
+| `section_crops` | Boxes round a cut, each serving at most a piece of it. |
 | `shared_limit` | One display limit for the whole cube. |
 | `site_axis` | The union of the grids' time bounds, clipped to a time range. |
 | `slice_extent` | The world bounding box of a frame. |
 | `smooth` | Gaussian smoothing along frame X and Y in metres; blanks stay blank. |
+| `smoothing_reach_cells` | The smoothing kernel's radius in cells. |
+| `solve_section_level` | One level solved by minimum curvature on a cut's crops and read along its columns. |
+| `solve_section_level_whole` | One level solved by minimum curvature on the whole frame and read along a cut's columns. |
 | `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
+| `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
 | `window_depths_m` | A window in metres, through a velocity model. |
 | `window_label` | A window's text label. |
 | `window_on` | A site window as a window on one grid's z axis. |
@@ -188,6 +207,7 @@ Amplitude to pixels, with no Qt.
 | `colormap_names` | The table names, optionally filtered by polarity. |
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
+| `section_rgba8` | A section's values to (H, W, 4) uint8, transparent wherever blank, in either polarity. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
 | `to_index8_unipolar` | Map 0..limit to 0..255. |
 | `to_rgb8` | Amplitudes, a limit and a (256, 3) lookup table to an (H, W, 3) uint8 RGB array, mapped as `to_index8` does. |

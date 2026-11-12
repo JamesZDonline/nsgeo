@@ -8,12 +8,13 @@ plugin on top. Today it reads GSSI DZT files. The core is laid out so that other
 instruments, such as magnetometry, conductivity and resistivity, can be added later
 without touching the plugin.
 
-> **Status: 0.3.0, experimental.** The QGIS plugin imports DZT files into grids
-> placed on the map, lets you fix a line's placement after import, links the
-> map and the profile both ways, processes and migrates profiles, records picks
-> that stay on their line, measures velocities from diffraction hyperbolas, and
-> builds time and depth slices for one grid or the whole site. It
-> installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x, and each release's
+> **Status: 0.4.0, experimental.** The QGIS plugin imports DZT files into grids
+> placed on the map, lets you fix, fit and destagger a line's placement after
+> import, links the map and the profile both ways, processes and migrates
+> profiles, shows a vertical section along any line you draw (a cut), records
+> picks that stay on their line, measures velocities from diffraction
+> hyperbolas, and builds time and depth slices for one grid or the whole site.
+> It installs from a single zip on QGIS 3.40–3.44 and QGIS 4.x, and each release's
 > zip is checked by installing it into QGIS 3.40, 3.44 and 4.2. macOS is
 > untested, and the [getting-started guide](docs/guide/getting-started.md) lists
 > the known issues.
@@ -91,19 +92,20 @@ a milestone merges or the plan changes.
 | M14 | Migration (Stolt f-k) ([#123]) | 0.3.0 |
 | | Survey panel grids start collapsed ([#133]) | 0.3.0 |
 | | Line editing: edit a line's placement after import, move lines between grids, and keep picks on their line when it moves ([#29], [#64], [#35]) | 0.3.0 |
-| | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | next release |
-| | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | next release |
+| | Grid velocity is optional: without one, lines use their header dielectric, and import flags a header dielectric no soil has ([#4]) | 0.4.0 (2026-11-12) |
+| | Shift+scroll over the map moves the depth one Step per wheel notch ([#109]) | 0.4.0 |
 | | Local real-data tests read one survey at a time, so the GPS lines for M17 no longer break them ([#141]) | tests only |
-| | A cube held in memory stores only the cells its lines cross: 3–8× less memory at fine cells, the same slices. Saved cubes use the compact format, and older saved cubes still load ([#113]) | next release |
-| | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | next release |
-| | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | next release |
-| | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | next release |
-| | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | next release |
-| | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | next release |
-| | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
-| | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
-| | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | next release |
-| | Measure the destagger: a Measure button in Edit lines works out each grid's shift from its own lines, and each line's own shift where it is clearly off, as a starting point to adjust before OK ([#159]) | next release |
+| | A cube held in memory stores only the cells its lines cross: 3–8× less memory at fine cells, the same slices. Saved cubes use the compact format, and older saved cubes still load ([#113]) | 0.4.0 |
+| | A faster minimum-curvature solver: multigrid, about 4–5× faster at a 0.05 m cell with the same slices, so the sharp slice arrives in under a second after the depth stops ([#111]) | 0.4.0 |
+| | Whole site never refuses a fine cell: past a size it draws a coarser preview and says why in the panel. Every slice blends the cells around each pixel at the cell size and is drawn smooth when zoomed in ([#107], [#112]) | 0.4.0 |
+| | The Hilbert envelope no longer leaks the top of a trace into the bottom, and a bandpass whose Low edge is below its taper width now removes DC ([#116], [#117]) | 0.4.0 |
+| | The background solver lets go of a cancelled solve's memory at once, not at the next solve, and its errors name their type (the worker items in [#120]) | 0.4.0 |
+| | The Slices memory warning counts what minimum curvature really holds: its plan beside the kriging preview, about twice the weights of IDW or kriging ([#148]) | 0.4.0 |
+| | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | 0.4.0 |
+| | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | 0.4.0 |
+| | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | 0.4.0 |
+| | Measure the destagger: a Measure button in Edit lines works out each grid's shift from its own lines, and each line's own shift where it is clearly off, as a starting point to adjust before OK ([#159]) | 0.4.0 |
+| M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on Sunnyside Grid 1, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open ([#172]) | 0.4.0 |
 
 ### In progress
 
@@ -116,27 +118,25 @@ a milestone merges or the plan changes.
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
-than reworking M15–M17 afterwards.
+than reworking M16–M17 afterwards.
 
-1. **M15: cut anywhere.** Draw a line on the map and see the vertical section
-   beneath it, with the same hover, cursor and picks as a survey line. Designed.
-   It must read the clock each saved cube records ([#163], item 5).
-2. **M16: 3-D.** Export a grid for ParaView to explore it as a volume (cloud,
+1. **M16: 3-D.** Export a grid for ParaView to explore it as a volume (cloud,
    isosurfaces, slices in any direction), build surfaces from your picks in
    QGIS, and see them in a simple QGIS 3-D view. Designed
-   ([spec](docs/superpowers/specs/2026-11-11-nsgeo-m16-3d-design.md)); its
-   first three plans don't need M15.
-3. **How a line is identified** ([#89]), settled before M17 stores GPS
+   ([spec](docs/superpowers/specs/2026-11-11-nsgeo-m16-3d-design.md)). Plan A
+   is in progress (above); then surfaces from picks, the QGIS 3-D view, and
+   cuts in the ParaView scene.
+2. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-4. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+3. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-5. **M18: issue cleanup.** Work through the backlog of open bugs and review
+4. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-6. **M19: magnetometer data.** The first instrument other than GPR.
+5. **M19: magnetometer data.** The first instrument other than GPR.
 
-Also worth doing early: edit or delete a pick from the profile ([#36]), before
-M15 brings picking to cuts; the migration real-data test ([#125]), before M16
+Also worth doing early: edit or delete a pick from the profile ([#36]), now
+that cuts carry picks too; the migration real-data test ([#125]), before M16
 builds on migrated cubes; and the three ways a restored cube can still come
 back on the wrong clock without a note ([#162]).
 
@@ -163,6 +163,9 @@ Grouped by area. The order within a group is not a priority.
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]).
+- **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
+  the picks a deleted cut leaves behind ([#170]); the review follow-ups
+  ([#171]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -220,7 +223,10 @@ Grouped by area. The order within a group is not a priority.
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
-[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
+[#169]: https://github.com/JamesZDonline/nsgeo/issues/169
+[#170]: https://github.com/JamesZDonline/nsgeo/issues/170
+[#171]: https://github.com/JamesZDonline/nsgeo/issues/171
+[#172]: https://github.com/JamesZDonline/nsgeo/pull/172
 
 ## Why
 

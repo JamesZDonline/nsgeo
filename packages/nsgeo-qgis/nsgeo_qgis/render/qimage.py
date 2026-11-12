@@ -33,6 +33,18 @@ def rgb_to_qimage(rgb: np.ndarray) -> QImage:
     return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
 
 
+def rgba_to_qimage(rgba: np.ndarray) -> QImage:
+    """Wrap an (H, W, 4) uint8 array as a straight-alpha RGBA8888 QImage that owns its memory.
+
+    A section has real nodata (cut spec §3): its blank pixels carry alpha 0, so
+    the profile's hatch shows through them. Copied for the reason
+    `rgb_to_qimage` gives, and with the true row stride (`4 * w`).
+    """
+    rgba = np.ascontiguousarray(rgba, dtype=np.uint8)
+    h, w, _ = rgba.shape
+    return QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
+
+
 class RadargramImage:
     """One radargram rendered once per display setting. Pan and zoom draw
     sub-rectangles of `image`; only a new radargram or a display change

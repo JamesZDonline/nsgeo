@@ -18,6 +18,7 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
 
@@ -157,6 +158,10 @@ class Site:
     #: Every key is optional; a missing key is the default.
     site_view: dict[str, Any] = field(default_factory=dict)
 
+    #: Cuts drawn on the grids, in drawing order. Each is keyed `cut:<id>`
+    #: and lives apart from `lines`, so line-only code never sees one.
+    cuts: list[Cut] = field(default_factory=list)
+
     @property
     def frames(self) -> dict[str, Grid]:
         return {g.id: g for g in self.grids}
@@ -172,3 +177,10 @@ class Site:
             grid_id = getattr(line.placement, "grid_id", None)
             if grid_id is not None and grid_id not in known:
                 raise ValueError(f"line {line.path.name} references unknown grid {grid_id!r}")
+        cut_ids = [c.id for c in self.cuts]
+        cut_dupes = {i for i in cut_ids if cut_ids.count(i) > 1}
+        if cut_dupes:
+            raise ValueError(f"duplicate cut ids: {sorted(cut_dupes)}")
+        for cut in self.cuts:
+            if cut.grid_id not in known:
+                raise ValueError(f"cut {cut.name!r} references unknown grid {cut.grid_id!r}")

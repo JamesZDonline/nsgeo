@@ -21,6 +21,7 @@ from typing import Any
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
 from nsgeo.slices.interpolate import METHODS
@@ -35,6 +36,12 @@ __all__ = [
 ]
 
 SCHEMA_VERSION = 1
+#: A site with cuts saves as 2, so a build that predates cuts refuses the file
+#: instead of opening it and dropping the cuts on its next save. A site
+#: without cuts still saves as `SCHEMA_VERSION`, and stays readable by those
+#: builds (cut spec §3, plan call 3).
+CUTS_SCHEMA_VERSION = SCHEMA_VERSION + 1
+READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION)
 
 
 class ProjectError(Exception):
@@ -75,6 +82,37 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         default_spacing=float(doc["default_spacing"]),
         velocity=velocity,
     )
+
+
+def _cut_to_dict(cut: Cut) -> dict[str, Any]:
+    return {
+        "id": cut.id,
+        "name": cut.name,
+        "grid_id": cut.grid_id,
+        "vertices": [[x, y] for x, y in cut.vertices],
+    }
+
+
+def _cut_from_dict(doc: Any) -> Cut:
+    try:
+        vertices = doc["vertices"]
+        if not isinstance(vertices, list):
+            raise TypeError("vertices must be a list")
+        pairs = []
+        for vertex in vertices:
+            if not isinstance(vertex, list) or len(vertex) != 2:
+                raise TypeError(f"a vertex must be an [x, y] pair, got {vertex!r}")
+            x, y = _finite(vertex[0]), _finite(vertex[1])
+            if x is None or y is None:
+                raise ValueError(f"a vertex must be two finite numbers, got {vertex!r}")
+            pairs.append((x, y))
+        for key in ("id", "name", "grid_id"):
+            if not isinstance(doc[key], str):
+                raise TypeError(f"{key} must be text")
+        return Cut(doc["id"], doc["name"], doc["grid_id"], tuple(pairs))
+    except (KeyError, TypeError, ValueError) as exc:
+        name = doc.get("name") if isinstance(doc, dict) else None
+        raise ProjectError(f"invalid cut {name!r}: {exc!r}") from exc
 
 
 def _placement_to_dict(placement: Any) -> dict[str, Any]:
@@ -209,10 +247,12 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         )
 
     doc = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION,
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
+    if site.cuts:
+        doc["cuts"] = [_cut_to_dict(c) for c in site.cuts]
     if site.presets:
         doc["presets"] = site.presets
     if site.cubes:
@@ -350,10 +390,10 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(f"{path} is not valid JSON: {exc}") from exc
 
     version = doc.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in READABLE_SCHEMA_VERSIONS:
         raise ProjectError(
             f"{path} declares schema version {version}, but this build reads "
-            f"version {SCHEMA_VERSION}"
+            f"versions {list(READABLE_SCHEMA_VERSIONS)}"
         )
 
     root = path.parent.resolve()
@@ -410,6 +450,15 @@ def load_site(path: str | Path) -> Site:
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
+
+    cuts = doc.get("cuts", [])
+    if not isinstance(cuts, list):
+        raise ProjectError(f"{path}: 'cuts' must be a list, got {type(cuts).__name__}")
+    site.cuts = [_cut_from_dict(entry) for entry in cuts]
+    known_grids = {g.id for g in grids}
+    for cut in site.cuts:
+        if cut.grid_id not in known_grids:
+            raise ProjectError(f"cut {cut.name!r} references unknown grid {cut.grid_id!r}")
 
     presets = doc.get("presets", {})
     if not isinstance(presets, dict):

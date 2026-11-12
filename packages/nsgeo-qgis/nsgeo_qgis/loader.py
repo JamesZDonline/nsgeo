@@ -51,6 +51,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from nsgeo.model import is_cut_key
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer, pyqtSignal
 
@@ -108,7 +109,7 @@ class LineLoader(QObject):
         # just validated in open_line(), so this path is not expected to
         # raise -- the guard is defensive, matching every other slot in
         # this plugin.
-        if not key:
+        if not key or is_cut_key(key):  # a cut has no samples to load (plan call 1)
             return
         try:
             self.request(key)

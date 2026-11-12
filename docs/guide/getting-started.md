@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.3.0. It is **experimental**, so keep
+This guide covers nsgeo 0.4.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.3.0](#5-known-issues-in-030)
+5. [Known issues in 0.4.0](#5-known-issues-in-040)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.3.0.zip` from the
+1. Download `nsgeo_qgis-0.4.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.3.0 · core 0.3.0 · build`, followed by
+   bar above the map should show `plugin 0.4.0 · core 0.4.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.3.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.4.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -68,9 +68,23 @@ QGIS 3.40, QGIS 3.44 and QGIS 4.2 on Linux.
 Install the new zip exactly as above. QGIS replaces the old version. Then
 **restart QGIS** and check **Plugins → nsgeo → About nsgeo** for the new
 version number. Upgrading does not touch your site folders. The first time
-nsgeo 0.3.0 opens a site that has picks, it puts any pick that had drifted off
-its line back onto it, with its depth at the line's current velocity, and the
-message bar says how many picks it updated.
+nsgeo 0.4.0 opens a site, the picks table gains a `zero_ns` column. Nothing is
+converted: a pick with no zero was measured on the radar's clock, and keeps
+reading that way. If the site has picks, it also puts any pick that had drifted
+off its line back onto it, with its depth at the line's current velocity, and
+the message bar says how many picks it updated.
+
+Two things stop an older version reading a site that 0.4.0 has saved:
+
+- **After you open a site in 0.4.0, do not reopen it in 0.3.0.** 0.3.0 drops
+  the picks table's `zero_ns` column. A pick made or moved on a profile that
+  Time zero relabelled would then read 0.5 to 1.5 ns off.
+- **A site with cuts saves as schema version 2, and 0.3.0 refuses to open it.**
+  A site without cuts still saves as version 1.
+
+A cube saved before 0.4.0, whose preset has a Time zero step, comes back
+shifted by the median line zero when you restore it, so its slices sit at the
+depths they showed before, and the Slices panel says so.
 
 ### Uninstalling
 
@@ -93,10 +107,11 @@ stay exactly where they are.
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
+| **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…** and **Import DZT…** stay greyed out until a site is
-open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
+site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -437,7 +452,7 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-020) before you do.
+  [Known issues](#5-known-issues-in-040) before you do.
 - A pick follows its line, so dragging it on the map does not move it: it goes
   back onto its line when you save the layer's edits. To move a pick along its
   line, delete it and pick again on the profile.
@@ -519,7 +534,68 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    site** afterwards so the site remembers it). **Export GeoTIFF…** writes every
    slice as one multi-band GeoTIFF and adds it to the map.
 
-### Step 8: Save, and next time
+### Step 8: Draw a cut
+
+A line you recorded shows what the radar saw along that one path. A **cut** is
+a line you draw yourself, anywhere on a grid. The profile then shows the
+vertical section beneath it, read from the same volume as the slices. Use it to
+follow a feature across the lines you recorded, or to see a slice's reflection
+from the side.
+
+1. Show the grid in the **nsgeo Slices** panel first (Step 7). A cut reads the
+   panel's volume, and uses the panel's **Interpolation** settings and
+   **Palette**, so it looks like the slice, cut another way. Until the grid is
+   shown the profile tells you which grid to show.
+2. Turn on **Cut** in the toolbar. Click inside a grid to start, click to add
+   points, and right-click or press Enter to finish. Backspace removes the last
+   point, and Esc cancels. The cut goes on the grid you first clicked in. It
+   appears in the **cuts** layer on the map, and under its grid in **nsgeo
+   Survey**, where a right-click renames or deletes it.
+3. The profile opens it. Its title reads **nsgeo Profile · cut:**, followed by
+   the name, the grid and the length. The distance along the cut runs left to
+   right from where you started. The depth axis is the grid's. The pale blue
+   band shows the slice you are looking at in **nsgeo Slices**, so you can see
+   which reflection a slice is made from. Blank stretches are places the cut
+   passes outside the grid, or farther than the **Max distance to data** from
+   any line.
+
+If the grid is being prepared again, the profile says so and redraws the cut
+when it is ready. A grid whose volume is too large to hold in memory cannot be
+cut: use a coarser cell or a shorter depth range in **nsgeo Slices**.
+
+With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first,
+and the title says so: *Kriging preview · minimum curvature n of N depths*,
+where N is how many depths the section has and n how many are finished so far.
+The finished section replaces it a depth at a time, starting at the slice you
+are looking at, and the title then reads *Minimum curvature*. It can take up to
+a minute or two for a long cut at a fine cell, and longer when **Max distance
+to data** is more than half the line spacing, because each depth
+is then solved over the whole grid. Move the slice window and the work turns to
+the new depth once the window has rested. Change a setting while it works and
+it starts again; changing the palette or renaming the cut does not. Only the
+cut you have opened is finished: hovering another one shows its kriging
+preview.
+
+The map works on cuts while the **cuts** layer is the current layer, and on
+lines otherwise. With **cuts** current, moving the pointer along a cut moves the
+profile cursor, and hovering a cut previews it. Selecting a cut with QGIS's
+Select tool opens it, and so does clicking its name in **nsgeo Survey**. Choose
+another layer, and the map goes back to following your recorded lines.
+
+**Pick** works on a cut as it does on a line: click the profile, and the pick
+lands on the cut's path on the map. A pick on a cut records its distance along
+the cut and its time, with a note of how the section was made. If you pick while
+the section is still the kriging preview, the pick says so. Picks on a cut use
+the grid's velocity, or its first line's if the grid has none, and a cut is not
+processed: the steps in **nsgeo Processing** belong to recorded lines.
+
+A cut's times are on the clock of the volume it was cut from. If you turn the
+preset's **Time zero** step on or off after making picks on a cut, those picks
+no longer fit the new section, so the profile leaves them out and its title
+counts them (*1 picks on another clock*). They stay on the map and in the picks
+table, and they come back when you turn the setting back.
+
+### Step 9: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
@@ -533,14 +609,14 @@ Everything for a site lives in its site folder:
 
 | In the site folder | What it holds |
 |---|---|
-| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **marks** and **picks**. |
+| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | your DZT files | Read by nsgeo, never changed. |
 
-**Picks are different from everything else.** nsgeo redraws the grids, lines and
-marks layers from `survey.nsgeo.json` and your DZT and DZX files whenever it
-needs to, so those layers are read-only. The **picks** layer is your own work,
+**Picks are different from everything else.** nsgeo redraws the grids, lines,
+cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
+whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
 
@@ -551,6 +627,18 @@ A few things to know:
   only on a computer where that path exists.
 - **A pick follows its line.** Editing a grid or a line moves its picks too, and
   dragging a pick on the map does not move it.
+- **A cut follows its grid.** Move or turn a grid and its cuts move with it, and
+  so do the picks on them. If you make a grid smaller, a cut that runs past its
+  edge stays, and shows blank where it is outside.
+- **A pick on a deleted cut stays on the map.** Deleting a cut never deletes its
+  picks, so they remain in the **picks** layer, where you can see them and
+  remove them yourself. The pick's note still says which cut it was made on.
+  Removing a grid deletes its cuts too, and asks first.
+- **A site with cuts does not open in nsgeo 0.3.0 or earlier.** Those versions
+  would drop the cuts the next time you saved, so they refuse to open it. They
+  say the site's file declares schema version 2, but that they read version 1.
+  A site with no cuts still opens in them. Update nsgeo on every computer that
+  opens the site.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the
@@ -559,7 +647,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.3.0
+## 5. Known issues in 0.4.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -620,8 +708,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.3.0 · core
-   0.3.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.4.0 · core
+   0.4.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open

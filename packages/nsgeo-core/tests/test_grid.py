@@ -62,3 +62,11 @@ def test_to_world_preserves_distances():
 def test_to_world_rejects_wrong_shape():
     with pytest.raises(ValueError, match=r"\(n, 2\)"):
         g().to_world(np.zeros((3, 3)))
+
+
+def test_to_local_inverts_to_world():
+    grid = g(10.497, origin=(500123.456, 4000987.654))
+    local = np.array([[0.0, 0.0], [3.3, 7.1], [19.9, 0.2], [-2.0, 25.0]])
+    np.testing.assert_allclose(grid.to_local(grid.to_world(local)), local, atol=1e-6)
+    with pytest.raises(ValueError):
+        grid.to_local(np.zeros(2))
