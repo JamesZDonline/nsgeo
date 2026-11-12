@@ -31,6 +31,7 @@ from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
@@ -875,7 +876,13 @@ class SiteSession(QObject):
         line = self.line_for_key(key)
         if fit_id is not None and fit_id not in line.velocity_fits:
             raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
-        new_line = dataclasses.replace(line, velocity_from_fit=fit_id)
+        source = None
+        if fit_id is not None:
+            label = line.placement.label or line.path.stem
+            member = SourceFit.of(key, fit_id, label, line.velocity_fits[fit_id])
+            applied_at = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            source = VelocitySource.from_fits([member], applied_at=applied_at)
+        new_line = dataclasses.replace(line, velocity_source=source)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
@@ -889,8 +896,7 @@ class SiteSession(QObject):
         if fit_id not in line.velocity_fits:
             raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
         fits = {i: f for i, f in line.velocity_fits.items() if i != fit_id}
-        pointer = None if line.velocity_from_fit == fit_id else line.velocity_from_fit
-        new_line = dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=pointer)
+        new_line = dataclasses.replace(line, velocity_fits=fits)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)

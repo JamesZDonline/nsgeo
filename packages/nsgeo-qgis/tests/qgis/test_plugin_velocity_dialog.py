@@ -202,12 +202,18 @@ def test_a_measured_line_velocity_names_the_fit_it_came_from(plugin):
 def test_a_pointer_to_a_fit_that_is_gone_leaves_the_bare_source(plugin):
     import dataclasses
 
+    from nsgeo.velocity_source import SourceFit, VelocitySource
     from nsgeo_qgis.ui.profile_dock import velocity_source
 
     s, key = plugin.session, plugin.session.keys()[0]
     s.set_line_velocity(key, VelocityModel.constant(0.09))
     line = s.line_for_key(key)
-    dangling = dataclasses.replace(line, velocity_from_fit="gone")  # as a hand-edited file
+    # A record whose member names a fit id the line does not have, as a hand-edited file leaves it.
+    stored = _stored(18.4, 0.09)
+    member = SourceFit.of(key, "gone", "L", stored)
+    record = VelocitySource.from_fits([member], applied_at=None)
+    dangling = dataclasses.replace(line, velocity_source=record)
+    assert dangling.velocity_from_fit is None
     s._lines_by_key[key] = dangling
     assert velocity_source(s, key) == "line override"
 

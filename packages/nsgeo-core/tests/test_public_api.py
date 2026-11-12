@@ -21,6 +21,7 @@ EXPECTED_PUBLIC = {
     "render",
     "velocity",
     "velocity_fit",
+    "velocity_source",
 }
 
 

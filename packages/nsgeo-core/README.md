@@ -251,3 +251,14 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
 | `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |
 | `unusable_fit_note` | The text for a stored fit that cannot be fitted again at the line's current time zero, with the reason. |
+
+### `nsgeo.velocity_source`
+
+Where a line's or a grid's velocity came from: the saved fits that made it.
+
+| Name | Purpose |
+|---|---|
+| `VelocitySource` | The record on a `Line` or `Grid`: how the velocity was made (`fit` or `weighted mean`), its member fits, the velocity and its standard error, and when it was applied. `from_fits` builds it, `summary` names it, `to_dict` and `from_dict` give the survey-JSON form. |
+| `SourceFit` | One member of a record: the line key, fit id and `fitted_at` that identify the fit, and a copy of its numbers (t0, velocity, standard error, zero) as used, so the record holds after the fit is deleted or its line changes. `of` copies a `StoredFit`. |
+| `weighted_mean` | Inverse-variance mean of velocity and standard-error pairs, with its standard error. Raises `ValueError` for no fits or a standard error that is zero, negative or not finite. |
+| `METHOD_FIT`, `METHOD_WEIGHTED_MEAN` | The two ways a record's velocity is made: one picked fit, or the weighted mean of several. |

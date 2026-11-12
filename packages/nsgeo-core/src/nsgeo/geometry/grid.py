@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_source import VelocitySource
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,7 @@ class Grid:
     crs: str
     default_spacing: float
     velocity: VelocityModel | None = None
+    velocity_source: VelocitySource | None = None
 
     def axes(self) -> tuple[np.ndarray, np.ndarray]:
         """Unit vectors of grid-local +X and +Y in world coordinates.
