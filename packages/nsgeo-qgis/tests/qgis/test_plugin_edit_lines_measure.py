@@ -53,7 +53,8 @@ def _shared_field_dzt(folder, name, backward, index, n_traces=LONG):
     """A line whose traces come from one field over the grid, so lines walked
     opposite ways see the same features at the same places, except that each
     is displaced `STAGGER_TRACES` along its own direction of travel: the
-    stagger the measurement should find."""
+    stagger the measurement should find. The destagger that cancels it is
+    about -0.15 (features sit ahead along travel, so the shift is negative)."""
     from tests.synthetic import write_dzt
 
     rng = np.random.default_rng(7)  # the same field for every line
@@ -330,7 +331,9 @@ def test_measuring_twice_reads_each_file_once_and_gives_the_same_values(make, mo
     first = [_shift(dialog, r) for r in range(6)]
     box = dialog.destagger_spin.value()
     assert all(v is not None for v in first), dialog.status.text()
-    assert abs(box) == pytest.approx(0.15, abs=0.04), dialog.status.text()
+    # -0.15 cancels the injected stagger; the 1/120 m placement offset makes it -0.142.
+    assert box == pytest.approx(-0.142, abs=0.02), dialog.status.text()
+    assert first == pytest.approx([box] * N_LINES, abs=0.02)
     dialog.measure()
     _finish(dialog)
     assert len(calls) == N_LINES
@@ -449,8 +452,8 @@ def test_progress_names_the_lines_read_and_then_the_comparison(make, monkeypatch
         dialog.measure()
         assert spin_until(lambda: dialog.status.text() == "Measuring… read 2 of 6 lines")
         read_gate.set()
+        assert spin_until(lambda: bool(canned.seen))  # progress is (6, 6) before this
         assert spin_until(lambda: dialog.status.text() == "Measuring… comparing lines")
-        assert canned.seen
     finally:
         read_gate.set()
 
@@ -468,6 +471,38 @@ def test_a_site_replaced_while_measuring_is_not_written_to(make, tmp_path):
     _finish(dialog)
     assert dialog.status.text() == MEASURE_SITE_CHANGED
     assert [_shift(dialog, r) for r in range(6)] == [None] * 6
+
+
+def test_the_same_site_reopened_while_measuring_is_still_a_new_site(make):
+    canned = Canned(gate=True)
+    session, dialog = make(canned)
+    session.save()
+    json_path = session.json_path
+    dialog.select_keys(dialog.keys())
+    dialog.measure()
+    assert spin_until(lambda: bool(canned.seen))
+    session.close_site()
+    session.open_site(json_path)
+    assert session.json_path == json_path  # a path check would pass this
+    canned.release()
+    _finish(dialog)
+    assert dialog.status.text() == MEASURE_SITE_CHANGED
+    assert [_shift(dialog, r) for r in range(6)] == [None] * 6
+
+
+def test_measure_with_every_selected_row_on_another_grid_starts_nothing(make):
+    canned = Canned()
+    session, dialog = make(canned)
+    dialog.select_keys(dialog.keys())
+    dialog.move_to("B")
+    dialog.select_keys(dialog.keys())
+    keys = dialog.keys()
+    before = [dialog.edit_for(k) for k in keys]
+    dialog.measure()
+    assert not dialog._measurer.busy
+    assert dialog.status.text() == MEASURE_NO_TARGETS
+    assert canned.seen == []
+    assert [dialog.edit_for(k) for k in keys] == before
 
 
 @pytest.mark.skipif(len(GPS_LINES) != 60, reason="needs Grid 1 in tests/data/local/with-dzg")

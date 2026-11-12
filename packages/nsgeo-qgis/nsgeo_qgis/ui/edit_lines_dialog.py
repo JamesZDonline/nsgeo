@@ -537,6 +537,9 @@ class EditLinesDialog(QDialog):
             self.status.setText(self._unavailable(exc))
             return
         targets = [k for k in targets if k in snapshot]  # P6: not rows sent to another grid
+        if not targets:  # every selected row now sits on another grid: nothing to fill
+            self.status.setText(MEASURE_NO_TARGETS)
+            return
         labels = {k: self._label_of(k) for k in self._order}
         job = MeasureJob(lines, self._bins)
         self._run = run = _MeasureRun(site, snapshot, targets, labels, job)
