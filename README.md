@@ -95,13 +95,10 @@ release's notes list everything in it.
 | M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
-| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]) | next release |
+| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
 
 ### In progress
 
-- **How a line is identified** ([#89]): a line is the object itself, so lines
-  can be cached and put in sets again, and M17's GPS fixes cannot break how
-  lines are compared. Built on `nsgeo-line-identity`, CI running.
 - **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
   the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
   typed min/max, a cumulative cut) as you move through the depths; M19's
