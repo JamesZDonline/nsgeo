@@ -124,6 +124,23 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
   traverses (rows 48–51, columns 220–232): runs of 4 and 8 pinned at +99.1–99.2, then 6 and 7
   at −100. The builder check found only about 5 genuine single-reading spikes in all six files.
 
+- **The six grids fit together** (inferred 2026-11-12 from where edges match, not confirmed).
+  Comparing the readings at each grid's traverse ends with another grid's traverse starts gives
+  r ≈ 0.92–0.93 for three joins, about what neighbouring columns inside one grid give. Last
+  traverses against first traverses give r = 0.86 for example3 → example6, and 0.57–0.61 for the
+  others. One layout is consistent with all of these joins, with traverses running left to right:
+
+  ```
+  ex4  ex1
+  ex5  ex2  ex3
+            ex6
+  ```
+
+  example3 being part-walked on its far side fits it being at the edge of the survey. With this
+  layout, an additive edge match after Zero the grid moves example3 by +2.3 nT and example6 by
+  +4.0 nT, against about −1.5 nT for the rest. Either part of the layout is wrong, or there is a
+  real gradient across the east of the survey.
+
 ## 4. Decisions
 
 ### Taken by the author
@@ -163,7 +180,19 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     the pinned readings are clipped anomaly peaks, §3.)
 12. **example1–3 are taken to be neighbours** for testing. *"I think you're right that 1,2,and 3
     are neighbors. I'd have to check to be sure and I can't access that for now. go with it."*
-    The author will bring data from a site with GPR over mag for the walkthroughs.
+    The author will bring data from a site with GPR over mag for the walkthroughs. The full
+    six-grid layout in §3 was inferred afterwards and is consistent with it.
+13. **The Mag panel, as mocked up** (`.lavish/m19-mag-panel.html`, local, reviewed 2026-11-12). It
+    is laid out like the Slices panel: **This grid / Whole site** buttons (chosen over a checklist
+    of grids), then Source (grid, file, **Change setup…**, how many readings are missing data),
+    Resolution, Interpolation (the Slices panel's own widgets), Across grids (Whole site only),
+    Display and **Export GeoTIFF…**.
+14. **Cleanup lives in the Processing panel, and destagger only in Edit lines.** Looking at the
+    mockup's cleanup box, the author asked: *"This box seems to be the processing steps
+    (equivalent to what lives in the processing panel for GPR) should we think about moving them
+    to the processing panel in some way?"*, and of the destagger box: *"similarly, should these
+    live in line edit? or here?"* Both were redrawn that way and the author chose them. The Mag
+    panel only makes the map, as the Slices panel does.
 
 ### Calls made by Claude (check these)
 
@@ -189,13 +218,16 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
    is a setting with 4 as its default.
 7. **Mag traverses are not drawn on the map as lines.** The mag grid's outline and the mag raster
    show the coverage. *(Assumed to avoid clutter; easy to add later.)*
-8. **A new Mag panel** in the Panels menu holds the mag source, the cleanup recipe, the finish
-   (cell, interpolation, max distance, smoothing, reusing the Slices panel's finish widgets),
-   normalisation and Export. The Slices panel stays GPR-only, with no depth controls hidden or
-   repurposed. Destagger stays in Edit lines, as for GPR. **Mock up the Mag panel with lavish
-   before M19a is planned.**
-9. **The cleanup recipe is saved and reusable,** like a GPR preset: one recipe per site by default,
-   with a per-grid override.
+8. **A new Mag panel** in the Panels menu (decision 13). The Slices panel stays GPR-only, with no
+   depth controls hidden or repurposed. The Mag panel has no cleanup and no destagger
+   (decision 14).
+9. **Each mag grid has its own steps, in the Processing panel** (decision 14). When a mag grid is
+   current, chosen in the Mag panel's This grid or selected in the Survey panel, the Processing
+   panel shows its steps the way it shows a GPR line's stack. **Add step** lists mag steps only.
+   **Presets** and **Apply to mag grids…** share steps between grids, as GPR lines share stacks.
+   The mag map uses each grid's own steps. That differs from GPR slices, which use one preset per
+   grid (#178). **Difference** shows before minus after on the mag preview, as it does on the
+   radargram for GPR.
 10. **Zero the grid is on by default.** It shifts the grid so its median is 0 nT. Grids sit at
     3.3–4.1 nT raw (§3), and a colour range centred on zero needs a zero background. It is the
     lightest possible step: one constant per grid.
@@ -209,7 +241,7 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
 12. **Despike, when the author turns it on** (decision 11), compares each reading with the median
     of a window along its traverse. A reading further than a threshold from that median, measured
     in median absolute deviations, is replaced by the median. The author sets the window and the
-    threshold, per site recipe or per grid (call 9). Pinned readings get no special rule: they are
+    threshold in the grid's Despike step (call 9). Pinned readings get no special rule: they are
     readings like any other. **The starting values** shown when it is first turned on remove
     single-reading glitches and leave the clipped anomaly peaks of §3 alone, so turning it on never
     notches an anomaly by surprise. Widening the window is how the author suppresses iron. The
@@ -232,7 +264,7 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     older build refuses it instead of dropping the mag on its next save. A site without mag saves
     as before.
 18. **Raw files are read where they are,** stored relative to the survey file like DZT paths. They
-    are never rewritten. The cleanup is a recipe, not an edited copy.
+    are never rewritten. The cleanup is a list of steps, not an edited copy.
 19. **One file per mag grid.** A Grad601 grid downloads as one file, and zero-the-grid, destripe
     groups and Measure all assume one sitting. "An existing mag grid" at import means one laid out
     in advance and still empty. Importing onto a grid that already has a file asks, then replaces
@@ -243,15 +275,14 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
     the traverse's own travel, so it keeps its meaning when the start corner changes). The survey
     file therefore stores each file's setup plus per-traverse corrections, not only finished
     placements.
-21. **Mag settings belong to the site, and the mag engine to the session.** The recipe, finish and
-    normalisation are saved in the survey file from M19a. The mag strip reads every mag grid with
+21. **Mag settings belong to the site, and the mag engine to the session.** Each grid's steps, the
+    finish and the normalisation are saved in the survey file from M19a. The mag strip reads every mag grid with
     its saved settings, whether or not the Mag panel is open and whichever grids the panel's
     preview shows.
 
 ## 5. Not decided (the author's)
 
 - Whether mag traverses should be drawn on the map after all (call 7).
-- The Mag panel's layout. A lavish mockup is reviewed before M19a is planned (call 8).
 
 ## 6. Behaviour
 
@@ -288,17 +319,19 @@ between traverses, 8 readings per metre, two sensors, walked zigzag.**
   spacing. The builder confirms them on the real files.
 - **Export** writes the mosaic as a one-band float32 GeoTIFF and adds it to the project.
 - Colours: the default is a symmetric grey ramp centred on zero. The author's own min/max and ramp
-  go through #180's mechanism.
+  go through #180's mechanism. Until Zero the grid exists (M19b), M19a's default range is centred
+  on the median of the readings shown, since raw grids sit at 3.3–4.1 nT. *(Claude's call.)*
 
 ### 6.3 Cleanup (M19b)
 
-The recipe runs in this order, on readings, before binning:
+A mag grid's steps, in the Processing panel (call 9), run in this order on readings, before
+binning:
 
 1. **Zero the grid** (on): grid median to 0 nT.
 2. **Destripe** (off): each sensor-and-direction group to median 0, or each traverse to median 0.
 3. **Despike** (off; the author turns it on and sets it, call 12).
 
-Destagger is not a recipe step. It is placement, in Edit lines (6.4). Resampling and smoothing are
+Destagger is not a step. It is placement, in Edit lines (6.4). Resampling and smoothing are
 the finish (6.2). Normalisation is a site choice (6.5). That matches the author's order (decision
 4).
 
@@ -336,7 +369,8 @@ As mocked up, and as chosen (decision 8):
   through both, and the readout adds the nT value at the cursor.
 - The strip's left axis is in nT (call 16), and its label names the mag grid or grids it reads.
 - Blank and hatched where no mag covers the line. A line with no mag at all shows no strip.
-- When the mag changes (a recipe or finish change in the Mag panel), the strip redraws.
+- When the mag changes (a step in the Processing panel, or the finish or normalisation in the Mag
+  panel), the strip redraws.
 - GPS-placed lines (M17) get the strip without extra work, since they carry map coordinates.
 
 ### 6.7 Integration, beyond the strip (placeholder)
@@ -352,7 +386,7 @@ one profile axis) that later integration can build on.
 |---|---|---|
 | (before) | **#180**, slice colours from QGIS's own symbology | S |
 | **M19a** | Grid instrument; import with remembered setup; mag files and traverses in the model and survey file; missing data; the Mag panel with finish; the mag mosaic layer and export; typed destagger and stretch in Edit lines | L (spec + 5–6 task plan) |
-| **M19b** | Cleanup recipe (zero, destripe, despike); Measure on mag; additive normalisation across grids | M |
+| **M19b** | Mag steps in the Processing panel (zero, destripe, despike), with presets and Apply to mag grids; Measure on mag; additive normalisation across grids | M |
 | **M19c** | The mag strip in the Profile panel | M |
 
 Each chunk gets its own plan, build, walkthrough and merge. M19a is planned after #180 merges,
@@ -409,10 +443,9 @@ data). The six `.dat` files, in the local real-data tests, skipped when absent:
   dipole unchanged; a wide window removes example5's dipole;
 - Measure on each grid finds a destagger near ±0.25 m, and after it is applied, neighbouring rows'
   best lag (§3's method) falls to about 0;
-- example1–3 placed as neighbours (decision 12): example1's last traverses beside example2's
-  first, and example2's traverse ends against example3's starts. The additive edge match closes
-  both seams. The layout is the builder check's inference, which the author has not yet
-  confirmed, so a test that fails only because of it is reported, not forced to pass.
+- the six grids placed as §3 infers (decision 12): the additive edge match closes the seams.
+  The layout is inferred, not confirmed, and §3's large offsets for example3 and example6 may
+  come from it, so a test that fails only because of the layout is reported, not forced to pass.
 
 The real files live only in the main checkout's `packages/nsgeo-core/tests/data/local/`, which a
 worktree does not have. The plan links them into the build worktree, and the real-data tests are
@@ -434,5 +467,5 @@ and will bring it in for the walkthrough (decision 12).
   required.
 - Default despike window and threshold, and default cell size, set and recorded from the real
   files.
-- The survey file's shape for mag files, setups and recipes, within call 17.
+- The survey file's shape for mag files, setups and each grid's steps, within call 17.
 - How the strip shares the profile view's horizontal transform.
