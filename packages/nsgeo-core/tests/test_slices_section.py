@@ -521,7 +521,7 @@ def test_a_cut_through_a_coverage_hole_agrees_with_the_slice(hole, path_name, sp
 def test_the_whole_frame_solve_can_be_stopped_and_shares_its_plan():
     cell = 0.2
     cube = _holed_cube(cell)
-    columns = section_columns(cube.frame, HOLE_PATHS["across the hole"])
+    columns = section_columns(cube.frame, HOLE_PATHS["across the hole, x=10.2"])
     settings = FinishSettings("min_curvature", 0.75, 0.75)
     plan = plan_fill(cube.coverage() > 0, cell, "min_curvature", 0.75, 0.75)
     with pytest.raises(SolveStopped):
