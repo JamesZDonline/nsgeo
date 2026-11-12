@@ -147,7 +147,9 @@ Grouped by area. The order within a group is not a priority.
   alone or the max distance is large ([#147]); lines processed differently in
   one cube, such as migration at each line's own velocity ([#178]); the scroll
   wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
-  ([#177]).
+  ([#177]); colour a slice with QGIS's own symbology: a colour ramp, a typed
+  min/max or a cumulative cut, which M19's magnetometer maps will reuse
+  ([#180]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -188,6 +190,7 @@ Grouped by area. The order within a group is not a priority.
 [#176]: https://github.com/JamesZDonline/nsgeo/issues/176
 [#177]: https://github.com/JamesZDonline/nsgeo/issues/177
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
+[#180]: https://github.com/JamesZDonline/nsgeo/issues/180
 
 ## Why
 
