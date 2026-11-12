@@ -110,8 +110,8 @@ a milestone merges or the plan changes.
   preview, streamed to disk in the background. Designed; the plan is next.
 - **Measure the destagger shift automatically** ([#159], from [#47]): a Measure
   button in Edit lines works out each grid's shift, and each line's own where it
-  is clearly off, from the lines as they are placed. Built; final review and
-  walkthrough next.
+  is clearly off, from the lines as they are placed. Built and reviewed; the
+  walkthrough is next.
 
 ### Next, in order
 
