@@ -97,6 +97,11 @@ def per_line_values(
     return _Solver(pairs, order, directions, neighbours, float(grid), max_lag, check).run()
 
 
+def _metres(curve: np.ndarray) -> float:
+    """A curve's peak lag in metres (parabola-refined)."""
+    return peak(curve)[0] * STEP_M
+
+
 class _Solver:
     def __init__(
         self,
@@ -181,11 +186,16 @@ class _Solver:
             )
         return out / len(self.nb[k])
 
+    def residual(self, k: int, own: np.ndarray, part: str = "full") -> float:
+        """How far k's features sit ahead of its corrected neighbours' (m, along its own
+        travel), read from `part`: the peak of `curve`. Its own value would correct this."""
+        return _metres(self.curve(k, part, own))
+
     def classify(self, k: int, own: np.ndarray) -> str:
         """'no_match', 'changes', 'candidate' or 'grid', read against corrected neighbours."""
         names = ("full", "shallow", "deep", "first", "second")
         curves = {name: self.curve(k, name, own) for name in names}
-        reading = {name: peak(c)[0] * STEP_M for name, c in curves.items()}
+        reading = {name: _metres(c) for name, c in curves.items()}
         if not is_clear(curves["full"]):
             return "no_match"
         decisive = {name: is_clear(curves[name], ratio=DECISIVE_RATIO) for name in names[1:]}
@@ -282,7 +292,7 @@ class _Solver:
         own = own.copy()
         for k in sorted(np.flatnonzero(own), key=lambda k: self.pos[int(k)]):
             self.check()
-            own[k] = -peak(self.curve(int(k), "full", own))[0] * STEP_M
+            own[k] = -self.residual(int(k), own)
         return own
 
     def _failing(self, own: np.ndarray, kinds: dict[int, str]) -> set[int]:

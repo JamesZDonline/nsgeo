@@ -298,6 +298,14 @@ varied alone; every real-data test still passes within the range given:
 - **The two large opposite moves (−0.50 beside +0.30)**, the prototype's weak case, are
   recovered either way round, as well as the single moves.
 
+**C14 outcome (author, 2026-11-11; the spec's "C14 outcome" paragraph).** The per-line values
+look better, the alternate-line blocks look right, and the `FILE__027` pin is dropped. The
+injected-error target is now (grid value) − (d + r0), where r0 is the line's own residual before
+the move (`FILE__031` +0.052, `FILE__032` +0.005). Against it the misses are:
+- +0.002 for the +0.30 move and −0.007 for the −0.50 move;
+- −0.015 (`FILE__031`) and +0.042 (`FILE__032`) for the adjacent pair;
+- for the two orderings of −0.50 beside +0.30 (not pinned), −0.023/+0.038 and −0.026/+0.037.
+
 **Skew** (0.02 m × line rank added to every start, Grid 1):
 - Unfitted: the grid value moves +0.0005. The same four lines keep own values, within 0.020
   of before. No own value is created or removed.

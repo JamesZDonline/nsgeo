@@ -5,12 +5,11 @@ its neighbours; a line that changes partway along, or matches nothing, is named
 and left at the grid value. Injected errors move real lines, so every case is
 real data (`moved` is 0-based: index 30 is FILE__031).
 
-Three spec tolerances cannot be met and are strict xfails with the measured
-numbers (ruling 2). FILE__031 already sits 0.05 m ahead of its neighbours
-before any move, below the own-value threshold, so its base value is the grid
-value; once moved it gets an own value that corrects that 0.05 m as well, and
-lands about 0.05 m from "base value - d". The move itself is recovered to
-within 0.01 m (`test_two_moves_of_one_line_differ_by_the_difference_of_the_moves`).
+A moved line's own value corrects everything that is off on it, not only the
+move: FILE__031 already sits 0.05 m ahead of its neighbours, below the own-value
+threshold, and is corrected by that too once moved. So the target for a line
+moved by d is (the grid value) - (d + r0), with r0 its own residual before the
+move, read by the solver itself (spec 10, decided by the author at C14).
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ import tracemalloc
 import numpy as np
 import pytest
 from nsgeo.destagger import LineStatus, measure_destagger, per_line
-from nsgeo.destagger.profiles import STEP_M, peak
 
 from tests.destagger_data import (
     GRID1_LENGTH,
@@ -33,8 +31,7 @@ from tests.real_data import GPS_LINES, GRID2_LINES
 
 #: Own values on Grid 2 are pinned to within this of the values measured when the
 #: per-line solve was built (2026-11-11); the prototype's agree to 0.03 m except
-#: FILE__051 fitted (+0.147 there). FILE__027, which gets none, is pinned at the
-#: prototype's +0.665 so its strict xfail fails loudly if it ever gets that value.
+#: FILE__051 fitted (+0.147 there).
 SIZE_TOL = 0.03
 
 NOT_OWN = (LineStatus.GRID, LineStatus.CHANGES, LineStatus.NO_MATCH)
@@ -53,9 +50,56 @@ def share_not_own(result):
     return sum(ln.status is not LineStatus.OWN for ln in result.lines.values()) / len(result.lines)
 
 
+def measure_with_solver(lines):
+    """`measure_destagger`, and the per-line solver it used, to read lines as it does."""
+    solvers = []
+    run = per_line._Solver.run
+
+    def spy(self):
+        solvers.append(self)
+        return run(self)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(per_line._Solver, "run", spy)
+        result = measure_destagger(lines)
+    (solver,) = solvers
+    return result, solver
+
+
+def own_corrections(result, solver):
+    """Each line's own correction (0 if none), in the solver's numbering. That numbering
+    is the result's order only while every line is measured: a line left out would shift
+    every index after it."""
+    assert len(result.lines) == solver.dirs.size
+    grid = grid_value(result)
+    return np.array(
+        [
+            ln.destagger - grid if ln.status is LineStatus.OWN else 0.0
+            for ln in result.lines.values()
+        ]
+    )
+
+
+def own_residual(result, solver, name):
+    """A line's own residual as the solver reads it, against its corrected neighbours."""
+    index = next(i for i, key in enumerate(result.lines) if key.endswith(f"/{name}.DZT"))
+    return solver.residual(index, own_corrections(result, solver))
+
+
 @pytest.fixture(scope="module")
-def grid1_unfitted():
-    return measure_destagger(lines_for(GPS_LINES, GRID1_LENGTH))
+def grid1_unfitted_solved():
+    return measure_with_solver(lines_for(GPS_LINES, GRID1_LENGTH))
+
+
+@pytest.fixture(scope="module")
+def grid1_unfitted(grid1_unfitted_solved):
+    return grid1_unfitted_solved[0]
+
+
+@pytest.fixture(scope="module")
+def unmoved_residual(grid1_unfitted_solved):
+    """r0: a line's own residual in the run before anything was moved."""
+    return lambda name: own_residual(*grid1_unfitted_solved, name)
 
 
 @pytest.fixture(scope="module")
@@ -97,31 +141,19 @@ def placements(grid1_unfitted, grid1_fitted):
 
 
 @needs_grid1
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FILE__031 gets -0.200 against the target base - 0.30 = -0.148 (off by 0.052): "
-    "its own +0.052 m residual, below the threshold before the move, is corrected too",
-)
-def test_a_line_moved_forward_is_recovered(grid1_unfitted, moved_forward):
-    base = line(grid1_unfitted, "FILE__031").destagger
+def test_a_line_moved_forward_is_recovered(unmoved_residual, moved_forward):
     moved = line(moved_forward, "FILE__031")
     assert moved.status is LineStatus.OWN
-    assert moved.destagger == pytest.approx(base - 0.30, abs=0.05)
+    target = grid_value(moved_forward) - (0.30 + unmoved_residual("FILE__031"))
+    assert moved.destagger == pytest.approx(target, abs=0.05)
 
 
 @needs_grid1
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="FILE__031 gets +0.596 against the target base + 0.50 = +0.652 (off by 0.056): "
-    "its own +0.052 m residual is corrected too, and the grid value moves by +0.003",
-)
-def test_a_line_moved_back_is_recovered(grid1_unfitted, moved_back):
-    base = line(grid1_unfitted, "FILE__031").destagger
+def test_a_line_moved_back_is_recovered(unmoved_residual, moved_back):
     moved = line(moved_back, "FILE__031")
     assert moved.status is LineStatus.OWN
-    assert moved.destagger == pytest.approx(base + 0.50, abs=0.05)
+    target = grid_value(moved_back) - (-0.50 + unmoved_residual("FILE__031"))
+    assert moved.destagger == pytest.approx(target, abs=0.05)
 
 
 @needs_grid1
@@ -144,26 +176,12 @@ def test_two_moves_of_one_line_differ_by_the_difference_of_the_moves(moved_forwa
 
 
 @needs_grid1
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            "FILE__031",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="FILE__031 gets -0.218 against base - 0.30 = -0.148 (off by 0.070): "
-                "its own +0.052 m residual again, plus 0.018 m of the shared pair",
-            ),
-        ),
-        "FILE__032",
-    ],
-)
-def test_two_adjacent_moved_lines_are_both_recovered(grid1_unfitted, moved_pair, name):
-    base = line(grid1_unfitted, name).destagger
+@pytest.mark.parametrize("name", ["FILE__031", "FILE__032"])
+def test_two_adjacent_moved_lines_are_both_recovered(unmoved_residual, moved_pair, name):
     moved = line(moved_pair, name)
     assert moved.status is LineStatus.OWN
-    assert moved.destagger == pytest.approx(base - 0.30, abs=0.05)
+    target = grid_value(moved_pair) - (0.30 + unmoved_residual(name))
+    assert moved.destagger == pytest.approx(target, abs=0.05)
 
 
 # --- skew and shares -------------------------------------------------------------------
@@ -212,20 +230,6 @@ def test_unfitted_file_011_gets_no_own_value(grid1_unfitted):
     [
         ("unfitted", "FILE__045", +0.25, 0.884),
         ("unfitted", "FILE__028", +0.25, 0.687),
-        pytest.param(
-            "unfitted",
-            "FILE__027",
-            +0.25,
-            0.665,
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="FILE__027 has no clear match once FILE__028 is corrected: the "
-                "027-028 pair reads -0.52 m (search to 2 m), so they are not both 0.5 m off, "
-                "and the strong reflector at 8.8 m lines up on 027-030 with 028 alone moved "
-                "(+0.525); the prototype's 027 +0.50 moves that reflector 0.35 m out of line",
-            ),
-        ),
         ("fitted", "FILE__051", +0.10, 0.173),
         ("fitted", "FILE__059", -0.10, -0.288),
     ],
@@ -293,26 +297,10 @@ def test_a_solve_that_does_not_settle_keeps_only_own_values_that_still_hold(monk
     """Grid 2 unfitted needs a second pass: FILE__027 and FILE__041 fail their first
     check. Stopped after one pass, each own value left must still qualify against the
     others, and sit at its own peak rather than where it was solved beside a dropped line."""
-    solvers = []
-    run = per_line._Solver.run
-
-    def spy(self):
-        solvers.append(self)
-        return run(self)
-
-    monkeypatch.setattr(per_line._Solver, "run", spy)
     monkeypatch.setattr(per_line, "MAX_PASSES", 1)
-    result = measure_destagger(lines_for(GRID2_LINES, GRID2_LENGTH))
-    (solver,) = solvers
-    grid = grid_value(result)
-    own = np.array(
-        [
-            ln.destagger - grid if ln.status is LineStatus.OWN else 0.0
-            for ln in result.lines.values()
-        ]
-    )
+    result, solver = measure_with_solver(lines_for(GRID2_LINES, GRID2_LENGTH))
+    own = own_corrections(result, solver)
     assert np.count_nonzero(own) >= 5
     for k in np.flatnonzero(own):
         assert solver.classify(int(k), own) == "candidate"
-        refit = -peak(solver.curve(int(k), "full", own))[0] * STEP_M
-        assert refit == pytest.approx(own[k], abs=0.005)
+        assert -solver.residual(int(k), own) == pytest.approx(own[k], abs=0.005)
