@@ -40,7 +40,7 @@ def test_weighted_mean_matches_hand_values():
 
 
 def test_weighted_mean_of_one_fit_is_that_fit():
-    assert weighted_mean([(0.09, 0.003)]) == pytest.approx((0.09, 0.003), rel=1e-12)
+    assert weighted_mean([(0.0921, 0.0041)]) == (0.0921, 0.0041)
 
 
 def test_weighted_mean_refuses_a_zero_sigma_and_names_it():
@@ -52,6 +52,19 @@ def test_weighted_mean_refuses_a_zero_sigma_and_names_it():
 def test_weighted_mean_refuses_a_bad_sigma(sigma):
     with pytest.raises(ValueError, match="fit 1 has σ .*cannot be weighted"):
         weighted_mean([(0.09, sigma)])
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [(0.09, 1e-170)],
+        [(0.09, 1e200)],
+        [(0.09, 1e-155), (0.08, 0.003)],
+    ],
+)
+def test_weighted_mean_refuses_a_sigma_whose_weight_is_not_usable(values):
+    with pytest.raises(ValueError, match="cannot be weighted"):
+        weighted_mean(values)
 
 
 def test_weighted_mean_of_nothing_is_refused():

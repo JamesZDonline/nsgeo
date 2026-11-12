@@ -125,6 +125,12 @@ def _merge_resolution(
     return None if new == old else new
 
 
+def _fit_number(fit_id: str) -> int:
+    """N of an id of the form `fit-N`; any other id counts as 0."""
+    match = re.fullmatch(r"fit-(\d+)", fit_id)
+    return int(match.group(1)) if match else 0
+
+
 class SiteSession(QObject):
     site_opened = pyqtSignal()
     site_closed = pyqtSignal()
@@ -630,7 +636,19 @@ class SiteSession(QObject):
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         # The report is empty: a velocity change moves no line.
-        self.replace_grid(dataclasses.replace(self.grid(grid_id), velocity=model))
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        self.replace_grid(
+            dataclasses.replace(self.grid(grid_id), velocity=model, velocity_source=None)
+        )
+
+    def apply_grid_velocity(
+        self, grid_id: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a grid's velocity and the record of where it came from, in one
+        `grids_changed`."""
+        self.replace_grid(
+            dataclasses.replace(self.grid(grid_id), velocity=model, velocity_source=source)
+        )
 
     # ---- lines ------------------------------------------------------------
     def add_lines(self, lines: list[Line]) -> None:
@@ -849,9 +867,23 @@ class SiteSession(QObject):
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
         site = self._require_site()
         line = self.line_for_key(key)
-        new_line = dataclasses.replace(line, velocity=model)
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=None)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line  # same key: only the object changed
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
+    def apply_line_velocity(
+        self, key: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a line's velocity and the record of where it came from, in one
+        `lines_changed`."""
+        site = self._require_site()
+        line = self.line_for_key(key)
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=source)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 
@@ -860,11 +892,12 @@ class SiteSession(QObject):
         Stores only: no velocity changes (`set_line_velocity` does that)."""
         site = self._require_site()
         line = self.line_for_key(key)
-        n = len(line.velocity_fits) + 1
-        while f"fit-{n}" in line.velocity_fits:
-            n += 1
+        highest = max((_fit_number(i) for i in line.velocity_fits), default=0)
+        n = max(line.fit_serial, highest) + 1
         fit_id = f"fit-{n}"
-        new_line = dataclasses.replace(line, velocity_fits={**line.velocity_fits, fit_id: fit})
+        new_line = dataclasses.replace(
+            line, velocity_fits={**line.velocity_fits, fit_id: fit}, fit_serial=n
+        )
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
@@ -889,8 +922,9 @@ class SiteSession(QObject):
         self.lines_changed.emit()
 
     def remove_velocity_fit(self, key: str, fit_id: str) -> None:
-        """Delete a stored fit. A velocity it set stays: it was applied
-        deliberately, and only the claim that this fit produced it goes."""
+        """Delete a stored fit. A velocity it set stays, and so does the record
+        of it: the record copies the fit's numbers, so it stays reproducible
+        and shows the member as deleted (grid velocity spec §7.3)."""
         site = self._require_site()
         line = self.line_for_key(key)
         if fit_id not in line.velocity_fits:
@@ -901,6 +935,34 @@ class SiteSession(QObject):
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
+
+    def member_state(self, member: SourceFit, grid_id: str | None = None) -> str:
+        """Where a record's member stands now: `"present"`, `"deleted"`,
+        `"line removed"`, `f"line moved to grid {gid}"` (only when `grid_id` is
+        given and the line is on another grid) or `"line moved off this grid"`
+        (the line is no longer on any grid)."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return "line removed"
+        if not any(member.names(i, f) for i, f in line.velocity_fits.items()):
+            return "deleted"
+        if grid_id is not None:
+            now = getattr(line.placement, "grid_id", None)
+            if now is None:
+                return "line moved off this grid"
+            if now != grid_id:
+                return f"line moved to grid {now}"
+        return "present"
+
+    def member_fit(self, member: SourceFit) -> StoredFit | None:
+        """The stored fit `member` copied, or None unless it is still `"present"`."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return None
+        fit = line.velocity_fits.get(member.fit_id)
+        return fit if fit is not None and member.names(member.fit_id, fit) else None
 
     def resolved_velocity(self, key: str) -> VelocityModel:
         if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)

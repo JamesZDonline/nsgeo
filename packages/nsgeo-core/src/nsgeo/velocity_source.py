@@ -32,13 +32,30 @@ def weighted_mean(values: Sequence[tuple[float, float]]) -> tuple[float, float]:
     """Inverse-variance mean of `(v, sigma)` pairs and its standard error."""
     if not values:
         raise ValueError("no fits")
+    weights: list[float] = []
     for i, (_, sigma) in enumerate(values, start=1):
-        if not math.isfinite(sigma) or sigma <= 0:
+        weight = _weight(sigma)
+        if weight is None:
             raise ValueError(f"fit {i} has σ {sigma}; it cannot be weighted")
-    weights = [1.0 / (s * s) for _, s in values]
+        weights.append(weight)
+    if len(values) == 1:
+        return values[0]  # one fit averages exactly to itself, with no rounding
     total = sum(weights)
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("these fits' σ cannot be weighted together")
     mean = sum(v * w for (v, _), w in zip(values, weights)) / total
     return mean, 1.0 / math.sqrt(total)
+
+
+def _weight(sigma: float) -> float | None:
+    """`1/σ²`, or None when σ is not finite and positive or the weight is not."""
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None
+    try:
+        weight = 1.0 / (sigma * sigma)
+    except ZeroDivisionError:
+        return None
+    return weight if math.isfinite(weight) and weight > 0 else None
 
 
 @dataclass(frozen=True)

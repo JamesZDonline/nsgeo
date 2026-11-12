@@ -12,6 +12,7 @@ from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis import session as session_module
 from nsgeo_qgis.line_edit import CHANGED_ELSEWHERE, REMOVED, LineEdit
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
@@ -1873,3 +1874,140 @@ def test_a_pick_on_a_line_whose_zero_is_unknown_is_stored_on_the_radar_clock(pic
     pick = session.add_pick(key, 30, 5.0, zero_ns=-0.04)
     assert pick.zero_ns is None
     assert pick.time_ns == pytest.approx(5.0 - 0.04)
+
+
+# ---- velocity records (grid velocity from fits, Task 2) ---------------------
+def _fit(stamp="t", v=0.09):
+    return StoredFit(20.0, v, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), stamp)
+
+
+def _member(session, key, fit_id):
+    line = session.line_for_key(key)
+    return SourceFit.of(
+        key, fit_id, line.placement.label or line.path.stem, line.velocity_fits[fit_id]
+    )
+
+
+def test_fit_ids_are_never_reused_after_a_delete(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    assert session.add_velocity_fit(key, _fit()) == "fit-1"
+    assert session.add_velocity_fit(key, _fit()) == "fit-2"
+    session.remove_velocity_fit(key, "fit-2")
+    assert session.add_velocity_fit(key, _fit()) == "fit-3"
+    for i in ("fit-1", "fit-3"):
+        session.remove_velocity_fit(key, i)
+    assert session.add_velocity_fit(key, _fit()) == "fit-4"
+    assert session.line_for_key(key).fit_serial == 4
+
+
+def test_fit_ids_survive_save_and_load(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.add_velocity_fit(key, _fit())
+    session.add_velocity_fit(key, _fit())
+    session.remove_velocity_fit(key, "fit-2")
+    session.save()
+    back = SiteSession()
+    back.open_site(tmp_path / SURVEY_FILE)
+    assert back.add_velocity_fit(key, _fit()) == "fit-3"
+
+
+def test_deleting_a_member_keeps_the_record_and_the_velocity(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    m = _member(session, key, fit_id)
+    source = VelocitySource.from_fits([m], "2026-11-12T00:00:00Z")
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    assert session.member_state(m) == "present"
+    session.remove_velocity_fit(key, fit_id)
+    line = session.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09)
+    assert line.velocity_source == source
+    assert session.member_state(m) == "deleted"
+    assert session.member_fit(m) is None
+
+
+def test_a_bare_velocity_drops_the_record(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    source = VelocitySource.from_fits([_member(session, key, fit_id)], None)
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), source)
+    assert session.grid("A").velocity_source == source
+    session.set_line_velocity(key, VelocityModel.constant(0.1))
+    session.set_grid_velocity("A", VelocityModel.constant(0.1))
+    assert session.line_for_key(key).velocity_source is None
+    assert session.grid("A").velocity_source is None
+    assert session.line_for_key(key).velocity == VelocityModel.constant(0.1)
+
+
+def test_apply_sets_velocity_and_record_with_one_signal(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    source = VelocitySource.from_fits([_member(session, key, fit_id)], None)
+    lines, grids = Spy(session.lines_changed), Spy(session.grids_changed)
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    assert len(lines.calls) == 1 and grids.calls == []
+    assert session.line_for_key(key).velocity_source == source
+    lines.calls.clear()
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), source)
+    assert len(grids.calls) == 1  # replace_grid also announces lines, as set_grid_velocity does
+    assert session.grid("A").velocity == VelocityModel.constant(0.09)
+    assert session.grid("A").velocity_source == source
+    session.apply_line_velocity(key, None, None)
+    assert session.line_for_key(key).velocity is None
+    assert session.line_for_key(key).velocity_source is None
+
+
+def test_member_state_names_each_way_a_member_goes(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    key = a[0]
+    fit_id = session.add_velocity_fit(key, _fit("t1"))
+    m = _member(session, key, fit_id)
+    assert session.member_state(m) == "present"
+    assert session.member_fit(m) == _fit("t1")
+    assert session.member_state(m, "A") == "present"
+    session.remove_velocity_fit(key, fit_id)
+    assert session.member_state(m) == "deleted"
+    fit_id = session.add_velocity_fit(key, _fit("t1"))
+    assert fit_id == "fit-2"  # a new id: the old member stays deleted
+    session.move_lines([key], "B")
+    assert session.member_state(m, "A") == "deleted"
+    m2 = _member(session, key, fit_id)
+    assert session.member_state(m2) == "present"
+    assert session.member_state(m2, "A") == "line moved to grid B"
+    assert session.member_state(m2, "B") == "present"
+    session.remove_line(key)
+    assert session.member_state(m2) == "line removed"
+    assert session.member_fit(m2) is None
+    # imported again, with a new fit-1 stamped differently
+    p = tmp_path / "raw" / "FILE__001.DZT"
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    again = session.add_velocity_fit(key, _fit("t9"))
+    assert again == "fit-1"
+    m1 = SourceFit(key, "fit-1", "t1", "FILE__001", 20.0, 0.09, 0.004, 0.0)
+    assert session.member_state(m1) == "deleted"
+
+
+def test_member_state_of_a_loose_line_asked_about_a_grid(session, tmp_path):
+    from types import SimpleNamespace
+
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    m = _member(session, key, fit_id)
+    line = session.line_for_key(key)
+    # No loose placement type exists yet; a stand-in without a grid id is the case.
+    session._lines_by_key[key] = dataclasses.replace(line, placement=SimpleNamespace(label=None))
+    assert session.member_state(m, "A") == "line moved off this grid"
+    assert session.member_state(m) == "present"
