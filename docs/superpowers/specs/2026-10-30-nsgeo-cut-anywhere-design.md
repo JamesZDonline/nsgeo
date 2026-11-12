@@ -268,6 +268,12 @@ On real single levels, kriging is not a close stand-in. In the gaps between line
   - **Built with a wider reach (2026-11-11).** On the ten real lines, cuts along the lines missed 0.1% by up to 3% with a 1 m reach. Minimum curvature through lines one cell wide couples across the lines the way a spline couples across its knots.
   - **So the reach is counted in line spacings:** six (3 m at 0.5 m). That gives a worst error of 2.2e-5 of the range, at about 0.2 s a level for a 12 m cut at 0.05 m, so about 40 s for Grid 1.
   - **The requirement stands:** agreement within 0.1% of the level's range. Crop sizes are the builder's call.
+  - **Crops only at a short max distance (2026-11-11, M15 final review).** The six-spacing reach rests on coupling that falls by a fixed factor per line crossed. A coverage hole has no lines to cross, so there the coupling reaches much further.
+    - Measured on the ten real lines with 1, 2 and 3 m holes, cuts across the hole at nine levels:
+      - at 0.75 spacings, crops missed 0.1% in 6 of 9 cases (1.1e-3 to 2.75e-3);
+      - at 0.5 spacings, every case passed (worst 6.6e-4).
+    - So crops are used only up to a max distance of 0.5 line spacings. Above it, including the default 0.75, each level solves the whole frame with the engine's own plan, then smooths and samples. That agrees with the slice by construction.
+    - Cost: about 0.30 s a level on Grid 1 against 0.215 s on crops, so about 140 s for its 463 levels.
 - **Only the working cut.** Hover previews show kriging and start no solve.
 - **Kept, and discarded.** A solved section is kept while the source and settings hold. Any change in 4.4's list discards it.
 - **Fair to the slices.** A cut's solve must not hold the slice's own refinement back by more than one level's solve. Whether the two share `refine.py`'s thread is the builder's call.
