@@ -508,11 +508,13 @@ def test_a_window_change_that_keeps_the_centre_does_not_restart_the_solve(workin
 
     sections._refiner.start = counting
     band = sections._band
+    announced = []
+    dock.window_changed.connect(lambda lo, hi: announced.append((lo, hi)))
     names = [dock.palette_combo.itemText(i) for i in range(dock.palette_combo.count())]
     dock.palette_combo.setCurrentText(
         next(n for n in names if n != dock.palette_combo.currentText())
     )
-    assert sections._band == band  # the palette change announced the very same band
+    assert announced and set(announced) == {band}  # it announced the very same band
     # The same band again, from a redraw and from a re-announce.
     dock.window_changed.emit(*band)
     dock.reannounce_window()

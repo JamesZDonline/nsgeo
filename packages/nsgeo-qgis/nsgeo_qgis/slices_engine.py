@@ -518,10 +518,10 @@ class SliceEngine(QObject):
 
     @property
     def preparation_generation(self) -> int:
-        """Counts every time this engine is pointed at a source again (a
-        preparation dispatched, `clear`, a cancel). A cut remembers a failed
-        cube build against it, so the build is tried again only once the
-        engine has been prepared again."""
+        """Counts every `set_source` that dispatches a preparation, and every
+        `clear`. A resolution change does not move it (see `cube_generation`
+        and `frame`/`z` for that). A cut remembers a failed cube build against
+        it, so the build is tried again once the engine is prepared again."""
         return self._generation
 
     @property

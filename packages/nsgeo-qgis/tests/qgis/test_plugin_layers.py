@@ -3082,6 +3082,8 @@ def test_opening_a_cut_runs_no_time_zero_follow(populated, monkeypatch, message_
     session.add_cut_pick(key, 3, 2.0, 12.0, '{"kind": "cut"}')
     assert layers.feature_count("picks") == 1
     followed = []
+    # Whatever the session says a cut's zero is, only the guard keeps `follow_zero` away.
+    monkeypatch.setattr(session, "line_zero", lambda k, *, load=False: 5.0)
     monkeypatch.setattr(layers, "follow_zero", lambda k, z: followed.append((k, z)) or 0)
     session.open_line(session.keys()[0])
     session.open_line(key)  # the cut is the working item, with a pick row on it

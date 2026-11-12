@@ -458,9 +458,10 @@ _HOLED: dict = {}
 
 def _hole_cases():
     """(hole, path, spacings). The set takes about a minute on one thread, so the
-    1 m and 3 m holes drop the 1.5 case and the "beside" path: that path lies in
-    the middle of the 3 m hole (nothing in reach) and is only 0.2 m from a line
-    of the 2 m hole."""
+    1 m and 3 m holes drop the 1.5 case and the "beside" path. That path is 0.2 m
+    inside the 2 m hole's edge; on the 3 m hole it lies in the middle of the hole
+    (nothing in reach, so every column is blank); on the 1 m hole it is 0.8 m
+    from the hole, so it would not test it."""
     cases = []
     for hole in sorted(HOLES):
         for path_name in sorted(HOLE_PATHS):

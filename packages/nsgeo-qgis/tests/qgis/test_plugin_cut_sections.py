@@ -642,3 +642,112 @@ def test_opening_the_cut_again_retries_a_failed_build(shown, monkeypatch):
     assert changed.calls == [(key,)]
     assert isinstance(sections.section(key, build_cube=True), CutSection)
     assert len(calls) >= 2  # the build was tried again, and held
+
+
+def test_the_first_open_of_a_failing_cut_builds_once_with_the_profile_attached(
+    site,  # noqa: F811
+    message_log,
+    monkeypatch,
+):
+    """The profile connects to `line_opened` before CutSections, so it asks first and the
+    build fails; the open's own slot must not count that fresh failure as an old one and
+    ask again (M15 5b review I1). Reopening after a line visit retries exactly once."""
+    dock = site.slices_dock
+    session = site.session
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    calls = []
+
+    def refuse():
+        calls.append(1)
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(engine, "cube", refuse)
+
+    def warnings():
+        return len([m for m in message_log if "could not build" in m])
+
+    session.open_line(key)
+    assert (len(calls), warnings()) == (1, 1)
+    session.open_line(session.keys()[0])
+    assert len(calls) == 1
+    session.open_line(key)
+    assert (len(calls), warnings()) == (2, 2)
+    dock.refresh_slice()
+    assert len(calls) == 2
+
+
+def test_a_failed_build_is_retried_after_a_resolution_change(shown, monkeypatch):
+    """`set_resolution` does not move `preparation_generation`, and "use a coarser cell"
+    is the remedy the guide gives (M15 5b review I2)."""
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    calls = []
+
+    def refuse():
+        calls.append(1)
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(engine, "cube", refuse)
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 1
+    changed = Spy(sections.section_changed)
+    generation = engine.preparation_generation
+    dock.cell_spin.setValue(dock.cell_spin.value() * 2)
+    dock.flush_debounce()
+    assert engine.preparation_generation == generation  # the memo cannot rely on it
+    assert (key,) in changed.calls  # announced, so the profile asks again
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    assert len(calls) == 2  # and the build was tried once more, not on every tick
+    for _ in range(3):
+        dock.refresh_slice()
+    assert len(calls) == 2
+
+
+def test_a_cube_the_engine_builds_itself_after_a_failure_reannounces_the_cut(shown, monkeypatch):
+    dock, session, sections = shown
+    key = session.add_cut("A", H)
+    engine = dock.engine
+    engine.drop_cube()
+    real = engine.cube
+
+    def refuse():
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(engine, "cube", refuse)
+    assert sections.section(key, build_cube=True).startswith("A's cube could not be built")
+    monkeypatch.undo()
+    changed = Spy(sections.section_changed)
+    real()  # the engine builds it for itself (a slice refresh, say)
+    assert engine.has_cube
+    dock.refresh_slice()
+    assert (key,) in changed.calls
+    assert isinstance(sections.section(key, build_cube=True), CutSection)
+
+
+def test_opening_a_sourceless_cut_keeps_the_working_cuts_cube_and_solve(shown):
+    dock, session, sections = shown
+    mc = dataclasses.replace(dock.grid_finish.value(), method="min_curvature")
+    dock.grid_finish.set_value(mc)
+    dock.refresh_slice()
+    key = session.add_cut("A", H)
+    other = session.add_cut("B", H)  # grid B is not the one This grid shows: no source
+    engine = dock.engine
+    engine.drop_cube()
+    session.open_line(key)
+    first = sections.section(key, build_cube=True)
+    assert isinstance(first, CutSection) and engine.has_cube
+    entry = sections._cache[key]
+    entry.section.values[3] = 7.0
+    entry.levels.add(3)
+    generation = engine.cube_generation
+    session.open_line(other)
+    assert isinstance(sections.section(other, build_cube=True), str)
+    assert engine.has_cube and engine.cube_generation == generation
+    session.open_line(key)
+    again = sections.section(key, build_cube=True)
+    assert sections._cache[key] is entry and entry.levels == {3}
+    assert again.values[3][np.isfinite(again.values[3])].max() == 7.0

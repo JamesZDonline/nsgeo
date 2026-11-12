@@ -160,6 +160,7 @@ class SiteSession(QObject):
         self._selection: tuple[int, int] = (-1, -1)
         self._preview_key: str | None = None
         self._preview_trace = -1
+        self._open_serial = 0
         # Set by SiteLayers' own constructor (see set_pick_store). None
         # until then, which is the normal state of a session built by a
         # test that has no layers at all.
@@ -1306,7 +1307,15 @@ class SiteSession(QObject):
         # drives that render, and ProfileDock clears its own preview on it.
         self._preview_key = None
         self._preview_trace = -1
+        self._open_serial += 1  # before the emit, so every slot of this open reads the same value
         self.line_opened.emit(key)
+
+    @property
+    def open_serial(self) -> int:
+        """Counts the items opened as the working item (`open_line` moving it).
+        Moved before `line_opened` is emitted, so a listener can tell what it did
+        during this open from what it did earlier, whatever order the slots run in."""
+        return self._open_serial
 
     def profiles_for(self, key: str) -> list[Profile] | None:
         return self._profiles.get(key)

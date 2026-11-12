@@ -169,6 +169,18 @@ class _Entry:
     levels: set[int]
 
 
+@dataclass(frozen=True)
+class _Failure:
+    """A cube build that failed, and what it was tried against."""
+
+    engine: SliceEngine
+    preparation: int
+    frame: Any
+    z: Any
+    opens: int  # the session's `open_serial` when it was written
+    reason: str
+
+
 class _SolveInputs:
     """What every depth of one solve shares: the cube, and the crops and their plans.
 
@@ -263,15 +275,19 @@ class CutSections(QObject):
         self.slices_dock = slices_dock
         self._cache: dict[str, _Entry] = {}
         #: Cuts last answered with a message, and what they wait for: "source"
-        #: (no engine shows their grid) or "cube" (a preview with none built).
+        #: (no engine shows their grid), "cube" (a preview with none built) or
+        #: "failed" (a build that failed, waiting for its inputs to change).
         #: A cut with nothing cached would never be announced otherwise.
         self._waiting: dict[str, str] = {}
         #: Cuts opened on a streaming engine, and the engine whose cube each one built (or
         #: found): the cube is dropped once none of them reads it (M15 final review, I2).
         self._streamed: dict[str, SliceEngine] = {}
-        #: Cuts whose cube build failed, as (engine, its `preparation_generation`, reason): the
-        #: build is not tried again while both still hold, however often a slider ticks.
-        self._failed: dict[str, tuple[SliceEngine, int, str]] = {}
+        #: Cuts whose cube build failed, as a `_Failure`: the build is not tried again while
+        #: the engine, its preparation and its frame and z still hold, however often a slider
+        #: ticks. A failure is stamped with the session's `open_serial`, which moves before
+        #: `line_opened` is emitted, so one written during an open is told apart from an older
+        #: one whichever of the open's slots (the profile's or this one) runs first.
+        self._failed: dict[str, _Failure] = {}
         #: The working cut's minimum curvature (cut spec §4.7). `_working` is
         #: the key waiting out its rest or being solved, `_stamp` the cached
         #: section's values stamp it was armed for.
@@ -375,13 +391,23 @@ class CutSections(QObject):
                 self._drop(key)
                 self._waiting[key] = "failed"
                 return BUILD_FAILED_TEXT.format(name=cut.name, grid=cut.grid_id, reason=failed)
+            # The cube this cut built on its old engine goes before the new one is built, so
+            # a source switch never holds two.
+            self._unhold_other(key, engine)
             QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 engine.cube()
             except Exception as exc:  # noqa: BLE001 -- no lines, a vanished source
                 reason = str(exc) or type(exc).__name__  # a MemoryError() says nothing itself
                 _log(f"could not build {cut.grid_id}'s cube: {reason}", Qgis.MessageLevel.Warning)
-                self._failed[key] = (engine, engine.preparation_generation, reason)
+                self._failed[key] = _Failure(
+                    engine,
+                    engine.preparation_generation,
+                    engine.frame,
+                    engine.z,
+                    self.session.open_serial,
+                    reason,
+                )
                 self._drop(key)
                 self._waiting[key] = "failed"
                 return BUILD_FAILED_TEXT.format(name=cut.name, grid=cut.grid_id, reason=reason)
@@ -408,15 +434,29 @@ class CutSections(QObject):
 
     def _failure_for(self, key: str, engine: SliceEngine) -> str | None:
         """The reason a build failed for this cut on this engine, while neither the
-        engine nor its preparation has changed since; None when it may be tried."""
+        engine, its preparation, frame or z have changed since; None when it may be tried."""
         failed = self._failed.get(key)
         if failed is None:
             return None
-        held, generation, reason = failed
-        if held is engine and generation == engine.preparation_generation:
-            return reason
+        if (
+            failed.engine is engine
+            and failed.preparation == engine.preparation_generation
+            and failed.frame == engine.frame
+            and failed.z == engine.z
+        ):
+            return failed.reason
         del self._failed[key]
         return None
+
+    def _unhold_other(self, key: str, engine: SliceEngine) -> None:
+        """Let go of the engine recorded for `key` when it is not `engine`, unless
+        another cut still reads it."""
+        old = self._streamed.get(key)
+        if old is None or old is engine:
+            return
+        del self._streamed[key]
+        if not any(old is other for other in self._streamed.values()):
+            self._drop_cube_of(old)
 
     def _preparing(self, grid_id: str) -> bool:
         """Whether the grid's engine is being prepared, or waits its turn, in either scope.
@@ -599,11 +639,17 @@ class CutSections(QObject):
             if self._working is not None and key != self._working:
                 self._cancel()
             if is_cut_key(key):
-                had_failed = self._failed.pop(key, None) is not None
-                self._release_cubes(only=key)
-                if had_failed:
-                    # Opened again: the failed build is tried once more. The profile has
-                    # already asked and been told it failed, so it is asked again.
+                cut = self._cut(key)
+                # A cut with no source (its grid is not shown) reads no cube: opening it
+                # leaves the working cut's cube and solve for the way back.
+                if cut is not None and self.source_for(cut.grid_id) is not None:
+                    self._release_cubes(only=key)
+                failed = self._failed.get(key)
+                if failed is not None and failed.opens < self.session.open_serial:
+                    # Opened again after an earlier failure: tried once more. A failure
+                    # written during this very open (the profile's slot may run first) is
+                    # left alone, so an open builds once whatever the slot order.
+                    del self._failed[key]
                     self._waiting.pop(key, None)
                     self.section_changed.emit(key)
         except Exception as exc:  # noqa: BLE001 -- a slot on a pyqtSignal
@@ -848,6 +894,7 @@ class CutSections(QObject):
                 cut = self._cut(key)
                 if cut is None:
                     del self._waiting[key]
+                    self._failed.pop(key, None)
                     continue
                 source = self.source_for(cut.grid_id)
                 ready = source is not None and (reason == "source" or source.engine.has_cube)
@@ -855,7 +902,11 @@ class CutSections(QObject):
                     ready = True  # the message changes to "show the grid"
                 if reason == "failed":
                     # A failed build is announced again only when it may be tried again.
-                    ready = source is None or self._failure_for(key, source.engine) is None
+                    ready = (
+                        source is None
+                        or source.engine.has_cube  # built by the engine itself
+                        or self._failure_for(key, source.engine) is None
+                    )
                 if ready:
                     del self._waiting[key]
                     self.section_changed.emit(key)

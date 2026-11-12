@@ -17,8 +17,13 @@ from nsgeo.velocity import VelocityModel
 from nsgeo_qgis.cut_sections import CutSection
 from nsgeo_qgis.map_link import CUT_GONE_TEXT
 from nsgeo_qgis.session import Pick
-from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsPointXY, QgsProject
-from qgis.PyQt.QtCore import QVariant
+from qgis.core import (
+    NULL,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+)
 from qgis.PyQt.QtWidgets import QMessageBox
 from test_plugin_cut_sections import H, site  # noqa: F401 -- fixtures
 
@@ -73,7 +78,7 @@ def test_a_pick_on_a_cut_lands_on_the_cut_and_records_its_provenance(opened):
     assert doc["time_base"] == time_base_of(section.source.engine.provenance().steps)
     assert doc["time_base"] == "time_zero"  # site3's preset "p" sets time zero
     assert row["time_ns"] == T
-    assert row["zero_ns"] is None or isinstance(row["zero_ns"], QVariant)  # NULL, not 0.0
+    assert row["zero_ns"] == NULL  # NULL, not 0.0
     assert [p.zero_ns for p in session.picks_for(key)] == [None]
     velocity = session.cut_velocity("A")
     assert row["depth_m"] == pytest.approx(float(velocity.depth_at([T])[0]))
