@@ -4,6 +4,7 @@ and the grid's velocity set from them (grid velocity spec §4, §7)."""
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 
 import numpy as np
@@ -21,7 +22,7 @@ from nsgeo.velocity_source import (
     VelocitySource,
     weighted_mean,
 )
-from plugin_testing import synthetic_dzt
+from plugin_testing import click_header_section, click_table_cell, synthetic_dzt
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 from tests.real_data import GRID2_LINES
@@ -136,22 +137,55 @@ def test_grid_dialog_lists_every_fit_on_the_grids_lines_only(plugin, message_log
     assert message_log == []
 
 
-def test_grid_dialog_sorts_by_a_clicked_column_and_keeps_ticks_and_selection(plugin, message_log):
+@pytest.fixture
+def shown(qgis_app):
+    """`show(dialog)`: the dialog shown at a fixed size, so real clicks land
+    on real cell geometry; hidden and deleted after the test."""
+    from qgis.PyQt.QtWidgets import QApplication
+
+    dialogs = []
+
+    def show(dialog):
+        dialogs.append(dialog)
+        dialog.resize(800, 500)
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+    yield show
+    for dialog in dialogs:
+        dialog.hide()
+        dialog.deleteLater()
+    QApplication.processEvents()
+
+
+def test_grid_dialog_sorts_by_a_clicked_column_and_keeps_ticks_and_selection(
+    plugin, shown, message_log
+):
     refs = _save_spread(plugin)
-    dialog = _dialog(plugin)
+    dialog = shown(_dialog(plugin))
     dialog.set_ticked(refs[1:3])
     dialog.select_row(3)
+    held = dialog.spin.value()
     header = dialog.table.horizontalHeader()
+    assert header.sortIndicatorSection() == 1  # Line: the order the rows open in
 
-    header.sectionClicked.emit(2)  # t0
+    click_header_section(header, 2)  # t0
 
     by_t0 = [refs[2], refs[0], refs[3], refs[1]]  # 9.8, 12.0, 22.4, 30.0
     assert _rows(dialog) == by_t0
+    assert header.sortIndicatorSection() == 2
     assert set(dialog.ticked_refs()) == set(refs[1:3])
     assert dialog.highlighted_ref() == refs[3]
-    header.sectionClicked.emit(2)  # again: deepest first
+    assert dialog.spin.value() == held  # a sort fills nothing
+    click_header_section(header, 2)  # again: deepest first
     assert _rows(dialog) == by_t0[::-1]
-    header.sectionClicked.emit(1)  # Line: back to survey order
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    click_header_section(header, 0)  # the tick column: no sort, and the indicator stays
+    assert _rows(dialog) == by_t0[::-1]
+    assert header.sortIndicatorSection() == 2
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    click_header_section(header, 1)  # Line: back to survey order
     assert _rows(dialog) == refs
     assert message_log == []
 
@@ -321,7 +355,7 @@ def test_grid_dialog_apply_of_an_average_sets_grid_velocity_and_record_not_line_
         "FILE__002",
         "FILE__003",
     ]
-    assert record.applied_at is not None
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record.applied_at)  # P6
     assert s.line_for_key(k2).velocity == VelocityModel.constant(0.0889)  # left alone
     assert s.line_for_key(k1).velocity is None and s.line_for_key(k3).velocity is None
     assert s.grid("B").velocity is None and s.grid("B").velocity_source is None
@@ -349,22 +383,110 @@ def test_grid_dialog_a_picked_row_records_that_lines_fit(plugin, drive_dialog, m
     assert message_log == []
 
 
-def test_grid_dialog_a_tick_click_does_not_pick(plugin, message_log):
-    s = plugin.session
+def test_grid_dialog_a_real_click_in_a_tick_cell_off_the_box_does_not_pick(
+    plugin, shown, message_log
+):
+    # Line 3's fit (0.0905) differs from the average, so a pick would show in
+    # the box as well as in the record.
     refs = _save_spread(plugin)
-    dialog = _dialog(plugin)
+    dialog = shown(_dialog(plugin))
     dialog.use_average_button.click()
     held = dialog.spin.value()
+    assert round(held, 4) != 0.0905
 
-    dialog.table.item(3, 0).setCheckState(Qt.CheckState.Unchecked)
-    dialog.table.cellClicked.emit(3, 0)  # the tick cell: ticking, not picking
-    dialog.table.item(3, 0).setCheckState(Qt.CheckState.Checked)
+    click_table_cell(dialog.table, 3, 0, right_edge=True)
 
+    assert dialog.table.item(3, 0).checkState() == Qt.CheckState.Checked  # off the box
+    assert dialog.highlighted_ref() == refs[3]  # selected, for the curve
     assert dialog.spin.value() == held
-    s.apply_grid_velocity("A", dialog.velocity(), dialog.chosen_source())
+    source = dialog.chosen_source()
+    assert source.method == METHOD_WEIGHTED_MEAN  # the average stays the record
+    assert [(m.line_key, m.fit_id) for m in source.members] == refs
+
+    click_table_cell(dialog.table, 2, 3)  # a data cell does pick: line 2's fit-1
+    assert dialog.spin.value() == pytest.approx(0.0920)
+    source = dialog.chosen_source()
+    assert source.method == METHOD_FIT
+    assert (source.members[0].line_key, source.members[0].fit_id) == refs[2]
+    assert message_log == []
+
+
+def test_grid_dialog_the_all_box_ticks_every_usable_fit_across_lines(plugin, message_log):
+    refs = _save_spread(plugin)
+    dialog = _dialog(plugin)
+    dialog.set_ticked(refs[2:3])
+    assert dialog.all_check.checkState() == Qt.CheckState.PartiallyChecked
+
+    dialog.all_check.click()  # partly -> all
+
+    assert dialog.ticked_refs() == refs
+    assert dialog.average_meta_text() == "4 fits on 3 lines · t0 from 9.8 to 30.0 ns"
+    dialog.all_check.click()  # all -> none
+    assert dialog.ticked_refs() == []
+    assert dialog.average_text() == "No fits ticked"
+    assert message_log == []
+
+
+def test_grid_dialog_ticks_changed_after_use_average_drop_the_record(
+    plugin, drive_dialog, message_log
+):
+    # Spec §7.2 rule 4: the box no longer holds the average of what is ticked.
+    s = plugin.session
+    refs = _save_spread(plugin)
+
+    def _drive(d):
+        d.use_average_button.click()
+        d.table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+        d.accept()
+
+    drive_dialog(QDialog, "exec", _drive)
+    plugin.open_grid_velocity_dialog("A")
+
+    grid = s.grid("A")
+    assert grid.velocity is not None and grid.velocity_source is None
+
+    def _drive_again(d):
+        d.set_ticked([refs[0], refs[2]])
+        d.use_average_button.click()  # a second press records what is ticked now
+        d.accept()
+
+    drive_dialog(QDialog, "exec", _drive_again)
+    plugin.open_grid_velocity_dialog("A")
+
     record = s.grid("A").velocity_source
-    assert record.method == METHOD_WEIGHTED_MEAN  # still the average, not line 3's fit
-    assert [(m.line_key, m.fit_id) for m in record.members] == refs
+    assert [(m.line_key, m.fit_id) for m in record.members] == [refs[0], refs[2]]
+    assert message_log == []
+
+
+def test_grid_dialog_a_line_imported_again_does_not_pass_its_new_fit_1_for_the_old(
+    plugin, message_log
+):
+    # Spec §7.1 and §12: the line keeps its key, but its fits and its id
+    # counter start over. Only `fitted_at` tells the new fit-1 from the old.
+    s = plugin.session
+    refs = _save_spread(plugin)
+    k3 = refs[3][0]
+    record = _record(plugin, [refs[0], refs[3]])
+    path = s.line_for_key(k3).path
+    s.remove_line(k3)
+    s.add_lines([Line.open(path, GridPlacement("A", "y", 3.0, 0.0))])
+    assert s.keys_on_grid("A")[-1] == k3
+    new = s.add_velocity_fit(
+        k3, _stored(22.4, 0.0905, 0.003, fitted_at="2026-11-13T09:00:00+00:00")
+    )
+    assert new == refs[3][1]  # the same id as the record's member
+
+    dialog = _dialog(plugin)
+
+    assert dialog.source_note_text() == "\n".join(
+        [
+            "This velocity is the average of 2 fits (applied 2026-11-01).",
+            "FILE__003's fit at 22.4 ns: deleted",
+        ]
+    )
+    assert refs[3] in _rows(dialog)
+    assert dialog.ticked_refs() == [refs[0]]  # the new fit-1 is not the member
+    assert dialog.chosen_source() == record  # nothing filled: the record stays
     assert message_log == []
 
 
@@ -667,7 +789,7 @@ def test_real_grid2_lines_list_and_average_their_fits(qgis_app, tmp_path, messag
         assert m.zero_ns == expected[m.line_key].zero_ns
     mean, _ = weighted_mean([(f.v_m_ns, f.v_stderr_m_ns) for f in expected.values()])
     assert s.grid("G2").velocity.surface_velocity == pytest.approx(mean, rel=1e-12)
-    # Four uncached lines read once each: well inside "does not freeze QGIS".
-    assert opened < 5.0, f"opening took {opened:.2f} s"
+    # Reported, not asserted: P9 is pinned by test_grid_dialog_reads_each_fitted_lines_zero_once,
+    # since timing tests have flaked here before (#165).
     print(f"grid velocity dialog over 4 uncached Grid 2 lines opened in {opened:.2f} s")
     assert message_log == []

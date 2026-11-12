@@ -5,6 +5,7 @@ view wired as `plugin.py` wires them. Real Qt mouse events, not handler calls.
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pytest
@@ -593,7 +594,8 @@ def test_strip_apply_to_grid_after_save_records_the_saved_fit(plugin, message_lo
     grid = s.grid("A")
     assert grid.velocity == VelocityModel.constant(stored.v_m_ns)
     record = grid.velocity_source
-    assert record.method == METHOD_FIT and record.applied_at is not None
+    assert record.method == METHOD_FIT
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record.applied_at)  # P6
     (member,) = record.members
     assert (member.line_key, member.fit_id, member.line_label) == (key, fit_id, "FILE__001")
     assert member.names(fit_id, stored)

@@ -10,7 +10,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, fit_hyperbola
-from plugin_testing import apply_fit, synthetic_dzt
+from plugin_testing import apply_fit, click_header_section, click_table_cell, synthetic_dzt
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QDialog, QMessageBox
@@ -889,22 +889,67 @@ def test_a_pick_is_kept_when_an_unusable_row_is_then_selected(plugin, message_lo
     assert message_log == []
 
 
-def test_a_click_on_a_tick_cell_does_not_turn_the_average_into_a_pick(plugin, message_log):
-    s, key = plugin.session, plugin.session.keys()[0]
+@pytest.fixture
+def shown(qgis_app):
+    """`show(dialog)`: the dialog shown at a fixed size, so real clicks land
+    on real cell geometry; hidden and deleted after the test."""
+    from qgis.PyQt.QtWidgets import QApplication
+
+    dialogs = []
+
+    def show(dialog):
+        dialogs.append(dialog)
+        dialog.resize(700, 500)
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+    yield show
+    for dialog in dialogs:
+        dialog.hide()
+        dialog.deleteLater()
+    QApplication.processEvents()
+
+
+def test_a_real_click_in_a_tick_cell_off_the_box_does_not_pick(plugin, shown, message_log):
+    # The click selects the row (an unselected one), which is what used to
+    # pick: a selection made from the tick column must not fill the box.
+    from nsgeo.velocity_source import METHOD_FIT, METHOD_WEIGHTED_MEAN
+
     ids = _save_three(plugin)
-    dialog = _dialog(plugin)
+    dialog = shown(_dialog(plugin))
     dialog.use_average_button.click()
     held = dialog.spin.value()
 
-    dialog.table.cellClicked.emit(2, 0)  # the tick cell of the 0.0920 fit
+    click_table_cell(dialog.table, 2, 0, right_edge=True)  # the 0.0920 fit's tick cell
 
+    assert dialog.table.item(2, 0).checkState() == Qt.CheckState.Checked  # off the box
+    assert dialog.highlighted_fit_id() == ids[2]  # selected, for the curve
     assert dialog.spin.value() == held
-    _apply(plugin, dialog)
-    record = s.line_for_key(key).velocity_source
-    assert [m.fit_id for m in record.members] == ids  # the average, not a pick
-    dialog = _dialog(plugin)
-    dialog.table.cellClicked.emit(2, 2)  # any other cell does pick
-    assert dialog.spin.value() == pytest.approx(0.0920)
+    source = dialog.chosen_source()
+    assert source.method == METHOD_WEIGHTED_MEAN
+    assert [m.fit_id for m in source.members] == ids  # the average stays the record
+
+    click_table_cell(dialog.table, 1, 2)  # a data cell does pick
+    assert dialog.spin.value() == pytest.approx(0.0910)
+    source = dialog.chosen_source()
+    assert source.method == METHOD_FIT and source.members[0].fit_id == ids[1]
+    assert message_log == []
+
+
+def test_a_real_click_on_the_tick_columns_header_leaves_the_sort_indicator(
+    plugin, shown, message_log
+):
+    ids = _save_three(plugin)
+    dialog = shown(_dialog(plugin))
+    header = dialog.table.horizontalHeader()
+    assert header.sortIndicatorSection() == 1  # t0, the order the rows are in
+
+    click_header_section(header, 0)
+
+    assert header.sortIndicatorSection() == 1
+    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+    assert [dialog.fit_id_at_row(r) for r in range(3)] == ids
     assert message_log == []
 
 

@@ -24,7 +24,6 @@ on.
 
 from __future__ import annotations
 
-import datetime as _dt
 import math
 import traceback
 from collections.abc import Callable, Iterable, Mapping
@@ -35,7 +34,6 @@ from nsgeo.velocity_fit import StoredFit, applied_fit_note, fit_at_zero, unusabl
 from nsgeo.velocity_source import (
     METHOD_FIT,
     METHOD_WEIGHTED_MEAN,
-    SourceFit,
     VelocitySource,
     weighted_mean,
 )
@@ -50,6 +48,7 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -61,6 +60,7 @@ from qgis.PyQt.QtWidgets import (
 
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.finish_panel import busy_cursor
+from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
 # What each column holds, by scope. The tick is always first and the flag last.
 _LINE_COLUMNS = ("tick", "t0", "v", "rms", "points", "flag")
@@ -140,15 +140,6 @@ def fits_at_line_zero(
     return fits, failed
 
 
-def _now() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _label(line: Any) -> str:
-    """A line's name as the Survey panel shows it (plan call P8)."""
-    return str(line.placement.label or line.path.stem)
-
-
 def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
@@ -190,7 +181,7 @@ class VelocityDialog(QDialog):
             session.line_for_key(key)  # type: ignore[arg-type]
             self._keys = [key]  # type: ignore[list-item]
         self._order = {k: i for i, k in enumerate(self._keys)}
-        self._labels = {k: _label(session.line_for_key(k)) for k in self._keys}
+        self._labels = {k: line_label(session.line_for_key(k)) for k in self._keys}
         self._kinds = _GRID_COLUMNS if grid_id is not None else _LINE_COLUMNS
         self._column = {kind: i for i, kind in enumerate(self._kinds)}
         self.setWindowTitle(f"Velocity · {grid_id if grid_id is not None else key}")
@@ -257,6 +248,8 @@ class VelocityDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
+        # Just wide enough for the box: most of a row is for picking.
+        header.setSectionResizeMode(_TICK_COLUMN, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
         self._starred_label = QLabel()
         self._starred_label.setWordWrap(True)
@@ -441,17 +434,16 @@ class VelocityDialog(QDialog):
                     )
                 self.table.setItem(row, _TICK_COLUMN, tick)
                 cells = {
-                    "line": self._line_text(ref[0]),
                     "t0": f"{fit.t0_ns:.1f}",
                     "v": f"{fit.v_m_ns:.4f} ± {fit.v_stderr_m_ns:.4f}",
                     "rms": f"{fit.rms_ns:.2f}",
                     "points": str(len(fit.points)),
                     "flag": flags[ref],
                 }
+                if "line" in self._column:
+                    cells["line"] = self._line_text(ref[0])
                 for kind, text in cells.items():
-                    col = self._column.get(kind)
-                    if col is not None:
-                        self.table.setItem(row, col, QTableWidgetItem(text))
+                    self.table.setItem(row, self._column[kind], QTableWidgetItem(text))
         finally:
             self.table.blockSignals(False)
 
@@ -669,8 +661,10 @@ class VelocityDialog(QDialog):
             return None
         return ref[1]
 
-    def _member(self, ref: Ref) -> SourceFit:
-        return SourceFit.of(ref[0], ref[1], self._labels[ref[0]], self._by_ref[ref])
+    def _record(self, refs: Iterable[Ref]) -> VelocitySource:
+        """The record of `refs`, with each fit's numbers as this dialog shows them."""
+        fits = [(key, fit_id, self._by_ref[(key, fit_id)]) for key, fit_id in refs]
+        return fit_record(self.session, fits, applied_at=applied_now())
 
     def _outcome(self) -> tuple[VelocityModel | None, VelocitySource | None]:
         """The model to apply and its record, by §7.2: the record follows the
@@ -684,7 +678,7 @@ class VelocityDialog(QDialog):
             and set(self.ticked_refs()) == set(self._fill_refs)
             and all(r in self._by_ref for r in self._fill_refs)
         ):
-            source = VelocitySource.from_fits([self._member(r) for r in self._fill_refs], _now())
+            source = self._record(self._fill_refs)
             # Unrounded: the box shows 4 dp of it.
             return VelocityModel.constant(source.v_m_ns), source
         if self._fill_kind == "pick":
@@ -693,7 +687,7 @@ class VelocityDialog(QDialog):
             ref = self._fill_refs[0]
             fit = self._by_ref.get(ref)
             if fit is not None and ref not in self._unusable and box == round(fit.v_m_ns, 4):
-                source = VelocitySource.from_fits([self._member(ref)], _now())
+                source = self._record([ref])
                 # The fit's own velocity, not the spin box's 4-dp rounding of it.
                 return VelocityModel.constant(source.v_m_ns), source
         current, record = self._scope_velocity()
@@ -712,11 +706,14 @@ class VelocityDialog(QDialog):
 
     # ---- driving the dialog --------------------------------------------------
     def select_fit(self, fit_id: str) -> None:
-        """Select a fit of the line, in a line's dialog."""
-        self.table.selectRow(self._refs.index((self.key, fit_id)))  # type: ignore[arg-type]
+        """Select a fit of the line, in a line's dialog, as a click on its
+        row's numbers would."""
+        self.select_row(self._refs.index((self.key, fit_id)))  # type: ignore[arg-type]
 
     def select_row(self, row: int) -> None:
-        self.table.selectRow(row)
+        """Select a row as a click on its numbers would: from a column that
+        is not the tick (`selectRow` makes the first column current)."""
+        self.table.setCurrentCell(row, _TICK_COLUMN + 1)
 
     def _select_quietly(self, ref: Ref) -> None:
         """Select a row for the highlight and the curve only: the box is not
@@ -744,7 +741,10 @@ class VelocityDialog(QDialog):
             self.delete_button.setEnabled(bool(rows))
             self._selected = self._refs[rows[0].row()] if rows else None
             self.fit_highlighted.emit(self._selected)
-            if not self._quiet_select:
+            # A row selected from its tick cell (a click beside the box) is
+            # being ticked, not picked: Qt makes the clicked cell current
+            # before it selects the row.
+            if not self._quiet_select and self.table.currentColumn() != _TICK_COLUMN:
                 self._pick(self._selected)
         except Exception:  # noqa: BLE001 -- a slot must not raise into Qt
             QgsMessageLog.logMessage(traceback.format_exc(), "nsgeo", Qgis.MessageLevel.Critical)
@@ -774,6 +774,8 @@ class VelocityDialog(QDialog):
         try:
             kind = self._kinds[section]
             if kind == "tick":
+                # Qt has already moved the indicator to the clicked section.
+                self._show_sort_indicator()
                 return
             if kind == self._sort_kind:
                 self._sort_descending = not self._sort_descending

@@ -108,7 +108,7 @@ from nsgeo.velocity_fit import (
     hyperbola_time,
     radar_clock_note,
 )
-from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, SourceFit, VelocitySource
+from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -130,6 +130,7 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.velocity_records import applied_now, fit_record
 
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
@@ -1490,14 +1491,6 @@ class ProfileDock(QgsDockWidget):
         grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
         return None if grid is None else str(grid.id)
 
-    def _fit_record(self, key: str, fit_id: str, fit: StoredFit) -> VelocitySource:
-        """A one-member record of `fit` (already measured at the zero used),
-        made by `fit` (grid velocity spec §7.4)."""
-        line = self.session.line_for_key(key)
-        member = SourceFit.of(key, fit_id, line.placement.label or line.path.stem, fit)
-        applied_at = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        return VelocitySource.from_fits([member], applied_at=applied_at)
-
     def _saved_record(self) -> tuple[str, float, VelocitySource] | None:
         """After Save fit, with no new points: the saved fit's line, its
         velocity at the line's current zero, and its record. None once that
@@ -1507,7 +1500,9 @@ class ProfileDock(QgsDockWidget):
         if saved is None or self._just_saved is None:
             return None
         key, fit_id = self._just_saved
-        return key, saved.v_m_ns, self._fit_record(key, fit_id, saved)
+        # One member, made by `fit` (grid velocity spec §7.4).
+        record = fit_record(self.session, [(key, fit_id, saved)], applied_at=applied_now())
+        return key, saved.v_m_ns, record
 
     def _stored_twin_record(self, key: str) -> VelocitySource | None:
         """The record for an unsaved working fit applied to its line: a stored
@@ -1529,7 +1524,7 @@ class ProfileDock(QgsDockWidget):
             )
         except ValueError:
             return None  # not measurable at this zero: the dialog never applies it either
-        return self._fit_record(key, fit_id, at_zero)
+        return fit_record(self.session, [(key, fit_id, at_zero)], applied_at=applied_now())
 
     def _apply_velocity_to_line(self, *_: Any) -> None:
         try:

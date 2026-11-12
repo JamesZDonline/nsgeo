@@ -41,12 +41,10 @@ def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None
     one-member record of it: what the strip's Apply to line does after Save
     fit. Returns the record."""
     from nsgeo.velocity import VelocityModel
-    from nsgeo.velocity_source import SourceFit, VelocitySource
+    from nsgeo_qgis.velocity_records import fit_record
 
-    line = session.line_for_key(key)
-    fit = line.velocity_fits[fit_id]
-    member = SourceFit.of(key, fit_id, line.placement.label or line.path.stem, fit)
-    record = VelocitySource.from_fits([member], applied_at=applied_at)
+    fit = session.line_for_key(key).velocity_fits[fit_id]
+    record = fit_record(session, [(key, fit_id, fit)], applied_at=applied_at)
     session.apply_line_velocity(key, VelocityModel.constant(fit.v_m_ns), record)
     return record
 
@@ -105,6 +103,37 @@ def send_hover(widget: Any, local_pos: Any) -> None:
     from qgis.PyQt.QtCore import Qt
 
     send_move_while_pressed(widget, local_pos, held_button=Qt.MouseButton.NoButton)
+
+
+def click_table_cell(table: Any, row: int, column: int, *, right_edge: bool = False) -> None:
+    """A real left click in a table cell, at its centre or (`right_edge`) one
+    pixel in from its right edge: in a checkable cell, off the check box. The
+    table must be shown, so its cells have their real geometry."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    rect = table.visualRect(table.model().index(row, column))
+    x = rect.right() - 1 if right_edge else rect.center().x()
+    QTest.mouseClick(
+        table.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, rect.center().y()),
+    )
+
+
+def click_header_section(header: Any, section: int) -> None:
+    """A real left click in the middle of a shown header's section."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    x = header.sectionViewportPosition(section) + header.sectionSize(section) // 2
+    QTest.mouseClick(
+        header.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, header.height() // 2),
+    )
 
 
 def connect_message_log(slot: Callable[[str, str, int], None]) -> Callable[[], None]:

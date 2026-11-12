@@ -46,6 +46,7 @@ from qgis.PyQt.QtWidgets import (
 from nsgeo_qgis.line_edit import SAME_M
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.velocity_records import line_label
 
 ROLE_KIND = int(Qt.ItemDataRole.UserRole)
 ROLE_ID = int(Qt.ItemDataRole.UserRole) + 1
@@ -236,7 +237,7 @@ class SurveyDock(QgsDockWidget):
         p = line.placement
         arrow = "↑" if getattr(p, "direction", 1) == 1 else "↓"
         cross = "x" if getattr(p, "axis", "y") == "y" else "y"
-        text = f"{p.label or line.path.stem} · {cross} {p.offset:.2f} · {arrow}"
+        text = f"{line_label(line)} · {cross} {p.offset:.2f} · {arrow}"
         try:
             line.distance_along()
         except ValueError:
