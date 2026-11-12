@@ -99,6 +99,10 @@ release's notes list everything in it.
 
 ### In progress
 
+- **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
+  the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
+  typed min/max, a cumulative cut) as you move through the depths; M19's
+  magnetometer maps will reuse it. Built, awaiting its walkthrough.
 - **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
   lists every saved fit on the grid's lines, averages the ones you tick, and
   remembers which fits made the grid's velocity. Slices take their depths
@@ -150,9 +154,7 @@ Grouped by area. The order within a group is not a priority.
   alone or the max distance is large ([#147]); lines processed differently in
   one cube, such as migration at each line's own velocity ([#178]); the scroll
   wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
-  ([#177]); colour a slice with QGIS's own symbology: a colour ramp, a typed
-  min/max or a cumulative cut, which M19's magnetometer maps will reuse
-  ([#180]); whole site at fine cells, the follow-ups: coverage edge lines on
+  ([#177]); whole site at fine cells, the follow-ups: coverage edge lines on
   coarse previews, averaged previews, a memory estimate for This grid, refusals
   that stay on screen, and where the preview note sits ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
