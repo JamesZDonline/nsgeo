@@ -28,3 +28,8 @@ CAMPUS_LINES = dzt_files(DATA)
 
 GPS_LINES = dzt_files(DATA / "with-dzg")
 """The sixty GPS-recorded lines for M17 (about 30 m each), a DZG beside each."""
+
+GRID2_LINES = dzt_files(DATA / "grid2")
+"""The sixty lines of Nashville City Cemetery 2023 Grid 2 (29.96 m), links to the raw files.
+
+Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey."""
