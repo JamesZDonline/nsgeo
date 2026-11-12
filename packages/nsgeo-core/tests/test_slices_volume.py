@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from nsgeo.io.dzt import read_header, read_samples
+from nsgeo.processing import build_step
+from nsgeo.processing.base import Radargram
 from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
+    PreparedLine,
     Provenance,
     SliceCube,
     VolumeSettings,
@@ -21,7 +25,8 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 
-from tests.real_lines import AXIS, CELL, needs_real_files, prepared_lines
+from tests.real_data import CAMPUS_LINES
+from tests.real_lines import AXIS, CELL, SPACING, needs_real_files, prepared_lines
 
 
 def _prov(transform: str) -> Provenance:
@@ -213,9 +218,141 @@ def test_slabs_equal_the_whole_with_a_layered_velocity():
     np.testing.assert_array_equal(np.concatenate(parts), a0)
 
 
+def test_prepare_volume_stops_when_progress_says_so():
+    filled = np.random.default_rng(7).random((60, 3, 3)).astype(np.float32)
+    calls: list[tuple[int, int]] = []
+
+    def progress(done: int, total: int) -> bool:
+        calls.append((done, total))
+        return done < 2
+
+    with pytest.raises(VolumeStopped):
+        prepare_volume(
+            filled,
+            ZAxis(0.0, 0.1, 60),
+            VelocityModel.constant(0.1),
+            0.1,
+            VolumeSettings(),
+            slab_levels=16,
+            progress=progress,
+        )
+    assert calls == [(1, 4), (2, 4)]
+
+
+def test_prepare_volume_reports_every_slab():
+    filled = np.random.default_rng(7).random((60, 3, 3)).astype(np.float32)
+    calls: list[tuple[int, int]] = []
+    prepare_volume(
+        filled,
+        ZAxis(0.0, 0.1, 60),
+        VelocityModel.constant(0.1),
+        0.1,
+        VolumeSettings(),
+        slab_levels=25,
+        progress=lambda d, t: calls.append((d, t)) or True,
+    )
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
 def test_an_empty_cube_is_refused():
     filled = np.full((10, 2, 2), np.nan, dtype=np.float32)
     with pytest.raises(ValueError):
         prepare_volume(
             filled, ZAxis(0.0, 0.1, 10), VelocityModel.constant(0.1), 0.1, VolumeSettings()
         )
+
+
+# --- real lines, squared amplitude from the bipolar data (no envelope step) -------------------
+
+_SQUARED: list = []
+
+
+def _squared_volume():
+    """Ten real lines, left bipolar and squared (`amp_square`), binned on a frame with spare rows
+    and columns so some cells stay uncovered. Built once."""
+    if not _SQUARED:
+        lines = []
+        for i, path in enumerate(CAMPUS_LINES[:10]):
+            header = read_header(path)
+            rg = Radargram(
+                data=np.asarray(read_samples(path, header)[0], dtype=float),
+                dt_ns=header.dt_ns,
+                t0_ns=header.position_ns,
+            )
+            for name in ("time_zero", "dewow", "background_mean", "gain_agc"):
+                rg = build_step(name).apply(rg)
+            n = rg.data.shape[1]
+            local = np.column_stack([np.linspace(0.0, 19.99, n), np.full(n, 0.25 + i * SPACING)])
+            lines.append(
+                PreparedLine(
+                    key=path.name,
+                    data=(rg.data**2).astype(np.float32),
+                    dt_ns=rg.dt_ns,
+                    t0_ns=rg.t0_ns,
+                    coords=local,
+                )
+            )
+        frame = CubeFrame((0.0, 0.0), 0.0, CELL, 110, 30, "EPSG:32633")
+        plans = [plan_line(p, frame, AXIS) for p in lines]
+        cube = build_cube(lines, plans, frame, AXIS, _prov("amp_square"))
+        finish = FinishSettings("idw", 0.25, 1.0)
+        weights = plan_fill(cube.coverage() > 0, CELL, "idw", 0.25, 1.0)
+        out = np.empty((AXIS.nz, frame.ny, frame.nx), dtype=np.float32)
+        fill_levels(cube, weights, finish, out)
+        vol = prepare_volume(out, AXIS, VelocityModel.constant(0.071), CELL, VolumeSettings())
+        _SQUARED.append((out, vol))
+    return _SQUARED[0]
+
+
+def _humps(c: np.ndarray) -> int:
+    """Humps above half the maximum. Two maxima are one hump unless the dip between them falls
+    below 80% of the lower of the two (a ripple on a plateau is not a second reflection)."""
+    peaks = np.flatnonzero((c[1:-1] > c[:-2]) & (c[1:-1] >= c[2:]) & (c[1:-1] > 0.5 * c.max())) + 1
+    count = 1 if peaks.size else 0
+    for a, b in zip(peaks, peaks[1:]):
+        if c[a : b + 1].min() < 0.8 * min(c[a], c[b]):
+            count += 1
+    return count
+
+
+@needs_real_files
+def test_real_volume_is_unipolar_and_uncovered_cells_stay_nan():
+    _, vol = _squared_volume()
+    amp, strength = vol.slab(0, vol.depths_m.size)
+    for arr in (amp, strength):
+        assert np.nanmin(arr) >= 0.0
+        assert np.isfinite(arr[:, vol.covered]).all()
+        assert np.isnan(arr[:, ~vol.covered]).all()
+    assert (~vol.covered).any() and vol.covered.any()
+
+
+@needs_real_files
+def test_real_column_through_a_strong_reflection_has_one_hump():
+    out, vol = _squared_volume()
+    # constant velocity from level 0: depth level j is source level j
+    assert vol.source_level[0] == 0
+    peaks = np.nan_to_num(out, nan=-1.0).max(axis=0)
+    strongest = np.argsort(peaks, axis=None)[::-1][:300]  # the 300 strongest columns
+    ringing = merged = 0
+    for flat in strongest:
+        y, x = np.unravel_index(flat, peaks.shape)
+        k = int(np.argmax(out[:, y, x]))
+        k0, k1 = max(0, k - 10), min(out.shape[0], k + 11)  # about +-2 ns round the peak
+        if _humps(out[k0:k1, y, x]) < 2:
+            continue
+        ringing += 1
+        amp, _ = vol.slab(k0, k1)
+        merged += _humps(amp[:, y, x].astype(float)) == 1
+    print("ringing columns", ringing, "merged to one hump", merged)
+    assert ringing >= 10
+    assert merged == ringing
+
+
+@needs_real_files
+def test_real_slabs_equal_the_whole():
+    _, vol = _squared_volume()
+    nd = vol.depths_m.size
+    a0, s0 = vol.slab(0, nd)
+    parts = [vol.slab(j, min(j + 23, nd)) for j in range(0, nd, 23)]
+    np.testing.assert_array_equal(np.concatenate([p[0] for p in parts]), a0)
+    np.testing.assert_array_equal(np.concatenate([p[1] for p in parts]), s0)

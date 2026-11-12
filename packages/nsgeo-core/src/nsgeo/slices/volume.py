@@ -141,12 +141,15 @@ def _rms_levels(
     """
     before, after = w // 2, w - w // 2 - 1
     n = b - a + 1
-    total = np.zeros((n,) + filled.shape[1:], dtype=np.float64)
-    for offset in range(-before, after + 1):
-        idx = np.clip(np.arange(a, b + 1) + offset, 0, nz - 1)
-        lo, hi = int(idx[0]), int(idx[-1])
-        block = np.asarray(filled[lo : hi + 1], dtype=np.float64)
-        total += np.where(covered, block[idx - lo], 0.0)
+    lo, hi = max(0, a - before), min(nz - 1, b + after)
+    ext = np.asarray(filled[lo : hi + 1], dtype=np.float64)
+    pad_front, pad_back = lo - (a - before), (b + after) - hi
+    if pad_front or pad_back:
+        ext = np.pad(ext, ((pad_front, pad_back), (0, 0), (0, 0)), mode="edge")
+    ext[:, ~covered] = 0.0
+    total = np.zeros((n,) + ext.shape[1:], dtype=np.float64)
+    for offset in range(w):
+        total += ext[offset : offset + n]
     rms = np.sqrt(np.maximum(total / w, 0.0))
     rms[:, ~covered] = np.nan
     return rms
@@ -207,10 +210,13 @@ def prepare_volume(
     settings: VolumeSettings,
     *,
     slab_levels: int = 64,
+    progress: Callable[[int, int], bool] | None = None,
 ) -> PreparedVolume:
     """Make the one pass that finds the depth trend; the amplitude itself is not kept.
 
     `filled` is what `fill_levels` wrote: squared amplitude, `(nz, ny, nx)`.
+    `progress(done, total)` is called once per slab of the pass; returning
+    False raises `VolumeStopped`.
     """
     if filled.ndim != 3 or filled.shape[0] != z.nz:
         raise ValueError(f"filled must be ({z.nz}, ny, nx), got {filled.shape}")
@@ -234,10 +240,13 @@ def prepare_volume(
         window=window,
     )
     median = np.empty(nd)
-    for j0 in range(0, nd, slab_levels):
+    starts = range(0, nd, slab_levels)
+    for done, j0 in enumerate(starts, start=1):
         j1 = min(j0 + slab_levels, nd)
         amp = vol._amplitude(j0, j1)
         median[j0:j1] = np.median(amp[:, covered], axis=1)
+        if progress is not None and not progress(done, len(starts)):
+            raise VolumeStopped(f"stopped after {done} of {len(starts)} slabs")
     step = float(depths[1] - depths[0]) if nd > 1 else 1.0
     tw = max(1, int(round(settings.trend_m / step))) if step > 0.0 else 1
     padded = np.pad(median, tw // 2, mode="edge")
