@@ -70,7 +70,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-11.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-12.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -103,6 +103,7 @@ a milestone merges or the plan changes.
 | | This grid and Whole site read a grid's lines and preset the same way, and a refused preparation clears the map. Ticking every line in the line chooser means every line, including lines imported later ([#100], [#101], [#106], [#103]) | next release |
 | | Line placement corrections: stretch or compress a line so its ends sit on the grid's edges (in Edit lines, or at import), and a destagger shift along each line's direction of travel, typed for a line or a selection ([#3], [#47]) | next release |
 | | Time zero sets the clock: the row the Time zero step lands on reads 0 ns, so depths, fits and slices measure from each line's first break. Picks, saved fits, cubes and GeoTIFFs record the zero they were measured from, so older projects and saved cubes open where they were ([#97]) | next release |
+| M15 | Cut anywhere: draw a line on the map with the **Cut** tool and see the vertical section beneath it, read from the grid's slices, with the same hover, cursor and picks as a survey line. Cuts and their picks move with their grid. Under minimum curvature a kriging preview shows at once, and the solved section replaces it in the background (about 100 s on Sunnyside Grid 1, [#169]). A site with cuts saves as schema 2, which 0.3.0 cannot open | next release |
 
 ### In progress
 
@@ -111,29 +112,26 @@ a milestone merges or the plan changes.
 
 ### Next, in order
 
-The first item comes before M15. Most are things the next milestones build
-on, so doing them now is cheaper than reworking M15–M17 afterwards.
+Most are things the next milestones build on, so doing them now is cheaper
+than reworking M16–M17 afterwards.
 
 1. **Measure the destagger shift automatically** ([#159], from [#47]): offer
    each grid's shift from its own lines, measured on the lines as they are
    placed (fitting a grid can flip the shift it needs). Real grids need it now,
    and M17's GPS lines use the same shift.
-2. **M15: cut anywhere.** Draw a line on the map and see the vertical section
-   beneath it, with the same hover, cursor and picks as a survey line. Designed.
-   It must read the clock each saved cube records ([#163], item 5).
-3. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
+2. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
    Being designed.
-4. **How a line is identified** ([#89]), settled before M17 stores GPS
+3. **How a line is identified** ([#89]), settled before M17 stores GPS
    coordinates in it.
-5. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+4. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-6. **M18: issue cleanup.** Work through the backlog of open bugs and review
+5. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-7. **M19: magnetometer data.** The first instrument other than GPR.
+6. **M19: magnetometer data.** The first instrument other than GPR.
 
-Also worth doing early: edit or delete a pick from the profile ([#36]), before
-M15 brings picking to cuts; the migration real-data test ([#125]), before M16
+Also worth doing early: edit or delete a pick from the profile ([#36]), now
+that cuts carry picks too; the migration real-data test ([#125]), before M16
 builds on migrated cubes; and the three ways a restored cube can still come
 back on the wrong clock without a note ([#162]).
 
@@ -160,6 +158,9 @@ Grouped by area. The order within a group is not a priority.
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]).
+- **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
+  the picks a deleted cut leaves behind ([#170]); the review follow-ups
+  ([#171]).
 - **Output:** annotated, publication-quality profile figures ([#83]); one
   cloud-optimised GeoTIFF per depth band, for hosting slices online ([#146]); a help
   page for each processing step (the first page is built and waiting for a
@@ -217,7 +218,9 @@ Grouped by area. The order within a group is not a priority.
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#159]: https://github.com/JamesZDonline/nsgeo/issues/159
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
-[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
+[#169]: https://github.com/JamesZDonline/nsgeo/issues/169
+[#170]: https://github.com/JamesZDonline/nsgeo/issues/170
+[#171]: https://github.com/JamesZDonline/nsgeo/issues/171
 
 ## Why
 

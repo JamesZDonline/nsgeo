@@ -1,5 +1,7 @@
 # nsgeo M16: the 3-D scene, features built from your picks
 
+> **Superseded.** This is the 2026-10-30 draft. M16 was redesigned on 2026-11-11 (`2026-11-11-nsgeo-m16-3d-design.md`, branch `nsgeo-m16`): volumes go to ParaView, and QGIS keeps a simple 3-D view. This draft is kept because the new spec cites it.
+
 You select a group of picks on the map and nsgeo builds a feature from them: a surface, a line or a body. A **3D view** button opens QGIS's own 3-D view of a grid, showing:
 
 - your picks at their depths;
