@@ -547,21 +547,29 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    so its factors can differ slightly from the ones on screen. Manual
    multipliers carry over as you typed them.
 
-   **Stepping through depths.** With nsgeo installed, an exported file steps one
-   band at a time in QGIS's Temporal Controller, however it gets into the
-   project: straight after an export, when you reopen a saved project, or when
-   you add it yourself with **Layer → Add Layer → Add Raster Layer**. nsgeo reads
-   the band times from the file and sets the controller to match. Open it with
-   **View → Panels → Temporal Controller**, or its clock button, then press play
-   or drag the slider. Adding one of these files replaces whatever the controller
-   was set to.
+   **Stepping through depths.** With nsgeo installed and enabled, an exported
+   file steps one band at a time in QGIS's Temporal Controller, however it gets
+   into the project: straight after an export, when you reopen a saved project,
+   or when you add it yourself with **Layer → Add Layer → Add Raster Layer**.
+   Layers already in the project when you enable nsgeo are set up too. nsgeo
+   reads the band times from the file and sets the controller to match. Open it
+   with **View → Panels → Temporal Controller**, or its clock button, then press
+   play or drag the slider. Adding one of these files replaces whatever the
+   controller was set to.
+
+   If you point a layer at its file again after opening a project (**Handle
+   Unavailable Layers**, or **Change Data Source**), it picks its band times up
+   the next time you open the project, or when you remove it and add it again.
 
    The times it shows are nanoseconds written as seconds after midnight on
    1 January 1970, so 00:00:05 is 5 ns. Times before 0 ns show as the last
-   seconds of 31 December 1969, so -1.8 ns is 23:59:58. Where nsgeo is not
-   installed, the file carries no time setting for QGIS. Step through its bands
-   with the band choice in the layer's **Symbology**, or with another GIS's band
-   list.
+   seconds of 31 December 1969, so -1.8 ns is 23:59:58.
+
+   Where nsgeo is not installed and enabled, the file carries no time setting
+   for QGIS. A project saved with nsgeo and opened without it keeps QGIS's own
+   band times, rounded to whole seconds, so the controller there skips some
+   bands and repeats others. In both cases step through the bands with the band
+   choice in the layer's **Symbology**, or with another GIS's band list.
 
    Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
    ending. Any QGIS project that opens the file draws it with the same colours,

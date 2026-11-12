@@ -130,3 +130,94 @@ def test_a_reopened_project_is_timed_exactly_and_the_controller_refitted(plugin,
     (reopened,) = QgsProject.instance().mapLayersByName("x")
     assert plugin.navigation.totalFrameCount() == N
     assert _frame_bands(reopened, plugin.navigation) == list(range(1, N + 1))
+
+
+def _save_and_clear(tmp_path) -> str:
+    layer = QgsRasterLayer(str(_write(tmp_path / "x.tif")), "x", "gdal")
+    QgsProject.instance().addMapLayer(layer)
+    project_file = str(tmp_path / "p.qgz")
+    assert QgsProject.instance().write(project_file)
+    QgsProject.instance().clear()
+    return project_file
+
+
+def test_the_refit_after_a_read_beats_a_panel_that_reads_after_the_layers(plugin, tmp_path):
+    """QGIS's Temporal Controller panel restores its own mode from the project after the
+    layers are read. A `readProject` slot connected after the plugin's does the same here;
+    only the deferred refit puts the controller back."""
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    def panel(*_args):
+        plugin.navigation.setNavigationMode(Qgis.TemporalNavigationMode.Disabled)
+
+    project_file = _save_and_clear(tmp_path)
+    QgsProject.instance().readProject.connect(panel)
+    try:
+        assert QgsProject.instance().read(project_file)
+        for _ in range(5):
+            QCoreApplication.processEvents()
+        mode = plugin.navigation.navigationMode()
+    finally:
+        QgsProject.instance().readProject.disconnect(panel)
+    assert mode == Qgis.TemporalNavigationMode.Animated
+    (reopened,) = QgsProject.instance().mapLayersByName("x")
+    assert _frame_bands(reopened, plugin.navigation) == list(range(1, N + 1))
+
+
+def test_an_unloaded_plugin_does_not_refit_after_a_read(plugin, tmp_path):
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    project_file = _save_and_clear(tmp_path)
+    plugin.unload()
+    plugin.navigation.setNavigationMode(Qgis.TemporalNavigationMode.Disabled)
+    assert QgsProject.instance().read(project_file)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert plugin.navigation.navigationMode() == Qgis.TemporalNavigationMode.Disabled
+
+
+def test_layers_already_in_the_project_are_timed_when_the_plugin_starts(
+    fake_iface, answer_modal, tmp_path
+):
+    import nsgeo_qgis
+
+    layer = QgsRasterLayer(str(_write(tmp_path / "x.tif")), "x", "gdal")
+    QgsProject.instance().addMapLayer(layer)
+    assert not layer.temporalProperties().isActive()
+    canvas = fake_iface.mapCanvas()
+    navigation = QgsTemporalNavigationObject(canvas)
+    canvas.setTemporalController(navigation)
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    try:
+        assert layer.temporalProperties().isActive()
+        assert navigation.totalFrameCount() == N
+        assert _frame_bands(layer, navigation) == list(range(1, N + 1))
+    finally:
+        plugin.unload()
+        QgsProject.instance().removeAllMapLayers()
+
+
+def test_a_repaired_layer_is_timed_when_the_project_is_next_opened(plugin, tmp_path):
+    """A file moved since the project was saved opens unavailable; re-pointing it (Change Data
+    Source) does not add it again, so it is not wired then. The next open does it."""
+    import shutil
+
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    project_file = _save_and_clear(tmp_path)
+    (tmp_path / "moved").mkdir()
+    moved = tmp_path / "moved" / "x.tif"
+    shutil.move(str(tmp_path / "x.tif"), str(moved))
+    assert QgsProject.instance().read(project_file)
+    (bad,) = QgsProject.instance().mapLayersByName("x")
+    assert not bad.isValid()
+    bad.setDataSource(str(moved), "x", "gdal")
+    assert bad.isValid() and not plugin._timed_layer_ids  # not wired by the repair itself
+    assert QgsProject.instance().write(project_file)
+    QgsProject.instance().clear()
+    assert QgsProject.instance().read(project_file)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    (reopened,) = QgsProject.instance().mapLayersByName("x")
+    assert _frame_bands(reopened, plugin.navigation) == list(range(1, N + 1))

@@ -695,7 +695,8 @@ def apply_temporal_properties(layer: QgsRasterLayer, plan: ExportPlan) -> None:
 def restore_band_times(layer: QgsRasterLayer, path: str | Path) -> str:
     """Wire `layer` to the band windows its own file records (`NSGEO_WINDOW_NS`).
 
-    For a layer put back from an export's file. GUI thread. Returns `"set"`; `"counts"`
+    For a layer from an nsgeo export's file: put back after a cancel, added by hand or reopened
+    with a project. GUI thread. Returns `"set"`; `"counts"`
     for a coverage file (tagged `largest_count`, or named by the companion rule
     `<stem>_coverage.tif`, as the first versions wrote it untagged), which has no time
     axis to follow; or `"missing"` when the file

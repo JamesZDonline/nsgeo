@@ -251,6 +251,8 @@ class NsgeoPlugin:
         project.layersAdded.connect(self._on_layers_added)
         project.readProject.connect(self._on_project_read)
         project.cleared.connect(self._forget_timed_layers)
+        # The plugin enabled with a project already open: its layers are not "added" again.
+        self._on_layers_added(list(project.mapLayers().values()))
         # Constructed now, before any new_site()/open_site() the user could
         # ever trigger, so it is connected before the first site_opened
         # fires (Task 8's requirement) rather than missing it.
@@ -1620,8 +1622,8 @@ class NsgeoPlugin:
     def _fit_temporal_controller(self, layer: QgsRasterLayer) -> None:
         """Set QGIS's Temporal Controller to step through `layer`'s bands, one per frame.
 
-        Overrides whatever the controller held: the file was just made or put back, and a
-        GPR project has no other timed layers. Skipped when the canvas has no navigation
+        Overrides whatever the controller held: the file was just made, put back, added or
+        reopened, and a GPR project has no other timed layers. Skipped when the canvas has no navigation
         object (no canvas, or a test stub). Never raises: it runs where an exception would
         vanish, and the layer is already added.
         """
