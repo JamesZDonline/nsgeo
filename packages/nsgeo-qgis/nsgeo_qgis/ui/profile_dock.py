@@ -78,13 +78,21 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 from __future__ import annotations
 
 import datetime as _dt
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import Radargram, StepStack, build_step
+from nsgeo.processing import Radargram, StepStack, build_step, first_break_ns, retime_ns
 from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
 from nsgeo.velocity import VelocityModel, resolve_velocity
-from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
+from nsgeo.velocity_fit import (
+    HyperbolaFit,
+    StoredFit,
+    fit_at_zero,
+    fit_hyperbola,
+    hyperbola_time,
+    radar_clock_note,
+)
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -126,6 +134,18 @@ def curve_param_name(step: Any) -> str | None:
     return None
 
 
+def _fit_t0_at_line_zero(session: SiteSession, key: str, line: Any, fit: StoredFit) -> float:
+    """`fit`'s t0 measured from the line's current time zero; the stored t0
+    when that zero is unknown, equal to the fit's, or the refit fails."""
+    zero = session.line_zero(key)
+    if zero is None or zero == fit.zero_ns:
+        return fit.t0_ns
+    try:
+        return fit_at_zero(fit, line.distance_along(), zero).t0_ns
+    except ValueError:
+        return fit.t0_ns
+
+
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
     "line override" (or "line override (fit at 18.4 ns)" when the override
@@ -162,7 +182,7 @@ def velocity_source(session: SiteSession, key: str) -> str:
         # A measured velocity stays distinguishable from a typed one (spec §6.1).
         fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
         if fit is not None:
-            return f"line override (fit at {fit.t0_ns:.1f} ns)"
+            return f"line override (fit at {_fit_t0_at_line_zero(session, key, line, fit):.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
         return f"Grid {grid.id}"
@@ -196,6 +216,9 @@ class ProfileDock(QgsDockWidget):
         self._working_key: str | None = None
         self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        self._shown_radargram: Radargram | None = None  # what `_render` last drew
+        self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
+        self._cube_zero_lookup: Callable[[str], float | None] | None = None
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
         # it. A None pair means the whole ruler (metres) or the whole record
         # (time) was showing, so the next line starts from its own fit there.
@@ -205,7 +228,7 @@ class ProfileDock(QgsDockWidget):
         ] = {}
         self._preview_key: str | None = None
         self._strip_was_visible = False
-        self._deferred_strip: tuple[list[list[float]], Any] | None = None
+        self._deferred_strip: tuple[list[list[float]], Any, float | None] | None = None
         # The Processing panel's selected row, and the step object the
         # cutoff line was last read from. Neither says which step is the
         # cutoff: see `_cutoff_row` and the module docstring.
@@ -464,8 +487,8 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and new is not None
             and key == old_key
-            and (new.n_traces, new.n_samples, new.bounds, new.mirrored)
-            == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
+            and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
+            == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
         ):
             view.transform = old
         elif ruler is not None and ruler.key in self._held:
@@ -474,7 +497,8 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and ruler is None
             and old_ruler is None
-            and (old.n_traces, old.n_samples) == (n_traces, n_samples)
+            and (old.n_traces, old.n_samples, old.t0_ns, old.dt_ns)
+            == (n_traces, n_samples, t0_ns, dt_ns)
         ):
             view.transform = old
         self._axes_key = key
@@ -682,6 +706,7 @@ class ProfileDock(QgsDockWidget):
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
             self._cutoff_step = None
+            self._shown_radargram = None
             self.view.set_cutoff(None)
             self._set_axes_holding(
                 key,
@@ -692,8 +717,8 @@ class ProfileDock(QgsDockWidget):
                 self._safe_distance(line),
             )
             self.view.set_image(None)
+            self._refresh_picks()  # no `_render` on this branch to do it
         self._refresh_velocity()
-        self._refresh_picks()
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -734,7 +759,12 @@ class ProfileDock(QgsDockWidget):
         if key is None:
             self.view.set_picks([])
             return
-        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
+        shown = self.shown_zero_ns()
+        # Each pick is placed by its radar time, whatever zero it was stored
+        # against.
+        self.view.set_picks(
+            [(p.trace, retime_ns(p.radar_ns, 0.0, shown)) for p in self.session.picks_for(key)]
+        )
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
@@ -765,6 +795,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        self._shown_radargram = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -789,6 +820,7 @@ class ProfileDock(QgsDockWidget):
     def _clear_view_only(self) -> None:
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
+        self._shown_radargram = None
         self.image = None
         self.gain_strip.set_headroom(None)
         self.view.clear()
@@ -921,7 +953,9 @@ class ProfileDock(QgsDockWidget):
         try:
             if self._refuse_velocity_edit_on_preview():
                 return
-            self._velocity_points.append((int(trace), float(time_ns)))
+            self._velocity_points.append(
+                (int(trace), float(retime_ns(float(time_ns), self.shown_zero_ns(), 0.0)))
+            )
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
@@ -953,28 +987,49 @@ class ProfileDock(QgsDockWidget):
             raise ValueError("this line has fewer than two traces, so it has no trace spacing")
         return distance, float(distance[0]), float(distance[1] - distance[0])
 
-    def velocity_points_in_metres(self) -> tuple[Any, Any]:
+    def velocity_points_in_metres(self, zero: float | None = None) -> tuple[Any, Any]:
         """The working points as (metres along the line, two-way ns) arrays,
-        in click order, so the first is still the apex guess."""
+        in click order, so the first is still the apex guess. The times are on
+        the line's own clock, the one its stack calls 0 (`zero`, when the
+        caller already has it)."""
         distance, _, _ = self._velocity_axis()
         last = len(distance) - 1
         x_m = np.array([distance[min(max(t, 0), last)] for t, _ in self._velocity_points])
-        t_ns = np.array([ns for _, ns in self._velocity_points], dtype=float)
+        if zero is None:
+            zero = self._line_zero()
+        t_ns = np.array(
+            [float(retime_ns(ns, 0.0, zero)) for _, ns in self._velocity_points], dtype=float
+        )
         return x_m, t_ns
 
+    def _line_zero(self) -> float:
+        """The radar-clock time the working line's own stack calls 0 (0.0
+        when it is not known, as for a line with no time zero step)."""
+        if self._working_key is None or not self.session.is_open:
+            return 0.0
+        zero = self.session.line_zero(self._working_key)
+        return 0.0 if zero is None else zero
+
     def velocity_curve_points(
-        self, fit: HyperbolaFit, distance: Any = None
+        self, fit: HyperbolaFit, distance: Any = None, zero: float | None = None
     ) -> list[tuple[float, float]]:
-        """`fit` sampled across the line's traces as (trace, ns) pairs.
-        `distance` is the line's axis when the caller already has it, so a
-        loop over several fits does not rebuild it for each."""
+        """`fit`, which is on the line's clock, sampled across the line's traces
+        as (trace, ns) pairs on the shown radargram's clock. `distance` is the
+        line's axis when the caller already has it, so a loop over several fits
+        does not rebuild it for each, and `zero` is the line's zero likewise."""
         if distance is None:
             distance, _, _ = self._velocity_axis()
+        if zero is None:
+            zero = self._line_zero()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        t = hyperbola_time(fit, trace_to_metres(distance, traces))
+        t = retime_ns(
+            hyperbola_time(fit, trace_to_metres(distance, traces)),
+            zero,
+            self.shown_zero_ns(),
+        )
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
-    def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
+    def _saved_velocity_curves(self, zero: float | None = None) -> list[list[tuple[float, float]]]:
         """The working line's stored fits as (trace, ns) curves. Empty for a
         line with no distance calibration, which could not have been fitted."""
         if self._working_key is None or not self.session.is_open:
@@ -984,20 +1039,30 @@ class ProfileDock(QgsDockWidget):
             distance, _, _ = self._velocity_axis()
         except ValueError:
             return []
-        return [
-            self.velocity_curve_points(
-                HyperbolaFit(
-                    apex_x_m=float(trace_to_metres(distance, float(f.apex_trace))),
-                    t0_ns=f.t0_ns,
-                    v_m_ns=f.v_m_ns,
-                    v_stderr_m_ns=f.v_stderr_m_ns,
-                    rms_ns=f.rms_ns,
-                    n_points=len(f.points),
-                ),
-                distance,
+        if zero is None:
+            zero = self._line_zero()
+        curves = []
+        for f in fits.values():
+            try:
+                at_zero = fit_at_zero(f, distance, zero)
+            except ValueError:
+                curves.append([])  # keeps the curves aligned with the line's fit order
+                continue
+            curves.append(
+                self.velocity_curve_points(
+                    HyperbolaFit(
+                        apex_x_m=float(trace_to_metres(distance, float(at_zero.apex_trace))),
+                        t0_ns=at_zero.t0_ns,
+                        v_m_ns=at_zero.v_m_ns,
+                        v_stderr_m_ns=at_zero.v_stderr_m_ns,
+                        rms_ns=at_zero.rms_ns,
+                        n_points=len(at_zero.points),
+                    ),
+                    distance,
+                    zero,
+                )
             )
-            for f in fits.values()
-        ]
+        return curves
 
     def _highlighted_index(self) -> int | None:
         """Where the dialog's selected fit sits in `_saved_velocity_curves`,
@@ -1020,17 +1085,33 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not highlight the fit: {exc}", Qgis.MessageLevel.Critical)
 
-    def _velocity_time_zero_note(self) -> str:
-        t = self.view.transform
-        # time_zero crops whole samples, so half a sample is the closest
-        # any user can get; a fixed ns tolerance would be unreachable on a
-        # coarse-sampled file.
-        if t is None or abs(t.t0_ns) <= 0.5 * t.dt_ns:
+    def _velocity_time_zero_note(self, v_now: float | None, zero: float) -> str:
+        """Why a fit's times may not be measured from the first break: said when
+        the working line's own stack sets no time zero and its first break is
+        more than half a sample from the radar's zero. Quiet otherwise.
+
+        The first break is read from the stack's SOURCE, not its result: a
+        background-removal or gain step can erase the direct wave, and the
+        source is what a Time zero step placed first would actually pick."""
+        key = self._working_key
+        if key is None or not self.session.is_open:
             return ""
-        return (
-            f"Time zero is at {t.t0_ns:.1f} ns, so a hyperbola's time is not its "
-            "two-way time to the reflector. Add the time_zero step first."
-        )
+        stack = self.session.stack_for(key, insert=False)
+        rg = stack.source
+        if rg is None or stack.sets_time_zero():
+            return ""
+        first_break = first_break_ns(rg)
+        v_from_break = None
+        if v_now is not None and self._velocity_points:
+            try:
+                x_m, _ = self.velocity_points_in_metres(zero)
+                shifted = np.array(
+                    [float(retime_ns(t, 0.0, first_break)) for _, t in self._velocity_points]
+                )
+                v_from_break = fit_hyperbola(x_m, shifted, float(x_m[0])).v_m_ns
+            except ValueError:
+                v_from_break = None  # no corrected velocity
+        return radar_clock_note(first_break, rg.dt_ns, v_now, v_from_break)
 
     def _update_velocity_fit(self) -> None:
         """Refit the working points and repaint the curve, read-out and
@@ -1038,7 +1119,7 @@ class ProfileDock(QgsDockWidget):
         try:
             self._velocity_fit = None
             curve: list[tuple[float, float]] = []
-            self.velocity_note.setText(self._velocity_time_zero_note())
+            zero = self._line_zero()  # once per repaint: a broken stack logs once
             if not self._velocity_points:
                 self.velocity_readout.setText(
                     "Click the hyperbola's apex, then points down both limbs."
@@ -1047,9 +1128,9 @@ class ProfileDock(QgsDockWidget):
                 )
             else:
                 try:
-                    x_m, t_ns = self.velocity_points_in_metres()
+                    x_m, t_ns = self.velocity_points_in_metres(zero)
                     fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
-                    curve = self.velocity_curve_points(fit)
+                    curve = self.velocity_curve_points(fit, zero=zero)
                     self._velocity_fit = fit
                     readout = (
                         f"v = {fit.v_m_ns:6.4f} ± {fit.v_stderr_m_ns:6.4f} m/ns"
@@ -1072,8 +1153,17 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
+            self.velocity_note.setText(
+                self._velocity_time_zero_note(
+                    None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
+                )
+            )
             if self._preview_key is None and self._velocity_mode:
-                self.view.set_velocity_fit(self._velocity_points, curve)
+                shown = self.shown_zero_ns()
+                self.view.set_velocity_fit(
+                    [(tr, float(retime_ns(t, 0.0, shown))) for tr, t in self._velocity_points],
+                    curve,
+                )
             else:
                 # The points and curve belong to the working line; painting
                 # them over a hovered one would put them on the wrong axes.
@@ -1083,7 +1173,7 @@ class ProfileDock(QgsDockWidget):
             # Saved fits belong to the working line too, never a hovered one.
             if self._preview_key is None:
                 self.view.set_saved_velocity_fits(
-                    self._saved_velocity_curves(), self._highlighted_index()
+                    self._saved_velocity_curves(zero), self._highlighted_index()
                 )
             else:
                 self.view.set_saved_velocity_fits([])
@@ -1119,11 +1209,11 @@ class ProfileDock(QgsDockWidget):
                 # `velocity_from_fit` is the fit that produced the override:
                 # a stored fit with these very points, else none -- a bare
                 # "line" is better than a provenance the velocity does not
-                # have. Same points, same fit: a fit reads nothing else of
-                # the line that could have changed, and no processing step
-                # moves a sample's time (time_zero crops rows, it does not
-                # rebase them). The store is asked rather than remembered,
-                # so a deleted fit is never named.
+                # have. Same points, same fit: the working points and a stored
+                # fit's points are both on the radar clock, whatever the line's
+                # time zero is, so equal points are the same clicks. The store
+                # is asked rather than remembered, so a deleted fit is never
+                # named.
                 points = tuple(self._velocity_points)
                 fits = self.session.line_for_key(self._working_key).velocity_fits
                 stored = [i for i, f in fits.items() if f.points == points]
@@ -1158,6 +1248,7 @@ class ProfileDock(QgsDockWidget):
                 apex_trace=round(float(metres_to_trace(distance, fit.apex_x_m))),
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+                zero_ns=self._line_zero(),
             )
             self.session.add_velocity_fit(self._working_key, stored)
             # A saved fit goes quietly into the line's record; say where to
@@ -1207,12 +1298,35 @@ class ProfileDock(QgsDockWidget):
         # exception here never reaches `emit()`, it is swallowed locally
         # and reaches `qFatal()` in the CI container.
         try:
-            self.view.set_slice_band(lo_ns, hi_ns)
+            self._slice_band = (lo_ns, hi_ns)
+            self._push_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
 
+    def set_cube_zero_lookup(self, fn: Callable[[str], float | None] | None) -> None:
+        """How to find the zero of a line in the cube on screen (the slices dock's)."""
+        self._cube_zero_lookup = fn
+
+    def _push_slice_band(self) -> None:
+        """Draw the stored cube-clock band on the clock of the line shown.
+
+        The band is in the cube's time; the cube's own zero for the line on
+        screen (else the shown radargram's) moves it onto the axis drawn."""
+        if self._slice_band is None:
+            return
+        shown = self.shown_zero_ns()
+        cube_zero = None
+        if self._cube_zero_lookup is not None and self._key is not None:
+            cube_zero = self._cube_zero_lookup(self._key)
+        source = shown if cube_zero is None else cube_zero
+        lo, hi = self._slice_band
+        self.view.set_slice_band(
+            float(retime_ns(lo, source, shown)), float(retime_ns(hi, source, shown))
+        )
+
     def clear_slice_band(self) -> None:
         try:
+            self._slice_band = None
             self.view.clear_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
@@ -1299,6 +1413,7 @@ class ProfileDock(QgsDockWidget):
             line = self.session.line_for_key(self._key)
             if rg.n_traces == line.n_traces:
                 distance = self._safe_distance(line)
+        self._shown_radargram = rg
         self._set_axes_holding(
             self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
         )
@@ -1317,7 +1432,30 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self._show_cutoff()
         self._update_velocity_fit()
+        self._refresh_picks()
+        self._push_slice_band()
         self._push_headroom()
+
+    def shown_zero_ns(self) -> float:
+        """The radar-clock time the drawn radargram's axis calls 0 (0.0 when
+        nothing is drawn)."""
+        rg = self._shown_radargram
+        return 0.0 if rg is None else rg.zero_ns
+
+    def step_input_zero_ns(self, row: int) -> float:
+        """The `zero_ns` of what the working stack's step at `row` receives:
+        the step before it, or the source for row 0. 0.0 with no source or
+        when the stack cannot evaluate."""
+        if self._working_key is None or not self.session.is_open:
+            return 0.0
+        stack = self.session.stack_for(self._working_key, insert=False)
+        try:
+            if row == 0:
+                src = stack.source
+                return 0.0 if src is None else src.zero_ns
+            return stack.intermediate(row - 1).zero_ns
+        except ValueError:
+            return 0.0
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
@@ -1368,7 +1506,13 @@ class ProfileDock(QgsDockWidget):
         name = time_param_name(step)
         assert name is not None
         self._cutoff_step = step
-        self.view.set_cutoff(float(step.params[name]))
+        self.view.set_cutoff(
+            float(
+                retime_ns(
+                    float(step.params[name]), self.step_input_zero_ns(row), self.shown_zero_ns()
+                )
+            )
+        )
 
     def set_selected_step(self, row: int) -> None:
         """`ProcessingDock.step_selected`: remember the row, and re-render
@@ -1399,10 +1543,17 @@ class ProfileDock(QgsDockWidget):
             if step is not self._cutoff_step:
                 return
             name = time_param_name(step)
-            if name is None or step.params[name] == end_ns:
+            if name is None:
+                return
+            shown, input_zero = self.shown_zero_ns(), self.step_input_zero_ns(row)
+            drawn = float(retime_ns(float(step.params[name]), input_zero, shown))
+            if end_ns == drawn:
+                return  # an unmoved handle writes nothing, on any clock
+            value = float(retime_ns(end_ns, shown, input_zero))
+            if value == step.params[name]:
                 return
             try:
-                new = build_step(step.name, **{**step.params, name: end_ns})
+                new = build_step(step.name, **{**step.params, name: value})
             except ValueError as exc:
                 self.error.emit(str(exc))
                 return
@@ -1417,7 +1568,12 @@ class ProfileDock(QgsDockWidget):
         if self.view.transform is not None:
             self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-    def show_gain_strip(self, points: list[list[float]] | None, owner: Any = None) -> None:
+    def show_gain_strip(
+        self,
+        points: list[list[float]] | None,
+        owner: Any = None,
+        input_zero_ns: float | None = None,
+    ) -> None:
         """Show the strip editing `points`, or hide it (`points is None`, the
         selected step is not a curve, or nothing has rendered yet so there
         is no axis to share).
@@ -1443,9 +1599,15 @@ class ProfileDock(QgsDockWidget):
         (the working line finishing a load mid-preview) that
         `_exit_preview` must still honour once the preview ends, rather
         than re-showing whatever was on screen before it started.
+
+        `input_zero_ns` says which clock `points` are on: the `zero_ns` of
+        what the curve step receives. They are moved onto the shown clock
+        at the moment they are drawn (so a payload deferred through a
+        preview lands on the working line's clock, not the preview's).
+        None means `points` are already on the shown clock.
         """
         if self._preview_key is not None:
-            self._deferred_strip = None if points is None else (points, owner)
+            self._deferred_strip = None if points is None else (points, owner, input_zero_ns)
             if points is None:
                 # An explicit "hide" that arrives mid-preview is still an
                 # instruction: without this, _exit_preview's
@@ -1458,6 +1620,9 @@ class ProfileDock(QgsDockWidget):
             self.gain_strip.hide()
             return
         self._sync_strip_mapping()
+        if input_zero_ns is not None:
+            shown = self.shown_zero_ns()
+            points = [[float(retime_ns(float(t), input_zero_ns, shown)), g] for t, g in points]
         self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
         self._push_headroom()

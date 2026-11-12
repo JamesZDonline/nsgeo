@@ -34,6 +34,7 @@ import numpy as np
 from nsgeo.geometry import Grid
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Line
+from nsgeo.processing import retime_ns
 from qgis.core import (
     NULL,
     Qgis,
@@ -108,6 +109,10 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             ("trace", "int"),
             ("distance_m", "float"),
             ("time_ns", "float"),
+            # #97: the radar-clock time `time_ns` is measured from (NULL =
+            # the radar clock). A migration like the M8 one below: every
+            # existing row keeps its values with this NULL.
+            ("zero_ns", "float"),
             ("depth_m", "float"),
             ("velocity_m_ns", "float"),
             ("stack_json", "str"),
@@ -315,6 +320,10 @@ class SiteLayers(QObject):
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
         session.lines_changed.connect(self.refresh)
+        # #97: a pick keeps its sample when its line's time zero moves.
+        session.stack_changed.connect(self._on_stack_changed)
+        session.line_opened.connect(self._on_line_opened)
+        session.line_loaded.connect(self._on_line_loaded)
         # A layer removed from the legend by hand (or any other code) is
         # gone from QGIS but not from the GeoPackage: drop it from our
         # registry so the next refresh reopens it, rather than holding a
@@ -599,8 +608,10 @@ class SiteLayers(QObject):
 
         A pick is a trace and a time on a line; everything else about it is
         a convenience, so a line that moves, or whose velocity changes,
-        takes its picks with it. `trace`, `time_ns`, `stack_json`, `note`,
-        `created`, `feature_id` and `seq` are never touched.
+        takes its picks with it. `trace`, `time_ns`, `zero_ns`, `stack_json`,
+        `note`, `created`, `feature_id` and `seq` are never touched: `time_ns`
+        is measured from the row's own `zero_ns`, and `follow_zero` is the
+        only writer of the time.
 
         `picks` cannot be regenerated, so this writes through the loaded
         layer's data provider -- committed rows only -- and never reads or
@@ -693,6 +704,96 @@ class SiteLayers(QObject):
         if written:
             layer.triggerRepaint()
         return written
+
+    def _on_stack_changed(self, key: str) -> None:
+        """A stack change on any line, previewed or not (a stack change is
+        never a hover): move that line's picks onto its zero, reading the
+        line from disk if no samples are attached. Does nothing when the key
+        has no pick rows or its zero cannot be found."""
+        self._follow_key(key, load=True)
+
+    def _on_line_opened(self, key: str) -> None:
+        """A line became the working line: if it is the current line, move
+        its picks onto its zero when that is known without reading (samples
+        already cached by a hover). When it is not yet known, `line_loaded`
+        follows once the load lands."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _on_line_loaded(self, key: str) -> None:
+        """Samples arrived for `key`: follow only when it is the working
+        line. A preview-only or stale hover load never writes `picks`."""
+        if key and key == self.session.current_key:
+            self._follow_key(key, load=False)
+
+    def _follow_key(self, key: str, *, load: bool) -> None:
+        """Shared body of the three slots above; guarded, never raises."""
+        try:
+            layer = self._picks_layer()
+            if layer is None or not any(
+                _as_str(_attr(f, "line_key")) == key for f in layer.dataProvider().getFeatures()
+            ):
+                return
+            zero = self.session.line_zero(key, load=load)
+            if zero is None:
+                return
+            self.follow_zero(key, zero)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            _log(
+                f"could not move the picks on {key} to its time zero: {exc}",
+                Qgis.MessageLevel.Critical,
+            )
+
+    def follow_zero(self, key: str, zero_ns: float) -> int:
+        """Re-measure the picks of line `key` from `zero_ns`: each row whose
+        stored zero (NULL counts as 0.0) differs gets `time_ns` retimed so it
+        keeps its radar time, `zero_ns` set, and `depth_m` / `velocity_m_ns`
+        derived again from the new time. Returns the number of rows written
+        (#97).
+
+        Written through the data provider only, committed rows, never the
+        edit buffer, as `follow_lines` does. Rows with no trace or time are
+        left alone.
+        """
+        layer = self._picks_layer()
+        if layer is None or self.session.site is None:
+            return 0
+        provider = layer.dataProvider()
+        # A time or zero waiting in the edit buffer was typed against the
+        # old zero; it must not be re-read against the new one. Read only.
+        pending: set[int] = set()
+        buffer = layer.editBuffer()
+        if buffer is not None:
+            names = ("time_ns", "zero_ns")
+            for fid, edits in buffer.changedAttributeValues().items():
+                if any(layer.fields().at(i).name() in names for i in edits):
+                    pending.add(fid)
+        changes: dict[int, dict[int, Any]] = {}
+        for feature in provider.getFeatures():
+            if _as_str(_attr(feature, "line_key")) != key or feature.id() in pending:
+                continue
+            trace, time_ns = _attr(feature, "trace"), _attr(feature, "time_ns")
+            if trace == NULL or time_ns == NULL:
+                continue
+            stored = _as_float(_attr(feature, "zero_ns")) or 0.0
+            if abs(stored - zero_ns) <= _SAME:
+                continue
+            new_time = float(retime_ns(float(time_ns), stored, zero_ns))
+            _, depth, velocity = self.session.derived_pick_fields(key, int(trace), new_time)
+            changes[feature.id()] = {
+                provider.fieldNameIndex("time_ns"): new_time,
+                provider.fieldNameIndex("zero_ns"): float(zero_ns),
+                provider.fieldNameIndex("depth_m"): depth,
+                provider.fieldNameIndex("velocity_m_ns"): velocity,
+            }
+        if changes and not provider.changeAttributeValues(changes):
+            raise RuntimeError(
+                f"could not move the picks to the line's time zero: {provider.error().message()}"
+            )
+        if changes:
+            layer.triggerRepaint()
+            self.session.picks_changed.emit()
+        return len(changes)
 
     def _clear_derived_tables(self) -> None:
         """No grids left: there is nothing to derive line/mark geometry
@@ -1575,6 +1676,7 @@ class SiteLayers(QObject):
             ("trace", int(pick.trace)),
             ("distance_m", pick.distance_m),
             ("time_ns", float(pick.time_ns)),
+            ("zero_ns", pick.zero_ns),
             ("depth_m", pick.depth_m),
             ("velocity_m_ns", pick.velocity_m_ns),
             ("stack_json", pick.stack_json),
@@ -1660,6 +1762,7 @@ class SiteLayers(QObject):
             created=_as_str(_attr(feature, "created")),
             feature_id=_as_opt_str(_attr(feature, "feature_id")),
             seq=None if seq == NULL else int(seq),
+            zero_ns=_as_float(_attr(feature, "zero_ns")),
         )
 
     # ---- derived tables ---------------------------------------------------

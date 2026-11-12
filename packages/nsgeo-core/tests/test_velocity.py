@@ -1,8 +1,8 @@
 """Layered velocity: boundaries in two-way time, depth by integration.
 
-Depth is measured from time zero. Before a time_zero step a real SIR-4000
-file (position -11.09 ns) therefore has negative depth at the top. That is
-correct, and the last test pins it against a real header.
+Depth is measured from 0 on the radargram's own clock. Without a time_zero
+step a real SIR-4000 file (position -11.09 ns) therefore has negative depth at
+the top. That is correct, and the last test pins it against a real header.
 """
 
 from __future__ import annotations

@@ -119,6 +119,22 @@ def test_round_trip_preserves_provenance(tmp_path):
     assert load_cube(path).provenance == cube.provenance
 
 
+def test_a_saved_cubes_metadata_names_its_time_base(tmp_path):
+    radar = make_cube()
+    assert _meta(radar)["time_base"] == "radar"
+    zeroed = replace(
+        radar,
+        provenance=replace(
+            radar.provenance,
+            steps=({"step": "time_zero", "params": {}, "enabled": True},),
+        ),
+    )
+    assert _meta(zeroed)["time_base"] == "time_zero"
+    path = tmp_path / "z.npz"
+    save_cube(zeroed, path)
+    assert load_cube(path).provenance == zeroed.provenance
+
+
 def test_dtypes_survive_the_round_trip(tmp_path):
     """float64 would double a 331 MB cube for nothing."""
     cube = make_cube()

@@ -25,7 +25,7 @@ from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.model import Line, Profile, Site
-from nsgeo.processing import Radargram, StepStack
+from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
@@ -96,6 +96,14 @@ class Pick:
     created: str
     feature_id: str | None = None
     seq: int | None = None
+    # #97: `time_ns` is measured from this radar-clock time. None means the
+    # radar clock itself (a row written before the column existed).
+    zero_ns: float | None = None
+
+    @property
+    def radar_ns(self) -> float:
+        """The pick's time on the radar clock, the one that never moves."""
+        return retime_ns(self.time_ns, self.zero_ns or 0.0, 0.0)
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
@@ -904,6 +912,30 @@ class SiteSession(QObject):
             self._attach_source(key, stack)
         return stack
 
+    def line_zero(self, key: str, *, load: bool = False) -> float | None:
+        """The radar-clock time the line's own stack calls 0.
+
+        0.0 with no enabled time_zero step (nothing is loaded for that). The
+        source's answer once one is attached. With no source, None, unless
+        `load` reads the line and runs a copy of the stack. None on any
+        failure, which is logged: this never raises, and never plants a stack.
+        """
+        try:
+            stack = self.stack_for(key, insert=False)
+            if not stack.sets_time_zero():
+                return 0.0
+            if stack.source is not None:
+                return float(stack.zero_ns())
+            if not load:
+                return None
+            profiles = self.line_for_key(key).load()
+            probe = StepStack.from_dicts(stack.to_dicts())
+            probe.source = Radargram.from_profile(profiles[self.channel(key)])
+            return float(probe.zero_ns())
+        except Exception as exc:  # noqa: BLE001 -- a read must not raise; the caller falls back
+            _log(f"could not find where line {key} has its time zero: {exc}")
+            return None
+
     def _attach_source(self, key: str, stack: StepStack) -> None:
         profiles = self._profiles.get(key)
         if not profiles:
@@ -1255,8 +1287,14 @@ class SiteSession(QObject):
         """
         self._pick_store = store
 
-    def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
+    def add_pick(self, key: str, trace: int, time_ns: float, *, zero_ns: float = 0.0) -> Pick:
         """Author one pick on the WORKING line.
+
+        `time_ns` is measured from `zero_ns` (the zero of the view it was
+        clicked on), so its radar time is `time_ns + zero_ns`. That radar time
+        is clamped into the header window, then stored measured from the
+        line's own zero (`line_zero`), with that zero; when the line's zero is
+        unknown it is stored on the radar clock with no zero (#97).
 
         `key` must be `current_key`. This is the same guard `set_trace`
         and `set_selection` carry, and it exists here rather than only in
@@ -1289,6 +1327,8 @@ class SiteSession(QObject):
             raise RuntimeError("no pick store is attached to this session; cannot author a pick")
         if not math.isfinite(time_ns):
             raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
+        if not math.isfinite(zero_ns):
+            raise ValueError(f"a pick needs a finite time zero, not {zero_ns!r}")
         line = self.line_for_key(key)
         index = max(0, min(int(trace), line.n_traces - 1))
         # The view emits a pick for any left click in the widget, and
@@ -1307,12 +1347,15 @@ class SiteSession(QObject):
         t0 = float(line.header.position_ns)
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
-        time = max(lo, min(float(time_ns), hi))
+        radar = max(lo, min(retime_ns(float(time_ns), float(zero_ns), 0.0), hi))
+        zero = self.line_zero(key)
+        time = radar if zero is None else retime_ns(radar, 0.0, zero)
         distance_m, depth_m, velocity_m_ns = self.derived_pick_fields(key, index, time)
         pick = Pick(
             line_key=key,
             trace=index,
             time_ns=time,
+            zero_ns=zero,
             distance_m=distance_m,
             depth_m=depth_m,
             velocity_m_ns=velocity_m_ns,

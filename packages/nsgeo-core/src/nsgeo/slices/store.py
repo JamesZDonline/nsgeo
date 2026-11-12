@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 
+from nsgeo.processing.timezero import time_base_of
 from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis
 
@@ -64,6 +65,7 @@ def _meta(cube: SliceCube) -> dict[str, Any]:
         },
         "z": {"t0_ns": cube.z.t0_ns, "dz_ns": cube.z.dz_ns, "nz": cube.z.nz},
         "provenance": cube.provenance.to_dict(),
+        "time_base": time_base_of(cube.provenance.steps),
         "blocks": [{"heading_deg": b.heading_deg} for b in cube.blocks],
     }
 
