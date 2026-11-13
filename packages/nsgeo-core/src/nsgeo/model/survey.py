@@ -18,6 +18,7 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.mag import MagFile, MagSetup
 from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
@@ -178,6 +179,19 @@ class Site:
     #: and lives apart from `lines`, so line-only code never sees one.
     cuts: list[Cut] = field(default_factory=list)
 
+    #: Magnetometer files, at most one per mag grid. Like a line, a
+    #: `MagFile` is identity-equal and names its file on disk.
+    mag_files: list[MagFile] = field(default_factory=list)
+
+    #: The setup the next import starts from (the author's last choice).
+    mag_setup: MagSetup | None = None
+
+    #: The Mag panel's remembered choices: `{"scope": "grid" | "site",
+    #: "grid": a mag grid id, "cell": metres, "finish": {"method",
+    #: "max_distance_spacings", "smooth_x_m", "smooth_y_m"}, "palette": str}`.
+    #: Every key is optional; a missing key is the default.
+    mag_view: dict[str, Any] = field(default_factory=dict)
+
     @property
     def frames(self) -> dict[str, Grid]:
         return {g.id: g for g in self.grids}
@@ -189,10 +203,15 @@ class Site:
         if dupes:
             raise ValueError(f"duplicate grid ids: {sorted(dupes)}")
         known = set(ids)
+        mag_grids = {g.id for g in self.grids if g.instrument == "mag"}
         for line in self.lines:
             grid_id = getattr(line.placement, "grid_id", None)
             if grid_id is not None and grid_id not in known:
                 raise ValueError(f"line {line.path.name} references unknown grid {grid_id!r}")
+            if grid_id in mag_grids:
+                raise ValueError(
+                    f"line {line.path.name} is on grid {grid_id!r}, which is a magnetometer grid"
+                )
         cut_ids = [c.id for c in self.cuts]
         cut_dupes = {i for i in cut_ids if cut_ids.count(i) > 1}
         if cut_dupes:
@@ -200,3 +219,21 @@ class Site:
         for cut in self.cuts:
             if cut.grid_id not in known:
                 raise ValueError(f"cut {cut.name!r} references unknown grid {cut.grid_id!r}")
+            if cut.grid_id in mag_grids:
+                raise ValueError(
+                    f"cut {cut.name!r} is on grid {cut.grid_id!r}, which is a magnetometer grid"
+                )
+        per_grid: dict[str, int] = {}
+        for mag in self.mag_files:
+            if mag.grid_id not in known:
+                raise ValueError(
+                    f"mag file {mag.path.name} references unknown grid {mag.grid_id!r}"
+                )
+            if mag.grid_id not in mag_grids:
+                raise ValueError(
+                    f"mag file {mag.path.name} is on grid {mag.grid_id!r}, which is a GPR grid"
+                )
+            per_grid[mag.grid_id] = per_grid.get(mag.grid_id, 0) + 1
+        for grid_id, n in per_grid.items():
+            if n > 1:
+                raise ValueError(f"grid {grid_id!r} holds {n} mag files; a mag grid holds one")

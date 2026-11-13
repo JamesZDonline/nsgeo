@@ -118,9 +118,9 @@ def test_rejects_future_schema_version(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
     doc = json.loads(out.read_text())
-    doc["schema_version"] = 3
+    doc["schema_version"] = 4
     out.write_text(json.dumps(doc))
-    with pytest.raises(ProjectError, match="schema version 3"):
+    with pytest.raises(ProjectError, match="schema version 4"):
         load_site(out)
 
 
@@ -794,18 +794,18 @@ def test_cuts_round_trip_and_bump_the_schema_only_when_present(tmp_path):
     assert load_site(path).cuts == []
 
 
-def test_loads_schema_1_and_2_and_refuses_3(tmp_path):
-    assert READABLE_SCHEMA_VERSIONS == (1, 2)
+def test_loads_schema_1_2_and_3_and_refuses_4(tmp_path):
+    assert READABLE_SCHEMA_VERSIONS == (1, 2, 3)
     path = tmp_path / "survey.nsgeo.json"
     save_site(_cut_site(), path)
     doc = json.loads(path.read_text())
-    for version, ok in ((1, True), (2, True), (3, False)):
+    for version, ok in ((1, True), (2, True), (3, True), (4, False)):
         doc["schema_version"] = version
         path.write_text(json.dumps(doc))
         if ok:
             load_site(path)
         else:
-            with pytest.raises(ProjectError, match="schema version 3"):
+            with pytest.raises(ProjectError, match="schema version 4"):
                 load_site(path)
 
 
@@ -895,3 +895,181 @@ def test_slice_colours_that_are_not_an_object_read_as_unset(tmp_path):
     doc["slice_colours"] = "own"
     path.write_text(json.dumps(doc))
     assert load_site(path).slice_colours == {}
+
+
+def _mag_site(tmp_path, **extra):
+    from nsgeo.mag import MagFile, MagSetup
+
+    from tests.mag_data import write_grad601
+
+    grid = Grid("M", (0.0, 0.0), 0.0, 30.0, 30.0, "EPSG:32616", 0.5, instrument="mag")
+    (tmp_path / "data").mkdir(exist_ok=True)
+    path = write_grad601(tmp_path / "data" / "a.dat", np.ones((4, 16)))
+    mag = MagFile.open(path, "M", MagSetup())
+    return Site(grids=[grid], mag_files=[mag]), mag, MagSetup
+
+
+def test_a_site_with_mag_saves_as_schema_3_and_round_trips(tmp_path):
+    from nsgeo.mag import MagSetup
+
+    site, mag, _ = _mag_site(tmp_path)
+    setup = MagSetup(axis="x", far_y=True, readings_per_metre=4.0, zigzag=False)
+    mag = dataclasses.replace(
+        mag, setup=setup, shifts=(0.0, 0.1, 0.0, 0.0), scales=(1.0, 1.0, 0.98, 1.0)
+    )
+    site.mag_files = [mag]
+    site.mag_setup = MagSetup(spacing_m=1.0, sensors=1)
+    site.mag_view = {"scope": "site", "cell": 0.25}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    assert doc["schema_version"] == 3
+    assert doc["grids"][0]["instrument"] == "mag"
+    assert doc["mag_files"] == [
+        {
+            "path": "data/a.dat",
+            "grid_id": "M",
+            "setup": setup.to_dict(),
+            "corrections": {"1": {"travel_shift": 0.1}, "2": {"scale": 0.98}},
+        }
+    ]
+    back = load_site(path)
+    (loaded,) = back.mag_files
+    assert loaded.setup == setup
+    assert loaded.scales == mag.scales
+    assert loaded.shifts == mag.shifts
+    assert (loaded.n_rows, loaded.n_readings) == (4, 16)
+    assert loaded.path.name == "a.dat"
+    assert back.grids[0].instrument == "mag"
+    assert back.mag_setup == site.mag_setup
+    assert back.mag_view == {"scope": "site", "cell": 0.25}
+
+
+def test_a_remembered_setup_is_written_whenever_it_is_set(tmp_path):
+    site, _, _ = _mag_site(tmp_path)
+    site.mag_files = []
+    site.grids = [dataclasses.replace(site.grids[0], instrument="gpr")]
+    from nsgeo.mag import MagSetup
+
+    site.mag_setup = MagSetup()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    assert doc["mag_setup"] == MagSetup().to_dict()
+    assert "mag_files" not in doc
+    assert load_site(path).mag_setup == MagSetup()
+
+
+def test_a_mag_grid_with_no_file_is_schema_3(tmp_path):
+    site, _, _ = _mag_site(tmp_path)
+    site.mag_files = []
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert json.loads(path.read_text())["schema_version"] == 3
+    assert load_site(path).grids[0].instrument == "mag"
+
+
+def test_a_site_without_mag_writes_no_mag_keys(tmp_path, site):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    assert doc["schema_version"] == 1
+    assert "instrument" not in doc["grids"][0]
+    assert not [k for k in doc if k.startswith("mag")]
+    save_site(_cut_site(), path)
+    assert json.loads(path.read_text())["schema_version"] == 2
+
+
+def _saved_mag_doc(tmp_path):
+    site, _, _ = _mag_site(tmp_path)
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    return path, json.loads(path.read_text())
+
+
+def test_a_missing_mag_file_is_a_project_error(tmp_path):
+    path, _ = _saved_mag_doc(tmp_path)
+    (tmp_path / "data" / "a.dat").unlink()
+    with pytest.raises(ProjectError, match="referenced file does not exist"):
+        load_site(path)
+
+
+def test_an_unknown_instrument_is_a_project_error(tmp_path):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["grids"][0]["instrument"] = "sonar"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="instrument"):
+        load_site(path)
+
+
+@pytest.mark.parametrize(
+    "corrections",
+    [
+        {"4": {"scale": 0.9}},
+        {"-1": {"scale": 0.9}},
+        {"x": {"scale": 0.9}},
+        {"1": {"scale": "wide"}},
+        {"1": {"scale": 0.0}},
+        {"1": {"travel_shift": 1e999}},
+        {"1": "oops"},
+    ],
+)
+def test_a_bad_correction_is_a_project_error(tmp_path, corrections):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_files"][0]["corrections"] = corrections
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="correction"):
+        load_site(path)
+
+
+def test_a_correction_for_a_traverse_the_file_lacks_is_a_project_error(tmp_path):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_files"][0]["corrections"] = {"9": {"travel_shift": 0.1}}
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="traverse"):
+        load_site(path)
+
+
+def test_an_invalid_mag_setup_is_a_project_error(tmp_path):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_files"][0]["setup"] = {"spacing_m": -1}
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="invalid setup for mag file 'data/a.dat'"):
+        load_site(path)
+
+
+def test_a_damaged_remembered_setup_or_view_reads_as_unset(tmp_path):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_setup"] = {"spacing_m": "wide"}
+    doc["mag_view"] = {"cell": -1, "scope": "everywhere", "grid": "nope", "palette": 3}
+    path.write_text(json.dumps(doc))
+    back = load_site(path)
+    assert back.mag_setup is None
+    assert back.mag_view == {}
+
+
+def test_a_usable_remembered_view_is_kept_field_by_field(tmp_path):
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_view"] = {
+        "scope": "grid",
+        "grid": "M",
+        "cell": 0.125,
+        "palette": "viridis",
+        "finish": {"method": "nope", "max_distance_spacings": 0.75, "smooth_x_m": -1},
+    }
+    path.write_text(json.dumps(doc))
+    assert load_site(path).mag_view == {
+        "scope": "grid",
+        "grid": "M",
+        "cell": 0.125,
+        "palette": "viridis",
+        "finish": {"max_distance_spacings": 0.75},
+    }
+
+
+def test_mag_colours_round_trip(tmp_path):
+    site, _, _ = _mag_site(tmp_path)
+    site.slice_colours = {"mag": {"own": True, "style": "<qgis/>"}}
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert load_site(path).slice_colours["mag"] == {"own": True, "style": "<qgis/>"}

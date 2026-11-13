@@ -41,9 +41,11 @@ Bartington Grad601 magnetometer files: reading them, marking missing data, and p
 | Name | Purpose |
 |---|---|
 | `MISSING_RUN` | The default run of consecutive 0.00 readings (4) that counts as missing data. |
+| `MagFile` | One Grad601 file on a mag grid: cached readings, per-traverse `scales` and `shifts`, and `points(grid)` in world coordinates. |
 | `MagFileError` | Raised, naming the file and row, for a file that does not look like a Grad601 grid file. |
 | `MagSetup` | How a download was walked: traverse axis and starting corner, spacing, readings per metre, sensors, zigzag, flipped. `to_dict` and `from_dict` give the survey-JSON form. |
 | `Traverse` | One file row with its `GridPlacement`, and whether its stored order is the reverse of walked. |
+| `clear_mag_cache` | Empties the cache of files read. |
 | `fit_problems` | What does not fit between a file's shape and its grid, as sentences; empty when it fits. |
 | `mark_missing` | A copy of the readings with NaN for each run of zeros at least `MISSING_RUN` long. |
 | `missing_summary` | One sentence naming the traverses that hold missing readings. |

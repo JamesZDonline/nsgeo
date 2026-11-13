@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from nsgeo.geometry.grid import Grid
+from nsgeo.mag import MagFile, MagSetup
 from nsgeo.mag.grad601 import mark_missing, missing_summary, read_grad601
 
 from tests.real_data import MAG_FILES
@@ -64,3 +66,14 @@ def test_real_missing_summaries():
     assert missing_summary(mark_missing(raw_of("example3.dat"))) == (
         "7273 readings are missing data, on traverses 1, 2, 3, 4, 5, 6 and 54 more."
     )
+
+
+def test_real_points_fill_the_grid():
+    grid = Grid("M", (0.0, 0.0), 0.0, 30.0, 30.0, "EPSG:32616", 0.5, instrument="mag")
+    for name in MISSING:
+        (path,) = [p for p in MAG_FILES if p.name == name]
+        xy, values = MagFile.open(path, "M", MagSetup()).points(grid)
+        assert xy.shape == (14400 - MISSING[name], 2), name
+        assert values.shape == (14400 - MISSING[name],), name
+        assert np.isfinite(values).all(), name
+        assert xy.min() >= 0.0 and xy.max() <= 30.0, name

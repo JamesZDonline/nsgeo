@@ -168,3 +168,55 @@ def test_index_finds_the_line_it_is_given_not_an_equal_copy(tmp_path):
     copy = dataclasses.replace(line)
     site = Site(lines=[copy, line])
     assert site.lines.index(line) == 1
+
+
+def _mag_grid(grid_id="M"):
+    return Grid(grid_id, (0.0, 0.0), 0.0, 30.0, 30.0, "EPSG:32616", 0.5, instrument="mag")
+
+
+def _mag_file(tmp_path, grid_id="M", name="m.dat"):
+    from nsgeo.mag import MagFile, MagSetup
+
+    from tests.mag_data import write_grad601
+
+    return MagFile.open(write_grad601(tmp_path / name, np.ones((2, 8))), grid_id, MagSetup())
+
+
+def test_a_line_on_a_mag_grid_fails_validate(tmp_path):
+    line = _line(tmp_path)
+    placed = dataclasses.replace(line, placement=GridPlacement("M", "y", 0.5))
+    with pytest.raises(ValueError, match="line a.DZT is on grid 'M', which is a magnetometer grid"):
+        Site(grids=[_mag_grid()], lines=[placed]).validate()
+
+
+def test_a_cut_on_a_mag_grid_fails_validate():
+    from nsgeo.model import Cut
+
+    cut = Cut("c1", "north", "M", ((0.0, 0.0), (1.0, 1.0)))
+    with pytest.raises(
+        ValueError, match="cut 'north' is on grid 'M', which is a magnetometer grid"
+    ):
+        Site(grids=[_mag_grid()], cuts=[cut]).validate()
+
+
+def test_a_mag_file_on_a_gpr_grid_fails_validate(tmp_path, grid):
+    with pytest.raises(ValueError, match="mag file m.dat is on grid 'G', which is a GPR grid"):
+        Site(grids=[grid], mag_files=[_mag_file(tmp_path, "G")]).validate()
+
+
+def test_two_mag_files_on_one_grid_fail_validate(tmp_path):
+    files = [_mag_file(tmp_path, "M", "a.dat"), _mag_file(tmp_path, "M", "b.dat")]
+    with pytest.raises(ValueError, match="grid 'M' holds 2 mag files; a mag grid holds one"):
+        Site(grids=[_mag_grid()], mag_files=files).validate()
+
+
+def test_a_mag_file_on_an_unknown_grid_fails_validate(tmp_path):
+    with pytest.raises(ValueError, match="mag file m.dat references unknown grid 'Z'"):
+        Site(grids=[_mag_grid()], mag_files=[_mag_file(tmp_path, "Z")]).validate()
+
+
+def test_a_valid_mag_site_passes_validate(tmp_path):
+    site = Site(grids=[_mag_grid()], mag_files=[_mag_file(tmp_path)])
+    site.validate()
+    assert site.mag_setup is None
+    assert site.mag_view == {}

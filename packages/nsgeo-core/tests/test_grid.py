@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
@@ -70,3 +72,15 @@ def test_to_local_inverts_to_world():
     np.testing.assert_allclose(grid.to_local(grid.to_world(local)), local, atol=1e-6)
     with pytest.raises(ValueError):
         grid.to_local(np.zeros(2))
+
+
+def test_a_grid_is_gpr_unless_told_otherwise():
+    assert g().instrument == "gpr"
+    assert dataclasses.replace(g(), instrument="mag").instrument == "mag"
+
+
+def test_an_unknown_instrument_is_refused():
+    with pytest.raises(
+        ValueError, match=r"instrument must be one of \('gpr', 'mag'\), got 'sonar'"
+    ):
+        dataclasses.replace(g(), instrument="sonar")

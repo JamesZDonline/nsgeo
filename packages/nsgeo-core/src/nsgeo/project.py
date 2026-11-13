@@ -19,8 +19,9 @@ import os
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry.grid import Grid
+from nsgeo.geometry.grid import INSTRUMENTS, Grid
 from nsgeo.geometry.placement import GridPlacement
+from nsgeo.mag import MagFile, MagSetup
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
 from nsgeo.processing.stack import StepStack
@@ -41,7 +42,10 @@ SCHEMA_VERSION = 1
 #: without cuts still saves as `SCHEMA_VERSION`, and stays readable by those
 #: builds (cut spec §3, plan call 3).
 CUTS_SCHEMA_VERSION = SCHEMA_VERSION + 1
-READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION)
+#: A site with a magnetometer grid or file saves as 3, for the same reason
+#: (M19a spec C17). A site without mag still saves as 1 or 2.
+MAG_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
+READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION, MAG_SCHEMA_VERSION)
 
 
 class ProjectError(Exception):
@@ -60,6 +64,9 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
     }
     if grid.velocity is not None:
         doc["velocity"] = grid.velocity.to_dict()
+    # Written only for a mag grid, so a GPR site saves as it always did.
+    if grid.instrument != "gpr":
+        doc["instrument"] = grid.instrument
     return doc
 
 
@@ -72,6 +79,12 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
             raise ProjectError(
                 f"invalid velocity for grid {doc.get('id', '<unknown>')!r}: {exc}"
             ) from exc
+    instrument = doc.get("instrument", "gpr")
+    if instrument not in INSTRUMENTS:
+        raise ProjectError(
+            f"grid {doc.get('id', '<unknown>')!r} has instrument {instrument!r}; "
+            f"expected one of {INSTRUMENTS}"
+        )
     return Grid(
         id=doc["id"],
         origin=(float(doc["origin"][0]), float(doc["origin"][1])),
@@ -81,6 +94,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         crs=doc["crs"],
         default_spacing=float(doc["default_spacing"]),
         velocity=velocity,
+        instrument=instrument,
     )
 
 
@@ -150,6 +164,84 @@ def _placement_from_dict(doc: dict[str, Any]) -> GridPlacement:
         scale=float(doc.get("scale", 1.0)),
         travel_shift=float(doc.get("travel_shift", 0.0)),
     )
+
+
+def _mag_file_to_dict(mag: MagFile, key: str) -> dict[str, Any]:
+    corrections: dict[str, dict[str, float]] = {}
+    for row, (scale, shift) in enumerate(zip(mag.scales, mag.shifts)):
+        entry: dict[str, float] = {}
+        if scale != 1.0:
+            entry["scale"] = scale
+        if shift != 0.0:
+            entry["travel_shift"] = shift
+        if entry:
+            corrections[str(row)] = entry
+    return {
+        "path": key,
+        "grid_id": mag.grid_id,
+        "setup": mag.setup.to_dict(),
+        "corrections": corrections,
+    }
+
+
+def _mag_file_from_dict(entry: Any, root: Path) -> MagFile:
+    try:
+        stored = Path(entry["path"])
+        grid_id = entry["grid_id"]
+        if not isinstance(grid_id, str):
+            raise TypeError("grid_id must be text")
+    except (KeyError, TypeError) as exc:
+        raise ProjectError(f"invalid mag file entry {entry!r}: {exc!r}") from exc
+    path = stored if stored.is_absolute() else root / stored
+    if not path.exists():
+        raise ProjectError(f"referenced file does not exist: {path} (stored as {entry['path']!r})")
+    try:
+        setup = MagSetup.from_dict(entry.get("setup", {}))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ProjectError(f"invalid setup for mag file {entry['path']!r}: {exc}") from exc
+    try:
+        mag = MagFile.open(path, grid_id, setup)
+    except (OSError, ValueError) as exc:
+        raise ProjectError(f"cannot read mag file {entry['path']!r}: {exc}") from exc
+    corrections = entry.get("corrections", {})
+    if not isinstance(corrections, dict):
+        raise ProjectError(f"invalid correction for mag file {entry['path']!r}: not an object")
+    scales = list(mag.scales)
+    shifts = list(mag.shifts)
+    for key, fix in corrections.items():
+        try:
+            row = int(key)
+        except (TypeError, ValueError):
+            raise ProjectError(
+                f"invalid correction for mag file {entry['path']!r}: {key!r} is not a traverse"
+            ) from None
+        if not 0 <= row < mag.n_rows:
+            raise ProjectError(
+                f"correction for traverse {row} of mag file {entry['path']!r}, "
+                f"which has {mag.n_rows} traverses (0 to {mag.n_rows - 1})"
+            )
+        if not isinstance(fix, dict):
+            raise ProjectError(
+                f"invalid correction for traverse {row} of mag file {entry['path']!r}: "
+                f"expected an object"
+            )
+        if "scale" in fix:
+            scale = _finite(fix["scale"])
+            if scale is None or scale <= 0:
+                raise ProjectError(
+                    f"invalid correction for traverse {row} of mag file {entry['path']!r}: "
+                    f"scale must be a finite number above 0"
+                )
+            scales[row] = scale
+        if "travel_shift" in fix:
+            shift = _finite(fix["travel_shift"])
+            if shift is None:
+                raise ProjectError(
+                    f"invalid correction for traverse {row} of mag file {entry['path']!r}: "
+                    f"travel_shift must be a finite number"
+                )
+            shifts[row] = shift
+    return dataclasses.replace(mag, scales=tuple(scales), shifts=tuple(shifts))
 
 
 def line_key(line_path: str | Path, root: Path, *, allow_absolute: bool = False) -> str:
@@ -246,13 +338,26 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             f"expected one of {sorted(keys_written)}"
         )
 
-    doc = {
-        "schema_version": CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION,
+    has_mag = bool(site.mag_files) or any(g.instrument == "mag" for g in site.grids)
+    version = (
+        MAG_SCHEMA_VERSION if has_mag else CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION
+    )
+    doc: dict[str, Any] = {
+        "schema_version": version,
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
     if site.cuts:
         doc["cuts"] = [_cut_to_dict(c) for c in site.cuts]
+    if site.mag_files:
+        doc["mag_files"] = [
+            _mag_file_to_dict(m, line_key(m.path, root, allow_absolute=allow_absolute))
+            for m in site.mag_files
+        ]
+    if site.mag_setup is not None:
+        doc["mag_setup"] = site.mag_setup.to_dict()
+    if site.mag_view:
+        doc["mag_view"] = site.mag_view
     if site.presets:
         doc["presets"] = site.presets
     if site.cubes:
@@ -290,6 +395,9 @@ def _finite(value: object) -> float | None:
     except (OverflowError, ValueError, TypeError):
         return None
     return number if math.isfinite(number) else None
+
+
+_FINISH_KEYS = ("method", "max_distance_spacings", "smooth_x_m", "smooth_y_m")
 
 
 def _clean_resolution(value: object) -> dict[str, float | str]:
@@ -359,7 +467,34 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     return out
 
 
-_COLOUR_SCOPES = ("grid", "site")
+_COLOUR_SCOPES = ("grid", "site", "mag")
+
+
+def _clean_mag_view(value: object, known_mag_grids: set[str]) -> dict[str, Any]:
+    """The Mag panel's remembered choices, each key kept only if usable.
+
+    Like every display choice, a damaged value reads as unset and never
+    blocks a survey from opening. The finish fields are vetted by the
+    rules of `_clean_resolution`.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, Any] = {}
+    if value.get("scope") in ("grid", "site"):
+        out["scope"] = value["scope"]
+    grid = value.get("grid")
+    if isinstance(grid, str) and grid in known_mag_grids:
+        out["grid"] = grid
+    cell = _finite(value.get("cell"))
+    if cell is not None and cell > 0:
+        out["cell"] = cell
+    finish = _clean_resolution(value.get("finish"))
+    finish = {k: v for k, v in finish.items() if k in _FINISH_KEYS}
+    if finish:
+        out["finish"] = finish
+    if isinstance(value.get("palette"), str):
+        out["palette"] = value["palette"]
+    return out
 
 
 def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
@@ -454,6 +589,17 @@ def load_site(path: str | Path) -> Site:
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
 
+    mag_entries = doc.get("mag_files", [])
+    if not isinstance(mag_entries, list):
+        raise ProjectError(f"{path}: 'mag_files' must be a list, got {type(mag_entries).__name__}")
+    site.mag_files = [_mag_file_from_dict(entry, root) for entry in mag_entries]
+    mag_setup = doc.get("mag_setup")
+    if isinstance(mag_setup, dict):
+        try:
+            site.mag_setup = MagSetup.from_dict(mag_setup)
+        except (TypeError, ValueError):
+            site.mag_setup = None
+
     cuts = doc.get("cuts", [])
     if not isinstance(cuts, list):
         raise ProjectError(f"{path}: 'cuts' must be a list, got {type(cuts).__name__}")
@@ -503,6 +649,9 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(f"{path}: 'site_view' must be an object, got {type(site_view).__name__}")
     site.site_view = _clean_site_view(site_view, known)
     site.slice_colours = _clean_slice_colours(doc.get("slice_colours", {}))
+    site.mag_view = _clean_mag_view(
+        doc.get("mag_view"), {g.id for g in grids if g.instrument == "mag"}
+    )
 
     site.validate()
     return site

@@ -14,6 +14,9 @@ import numpy as np
 
 from nsgeo.velocity import VelocityModel
 
+#: What a grid is surveyed with. Fixed once the grid exists.
+INSTRUMENTS: tuple[str, ...] = ("gpr", "mag")
+
 
 @dataclass(frozen=True)
 class Grid:
@@ -25,6 +28,11 @@ class Grid:
     crs: str
     default_spacing: float
     velocity: VelocityModel | None = None
+    instrument: str = "gpr"
+
+    def __post_init__(self) -> None:
+        if self.instrument not in INSTRUMENTS:
+            raise ValueError(f"instrument must be one of {INSTRUMENTS}, got {self.instrument!r}")
 
     def axes(self) -> tuple[np.ndarray, np.ndarray]:
         """Unit vectors of grid-local +X and +Y in world coordinates.
