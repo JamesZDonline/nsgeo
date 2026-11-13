@@ -114,6 +114,11 @@ release's notes list everything in it.
   panel's mockup under review. Then the QGIS 3-D view, and cuts in the
   ParaView scene.
 
+- **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
+  Bartington Grad601 files onto magnetometer grids and see them as one mag
+  map in a new Mag panel, beside the GPR. Building. **Plan B:** export the
+  mag map, destagger in Edit lines, and change a file's setup after import.
+
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
