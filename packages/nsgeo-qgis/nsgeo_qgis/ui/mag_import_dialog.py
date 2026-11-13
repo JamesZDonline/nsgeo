@@ -227,7 +227,7 @@ class MagImportDialog(QDialog):
     # ---- the rows ----------------------------------------------------------
     def add_files(self, paths: list[Path]) -> None:
         """Add files to the table. An unreadable one goes to the status line instead."""
-        error = ""
+        errors: list[str] = []
         on_site: list[str] = []
         for path in paths:
             path = Path(path)
@@ -239,13 +239,13 @@ class MagImportDialog(QDialog):
             try:
                 probe = MagFile.open(path, "", MagSetup())
             except (MagFileError, OSError) as exc:
-                error = f"Could not read {path.name}: {exc}"
+                errors.append(f"Could not read {path.name}: {exc}")
                 continue
             self._rows.append(_Row(path, probe.n_rows, probe.n_readings))
             self._append_table_row()
         self._take_free_grids()
         self._refresh()
-        notes = [error] if error else []
+        notes = list(errors)
         if on_site:
             notes.append(f"Already on the site, left out: {', '.join(on_site)}.")
         if notes:

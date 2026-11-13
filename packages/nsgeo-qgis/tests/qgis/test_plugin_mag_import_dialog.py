@@ -151,6 +151,19 @@ def test_an_unreadable_file_is_named_and_not_added(dialog, folder):
     )
 
 
+def test_every_unreadable_file_is_named(dialog, folder):
+    folder.mkdir(parents=True, exist_ok=True)
+    one = folder / "one.dat"
+    two = folder / "two.dat"
+    one.write_bytes(b"1\t2\t3\r\n4\t5\r\n")
+    two.write_bytes(b"1\t2\r\n4\t5\t6\r\n")
+    dialog.add_files([one, two])
+    assert dialog.table.rowCount() == 0
+    text = dialog.status.text()
+    assert text.startswith("Could not read one.dat: ")
+    assert " Could not read two.dat: " in text
+
+
 def test_import_after_the_site_was_replaced_adds_nothing(mag_site, dialog, folder, tmp_path):
     session, root = mag_site
     dialog.add_files([synthetic_grad601(folder, "a.dat")])
