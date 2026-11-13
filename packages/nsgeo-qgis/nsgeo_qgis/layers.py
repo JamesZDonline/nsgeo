@@ -26,7 +26,9 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +44,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsFields,
     QgsGeometry,
@@ -64,6 +67,7 @@ from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.session import Pick, SiteSession
+from nsgeo_qgis.surface_plan import FeatureRecord
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
 _KIND = {
@@ -143,6 +147,33 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
     ),
 }
 DERIVED = ("grids", "lines", "marks", "cuts")
+
+# M16 B (spec §4 call 8): the site's authored features -- surfaces now, more
+# kinds later. A plain attribute table with no geometry. Like `picks` it has
+# no other source of truth, so nothing ever drops or recreates it and a CRS
+# change leaves it alone; unlike `picks` it is never in `TABLES` (those are
+# rebuilt per CRS), never in the project or the Layers panel, and edited only
+# through nsgeo. Membership is the picks table's own `feature_id` column.
+FEATURES = "features"
+FEATURES_SPEC: list[tuple[str, str]] = [
+    ("feature_id", "str"),
+    ("name", "str"),
+    ("grid_id", "str"),
+    ("kind", "str"),
+    ("settings_json", "str"),
+    ("created", "str"),
+]
+
+
+@dataclass(frozen=True)
+class PickRow:
+    """One committed `picks` row: its fid, the pick, and its map position in
+    the package CRS (None for a row with no geometry)."""
+
+    fid: int
+    pick: Pick
+    point: tuple[float, float] | None
+
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
@@ -353,6 +384,9 @@ class SiteLayers(QObject):
         # already hold the NEW object, and the old one is only reachable
         # if something kept it).
         self._bound_picks: QgsVectorLayer | None = None
+        # The `features` table (see FEATURES): held here, never in `layers` or
+        # the project, so `detach` and `_on_layers_removed` leave it to us.
+        self._features: QgsVectorLayer | None = None
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
@@ -453,6 +487,7 @@ class SiteLayers(QObject):
             if ids:
                 self.project.removeMapLayers(ids)
             self.layers.clear()
+        self._features = None
         group = self.group
         if group is not None:
             parent = group.parent()
@@ -903,6 +938,10 @@ class SiteLayers(QObject):
                 # trying the other three, the same containment refresh()
                 # already gives each refill.
                 _log(f"could not prepare table {name!r}: {exc}", Qgis.MessageLevel.Critical)
+        try:
+            self._ensure_features_table(path)
+        except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            _log(f"could not prepare table {FEATURES!r}: {exc}", Qgis.MessageLevel.Critical)
         group = self.group
         if group is None:
             # #68: on top, above any imagery already open, rather than
@@ -942,6 +981,33 @@ class SiteLayers(QObject):
         # when the bound object hasn't changed (unbind-then-rebind onto
         # the same layer nets one connection, same as before).
         self._bind_picks_signals()
+
+    def _ensure_features_table(self, path: str) -> None:
+        """Create `features` only when it is absent, add any field an older
+        table lacks, and hold it open (not in the project). Never rebuilt, never
+        dropped: a table present but unopenable is refused, not replaced."""
+        if self._features_layer() is not None:
+            return
+        crs, _ = self._table_schema(path, FEATURES)
+        if crs is _TABLE_UNREADABLE:
+            raise RuntimeError(
+                f"the features table in {path} is present but could not be opened; "
+                "refusing to replace it -- it has no other source of truth"
+            )
+        if crs is None:
+            self._create_table(path, FEATURES, QgsWkbTypes.Type.NoGeometry, FEATURES_SPEC, None)
+        layer = QgsVectorLayer(f"{path}|layername={FEATURES}", FEATURES, "ogr")
+        if not layer.isValid():
+            raise RuntimeError(f"could not open table {FEATURES!r} in {path}")
+        missing = [(n, k) for n, k in FEATURES_SPEC if layer.fields().indexOf(n) < 0]
+        if missing:
+            provider = layer.dataProvider()
+            if not provider.addAttributes([QgsField(n, _KIND[k]) for n, k in missing]):
+                raise RuntimeError(
+                    f"could not add fields to {FEATURES!r}: {provider.error().message()}"
+                )
+            layer.updateFields()
+        self._features = layer
 
     def _legend_row(self, group: Any, name: str) -> int:
         """Where table `name` goes in `group`: just below the lowest of the
@@ -1337,7 +1403,7 @@ class SiteLayers(QObject):
         name: str,
         wkb: Any,
         spec: list[tuple[str, str]],
-        crs: QgsCoordinateReferenceSystem,
+        crs: QgsCoordinateReferenceSystem | None,
     ) -> None:
         opts = QgsVectorFileWriter.SaveVectorOptions()
         opts.driverName = "GPKG"
@@ -1348,7 +1414,12 @@ class SiteLayers(QObject):
             else QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
         )
         writer = QgsVectorFileWriter.create(
-            path, _fields(spec), wkb, crs, self.project.transformContext(), opts
+            path,
+            _fields(spec),
+            wkb,
+            QgsCoordinateReferenceSystem() if crs is None else crs,
+            self.project.transformContext(),
+            opts,
         )
         if writer.hasError() != QgsVectorFileWriter.WriterError.NoError:
             raise RuntimeError(f"could not create table {name!r}: {writer.errorMessage()}")
@@ -1859,6 +1930,150 @@ class SiteLayers(QObject):
             seq=None if seq == NULL else int(seq),
             zero_ns=_as_float(_attr(feature, "zero_ns")),
         )
+
+    # ---- features and pick membership (M16 B) -------------------------------
+    def _features_layer(self) -> QgsVectorLayer | None:
+        layer = self._features
+        if layer is None or sip.isdeleted(layer):
+            return None
+        return layer
+
+    def selected_pick_ids(self) -> list[int]:
+        """The fids selected on the picks layer, in order. Unsaved rows (added
+        in QGIS's editing mode) have negative fids; `pick_rows` leaves them out
+        and the caller counts them."""
+        layer = self._picks_layer()
+        return [] if layer is None else sorted(layer.selectedFeatureIds())
+
+    def pick_rows(self, fids: Iterable[int]) -> list[PickRow]:
+        """The committed rows among `fids` as `PickRow`s, by fid. An unsaved,
+        deleted or unreadable row is simply absent, so `len(result) < len(fids)`
+        says some could not be used."""
+        layer = self._picks_layer()
+        wanted = sorted({int(f) for f in fids if int(f) >= 0})
+        if layer is None or not wanted:
+            return []
+        request = QgsFeatureRequest().setFilterFids(wanted)
+        return [
+            row for row in map(self._pick_row, layer.dataProvider().getFeatures(request)) if row
+        ]
+
+    def _pick_row(self, feature: QgsFeature) -> PickRow | None:
+        pick = self._row_to_pick(feature, _as_str(_attr(feature, "line_key")))
+        if pick is None:
+            return None
+        geometry = feature.geometry()
+        point = None
+        if not geometry.isNull() and not geometry.isEmpty():
+            xy = geometry.asPoint()
+            point = (xy.x(), xy.y())
+        return PickRow(feature.id(), pick, point)
+
+    def members_by_feature(self) -> dict[str, list[PickRow]]:
+        """Every committed pick that belongs to a feature, by feature id, in
+        one scan. A `feature_id` that names no record in `features` is ignored
+        (a deleted surface's leftovers are not members of anything)."""
+        layer = self._picks_layer()
+        if layer is None:
+            return {}
+        known = {r.feature_id for r in self.feature_records()}
+        out: dict[str, list[PickRow]] = {}
+        for feature in layer.dataProvider().getFeatures():
+            fid = _as_opt_str(_attr(feature, "feature_id"))
+            if fid is None or fid not in known:
+                continue
+            row = self._pick_row(feature)
+            if row is not None:
+                out.setdefault(fid, []).append(row)
+        return out
+
+    def set_pick_feature(self, fids: Iterable[int], feature_id: str | None) -> None:
+        """Set (or, with None, clear) `feature_id` on committed rows `fids`,
+        through the provider as `follow_lines` writes: the edit buffer is never
+        read or changed, so a note typed in editing mode survives. Raises
+        RuntimeError if the write fails."""
+        layer = self._picks_layer()
+        if layer is None:
+            raise RuntimeError("the picks table is not open; no site is loaded")
+        provider = layer.dataProvider()
+        index = provider.fieldNameIndex("feature_id")
+        if index < 0:
+            raise RuntimeError("the picks table has no feature_id field")
+        value = NULL if feature_id is None else feature_id
+        changes = {int(f): {index: value} for f in fids if int(f) >= 0}
+        if not changes:
+            return
+        if not provider.changeAttributeValues(changes):
+            raise RuntimeError(f"could not update the picks: {provider.error().message()}")
+        layer.triggerRepaint()
+
+    def _feature_fid(self, feature_id: str) -> int:
+        layer = self._features_layer()
+        if layer is not None:
+            for feature in layer.dataProvider().getFeatures():
+                if _as_str(_attr(feature, "feature_id")) == feature_id:
+                    return int(feature.id())
+        raise KeyError(f"no feature with id {feature_id!r}")
+
+    def feature_records(self) -> list[FeatureRecord]:
+        """Every row of `features`, oldest first."""
+        layer = self._features_layer()
+        if layer is None:
+            return []
+        names = [f.name() for f in layer.fields() if f.name() != "fid"]
+        records = [
+            FeatureRecord.from_row({n: _as_str(_attr(f, n)) for n in names})
+            for f in layer.dataProvider().getFeatures()
+        ]
+        return records
+
+    def write_feature(self, record: FeatureRecord) -> None:
+        layer = self._features_layer()
+        if layer is None:
+            raise RuntimeError("the features table is not open; no site with a grid is loaded")
+        feature = QgsFeature(layer.fields())
+        for name, value in record.to_row().items():
+            feature[name] = value
+        ok, _ = layer.dataProvider().addFeatures([feature])
+        if not ok:
+            raise RuntimeError(
+                f"could not write the feature: {layer.dataProvider().error().message()}"
+            )
+
+    def update_feature(
+        self, feature_id: str, *, name: str | None = None, settings: Any = None
+    ) -> None:
+        """Change a record's name and/or settings. KeyError for an unknown id."""
+        layer = self._features_layer()
+        fid = self._feature_fid(feature_id)
+        assert layer is not None
+        provider = layer.dataProvider()
+        values: dict[int, Any] = {}
+        if name is not None:
+            values[provider.fieldNameIndex("name")] = name
+        if settings is not None:
+            values[provider.fieldNameIndex("settings_json")] = json.dumps(settings.to_dict())
+        if values and not provider.changeAttributeValues({fid: values}):
+            raise RuntimeError(f"could not update the feature: {provider.error().message()}")
+
+    def remove_feature(self, feature_id: str) -> None:
+        """Delete the record only; its picks keep their `feature_id` until the
+        caller clears it (`members_by_feature` ignores such leftovers)."""
+        layer = self._features_layer()
+        fid = self._feature_fid(feature_id)
+        assert layer is not None
+        if not layer.dataProvider().deleteFeatures([fid]):
+            raise RuntimeError(
+                f"could not delete the feature: {layer.dataProvider().error().message()}"
+            )
+
+    @staticmethod
+    def new_feature_id() -> str:
+        return uuid.uuid4().hex
+
+    @staticmethod
+    def now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ---- derived tables ---------------------------------------------------
     def refill_grids(self) -> None:

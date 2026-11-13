@@ -142,6 +142,9 @@ class SiteSession(QObject):
     preview_changed = pyqtSignal(str, int)  # ("", -1) when cleared
     stack_changed = pyqtSignal(str)
     picks_changed = pyqtSignal()
+    # M16 B: a surface was made, renamed, rebuilt-with-new-settings, or lost
+    # or gained picks. Written straight to the package like picks; never dirty.
+    features_changed = pyqtSignal()
     presets_changed = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
