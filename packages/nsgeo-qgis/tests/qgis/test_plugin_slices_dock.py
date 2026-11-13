@@ -1663,7 +1663,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
     assert dock.z0_spin.value() == record["z"]["t0_ns"]
     assert dock.cell_spin.value() == record["cell"]
-    assert dock.view_settings() == view
+    # A record without colours (#180) leaves them as they were: the default.
+    assert dock.view_settings() == dataclasses.replace(view, colours="nsgeo")
 
 
 def test_restore_cube_refuses_a_missing_grid(docked):
@@ -3936,3 +3937,62 @@ def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
     finally:
         profile.hide()
         profile.deleteLater()
+
+
+# ---- #180: a saved cube carries This grid's colours ---------------------------------------
+
+
+def test_view_settings_carry_this_grids_colours(docked):
+    dock, session = docked
+    assert (dock.view_settings().colours, dock.view_settings().style) == ("nsgeo", None)
+    session.set_slice_colours("grid", own=True, style="<qgis>mine</qgis>")
+    session.set_slice_colours("site", own=False, style="<qgis>site</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("own", "<qgis>mine</qgis>")
+
+
+def test_apply_view_restores_the_colours_and_an_older_record_leaves_them(docked):
+    dock, session = docked
+    view = dock.view_settings()
+    dock.apply_view(
+        dataclasses.replace(view, colours="own", style="<qgis>mine</qgis>"), spacing_m=0.5
+    )
+    assert session.slice_colours("grid") == {"own": True, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 1 and not dock.stretch_combo.isEnabled()
+    dock.apply_view(dataclasses.replace(view, colours=None, style=None), spacing_m=0.5)
+    assert session.slice_colours("grid")["own"] is True
+    dock.apply_view(dataclasses.replace(view, colours="nsgeo", style=None), spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 0 and dock.stretch_combo.isEnabled()
+
+
+def test_the_colours_choice_needs_an_open_survey(qgis_app):
+    dock = SlicesDock(SiteSession())
+    try:
+        assert not dock.colours_combo.isEnabled()
+        assert not dock.own_colours_on() and dock.own_style() is None
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_cube_saved_under_the_plugin_colours_keeps_no_style(docked):
+    """Review finding 6: restoring it must not replace a style refined since."""
+    dock, session = docked
+    session.set_slice_colours("grid", own=False, style="<qgis>refined</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("nsgeo", None)
+    dock.apply_view(view, spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>refined</qgis>"}
+
+
+def test_the_symbology_button_is_off_while_coverage_shows(docked):
+    """Review finding 5: an edit on the coverage colours would be lost."""
+    dock, session = docked
+    dock.colours_combo.setCurrentIndex(1)
+    assert dock.symbology_button.isEnabled()
+    dock.coverage_check.setChecked(True)
+    assert not dock.symbology_button.isEnabled()
+    assert "Show coverage" in dock.symbology_button.toolTip()
+    dock.coverage_check.setChecked(False)
+    assert dock.symbology_button.isEnabled()

@@ -201,6 +201,8 @@ Amplitude to pixels, with no Qt.
 | `colormap` | A 256-entry RGB lookup table, by name. |
 | `colormap_names` | The table names, optionally filtered by polarity. |
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
+| `display_range` | The colour range for an array by one of QGIS's computed rules: minimum and maximum, cumulative cut, or mean ± standard deviations. |
+| `gradient_stops` | The fewest colour stops that redraw a lookup table by straight-line blending, for a GIS gradient editor. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
 | `section_rgba8` | A section's values to (H, W, 4) uint8, transparent wherever blank, in either polarity. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
