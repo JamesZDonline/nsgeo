@@ -265,8 +265,10 @@ def test_the_deepest_time_hint_gives_the_depth_and_where_the_record_ends():
 def test_the_too_shallow_message_says_what_to_change():
     from nsgeo_qgis.paraview_scene import shallow_t1_message
 
-    text = shallow_t1_message(0.0)
-    assert "Down to must be deeper than time zero" in text and "0.0 ns" in text
+    assert shallow_t1_message(1.5, 2.0) == (
+        "Down to must be at least one depth step (2.000 ns) past time zero; it is 1.500 ns"
+    )
+    assert "it is 0.040 ns" in shallow_t1_message(0.04, 0.2)
 
 
 def test_the_hints_name_the_panels_cell_and_the_files_step():

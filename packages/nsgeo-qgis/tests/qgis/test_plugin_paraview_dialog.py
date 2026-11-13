@@ -589,3 +589,23 @@ def test_accepting_remembers_the_deepest_time(plugin, drive_dialog, message_log)
 
     _open_dialog(plugin_obj, drive_dialog, driver)
     assert s.volume_record("A")["t1_ns"] > 0
+
+
+def test_the_whole_record_can_be_remembered_over_an_earlier_depth(plugin):
+    plugin_obj, s = plugin
+    export = ParaViewExport(s, plugin_obj.slices_dock)
+    end = export.panel_values("A")[2]
+    s.remember_volume("A", t1_ns=end / 2)
+    dialog = _make_dialog(plugin_obj)
+    dialog.t1_spin.setValue(dialog.t1_spin.maximum())
+    s.remember_volume("A", **dialog.choice().to_record())  # as export_paraview does
+    again = _make_dialog(plugin_obj)
+    assert again.t1_spin.value() == pytest.approx(again.t1_spin.maximum())
+    assert s.volume_record("A")["t1_ns"] == pytest.approx(again.t1_spin.maximum(), abs=1e-3)
+
+
+def test_the_down_to_hint_is_cleared_when_the_size_is_refused(plugin):
+    dialog = _make_dialog(plugin[0])
+    assert dialog.t1_hint.text()
+    dialog.cell_spin.setValue(0.002)  # too fine: refused
+    assert dialog.t1_hint.text() == ""

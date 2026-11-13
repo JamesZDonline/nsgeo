@@ -115,25 +115,24 @@ def _depth_levels(z: ZAxis) -> int:
     return int(np.count_nonzero(z.times_ns() >= -1e-9))
 
 
-def _bounds(lines: Sequence[PreparedLine], t1_ns: float | None = None) -> tuple[float, float]:
-    """The two-way time range every line covers (as `SliceEngine.prepared_z_bounds`), its end
-    clipped to `t1_ns` when that is set."""
+def _lines_range(lines: Sequence[PreparedLine]) -> tuple[float, float]:
+    """The two-way time range every line covers (as `SliceEngine.prepared_z_bounds`)."""
     t0 = max(line.t0_ns for line in lines)
     t1 = min(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns for line in lines)
     if not t1 > t0:
         raise ValueError("the lines share no time range, so there is nothing to export")
-    return _clip(t0, t1, t1_ns)
-
-
-def _clip(t0: float, t1: float, t1_ns: float | None) -> tuple[float, float]:
-    """The range with its end at `t1_ns` when that is earlier; a ValueError, in words, when
-    that leaves nothing after the range's start."""
-    if t1_ns is None:
-        return t0, t1
-    t1 = min(t1, t1_ns)
-    if not t1 > t0:
-        raise ValueError(shallow_t1_message(t1_ns))
     return t0, t1
+
+
+def _clip(t0: float, t1: float, choice: VolumeChoice) -> tuple[float, float]:
+    """The range with its end at the choice's deepest time when that is earlier; a ValueError,
+    in words, when that leaves nothing after the range's start."""
+    if choice.t1_ns is None:
+        return t0, t1
+    clipped = min(t1, choice.t1_ns)
+    if not clipped > t0:
+        raise ValueError(shallow_t1_message(choice.t1_ns, choice.dz_ns))
+    return t0, clipped
 
 
 def _levels(t0: float, t1: float, choice: VolumeChoice) -> tuple[ZAxis, int]:
@@ -142,9 +141,15 @@ def _levels(t0: float, t1: float, choice: VolumeChoice) -> tuple[ZAxis, int]:
     nd = _depth_levels(z)
     if nd < 2:
         if choice.t1_ns is not None:
-            raise ValueError(shallow_t1_message(choice.t1_ns))
+            raise ValueError(shallow_t1_message(choice.t1_ns, choice.dz_ns))
         raise ValueError("the lines have no depth range to export")
     return z, nd
+
+
+def _effective_t1(choice: VolumeChoice, record_end: float) -> float | None:
+    """The deepest time as it affects the fill: None when it reaches the record's end."""
+    t1 = choice.t1_ns
+    return None if t1 is None or t1 >= record_end - 1e-6 else round(t1, 6)
 
 
 _HEX16 = "[0-9a-f]{16}"
@@ -239,7 +244,7 @@ class ParaViewExport:
         that sets time zero, a probe of where that first line's zero falls."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source, choice.t1_ns)
+        t0, t1 = self._time_range(source, choice)
         _z, nd = _levels(t0, t1, choice)
         return export_size_bytes(frame.nx, frame.ny, nd)
 
@@ -265,7 +270,7 @@ class ParaViewExport:
         too fine, or a grid that cannot be exported."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source, choice.t1_ns)
+        t0, t1 = self._time_range(source, choice)
         _z, nd = _levels(t0, t1, choice)
         velocity = self.session.resolved_velocity(source.line_keys[0])
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
@@ -296,12 +301,14 @@ class ParaViewExport:
         without them a cache file of the grid with the shape this export needs counts."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source, choice.t1_ns)
+        t0, t1 = self._time_range(source, choice)
         shape = (_levels(t0, t1, choice)[0].nz, frame.ny, frame.nx)
         cache_dir = paraview_folder(self.session, grid_id).parent / ".cache"
         found = _cache_files(cache_dir, grid_id)
         full = _npy_bytes(shape)
-        skey = self._settings_key(source, choice, self._finish(grid_id), frame)
+        skey = self._settings_key(
+            source, choice, self._finish(grid_id), frame, self._record_range(source)[1]
+        )
         engine = self._panel_engine(source)
         if engine is not None:
             # The exact name is known from the panel's prepared lines.
@@ -425,7 +432,8 @@ class ParaViewExport:
         lines, prov = self._prepared(source)
         got = {line.key for line in lines}
         self.skipped_lines = sorted(k for k in source.line_keys if k not in got)
-        t0, t1 = _bounds(lines, choice.t1_ns)
+        t0, record_end = _lines_range(lines)
+        t0, t1 = _clip(t0, record_end, choice)
         z, nd = _levels(t0, t1, choice)
         finish = self._finish(grid_id)
         velocity = self.session.resolved_velocity(lines[0].key)
@@ -449,7 +457,7 @@ class ParaViewExport:
         cache_part: Path | None = None
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
-            skey = self._settings_key(source, choice, finish, frame)
+            skey = self._settings_key(source, choice, finish, frame, record_end)
             key = self._cache_key(lines, prov, choice, t0, t1, finish, frame)
             cache = cache_dir / _cache_name(grid_id, skey, key)
             shape = (z.nz, frame.ny, frame.nx)
@@ -512,7 +520,12 @@ class ParaViewExport:
 
     # ---- the pieces ----------------------------------------------------------
     def _settings_key(
-        self, source: SourceChoice, choice: VolumeChoice, finish: Any, frame: CubeFrame
+        self,
+        source: SourceChoice,
+        choice: VolumeChoice,
+        finish: Any,
+        frame: CubeFrame,
+        record_end: float,
     ) -> str:
         """The part of a cache's name that is known without preparing any line: the lines and
         where they are placed, the preset, transform, cell, depth step, finish and frame, and the
@@ -529,7 +542,7 @@ class ParaViewExport:
             "transform": choice.transform,
             "cell": choice.cell,
             "dz_ns": choice.dz_ns,
-            "t1_ns": choice.t1_ns,
+            "t1_ns": _effective_t1(choice, record_end),
             "finish": [
                 finish.method,
                 finish.max_distance_m,

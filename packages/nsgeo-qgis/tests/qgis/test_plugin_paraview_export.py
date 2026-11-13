@@ -846,7 +846,9 @@ def test_a_deepest_time_that_leaves_no_depth_is_refused_in_words(synth_site):
         lambda: export.cache_bytes("Grid A", shallow),
         lambda: export.run("Grid A", shallow, progress=_noop),
     ):
-        with pytest.raises(ValueError, match="Down to must be deeper than time zero; it is "):
+        with pytest.raises(
+            ValueError, match="Down to must be at least one depth step .* past time zero; it is "
+        ):
             call()
     assert not (Path(session.root) / "paraview").exists()
 
@@ -869,3 +871,24 @@ def test_panel_values_end_with_the_records_end_time(synth_site):
     assert export.summary("Grid A", _choice(session)).max_depth_m == pytest.approx(
         float(session.resolved_velocity(session.keys()[0]).depth_at(np.asarray([end]))[0])
     )
+
+
+def test_a_deepest_time_past_the_end_shares_the_fill_with_none(synth_site):
+    session, _dock, export = synth_site
+    end = _full_end_ns(export, session)
+    whole, beyond = _choice(session), _choice(session, t1_ns=end * 3)
+    export.run("Grid A", whole, progress=_noop)
+    assert export.cache_bytes("Grid A", beyond) == 0
+    export.run("Grid A", beyond, progress=_noop)
+    assert len(list((Path(session.root) / "paraview" / ".cache").glob("Grid_A-*.npy"))) == 1
+
+
+def test_a_new_panel_z1_after_the_first_export_does_not_change_the_defaults(synth_site):
+    session, _dock, export = synth_site
+    first = export.defaults("Grid A")  # the panel has no z1: the whole record
+    assert first.t1_ns is None
+    session.remember_volume(
+        "Grid A", **_choice(session, t1_ns=_full_end_ns(export, session)).to_record()
+    )
+    session.remember_slice_resolution("Grid A", t1_ns=30.0)
+    assert export.defaults("Grid A").t1_ns == _full_end_ns(export, session)

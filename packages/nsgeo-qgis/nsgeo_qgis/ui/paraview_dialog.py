@@ -247,7 +247,6 @@ class ParaViewExportDialog(QDialog):
         return self.grid_combo.currentText()
 
     def choice(self) -> VolumeChoice:
-        at_end = self.t1_spin.value() >= self.t1_spin.maximum()  # to the end of the record
         return VolumeChoice(
             cell=self.cell_spin.value(),
             dz_ns=self.dz_spin.value(),
@@ -258,7 +257,7 @@ class ParaViewExportDialog(QDialog):
                 blur_m=self.blur_spin.value(),
                 trend_m=self.trend_spin.value(),
             ),
-            t1_ns=None if at_end else self.t1_spin.value(),
+            t1_ns=self.t1_spin.value(),
         )
 
     def paraview_path(self) -> str:
@@ -277,11 +276,6 @@ class ParaViewExportDialog(QDialog):
             self._loading = True
             try:
                 choice = self._choice_for(grid)
-                panel_cell, native_dt, self._record_end = (
-                    self._hints_for(grid) if self._hints_for is not None else (None, 0.0, None)
-                )
-                self.t1_spin.setMaximum(self._record_end or _NO_END_NS)
-                self.t1_spin.setValue(choice.t1_ns or self.t1_spin.maximum())
                 self.cell_spin.setValue(choice.cell)
                 self.dz_spin.setValue(choice.dz_ns)
                 self.transform_combo.set_value(choice.transform or NONE_VALUE)
@@ -289,9 +283,16 @@ class ParaViewExportDialog(QDialog):
                 self.period_spin.setValue(choice.settings.period_ns)
                 self.blur_spin.setValue(choice.settings.blur_m)
                 self.trend_spin.setValue(choice.settings.trend_m)
+                self.t1_hint.setText("")
                 if self._hints_for is not None:
+                    panel_cell, native_dt, self._record_end = self._hints_for(grid)
+                    self.t1_spin.setMaximum(self._record_end or _NO_END_NS)
                     self.cell_hint.setText(cell_hint(panel_cell))
                     self.dz_hint.setText(dt_hint(native_dt))
+                else:
+                    self._record_end = None
+                    self.t1_spin.setMaximum(_NO_END_NS)
+                self.t1_spin.setValue(choice.t1_ns or self.t1_spin.maximum())
             finally:
                 self._loading = False
             self._refresh()
@@ -307,6 +308,7 @@ class ParaViewExportDialog(QDialog):
             try:
                 summary = self._summary_for(self.grid_id(), self.choice())
             except ValueError as exc:
+                self.t1_hint.setText("")
                 self._show_problem(str(exc))
                 return
             if self._record_end is not None:

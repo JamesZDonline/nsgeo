@@ -226,8 +226,11 @@ def t1_hint(depth_m: float | None, record_end_ns: float) -> str:
     return end if depth_m is None else f"{depth_m:.2f} m; {end}"
 
 
-def shallow_t1_message(t1_ns: float) -> str:
-    return f"Down to must be deeper than time zero; it is {t1_ns:.1f} ns"
+def shallow_t1_message(t1_ns: float, dz_ns: float) -> str:
+    return (
+        f"Down to must be at least one depth step ({dz_ns:.3f} ns) past time zero; "
+        f"it is {t1_ns:.3f} ns"
+    )
 
 
 _SKIPPED_SHOWN = 3
