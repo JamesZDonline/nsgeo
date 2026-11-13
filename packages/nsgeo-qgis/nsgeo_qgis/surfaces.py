@@ -1,6 +1,11 @@
-"""Surfaces: the site's authored surface records and which picks belong to
-each (M16 B Task 2; spec §4 calls 8 and 10, §5.3). Membership only -- building
-a surface is Task 3.
+"""Surfaces: the site's authored surface records, which picks belong to each (M16 B
+Task 2; spec §4 calls 8 and 10, §5.3), and building one (Task 3; calls 2, 7, 9, 17).
+
+A build gets its lines and its kept fill from `ParaViewExport.fill` at the grid's own 3-D
+resolution, runs the core builder and writes `<site>/surfaces/<grid>/`: per surface an
+`.npz` (the depth grid), a `.2dm` mesh and a `.dat` depth dataset named by feature id and a
+build key, then `<id>.json` last, so a build is complete exactly when its json names its
+files. A cancelled or failed build leaves the previous build's files and json untouched.
 
 A surface is a row in `features` plus every `picks` row whose `feature_id`
 names it. Both live in the GeoPackage and are written straight through the
@@ -11,29 +16,95 @@ emits `session.features_changed` after the write.
 
 from __future__ import annotations
 
+import contextlib
+import json
+import math
+import os
+import re
+import traceback
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
+import nsgeo
+import numpy as np
 from nsgeo.model import is_cut_key
-from nsgeo.slices import SurfaceSettings, picks_span_an_area
+from nsgeo.slices import (
+    SurfaceSettings,
+    build_surface,
+    picks_span_an_area,
+    surface_mesh,
+    surface_volume,
+)
 
 from nsgeo_qgis.layers import PickRow, SiteLayers
+from nsgeo_qgis.paraview_export import (
+    ParaViewExportCancelled,
+    _safe,
+    _slab_levels,
+    place_picks,
+)
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.surface_plan import (
+    INPUTS,
     KIND_SURFACE,
     FeatureRecord,
     clean_name,
     grid_mismatch_refusal,
+    input_hash,
+    mesh_2dm,
+    mesh_dat,
     name_refusal,
     new_feature_id,
     now_iso,
+    rebuild_refusal,
     remove_refusal,
     selection_refusal,
 )
 
 if TYPE_CHECKING:
     from nsgeo_qgis.paraview_export import ParaViewExport
+
+# Of a build's progress, the share spent on the fill's levels and on the volume's slabs;
+# the rest is the surfaces themselves.
+_FILL_SHARE = 80
+_VOLUME_SHARE = 95
+
+_OWN_FILES = re.compile(r"[0-9a-f]{32}(-[0-9a-f]{8}\.(npz|2dm|dat)|\.json)(\.part)?")
+
+
+@dataclass(frozen=True)
+class SurfaceState:
+    """`built`: a complete build exists; `stale`: the inputs (of `INPUTS`) that differ from
+    that build's; `report`: its json (None until built)."""
+
+    built: bool
+    stale: tuple[str, ...]
+    report: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class BuildReport:
+    feature_id: str
+    name: str
+    report: dict[str, Any]
+    files: tuple[Path, ...]
+
+
+@dataclass(frozen=True, eq=False)
+class BuiltSurface:
+    """A saved build: the npz's arrays beside its json."""
+
+    report: dict[str, Any]
+    depth_m: np.ndarray
+    strength: np.ndarray
+    cell: float
+    origin: tuple[float, float]
+    azimuth: float
+    crs: str
+    files: dict[str, Path]
 
 
 @dataclass(frozen=True)
@@ -223,3 +294,367 @@ class Surfaces:
         self.layers.clear_pick_feature(feature_id)
         self.layers.remove_feature(feature_id)
         self._changed()
+
+    # ---- building (Task 3) ----------------------------------------------------
+    def _export(self) -> ParaViewExport:
+        if self.export_for is None:
+            raise RuntimeError("surfaces cannot be built here: no 3-D export is attached")
+        return self.export_for()
+
+    def folder(self, grid_id: str) -> Path:
+        """Where a grid's built surfaces go: `<site>/surfaces/<grid>`."""
+        return Path(self.session.root) / "surfaces" / _safe(grid_id)
+
+    def _json_path(self, record: FeatureRecord) -> Path:
+        return self.folder(record.grid_id) / f"{record.feature_id}.json"
+
+    def inputs(self, feature_id: str) -> dict[str, str]:
+        """What the surface's numbers depend on, one 16-hex hash per `INPUTS` name. Reads the
+        record and the session only; nothing is prepared."""
+        export = self._export()
+        record = self._record(feature_id)
+        session = self.session
+        grid = session.grid(record.grid_id)
+        choice = export.defaults(record.grid_id)
+        source = export.source_choice(record.grid_id, choice)
+        finish = export.fill_settings(record.grid_id)
+        members = self.members(feature_id)
+        picks = sorted(
+            [r.pick.line_key, r.pick.trace, r.pick.time_ns, r.pick.zero_ns] for r in members
+        )
+        keys = sorted(source.line_keys)
+        return {
+            "picks": input_hash(picks),
+            "settings": input_hash(record.settings.to_dict()),
+            "source": input_hash(
+                {
+                    "preset": source.preset,
+                    "steps": list(session.site.presets.get(source.preset, [])),
+                    "transform": source.transform,
+                    "lines": [[k, repr(session.line_for_key(k).placement)] for k in keys],
+                    "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
+                }
+            ),
+            "resolution": input_hash(
+                {
+                    "cell": choice.cell,
+                    "dz_ns": choice.dz_ns,
+                    "t1_ns": export.effective_t1(record.grid_id, choice),
+                }
+            ),
+            "fill": input_hash(
+                [
+                    finish.method,
+                    finish.max_distance_m,
+                    finish.search_radius_m,
+                    finish.smooth_x_m,
+                    finish.smooth_y_m,
+                ]
+            ),
+            "volume": input_hash(
+                {"period_ns": choice.settings.period_ns, "trend_m": choice.settings.trend_m}
+            ),
+            "velocity": input_hash(session.resolved_velocity(source.line_keys[0]).to_dict()),
+        }
+
+    def _read_report(self, record: FeatureRecord) -> dict[str, Any] | None:
+        """The surface's json when it is whole: it parses and the files it names exist."""
+        path = self._json_path(record)
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+            files = [path.parent / name for name in report["files"].values()]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if not isinstance(report, dict) or not all(f.is_file() for f in files):
+            return None
+        return report
+
+    def state(self, feature_id: str) -> SurfaceState:
+        record = self._record(feature_id)
+        report = self._read_report(record)
+        if report is None:
+            return SurfaceState(False, (), None)
+        try:
+            now = self.inputs(feature_id)
+        except ValueError:
+            # No preset, or lines that share no time range: what it was built from is gone.
+            return SurfaceState(True, ("source",), report)
+        then = report.get("inputs", {})
+        stale = tuple(name for name in INPUTS if now.get(name) != then.get(name))
+        return SurfaceState(True, stale, report)
+
+    def built(self, feature_id: str) -> BuiltSurface | None:
+        record = self._record(feature_id)
+        report = self._read_report(record)
+        if report is None:
+            return None
+        folder = self.folder(record.grid_id)
+        files = {kind: folder / name for kind, name in report["files"].items()}
+        try:
+            with np.load(files["npz"]) as npz:
+                return BuiltSurface(
+                    report=report,
+                    depth_m=np.array(npz["depth_m"]),
+                    strength=np.array(npz["strength"]),
+                    cell=float(npz["cell"]),
+                    origin=(float(npz["origin"][0]), float(npz["origin"][1])),
+                    azimuth=float(npz["azimuth"]),
+                    crs=str(npz["crs"]),
+                    files=files,
+                )
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def sweep(self, grid_id: str) -> list[Path]:
+        """Delete the files in the grid's folder that no surface's json names, and any
+        unfinished `.part`; files that are not nsgeo's own are never touched, and one that
+        cannot be deleted (open elsewhere) is skipped. Returns what was deleted."""
+        folder = self.folder(grid_id)
+        if not folder.is_dir():
+            return []
+        keep: set[str] = set()
+        for record in self.records():
+            if record.grid_id != grid_id:
+                continue
+            path = self._json_path(record)
+            if not path.exists():
+                continue
+            keep.add(path.name)
+            try:
+                keep.update(json.loads(path.read_text(encoding="utf-8"))["files"].values())
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                # A json that cannot be read cannot say what it owns: keep everything of its.
+                keep.update(
+                    p.name for p in folder.iterdir() if p.name.startswith(f"{record.feature_id}-")
+                )
+        gone: list[Path] = []
+        for path in sorted(folder.iterdir()):
+            if not path.is_file() or not _OWN_FILES.fullmatch(path.name):
+                continue
+            if path.name in keep and not path.name.endswith(".part"):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            gone.append(path)
+        return gone
+
+    def build(
+        self, feature_ids: Iterable[str], *, progress: Callable[[int, int], bool]
+    ) -> list[BuildReport]:
+        """Build each surface of `feature_ids` (all on one grid) at the grid's own 3-D
+        resolution. `progress(done, total)` is called with a total of 100; False cancels with
+        `ParaViewExportCancelled` and leaves every earlier build as it was. Synchronous."""
+        ids = list(dict.fromkeys(feature_ids))
+        if not ids:
+            return []
+        records = [self._record(i) for i in ids]
+        grids = {r.grid_id for r in records}
+        if len(grids) > 1:
+            raise ValueError("a build is of one grid's surfaces; these are on more than one grid")
+        members = {r.feature_id: self.members(r.feature_id) for r in records}
+        for record in records:
+            text = rebuild_refusal(record.name, len(members[record.feature_id]))
+            if text:
+                raise ValueError(text)
+        export = self._export()
+        grid_id = records[0].grid_id
+        choice = export.defaults(grid_id)
+        self.session.remember_volume(grid_id, **choice.to_record())
+        folder = self.folder(grid_id)
+        made: list[Path] = []
+        try:
+            results = self._compute(export, grid_id, choice, records, members, progress)
+            folder.mkdir(parents=True, exist_ok=True)
+            reports = [
+                self._write(folder, record, results[record.feature_id], made) for record in records
+            ]
+            # The jsons last: a build is complete exactly when its json names its files.
+            out = []
+            for record, report in zip(records, reports):
+                part = folder / f"{record.feature_id}.json.part"
+                made.append(part)
+                part.write_text(json.dumps(report, indent=2), encoding="utf-8")
+                os.replace(part, self._json_path(record))
+                made.remove(part)
+                out.append(
+                    BuildReport(
+                        record.feature_id,
+                        record.name,
+                        report,
+                        tuple(folder / n for n in report["files"].values()),
+                    )
+                )
+        except BaseException as exc:
+            # The traceback keeps the kept fill's memory map alive (see ParaViewExport.run).
+            traceback.clear_frames(exc.__traceback__)
+            for path in made:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+            raise
+        return out
+
+    def _compute(
+        self,
+        export: ParaViewExport,
+        grid_id: str,
+        choice: Any,
+        records: list[FeatureRecord],
+        members: dict[str, list[PickRow]],
+        progress: Callable[[int, int], bool],
+    ) -> dict[str, dict[str, Any]]:
+        """Fill, volume and the core builder for each record, in memory; nothing is written."""
+
+        def report(done: float) -> None:
+            if not progress(int(done), 100):
+                raise ParaViewExportCancelled("build cancelled")
+
+        def fill_progress(done: int, total: int) -> bool:
+            report(_FILL_SHARE * done / max(1, total))
+            return True
+
+        got = export.fill(grid_id, choice, progress=fill_progress)
+        window = max(1, int(round(choice.settings.period_ns / got.z.dz_ns)))
+        vol = surface_volume(
+            got.filled,
+            got.z,
+            got.velocity,
+            choice.cell,
+            choice.settings,
+            slab_levels=_slab_levels(got.frame.n_cells, window),
+            progress=lambda done, n: (
+                report(_FILL_SHARE + (_VOLUME_SHARE - _FILL_SHARE) * done / max(1, n)) or True
+            ),
+        )
+        prepared = {line.key for line in got.lines}
+        out: dict[str, dict[str, Any]] = {}
+        for k, record in enumerate(records):
+            rows = [(r.pick.line_key, r.pick) for r in members[record.feature_id]]
+            placed = place_picks(rows, got.lines, got.prov, got.frame, got.velocity)
+            used: list[tuple[Any, Any]] = []
+            skipped: list[dict[str, str]] = []
+            for (key, pick), spot in zip(rows, placed):
+                if spot is None:
+                    why = (
+                        "its line is not among the lines used for 3-D"
+                        if key not in prepared
+                        else "its depth could not be found"
+                    )
+                elif not (math.isfinite(spot.x_m) and math.isfinite(spot.y_m)):
+                    why = "its position on the line could not be found"
+                else:
+                    used.append((pick, spot))
+                    continue
+                skipped.append({"line_key": key, "why": why})
+            try:
+                surface = build_surface(
+                    vol,
+                    np.array([s.x_m for _, s in used]),
+                    np.array([s.y_m for _, s in used]),
+                    np.array([s.depth_m for _, s in used]),
+                    record.settings,
+                )
+            except ValueError as exc:
+                raise ValueError(f"“{record.name}”: {exc}") from exc
+            out[record.feature_id] = {
+                "surface": surface,
+                "used": used,
+                "skipped": skipped,
+                "frame": got.frame,
+            }
+            report(_VOLUME_SHARE + (100 - _VOLUME_SHARE) * (k + 1) / len(records))
+        del vol, got
+        return out
+
+    def _label(self, key: str) -> str:
+        line = self.session.line_for_key(key)
+        return str(getattr(line.placement, "label", None) or line.path.stem)
+
+    def _write(
+        self, folder: Path, record: FeatureRecord, result: dict[str, Any], made: list[Path]
+    ) -> dict[str, Any]:
+        """Write one surface's three files (each `.part`, then renamed; every path is added
+        to `made` so a failure can remove them) and return its json document."""
+        surface, frame = result["surface"], result["frame"]
+        key = uuid.uuid4().hex[:8]
+        names = {kind: f"{record.feature_id}-{key}.{kind}" for kind in ("npz", "2dm", "dat")}
+        points, triangles, _cells = surface_mesh(surface.depth_m, surface.cell)
+        x_hat, y_hat = frame.axes()
+        origin = np.asarray(frame.origin, dtype=float)
+        world = origin + points[:, :1] * x_hat + points[:, 1:2] * y_hat
+        texts = {
+            "2dm": mesh_2dm(world, -points[:, 2], triangles),
+            "dat": mesh_dat(points[:, 2], len(triangles)),
+        }
+
+        def write(kind: str, put: Callable[[Any], None], binary: bool) -> None:
+            final = folder / names[kind]
+            part = final.with_name(final.name + ".part")
+            made.append(part)
+            with open(
+                part, "wb" if binary else "w", **({} if binary else {"encoding": "utf-8"})
+            ) as f:
+                put(f)
+            os.replace(part, final)
+            made.remove(part)
+            made.append(final)
+
+        write(
+            "npz",
+            lambda f: np.savez(
+                f,
+                depth_m=surface.depth_m,
+                strength=surface.strength,
+                cell=np.float64(surface.cell),
+                origin=origin,
+                azimuth=np.float64(frame.azimuth),
+                crs=np.array(str(frame.crs)),
+            ),
+            True,
+        )
+        write("2dm", lambda f: f.write(texts["2dm"]), False)
+        write("dat", lambda f: f.write(texts["dat"]), False)
+        fit = surface.fit
+        outliers = []
+        for o in fit.outliers:
+            pick, spot = result["used"][o.index]
+            outliers.append(
+                {
+                    "line_key": spot.line_key,
+                    "label": self._label(spot.line_key),
+                    "distance_m": pick.distance_m,
+                    "picked_m": o.picked_m,
+                    "surface_m": o.surface_m,
+                    "reason": o.reason,
+                }
+            )
+        choice = self._export().defaults(record.grid_id)
+        return {
+            "feature_id": record.feature_id,
+            "name": record.name,
+            "grid": record.grid_id,
+            "kind": record.kind,
+            "built_utc": now_iso(),
+            "nsgeo_version": nsgeo.__version__,
+            "inputs": self.inputs(record.feature_id),
+            "resolution": {"cell": choice.cell, "dz_ns": choice.dz_ns},
+            "settings": record.settings.to_dict(),
+            "offset_m": float(surface.offset_m),
+            "offset_votes": int(surface.offset_votes),
+            "offset_at_limit": int(surface.offset_at_limit),
+            "offset_reliable": bool(surface.offset_reliable),
+            "fit": {
+                "picks": len(result["used"]),
+                "within_2cm": fit.within_close,
+                "within_5cm": fit.within_near,
+                "further": fit.further,
+                "at_edge": fit.at_edge,
+                "on_holes": fit.on_holes,
+            },
+            "outliers": outliers,
+            "skipped": result["skipped"],
+            "cells": int(np.isfinite(surface.depth_m).sum()),
+            "region_cells": int(surface.region.sum()),
+            "files": names,
+        }

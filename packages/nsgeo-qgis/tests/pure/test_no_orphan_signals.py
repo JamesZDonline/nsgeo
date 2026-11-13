@@ -40,6 +40,9 @@ KNOWN_UNCONSUMED = {
     # M16 B Task 2 declares it; Task 4's `SurfaceLayers` consumes it and removes
     # this line (the next test enforces that).
     "features_changed",
+    # M16 B Task 3 declares it; Task 4's surface layers follow it (to show a stale surface)
+    # and remove this line (the next test enforces that).
+    "slice_sources_changed",
 }
 
 # A signal name declared by more than one class cannot be judged by a

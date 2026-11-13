@@ -145,6 +145,9 @@ class SiteSession(QObject):
     # M16 B: a surface was made, renamed, rebuilt-with-new-settings, or lost
     # or gained picks. Written straight to the package like picks; never dirty.
     features_changed = pyqtSignal()
+    # M16 B: a grid's remembered slice source (preset, lines, resolution, 3-D choice, gain)
+    # really changed; carries the grid's id. A surface's staleness reads these.
+    slice_sources_changed = pyqtSignal(str)
     presets_changed = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -1169,6 +1172,7 @@ class SiteSession(QObject):
             return
         sources[grid_id] = new
         self._set_dirty(True)
+        self.slice_sources_changed.emit(grid_id)
 
     def remember_slice_source(
         self, grid_id: str, *, preset: str, lines: tuple[str, ...] | None

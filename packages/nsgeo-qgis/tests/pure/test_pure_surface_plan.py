@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import numpy as np
 from nsgeo.slices import SurfaceSettings
 from nsgeo_qgis.surface_plan import (
+    INPUTS,
     KIND_SURFACE,
+    STALE_REASONS,
     FeatureRecord,
+    built_message,
     clean_name,
     delete_question,
+    empty_message,
+    fit_rows,
+    mesh_2dm,
+    mesh_dat,
     move_note,
     name_refusal,
+    outlier_line,
+    rebuild_refusal,
     remove_refusal,
     selection_refusal,
+    stale_text,
 )
 
 
@@ -108,3 +119,118 @@ def test_move_note_says_when_a_surface_is_left_too_small():
     assert "Ditch” is left" not in note
     assert "too few" not in move_note({"Bowl": 4}, 30, {"Bowl": 3})
     assert "left with 1 pick," in move_note({"Bowl": 4}, 30, {"Bowl": 1})
+
+
+def test_stale_text_names_every_reason():
+    assert set(STALE_REASONS) == set(INPUTS)
+    assert STALE_REASONS["picks"] == "its picks changed"
+    assert STALE_REASONS["resolution"] == "the grid's 3-D cell or depth step changed"
+    assert stale_text(()) == ""
+    for name in INPUTS:
+        assert STALE_REASONS[name] in stale_text([name])
+    one = stale_text(["picks"])
+    assert one.startswith("Stale: its picks changed since it was built.")
+    assert "last build" in one
+    # panel order, "and" before the last
+    both = stale_text(["resolution", "picks"])
+    assert "its picks changed and the grid's 3-D cell or depth step changed" in both
+
+
+REPORT = {
+    "fit": {
+        "picks": 88,
+        "within_2cm": 82,
+        "within_5cm": 3,
+        "further": 0,
+        "at_edge": 0,
+        "on_holes": 3,
+    },
+    "offset_m": 0.036,
+    "offset_votes": 85,
+    "offset_at_limit": 2,
+    "offset_reliable": True,
+    "cells": 5214,
+    "region_cells": 6038,
+    "resolution": {"cell": 0.05, "dz_ns": 0.1},
+    "built_utc": "2026-11-13T10:42:07+00:00",
+}
+
+
+def test_fit_rows_match_the_mockup():
+    rows = fit_rows(REPORT)
+    assert [k for k, _ in rows] == ["Picks", "Offset", "Cover", "Built"]
+    assert dict(rows) == {
+        "Picks": "82 of 88 within 2 cm · 3 within 5 cm · 3 on holes",
+        "Offset": "your picks sit 3.6 cm above the strongest swing",
+        "Cover": "5,214 of 6,038 cells (86%); the rest are holes",
+        "Built": "2026-11-13 10:42 UTC at 0.05 m, 0.1 ns",
+    }
+
+
+def test_fit_rows_show_edge_picks_and_say_when_the_offset_is_unreliable():
+    report = {
+        **REPORT,
+        "fit": {**REPORT["fit"], "at_edge": 4, "further": 2},
+        "offset_m": -0.02,
+        "offset_at_limit": 60,
+        "offset_reliable": False,
+    }
+    rows = dict(fit_rows(report))
+    assert "4 at the window's edge" in rows["Picks"] and "2 further away" in rows["Picks"]
+    assert "2.0 cm below the strongest swing" in rows["Offset"]
+    assert "5 cm search limit" in rows["Offset"] and "check the picks" in rows["Offset"]
+    assert "no pick had a swing" in dict(fit_rows({**REPORT, "offset_votes": 0}))["Offset"]
+    assert dict(fit_rows({**REPORT, "cells": 36, "region_cells": 36}))["Cover"] == (
+        "all 36 cells; no holes"
+    )
+    assert "no cell" in dict(fit_rows({**REPORT, "cells": 0, "region_cells": 0}))["Cover"]
+
+
+def test_outlier_lines_and_the_messages():
+    hole = {
+        "line_key": "a/FILE__023.DZT",
+        "label": "FILE__023",
+        "distance_m": 4.15,
+        "picked_m": 0.62,
+        "surface_m": None,
+        "reason": "hole",
+    }
+    far = {
+        "line_key": "k",
+        "label": "FILE__027",
+        "distance_m": 1.35,
+        "picked_m": 0.58,
+        "surface_m": 0.55,
+        "reason": "far",
+    }
+    assert outlier_line(hole) == "FILE__023 at 4.15 m · picked 0.62 m · on a hole"
+    assert outlier_line(far) == "FILE__027 at 1.35 m · picked 0.58 m · surface 0.55 m (3.0 cm)"
+    edge = {**far, "reason": "edge", "distance_m": None}
+    assert outlier_line(edge).endswith("held at the window's edge")
+    assert outlier_line(edge).startswith("FILE__027 · picked")
+    assert built_message("Bowl", REPORT) == (
+        "Built “Bowl”: 82 of 88 picks within 2 cm, 3 on holes. "
+        "Your picks sit 3.6 cm above the strongest swing."
+    )
+    assert "“Bowl”" in empty_message("Bowl") and "strength" in empty_message("Bowl")
+    assert rebuild_refusal("Bowl", 3) == ""
+    assert "too few to rebuild" in rebuild_refusal("Bowl", 2)
+
+
+def test_the_mesh_files():
+    xy = np.array([[100.0, 200.0], [101.0, 200.0], [100.0, 201.0]])
+    text = mesh_2dm(xy, np.array([-0.5, -0.6, -0.55]), np.array([[0, 1, 2]]))
+    assert text.splitlines() == [
+        "MESH2D",
+        "ND 1 100.0000 200.0000 -0.50000",
+        "ND 2 101.0000 200.0000 -0.60000",
+        "ND 3 100.0000 201.0000 -0.55000",
+        "E3T 1 1 2 3 1",
+    ]
+    dat = mesh_dat(np.array([0.5, 0.6, 0.55]), 1).splitlines()
+    assert (
+        dat[0] == "DATASET"
+        and dat[-1] == "ENDDS"
+        and dat[7:-1] == ["0.50000", "0.60000", "0.55000"]
+    )
+    assert mesh_2dm(np.empty((0, 2)), np.empty(0), np.empty((0, 3), dtype=int)) == "MESH2D\n"

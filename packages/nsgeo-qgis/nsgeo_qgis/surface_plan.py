@@ -8,6 +8,7 @@ and the dialog shows it unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Collection, Iterable, Mapping
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
 from nsgeo.slices import SurfaceSettings
 
 KIND_SURFACE = "surface"
@@ -210,3 +212,172 @@ def remove_refusal(left: int) -> str:
 def delete_question(name: str, n_picks: int) -> str:
     stay = "Its pick stays; it stops" if n_picks == 1 else f"Its {n_picks} picks stay; they stop"
     return f"Delete “{name}”? {stay} belonging to it. Its map layer and built files go."
+
+
+def rebuild_refusal(name: str, members: int) -> str:
+    """Why a surface cannot be rebuilt, or "" (picks moved out of it can leave it with too few)."""
+    if members >= MIN_PICKS:
+        return ""
+    return (
+        f"“{name}” has {members} pick{'' if members == 1 else 's'} left, too few to rebuild; "
+        f"a surface needs at least {MIN_PICKS}. Add picks to it, or delete it."
+    )
+
+
+# ---- what a build depends on -------------------------------------------------------------
+#: What a surface's numbers depend on, in the order the panel lists them (spec call 9).
+INPUTS = ("picks", "settings", "source", "resolution", "fill", "volume", "velocity")
+
+STALE_REASONS: dict[str, str] = {
+    "picks": "its picks changed",
+    "settings": "its settings changed",
+    "source": "the grid's processing, lines or placement changed",
+    "resolution": "the grid's 3-D cell or depth step changed",
+    "fill": "the grid's fill method or distances changed",
+    "volume": "the 3-D wave period or depth balance changed",
+    "velocity": "the grid's velocity changed",
+}
+
+
+def input_hash(value: Any) -> str:
+    """16 hex characters of the sha1 of `value` as sorted JSON."""
+    text = json.dumps(value, sort_keys=True, default=str)
+    return hashlib.sha1(text.encode()).hexdigest()[:16]
+
+
+def stale_text(stale: Iterable[str]) -> str:
+    """The line the panel shows for a stale surface ("" when nothing changed)."""
+    reasons = [STALE_REASONS.get(name, f"{name} changed") for name in INPUTS if name in set(stale)]
+    reasons += [f"{n} changed" for n in stale if n not in STALE_REASONS]
+    if not reasons:
+        return ""
+    return (
+        f"Stale: {_and(reasons)} since it was built. "
+        "The map and the next export show the last build."
+    )
+
+
+# ---- the fit report ---------------------------------------------------------------------
+def _cm(metres: float) -> str:
+    return f"{abs(metres) * 100.0:.1f} cm"
+
+
+def offset_text(report: Mapping[str, Any]) -> str:
+    """Where the picks sit against the strongest swing; says plainly when the offset is
+    unreliable (most picks found their strongest swing only at the search limit)."""
+    votes = int(report.get("offset_votes", 0))
+    if votes <= 0:
+        return "no pick had a swing in reach, so the offset could not be measured"
+    offset = float(report.get("offset_m", 0.0))
+    if abs(offset) < 0.0005:
+        text = "your picks sit on the strongest swing"
+    else:
+        side = "above" if offset > 0 else "below"
+        text = f"your picks sit {_cm(offset)} {side} the strongest swing"
+    if not report.get("offset_reliable", True):
+        text += (
+            "; most of your picks found their strongest swing only at the 5 cm search limit; "
+            "a stronger reflection out of reach may be pulling this surface — check the picks"
+        )
+    return text
+
+
+def _fit(report: Mapping[str, Any]) -> Mapping[str, Any]:
+    fit = report.get("fit", {})
+    return fit if isinstance(fit, Mapping) else {}
+
+
+def fit_rows(report: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Picks, Offset, Cover and Built, as the mockup's fit block."""
+    fit = _fit(report)
+    picks = int(fit.get("picks", 0))
+    parts = [
+        f"{int(fit.get('within_2cm', 0))} of {picks} within 2 cm",
+        f"{int(fit.get('within_5cm', 0))} within 5 cm",
+    ]
+    if int(fit.get("further", 0)):
+        parts.append(f"{int(fit['further'])} further away")
+    if int(fit.get("at_edge", 0)):
+        parts.append(f"{int(fit['at_edge'])} at the window's edge")
+    parts.append(f"{int(fit.get('on_holes', 0))} on holes")
+    cells, region = int(report.get("cells", 0)), int(report.get("region_cells", 0))
+    if region > 0 and cells >= region:
+        cover = f"all {cells:,} cells; no holes"
+    elif region > 0:
+        share = round(100.0 * cells / region)
+        cover = f"{cells:,} of {region:,} cells ({share}%); the rest are holes"
+    else:
+        cover = "no cell was inside the picks' area"
+    res = report.get("resolution", {})
+    built = str(report.get("built_utc", ""))[:16].replace("T", " ")
+    return [
+        ("Picks", " · ".join(parts)),
+        ("Offset", offset_text(report)),
+        ("Cover", cover),
+        (
+            "Built",
+            f"{built} UTC at {float(res.get('cell', 0.0)):g} m, "
+            f"{float(res.get('dz_ns', 0.0)):g} ns",
+        ),
+    ]
+
+
+def outlier_line(outlier: Mapping[str, Any]) -> str:
+    """One outlier as the panel lists it: `FILE__023 at 4.15 m · picked 0.62 m · on a hole`."""
+    where = str(outlier.get("label", "")) or str(outlier.get("line_key", ""))
+    if outlier.get("distance_m") is not None:
+        where += f" at {float(outlier['distance_m']):.2f} m"
+    text = f"{where} · picked {float(outlier.get('picked_m', 0.0)):.2f} m"
+    surface = outlier.get("surface_m")
+    reason = outlier.get("reason", "")
+    if surface is None or reason == "hole":
+        return text + " · on a hole"
+    gap = float(surface) - float(outlier.get("picked_m", 0.0))
+    text += f" · surface {float(surface):.2f} m ({_cm(gap)})"
+    return text + (" · held at the window's edge" if reason == "edge" else "")
+
+
+def built_message(name: str, report: Mapping[str, Any]) -> str:
+    """The message bar's line after a build."""
+    fit = _fit(report)
+    text = (
+        f"Built “{name}”: {int(fit.get('within_2cm', 0))} of {int(fit.get('picks', 0))} picks "
+        f"within 2 cm, {int(fit.get('on_holes', 0))} on holes."
+    )
+    offset = offset_text(report)
+    return f"{text} {offset[0].upper()}{offset[1:]}."
+
+
+def empty_message(name: str) -> str:
+    return (
+        f"“{name}” built empty: no cell passed the strength test. Lower the strength test, "
+        "or check that the picks are on a reflection."
+    )
+
+
+# ---- the mesh files ---------------------------------------------------------------------
+def mesh_2dm(world_xy: np.ndarray, z: np.ndarray, triangles: np.ndarray) -> str:
+    """A 2DM mesh: vertices `ND i x y z` and triangles `E3T i a b c 1`, numbered from 1."""
+    lines = ["MESH2D"]
+    lines += [
+        f"ND {i + 1} {x:.4f} {y:.4f} {v:.5f}"
+        for i, (x, y, v) in enumerate(zip(world_xy[:, 0], world_xy[:, 1], z))
+    ]
+    lines += [f"E3T {i + 1} {a + 1} {b + 1} {c + 1} 1" for i, (a, b, c) in enumerate(triangles)]
+    return "\n".join(lines) + "\n"
+
+
+def mesh_dat(values: np.ndarray, n_elements: int) -> str:
+    """An ASCII DAT scalar dataset "depth (m)" with one value per vertex."""
+    lines = [
+        "DATASET",
+        'OBJTYPE "mesh2d"',
+        "BEGSCL",
+        f"ND {len(values)}",
+        f"NC {n_elements}",
+        'NAME "depth (m)"',
+        "TS 0 0.0",
+    ]
+    lines += [f"{v:.5f}" for v in values]
+    lines.append("ENDDS")
+    return "\n".join(lines) + "\n"

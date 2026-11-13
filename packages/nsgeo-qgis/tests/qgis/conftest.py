@@ -562,3 +562,29 @@ def site3_factory(qgis_app, tmp_path):
 def site3(site3_factory):
     """Three adjacent 6 x 6 m synthetic grids, A, B and C, four lines each."""
     return site3_factory()
+
+
+@pytest.fixture
+def synth_site(qgis_app, tmp_path):
+    """Two synthetic lines on a 3 x 12 m grid, in a site folder with a space in its path:
+    for tests that prepare nothing real (they run on CI). Yields `(session, dock, export)`."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.paraview_export import ParaViewExport
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import GRID, STEPS_ZERO, Dock, synthetic_dzt
+
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session = SiteSession()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    dock = Dock(session)
+    yield session, dock, ParaViewExport(session, dock)
+    dock.dispose()

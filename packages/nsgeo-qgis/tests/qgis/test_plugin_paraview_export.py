@@ -3,7 +3,6 @@ clock, the fill cache, cancelling and the refusals. Real DZT lines, real files o
 
 from __future__ import annotations
 
-import contextlib
 import json
 import re
 import types
@@ -23,38 +22,15 @@ from nsgeo_qgis.session import Pick, SiteSession
 from nsgeo_qgis.slices_engine import SliceEngine
 from nsgeo_qgis.slices_plan import Resolution, SourceChoice, VolumeChoice
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys
-from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
-
-GRID = Grid("Grid A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
-STEPS_ZERO = [
-    {"step": "time_zero", "params": {}, "enabled": True},
-    {"step": "dewow", "params": {}, "enabled": True},
-    {"step": "background_mean", "params": {}, "enabled": True},
-]
-STEPS_RADAR = STEPS_ZERO[1:]
-
-
-class Dock:
-    """What the exporter reads from the Slices dock: two engines and the transform combo."""
-
-    def __init__(self, session):
-        self.engine = SliceEngine(session)
-        self.site_engine = SliceEngine(session)
-        self.transform_combo = types.SimpleNamespace(value=lambda: "amp_square")
-        self.registered: list = []
-        self.foreign_preparing = False
-
-    @contextlib.contextmanager
-    def foreign_preparation(self, engine):
-        self.registered.append(engine)
-        try:
-            yield
-        finally:
-            self.registered.remove(engine)
-
-    def dispose(self):
-        self.engine.dispose()
-        self.site_engine.dispose()
+from plugin_testing import (
+    GRID,
+    REAL_DZT,
+    STEPS_RADAR,
+    STEPS_ZERO,
+    Dock,
+    needs_real_data,
+    spin_until,
+)
 
 
 @pytest.fixture
@@ -71,25 +47,6 @@ def site(qgis_app, tmp_path):
         )
         for i in range(4)
     ]
-    session.add_lines(lines)
-    session.site.presets["p"] = list(STEPS_ZERO)
-    dock = Dock(session)
-    yield session, dock, ParaViewExport(session, dock)
-    dock.dispose()
-
-
-@pytest.fixture
-def synth_site(qgis_app, tmp_path):
-    """The same site on synthetic lines: for tests that prepare nothing (they run on CI)."""
-    folder = tmp_path / "my site"
-    folder.mkdir()
-    session = SiteSession()
-    session.new_site(folder)
-    session.add_grid(GRID)
-    lines = []
-    for i in range(2):
-        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
-        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
     session.add_lines(lines)
     session.site.presets["p"] = list(STEPS_ZERO)
     dock = Dock(session)

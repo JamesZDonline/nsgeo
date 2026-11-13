@@ -29,6 +29,7 @@ import re
 import shutil
 import traceback
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,64 @@ def _spans(n: int, step: int) -> list[tuple[int, int]]:
     return [(j, min(j + step, n)) for j in range(0, n, step)]
 
 
+@dataclass(frozen=True)
+class FilledGrid:
+    """A grid's prepared lines and its kept, filled cube (M16 B): what `ParaViewExport.fill` hands
+    to the export and to surface builds. `filled` is a read-only memory map, `(nz, ny, nx)`."""
+
+    lines: list[PreparedLine]
+    prov: Any
+    frame: CubeFrame
+    z: ZAxis
+    velocity: Any
+    filled: np.ndarray
+    skipped_lines: list[str]
+
+
+@dataclass(frozen=True)
+class PlacedPick:
+    """A pick on the cube: its line, its (clamped) trace, frame-local metres and true depth."""
+
+    line_key: str
+    trace: int
+    x_m: float
+    y_m: float
+    depth_m: float
+
+
+def place_picks(
+    rows: Sequence[tuple[str, Any]],
+    lines: Sequence[PreparedLine],
+    prov: Any,
+    frame: CubeFrame,
+    velocity: Any,
+) -> list[PlacedPick | None]:
+    """Each `(line_key, pick)` of `rows` on the cube's clock, in order. A pick whose line is not
+    among `lines`, or whose depth is not finite, is None."""
+    on_zero = time_base_of(prov.steps) == TIME_BASE_TIME_ZERO
+    by_key = {line.key: line for line in lines}
+    found: list[tuple[int, PreparedLine, int, float]] = []
+    for i, (key, p) in enumerate(rows):
+        line = by_key.get(key)
+        if line is None:
+            continue
+        target = line.zero_ns if on_zero else 0.0
+        trace = min(max(int(p.trace), 0), line.coords.shape[0] - 1)
+        found.append((i, line, trace, float(retime_ns(p.time_ns, p.zero_ns or 0.0, target))))
+    out: list[PlacedPick | None] = [None] * len(rows)
+    if not found:
+        return out
+    depth = np.asarray(
+        velocity.depth_at(np.asarray([f[3] for f in found], dtype=float)), dtype=float
+    )
+    for (i, line, trace, _), d in zip(found, depth):
+        if not math.isfinite(float(d)):
+            continue
+        x, y = frame.to_local(line.coords[trace : trace + 1])[0]
+        out[i] = PlacedPick(line.key, trace, float(x), float(y), float(d))
+    return out
+
+
 class ParaViewExport:
     """Writes a grid's ParaView folder. `dock` is the Slices dock (read only)."""
 
@@ -228,6 +287,20 @@ class ParaViewExport:
         if not keys:
             raise ValueError(f"grid {grid_id!r} has no lines to export")
         return SourceChoice(grid_id, preset, choice.transform, keys)
+
+    def source_choice(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
+        """What the grid's cube is made from (preset, transform, lines); prepares nothing."""
+        return self._source(grid_id, choice)
+
+    def fill_settings(self, grid_id: str) -> Any:
+        """The grid's fill: method, max distance, search radius and smoothing."""
+        return self._finish(grid_id)
+
+    def effective_t1(self, grid_id: str, choice: VolumeChoice) -> float | None:
+        """`choice`'s deepest time as it affects the fill (None: the end of the record);
+        prepares nothing."""
+        source = self._source(grid_id, choice)
+        return _effective_t1(choice, self._record_range(source)[1])
 
     def _frame(self, grid_id: str, choice: VolumeChoice) -> CubeFrame:
         grid = self.session.grid(grid_id)
@@ -409,19 +482,40 @@ class ParaViewExport:
             finally:
                 own.dispose()
 
-    # ---- the run -------------------------------------------------------------
-    def run(
+    # ---- the fill ------------------------------------------------------------
+    def fill(
+        self, grid_id: str, choice: VolumeChoice, *, progress: Callable[[int, int], bool]
+    ) -> FilledGrid:
+        """The grid's prepared lines and its filled cube at `choice`, kept as a memory-mapped
+        file in `<site>/paraview/.cache/` (the export's own cache: an export and a surface
+        build of one grid and choice share it). `progress(done, total)` counts the fill's
+        levels; False cancels (ParaViewExportCancelled) and keeps nothing of this fill."""
+        state = {"done": 0, "total": 0}
+
+        def announce(frame: CubeFrame, z: ZAxis) -> None:
+            state["total"] = z.nz
+
+        def step(n: int = 1) -> None:
+            state["done"] += n
+            if not progress(state["done"], state["total"]):
+                raise ParaViewExportCancelled("cancelled")
+
+        try:
+            return self._fill_grid(grid_id, choice, step, announce)
+        except BaseException as exc:
+            traceback.clear_frames(exc.__traceback__)  # see `run`: a mapped file cannot be deleted
+            raise
+
+    def _fill_grid(
         self,
         grid_id: str,
         choice: VolumeChoice,
-        *,
-        progress: Callable[[int, int], bool],
-        paraview_path: str = "",
-    ) -> Path:
-        """Write the grid's folder and return it. `progress(done, total)` counts the fill
-        levels, the volume's trend slabs and the written slabs; False cancels
-        (ParaViewExportCancelled) and leaves any earlier export as it was."""
-        grid = self.session.grid(grid_id)
+        step: Callable[[int], None],
+        announce: Callable[[CubeFrame, ZAxis], None],
+    ) -> FilledGrid:
+        """Everything `run` does before the volume: the frame and source checks, the sweep of
+        unfinished cache files, the lines, the fill (or the kept one) and its opened map.
+        `announce(frame, z)` is called once the depth axis is known, before any `step`."""
         frame = self._frame(grid_id, choice)  # before anything is prepared or written
         source = self._source(grid_id, choice)
         folder = paraview_folder(self.session, grid_id)
@@ -434,26 +528,11 @@ class ParaViewExport:
         self.skipped_lines = sorted(k for k in source.line_keys if k not in got)
         t0, record_end = _lines_range(lines)
         t0, t1 = _clip(t0, record_end, choice)
-        z, nd = _levels(t0, t1, choice)
+        z, _nd = _levels(t0, t1, choice)
         finish = self._finish(grid_id)
         velocity = self.session.resolved_velocity(lines[0].key)
-        window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
-        slab = _slab_levels(frame.n_cells, window)
-        spans = _spans(nd, slab)
-        total = z.nz + 3 * len(spans)
-        state = {"done": 0}
-
-        def step(n: int = 1) -> None:
-            state["done"] += n
-            if not progress(state["done"], total):
-                raise ParaViewExportCancelled("export cancelled")
-
-        def tick_trend() -> bool:
-            step()
-            return True
-
+        announce(frame, z)
         cache_dir = folder.parent / ".cache"
-        partial = folder.with_name(folder.name + ".partial")
         cache_part: Path | None = None
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)
@@ -477,6 +556,54 @@ class ParaViewExport:
                     if old != cache:
                         old.unlink(missing_ok=True)
             filled = np.lib.format.open_memmap(cache, mode="r")
+        except BaseException:
+            if cache_part is not None:
+                with contextlib.suppress(OSError):
+                    cache_part.unlink(missing_ok=True)
+            raise
+        return FilledGrid(lines, prov, frame, z, velocity, filled, list(self.skipped_lines))
+
+    # ---- the run -------------------------------------------------------------
+    def run(
+        self,
+        grid_id: str,
+        choice: VolumeChoice,
+        *,
+        progress: Callable[[int, int], bool],
+        paraview_path: str = "",
+    ) -> Path:
+        """Write the grid's folder and return it. `progress(done, total)` counts the fill
+        levels, the volume's trend slabs and the written slabs; False cancels
+        (ParaViewExportCancelled) and leaves any earlier export as it was."""
+        grid = self.session.grid(grid_id)
+        folder = paraview_folder(self.session, grid_id)
+        cache_dir = folder.parent / ".cache"
+        partial = folder.with_name(folder.name + ".partial")
+        state = {"done": 0, "total": 0}
+        spans: list[tuple[int, int]] = []
+
+        def step(n: int = 1) -> None:
+            state["done"] += n
+            if not progress(state["done"], state["total"]):
+                raise ParaViewExportCancelled("export cancelled")
+
+        def tick_trend() -> bool:
+            step()
+            return True
+
+        def announce(frame: CubeFrame, z: ZAxis) -> None:
+            window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
+            spans.extend(_spans(_depth_levels(z), _slab_levels(frame.n_cells, window)))
+            state["total"] = z.nz + 3 * len(spans)
+
+        try:
+            got = self._fill_grid(grid_id, choice, step, announce)
+            frame, z = got.frame, got.z
+            lines, prov, velocity, filled = got.lines, got.prov, got.velocity, got.filled
+            nd = _depth_levels(z)
+            finish = self._finish(grid_id)
+            window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
+            slab = _slab_levels(frame.n_cells, window)
             vol = prepare_volume(
                 filled,
                 z,
@@ -510,9 +637,6 @@ class ParaViewExport:
             # (the next run deletes what is left).
             traceback.clear_frames(exc.__traceback__)
             shutil.rmtree(partial, ignore_errors=True)
-            if cache_part is not None:
-                with contextlib.suppress(OSError):
-                    cache_part.unlink(missing_ok=True)
             if isinstance(exc, VolumeStopped):
                 raise ParaViewExportCancelled(str(exc)) from exc
             raise
@@ -697,28 +821,12 @@ class ParaViewExport:
         velocity: Any,
     ) -> int:
         """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity."""
-        on_zero = time_base_of(prov.steps) == TIME_BASE_TIME_ZERO
         order = {line.key: i for i, line in enumerate(sorted(lines, key=lambda ln: ln.key))}
-        xy: list[np.ndarray] = []
-        times: list[float] = []
-        index: list[int] = []
-        for line in lines:
-            target = line.zero_ns if on_zero else 0.0
-            n = line.coords.shape[0]
-            for p in self.session.picks_for(line.key):
-                trace = min(max(int(p.trace), 0), n - 1)
-                xy.append(frame.to_local(line.coords[trace : trace + 1])[0])
-                times.append(float(retime_ns(p.time_ns, p.zero_ns or 0.0, target)))
-                index.append(order[line.key])
-        if times:
-            depth = np.asarray(velocity.depth_at(np.asarray(times, dtype=float)), dtype=float)
-            local = np.asarray(xy, dtype=float).reshape(-1, 2)
-            keep = np.isfinite(depth)
-            depth, local = depth[keep], local[keep]
-            line_index = np.asarray(index, dtype=np.int32)[keep]
-        else:
-            depth, local = np.empty(0), np.empty((0, 2))
-            line_index = np.empty(0, dtype=np.int32)
+        rows = [(line.key, p) for line in lines for p in self.session.picks_for(line.key)]
+        placed = [p for p in place_picks(rows, lines, prov, frame, velocity) if p is not None]
+        depth = np.asarray([p.depth_m for p in placed], dtype=float)
+        local = np.asarray([[p.x_m, p.y_m] for p in placed], dtype=float).reshape(-1, 2)
+        line_index = np.asarray([order[p.line_key] for p in placed], dtype=np.int32)
         points = (
             np.column_stack([local, -depth * choice.stretch]) if depth.size else np.empty((0, 3))
         )
