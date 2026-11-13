@@ -367,7 +367,11 @@ class GridDialog(QDialog):
         mag = self.instrument == "mag"
         for w in (self._velocity_label, self.velocity, self.velocity_hint):
             w.setVisible(not mag)
-        if self.existing is not None or (not starting and any(self._typed)):
+        # Typed sizes, and sizes a Fit measured from the corners, are the
+        # user's: a switch never overwrites them.
+        if self.existing is not None or (
+            not starting and (any(self._typed) or self._measured is not None)
+        ):
             return
         self._sizing = True
         try:

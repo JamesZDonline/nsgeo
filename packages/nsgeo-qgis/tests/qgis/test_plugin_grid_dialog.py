@@ -2756,3 +2756,14 @@ def test_an_existing_grids_instrument_is_shown_and_fixed(session):
     g = GridDialog(session, grid=session.grid("G"))
     assert g.instrument_combo.currentText() == "GPR" and not g.instrument_combo.isEnabled()
     assert g.result_grid().instrument == "gpr"
+
+
+def test_switching_the_instrument_after_a_fit_keeps_the_measured_size(session):
+    d = _utm_dialog(session)
+    _type_site(d)
+    d.fit_corners()
+    assert (d.size_x.value(), d.size_y.value()) == pytest.approx((20.0, 20.0), abs=1e-6)
+    d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("mag"))
+    assert (d.size_x.value(), d.size_y.value()) == pytest.approx((20.0, 20.0), abs=1e-6)
+    d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("gpr"))
+    assert (d.size_x.value(), d.size_y.value()) == pytest.approx((20.0, 20.0), abs=1e-6)
