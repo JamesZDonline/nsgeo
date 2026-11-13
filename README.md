@@ -71,7 +71,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-12.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-13.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -108,14 +108,21 @@ release's notes list everything in it.
   remembers which fits made the grid's velocity. Slices take their depths
   from the grid's velocity, as cuts already do. Designed, with a five-task
   plan.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView:** one action
+  writes a grid's prepared volume, picks and lines to a folder ParaView opens
+  ready to explore. Built, awaiting its walkthrough. **Plan B, surfaces from
+  picks:** select picks on the map and nsgeo builds the surface they name,
+  leaving holes where the radar saw nothing; it shows on the map, in the
+  ParaView export and in a Surfaces panel with its fit. Planned, with the
+  panel's mockup under review. Then the QGIS 3-D view, and cuts in the
+  ParaView scene.
 
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
 than reworking M16–M17 afterwards.
 
-1. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
-   Being designed.
+1. **M16: 3-D.** In progress (above).
 2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
