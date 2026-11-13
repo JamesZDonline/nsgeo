@@ -16,6 +16,8 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
+from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_engine import solve_key
@@ -32,6 +34,7 @@ from nsgeo_qgis.slices_plan import (
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
     LayoutProbe,
@@ -43,6 +46,7 @@ from plugin_testing import (
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
+from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
@@ -1418,14 +1422,13 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
 
 
 def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
-    """Final review, Minor 6. `engine.provenance()` resolves velocity
-    against the FIRST prepared line's key and raises `KeyError` once that
-    line has been removed from the session -- a contributing line can be
-    deleted while a source stays prepared, and the cube's own arrays are
-    still entirely correct. `_resolved_velocity`'s catch used to guard
-    only `RuntimeError`, so the `KeyError` escaped through `_update_
-    readout` into `refresh_slice`'s broad `except`, which reported
-    `error: '<key>'` and cleared the map for a still-good slice."""
+    """Final review, Minor 6. A contributing line can be deleted while a source
+    stays prepared, and the cube's own arrays are still entirely correct. The
+    grid's velocity (`grid_depth_velocity`) is the grid's own velocity, else
+    the first line left in survey order, so removing the first line moves the
+    label to the new first line rather than raising. A `KeyError` escaping
+    through `_update_readout` into `refresh_slice`'s broad `except` used to
+    report `error: '<key>'` and clear the map for a still-good slice."""
     dock, session = docked
     _ready(dock)
     dock.slice_slider.setValue(5)
@@ -1441,7 +1444,147 @@ def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked)
     assert dock.current_values() is not None, "a still-valid slice must not be blanked"
     assert not dock.readout.text().startswith("error:"), dock.readout.text()
     assert not any(removed_key in e for e in errors), errors
-    assert dock.velocity_label.text() == "", "the velocity provenance has nothing left to name"
+    # The grid's velocity does not hang on the removed line: the label stays,
+    # and names the grid's new first line.
+    new_first = session.keys_on_grid("A")[0]
+    epsr = session.line_for_key(new_first).header.epsr
+    assert dock.velocity_label.text().endswith(
+        f"(header ε {epsr:g}, {line_label(session.line_for_key(new_first))})"
+    )
+
+
+def _override_every_line(session, velocity=0.12):
+    """The hazard input (spec 12): the grid's first line in survey order, and
+    the first prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def _two_fit_record(session):
+    members = [
+        SourceFit(
+            key,
+            "fit-1",
+            "2026-11-12T00:00:00+00:00",
+            line_label(session.line_for_key(key)),
+            20.0,
+            0.09,
+            0.002,
+            0.0,
+        )
+        for key in session.keys_on_grid("A")[:2]
+    ]
+    return VelocitySource.from_fits(members, applied_at=None)
+
+
+def test_slice_label_and_readout_use_the_grids_velocity(docked, message_log):
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+    lo_m, hi_m = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.09))
+    text = dock.readout.text()
+    assert f"{lo_m:.2f}" in text and f"{hi_m:.2f}" in text
+    lo_o, hi_o = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.12))
+    assert f"{lo_o:.2f}–{hi_o:.2f} m" not in text
+    assert message_log == []
+
+
+def test_slice_label_names_the_grids_record(docked, message_log):
+    dock, session = docked
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_live_grid_apply_relabels_the_prepared_slice(docked, message_log):
+    """Final review, Important: `grids_changed` reached `rebuild_source`, which
+    only refreshed a slice whose finish had moved, so a grid Apply left the
+    label and the readout's metres standing while Export GeoTIFF (through
+    `_resolved_velocity`) already used the new velocity."""
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+
+    def metres(v):
+        lo, hi = window_depths_m(dock.engine.z, window, VelocityModel.constant(v))
+        return f"{lo:.2f}-{hi:.2f} m"
+
+    assert metres(0.09) in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), None)
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A)"
+    assert metres(0.12) in dock.readout.text()
+    assert metres(0.09) not in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), _two_fit_record(session))
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_slice_survives_losing_every_line_of_a_grid_with_no_velocity(docked, message_log):
+    """The `KeyError` guards in `_resolved_velocity` and `_update_velocity_label`:
+    a grid with no velocity and no line has nothing to resolve, and that must
+    neither blank a still-valid slice nor leave an old label standing."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    for key in list(session.keys_on_grid("A")):
+        session.remove_line(key)
+    dock.slice_slider.setValue(6)
+    assert dock.current_values() is not None
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert "error:" not in dock.readout.text()
+    assert dock.velocity_label.text() == ""
+    # `_resolved_velocity` returns first on this path, so the label's own guard
+    # is reached only when it is handed a velocity the grid can no longer name.
+    dock.velocity_label.setText("stale")
+    dock._update_velocity_label("A", VelocityModel.constant(0.1))
+    assert dock.velocity_label.text() == ""
+    assert message_log == []
+
+
+def test_slice_label_without_a_grid_velocity_names_the_header_and_line(docked, message_log):
+    dock, session = docked
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    v = session.grid_depth_velocity("A").surface_velocity
+    assert dock.velocity_label.text() == (
+        f"v = {v:.3f} m/ns (header ε {first.header.epsr:g}, {line_label(first)})"
+    )
+    assert v != pytest.approx(0.12)
+    assert message_log == []
+
+
+def test_grid_velocity_label_covers_each_tier(docked):
+    from nsgeo_qgis.ui.profile_dock import grid_velocity_label
+
+    _, session = docked
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    assert (
+        grid_velocity_label(session, "A") == f"header ε {first.header.epsr:g}, {line_label(first)}"
+    )
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert grid_velocity_label(session, "A") == "Grid A"
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    assert grid_velocity_label(session, "A") == "Grid A, average of 2 fits"
+    one = VelocitySource.from_fits(_two_fit_record(session).members[:1], applied_at=None)
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), one)
+    assert grid_velocity_label(session, "A") == f"Grid A, fit on {one.members[0].line_label}"
 
 
 def test_moving_the_slider_announces_the_window_it_averaged(docked):
@@ -1663,7 +1806,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
     assert dock.z0_spin.value() == record["z"]["t0_ns"]
     assert dock.cell_spin.value() == record["cell"]
-    assert dock.view_settings() == view
+    # A record without colours (#180) leaves them as they were: the default.
+    assert dock.view_settings() == dataclasses.replace(view, colours="nsgeo")
 
 
 def test_restore_cube_refuses_a_missing_grid(docked):
@@ -3936,3 +4080,97 @@ def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
     finally:
         profile.hide()
         profile.deleteLater()
+
+
+@pytest.mark.skipif(len(GRID2_LINES) < 3, reason="needs Grid 2 in tests/data/local/grid2")
+def test_real_grid2_slice_depth_follows_the_grid_with_an_override_on_the_first_line(
+    qgis_app, tmp_path, message_log
+):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("G2", (500.0, 700.0), 0.0, 2.0, 29.96, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("G2", "y", 0.25 + 0.5 * k, 0.0, 1, p.stem))
+            for k, p in enumerate(GRID2_LINES[:3])
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.set_grid_velocity("G2", VelocityModel.constant(0.09))
+    session.set_line_velocity(session.keys_on_grid("G2")[0], VelocityModel.constant(0.12))
+    dock = SlicesDock(session)
+    try:
+        _ready(dock)
+        dock.thickness_spin.setValue(4.0)
+        dock.slice_slider.setValue(10)
+        assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid G2)"
+        assert dock.engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+        lo_m, hi_m = window_depths_m(
+            dock.engine.z, dock.current_window(), VelocityModel.constant(0.09)
+        )
+        assert f"{lo_m:.2f}" in dock.readout.text()
+        assert message_log == []
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+# ---- #180: a saved cube carries This grid's colours ---------------------------------------
+
+
+def test_view_settings_carry_this_grids_colours(docked):
+    dock, session = docked
+    assert (dock.view_settings().colours, dock.view_settings().style) == ("nsgeo", None)
+    session.set_slice_colours("grid", own=True, style="<qgis>mine</qgis>")
+    session.set_slice_colours("site", own=False, style="<qgis>site</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("own", "<qgis>mine</qgis>")
+
+
+def test_apply_view_restores_the_colours_and_an_older_record_leaves_them(docked):
+    dock, session = docked
+    view = dock.view_settings()
+    dock.apply_view(
+        dataclasses.replace(view, colours="own", style="<qgis>mine</qgis>"), spacing_m=0.5
+    )
+    assert session.slice_colours("grid") == {"own": True, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 1 and not dock.stretch_combo.isEnabled()
+    dock.apply_view(dataclasses.replace(view, colours=None, style=None), spacing_m=0.5)
+    assert session.slice_colours("grid")["own"] is True
+    dock.apply_view(dataclasses.replace(view, colours="nsgeo", style=None), spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 0 and dock.stretch_combo.isEnabled()
+
+
+def test_the_colours_choice_needs_an_open_survey(qgis_app):
+    dock = SlicesDock(SiteSession())
+    try:
+        assert not dock.colours_combo.isEnabled()
+        assert not dock.own_colours_on() and dock.own_style() is None
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_cube_saved_under_the_plugin_colours_keeps_no_style(docked):
+    """Review finding 6: restoring it must not replace a style refined since."""
+    dock, session = docked
+    session.set_slice_colours("grid", own=False, style="<qgis>refined</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("nsgeo", None)
+    dock.apply_view(view, spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>refined</qgis>"}
+
+
+def test_the_symbology_button_is_off_while_coverage_shows(docked):
+    """Review finding 5: an edit on the coverage colours would be lost."""
+    dock, session = docked
+    dock.colours_combo.setCurrentIndex(1)
+    assert dock.symbology_button.isEnabled()
+    dock.coverage_check.setChecked(True)
+    assert not dock.symbology_button.isEnabled()
+    assert "Show coverage" in dock.symbology_button.toolTip()
+    dock.coverage_check.setChecked(False)
+    assert dock.symbology_button.isEnabled()

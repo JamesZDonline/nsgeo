@@ -384,3 +384,75 @@ def test_section_rgba8_makes_blanks_transparent_in_both_polarities(unipolar):
         render.section_rgba8(np.full((2, 3), np.nan), 99.0, lut, unipolar=unipolar)[..., 3] == 0
     ).all()
     assert render.section_rgba8(np.zeros((2, 3)), 99.0, lut, unipolar=unipolar).shape == (2, 3, 4)
+
+
+# ---- #180: a slice coloured with QGIS's own symbology --------------------------------
+
+
+@pytest.mark.parametrize("name", colormap_names())
+def test_gradient_stops_reproduce_every_table_within_tolerance(name):
+    lut = colormap(name)
+    stops = render.gradient_stops(lut, tolerance=1.0)
+    positions = np.array([p for p, _ in stops])
+    colours = np.array([c for _, c in stops], dtype=float)
+    assert positions[0] == 0.0 and positions[-1] == 1.0
+    assert (np.diff(positions) > 0).all()
+    rebuilt = np.stack(
+        [np.interp(np.arange(256) / 255.0, positions, colours[:, k]) for k in range(3)], axis=1
+    )
+    assert np.abs(rebuilt - lut).max() <= 1.0
+
+
+def test_gradient_stops_keep_a_straight_table_to_its_two_ends():
+    stops = render.gradient_stops(colormap("grey_white_high"))
+    assert stops == [(0.0, (0, 0, 0)), (1.0, (255, 255, 255))]
+
+
+def test_gradient_stops_keep_the_bends_of_a_curved_table():
+    # amp_heat bends where each channel saturates: a third and two thirds.
+    stops = render.gradient_stops(colormap("amp_heat"))
+    assert 3 <= len(stops) <= 8
+    seismic = render.gradient_stops(colormap("seismic"))
+    assert (128 / 255.0, (255, 255, 255)) in seismic
+
+
+def test_gradient_stops_validate_the_table():
+    with pytest.raises(ValueError):
+        render.gradient_stops(np.zeros((10, 3), dtype=np.uint8))
+
+
+def test_display_range_minimum_maximum_ignores_nodata():
+    values = np.array([[np.nan, -2.0], [5.0, np.inf]])
+    assert render.display_range(values, "minimum_maximum") == (-2.0, 5.0)
+
+
+def test_display_range_cumulative_cut_takes_the_percentiles():
+    values = np.arange(101, dtype=float)
+    lo, hi = render.display_range(values, "cumulative_cut", lower=0.02, upper=0.98)
+    assert (lo, hi) == pytest.approx((2.0, 98.0))
+
+
+def test_display_range_std_dev_is_mean_plus_minus_the_factor():
+    values = np.array([1.0, 3.0, 1.0, 3.0, np.nan])
+    assert render.display_range(values, "std_dev", sd_factor=2.0) == pytest.approx((0.0, 4.0))
+
+
+def test_display_range_estimate_samples_large_arrays_deterministically():
+    values = np.random.default_rng(3).normal(size=1_000_000)
+    first = render.display_range(values, "cumulative_cut", max_samples=250_000)
+    again = render.display_range(values, "cumulative_cut", max_samples=250_000)
+    exact = render.display_range(values, "cumulative_cut")
+    assert first == again
+    assert first == pytest.approx(exact, abs=0.02)
+
+
+@pytest.mark.parametrize(
+    "values", [np.array([]), np.full((3, 3), np.nan), np.full(4, 2.5)], ids=["empty", "nan", "flat"]
+)
+def test_display_range_is_none_when_there_is_no_range_to_fit(values):
+    assert render.display_range(values, "minimum_maximum") is None
+
+
+def test_display_range_refuses_an_unknown_kind():
+    with pytest.raises(ValueError, match="kind"):
+        render.display_range(np.ones(3), "histogram")

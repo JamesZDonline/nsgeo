@@ -1079,6 +1079,24 @@ def test_a_record_from_this_build_still_loads_in_0_2_0(method):
     assert got == _ViewSettings020(**_OLD_KEYS)
 
 
+def test_view_settings_round_trip_the_colours():
+    view = ViewSettings(**_OLD_KEYS, colours="own", style="<qgis>mine</qgis>")
+    again = ViewSettings.from_dict(view.to_dict())
+    assert again == view
+    assert _ViewSettings020.from_dict(view.to_dict()) == _ViewSettings020(**_OLD_KEYS)
+
+
+def test_a_view_record_without_colours_leaves_them_unset():
+    got = ViewSettings.from_dict(dict(_OLD_KEYS))
+    assert (got.colours, got.style) == (None, None)
+    assert "colours" not in ViewSettings(**_OLD_KEYS).to_dict()
+
+
+def test_a_view_record_with_damaged_colours_reads_them_as_unset():
+    got = ViewSettings.from_dict({**_OLD_KEYS, "colours": "plaid", "style": 7})
+    assert (got.colours, got.style) == (None, None)
+
+
 # ---- milestone B: the file at any pixel (write_bands) ------------------------
 def _band_plan(engine, n=3, lattice=None, **extra):
     """An `ExportPlan` of `n` bands on `lattice` (default: the frame's own, at its cell)."""

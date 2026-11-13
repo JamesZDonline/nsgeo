@@ -108,6 +108,7 @@ from nsgeo.velocity_fit import (
     hyperbola_time,
     radar_clock_note,
 )
+from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -129,6 +130,7 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
@@ -182,7 +184,9 @@ def _fit_t0_at_line_zero(session: SiteSession, key: str, line: Any, fit: StoredF
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
     "line override" (or "line override (fit at 18.4 ns)" when the override
-    was measured from a stored fit), "Grid <id>", a header-dielectric fallback, or
+    was measured from a stored fit, "line override, average of 3 fits" from
+    several), "Grid <id>" (with ", average of 6 fits" or ", fit on FILE__003"
+    when the grid remembers its fits), a header-dielectric fallback, or
     "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
@@ -213,15 +217,37 @@ def velocity_source(session: SiteSession, key: str) -> str:
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
         # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        record = line.velocity_source
+        if record is not None and record.method == METHOD_WEIGHTED_MEAN:
+            return f"line override, {record.summary()}"
         fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
         if fit is not None:
             return f"line override (fit at {_fit_t0_at_line_zero(session, key, line, fit):.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
         return f"Grid {grid.id}"
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
+
+
+def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
+    """What the Slices panel says a grid's depths come from: "Grid G2" with
+    ", average of 6 fits" or ", fit on FILE__003" when it remembers its fits,
+    else the header dielectric of the grid's first line, named, the line
+    `SiteSession.grid_depth_velocity` takes it from. `KeyError` as that does."""
+    grid = session.grid(grid_id)
+    if grid.velocity is not None:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
+        return f"Grid {grid.id}"
+    keys = session.keys_on_grid(grid_id)
+    if not keys:
+        raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+    line = session.line_for_key(keys[0])
+    return f"header ε {line.header.epsr:g}, {line_label(line)}"
 
 
 class ProfileDock(QgsDockWidget):
@@ -1482,46 +1508,76 @@ class ProfileDock(QgsDockWidget):
         grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
         return None if grid is None else str(grid.id)
 
+    def _saved_record(self) -> tuple[str, float, VelocitySource] | None:
+        """After Save fit, with no new points: the saved fit's line, its
+        velocity at the line's current zero, and its record. None once that
+        state has ended (the store is asked, so a deleted fit is never applied
+        or named)."""
+        saved = None if self._velocity_points else self._saved_fit_now()
+        if saved is None or self._just_saved is None:
+            return None
+        key, fit_id = self._just_saved
+        # One member, made by `fit` (grid velocity spec §7.4).
+        record = fit_record(self.session, [(key, fit_id, saved)], applied_at=applied_now())
+        return key, saved.v_m_ns, record
+
+    def _stored_twin_record(self, key: str) -> VelocitySource | None:
+        """The record for an unsaved working fit applied to its line: a stored
+        fit with these very points, else none -- a bare "line override" is
+        better than a provenance the velocity does not have. Same points, same
+        fit: the working points and a stored fit's points are both on the radar
+        clock, whatever the line's time zero is, so equal points are the same
+        clicks. The fit is measured at the zero the working fit used, so the
+        record copies the number applied."""
+        points = tuple(self._velocity_points)
+        line = self.session.line_for_key(key)
+        stored = [i for i, f in line.velocity_fits.items() if f.points == points]
+        if not stored:
+            return None
+        fit_id = stored[-1]
+        try:
+            at_zero = fit_at_zero(
+                line.velocity_fits[fit_id], line.distance_along(), self._line_zero()
+            )
+        except ValueError:
+            return None  # not measurable at this zero: the dialog never applies it either
+        return fit_record(self.session, [(key, fit_id, at_zero)], applied_at=applied_now())
+
     def _apply_velocity_to_line(self, *_: Any) -> None:
         try:
-            saved = None if self._velocity_points else self._saved_fit_now()
-            if saved is not None and self._just_saved is not None:
-                # Just saved: the working points are gone, the stored fit is
-                # the one being applied, and its id is the provenance.
-                key, fit_id = self._just_saved
-                self.session.set_line_velocity(key, VelocityModel.constant(saved.v_m_ns))
-                self.session.set_velocity_from_fit(key, fit_id)
+            saved = self._saved_record()
+            if saved is not None:
+                # Just saved: the working points are gone, and the stored fit
+                # is the one being applied, with its record.
+                key, v, record = saved
+                self.session.apply_line_velocity(key, VelocityModel.constant(v), record)
                 return
             fit = self._velocity_fit
-            if fit is not None and self._working_key is not None:
-                self.session.set_line_velocity(
-                    self._working_key, VelocityModel.constant(fit.v_m_ns)
-                )
-                # `velocity_from_fit` is the fit that produced the override:
-                # a stored fit with these very points, else none -- a bare
-                # "line" is better than a provenance the velocity does not
-                # have. Same points, same fit: the working points and a stored
-                # fit's points are both on the radar clock, whatever the line's
-                # time zero is, so equal points are the same clicks. The store
-                # is asked rather than remembered, so a deleted fit is never
-                # named.
-                points = tuple(self._velocity_points)
-                fits = self.session.line_for_key(self._working_key).velocity_fits
-                stored = [i for i, f in fits.items() if f.points == points]
-                self.session.set_velocity_from_fit(
-                    self._working_key, stored[-1] if stored else None
+            working = self._working_key
+            if fit is not None and working is not None:
+                self.session.apply_line_velocity(
+                    working,
+                    VelocityModel.constant(fit.v_m_ns),
+                    self._stored_twin_record(working),
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
 
     def _apply_velocity_to_grid(self, *_: Any) -> None:
+        """A saved fit is recorded as the grid's source; an unsaved working fit
+        sets a bare number, with no record (grid velocity spec §7.4)."""
         try:
-            saved = None if self._velocity_points else self._saved_fit_now()
-            fit = self._velocity_fit
-            v = saved.v_m_ns if saved is not None else (None if fit is None else fit.v_m_ns)
             grid_id = self._working_grid_id()
-            if v is not None and grid_id is not None:
-                self.session.set_grid_velocity(grid_id, VelocityModel.constant(v))
+            if grid_id is None:
+                return
+            saved = self._saved_record()
+            if saved is not None:
+                _, v, record = saved
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(v), record)
+                return
+            fit = self._velocity_fit
+            if fit is not None:
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns), None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
 
