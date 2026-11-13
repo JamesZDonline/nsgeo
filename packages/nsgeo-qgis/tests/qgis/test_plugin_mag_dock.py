@@ -256,12 +256,17 @@ def test_a_mag_only_view_is_not_written_to_a_gpr_only_site(qgis_app, tmp_path):
         w.dock.show()
         w.dock.cell_spin.setValue(0.25)
         w.dock.palette_combo.setCurrentIndex(1)
+        w.dock.colours_combo.setCurrentIndex(1)
+        w.dock.colours_combo.setCurrentIndex(0)
+        w.dock.colours_combo.setCurrentIndex(1)
         w.dock.set_scope("site")
         _tick(w.dock)
         assert w.dock.status() == "Import a magnetometer file to see it here."
         session.save()
         text = (root / SURVEY_FILE).read_text()
-        assert "mag_view" not in text and not [k for k in json.loads(text) if k.startswith("mag")]
+        doc = json.loads(text)
+        assert "mag_view" not in doc and not [k for k in doc if k.startswith("mag")]
+        assert "mag" not in doc.get("slice_colours", {})
     finally:
         w.close()
 
@@ -286,3 +291,24 @@ def test_a_real_grid_draws(qgis_app, tmp_path):
         assert w.drawn() and w.errors == []
     finally:
         w.close()
+
+
+def test_choosing_a_grid_by_navigation_is_not_remembered(world):
+    dock, session = world.dock, world.session
+    assert not session.dirty
+    dock.show_grid("M2")
+    assert dock.grid_combo.currentData() == "M2"
+    assert not session.dirty and session.mag_view() == {}
+    assert dock.status() == "Grid M2 has no magnetometer file yet."
+    dock.grid_combo.setCurrentIndex(dock.grid_combo.findData("M1"))  # the author's own choice
+    assert session.mag_view()["grid"] == "M1"
+
+
+def test_show_grid_guards_itself(world, monkeypatch):
+    def boom(*_a):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(world.dock, "_sync_source", boom)
+    dock = world.dock
+    dock.show_grid("M2")  # must not raise
+    assert world.errors and "boom" in world.errors[-1]

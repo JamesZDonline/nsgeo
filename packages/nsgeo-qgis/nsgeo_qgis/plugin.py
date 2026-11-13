@@ -412,7 +412,7 @@ class NsgeoPlugin:
         self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.mag_dock)
         self.docks.append(self.mag_dock)
         self.mag_dock.hide()
-        self.survey_dock.mag_grid_selected.connect(self.mag_dock.show_grid)
+        self.survey_dock.mag_grid_selected.connect(self.show_mag_panel)
         self._build_panels_menu()
 
         # The active slice on the map: owned here (not by the dock) for

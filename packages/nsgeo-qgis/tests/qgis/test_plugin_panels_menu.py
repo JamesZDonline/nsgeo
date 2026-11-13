@@ -150,9 +150,54 @@ def test_the_mag_panel_starts_hidden_and_the_menu_opens_it(shown_plugin):
     assert _entries(shown_plugin)["Mag"].isChecked()
 
 
-def test_show_mag_panel_opens_the_panel_on_that_grid(shown_plugin):
-    shown_plugin.show_mag_panel("M9")  # a grid the site lacks: opens, changes nothing
+def _open_mag_site(plugin, root):
+    from nsgeo_qgis.session import SURVEY_FILE
+
+    plugin.session.open_site(root / SURVEY_FILE)
+    QCoreApplication.processEvents()
+
+
+def test_show_mag_panel_opens_the_panel_on_that_grid(shown_plugin, mag_site):
+    _, root = mag_site
+    _open_mag_site(shown_plugin, root)
+    shown_plugin.show_mag_panel("M2")
     assert not shown_plugin.mag_dock.isHidden()
+    assert shown_plugin.mag_dock.grid_combo.currentData() == "M2"
+    shown_plugin.show_mag_panel("M1")
+    assert shown_plugin.mag_dock.grid_combo.currentData() == "M1"
+
+
+def test_a_survey_click_on_a_mag_grid_shows_the_panel_and_leaves_the_site_saved(
+    shown_plugin, mag_site
+):
+    _, root = mag_site
+    _open_mag_site(shown_plugin, root)
+    assert shown_plugin.mag_dock.isHidden()
+    assert not shown_plugin.session.dirty
+    shown_plugin.survey_dock.mag_grid_selected.emit("M2")
+    assert not shown_plugin.mag_dock.isHidden()
+    assert shown_plugin.mag_dock.grid_combo.currentData() == "M2"
+    assert not shown_plugin.session.dirty
+    assert shown_plugin.session.mag_view() == {}
+
+
+def test_the_mag_panel_draws_its_layer_through_the_plugin_and_closing_the_site_clears_it(
+    shown_plugin, mag_site
+):
+    from nsgeo_qgis.slice_layer import MAG_LAYER_NAME
+    from qgis.core import QgsProject, QgsRectangle
+
+    _, root = mag_site
+    _open_mag_site(shown_plugin, root)
+    shown_plugin.show_mag_panel("M1")
+    _wait_for(lambda: shown_plugin.mag_dock.isVisible(), "the Mag panel showing")
+    shown_plugin.mag_dock.refresh()
+    layers = QgsProject.instance().mapLayersByName(MAG_LAYER_NAME)
+    assert len(layers) == 1
+    assert layers[0].extent().contains(QgsRectangle(100.0, 100.0, 104.0, 104.0))
+    shown_plugin.session.close_site()
+    QCoreApplication.processEvents()
+    assert QgsProject.instance().mapLayersByName(MAG_LAYER_NAME) == []
 
 
 def test_a_panel_entry_follows_its_panel_however_it_is_closed(shown_plugin):

@@ -222,10 +222,22 @@ class MagDock(QgsDockWidget):
         self.refresh()
 
     def show_grid(self, grid_id: str) -> None:
-        """Choose `grid_id` in the Grid combo; the scope is unchanged."""
-        index = self.grid_combo.findData(grid_id)
-        if index >= 0:
-            self.grid_combo.setCurrentIndex(index)
+        """Choose `grid_id` in the Grid combo, as navigation: the scope is
+        unchanged and nothing is remembered (only the author's own change in
+        this panel is). A slot: never raises."""
+        try:
+            index = self.grid_combo.findData(grid_id)
+            if index < 0:
+                return
+            self._seeding = True
+            try:
+                self.grid_combo.setCurrentIndex(index)
+            finally:
+                self._seeding = False
+            self._sync_source()
+            self.refresh()
+        except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
+            self.error.emit(f"could not show the mag grid: {exc}")
 
     # ---- drawing ----------------------------------------------------------
     def refresh(self) -> None:
@@ -397,6 +409,7 @@ class MagDock(QgsDockWidget):
         """`grids_changed` / `mag_changed`: a grid, its placement or its file moved."""
         try:
             self._fill_grids()
+            self._sync_colours()
             self.refresh()
         except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
             self.error.emit(f"could not update the Mag panel: {exc}")
@@ -477,7 +490,7 @@ class MagDock(QgsDockWidget):
 
     def _on_colours_changed(self, index: int) -> None:
         try:
-            if self.session.is_open:
+            if self.session.is_open and self._has_mag():
                 self.session.set_slice_colours("mag", own=index == 1)
             self._sync_colours()
             if self.isVisible() and self._map is not None:
@@ -492,5 +505,5 @@ class MagDock(QgsDockWidget):
             self.colours_combo.setCurrentIndex(1 if own else 0)
         finally:
             self.colours_combo.blockSignals(blocked)
-        self.colours_combo.setEnabled(self.session.is_open)
+        self.colours_combo.setEnabled(self.session.is_open and self._has_mag())
         self.symbology_button.setEnabled(own)
