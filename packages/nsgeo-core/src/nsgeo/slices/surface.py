@@ -141,9 +141,11 @@ class Surface:
     def offset_reliable(self) -> bool:
         """True when picks voted and fewer than half the votes sit on the offset search limit.
 
-        A vote on the limit only says the strongest swing is at least that far away. When most
-        sit there the offset is unreliable: a stronger reflection out of reach is likely pulling
-        the surface, so the picks should be checked."""
+        A vote on the limit only says the strongest swing is at least that far away; when at
+        least half sit there the offset is unreliable, and a stronger reflection out of reach is
+        likely pulling the surface, so the picks should be checked. The flag does not catch a
+        stronger reflection whose sidelobe falls inside the search: that can pull the offset,
+        unflagged (a known blind spot)."""
         return self.offset_votes > 0 and 2 * self.offset_at_limit < self.offset_votes
 
 

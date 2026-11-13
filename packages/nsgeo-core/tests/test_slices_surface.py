@@ -205,29 +205,42 @@ def test_a_milder_decoy_out_of_reach_leaves_a_reliable_offset(below_m, gain):
 
 
 @pytest.mark.parametrize("below_m", [0.04, 0.08])
-def test_a_strong_decoy_makes_the_offset_unreliable_never_wrong_and_reliable(below_m):
+def test_a_strong_decoy_puts_every_vote_on_the_limit_and_flags_the_offset(below_m):
     s = _build(_decoy(below_m, 3.0))
     assert s.offset_votes == 12
     assert not s.offset_reliable
     assert s.offset_at_limit == s.offset_votes
 
 
+# What the reliable flag covers: a decoy whose main peak lies beyond the search, or whose votes
+# are censored at its limit. It does not cover a stronger reflection whose sidelobe falls inside
+# the +-5 cm search; see the xfail below.
 @pytest.mark.parametrize(
     ("below_m", "gain"),
     [(0.04, 1.5), (0.04, 2.0), (0.04, 3.0), (0.08, 1.5), (0.08, 2.0), (0.08, 3.0)],
 )
-def test_a_reliable_offset_is_never_wrong(below_m, gain):
+def test_the_offset_is_right_or_flagged_for_decoys_with_no_sidelobe_in_reach(below_m, gain):
     s = _build(_decoy(below_m, gain), strength=0.5)
     assert abs(s.offset_m - 0.02) <= STEP or not s.offset_reliable
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="known blind spot: a stronger reflection whose sidelobe falls inside the +-5 cm "
+    "search drags the offset unflagged (M16 B ruling R8; follow-up)",
+)
+def test_the_offset_is_right_or_flagged_when_a_sidelobe_falls_in_reach():
+    s = _build(_decoy(0.065, 3.0), strength=0.5)
+    assert abs(s.offset_m - 0.02) <= STEP or not s.offset_reliable
+
+
 def test_tracking_ignores_a_decoy_outside_its_window():
-    # 8 cm below the picked reflection, twice its amplitude: beyond the 5 cm offset search and
-    # four windows away. Its sidelobe at the window's edge (0.73 of the true peak) is weaker than
-    # the true peak inside the window, so the surface stays on the truth; a tracker searching
+    # 10 cm below the picked reflection, twice its amplitude: beyond the 5 cm offset search and
+    # five windows away. Its sidelobe at the window's edge is weaker than the true peak inside
+    # the window, so the surface stays on the truth; a tracker searching
     # five windows wide jumps to the decoy and the kept depths leave the truth by 2 cm.
     # The decoy lifts the depth trend, so the strength test is lowered to 0.5.
-    s = _build(_decoy(0.08, 2.0), strength=0.5)
+    s = _build(_decoy(0.10, 2.0), strength=0.5)
     truth = np.broadcast_to(_depth_of((np.arange(NX) + 0.5) * C) - 0.02, (NY, NX))
     kept = np.isfinite(s.depth_m) & ~_patch_mask()
     assert kept.sum() > 100
@@ -287,14 +300,32 @@ def test_picks_in_one_cell_that_disagree_are_far_not_edge():
 
 
 def test_smoothing_never_hides_a_pick_held_at_the_edge():
-    x, y, d = _picks()
-    d = d.copy()
-    d[5] += 0.03
-    plain = build_surface(_volume(), x, y, d, SurfaceSettings())
-    soft = build_surface(_volume(), x, y, d, SurfaceSettings(smoothing_m=0.3))
-    assert plain.fit.at_edge >= 1
+    # a flat guide at 0.48 m over a flat reflection at 0.50 m, except a three-column strip through
+    # pick 5 whose reflection sits 3 cm deeper: the strip is held at the window's edge, and
+    # smoothing (which averages in the cells either side) pulls it back inside the window
+    t = Z.times_ns()[:, None, None]
+    centre = np.full(NX, 10.0)
+    centre[17:20] = 10.6
+    filled = 1e-4 + _ricker2(t - centre[None, None, :]) * np.ones((1, NY, 1))
+    filled[:, :, -3:] = np.nan
+    vol = _volume(filled.astype(np.float32))
+    x, y, _ = _picks()
+    iy, ix = int(y[5] // C), int(x[5] // C)
+    assert ix == 18
+    d = np.full(12, 0.48)
+    window = 0.0225  # a level lies 2.0 cm and the next 2.5 cm from the target: the edge is reached
+    plain = build_surface(vol, x, y, d, SurfaceSettings(strength=0.3, window_m=window))
+    soft = build_surface(
+        vol, x, y, d, SurfaceSettings(strength=0.3, window_m=window, smoothing_m=0.1)
+    )
+    held = abs(float(plain.depth_m[iy, ix]) - float(plain.guide_m[iy, ix]))
+    pulled = abs(float(soft.depth_m[iy, ix]) - float(soft.guide_m[iy, ix]))
+    assert held >= window - 1e-6  # the premise: pinned at the window's edge...
+    assert pulled < window - 1e-4  # ...and smoothing really does draw it back inside
+    for s in (plain, soft):
+        assert s.fit.at_edge >= 1
+        assert [o.reason for o in s.fit.outliers if o.index == 5] == ["edge"]
     assert soft.fit.at_edge == plain.fit.at_edge
-    assert [o.reason for o in soft.fit.outliers if o.index == 5] == ["edge"]
 
 
 def test_too_few_usable_picks_say_how_many_and_why():
