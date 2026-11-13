@@ -36,7 +36,10 @@ MIN_DOTS = 4
 V_MIN_M_NS = 0.03
 V_MAX_M_NS = 0.30
 #: Traces times samples a box may hold. Read at call time (tests change it).
-MAX_BOX_CELLS = 10**9
+#: Measured on a real 1780-trace line: a box of 208 000 cells (1000 traces by
+#: 208 samples) traces in 0.8 to 1.0 s, 250 000 cells in 1.2 s. The largest box
+#: drawn around a saved hand fit holds about 11 000 cells and traces in 0.23 s.
+MAX_BOX_CELLS = 200_000
 
 _MIN_BOX = 8  # traces and samples
 #: The best curve's mean smoothed |amplitude| must beat the box's median by this
@@ -289,7 +292,7 @@ def trace_hyperbola(
     # Thin: evenly spaced along the traced extent, each target taking the
     # nearest survivor not already taken, and keeping the apex-nearest.
     apex_i = int(np.argmin(np.abs(x_e - fit.apex_x_m)))
-    chosen = {apex_i}
+    chosen = set(range(cols.size))
     if cols.size > max_dots:
         picks: list[int] = []
         for target in np.linspace(x_e[0], x_e[-1], max_dots):

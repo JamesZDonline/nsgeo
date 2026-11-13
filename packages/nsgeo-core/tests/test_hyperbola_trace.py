@@ -189,3 +189,10 @@ def test_a_backwards_box_is_normalised():
     forward = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0))
     backward = trace_hyperbola(data, t, x, TraceBox(140, 60, 30.0, 10.0))
     assert forward == backward
+
+
+def test_a_few_survivors_are_all_returned_not_just_the_apex():
+    # Fewer cleaned edges than max_dots must all come back (once returned only the apex).
+    data, t, x = _scene([Planted(100, 15.0, 0.07)])
+    dots = trace_hyperbola(data, t, x, TraceBox(96, 104, 10.0, 30.0))
+    assert len(dots) >= ht.MIN_DOTS
