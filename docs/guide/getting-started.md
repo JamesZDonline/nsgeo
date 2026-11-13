@@ -10,7 +10,7 @@ backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do no
 need to install anything else.
 
 1. [Install](#1-install)
-2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
+2. [The toolbar and the five panels](#2-the-toolbar-and-the-five-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
 5. [Known issues in 0.4.0](#5-known-issues-in-040)
@@ -94,7 +94,7 @@ stay exactly where they are.
 
 ---
 
-## 2. The toolbar and the four panels
+## 2. The toolbar and the five panels
 
 ### The nsgeo toolbar
 
@@ -115,7 +115,7 @@ site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
-QGIS docks the four panels around the map. You can drag, float or close them like
+QGIS docks the five panels around the map. You can drag, float or close them like
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
@@ -145,16 +145,22 @@ any other QGIS panel.
   **Presets**.
 - **nsgeo Slices** (right) builds time and depth slices across a grid. The first
   time nsgeo starts, it sits as a tab behind **nsgeo Processing**.
+- **nsgeo Mag** (right) maps a magnetometer grid, or every magnetometer grid that
+  holds a file. It starts closed: open it from **Panels ▾**, or click a
+  magnetometer grid in **nsgeo Survey**. **This grid** and **Whole site** choose
+  what is drawn. The map is drawn as the layer **Mag (live preview)**, and only
+  while the panel is open. Closing the panel leaves the layer as it was last
+  drawn.
 
 **Panels ▾** on the nsgeo toolbar ticks each panel that is open, including one
 sitting behind another tab. Tick a panel to bring it back in front, or untick it
 to close it. Below the ticks are three layouts:
 
 - **Profile work** keeps **nsgeo Survey** and **nsgeo Profile**, and closes
-  Processing and Slices.
-- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile
-  and Processing.
-- **Show all** opens all four again.
+  Processing, Slices and Mag.
+- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile,
+  Processing and Mag.
+- **Show all** opens all five.
 
 A layout only opens and closes panels: each one comes back at the size and in
 the place you left it, and QGIS's own panels are left alone. **View → Panels**

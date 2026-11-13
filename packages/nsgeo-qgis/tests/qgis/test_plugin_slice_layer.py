@@ -863,3 +863,44 @@ def test_an_unreadable_style_starts_again_from_the_real_limit(mapped):
     _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style", limit=lambda: 7.0)
     assert _range(sl) == (-7.0, 7.0)
     assert len(seen) == 1
+
+
+def test_a_centre_shifts_the_palette_range(mapped):
+    sl, _, _, _ = mapped
+    sl.update_north_up(
+        _values(),
+        (500.0, 0.5, 0.0, 706.0, 0.0, -0.5),
+        "EPSG:32616",
+        limit=3.0,
+        centre=4.0,
+        colormap_name="grey_black_high",
+        unipolar=False,
+        subtitle="x",
+        name=slice_layer.MAG_LAYER_NAME,
+    )
+    assert sl.layer.name() == "Mag (live preview)"
+    renderer = sl.layer.renderer()
+    assert (renderer.classificationMin(), renderer.classificationMax()) == (4.0 - 3.0, 4.0 + 3.0)
+    items = build_shader(colormap("seismic"), 3.0, False, centre=4.0)
+    ramp = items.rasterShaderFunction().colorRampItemList()
+    assert (ramp[0].value, ramp[-1].value) == pytest.approx((1.0, 7.0))
+    # Unipolar ignores the centre.
+    flat = build_shader(colormap("amp_heat"), 3.0, True, centre=4.0)
+    ramp = flat.rasterShaderFunction().colorRampItemList()
+    assert (ramp[0].value, ramp[-1].value) == pytest.approx((0.0, 3.0))
+
+
+def test_own_colours_seed_around_the_centre(mapped):
+    sl, _, _, _ = mapped
+    sl.update_north_up(
+        _values(),
+        (500.0, 0.5, 0.0, 706.0, 0.0, -0.5),
+        "EPSG:32616",
+        limit=3.0,
+        centre=4.0,
+        colormap_name="seismic",
+        unipolar=False,
+        subtitle="x",
+        own=True,
+    )
+    assert _range(sl) == (1.0, 7.0)

@@ -41,7 +41,6 @@ KNOWN_UNCONSUMED = {
     # connects them in Task 5 (the import dialog) and Task 6 (the Mag
     # panel), and each leaves this set in the task that does.
     "mag_import_requested",
-    "mag_grid_selected",
 }
 
 # A signal name declared by more than one class cannot be judged by a
@@ -84,7 +83,9 @@ SHADOWED = {
     # Task 3 (M11) adds a third: SlicesDock.error, connected in plugin.py
     # the same way ProfileDock's is -- declared rises to 3, connects to 2,
     # and ParamForm.error stays the one genuine orphan of the three.
-    "error": {"declared": 3, "connects": 2},
+    "error": {"declared": 4, "connects": 3},
+    # M19a Task 6: MagDock.error is connected in plugin.py the same way
+    # (declared 4, connects 3); ParamForm.error stays the one orphan.
     # M12 Task 5: SlicesDock.choose_lines_requested (plugin.py connects it to
     # open_line_choice_dialog) and SiteSourcePanel's own, carrying the grid
     # id (slices_dock.py connects it to re-emit the dock's). Both consumed.
@@ -96,7 +97,11 @@ SHADOWED = {
     # Interpolation Task 3: FinishPanel.edited joins ParamForm.edited. The dock
     # connects This grid's panel (Task 4); Task 5 connects the site's, raising
     # connects to 3.
-    "edited": {"declared": 2, "connects": 3},
+    # The Mag panel (M19a Task 6) connects its own FinishPanel: 4 connects.
+    "edited": {"declared": 2, "connects": 4},
+    # M19a Task 6: SlicesDock.symbology_requested and MagDock.symbology_requested
+    # (#180), each connected in plugin.py to open its layer's Symbology page.
+    "symbology_requested": {"declared": 2, "connects": 2},
 }
 
 

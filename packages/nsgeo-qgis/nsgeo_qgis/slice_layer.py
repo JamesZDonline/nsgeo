@@ -70,9 +70,13 @@ _CREATION_OPTIONS = ["INTERLEAVE=BAND", "TILED=NO", "BIGTIFF=IF_SAFER"]
 LAYER_NAME = "Slice (live preview)"
 #: M12 spec 4.5: the same one layer, renamed while the dock shows the whole site.
 SITE_LAYER_NAME = "Site slice (live preview)"
+#: M19a: the magnetometer map, a second layer beside the slice.
+MAG_LAYER_NAME = "Mag (live preview)"
 
 
-def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShader:
+def build_shader(
+    lut: np.ndarray, limit: float, unipolar: bool, centre: float = 0.0
+) -> QgsRasterShader:
     """A 256-stop ramp from a core colour table.
 
     The core's LUT is the authority on colour, here as in the profile
@@ -80,9 +84,12 @@ def build_shader(lut: np.ndarray, limit: float, unipolar: bool) -> QgsRasterShad
     rather than a subsample: it is rebuilt only when the palette or the
     limit changes, never per tick, and a subsampled ramp would
     interpolate across the non-linear stretch of `amp_heat`.
+
+    A bipolar ramp runs `centre - limit` to `centre + limit` (a magnetometer
+    map is centred on its median, M19a); a unipolar one ignores `centre`.
     """
-    lo = 0.0 if unipolar else -float(limit)
-    hi = float(limit)
+    lo = 0.0 if unipolar else float(centre) - float(limit)
+    hi = float(limit) if unipolar else float(centre) + float(limit)
     items = [
         QgsColorRampShader.ColorRampItem(
             lo + (hi - lo) * i / 255.0,
@@ -108,12 +115,18 @@ def apply_smooth_resampling(layer: QgsRasterLayer) -> None:
     layer.setResamplingStage(Qgis.RasterResamplingStage.ResampleFilter)
 
 
-def apply_renderer(layer: QgsRasterLayer, colormap_name: str, limit: float, unipolar: bool) -> None:
+def apply_renderer(
+    layer: QgsRasterLayer,
+    colormap_name: str,
+    limit: float,
+    unipolar: bool,
+    centre: float = 0.0,
+) -> None:
     """The slice look on `layer`: pseudocolour ramp over band 1 at `limit`, smooth zoomed in."""
-    shader = build_shader(colormap(colormap_name), limit, unipolar)
+    shader = build_shader(colormap(colormap_name), limit, unipolar, centre)
     renderer = QgsSingleBandPseudoColorRenderer(layer.dataProvider(), 1, shader)
-    renderer.setClassificationMin(0.0 if unipolar else -float(limit))
-    renderer.setClassificationMax(float(limit))
+    renderer.setClassificationMin(0.0 if unipolar else float(centre) - float(limit))
+    renderer.setClassificationMax(float(limit) if unipolar else float(centre) + float(limit))
     layer.setRenderer(renderer)
     apply_smooth_resampling(layer)
 
@@ -217,6 +230,7 @@ class SliceLayer(QObject):
         name: str = LAYER_NAME,
         own: bool = False,
         own_style: str | None = None,
+        centre: float = 0.0,
     ) -> None:
         """Draw an array that is already north-up on `geotransform` (M12: the
         site lattice, spec 4.5). Every path to the map comes through here, so
@@ -276,7 +290,7 @@ class SliceLayer(QObject):
             seeded = None
             if own:
                 seeded = self._apply_own(
-                    own_style, colormap_name, limit, unipolar, array, tuple(geotransform)
+                    own_style, colormap_name, limit, unipolar, array, tuple(geotransform), centre
                 )
             else:
                 value = float(limit() if callable(limit) else limit)
@@ -288,9 +302,9 @@ class SliceLayer(QObject):
                     # Leaving the user's colours: their brightness, saturation,
                     # blending and resampling go too, not only their renderer.
                     own_colours.apply_style_text(self.layer, self._plain_style)
-                key = ("nsgeo", colormap_name, value, bool(unipolar))
+                key = ("nsgeo", colormap_name, value, bool(unipolar), float(centre))
                 if key != self._renderer_key:
-                    self._apply_renderer(colormap_name, value, unipolar)
+                    self._apply_renderer(colormap_name, value, unipolar, centre)
                     self._renderer_key = key
             self.layer.setCustomProperty("nsgeo/window", subtitle)
             self.layer.serverProperties().setAbstract(subtitle)
@@ -310,6 +324,7 @@ class SliceLayer(QObject):
         unipolar: bool,
         array: np.ndarray,
         geotransform: tuple[float, ...],
+        centre: float = 0.0,
     ) -> str | None:
         """Put the user's style on once, then refit it to this slice. Returns
         the style when it was seeded from the palette here (to report), else
@@ -321,21 +336,27 @@ class SliceLayer(QObject):
         assert self.layer is not None
         seeded = None
         if own_style is None:
-            seeded = self._seed(colormap_name, limit, unipolar)
+            seeded = self._seed(colormap_name, limit, unipolar, centre)
         elif self._renderer_key != ("own", own_style):
             try:
                 own_colours.apply_style_text(self.layer, own_style)
                 self._renderer_key = ("own", own_style)
             except ValueError as exc:
                 _log(f"could not use the saved slice colours, so the palette's are used: {exc}")
-                seeded = self._seed(colormap_name, limit, unipolar)
+                seeded = self._seed(colormap_name, limit, unipolar, centre)
         own_colours.refit(self.layer, array, geotransform, self._view())
         return seeded
 
-    def _seed(self, colormap_name: str, limit: float | Callable[[], float], unipolar: bool) -> str:
+    def _seed(
+        self,
+        colormap_name: str,
+        limit: float | Callable[[], float],
+        unipolar: bool,
+        centre: float = 0.0,
+    ) -> str:
         assert self.layer is not None
         value = float(limit() if callable(limit) else limit)
-        own_colours.seed_style(self.layer, colormap_name, value, unipolar)
+        own_colours.seed_style(self.layer, colormap_name, value, unipolar, centre)
         text = own_colours.style_text(self.layer)
         self._renderer_key = ("own", text)
         return text
@@ -568,11 +589,13 @@ class SliceLayer(QObject):
         self._plain_style = own_colours.style_text(layer)
         self._ensure_group_membership()
 
-    def _apply_renderer(self, colormap_name: str, limit: float, unipolar: bool) -> None:
+    def _apply_renderer(
+        self, colormap_name: str, limit: float, unipolar: bool, centre: float = 0.0
+    ) -> None:
         assert self.layer is not None
         # A fresh layer's first draw, and any new renderer. Each tick's
         # repoint sets the resampling again in `_repoint`.
-        apply_renderer(self.layer, colormap_name, limit, unipolar)
+        apply_renderer(self.layer, colormap_name, limit, unipolar, centre)
 
     # ---- lifecycle ------------------------------------------------------
     def clear(self) -> None:

@@ -127,6 +127,7 @@ from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
+from nsgeo_qgis.ui.mag_dock import MagDock, draw_mag_layer
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
@@ -225,12 +226,15 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        self.mag_dock: MagDock | None = None
         #: A cut's section, read from the Slices panel's cube (cut spec §4.3).
         self.cut_sections: CutSections | None = None
         #: Whether this session should still tab Slices onto Processing.
         #: Read from settings in `initGui`; see `_tabify_slices_dock`.
         self._want_tabify = False
         self.slice_layer: SliceLayer | None = None
+        #: M19a: the magnetometer map, a second layer beside the slice.
+        self.mag_layer: SliceLayer | None = None
         self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
         self.act_open: QAction | None = None
@@ -400,6 +404,15 @@ class NsgeoPlugin:
             # sticks.
             QTimer.singleShot(0, self._tabify_slices_dock)
         self.docks.append(self.slices_dock)
+
+        # M19a: the Mag panel. Hidden at start-up (plan call P14); an import
+        # shows it, and the Panels menu opens it.
+        self.mag_dock = MagDock(self.session, main)
+        self.mag_dock.error.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.mag_dock)
+        self.docks.append(self.mag_dock)
+        self.mag_dock.hide()
+        self.survey_dock.mag_grid_selected.connect(self.mag_dock.show_grid)
         self._build_panels_menu()
 
         # The active slice on the map: owned here (not by the dock) for
@@ -412,6 +425,12 @@ class NsgeoPlugin:
         self.slice_layer.own_style_changed.connect(self._on_own_style_changed)
         self.slice_layer.extent_in = self._canvas_extent_in
         self.slices_dock.symbology_requested.connect(self._open_slice_symbology)
+        self.mag_layer = SliceLayer(self.layers)
+        self.mag_layer.own_style_changed.connect(self._on_mag_own_style_changed)
+        self.mag_layer.extent_in = self._canvas_extent_in
+        self.mag_dock.symbology_requested.connect(self._open_mag_symbology)
+        self.mag_dock.map_changed.connect(self._on_mag_map_changed)
+        self.session.site_closed.connect(self._clear_mag_layer)
         self.cut_sections = CutSections(self.session, self.slices_dock)
         self.profile_dock.set_cut_sections(self.cut_sections)
         self.map_link.set_sections(self.cut_sections)
@@ -513,6 +532,7 @@ class NsgeoPlugin:
             ("Profile", self.profile_dock),
             ("Processing", self.processing_dock),
             ("Slices", self.slices_dock),
+            ("Mag", self.mag_dock),
         )
         for text, dock in named:
             entry = menu.addAction(text)
@@ -718,6 +738,7 @@ class NsgeoPlugin:
         self.profile_dock = None
         self.processing_dock = None
         self.slices_dock = None
+        self.mag_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
@@ -758,6 +779,9 @@ class NsgeoPlugin:
             # is orphaned by this plugin unloading around it.
             self.slice_layer.dispose()
             self.slice_layer = None
+        if self.mag_layer is not None:
+            self.mag_layer.dispose()
+            self.mag_layer = None
         if self.layers is not None:
             self.layers.detach()
             self.layers = None
@@ -1041,6 +1065,62 @@ class NsgeoPlugin:
             self.message(
                 f"could not open the slice's Symbology page: {exc}", Qgis.MessageLevel.Warning
             )
+
+    def _on_mag_map_changed(self) -> None:
+        """`MagDock.map_changed`: draw the dock's map on the Mag layer, or clear
+        the layer when there is none (M19a). A slot: never raises."""
+        try:
+            dock, layer = self.mag_dock, self.mag_layer
+            if dock is None or layer is None:
+                return
+            draw_mag_layer(dock, layer)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not draw the mag map: {exc}", Qgis.MessageLevel.Warning)
+
+    def _clear_mag_layer(self) -> None:
+        """`site_closed`: no mag map is left on the canvas. A slot."""
+        try:
+            if self.mag_layer is not None:
+                self.mag_layer.clear()
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not clear the mag map: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_mag_own_style_changed(self, text: str) -> None:
+        """`SliceLayer.own_style_changed` on the Mag layer: remember the style
+        (one choice for both mag scopes). A slot."""
+        try:
+            if self.mag_dock is not None:
+                self.mag_dock.set_own_style(text)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not remember the mag colours: {exc}", Qgis.MessageLevel.Warning)
+
+    def _open_mag_symbology(self) -> None:
+        """`MagDock.symbology_requested`: the Mag layer's Symbology page. A slot."""
+        try:
+            layer = self.mag_layer.layer if self.mag_layer is not None else None
+            if layer is None or sip.isdeleted(layer):
+                self.message(
+                    "show a mag map first: the Symbology page belongs to the Mag layer.",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            self.iface.showLayerProperties(layer, own_colours.SYMBOLOGY_PAGE)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(
+                f"could not open the Mag layer's Symbology page: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def show_mag_panel(self, grid_id: str) -> None:
+        """Open the Mag panel, in front, on `grid_id` (an import calls this)."""
+        try:
+            dock = self.mag_dock
+            if dock is None:
+                return
+            dock.show_grid(grid_id)
+            dock.setUserVisible(True)
+            dock.raise_()
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not show the Mag panel: {exc}", Qgis.MessageLevel.Warning)
 
     def _canvas_extent_in(self, crs: QgsCoordinateReferenceSystem) -> tuple[float, ...] | None:
         """The map view as (xmin, ymin, xmax, ymax) in `crs`, for a slice style

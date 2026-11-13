@@ -77,12 +77,18 @@ _KINDS = {
 Extent = tuple[float, float, float, float]
 
 
-def seed_style(layer: QgsRasterLayer, colormap_name: str, limit: float, unipolar: bool) -> None:
+def seed_style(
+    layer: QgsRasterLayer,
+    colormap_name: str,
+    limit: float,
+    unipolar: bool,
+    centre: float = 0.0,
+) -> None:
     """Put the plugin's palette and limit on `layer` as an editable QGIS style.
 
     A pseudocolour renderer on band 1 whose source ramp is the palette as a
-    gradient, classified continuously from it, between `-limit` (or 0 for
-    unipolar data) and `limit`, held as user-defined numbers.
+    gradient, classified continuously from it, between `centre - limit` (or 0
+    for unipolar data) and `centre + limit` (or `limit`), held as user-defined numbers.
     """
     from nsgeo_qgis.slice_layer import apply_smooth_resampling
 
@@ -93,8 +99,8 @@ def seed_style(layer: QgsRasterLayer, colormap_name: str, limit: float, unipolar
         False,
         [QgsGradientStop(position, QColor(*rgb)) for position, rgb in stops[1:-1]],
     )
-    lo = 0.0 if unipolar else -float(limit)
-    hi = float(limit)
+    lo = 0.0 if unipolar else float(centre) - float(limit)
+    hi = float(limit) if unipolar else float(centre) + float(limit)
     function = QgsColorRampShader(lo, hi, ramp)
     function.setColorRampType(QgsColorRampShader.Type.Interpolated)
     function.classifyColorRamp()
