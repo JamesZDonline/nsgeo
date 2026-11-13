@@ -135,3 +135,5 @@ Deployed: profile ns_geo_velocity_fixes → this worktree; headless load probe: 
 Walkthrough published: https://claude.ai/artifact/WBbG6CkcbiYPtPNq6WxQsg (db collection "results", 24 checks, H2 data-loss relevant). Awaiting the author's results.
 Walkthrough (2026-11-13): 23 pass, 1 skipped (D2, optional: no member line without a Time zero step), 0 fail. Author note on B9: a future issue — selecting a row in the fit table should show that hyperbola on its profile, so a suspicious fit can be reviewed.
 Post-walkthrough round (controller, right-sized: tests/comments only): the grid-scope R8 test now applies its record inside the loop; the provenance KeyError comment is corrected; the relabel guard logs ValueError instead of suppressing it; a test docstring is fixed. grid_velocity_dialog 29 passed, slices_dock 172 passed, ruff clean.
+Filed #185 (selecting a fit shows its hyperbola on its profile) from the author's B9 note.
+Tidy before PR (2026-11-13): merged origin/main (#180 own slice colours); three appended-test conflicts kept both sides; README roadmap moves this work to Done (next release) and adds #185 to the wishlist.

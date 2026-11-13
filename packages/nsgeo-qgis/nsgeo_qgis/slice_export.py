@@ -795,6 +795,11 @@ class ViewSettings:
     max_distance_spacings: float = DEFAULT_MAX_DISTANCE_SPACINGS
     smooth_x_m: float = 0.0
     smooth_y_m: float = 0.0
+    # #180: "nsgeo" (the palette and stretch above) or "own" (the user's own
+    # QGIS symbology, `style`, as style XML). None in a record written before
+    # them: restoring it leaves the colours as they are.
+    colours: str | None = None
+    style: str | None = None
 
     @property
     def finish(self) -> SliceFinish:
@@ -814,6 +819,8 @@ class ViewSettings:
             "max_distance_spacings": self.max_distance_spacings,
             "smooth_x_m": self.smooth_x_m,
             "smooth_y_m": self.smooth_y_m,
+            **({"colours": self.colours} if self.colours is not None else {}),
+            **({"style": self.style} if self.style is not None else {}),
         }
 
     @classmethod
@@ -836,6 +843,8 @@ class ViewSettings:
             max_distance_spacings=finish.max_distance_spacings,
             smooth_x_m=finish.smooth_x_m,
             smooth_y_m=finish.smooth_y_m,
+            colours=doc["colours"] if doc.get("colours") in ("nsgeo", "own") else None,
+            style=doc["style"] if isinstance(doc.get("style"), str) else None,
         )
 
 

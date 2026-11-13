@@ -112,6 +112,15 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+#: The slice scopes that each keep their own colours (#180).
+COLOUR_SCOPES = ("grid", "site")
+
+
+def _check_colour_scope(scope: str) -> None:
+    if scope not in COLOUR_SCOPES:
+        raise ValueError(f"unknown slice scope {scope!r}; expected one of {COLOUR_SCOPES}")
+
+
 def _merge_resolution(
     old: dict[str, float | str], **fields: float | str | None
 ) -> dict[str, float | str] | None:
@@ -1300,6 +1309,33 @@ class SiteSession(QObject):
         if new == view:
             return
         self._require_site().site_view = new
+        self._set_dirty(True)
+
+    def slice_colours(self, scope: str) -> dict[str, Any]:
+        """A copy of a slice scope's remembered colours (#180), or {}.
+
+        `scope` is `"grid"` (This grid) or `"site"` (Whole site). The record is
+        `{"own": bool, "style": str}`, each key optional: `own` is True when the
+        slice uses the user's own QGIS symbology, `style` that symbology."""
+        _check_colour_scope(scope)
+        return dict(self._require_site().slice_colours.get(scope, {}))
+
+    def set_slice_colours(
+        self, scope: str, *, own: bool | None = None, style: str | None = None
+    ) -> None:
+        """Merge the given colour choices into a scope's record; None leaves a
+        field as it is. Marks the site unsaved only when something changed."""
+        _check_colour_scope(scope)
+        colours = self._require_site().slice_colours
+        old = colours.get(scope, {})
+        new = dict(old)
+        if own is not None:
+            new["own"] = bool(own)
+        if style is not None:
+            new["style"] = style
+        if new == old:
+            return
+        colours[scope] = new
         self._set_dirty(True)
 
     def site_resolution(self) -> dict[str, float | str]:

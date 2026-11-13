@@ -2011,3 +2011,43 @@ def test_member_state_of_a_loose_line_asked_about_a_grid(session, tmp_path):
     session._lines_by_key[key] = dataclasses.replace(line, placement=SimpleNamespace(label=None))
     assert session.member_state(m, "A") == "line moved off this grid"
     assert session.member_state(m) == "present"
+
+
+# ---- #180: each slice scope's colours ---------------------------------------------------
+
+
+def test_slice_colours_default_to_the_plugin_colours(session):
+    assert session.slice_colours("grid") == {}
+    assert session.slice_colours("site") == {}
+
+
+def test_set_slice_colours_merges_per_scope_and_is_quiet_when_unchanged(session, tmp_path):
+    session.save()
+    session.set_slice_colours("grid", own=True)
+    session.set_slice_colours("grid", style="<qgis/>")
+    session.set_slice_colours("site", own=False)
+    assert session.slice_colours("grid") == {"own": True, "style": "<qgis/>"}
+    assert session.slice_colours("site") == {"own": False}
+    assert session.dirty
+    session.save()
+    session.set_slice_colours("grid", own=True, style="<qgis/>")
+    assert not session.dirty
+
+
+def test_slice_colours_are_a_copy(session):
+    session.set_slice_colours("grid", own=True)
+    session.slice_colours("grid")["own"] = False
+    assert session.slice_colours("grid") == {"own": True}
+
+
+def test_set_slice_colours_refuses_an_unknown_scope(session):
+    with pytest.raises(ValueError, match="scope"):
+        session.set_slice_colours("profile", own=True)
+
+
+def test_slice_colours_survive_save_and_reopen(session):
+    session.set_slice_colours("site", own=True, style="<qgis>s</qgis>")
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.root / SURVEY_FILE)
+    assert reopened.slice_colours("site") == {"own": True, "style": "<qgis>s</qgis>"}

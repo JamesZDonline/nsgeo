@@ -288,6 +288,8 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
         doc["slice_sources"] = site.slice_sources
     if site.site_view:
         doc["site_view"] = site.site_view
+    if site.slice_colours:
+        doc["slice_colours"] = site.slice_colours
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
@@ -381,6 +383,32 @@ def _clean_site_view(view: dict[str, Any], known: set[str]) -> dict[str, Any]:
     resolution = _clean_resolution(view.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    return out
+
+
+_COLOUR_SCOPES = ("grid", "site")
+
+
+def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
+    """The remembered slice colours (#180), each field kept only if usable.
+
+    A display choice never blocks a survey from opening: a value of the wrong
+    type, or a scope this build does not know, reads as unset.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for scope in _COLOUR_SCOPES:
+        entry = value.get(scope)
+        if not isinstance(entry, dict):
+            continue
+        kept: dict[str, Any] = {}
+        if isinstance(entry.get("own"), bool):
+            kept["own"] = entry["own"]
+        if isinstance(entry.get("style"), str):
+            kept["style"] = entry["style"]
+        if kept:
+            out[scope] = kept
     return out
 
 
@@ -521,6 +549,7 @@ def load_site(path: str | Path) -> Site:
     if not isinstance(site_view, dict):
         raise ProjectError(f"{path}: 'site_view' must be an object, got {type(site_view).__name__}")
     site.site_view = _clean_site_view(site_view, known)
+    site.slice_colours = _clean_slice_colours(doc.get("slice_colours", {}))
 
     site.validate()
     return site

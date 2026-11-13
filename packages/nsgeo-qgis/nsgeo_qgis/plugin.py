@@ -87,7 +87,7 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
 )
 
-from nsgeo_qgis import build_label, plugin_version
+from nsgeo_qgis import build_label, own_colours, plugin_version
 from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
 from nsgeo_qgis.export_style import write_style
@@ -409,6 +409,11 @@ class NsgeoPlugin:
         # concern that outlives any one dock widget and is torn down
         # outside-in in `unload()`, before `self.layers.detach()`.
         self.slice_layer = SliceLayer(self.layers)
+        # #180: the user's own colours, their edits remembered by the dock,
+        # their "Current canvas" min/max read from this map view.
+        self.slice_layer.own_style_changed.connect(self._on_own_style_changed)
+        self.slice_layer.extent_in = self._canvas_extent_in
+        self.slices_dock.symbology_requested.connect(self._open_slice_symbology)
         self.cut_sections = CutSections(self.session, self.slices_dock)
         self.profile_dock.set_cut_sections(self.cut_sections)
         self.map_link.set_sections(self.cut_sections)
@@ -962,6 +967,13 @@ class NsgeoPlugin:
             dock, layer = self.slices_dock, self.slice_layer
             if dock is None or layer is None:
                 return
+            # #180: counts are always drawn in the plugin's colours. The limit
+            # goes as a callable: under the user's own colours it is read only
+            # to start their style from what was shown, since measuring it is a
+            # pass over the cube.
+            own = dock.own_colours_on() and not dock.coverage_check.isChecked()
+            own_style = dock.own_style() if own else None
+            limit = dock.display_limit
             if dock.scope() == "site":
                 # M12 spec 4.5: one layer over every included grid, already
                 # north-up on the site lattice.
@@ -973,28 +985,74 @@ class NsgeoPlugin:
                     shown.array,
                     shown.lattice.geotransform,
                     shown.lattice.crs,
-                    limit=dock.display_limit(),
+                    limit=limit,
                     colormap_name=dock.palette_combo.currentText(),
                     unipolar=dock.display_unipolar(),
                     subtitle=dock.readout.text(),
                     name=SITE_LAYER_NAME,
+                    own=own,
+                    own_style=own_style,
                 )
-                return
-            values, frame = dock.current_values(), dock.current_frame()
-            if values is None or frame is None:
-                layer.clear()
-                return
-            layer.update(
-                values,
-                frame,
-                limit=dock.display_limit(),
-                colormap_name=dock.palette_combo.currentText(),
-                unipolar=dock.display_unipolar(),
-                subtitle=dock.readout.text(),
-                counts=dock.coverage_check.isChecked(),
-            )
+            else:
+                values, frame = dock.current_values(), dock.current_frame()
+                if values is None or frame is None:
+                    layer.clear()
+                    return
+                layer.update(
+                    values,
+                    frame,
+                    limit=limit,
+                    colormap_name=dock.palette_combo.currentText(),
+                    unipolar=dock.display_unipolar(),
+                    subtitle=dock.readout.text(),
+                    counts=dock.coverage_check.isChecked(),
+                    own=own,
+                    own_style=own_style,
+                )
+            if own:
+                dock.show_own_legend(own_colours.legend_text(layer.layer))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_own_style_changed(self, text: str) -> None:
+        """`SliceLayer.own_style_changed`: remember the style for the scope on
+        screen, and say its range on the Legend line at once, since an edit in
+        Layer Properties redraws nothing in the panel (#180). A slot."""
+        try:
+            dock, layer = self.slices_dock, self.slice_layer
+            if dock is None or layer is None:
+                return
+            dock.set_own_style(text)
+            dock.show_own_legend(own_colours.legend_text(layer.layer))
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not remember the slice colours: {exc}", Qgis.MessageLevel.Warning)
+
+    def _open_slice_symbology(self) -> None:
+        """`SlicesDock.symbology_requested`: the slice layer's Symbology page
+        (#180). A slot: never raises."""
+        try:
+            layer = self.slice_layer.layer if self.slice_layer is not None else None
+            if layer is None or sip.isdeleted(layer):
+                self.message(
+                    "show a slice first: the Symbology page belongs to the slice layer.",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            self.iface.showLayerProperties(layer, own_colours.SYMBOLOGY_PAGE)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(
+                f"could not open the slice's Symbology page: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def _canvas_extent_in(self, crs: QgsCoordinateReferenceSystem) -> tuple[float, ...] | None:
+        """The map view as (xmin, ymin, xmax, ymax) in `crs`, for a slice style
+        whose min/max is computed over the current canvas (#180)."""
+        canvas = self.iface.mapCanvas()
+        extent = canvas.extent()
+        transform = crs_transform(canvas.mapSettings().destinationCrs(), crs, self.layers.project)
+        if transform is not None:
+            extent = transform.transformBoundingBox(extent)
+        return (extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum())
 
     # ---- Task 6: what leaves the plugin -----------------------------------
     def save_cube(self) -> None:
@@ -1252,6 +1310,15 @@ class NsgeoPlugin:
             coverage=coverage,
         )
 
+    def _export_own_style(self, dock: SlicesDock) -> str | None:
+        """The user's own colours for an export's style file (#180), or None
+        for the plugin's: as the slice shows them now (this slice's computed
+        range included), else as remembered (Show coverage is on)."""
+        if not dock.own_colours_on():
+            return None
+        shown = self.slice_layer.own_style_now() if self.slice_layer is not None else None
+        return shown if shown is not None else dock.own_style()
+
     @staticmethod
     def _clip(unipolar: bool) -> Any:
         """The stretch rule of the panel's own view (`display_limit`)."""
@@ -1328,6 +1395,7 @@ class NsgeoPlugin:
         palette = dock.palette_combo.currentText()
         unipolar = dock.source_unipolar()
         counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+        own_style = self._export_own_style(dock)
 
         def on_done(result: ExportResult) -> None:
             self._finish_export(
@@ -1340,6 +1408,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 counts_palette=counts_palette,
                 removed=removed,
+                own_style=own_style,
             )
 
         task = ExportTask(
@@ -1394,6 +1463,7 @@ class NsgeoPlugin:
         unipolar: bool,
         counts_palette: str,
         removed: Sequence[tuple[str, Path]] = (),
+        own_style: str | None = None,
     ) -> None:
         """The export task's `on_done`, on the GUI thread; it never raises.
 
@@ -1418,6 +1488,7 @@ class NsgeoPlugin:
                     palette=palette,
                     unipolar=unipolar,
                     removed=removed,
+                    own_style=own_style,
                 )
                 return
             if not result.ok:
@@ -1455,6 +1526,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 temporal=job.temporal,
                 notes=style_notes,
+                own_style=own_style,
             )
             if problem is not None:
                 self.message(problem, Qgis.MessageLevel.Warning)
@@ -1506,6 +1578,7 @@ class NsgeoPlugin:
         palette: str,
         unipolar: bool,
         removed: Sequence[tuple[str, Path]],
+        own_style: str | None = None,
     ) -> None:
         """The values file replaced its target but the companion could not be written.
 
@@ -1538,6 +1611,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 temporal=job.temporal,
                 notes=style_notes,
+                own_style=own_style,
             )
             text += "; the new layer was added" if problem is None else f"; {problem}"
         if note:
@@ -1615,6 +1689,7 @@ class NsgeoPlugin:
         unipolar: bool,
         temporal: Callable[[Any], None] | None,
         notes: list[str] | None = None,
+        own_style: str | None = None,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
@@ -1625,7 +1700,9 @@ class NsgeoPlugin:
         this file) and a sentence about it is appended to `notes`.
         """
         try:
-            write_style(path, limit=limit, colormap_name=palette, unipolar=unipolar)
+            write_style(
+                path, limit=limit, colormap_name=palette, unipolar=unipolar, own_style=own_style
+            )
         except Exception as exc:  # noqa: BLE001 -- the file is good; QGIS just draws it plainly
             QgsMessageLog.logMessage(
                 f"could not write the style file for {path}: {exc}",

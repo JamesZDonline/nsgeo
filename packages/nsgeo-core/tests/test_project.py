@@ -1034,3 +1034,47 @@ def test_velocity_from_fit_reads_none_when_the_record_is_an_average_or_its_fit_i
     )
     assert average.velocity_from_fit is None
     assert line.velocity_from_fit is None
+
+
+# ---- #180: the slice colours each scope keeps ------------------------------------------
+
+
+def test_slice_colours_round_trip(tmp_path):
+    site = _two_grid_site()
+    site.slice_colours = {
+        "grid": {"own": True, "style": "<qgis>grid</qgis>"},
+        "site": {"own": False, "style": "<qgis>site</qgis>"},
+    }
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    assert json.loads(path.read_text())["slice_colours"] == site.slice_colours
+    assert load_site(path).slice_colours == site.slice_colours
+
+
+def test_no_slice_colours_writes_no_key(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_two_grid_site(), path)
+    assert "slice_colours" not in json.loads(path.read_text())
+    assert load_site(path).slice_colours == {}
+
+
+def test_damaged_slice_colours_read_as_unset(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_two_grid_site(), path)
+    doc = json.loads(path.read_text())
+    doc["slice_colours"] = {
+        "grid": {"own": "yes", "style": "<qgis/>"},
+        "site": ["not", "an", "object"],
+        "elsewhere": {"own": True},
+    }
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_colours == {"grid": {"style": "<qgis/>"}}
+
+
+def test_slice_colours_that_are_not_an_object_read_as_unset(tmp_path):
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(_two_grid_site(), path)
+    doc = json.loads(path.read_text())
+    doc["slice_colours"] = "own"
+    path.write_text(json.dumps(doc))
+    assert load_site(path).slice_colours == {}

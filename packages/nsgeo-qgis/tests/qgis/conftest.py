@@ -78,6 +78,8 @@ class FakeIface:
         self.docks: list = []
         self.toolbars: list = []
         self.menu_actions: list = []
+        #: `(layer, page)` for each `showLayerProperties` call (#180).
+        self.layer_properties: list = []
 
     def mainWindow(self):
         return self._main
@@ -90,6 +92,10 @@ class FakeIface:
 
     def activeLayer(self):
         return self._active_layer
+
+    def showLayerProperties(self, layer, page=""):
+        """Records the request; QGIS would open its modal dialog here."""
+        self.layer_properties.append((layer, page))
 
     def setActiveLayer(self, layer):
         """As QGIS: a change of layer announces itself."""

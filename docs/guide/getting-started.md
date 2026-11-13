@@ -541,8 +541,24 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    full detail. Past a size it draws a preview at a coarser pixel and says so in
    the panel. An export is not limited by the preview: it works out its own
    cells at the size you choose (see step 6).
-5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
-   many traces fell in each cell, rather than the amplitude. The number in a cell
+5. **Display** sets how the slice is coloured. **Colours** offers two choices:
+   - **nsgeo colours** uses the **Stretch** and **Palette** below it.
+   - **my own colours** keeps whatever you set on the slice layer's
+     **Symbology** page in QGIS. The **Symbology…** button beside the choice
+     opens that page, where you can pick a colour ramp, type a min and max, or
+     use a cumulative cut. Your colours start from what nsgeo was showing.
+     Numbers you type stay the same at every depth. A computed range (Min /
+     max, Cumulative cut, Mean ± standard deviation) is worked out again for
+     each slice, so a dim deep slice still uses the whole ramp. **Stretch** is
+     greyed out while your own colours are on.
+
+   This grid and Whole site each keep their own colours, and the site remembers
+   them; a saved cube keeps them too. **Palette** still colours cuts and the
+   coverage view.
+
+   **Show coverage** shows how many traces fell in each cell, rather than the
+   amplitude, always in nsgeo's colours: turn it off and your own colours come
+   back. The number in a cell
    is how many traces fell in it. A blank cell had no line through it. What counts
    as a low number depends on the cell size: at a fine cell, one or two traces a
    cell is normal, because a cell holds only a few traces along the line. Compare a
@@ -615,7 +631,10 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
    ending. Any QGIS project that opens the file draws it with the same colours,
    stretch and smooth drawing when zoomed in. Other GIS software, ArcGIS and
-   the rest, reads the values but chooses its own colours.
+   the rest, reads the values but chooses its own colours. With **my own
+   colours** on, the style file holds your colours as they were on screen when
+   the export started. The file keeps one range for every depth: the export
+   does not work a computed range out again band by band.
 
 ### Step 8: Draw a cut
 
