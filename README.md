@@ -121,7 +121,12 @@ than reworking M16–M17 afterwards.
    profiles at true distance, and GPS areas.
 3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-4. **M19: magnetometer data.** The first instrument other than GPR.
+4. **M19: magnetometer data.** The first instrument other than GPR:
+   Bartington Grad601 grids placed on the map with the GPR, cleaned up in
+   the Processing panel (zero, destripe, despike) and Edit lines (destagger),
+   joined into one map with the grids levelled to each other, and a mag strip
+   above the radargram on lines and cuts. Designed, in three parts; the first
+   is planned once [#180] merges.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; the migration real-data test ([#125]), before M16
