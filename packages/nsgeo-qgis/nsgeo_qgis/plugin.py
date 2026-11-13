@@ -133,7 +133,12 @@ from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_res
 from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
 from nsgeo_qgis.surface_layers import SurfaceLayers
 from nsgeo_qgis.surface_plan import (
+    EXPORT_RUNNING,
+    PREPARING_LINES,
+    build_failure_text,
     build_outcome,
+    build_title,
+    resolution_hint,
     selection_label,
     skipped_surfaces_text,
     write_failure_text,
@@ -447,6 +452,7 @@ class NsgeoPlugin:
         self._want_tabify = not QgsSettings().value(_TABIFIED_KEY, False, type=bool)
         self.surfaces_dock = SurfacesDock(self.session, self.surfaces, main)
         self.surfaces_dock.problem.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.surfaces_dock.notice.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Info))
         self.surfaces_dock.new_requested.connect(self.new_surface)
         self.surfaces_dock.build_requested.connect(self.build_surfaces)
         self.surfaces_dock.select_picks_requested.connect(self._select_picks)
@@ -1411,14 +1417,25 @@ class NsgeoPlugin:
                 return
             fids = self.layers.selected_pick_ids()
             check = self.surfaces.check(fids)
-            labels = [
-                self.surfaces.line_label(row.pick.line_key) for row in self.layers.pick_rows(fids)
-            ]
+            labels = []
+            for row in self.layers.pick_rows(fids):
+                # A pick on a cut or on a line no longer in the site has no label: the check
+                # says why it cannot be used.
+                with contextlib.suppress(KeyError):
+                    labels.append(self.surfaces.line_label(row.pick.line_key))
+            hint = resolution_hint(None)
+            if check.grid_id is not None:
+                try:
+                    choice = self._surface_export().defaults(check.grid_id)
+                    hint = resolution_hint(check.grid_id, choice.cell, choice.dz_ns)
+                except (KeyError, ValueError, RuntimeError):
+                    pass  # the generic line; the build will say what is wrong
             dialog = NewSurfaceDialog(
                 check,
                 selection_label(check.n, check.grid_id, labels),
                 self.iface.mainWindow(),
                 taken=[r.name for r in self.surfaces.records()],
+                hint=hint,
             )
             try:
                 accepted = dialog.exec() == QDialog.DialogCode.Accepted
@@ -1447,18 +1464,24 @@ class NsgeoPlugin:
                 or not feature_ids
             ):
                 return
+            if running_export() is not None:
+                self.message(EXPORT_RUNNING, Qgis.MessageLevel.Warning)
+                return
             surfaces, dock = self.surfaces, self.slices_dock
-            grid_of = {r.feature_id: r.grid_id for r in surfaces.records()}
+            records = {r.feature_id: r for r in surfaces.records()}
             groups: dict[str, list[str]] = {}
             for fid in dict.fromkeys(feature_ids):
-                if fid in grid_of:
-                    groups.setdefault(grid_of[fid], []).append(fid)
-            title = "Building surface" if len(feature_ids) == 1 else "Building surfaces"
+                if fid in records:
+                    groups.setdefault(records[fid].grid_id, []).append(fid)
+            if not groups:
+                return
+            title = build_title([records[f].name for g in groups.values() for f in g])
             progress, bar = self._export_progress(title, 100, show_now=True)
             done: list[Any] = []
-            failure: str | None = None
+            failures: list[str] = []
+            cancelled = False
             try:
-                bar.setLabelText("Preparing lines\u2026")
+                bar.setLabelText(PREPARING_LINES)
                 progress(0, 100)
 
                 def one_group(index: int) -> Callable[[int, int], bool]:
@@ -1471,31 +1494,43 @@ class NsgeoPlugin:
 
                 with busy_cursor(), dock.refining_paused():
                     for index, group in enumerate(groups.values()):
-                        done += surfaces.build(group, progress=one_group(index))
-            except ParaViewExportCancelled:
-                failure = CANCELLED_MESSAGE
-            except (RuntimeError, ValueError) as exc:
-                failure = write_failure_text(str(exc))
+                        try:
+                            done += surfaces.build(group, progress=one_group(index))
+                        except ParaViewExportCancelled:
+                            cancelled = True
+                            break
+                        except Exception as exc:  # noqa: BLE001 -- each grid reports its own
+                            names = [records[f].name for f in group]
+                            failures.append(build_failure_text(names, exc))
             finally:
                 bar.close()
                 bar.deleteLater()
-            # A sync owed during the build is deferred, never self-triggered: do it now.
-            if self.surface_layers is not None:
-                self.surface_layers.sync()
-            if self.surfaces_dock is not None:
-                self.surfaces_dock.refresh()
-            for built in done:
-                text, warn = build_outcome(built.name, built.report)
-                self.message(text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info)
-            if failure is not None:
-                self.message(
-                    failure,
-                    Qgis.MessageLevel.Info
-                    if failure == CANCELLED_MESSAGE
-                    else Qgis.MessageLevel.Warning,
-                )
+                self._after_surface_build()
+            self._report_surface_build(done, failures, cancelled)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not build the surfaces: {exc}", Qgis.MessageLevel.Critical)
+
+    def _after_surface_build(self) -> None:
+        """Whatever a build did (all, part, nothing), bring the map and the panel in line with
+        the files on disk. A sync owed during a build is deferred, never self-triggered."""
+        for step in (
+            self.surface_layers.sync if self.surface_layers is not None else None,
+            self.surfaces_dock.refresh if self.surfaces_dock is not None else None,
+        ):
+            try:
+                if step is not None:
+                    step()
+            except Exception as exc:  # noqa: BLE001 -- runs in a finally; never mask the build
+                self.message(f"could not update the surfaces: {exc}", Qgis.MessageLevel.Warning)
+
+    def _report_surface_build(self, done: list[Any], failures: list[str], cancelled: bool) -> None:
+        for built in done:
+            text, warn = build_outcome(built.name, built.report)
+            self.message(text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info)
+        for text in failures:
+            self.message(text, Qgis.MessageLevel.Warning)
+        if cancelled:
+            self.message(CANCELLED_MESSAGE)
 
     def _export_site(self) -> None:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.

@@ -293,7 +293,12 @@ def _attr(feature: QgsFeature, name: str) -> Any:
 
 def _provider_reason(provider: Any) -> str:
     """The provider's own message, or a plain reason when it gives none."""
-    return provider.error().message() or "the GeoPackage refused the write (is it read-only?)"
+    message = provider.error().message()
+    if not message:
+        # A real "database is locked" leaves error() empty and its text only in errors().
+        errors = [e for e in provider.errors() if e]
+        message = errors[-1] if errors else ""
+    return message or "the GeoPackage refused the write (is it read-only?)"
 
 
 def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
@@ -2107,7 +2112,7 @@ class SiteLayers(QObject):
         ok, _ = layer.dataProvider().addFeatures([feature])
         if not ok:
             raise RuntimeError(
-                f"could not write the feature: {layer.dataProvider().error().message()}"
+                f"could not write the feature: {_provider_reason(layer.dataProvider())}"
             )
 
     def update_feature(
@@ -2124,7 +2129,7 @@ class SiteLayers(QObject):
         if settings is not None:
             values[provider.fieldNameIndex("settings_json")] = settings_json(settings)
         if values and not provider.changeAttributeValues({fid: values}):
-            raise RuntimeError(f"could not update the feature: {provider.error().message()}")
+            raise RuntimeError(f"could not update the feature: {_provider_reason(provider)}")
 
     def remove_feature(self, feature_id: str) -> None:
         """Delete the record only; its picks keep their `feature_id` until the
@@ -2134,7 +2139,7 @@ class SiteLayers(QObject):
         assert layer is not None
         if not layer.dataProvider().deleteFeatures([fid]):
             raise RuntimeError(
-                f"could not delete the feature: {layer.dataProvider().error().message()}"
+                f"could not delete the feature: {_provider_reason(layer.dataProvider())}"
             )
 
     # ---- derived tables ---------------------------------------------------

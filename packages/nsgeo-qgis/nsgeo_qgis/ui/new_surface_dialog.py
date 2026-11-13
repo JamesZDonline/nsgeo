@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.surface_plan import move_note, name_refusal, settings_summary
+from nsgeo_qgis.surface_plan import move_note, name_refusal, resolution_hint, settings_summary
 from nsgeo_qgis.surfaces import SelectionCheck
 from nsgeo_qgis.ui.surface_settings_form import SurfaceSettingsForm
 
@@ -40,6 +40,7 @@ class NewSurfaceDialog(QDialog):
         *,
         taken: Iterable[str] = (),
         default_name: str = "",
+        hint: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("New surface")
@@ -77,12 +78,9 @@ class NewSurfaceDialog(QDialog):
         self.form = SurfaceSettingsForm()
         self.form.setVisible(False)
         layout.addWidget(self.form)
-        hint = _wrapped()
-        hint.setText("Built at the grid's 3-D resolution, the one its ParaView export uses.")
-        hint.setToolTip(
-            "The cell and depth step are the grid's own; change them in the ParaView export."
-        )
-        layout.addWidget(hint)
+        self.hint_label = hint_label = _wrapped()
+        hint_label.setText(hint or resolution_hint(None))
+        layout.addWidget(hint_label)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel

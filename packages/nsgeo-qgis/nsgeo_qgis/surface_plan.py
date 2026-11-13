@@ -520,3 +520,53 @@ def skipped_surfaces_text(names: Sequence[str]) -> str:
         f"{noun} {listed} {'was' if len(names) == 1 else 'were'} left out: "
         "the coordinate system of the build could not be converted to this export's."
     )
+
+
+# ---- more wording the panel, the dialog and the build flow show -----------------------------
+PREPARING_LINES = "Preparing lines…"
+NO_LONGER_MEMBER = "That pick is no longer in the surface; rebuild to refresh the list."
+EXPORT_RUNNING = (
+    "an export is already running; wait for it to finish, or cancel it in the task list."
+)
+
+
+def not_built_text(n_picks: int) -> str:
+    picks = f"{n_picks} pick{'' if n_picks == 1 else 's'}"
+    return f"Not built yet ({picks}). Rebuild to put it on the map."
+
+
+def outlier_header(window_m: float, n: int) -> str:
+    text = f"More than {window_m * 100:g} cm from the surface ({n})"
+    return text + ("; click one to select it on the map:" if n else "")
+
+
+def build_title(names: Sequence[str]) -> str:
+    """The progress dialog's label: `Building “Bowl”`, or `Building 3 surfaces`."""
+    if len(names) == 1:
+        return f"Building “{names[0]}”"
+    return f"Building {len(names)} surfaces"
+
+
+def resolution_hint(
+    grid_id: str | None, cell: float | None = None, dz_ns: float | None = None
+) -> str:
+    """The New surface dialog's line on the 3-D resolution a build uses."""
+    if grid_id is None or cell is None or dz_ns is None:
+        return "Built at the grid's 3-D resolution, the one its ParaView export uses."
+    return (
+        f"Built at Grid {grid_id}'s 3-D resolution ({cell:g} m, {dz_ns:g} ns), "
+        "the one its ParaView export uses."
+    )
+
+
+def build_failure_text(names: Sequence[str], exc: BaseException) -> str:
+    """Why a build failed. A refusal (ValueError, RuntimeError) is already worded; anything else
+    (a full disk, a locked file, a lookup) is named after the surfaces it stopped."""
+    if isinstance(exc, (ValueError, RuntimeError)):
+        return write_failure_text(str(exc))
+    listed = _and([f"“{n}”" for n in names])
+    return f"Could not build {listed}: {write_failure_text(str(exc)) or type(exc).__name__}"
+
+
+DELETE_TITLE = "Delete surface"
+DELETE_BUTTON = "Delete"

@@ -279,3 +279,28 @@ def test_the_dialog_and_panel_wording():
     assert build_outcome("Bowl", {**good, "offset_reliable": False})[1]
     assert build_outcome("Bowl", {**good, "skipped": [{"why": "x"}]})[1]
     assert build_outcome("Bowl", {**good, "fit": {**good["fit"], "at_edge": 1}})[1]
+
+
+def test_the_panel_build_and_dialog_wording_round_two():
+    from nsgeo_qgis.surface_plan import (
+        build_failure_text,
+        build_title,
+        not_built_text,
+        outlier_header,
+        resolution_hint,
+    )
+
+    assert not_built_text(1) == "Not built yet (1 pick). Rebuild to put it on the map."
+    assert not_built_text(4).startswith("Not built yet (4 picks)")
+    assert outlier_header(0.02, 0) == "More than 2 cm from the surface (0)"
+    assert outlier_header(0.02, 6).endswith("(6); click one to select it on the map:")
+    assert build_title(["Bowl"]) == "Building “Bowl”"
+    assert build_title(["A", "B", "C"]) == "Building 3 surfaces"
+    assert resolution_hint("1", 0.05, 0.1) == (
+        "Built at Grid 1's 3-D resolution (0.05 m, 0.1 ns), the one its ParaView export uses."
+    )
+    assert resolution_hint(None).startswith("Built at the grid's 3-D resolution")
+    assert build_failure_text(["A", "B"], OSError("No space left")) == (
+        "Could not build “A” and “B”: No space left"
+    )
+    assert build_failure_text(["A"], ValueError("too few")) == "too few"

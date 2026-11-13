@@ -46,6 +46,24 @@ class SteadySpinBox(QDoubleSpinBox):
             _log()
 
 
+class SteadyComboBox(QComboBox):
+    """A combo box the wheel changes only while it has focus (StrongFocus alone does not stop
+    an unfocused combo taking the wheel, so scrolling a panel would edit it)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event: QWheelEvent | None) -> None:  # noqa: N802
+        try:
+            if event is not None and not self.hasFocus():
+                event.ignore()  # let the panel scroll
+                return
+            super().wheelEvent(event)
+        except Exception:  # noqa: BLE001 -- a Qt override: never let it escape
+            _log()
+
+
 class SurfaceSettingsForm(QWidget):
     #: A setting was committed (a typed value on Enter or leaving the box, a click, a choice).
     settings_edited = pyqtSignal()
@@ -53,10 +71,9 @@ class SurfaceSettingsForm(QWidget):
     def __init__(self, settings: SurfaceSettings | None = None, parent: QWidget | None = None):
         super().__init__(parent)
         settings = settings or SurfaceSettings()
-        self.join_combo = QComboBox()
+        self.join_combo = SteadyComboBox()
         for join in JOINS:
             self.join_combo.addItem(_JOIN_LABELS.get(join, join_name(join)), join)
-        self.join_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.join_combo.setToolTip(
             "How the surface is drawn between your picks: smooth minimum curvature, or an "
             "inverse-distance blend that stays close to every pick."

@@ -12,7 +12,7 @@ from nsgeo_qgis.surface_layers import PROP_FEATURE
 from nsgeo_qgis.ui.surfaces_dock import ALL_GRIDS
 from qgis.core import QgsProject
 from qgis.PyQt.QtCore import QCoreApplication
-from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox, QScrollArea
+from qgis.PyQt.QtWidgets import QDialog, QInputDialog, QScrollArea
 from tests.vtk_reader import read_vtk_xml
 
 
@@ -242,18 +242,35 @@ def test_select_its_picks_and_add_and_remove_selected(surface_plugin):
     assert len(plugin.surfaces.members(record.feature_id)) == 3
 
 
-def test_delete_asks_first_and_keeps_the_picks(surface_plugin, answer_modal):
+def _press(button_text):
+    """A driver for a QMessageBox: press the button with this text."""
+
+    def driver(box):
+        (button,) = [b for b in box.buttons() if b.text().replace("&", "") == button_text]
+        button.click()
+
+    return driver
+
+
+def test_delete_asks_first_and_keeps_the_picks(surface_plugin, drive_dialog):
     plugin = surface_plugin
     dock = plugin.surfaces_dock
     record = _made(plugin)
     dock.table.selectRow(0)
-    asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    asked = []
+
+    def decline(box):
+        asked.append((box.text(), sorted(b.text().replace("&", "") for b in box.buttons())))
+        _press("Cancel")(box)
+
+    drive_dialog(QDialog, "exec", decline)
     dock.delete_button.click()
     assert len(asked) == 1
-    assert "Delete “Bowl”? Its 4 picks stay" in asked[0][0][2]
+    assert asked[0][0].startswith("Delete “Bowl”? Its 4 picks stay")
+    assert asked[0][1] == ["Cancel", "Delete"]  # the mockup's buttons, not Yes/No
     assert [r.name for r in plugin.surfaces.records()] == ["Bowl"]  # declined: kept
     folder = plugin.surfaces.folder("Grid A")
-    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    drive_dialog(QDialog, "exec", _press("Delete"))
     dock.delete_button.click()
     QCoreApplication.processEvents()
     assert plugin.surfaces.records() == []
@@ -261,7 +278,7 @@ def test_delete_asks_first_and_keeps_the_picks(surface_plugin, answer_modal):
     saved = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
     assert set(plugin.pick_fids) <= saved  # the picks all stay
     assert _layers_of(record.feature_id) == []
-    assert not [p for p in folder.glob(f"{record.feature_id}*")]
+    assert not list(folder.glob(f"{record.feature_id}*"))
 
 
 def test_rename_refuses_a_taken_name(surface_plugin, answer_modal):
@@ -350,3 +367,151 @@ def test_unloading_disposes_the_surface_layers_and_the_panel(surface_plugin):
     assert plugin.surfaces is None and plugin.surface_layers is None
     assert plugin.surfaces_dock is None
     assert _layers_of(record.feature_id) == []
+
+
+def test_an_unfocused_wheel_changes_no_setting(surface_plugin, monkeypatch):
+    from nsgeo_qgis.ui.surface_settings_form import SteadyComboBox
+    from qgis.PyQt.QtCore import QPoint, QPointF, Qt
+    from qgis.PyQt.QtGui import QWheelEvent
+
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    _made(plugin)
+    dock.table.selectRow(0)
+    saved = []
+    monkeypatch.setattr(plugin.surfaces, "set_settings", lambda *a: saved.append(a))
+    assert isinstance(dock.form.join_combo, SteadyComboBox)
+    assert isinstance(dock.grid_combo, SteadyComboBox)
+    for combo in (dock.form.join_combo, dock.grid_combo):
+        before = combo.currentIndex()
+        event = QWheelEvent(
+            QPointF(2, 2),
+            QPointF(2, 2),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase,
+            False,
+        )
+        combo.wheelEvent(event)
+        assert combo.currentIndex() == before and not event.isAccepted()
+    assert saved == []
+
+
+def test_a_refresh_keeps_the_whole_selection(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    plugin.surfaces.create("A", plugin.pick_fids[:3], SurfaceSettings())
+    plugin.surfaces.create("B", plugin.pick_fids[1:], SurfaceSettings())
+    dock.refresh()
+    dock.table.selectAll()
+    ids = set(dock.selected_ids())
+    assert len(ids) == 2
+    dock.refresh()
+    assert set(dock.selected_ids()) == ids
+
+
+def test_add_selected_picks_says_when_it_moves_picks_out_of_another_surface(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    fids = plugin.pick_fids
+    plugin.surfaces.create("Bowl", fids[:3], SurfaceSettings())
+    ridge = plugin.surfaces.create("Ridge", [fids[3], fids[2], fids[1]], SurfaceSettings())
+    dock.refresh()
+    dock.table.selectRow([r[0] for r in _rows(dock)].index("Ridge"))
+    plugin.layers.select_picks([fids[0]])
+    dock.add_button.click()
+    assert "“Bowl”" in _shown(plugin) and "will move" in _shown(plugin)
+    assert fids[0] in {r.fid for r in plugin.surfaces.members(ridge.feature_id)}
+
+
+def test_build_refuses_while_an_export_runs(surface_plugin, monkeypatch):
+    from nsgeo_qgis import plugin as plugin_module
+    from nsgeo_qgis.surface_plan import EXPORT_RUNNING
+
+    plugin = surface_plugin
+    record = _made(plugin, build=False)
+    real = plugin_module.running_export
+    monkeypatch.setattr(plugin_module, "running_export", lambda: object())
+    try:
+        plugin.build_surfaces([record.feature_id])
+        assert _shown(plugin) == EXPORT_RUNNING
+    finally:
+        # Put it back by hand: `monkeypatch.undo()` would also lift the modal guards.
+        monkeypatch.setattr(plugin_module, "running_export", real)
+    assert not plugin.surfaces.state(record.feature_id).built
+
+
+def test_the_progress_label_names_the_surface(surface_plugin, monkeypatch):
+    plugin = surface_plugin
+    record = _made(plugin, build=False)
+    titles = []
+    real = plugin._export_progress
+
+    def spy(title, total, **kw):
+        titles.append(title)
+        return real(title, total, **kw)
+
+    monkeypatch.setattr(plugin, "_export_progress", spy)
+    plugin.build_surfaces([record.feature_id])
+    assert titles == ["Building “Bowl”"]
+
+
+def test_an_oserror_on_the_second_grid_still_syncs_and_reports_both(surface_plugin, monkeypatch):
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.session import Pick
+    from plugin_testing import synthetic_dzt
+
+    plugin = surface_plugin
+    session = plugin.session
+    session.add_grid(Grid("Grid B", (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    extra = []
+    for i in range(2):
+        path = synthetic_dzt(session.root.parent / "raw", f"FILE__01{i}.DZT", n_traces=60)
+        extra.append(Line.open(path, GridPlacement("Grid B", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(extra)
+    keys = [
+        k for k in list(session.keys()) if session.line_for_key(k).placement.grid_id == "Grid B"
+    ]
+    before = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    for key, trace, time_ns in [(keys[0], 5, 10.0), (keys[0], 55, 11.0), (keys[1], 5, 10.5)]:
+        plugin.layers.write_pick(
+            Pick(key, trace, time_ns, None, None, None, "", "", "2026-11-13T00:00:00+00:00", None)
+        )
+    fids_b = sorted(
+        {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()} - before
+    )
+    a = _made(plugin, "A", build=False)
+    b = plugin.surfaces.create("B", fids_b, SurfaceSettings(strength=0.0))
+    real = plugin.surfaces.build
+
+    def build(ids, *, progress):
+        if list(ids) == [b.feature_id]:
+            raise OSError("No space left on device")
+        return real(ids, progress=progress)
+
+    monkeypatch.setattr(plugin.surfaces, "build", build)
+    messages = []
+    monkeypatch.setattr(
+        plugin, "message", lambda text, level=None, title="nsgeo": messages.append(text)
+    )
+    plugin.build_surfaces([a.feature_id, b.feature_id])
+    assert plugin.surfaces.state(a.feature_id).built  # A's build stands...
+    assert len(_layers_of(a.feature_id)) == 1  # ...and is on the map
+    assert any(m.startswith("Built “A”") for m in messages)
+    assert any("Could not build “B”" in m and "No space left" in m for m in messages)
+    assert plugin.surfaces_dock.table.item(0, 4).text() in ("", "not built")
+
+
+def test_a_grid_that_lost_all_its_lines_reads_as_unavailable(surface_plugin):
+    plugin = surface_plugin
+    record = _made(plugin)
+    plugin.session.remove_lines(list(plugin.session.keys()))
+    QCoreApplication.processEvents()
+    state = plugin.surfaces.state(record.feature_id)
+    assert state.built and state.stale == ("unavailable",)
+    plugin.surfaces_dock.refresh()  # the panel survives it
+    assert _rows(plugin.surfaces_dock)[0][4] == "stale"

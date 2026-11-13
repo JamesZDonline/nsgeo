@@ -204,21 +204,68 @@ def test_create_and_build_adds_the_surface_and_its_layer(surface_plugin, drive_d
     assert _shown(plugin).startswith("Built “Bowl”: ")
 
 
-def test_a_locked_site_file_says_to_save_the_picks_layers_edits(
-    surface_plugin, drive_dialog, monkeypatch
-):
+def test_a_locked_site_file_says_to_save_the_picks_layers_edits(surface_plugin, drive_dialog):
+    """A real lock: another connection holds the write lock on the site's GeoPackage."""
+    import sqlite3
+    from pathlib import Path
+
     plugin = surface_plugin
     plugin.layers.select_picks(plugin.pick_fids)
-
-    def locked(*_a, **_k):
-        raise RuntimeError("could not write the feature: database is locked")
-
-    monkeypatch.setattr(plugin.layers, "write_feature", locked)
+    gpkg = Path(plugin.session.root) / "site.nsgeo.gpkg"
+    con = sqlite3.connect(str(gpkg), timeout=0)
+    con.execute("BEGIN IMMEDIATE")  # readers carry on; the first writer is refused
 
     def driver(dialog):
         dialog.name_edit.setText("Bowl")
         dialog.accept()
 
-    _open(plugin, drive_dialog, driver)
+    try:
+        _open(plugin, drive_dialog, driver)
+    finally:
+        con.rollback()
+        con.close()
     assert plugin.surfaces.records() == []
     assert _shown(plugin) == LOCKED_PICKS_TEXT
+
+
+def test_a_pick_on_a_cut_or_a_missing_line_opens_the_dialog_with_the_refusal(
+    surface_plugin, drive_dialog
+):
+    plugin = surface_plugin
+    session = plugin.session
+    cut = session.add_cut("Grid A", [(1.0, 1.0), (5.0, 1.0)])
+    session.open_line(cut)
+    cut_picks = [session.add_cut_pick(cut, 3 * i + 1, 1.0 + i, 12.5, "{}") for i in range(3)]
+    assert len(cut_picks) == 3
+    # picks on a line that has since left the site stay on the picks layer
+    gone = session.keys()[1]
+    session.open_line(session.keys()[0])
+    orphan_rows = [
+        r.fid for r in plugin.layers.pick_rows(plugin.pick_fids) if r.pick.line_key == gone
+    ]
+    session.remove_lines([gone])
+    assert gone not in set(session.keys())
+    saved = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    orphan_rows = [f for f in orphan_rows if f in saved]
+    assert orphan_rows, "the picks of a removed line should stay on the layer"
+    cut_fids = [r.fid for r in plugin.layers.pick_rows(sorted(saved)) if r.pick.line_key == cut]
+    seen = []
+
+    def driver(dialog):
+        seen.append((dialog.refusal_label.text(), dialog.create_button.isEnabled()))
+        dialog.reject()
+
+    for picks in (cut_fids, orphan_rows):
+        plugin.layers.select_picks(picks)
+        _open(plugin, drive_dialog, driver)
+    assert len(seen) == 2 and not any(enabled for _, enabled in seen)
+    assert "on a cut" in seen[0][0] and "not on a line of a grid" in seen[1][0]
+
+
+def test_the_dialog_states_the_grids_resolution(surface_plugin, drive_dialog):
+    plugin = surface_plugin
+    plugin.layers.select_picks(plugin.pick_fids)
+    seen = []
+    _open(plugin, drive_dialog, lambda d: (seen.append(d.hint_label.text()), d.reject()))
+    assert seen[0].startswith("Built at Grid Grid A's 3-D resolution (")
+    assert seen[0].endswith("ns), the one its ParaView export uses.")

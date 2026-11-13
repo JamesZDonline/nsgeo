@@ -16,9 +16,9 @@ from nsgeo.slices import SurfaceSettings
 from qgis.core import Qgis, QgsMessageLog
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QShowEvent
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -38,16 +38,22 @@ from qgis.PyQt.QtWidgets import (
 
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.surface_plan import (
+    DELETE_BUTTON,
+    DELETE_TITLE,
+    NO_LONGER_MEMBER,
     delete_question,
     fit_rows,
     fit_short,
+    move_note,
+    not_built_text,
+    outlier_header,
     outlier_line,
     stale_text,
     state_text,
     write_failure_text,
 )
 from nsgeo_qgis.surfaces import Surfaces
-from nsgeo_qgis.ui.surface_settings_form import SurfaceSettingsForm
+from nsgeo_qgis.ui.surface_settings_form import SteadyComboBox, SurfaceSettingsForm
 
 ALL_GRIDS = "All grids"
 COLUMNS = ("Name", "Grid", "Picks", "Fit", "State")
@@ -67,6 +73,8 @@ class SurfacesDock(QgsDockWidget):
     select_picks_requested = pyqtSignal(list)
     #: Something the user must be told (a refused change); the plugin shows it.
     problem = pyqtSignal(str)
+    #: Something done that the user should know of (picks moved out of other surfaces).
+    notice = pyqtSignal(str)
 
     def __init__(self, session: SiteSession, surfaces: Surfaces, parent: QWidget | None = None):
         super().__init__("nsgeo Surfaces", parent)
@@ -78,6 +86,8 @@ class SurfacesDock(QgsDockWidget):
         self.surfaces = surfaces
         self._disposed = False
         self._loading = False
+        #: A refresh was asked for while the panel was closed; made when it is shown.
+        self._stale_view = False
         #: The outliers listed in the details, in the list's order.
         self._outliers: list[dict[str, Any]] = []
 
@@ -87,7 +97,7 @@ class SurfacesDock(QgsDockWidget):
 
         top = QGridLayout()
         top.addWidget(QLabel("Grid"), 0, 0)
-        self.grid_combo = QComboBox()
+        self.grid_combo = SteadyComboBox()
         self.grid_combo.addItem(ALL_GRIDS)
         top.addWidget(self.grid_combo, 0, 1)
         top.setColumnStretch(1, 1)
@@ -205,9 +215,23 @@ class SurfacesDock(QgsDockWidget):
     def request_refresh(self, *_: Any) -> None:
         """Ask for a `refresh` at the next turn of the event loop; many asks make one."""
         try:
-            if not self._disposed and not self._timer.isActive():
+            if self._disposed:
+                return
+            if self.isHidden():
+                self._stale_view = True  # closed: nothing to draw until it is shown again
+                return
+            if not self._timer.isActive():
                 self._timer.start()
         except Exception:  # noqa: BLE001 -- a slot on session signals
+            _log()
+
+    def showEvent(self, event: QShowEvent | None) -> None:  # noqa: N802
+        try:
+            super().showEvent(event)
+            if self._stale_view:
+                self._stale_view = False
+                self.request_refresh()
+        except Exception:  # noqa: BLE001 -- a Qt override
             _log()
 
     def dispose(self) -> None:
@@ -242,7 +266,7 @@ class SurfacesDock(QgsDockWidget):
     def _refresh_table(self) -> None:
         records = self.surfaces.records() if self.session.is_open else []
         grids = sorted({r.grid_id for r in records})
-        keep_ids = self.selected_ids()
+        keep_ids = set(self.selected_ids())
         self._loading = True
         try:
             wanted = self.grid_combo.currentText()
@@ -255,13 +279,13 @@ class SurfacesDock(QgsDockWidget):
             self.grid_combo.blockSignals(False)
             chosen = self.grid_combo.currentText()
             shown = [r for r in records if chosen == ALL_GRIDS or r.grid_id == chosen]
-            members = self.surfaces.layers.members_by_feature()
+            members = self.surfaces.layers.members_by_feature()  # once for the whole refresh
             self.table.blockSignals(True)
             self.table.clearContents()
             self.table.setRowCount(len(shown))
             for row, record in enumerate(shown):
                 try:
-                    state = self.surfaces.state(record.feature_id)
+                    state = self.surfaces.state(record.feature_id, members)
                     state_label = state_text(state.built, state.stale)
                     fit = fit_short(state.report)
                 except Exception:  # noqa: BLE001 -- one surface's trouble never hides the rest
@@ -283,19 +307,22 @@ class SurfacesDock(QgsDockWidget):
                         )
                     self.table.setItem(row, col, item)
                 if record.feature_id in keep_ids:
-                    self.table.selectRow(row)
+                    for col in range(len(COLUMNS)):
+                        item = self.table.item(row, col)
+                        if item is not None:
+                            item.setSelected(True)
             self.table.blockSignals(False)
         finally:
             self.table.blockSignals(False)
             self._loading = False
-        self._show_details()
+        self._show_details(members)
 
     # ---- the selected surface -------------------------------------------------
     def _current(self) -> str | None:
         ids = self.selected_ids()
         return ids[0] if len(ids) == 1 else None
 
-    def _show_details(self) -> None:
+    def _show_details(self, members: dict[str, list[Any]] | None = None) -> None:
         ids = self.selected_ids()
         fid = ids[0] if len(ids) == 1 else None
         self.rebuild_button.setEnabled(bool(ids))
@@ -312,11 +339,13 @@ class SurfacesDock(QgsDockWidget):
             return
         self.details.setTitle(record.name)
         self.details.setToolTip("")
-        n = len(self.surfaces.members(fid))
-        state = self.surfaces.state(fid)
+        if members is None:
+            members = self.surfaces.layers.members_by_feature()
+        n = len(members.get(fid, []))
+        state = self.surfaces.state(fid, members)
         text = stale_text(state.stale)
         if not state.built:
-            text = f"Not built yet ({n} pick{'' if n == 1 else 's'}). Rebuild to put it on the map."
+            text = not_built_text(n)
         self.stale_label.setText(text)
         self.stale_label.setVisible(bool(text))
         # The form shows what is saved, never echoing back its own edit (the spin boxes round).
@@ -337,13 +366,8 @@ class SurfacesDock(QgsDockWidget):
             self.fit_form.addRow(label, text_label)
         outliers = [o for o in report.get("outliers", []) if isinstance(o, dict)]
         self._outliers = outliers
-        window_cm = (
-            float(report.get("settings", {}).get("window_m", record.settings.window_m)) * 100
-        )
-        self.outlier_header.setText(
-            f"More than {window_cm:g} cm from the surface ({len(outliers)})"
-            + ("; click one to select it on the map:" if outliers else "")
-        )
+        window_m = float(report.get("settings", {}).get("window_m", record.settings.window_m))
+        self.outlier_header.setText(outlier_header(window_m, len(outliers)))
         for outlier in outliers:
             item = QListWidgetItem(outlier_line(outlier))
             item.setToolTip(outlier_line(outlier))
@@ -377,14 +401,21 @@ class SurfacesDock(QgsDockWidget):
         if fid is None:
             return
         record = next(r for r in self.surfaces.records() if r.feature_id == fid)
-        answer = QMessageBox.question(
-            self,
-            "Delete surface",
+        box = QMessageBox(
+            QMessageBox.Icon.Question,
+            DELETE_TITLE,
             delete_question(record.name, len(self.surfaces.members(fid))),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Cancel,
+            self,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        delete = box.addButton(DELETE_BUTTON, QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        try:
+            box.exec()
+            chosen = box.clickedButton()
+        finally:
+            box.deleteLater()
+        if chosen is not delete:
             return
         try:
             self.surfaces.delete(fid)
@@ -401,7 +432,12 @@ class SurfacesDock(QgsDockWidget):
         if fid is None:
             return
         try:
-            self.surfaces.add_picks(fid, self.surfaces.layers.selected_pick_ids())
+            fids = self.surfaces.layers.selected_pick_ids()
+            found = self.surfaces.check(fids, into=fid)
+            self.surfaces.add_picks(fid, fids)
+            note = move_note(found.moving, found.n, found.left)
+            if note and not found.refusal:
+                self.notice.emit(note)
         except (ValueError, RuntimeError) as exc:
             self.problem.emit(write_failure_text(str(exc)))
 
@@ -433,7 +469,7 @@ class SurfacesDock(QgsDockWidget):
         key = str(outlier.get("line_key", ""))
         pick = self._pick_of(fid, outlier)
         if pick is None:
-            self.problem.emit("That pick is no longer in the surface; rebuild to refresh the list.")
+            self.problem.emit(NO_LONGER_MEMBER)
             return
         self.select_picks_requested.emit([pick.fid])
         # A line that left the site is only selected; there is nothing to open.
@@ -445,9 +481,11 @@ class SurfacesDock(QgsDockWidget):
         """The member the outlier names: its line and trace (an older build has the distance)."""
         key = str(outlier.get("line_key", ""))
         rows = [r for r in self.surfaces.members(feature_id) if r.pick.line_key == key]
-        trace = outlier.get("trace")
+        trace, time_ns = outlier.get("trace"), outlier.get("time_ns")
         if trace is not None:
             rows = [r for r in rows if r.pick.trace == int(trace)]
+            if time_ns is not None:
+                rows = [r for r in rows if abs(r.pick.time_ns - float(time_ns)) < 1e-9]
         elif outlier.get("distance_m") is not None:
             rows = [
                 r

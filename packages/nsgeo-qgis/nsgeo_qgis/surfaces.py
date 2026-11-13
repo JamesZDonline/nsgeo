@@ -316,7 +316,9 @@ class Surfaces:
     def _json_path(self, record: FeatureRecord) -> Path:
         return self.folder(record.grid_id) / f"{record.feature_id}.json"
 
-    def inputs(self, feature_id: str) -> dict[str, str]:
+    def inputs(
+        self, feature_id: str, members: dict[str, list[PickRow]] | None = None
+    ) -> dict[str, str]:
         """What the surface's numbers depend on, one 16-hex hash per `INPUTS` name. Reads the
         record and the session only; nothing is prepared."""
         export = self._export()
@@ -326,9 +328,9 @@ class Surfaces:
         choice = export.defaults(record.grid_id)
         source = export.source_choice(record.grid_id, choice)
         finish = export.fill_settings(record.grid_id)
-        members = self.members(feature_id)
+        held = self.members(feature_id) if members is None else members.get(feature_id, [])
         picks = sorted(
-            [r.pick.line_key, r.pick.trace, r.pick.time_ns, r.pick.zero_ns] for r in members
+            [r.pick.line_key, r.pick.trace, r.pick.time_ns, r.pick.zero_ns] for r in held
         )
         keys = sorted(source.line_keys)
         return {
@@ -378,14 +380,16 @@ class Surfaces:
             return None
         return report
 
-    def state(self, feature_id: str) -> SurfaceState:
+    def state(
+        self, feature_id: str, members: dict[str, list[PickRow]] | None = None
+    ) -> SurfaceState:
         record = self._record(feature_id)
         report = self._read_report(record)
         if report is None:
             return SurfaceState(False, (), None)
         try:
-            now = self.inputs(feature_id)
-        except (KeyError, OSError, ValueError, RuntimeError):
+            now = self.inputs(feature_id, members)
+        except (KeyError, IndexError, OSError, ValueError, RuntimeError):
             # The grid or a line is gone, or a file cannot be reached: say so, never raise.
             return SurfaceState(True, ("unavailable",), report)
         then = report.get("inputs", {})
@@ -656,6 +660,7 @@ class Surfaces:
                     "label": self.line_label(spot.line_key),
                     "distance_m": pick.distance_m,
                     "trace": pick.trace,
+                    "time_ns": pick.time_ns,
                     "picked_m": o.picked_m,
                     "surface_m": o.surface_m,
                     "reason": o.reason,
