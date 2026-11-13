@@ -20,6 +20,7 @@ from nsgeo.slices import (
     surface_mesh,
     surface_volume,
 )
+from nsgeo.slices.surface import _measure_offset
 from nsgeo.velocity import VelocityModel
 
 from tests.real_lines import AXIS, CELL, needs_real_files, squared_volume
@@ -162,7 +163,7 @@ def test_uncovered_cells_are_outside_the_region():
     s = _build()
     assert not s.region[:, -3:].any()
     assert np.isnan(s.depth_m[:, -3:]).all() and np.isnan(s.guide_m[:, -3:]).all()
-    assert s.region[:, :5].any() or s.region.any()
+    assert s.region[:, :34].any()  # the region exists, and stops at the covered cells
     assert np.isnan(s.guide_m[~s.region]).all()
 
 
@@ -175,21 +176,128 @@ def test_tracking_never_leaves_its_window():
     assert gap.max() <= 0.02 + STEP + 1e-6
 
 
+def _flat(centre_ns: float):
+    """A flat reflector centred at `centre_ns`, over the covered cells."""
+    t = Z.times_ns()[:, None, None]
+    filled = 1e-4 + _ricker2(t - centre_ns) * np.ones((1, NY, NX))
+    filled[:, :, -3:] = np.nan
+    return filled.astype(np.float32)
+
+
+def _decoy(below_m: float, gain: float):
+    return _volume(_dipping(extra_below_m=below_m, extra_gain=gain))
+
+
+# The decoy's own sidelobes are swings too. A decoy 3x the amplitude has a sidelobe stronger
+# than the picked reflection's main peak (0.44 * 3 > 1), so no rule could tell the two apart;
+# these decoys are strong enough to drag an argmax (their flank or sidelobe is as high as the
+# true peak) but not so strong that a sidelobe beats it.
+@pytest.mark.parametrize(("below_m", "gain"), [(0.04, 1.5), (0.08, 2.0)])
+def test_a_stronger_reflection_out_of_reach_does_not_drag_the_offset(below_m, gain):
+    s = _build(_decoy(below_m, gain), strength=0.5)
+    assert abs(s.offset_m - 0.02) <= STEP  # the sidelobes move it by about 2-3 mm
+    truth = np.broadcast_to(_depth_of((np.arange(NX) + 0.5) * C) - 0.02, (NY, NX))
+    kept = np.isfinite(s.depth_m) & ~_patch_mask()
+    assert kept.sum() > 100
+    assert np.abs(s.depth_m[kept] - truth[kept]).max() <= STEP
+    assert s.fit.within_close == 12 and s.fit.at_edge == 0
+
+
+def test_tracking_ignores_a_decoy_outside_its_window():
+    # 8 cm below the picked reflection, twice its amplitude: beyond the 5 cm offset search and
+    # four windows away. Its sidelobe at the window's edge (0.73 of the true peak) is weaker than
+    # the true peak inside the window, so the surface stays on the truth; a tracker searching
+    # five windows wide jumps to the decoy and the kept depths leave the truth by 2 cm.
+    # The decoy lifts the depth trend, so the strength test is lowered to 0.5.
+    s = _build(_decoy(0.08, 2.0), strength=0.5)
+    truth = np.broadcast_to(_depth_of((np.arange(NX) + 0.5) * C) - 0.02, (NY, NX))
+    kept = np.isfinite(s.depth_m) & ~_patch_mask()
+    assert kept.sum() > 100
+    assert np.abs(s.depth_m[kept] - truth[kept]).max() <= 0.005
+    assert s.fit.at_edge == 0 and s.fit.within_close == 12
+
+
+def _ramp(swing_from_column: int | None = None):
+    """Amplitude that only grows with depth, so every column is a flank; optionally a swing at
+    0.5 m from a column on."""
+    t = Z.times_ns()[:, None, None]
+    filled = 1e-4 + np.exp((t - 20.0) / 2.0) * np.ones((1, NY, NX))
+    if swing_from_column is not None:
+        filled[:, :, swing_from_column:] += _ricker2(t - 10.0)
+    filled[:, :, -3:] = np.nan
+    return filled.astype(np.float32)
+
+
+def test_a_pick_whose_search_holds_only_a_flank_casts_no_vote():
+    iy = np.array([10, 12, 14])
+    ix = np.array([8, 12, 16])
+    vol = _volume(_ramp())
+    # search 0.39-0.49 m: amplitude climbs the whole way, no maximum inside it
+    assert _measure_offset(vol, iy, ix, np.full(3, 0.44), 64) == 0.0
+    # with a swing in the right-hand columns, only the picks on it vote
+    mixed = _volume(_ramp(swing_from_column=20))
+    on = _measure_offset(mixed, iy + 2, np.array([22, 26, 30]), np.full(3, 0.48), 64)
+    assert abs(on - 0.02) <= 0.1 * STEP
+    both = _measure_offset(
+        mixed,
+        np.append(iy + 2, [10, 12]),
+        np.append([22, 26, 30], [8, 12]),
+        np.append(np.full(3, 0.48), [0.44, 0.44]),
+        64,
+    )
+    assert both == on
+
+
+def test_picks_in_one_cell_that_disagree_are_far_not_edge():
+    vol = _volume()
+    x, y, d = _picks()
+    x, y, d = x.copy(), y.copy(), d.copy()
+    # replace pick 3 by two picks in its cell, 3 cm either side of the offset-corrected pick,
+    # whose binned guide lies between them, on the reflection
+    ax, ay, ad = np.append(x, x[3]), np.append(y, y[3]), np.append(d, d[3])
+    ad[3] -= 0.03
+    ad[-1] += 0.03
+    s = build_surface(vol, ax, ay, ad, SurfaceSettings())
+    far = [o for o in s.fit.outliers if o.reason == "far"]
+    assert sorted(o.index for o in far) == [3, 12]
+    assert all(o.surface_m is not None for o in far)
+    assert s.fit.at_edge == 0 and _categories(s.fit) == 13
+
+
+def test_smoothing_never_hides_a_pick_held_at_the_edge():
+    x, y, d = _picks()
+    d = d.copy()
+    d[5] += 0.03
+    plain = build_surface(_volume(), x, y, d, SurfaceSettings())
+    soft = build_surface(_volume(), x, y, d, SurfaceSettings(smoothing_m=0.3))
+    assert plain.fit.at_edge >= 1
+    assert soft.fit.at_edge == plain.fit.at_edge
+    assert [o.reason for o in soft.fit.outliers if o.index == 5] == ["edge"]
+
+
+def test_too_few_usable_picks_say_how_many_and_why():
+    vol = _volume()
+    x, y, d = _picks()
+    x, y, d = x.copy()[:4], y.copy()[:4], d.copy()[:4]
+    x[:2] = -1.0  # outside the frame
+    d[2] = vol.depths_m[-1] + 1.0  # below the last level
+    with pytest.raises(
+        ValueError, match=r"1 of 4 picks are usable.*2 outside the frame.*1 outside"
+    ):
+        build_surface(vol, x, y, d, SurfaceSettings())
+
+
 def test_refinement_finds_a_peak_between_levels():
-    shift = 0.5  # half a level, in ns
-    vol = _volume(_dipping(shift_ns=shift))
-    truth = _depth_of((np.arange(NX) + 0.5) * C) + 0.05 * shift
+    centre = 10.05  # halfway between the levels at 10.0 and 10.1 ns
+    assert abs(Z.times_ns()[100] - 10.0) < 1e-9
+    truth = 0.05 * centre
+    vol = _volume(_flat(centre))
     x, y, _ = _picks()
-    s = build_surface(vol, x, y, _depth_of(x) + 0.05 * shift, SurfaceSettings())
+    s = build_surface(vol, x, y, np.full(12, truth), SurfaceSettings())
     kept = np.isfinite(s.depth_m)
-    # away from the edge of the kept area, where the 3x3 median meets a tilted neighbour
-    inner = kept.copy()
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            inner &= np.roll(kept, (dy, dx), axis=(0, 1))
-    inner &= ~_patch_mask()
-    assert inner.sum() > 100
-    assert np.abs(s.depth_m - truth[None, :])[inner].max() <= 0.1 * STEP
+    assert kept.sum() > 200
+    assert np.abs(s.depth_m[kept] - truth).max() <= 0.1 * STEP
+    assert abs(s.offset_m) <= 0.1 * STEP
 
 
 def test_a_pick_outside_the_depth_range_or_frame_is_reported_not_fatal():
@@ -302,6 +410,7 @@ def test_swing_is_the_filled_amplitude_and_nan_off_coverage():
 # --- real lines ---------------------------------------------------------------------------------
 
 _V = 0.071
+EDGE_SHARE_LIMIT = 0.10
 
 
 def _surface_vol():
@@ -329,7 +438,12 @@ def _reflector_picks(vol):
     rows = [int((0.25 + 0.5 * i) // CELL) for i in range(10)]
     _, strength = vol.slab(0, nd)
     data = strength[:, rows, :]
-    share = np.array([np.mean(data[j][np.isfinite(data[j])] >= 1.5) for j in range(nd)])
+    share = np.array(
+        [
+            np.mean(data[j][np.isfinite(data[j])] >= 1.5) if np.isfinite(data[j]).any() else -1.0
+            for j in range(nd)
+        ]
+    )
     share[vol.depths_m < 0.3] = -1.0
     level = int(np.argmax(share))
     cells = [
@@ -361,7 +475,6 @@ def test_real_picks_on_a_reflector_land_within_2_cm():
     iy, ix = (y // CELL).astype(int), (x // CELL).astype(int)
     got = s.depth_m[iy, ix]
     kept = np.isfinite(got)
-    print("kept", int(kept.sum()), "offset", s.offset_m, s.fit)
     assert kept.sum() >= 12
     assert np.abs(got[kept] - d[kept]).max() <= 0.02 + 1e-6
 
@@ -385,6 +498,12 @@ def test_real_surface_never_leaves_its_window():
     s = build_surface(vol, *_reflector_picks(vol), SurfaceSettings())
     kept = np.isfinite(s.depth_m)
     assert np.abs(s.depth_m[kept] - s.guide_m[kept]).max() <= 0.02 + 1e-6
+    # the clamp makes the bound above hold whatever the tracker does; what pins the tracker to
+    # its window is how few kept cells are held at the window's edge (a tracker searching five
+    # windows wide holds 242 of 778 cells there, the real one about 4%)
+    held = np.abs(s.depth_m[kept] - s.guide_m[kept]) >= 0.02 - 1e-6
+    assert s.fit.at_edge == 0
+    assert held.mean() < EDGE_SHARE_LIMIT
 
 
 @needs_real_files
@@ -409,7 +528,6 @@ def test_real_pick_on_another_reflection_is_reported():
     d = d.copy()
     d[7] += 0.15
     s = build_surface(vol, x, y, d, SurfaceSettings())
-    print("outliers", s.fit.outliers)
     assert [o.index for o in s.fit.outliers if o.index == 7] != []
     assert _categories(s.fit) == 15
     assert [o.reason for o in s.fit.outliers if o.index == 7] == ["edge"]

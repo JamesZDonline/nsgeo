@@ -123,14 +123,14 @@ class SurfaceFit:
     outliers: tuple[Outlier, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Surface:
     """A built surface. Arrays are `(ny, nx)`; `depth_m` and `guide_m` are NaN where empty."""
 
-    depth_m: np.ndarray = field(repr=False, compare=False)
-    strength: np.ndarray = field(repr=False, compare=False)
-    guide_m: np.ndarray = field(repr=False, compare=False)
-    region: np.ndarray = field(repr=False, compare=False)
+    depth_m: np.ndarray = field(repr=False)
+    strength: np.ndarray = field(repr=False)
+    guide_m: np.ndarray = field(repr=False)
+    region: np.ndarray = field(repr=False)
     offset_m: float
     cell: float
     fit: SurfaceFit
@@ -224,7 +224,10 @@ def _level_span(depths: np.ndarray, centre: np.ndarray, reach: float) -> tuple[n
 def _measure_offset(
     vol: PreparedVolume, iy: np.ndarray, ix: np.ndarray, depth: np.ndarray, max_levels: int
 ) -> float:
-    """Median of (refined swing peak within `OFFSET_SEARCH_M` of a pick) minus the pick."""
+    """Median of (refined swing peak within `OFFSET_SEARCH_M` of a pick) minus the pick.
+
+    A pick votes with the strongest local maximum of squared amplitude in its search; a pick with
+    none in reach casts no vote, and with no votes at all the offset is 0.0."""
     depths = vol.depths_m
     nd = depths.size
     step = float(depths[1] - depths[0]) if nd > 1 else 0.0
@@ -245,10 +248,16 @@ def _measure_offset(
     found = []
     for p in use:
         col = series[int(p)]
-        inner = col[int(lo[p] - first[p]) : int(hi[p] - first[p])]
-        if not np.isfinite(inner).any():
+        first_in, last_in = int(lo[p] - first[p]), int(hi[p] - first[p])
+        # a swing is a local maximum of the whole column: a level on the search limit that
+        # merely climbs toward a reflection out of reach is a flank, and casts no vote
+        left = np.concatenate([[-np.inf], np.nan_to_num(col[:-1], nan=-np.inf)])
+        right = np.concatenate([np.nan_to_num(col[1:], nan=-np.inf), [-np.inf]])
+        peak = np.isfinite(col) & (col >= left) & (col > right)
+        votes = np.flatnonzero(peak[first_in:last_in]) + first_in
+        if votes.size == 0:
             continue
-        k = int(lo[p] - first[p]) + int(np.argmax(np.where(np.isfinite(inner), inner, -np.inf)))
+        k = int(votes[np.argmax(col[votes])])
         vm = col[k - 1] if k > 0 else np.nan
         vp = col[k + 1] if k + 1 < col.size else np.nan
         shift = float(_peak_shift(np.array(vm), np.array(col[k]), np.array(vp)))
@@ -333,26 +342,27 @@ def _inside_hull(poly: np.ndarray, gx: np.ndarray, gy: np.ndarray, margin: float
 def _guide(
     join: str,
     cell: float,
-    shape: tuple[int, int],
+    region: np.ndarray,
     iy: np.ndarray,
     ix: np.ndarray,
     x: np.ndarray,
     y: np.ndarray,
     depth: np.ndarray,
-    gx: np.ndarray,
-    gy: np.ndarray,
 ) -> np.ndarray:
-    """The picks joined over the whole grid, `(ny, nx)` float64."""
+    """The picks joined over the grid, `(ny, nx)` float64. Inverse distance is computed for the
+    region's cells only (NaN elsewhere); minimum curvature joins the whole grid."""
+    shape = region.shape
     if join == "idw":
-        flat_x, flat_y = gx.ravel(), gy.ravel()
-        out = np.empty(flat_x.size)
-        for s in range(0, flat_x.size, _IDW_BLOCK):
-            dist = np.hypot(
-                flat_x[s : s + _IDW_BLOCK, None] - x, flat_y[s : s + _IDW_BLOCK, None] - y
-            )
+        ry, rx = np.nonzero(region)
+        cx, cy = (rx + 0.5) * cell, (ry + 0.5) * cell
+        out = np.full(shape, np.nan)
+        values = np.empty(cx.size)
+        for s in range(0, cx.size, _IDW_BLOCK):
+            dist = np.hypot(cx[s : s + _IDW_BLOCK, None] - x, cy[s : s + _IDW_BLOCK, None] - y)
             w = 1.0 / np.maximum(dist, IDW_MIN_DISTANCE_M) ** 2
-            out[s : s + _IDW_BLOCK] = (w * depth).sum(axis=1) / w.sum(axis=1)
-        return out.reshape(shape)
+            values[s : s + _IDW_BLOCK] = (w * depth).sum(axis=1) / w.sum(axis=1)
+        out[ry, rx] = values
+        return out
     total = np.zeros(shape)
     count = np.zeros(shape)
     np.add.at(total, (iy, ix), depth)
@@ -363,12 +373,15 @@ def _guide(
     return np.where(np.isfinite(joined), joined.astype(float), float(np.nanmean(mean)))
 
 
-def _fit(picked: np.ndarray, surface: np.ndarray, guide: np.ndarray, window_m: float) -> SurfaceFit:
-    """`surface` and `guide` hold each pick's cell's values, NaN on a hole or off the grid."""
+def _fit(
+    picked: np.ndarray, surface: np.ndarray, held: np.ndarray, guide: np.ndarray, window_m: float
+) -> SurfaceFit:
+    """`surface`, `held` (the depth before smoothing) and `guide` hold each pick's cell's values,
+    NaN on a hole or off the grid."""
     on_hole = ~np.isfinite(surface)
     miss = np.abs(surface - picked) - _FIT_SLACK  # distance, less float32 rounding
     with np.errstate(invalid="ignore"):
-        edge = ~on_hole & (np.abs(surface - guide) >= window_m - _FIT_SLACK)
+        edge = ~on_hole & (np.abs(held - guide) >= window_m - _FIT_SLACK)
         kept = ~on_hole & ~edge
         close = kept & (miss <= FIT_CLOSE_M)
         near = kept & (miss > FIT_CLOSE_M) & (miss <= FIT_NEAR_M)
@@ -431,14 +444,21 @@ def build_surface(
         & (depth <= depths[-1])
     )
     if not picks_span_an_area(x[usable], y[usable]):
-        raise ValueError("the picks must span an area: at least 3, not all on one line")
+        in_frame = (iy_all >= 0) & (iy_all < ny) & (ix_all >= 0) & (ix_all < nx)
+        raise ValueError(
+            f"{int(usable.sum())} of {x.size} picks are usable "
+            f"({int((~in_frame).sum())} outside the frame, "
+            f"{int((in_frame & ~((depth >= depths[0]) & (depth <= depths[-1]))).sum())} outside "
+            f"the depth range {depths[0]:.2f} to {depths[-1]:.2f} m); a surface needs at least 3 "
+            "usable picks that do not all lie on one line"
+        )
     ux, uy, ud = x[usable], y[usable], depth[usable]
     iy, ix = iy_all[usable], ix_all[usable]
 
     gx = np.broadcast_to((np.arange(nx) + 0.5) * cell, (ny, nx))
     gy = np.broadcast_to(((np.arange(ny) + 0.5) * cell)[:, None], (ny, nx))
     region = _inside_hull(_hull(ux, uy), gx, gy, HULL_MARGIN_M) & vol.covered
-    guide = _guide(settings.join, cell, (ny, nx), iy, ix, ux, uy, ud, gx, gy)
+    guide = _guide(settings.join, cell, region, iy, ix, ux, uy, ud)
 
     offset = _measure_offset(vol, iy, ix, ud, max_levels)
     tracked = np.full((ny, nx), np.nan)
@@ -460,6 +480,7 @@ def build_surface(
     # the median may borrow a neighbour's depth; it must not carry a cell out of its window
     final = np.clip(_median3(tracked), target - settings.window_m, target + settings.window_m)
     final = final - offset
+    held32 = final.astype(np.float32)  # before smoothing: smoothing must not hide an edge pick
     if settings.smoothing_m > 0.0:
         final = smooth(final, cell, settings.smoothing_m, settings.smoothing_m)
     final32 = final.astype(np.float32)
@@ -469,6 +490,8 @@ def build_surface(
     guide32 = np.where(region, guide, np.nan).astype(np.float32)
     at_guide = np.full(depth.size, np.nan)
     at_guide[usable] = guide32[iy, ix]
+    held = np.full(depth.size, np.nan)
+    held[usable] = held32[iy, ix]
     return Surface(
         depth_m=final32,
         strength=strength.astype(np.float32),
@@ -476,7 +499,7 @@ def build_surface(
         region=region,
         offset_m=offset,
         cell=float(cell),
-        fit=_fit(depth, in_surface, at_guide, settings.window_m),
+        fit=_fit(depth, in_surface, held, at_guide, settings.window_m),
     )
 
 

@@ -118,7 +118,7 @@ several grids' slices into one site view.
 | `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
 | `OFFSET_SEARCH_M` | How far from a pick the strongest swing is sought when measuring the offset: 5 cm. |
-| `Outlier` | A pick the surface does not honour: on a hole, or further than the window. |
+| `Outlier` | A pick the surface does not honour, with its `reason`: `hole`, `edge` (the surface is held at the window's edge) or `far` (further than the window). |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
@@ -135,7 +135,7 @@ several grids' slices into one site view.
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
 | `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset and the fit. |
-| `SurfaceFit` | How a surface sits against its picks: counts within 2 cm, within 5 cm, further and on holes, and the outliers. |
+| `SurfaceFit` | How a surface sits against its picks, every pick counted once: within 2 cm, within 5 cm, further, `at_edge` (held at the window's edge) or on a hole; and the outliers. |
 | `SurfaceSettings` | How a surface is built: the join, the tracking window, the strength test and the smoothing. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
 | `VolumeSettings` | How a volume is prepared: the RMS wave period, the sideways blur and the depth-trend window. |
