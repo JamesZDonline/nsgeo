@@ -1496,6 +1496,7 @@ class NsgeoPlugin:
                     for index, group in enumerate(groups.values()):
                         try:
                             done += surfaces.build(group, progress=one_group(index))
+                            failures += surfaces.refused  # skipped, the rest were built
                         except ParaViewExportCancelled:
                             cancelled = True
                             break

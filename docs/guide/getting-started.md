@@ -769,7 +769,9 @@ Picks on cuts cannot be used yet.
 4. **Read the fit.** Select the surface in the **nsgeo Surfaces** panel. **Fit,
    last build** says how many picks lie within 2 cm of the surface, how many are on
    holes, and where your picks sit against the strongest swing of the wave. The
-   list under it names the picks that are more than the window from the surface.
+   list under it names the picks the surface doesn't follow: a pick on a hole, one
+   held at the edge of the window (the reflection lies beyond it), and one more than
+   the window from the surface.
    Click one to select it on the map and open its line in the Profile panel, at
    that pick: you can see whether it sits on the wrong reflection.
 5. **Rebuild after changes.** Changing a surface's picks, its settings, or the
@@ -813,7 +815,11 @@ the site folder.
 **Surfaces are saved as you go**, like picks: each surface's name, settings and
 picks are written to `site.nsgeo.gpkg` the moment you change them, with no need to
 **Save site**. The built surfaces and the exports are regenerable files in the
-site folder (`surfaces` and `paraview`), so deleting them loses nothing.
+site folder (`surfaces` and `paraview`), so deleting them loses nothing. One thing
+is saved with **Save site** after all: a build remembers the grid's 3-D settings,
+and those live in `survey.nsgeo.json`. If you close without saving and the build
+was the first use of 3-D on that grid, the surfaces reopen marked stale
+(resolution); **Rebuild** clears it.
 
 A few things to know:
 

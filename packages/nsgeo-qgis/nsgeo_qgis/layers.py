@@ -291,6 +291,16 @@ def _attr(feature: QgsFeature, name: str) -> Any:
     return feature[name] if feature.fields().indexOf(name) >= 0 else NULL
 
 
+def _groups_transactions(project: Any) -> bool:
+    """Whether the project's "automatic transaction groups" (or buffered groups) are on, across
+    QGIS 3.40 to 4.x: `transactionMode()` where it exists, else `autoTransaction()`."""
+    mode = getattr(project, "transactionMode", None)
+    if mode is not None and hasattr(Qgis, "TransactionMode"):
+        return bool(mode() != Qgis.TransactionMode.Disabled)
+    auto = getattr(project, "autoTransaction", None)
+    return bool(auto()) if auto is not None else False
+
+
 def _provider_reason(provider: Any) -> str:
     """The provider's own message, or a plain reason when it gives none."""
     message = provider.error().message()
@@ -1017,7 +1027,7 @@ class SiteLayers(QObject):
             provider = layer.dataProvider()
             if not provider.addAttributes([QgsField(n, _KIND[k]) for n, k in missing]):
                 raise RuntimeError(
-                    f"could not add fields to {FEATURES!r}: {provider.error().message()}"
+                    f"could not add fields to {FEATURES!r}: {_provider_reason(provider)}"
                 )
             layer.updateFields()
         self._features = layer
@@ -1869,7 +1879,7 @@ class SiteLayers(QObject):
         ok, _ = layer.dataProvider().addFeatures([feature])
         if not ok:
             raise RuntimeError(
-                f"could not write the pick: {layer.dataProvider().error().message()}"
+                f"could not write the pick: {_provider_reason(layer.dataProvider())}"
             )
         layer.updateExtents()
         layer.triggerRepaint()
@@ -1945,6 +1955,21 @@ class SiteLayers(QObject):
         )
 
     # ---- features and pick membership (M16 B) -------------------------------
+    def picks_in_open_transaction(self) -> bool:
+        """True while the picks layer is in editing mode and the project groups its layers' edits
+        into transactions: a write to the package then lands inside the user's open transaction
+        (and "database is locked", or a Discard that undoes it)."""
+        layer = self._picks_layer()
+        if layer is None or not layer.isEditable():
+            return False
+        return _groups_transactions(self.project)
+
+    def features_available(self) -> bool:
+        """Whether the `features` table is open: when it is not, `feature_records()` is empty
+        for want of reading, not because there are no features."""
+        layer = self._features_layer()
+        return layer is not None and layer.isValid()
+
     def _features_layer(self) -> QgsVectorLayer | None:
         layer = self._features
         if layer is None or sip.isdeleted(layer):

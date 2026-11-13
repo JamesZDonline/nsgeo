@@ -41,6 +41,7 @@ from nsgeo_qgis.surface_plan import (
     DELETE_BUTTON,
     DELETE_TITLE,
     NO_LONGER_MEMBER,
+    NOTHING_TO_REMOVE,
     delete_question,
     fit_rows,
     fit_short,
@@ -446,7 +447,9 @@ class SurfacesDock(QgsDockWidget):
         if fid is None:
             return
         try:
-            self.surfaces.remove_picks(fid, self.surfaces.layers.selected_pick_ids())
+            removed = self.surfaces.remove_picks(fid, self.surfaces.layers.selected_pick_ids())
+            if not removed:
+                self.notice.emit(NOTHING_TO_REMOVE)
         except (ValueError, RuntimeError) as exc:
             self.problem.emit(write_failure_text(str(exc)))
 

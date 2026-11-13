@@ -200,6 +200,16 @@ def move_note(moving: Mapping[str, int], n: int, left: Mapping[str, int] | None 
     return note
 
 
+IN_TRANSACTION_REFUSAL = (
+    "The picks layer is in editing mode, and this project groups edits into one transaction, "
+    "so a change to a surface's picks would be undone if you discard the layer's edits. "
+    "Save the picks layer's edits or leave editing mode, then try again."
+)
+NOTHING_TO_REMOVE = (
+    "None of the picks selected on the map belong to this surface, so nothing was removed."
+)
+
+
 def remove_refusal(left: int) -> str:
     if left >= MIN_PICKS:
         return ""
@@ -366,7 +376,9 @@ def outlier_line(outlier: Mapping[str, Any]) -> str:
         return text + " · on a hole"
     gap = float(surface) - float(outlier.get("picked_m", 0.0))
     text += f" · surface {float(surface):.2f} m ({_cm(gap)})"
-    return text + (" · held at the window's edge" if reason == "edge" else "")
+    if reason == "edge":
+        return text + " · held at the window's edge"
+    return text + " · beyond the window"
 
 
 def built_message(name: str, report: Mapping[str, Any]) -> str:
@@ -490,10 +502,21 @@ LOCKED_PICKS_TEXT = (
 )
 
 
+FILE_LOCKED_TEXT = (
+    "Another program has the site file open (Windows locks a file while it is in use). "
+    "Close it there, then try again."
+)
+
+
 def write_failure_text(message: str) -> str:
     """A refused write as the user should read it: QGIS's "database is locked" (a picks layer in
     editing mode under the project's automatic transaction groups) says what to do."""
-    return LOCKED_PICKS_TEXT if "locked" in message.lower() else message
+    lowered = message.lower()
+    if "database is locked" in lowered:
+        return LOCKED_PICKS_TEXT
+    if "locked a portion of the file" in lowered:
+        return FILE_LOCKED_TEXT
+    return message
 
 
 def build_outcome(name: str, report: Mapping[str, Any]) -> tuple[str, bool]:
@@ -536,7 +559,10 @@ def not_built_text(n_picks: int) -> str:
 
 
 def outlier_header(window_m: float, n: int) -> str:
-    text = f"More than {window_m * 100:g} cm from the surface ({n})"
+    text = (
+        f"Picks the surface doesn't follow ({n}): on a hole, at the window's edge, "
+        f"or more than {window_m * 100:g} cm off"
+    )
     return text + ("; click one to select it on the map:" if n else "")
 
 

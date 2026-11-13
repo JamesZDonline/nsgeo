@@ -454,3 +454,61 @@ def test_an_older_features_table_gains_missing_fields_and_reads_correctly(site):
     surfaces.rename(record.feature_id, "Basin")
     assert surfaces.records()[0].name == "Basin"
     assert len(surfaces.members(record.feature_id)) == 6
+
+
+@pytest.fixture
+def grouped_transactions(site):
+    """The picks layer in editing mode under the project's automatic transaction groups, the
+    state in which a write to the package lands inside the user's open transaction."""
+    from qgis.core import Qgis
+
+    project = QgsProject.instance()
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 5)
+    record = surfaces.create("Bowl", fids)
+    project.setTransactionMode(Qgis.TransactionMode.AutomaticGroups)
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    try:
+        yield layers, surfaces, record, fids
+    finally:
+        picks.rollBack()
+        project.setTransactionMode(Qgis.TransactionMode.Disabled)
+
+
+def test_membership_writes_are_refused_inside_the_users_transaction(grouped_transactions):
+    layers, surfaces, record, fids = grouped_transactions
+    assert layers.picks_in_open_transaction()
+    held = sorted(r.fid for r in surfaces.members(record.feature_id))
+    with pytest.raises(ValueError, match="editing mode"):
+        surfaces.create("Other", fids[:3])
+    with pytest.raises(ValueError, match="editing mode"):
+        surfaces.add_picks(record.feature_id, fids[:1])
+    with pytest.raises(ValueError, match="editing mode"):
+        surfaces.remove_picks(record.feature_id, fids[:1])
+    with pytest.raises(ValueError, match="editing mode"):
+        surfaces.delete(record.feature_id)
+    assert sorted(r.fid for r in surfaces.members(record.feature_id)) == held
+    assert [r.name for r in surfaces.records()] == ["Bowl"]
+
+
+def test_editing_mode_alone_or_grouping_alone_is_no_hazard(site):
+    from qgis.core import Qgis
+
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 5)
+    record = surfaces.create("Bowl", fids)
+    project = QgsProject.instance()
+    picks = layers.layers["picks"]
+    assert not layers.picks_in_open_transaction()
+    project.setTransactionMode(Qgis.TransactionMode.AutomaticGroups)
+    try:
+        assert not layers.picks_in_open_transaction()  # grouping on, not editing
+    finally:
+        project.setTransactionMode(Qgis.TransactionMode.Disabled)
+    assert picks.startEditing()
+    try:
+        assert not layers.picks_in_open_transaction()  # editing, no grouping
+    finally:
+        picks.rollBack()
+    assert surfaces.remove_picks(record.feature_id, fids[:1]) == 1

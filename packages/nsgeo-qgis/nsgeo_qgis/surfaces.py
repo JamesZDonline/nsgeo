@@ -24,7 +24,7 @@ import re
 import traceback
 import uuid
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +48,7 @@ from nsgeo_qgis.paraview_export import (
 )
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.surface_plan import (
+    IN_TRANSACTION_REFUSAL,
     INPUTS,
     KIND_SURFACE,
     MULTI_GRID_REFUSAL,
@@ -142,6 +143,8 @@ class Surfaces:
         #: Greater than 0 while `build` runs: nothing may delete a grid's surface files then
         #: (`SurfaceLayers.sync` holds back its sweep).
         self.building = 0
+        #: The refusals (too few picks left) of the surfaces the last `build` skipped.
+        self.refused: list[str] = []
 
     # ---- reading ------------------------------------------------------------
     def records(self) -> list[FeatureRecord]:
@@ -228,6 +231,12 @@ class Surfaces:
             raise ValueError(text)
         return clean_name(name)
 
+    def _refuse_in_transaction(self) -> None:
+        """Membership writes go to the package at once; inside the user's open transaction
+        group they would be discarded with it (see `SiteLayers.picks_in_open_transaction`)."""
+        if self.layers.picks_in_open_transaction():
+            raise ValueError(IN_TRANSACTION_REFUSAL)
+
     def _changed(self) -> None:
         self.session.features_changed.emit()
 
@@ -235,6 +244,7 @@ class Surfaces:
         self, name: str, fids: Iterable[int], settings: SurfaceSettings | None = None
     ) -> FeatureRecord:
         fids = list(fids)
+        self._refuse_in_transaction()
         name = self._refuse_name(name)
         found = self.check(fids)
         if found.refusal:
@@ -272,6 +282,7 @@ class Surfaces:
 
     def add_picks(self, feature_id: str, fids: Iterable[int]) -> None:
         fids = list(fids)
+        self._refuse_in_transaction()
         found = self.check(fids, into=feature_id)
         if found.refusal:
             raise ValueError(found.refusal)
@@ -282,23 +293,27 @@ class Surfaces:
         self.layers.set_pick_feature(fresh, feature_id)
         self._changed()
 
-    def remove_picks(self, feature_id: str, fids: Iterable[int]) -> None:
+    def remove_picks(self, feature_id: str, fids: Iterable[int]) -> int:
+        """Take `fids` out of the surface; returns how many were in it (0: nothing changed)."""
         self._record(feature_id)
+        self._refuse_in_transaction()
         held = {row.fid for row in self.members(feature_id)}
         leaving = sorted(held & {int(f) for f in fids})
         if not leaving:
-            return
+            return 0
         text = remove_refusal(len(held) - len(leaving))
         if text:
             raise ValueError(text)
         self.layers.set_pick_feature(leaving, None)
         self._changed()
+        return len(leaving)
 
     def delete(self, feature_id: str) -> None:
         """Remove the surface. Its picks all stay: they are cleared first, so
         a failure partway leaves a surface with fewer picks, never picks that
         name a surface which is gone."""
         self._record(feature_id)
+        self._refuse_in_transaction()
         self.layers.clear_pick_feature(feature_id)
         self.layers.remove_feature(feature_id)
         self._changed()
@@ -466,11 +481,21 @@ class Surfaces:
         grids = {r.grid_id for r in records}
         if len(grids) > 1:
             raise ValueError(MULTI_GRID_REFUSAL)
-        members = {r.feature_id: self.members(r.feature_id) for r in records}
+        everyone = self.layers.members_by_feature()
+        members = {r.feature_id: everyone.get(r.feature_id, []) for r in records}
+        # A surface left with too few picks is skipped and reported, so it never blocks the
+        # others of its grid; when none can be built, the first refusal is the error.
+        self.refused = []
+        buildable = []
         for record in records:
             text = rebuild_refusal(record.name, len(members[record.feature_id]))
             if text:
-                raise ValueError(text)
+                self.refused.append(text)
+            else:
+                buildable.append(record)
+        if not buildable:
+            raise ValueError(self.refused[0])
+        records = buildable
         export = self._export()
         grid_id = records[0].grid_id
         folder = self.folder(grid_id)
@@ -526,6 +551,10 @@ class Surfaces:
         """Fill, volume and the core builder for each record, in memory; nothing is written.
         Returns the choice the build used (remembered, with its depth) and each result."""
         choice = export.defaults(grid_id)
+        # The export dialog shows the depth step to four decimals, so an untouched dialog writes
+        # that back: build with it, or the next export would call the surface stale (R11).
+        if round(choice.dz_ns, 4) > 0.0:
+            choice = replace(choice, dz_ns=round(choice.dz_ns, 4))
 
         def report(done: float) -> None:
             if not progress(int(done), 100):
@@ -543,8 +572,7 @@ class Surfaces:
         end = round(end, 4)
         if end < got.t1_ns:
             end = round(end + 1e-4, 4)
-        self.session.remember_volume(grid_id, **{**choice.to_record(), "t1_ns": end})
-        choice = export.defaults(grid_id)
+        choice = replace(choice, t1_ns=end)
         window = max(1, int(round(choice.settings.period_ns / got.z.dz_ns)))
         vol = surface_volume(
             got.filled,
@@ -594,6 +622,8 @@ class Surfaces:
             }
             report(_VOLUME_SHARE + (100 - _VOLUME_SHARE) * (k + 1) / len(records))
         del vol, got
+        # Remembered last: a build that is refused or cancelled leaves the grid's choice alone.
+        self.session.remember_volume(grid_id, **choice.to_record())
         return choice, out
 
     def line_label(self, key: str) -> str:

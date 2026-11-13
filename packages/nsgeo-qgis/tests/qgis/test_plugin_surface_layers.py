@@ -360,3 +360,38 @@ def test_a_cleared_project_does_not_count_as_removing_layers_by_hand(built_site,
     layers.refresh()
     sl.sync()
     assert len(_by_feature(project, record.feature_id)) == 1
+
+
+def test_an_unreadable_features_table_never_sweeps_the_builds_away(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    record, report = _build(built_site)
+    sl.sync()
+    folder = surfaces.folder(GRID)
+    owned = [folder / n for n in report.report["files"].values()]
+    owned.append(folder / f"{record.feature_id}.json")
+    assert all(p.is_file() for p in owned)
+    table = layers._features
+    layers._features = None  # the table could not be opened: no record is listed
+    try:
+        assert not layers.features_available()
+        assert surfaces.records() == []
+        sl.sync()
+        assert all(p.is_file() for p in owned)
+    finally:
+        layers._features = table
+    assert layers.features_available()
+    sl.sync()
+    assert all(p.is_file() for p in owned)
+    assert surfaces.built(record.feature_id) is not None
+
+
+def test_a_sync_scans_the_picks_once_however_many_surfaces(built_site, shown, monkeypatch):
+    session, layers, surfaces, sl, project = shown
+    _build(built_site, "One")
+    _build(built_site, "Two")
+    sl.sync()
+    calls = []
+    real = layers.members_by_feature
+    monkeypatch.setattr(layers, "members_by_feature", lambda: calls.append(1) or real())
+    sl.sync()
+    assert len(calls) == 1

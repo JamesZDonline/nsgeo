@@ -316,7 +316,8 @@ class SurfaceLayers:
                 self._dismissed[fid] = shown.build
                 del self._shown[fid]
         records = {r.feature_id: r for r in self.surfaces.records()}
-        states = {fid: self.surfaces.state(fid) for fid in records}
+        members = self.surfaces.layers.members_by_feature()  # one scan for every surface
+        states = {fid: self.surfaces.state(fid, members) for fid in records}
         # fid -> (build key, files) of each build that has at least one cell.
         wanted: dict[str, str] = {}
         for fid, state in states.items():
@@ -371,8 +372,9 @@ class SurfaceLayers:
                     shown.styled = span
         self._drop_group_if_empty()
         # Every grid folder, not only those with a surface: a deleted surface's files go too.
+        # Never on an unreadable features table: it lists no surface, and every build would go.
         root = Path(self.session.root) / "surfaces"
-        if root.is_dir():
+        if root.is_dir() and self.surfaces.layers.features_available():
             for folder in sorted(root.iterdir()):
                 if folder.is_dir():
                     self.surfaces.sweep(folder.name)

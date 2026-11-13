@@ -289,9 +289,13 @@ def _track(
     window_m: float,
     min_strength: float,
     max_levels: int,
-) -> tuple[np.ndarray, np.ndarray]:
-    """`(depth, strength)` per column: the swing's refined peak within `window_m` of `target`,
-    NaN where the column has no level in reach or its strength fails the test."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`(depth, strength, held)` per column: the swing's refined peak within `window_m` of
+    `target`, NaN where the column has no level in reach or its strength fails the test.
+
+    `held` is True where the strongest level in the window is the window's first or last level
+    and the swing at the next level outside the window is larger: the reflection lies beyond the
+    window and the pick is held at its edge. False where no level lies outside."""
     depths = vol.depths_m
     nd = depths.size
     step = float(depths[1] - depths[0]) if nd > 1 else 0.0
@@ -302,6 +306,8 @@ def _track(
     best_vm = np.full(n, np.nan)
     best_vp = np.full(n, np.nan)
     best_s = np.full(n, np.nan)
+    out_lo = np.full(n, -np.inf)
+    out_hi = np.full(n, -np.inf)
     cols = np.arange(n)
     live = lo < hi
     if live.any():
@@ -312,6 +318,10 @@ def _track(
             _, strength = vol.slab(c0, c1)
             strength = strength[:, iy, ix]
             js = np.arange(c0, c1)[:, None]
+            rows = np.arange(c0 - 1, c1 + 1)[:, None]
+            fin = np.isfinite(padded)
+            out_lo = np.maximum(out_lo, np.where(fin & (rows == lo - 1), padded, -np.inf).max(0))
+            out_hi = np.maximum(out_hi, np.where(fin & (rows == hi), padded, -np.inf).max(0))
             inner = padded[1:-1]
             inside = (js >= lo) & (js < hi) & np.isfinite(inner)
             vals = np.where(inside, inner, -np.inf)
@@ -330,7 +340,11 @@ def _track(
     depth = np.clip(depth, target - window_m, target + window_m)
     with np.errstate(invalid="ignore"):
         keep = found & (best_s >= min_strength)
-    return np.where(keep, depth, np.nan), np.where(keep, best_s, np.nan)
+    with np.errstate(invalid="ignore"):
+        held = keep & (
+            ((best_k == lo) & (out_lo > best_v)) | ((best_k == hi - 1) & (out_hi > best_v))
+        )
+    return np.where(keep, depth, np.nan), np.where(keep, best_s, np.nan), held
 
 
 def _median3(depth: np.ndarray) -> np.ndarray:
@@ -363,7 +377,8 @@ def _guide(
     depth: np.ndarray,
 ) -> np.ndarray:
     """The picks joined over the grid, `(ny, nx)` float64. Inverse distance is computed for the
-    region's cells only (NaN elsewhere); minimum curvature joins the whole grid."""
+    region's cells only (NaN elsewhere); minimum curvature joins the whole grid and is NaN beyond
+    its reach of every pick."""
     shape = region.shape
     if join == "idw":
         ry, rx = np.nonzero(region)
@@ -383,18 +398,26 @@ def _guide(
     populated = count > 0
     mean = np.where(populated, total / np.maximum(count, 1.0), np.nan)
     joined = plan_curvature(populated, cell, JOIN_REACH_M).apply(mean.astype(np.float32))
-    return np.where(np.isfinite(joined), joined.astype(float), float(np.nanmean(mean)))
+    return np.where(np.isfinite(joined), joined.astype(float), np.nan)
 
 
 def _fit(
-    picked: np.ndarray, surface: np.ndarray, held: np.ndarray, guide: np.ndarray, window_m: float
+    picked: np.ndarray,
+    surface: np.ndarray,
+    held: np.ndarray,
+    guide: np.ndarray,
+    window_m: float,
+    beyond_window: np.ndarray | None = None,
 ) -> SurfaceFit:
     """`surface`, `held` (the depth before smoothing) and `guide` hold each pick's cell's values,
-    NaN on a hole or off the grid."""
+    NaN on a hole or off the grid. `beyond_window` flags the picks whose column's strongest swing
+    lies outside the window (see `_track`); they are at the edge whatever the clamp did."""
     on_hole = ~np.isfinite(surface)
     miss = np.abs(surface - picked) - _FIT_SLACK  # distance, less float32 rounding
     with np.errstate(invalid="ignore"):
         edge = ~on_hole & (np.abs(held - guide) >= window_m - _FIT_SLACK)
+        if beyond_window is not None:
+            edge |= ~on_hole & beyond_window
         kept = ~on_hole & ~edge
         close = kept & (miss <= FIT_CLOSE_M)
         near = kept & (miss > FIT_CLOSE_M) & (miss <= FIT_NEAR_M)
@@ -472,13 +495,15 @@ def build_surface(
     gy = np.broadcast_to(((np.arange(ny) + 0.5) * cell)[:, None], (ny, nx))
     region = _inside_hull(_hull(ux, uy), gx, gy, HULL_MARGIN_M) & vol.covered
     guide = _guide(settings.join, cell, region, iy, ix, ux, uy, ud)
+    region &= np.isfinite(guide)  # no flat guide beyond the join's reach of every pick
 
     offset, votes, at_limit = _measure_offset(vol, iy, ix, ud, max_levels)
     tracked = np.full((ny, nx), np.nan)
     strength = np.full((ny, nx), np.nan)
+    beyond = np.zeros((ny, nx), dtype=bool)
     ry, rx = np.nonzero(region)
     if ry.size:
-        d, s = _track(
+        d, s, h = _track(
             vol,
             ry,
             rx,
@@ -489,6 +514,7 @@ def build_surface(
         )
         tracked[ry, rx] = d
         strength[ry, rx] = s
+        beyond[ry, rx] = h
     target = guide + offset
     # the median may borrow a neighbour's depth; it must not carry a cell out of its window
     final = np.clip(_median3(tracked), target - settings.window_m, target + settings.window_m)
@@ -505,6 +531,8 @@ def build_surface(
     at_guide[usable] = guide32[iy, ix]
     held = np.full(depth.size, np.nan)
     held[usable] = held32[iy, ix]
+    beyond_pick = np.zeros(depth.size, dtype=bool)
+    beyond_pick[usable] = beyond[iy, ix]
     return Surface(
         depth_m=final32,
         strength=strength.astype(np.float32),
@@ -514,7 +542,7 @@ def build_surface(
         offset_votes=votes,
         offset_at_limit=at_limit,
         cell=float(cell),
-        fit=_fit(depth, in_surface, held, at_guide, settings.window_m),
+        fit=_fit(depth, in_surface, held, at_guide, settings.window_m, beyond_pick),
     )
 
 

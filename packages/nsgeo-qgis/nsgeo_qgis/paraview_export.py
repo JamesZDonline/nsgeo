@@ -339,6 +339,9 @@ class ParaViewExport:
         dt = float(self.session.line_for_key(keys[0]).header.dt_ns)
         try:
             end: float | None = self._record_range(self._source(grid_id, self.defaults(grid_id)))[1]
+            # The dialog's spin box keeps four decimals: round up, so that "Down to" can hold
+            # a depth a build remembered (also rounded up) and the record's own end (R11).
+            end = math.ceil(end * 1e4 - 1e-6) / 1e4
         except ValueError:
             end = None  # no preset or no shared range: the summary says so
         return (float(cell) if isinstance(cell, float) and cell > 0.0 else None), dt, end
@@ -383,10 +386,14 @@ class ParaViewExport:
         if self.surfaces is None:
             return []
         out = []
+        members = self.surfaces.layers.members_by_feature()  # one scan, not one per surface
+        folder = self.surfaces.folder(grid_id)
         for record in self.surfaces.records():
             if record.grid_id == grid_id:
-                state = self.surfaces.state(record.feature_id)
-                if state.built and self.surfaces.built(record.feature_id) is not None:
+                state = self.surfaces.state(record.feature_id, members)
+                # The json names the files; a dialog refresh must not load every npz.
+                npz = (state.report or {}).get("files", {}).get("npz")
+                if state.built and npz and (folder / str(npz)).is_file():
                     out.append(state)
         return out
 
@@ -899,6 +906,7 @@ class ParaViewExport:
         self.skipped_surfaces = []
         count = 0
         records = [] if self.surfaces is None else self.surfaces.records()
+        members = {} if self.surfaces is None else self.surfaces.layers.members_by_feature()
         for record in records:
             if record.grid_id != grid_id:
                 continue
@@ -906,7 +914,7 @@ class ParaViewExport:
             if built is None:
                 continue
             index = len(entries)
-            is_stale = bool(self.surfaces.state(record.feature_id).stale)
+            is_stale = bool(self.surfaces.state(record.feature_id, members).stale)
             local, triangles, _cells = surface_mesh(built.depth_m, built.cell)
             if len(local):
                 # The build's own frame to world, then to this export's frame: the same unless

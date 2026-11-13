@@ -416,7 +416,8 @@ def test_building_remembers_the_grids_3d_choice(built_site):
     surfaces.build([record.feature_id], progress=_noop)
     record = session.volume_record(GRID)
     assert isinstance(record.pop("t1_ns"), float)  # the depth the fill used, explicit
-    assert record == choice.to_record()
+    # the depth step as the export dialog shows it (four decimals), so an untouched dialog agrees
+    assert record == {**choice.to_record(), "dz_ns": round(choice.dz_ns, 4)}
 
 
 def test_a_build_is_refused_while_slices_prepare(built_site):
@@ -482,3 +483,65 @@ def test_a_surface_cannot_build_without_an_export(built_site):
         surfaces.build([record.feature_id], progress=_noop)
     with pytest.raises(RuntimeError):
         surfaces.inputs(record.feature_id)
+
+
+def test_a_refused_build_remembers_nothing(built_site, monkeypatch):
+    from nsgeo_qgis import surfaces as surfaces_module
+
+    session, _, _, _, surfaces = built_site
+    record, _ = _surface(built_site)
+
+    def refuse(*args, **kwargs):
+        raise ValueError("no surface here")
+
+    monkeypatch.setattr(surfaces_module, "build_surface", refuse)
+    with pytest.raises(ValueError, match="no surface here"):
+        surfaces.build([record.feature_id], progress=_noop)
+    assert session.volume_record(GRID) == {}
+
+
+def test_building_then_exporting_at_the_dialogs_defaults_keeps_surfaces_fresh(
+    built_site, monkeypatch
+):
+    """The dialog's "Down to" holds what the build remembered, so accepting it untouched writes
+    the same value back: no stale surface, no second fill (R11)."""
+    from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
+
+    session, _, export, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    calls = []
+    real = paraview_export.fill_levels
+    monkeypatch.setattr(
+        paraview_export, "fill_levels", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    surfaces.build([record.feature_id], progress=_noop)
+    assert surfaces.state(record.feature_id).stale == ()
+    dialog = ParaViewExportDialog(
+        [GRID], GRID, export.defaults, export.summary, "", hints_for=export.panel_values
+    )
+    try:
+        choice = dialog.choice()
+    finally:
+        dialog.deleteLater()
+    session.remember_volume(GRID, **choice.to_record())  # as `export_paraview` does
+    assert surfaces.state(record.feature_id).stale == ()
+    export.run(GRID, choice, progress=_noop)
+    assert surfaces.state(record.feature_id).stale == ()
+    assert len(calls) == 1
+
+
+def test_one_too_small_surface_never_blocks_its_grids_rebuild(built_site):
+    session, _, _, layers, surfaces = built_site
+    ok, _ = _surface(built_site, "Ok")
+    more = _write(layers, session, [(0, 10, 10.2), (0, 50, 10.8), (1, 30, 10.4)])
+    small = surfaces.create("Small", more, SurfaceSettings(strength=0.0))
+    layers.set_pick_feature(more[:1], None)  # two picks left: too few to rebuild
+    reports = surfaces.build([ok.feature_id, small.feature_id], progress=_noop)
+    assert [r.feature_id for r in reports] == [ok.feature_id]
+    assert surfaces.built(ok.feature_id) is not None
+    assert surfaces.built(small.feature_id) is None
+    assert len(surfaces.refused) == 1 and "“Small”" in surfaces.refused[0]
+    assert "too few to rebuild" in surfaces.refused[0]
+    # with nothing buildable the refusal is the error, as before
+    with pytest.raises(ValueError, match="too few to rebuild"):
+        surfaces.build([small.feature_id], progress=_noop)

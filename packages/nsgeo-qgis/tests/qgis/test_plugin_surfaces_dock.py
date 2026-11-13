@@ -242,6 +242,19 @@ def test_select_its_picks_and_add_and_remove_selected(surface_plugin):
     assert len(plugin.surfaces.members(record.feature_id)) == 3
 
 
+def test_removing_picks_that_are_not_in_the_surface_says_so(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    fids = plugin.pick_fids
+    record = plugin.surfaces.create("Bowl", fids[:3], SurfaceSettings(strength=0.0))
+    dock.refresh()
+    dock.table.selectRow(0)
+    plugin.layers.select_picks([fids[3]])  # not one of its picks
+    dock.remove_button.click()
+    assert "None of the picks selected" in _shown(plugin)
+    assert len(plugin.surfaces.members(record.feature_id)) == 3
+
+
 def _press(button_text):
     """A driver for a QMessageBox: press the button with this text."""
 

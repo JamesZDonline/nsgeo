@@ -205,7 +205,10 @@ def test_outlier_lines_and_the_messages():
         "reason": "far",
     }
     assert outlier_line(hole) == "FILE__023 at 4.15 m · picked 0.62 m · on a hole"
-    assert outlier_line(far) == "FILE__027 at 1.35 m · picked 0.58 m · surface 0.55 m (3.0 cm)"
+    assert (
+        outlier_line(far)
+        == "FILE__027 at 1.35 m · picked 0.58 m · surface 0.55 m (3.0 cm) · beyond the window"
+    )
     edge = {**far, "reason": "edge", "distance_m": None}
     assert outlier_line(edge).endswith("held at the window's edge")
     assert outlier_line(edge).startswith("FILE__027 · picked")
@@ -268,6 +271,13 @@ def test_the_dialog_and_panel_wording():
     assert "database is locked" not in write_failure_text("could not write: database is locked")
     assert "Save the picks layer" in write_failure_text("could not write: database is locked")
     assert write_failure_text("disk full") == "disk full"
+    # only SQLite's own text gets the picks-layer advice; a Windows file lock has its own words
+    other = "could not write: another process has locked a portion of the file"
+    assert "Save the picks layer" not in write_failure_text(other)
+    assert "open" in write_failure_text(other) and "locked a portion" not in write_failure_text(
+        other
+    )
+    assert write_failure_text("the lock screen is up") == "the lock screen is up"
     assert skipped_surfaces_text([]) == ""
     assert "“Bowl”" in skipped_surfaces_text(["Bowl"]) and "left out" in skipped_surfaces_text(
         ["Bowl"]
@@ -292,8 +302,14 @@ def test_the_panel_build_and_dialog_wording_round_two():
 
     assert not_built_text(1) == "Not built yet (1 pick). Rebuild to put it on the map."
     assert not_built_text(4).startswith("Not built yet (4 picks)")
-    assert outlier_header(0.02, 0) == "More than 2 cm from the surface (0)"
-    assert outlier_header(0.02, 6).endswith("(6); click one to select it on the map:")
+    assert outlier_header(0.02, 0) == (
+        "Picks the surface doesn't follow (0): on a hole, at the window's edge, "
+        "or more than 2 cm off"
+    )
+    assert outlier_header(0.02, 6).endswith(
+        "(6): on a hole, at the window's edge, or more than 2 cm off; "
+        "click one to select it on the map:"
+    )
     assert build_title(["Bowl"]) == "Building “Bowl”"
     assert build_title(["A", "B", "C"]) == "Building 3 surfaces"
     assert resolution_hint("1", 0.05, 0.1) == (

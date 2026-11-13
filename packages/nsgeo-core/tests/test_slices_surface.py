@@ -605,3 +605,39 @@ def test_real_joins_differ_as_described():
 
     # the minimum-curvature join passes through every pick; inverse distance is pulled off them
     assert np.abs(idw.guide_m[populated] - (binned / np.maximum(count, 1))[populated]).max() > 1e-4
+
+
+def test_a_pick_beyond_the_window_with_a_stronger_swing_outside_is_at_the_edge():
+    # window 2.35 cm: the levels at 2.0 and 2.5 cm from the target fall either side of its edge.
+    # A three-column strip's reflection peaks 2.45 cm out, so the strongest level inside is the
+    # rising flank at 2.0 cm; refinement moves it under half a level, short of the edge, which a
+    # clamp test alone would call "within 2 cm"
+    t = Z.times_ns()[:, None, None]
+    centre = np.full(NX, 10.0)
+    centre[17:20] = 10.49
+    filled = 1e-4 + _ricker2(t - centre[None, None, :]) * np.ones((1, NY, 1))
+    filled[:, :, -3:] = np.nan
+    vol = _volume(filled.astype(np.float32))
+    x, y, _ = _picks()
+    assert int(x[5] // C) == 18
+    s = build_surface(vol, x, y, np.full(12, 0.48), SurfaceSettings(strength=0.3, window_m=0.0235))
+    assert [o.reason for o in s.fit.outliers if o.index == 5] == ["edge"]
+    assert s.fit.at_edge >= 1
+    assert _categories(s.fit) == 12
+    assert s.fit.within_close + s.fit.within_near == 12 - s.fit.at_edge - s.fit.further
+
+
+def test_cells_beyond_the_curvature_joins_reach_are_outside_the_region():
+    nx, ny = 100, 30
+    t = Z.times_ns()[:, None, None]
+    filled = 1e-4 + _ricker2(t - 10.0) * np.ones((1, ny, nx))
+    vol = surface_volume(filled.astype(np.float32), Z, VEL, C, VolumeSettings())
+    # two clusters of picks more than 4 m apart; the hull spans the gap
+    xs = np.array([0.5, 1.0, 1.5, 0.7, 1.2, 8.5, 9.0, 9.5, 8.7, 9.2])
+    ys = np.array([0.5, 2.5, 1.5, 1.0, 2.0, 0.5, 2.5, 1.5, 1.0, 2.0])
+    s = build_surface(vol, xs, ys, np.full(xs.size, 0.5), SurfaceSettings(join="min_curvature"))
+    gap = slice(40, 60)  # 4.0 to 6.0 m: more than 2 m from every pick
+    assert not s.region[:, gap].any()
+    assert np.isnan(s.depth_m[:, gap]).all()
+    assert s.region[:, :20].any() and s.region[:, 80:].any()
+    assert np.isfinite(s.guide_m[s.region]).all()
