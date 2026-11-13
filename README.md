@@ -102,7 +102,8 @@ release's notes list everything in it.
 - **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
   the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
   typed min/max, a cumulative cut) as you move through the depths; M19's
-  magnetometer maps will reuse it. Built, awaiting its walkthrough.
+  magnetometer maps will reuse it. Walkthrough passed; one note to
+  settle before the merge.
 - **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
   lists every saved fit on the grid's lines, averages the ones you tick, and
   remembers which fits made the grid's velocity. Slices take their depths
@@ -168,7 +169,8 @@ Grouped by area. The order within a group is not a priority.
   coarse previews, averaged previews, a memory estimate for This grid, refusals
   that stay on screen, and where the preview note sits ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
-  ([#167]).
+  ([#167]); move the colour ramp's stops and watch the slice recolour as you
+  drag ([#183]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -213,6 +215,7 @@ Grouped by area. The order within a group is not a priority.
 [#177]: https://github.com/JamesZDonline/nsgeo/issues/177
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
 [#180]: https://github.com/JamesZDonline/nsgeo/issues/180
+[#183]: https://github.com/JamesZDonline/nsgeo/issues/183
 
 ## Why
 
