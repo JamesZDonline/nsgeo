@@ -122,6 +122,13 @@ release's notes list everything in it.
   dots on the outer edge of its top band, ready to edit and save like
   clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
   switching velocity mode on first. Being designed.
+- **Slices panel: scroll wheel, typing, width and notes** ([#177], [#176],
+  [#105], [#121], and parts of [#157], [#163] and [#50]). The scroll wheel no
+  longer changes dz, z0, z1, the cell size or a line's grid in Edit lines until
+  you click into the box; dz can't go below the radar's own sample interval; a
+  Whole site refresh leaves a box you are typing in alone; warnings and
+  refusals get their own section in the panel, and its settings sections fold.
+  Being designed.
 
 ### Next, in order
 
@@ -154,8 +161,7 @@ Grouped by area. The order within a group is not a priority.
   ([#130]; the outline and its slice mask come with M17's GPS areas); balancing
   lines walked in different directions (the second half of [#47]); a preset or
   velocity override for a selection of lines at once ([#58]; editing their
-  placement together is done); the scroll wheel no longer moves a line to
-  another grid in Edit lines ([#176]).
+  placement together is done).
 - **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
   its own profile ([#185]); a layered velocity from fits at several depths
   ([#187]); exports record where the grid's velocity came from ([#188]).
@@ -169,11 +175,9 @@ Grouped by area. The order within a group is not a priority.
   deciding before M16, which adds more code that assumes one.
 - **Slices:** minimum curvature accurate beyond float32 where a line stands
   alone or the max distance is large ([#147]); lines processed differently in
-  one cube, such as migration at each line's own velocity ([#178]); the scroll
-  wheel no longer changes dz, z0 and z1 by accident, which can freeze QGIS
-  ([#177]); whole site at fine cells, the follow-ups: coverage edge lines on
-  coarse previews, averaged previews, a memory estimate for This grid, refusals
-  that stay on screen, and where the preview note sits ([#157]); exports of
+  one cube, such as migration at each line's own velocity ([#178]); whole site
+  at fine cells, the follow-ups: coverage edge lines on coarse previews,
+  averaged previews and a memory estimate for This grid ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
   ([#167]); move the colour ramp's stops and watch the slice recolour as you
   drag ([#183]).
@@ -189,13 +193,16 @@ Grouped by area. The order within a group is not a priority.
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
 [#36]: https://github.com/JamesZDonline/nsgeo/issues/36
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
+[#50]: https://github.com/JamesZDonline/nsgeo/issues/50
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
 [#83]: https://github.com/JamesZDonline/nsgeo/issues/83
 [#86]: https://github.com/JamesZDonline/nsgeo/issues/86
 [#88]: https://github.com/JamesZDonline/nsgeo/issues/88
 [#89]: https://github.com/JamesZDonline/nsgeo/issues/89
+[#105]: https://github.com/JamesZDonline/nsgeo/issues/105
 [#108]: https://github.com/JamesZDonline/nsgeo/issues/108
 [#114]: https://github.com/JamesZDonline/nsgeo/issues/114
+[#121]: https://github.com/JamesZDonline/nsgeo/issues/121
 [#125]: https://github.com/JamesZDonline/nsgeo/issues/125
 [#126]: https://github.com/JamesZDonline/nsgeo/issues/126
 [#127]: https://github.com/JamesZDonline/nsgeo/issues/127
@@ -212,6 +219,7 @@ Grouped by area. The order within a group is not a priority.
 [#157]: https://github.com/JamesZDonline/nsgeo/issues/157
 [#158]: https://github.com/JamesZDonline/nsgeo/issues/158
 [#162]: https://github.com/JamesZDonline/nsgeo/issues/162
+[#163]: https://github.com/JamesZDonline/nsgeo/issues/163
 [#167]: https://github.com/JamesZDonline/nsgeo/issues/167
 [#169]: https://github.com/JamesZDonline/nsgeo/issues/169
 [#170]: https://github.com/JamesZDonline/nsgeo/issues/170
