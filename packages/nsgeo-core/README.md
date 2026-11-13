@@ -134,7 +134,7 @@ several grids' slices into one site view.
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
-| `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset and the fit. |
+| `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset with its `offset_votes`, `offset_at_limit` and `offset_reliable` (False when most votes sit on the search limit: a stronger reflection out of reach is likely pulling the surface, so check the picks), and the fit. |
 | `SurfaceFit` | How a surface sits against its picks, every pick counted once: within 2 cm, within 5 cm, further, `at_edge` (held at the window's edge) or on a hole; and the outliers. |
 | `SurfaceSettings` | How a surface is built: the join, the tracking window, the strength test and the smoothing. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |

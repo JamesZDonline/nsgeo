@@ -132,8 +132,19 @@ class Surface:
     guide_m: np.ndarray = field(repr=False)
     region: np.ndarray = field(repr=False)
     offset_m: float
+    offset_votes: int
+    offset_at_limit: int
     cell: float
     fit: SurfaceFit
+
+    @property
+    def offset_reliable(self) -> bool:
+        """True when picks voted and fewer than half the votes sit on the offset search limit.
+
+        A vote on the limit only says the strongest swing is at least that far away. When most
+        sit there the offset is unreliable: a stronger reflection out of reach is likely pulling
+        the surface, so the picks should be checked."""
+        return self.offset_votes > 0 and 2 * self.offset_at_limit < self.offset_votes
 
 
 def _hull(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -223,11 +234,14 @@ def _level_span(depths: np.ndarray, centre: np.ndarray, reach: float) -> tuple[n
 
 def _measure_offset(
     vol: PreparedVolume, iy: np.ndarray, ix: np.ndarray, depth: np.ndarray, max_levels: int
-) -> float:
-    """Median of (refined swing peak within `OFFSET_SEARCH_M` of a pick) minus the pick.
+) -> tuple[float, int, int]:
+    """`(offset, votes, at_limit)`: the median of (refined swing argmax within `OFFSET_SEARCH_M` of
+    a pick) minus the pick, the picks that voted, and the votes whose argmax is the first or last
+    level of the search.
 
-    A pick votes with the strongest local maximum of squared amplitude in its search; a pick with
-    none in reach casts no vote, and with no votes at all the offset is 0.0."""
+    A vote on the limit is censored (the strongest swing may lie further out) but still counts at
+    the limit in the median, which stays unbiased while fewer than half the votes sit there. A
+    pick with no finite level in reach casts no vote; with none at all the offset is 0.0."""
     depths = vol.depths_m
     nd = depths.size
     step = float(depths[1] - depths[0]) if nd > 1 else 0.0
@@ -235,7 +249,7 @@ def _measure_offset(
     lo, hi = _level_span(depths, depth, OFFSET_SEARCH_M)
     use = np.flatnonzero(covered & (lo < hi))
     if use.size == 0:
-        return 0.0
+        return 0.0, 0, 0
     first = np.maximum(lo - 1, 0)
     last = np.minimum(hi + 1, nd)
     series = {int(p): np.full(int(last[p] - first[p]), np.nan) for p in use}
@@ -246,18 +260,15 @@ def _measure_offset(
             if a < b:
                 series[int(p)][a - first[p] : b - first[p]] = sw[a - c0 : b - c0, iy[p], ix[p]]
     found = []
+    at_limit = 0
     for p in use:
         col = series[int(p)]
         first_in, last_in = int(lo[p] - first[p]), int(hi[p] - first[p])
-        # a swing is a local maximum of the whole column: a level on the search limit that
-        # merely climbs toward a reflection out of reach is a flank, and casts no vote
-        left = np.concatenate([[-np.inf], np.nan_to_num(col[:-1], nan=-np.inf)])
-        right = np.concatenate([np.nan_to_num(col[1:], nan=-np.inf), [-np.inf]])
-        peak = np.isfinite(col) & (col >= left) & (col > right)
-        votes = np.flatnonzero(peak[first_in:last_in]) + first_in
-        if votes.size == 0:
+        inner = col[first_in:last_in]
+        if not np.isfinite(inner).any():
             continue
-        k = int(votes[np.argmax(col[votes])])
+        k = first_in + int(np.argmax(np.where(np.isfinite(inner), inner, -np.inf)))
+        at_limit += k in (first_in, last_in - 1)
         vm = col[k - 1] if k > 0 else np.nan
         vp = col[k + 1] if k + 1 < col.size else np.nan
         shift = float(_peak_shift(np.array(vm), np.array(col[k]), np.array(vp)))
@@ -265,7 +276,7 @@ def _measure_offset(
         found.append(
             min(max(refined, depth[p] - OFFSET_SEARCH_M), depth[p] + OFFSET_SEARCH_M) - depth[p]
         )
-    return float(np.median(found)) if found else 0.0
+    return (float(np.median(found)) if found else 0.0), len(found), int(at_limit)
 
 
 def _track(
@@ -460,7 +471,7 @@ def build_surface(
     region = _inside_hull(_hull(ux, uy), gx, gy, HULL_MARGIN_M) & vol.covered
     guide = _guide(settings.join, cell, region, iy, ix, ux, uy, ud)
 
-    offset = _measure_offset(vol, iy, ix, ud, max_levels)
+    offset, votes, at_limit = _measure_offset(vol, iy, ix, ud, max_levels)
     tracked = np.full((ny, nx), np.nan)
     strength = np.full((ny, nx), np.nan)
     ry, rx = np.nonzero(region)
@@ -498,6 +509,8 @@ def build_surface(
         guide_m=guide32,
         region=region,
         offset_m=offset,
+        offset_votes=votes,
+        offset_at_limit=at_limit,
         cell=float(cell),
         fit=_fit(depth, in_surface, held, at_guide, settings.window_m),
     )

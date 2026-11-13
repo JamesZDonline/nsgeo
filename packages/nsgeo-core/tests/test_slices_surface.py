@@ -188,19 +188,37 @@ def _decoy(below_m: float, gain: float):
     return _volume(_dipping(extra_below_m=below_m, extra_gain=gain))
 
 
-# The decoy's own sidelobes are swings too. A decoy 3x the amplitude has a sidelobe stronger
-# than the picked reflection's main peak (0.44 * 3 > 1), so no rule could tell the two apart;
-# these decoys are strong enough to drag an argmax (their flank or sidelobe is as high as the
-# true peak) but not so strong that a sidelobe beats it.
+# A decoy 3x the amplitude has a sidelobe stronger than the picked reflection's main peak
+# (0.44 * 3 > 1) and a body that fills the search's far end, so every vote lands on the limit:
+# the offset cannot be told, and the surface says so. Milder decoys leave the true peak the
+# strongest swing in reach (their sidelobes stay below it) and the offset comes out right.
 @pytest.mark.parametrize(("below_m", "gain"), [(0.04, 1.5), (0.08, 2.0)])
-def test_a_stronger_reflection_out_of_reach_does_not_drag_the_offset(below_m, gain):
+def test_a_milder_decoy_out_of_reach_leaves_a_reliable_offset(below_m, gain):
     s = _build(_decoy(below_m, gain), strength=0.5)
     assert abs(s.offset_m - 0.02) <= STEP  # the sidelobes move it by about 2-3 mm
+    assert s.offset_reliable and s.offset_votes == 12
     truth = np.broadcast_to(_depth_of((np.arange(NX) + 0.5) * C) - 0.02, (NY, NX))
     kept = np.isfinite(s.depth_m) & ~_patch_mask()
     assert kept.sum() > 100
     assert np.abs(s.depth_m[kept] - truth[kept]).max() <= STEP
     assert s.fit.within_close == 12 and s.fit.at_edge == 0
+
+
+@pytest.mark.parametrize("below_m", [0.04, 0.08])
+def test_a_strong_decoy_makes_the_offset_unreliable_never_wrong_and_reliable(below_m):
+    s = _build(_decoy(below_m, 3.0))
+    assert s.offset_votes == 12
+    assert not s.offset_reliable
+    assert s.offset_at_limit == s.offset_votes
+
+
+@pytest.mark.parametrize(
+    ("below_m", "gain"),
+    [(0.04, 1.5), (0.04, 2.0), (0.04, 3.0), (0.08, 1.5), (0.08, 2.0), (0.08, 3.0)],
+)
+def test_a_reliable_offset_is_never_wrong(below_m, gain):
+    s = _build(_decoy(below_m, gain), strength=0.5)
+    assert abs(s.offset_m - 0.02) <= STEP or not s.offset_reliable
 
 
 def test_tracking_ignores_a_decoy_outside_its_window():
@@ -228,24 +246,28 @@ def _ramp(swing_from_column: int | None = None):
     return filled.astype(np.float32)
 
 
-def test_a_pick_whose_search_holds_only_a_flank_casts_no_vote():
+def test_a_pick_whose_search_holds_only_a_flank_votes_at_the_limit():
     iy = np.array([10, 12, 14])
     ix = np.array([8, 12, 16])
     vol = _volume(_ramp())
-    # search 0.39-0.49 m: amplitude climbs the whole way, no maximum inside it
-    assert _measure_offset(vol, iy, ix, np.full(3, 0.44), 64) == 0.0
-    # with a swing in the right-hand columns, only the picks on it vote
+    # search 0.39-0.49 m: amplitude climbs the whole way, so the argmax is the last level
+    offset, votes, at_limit = _measure_offset(vol, iy, ix, np.full(3, 0.44), 64)
+    assert (votes, at_limit) == (3, 3)
+    assert abs(offset - 0.05) <= 1e-9  # censored: counted at the limit
+    # with a swing in the right-hand columns, the picks on it vote inside the search
     mixed = _volume(_ramp(swing_from_column=20))
-    on = _measure_offset(mixed, iy + 2, np.array([22, 26, 30]), np.full(3, 0.48), 64)
-    assert abs(on - 0.02) <= 0.1 * STEP
-    both = _measure_offset(
+    on, votes, at_limit = _measure_offset(
+        mixed, iy + 2, np.array([22, 26, 30]), np.full(3, 0.48), 64
+    )
+    assert abs(on - 0.02) <= 0.1 * STEP and (votes, at_limit) == (3, 0)
+    _, votes, at_limit = _measure_offset(
         mixed,
         np.append(iy + 2, [10, 12]),
         np.append([22, 26, 30], [8, 12]),
         np.append(np.full(3, 0.48), [0.44, 0.44]),
         64,
     )
-    assert both == on
+    assert (votes, at_limit) == (5, 2)
 
 
 def test_picks_in_one_cell_that_disagree_are_far_not_edge():
@@ -504,6 +526,7 @@ def test_real_surface_never_leaves_its_window():
     held = np.abs(s.depth_m[kept] - s.guide_m[kept]) >= 0.02 - 1e-6
     assert s.fit.at_edge == 0
     assert held.mean() < EDGE_SHARE_LIMIT
+    assert s.offset_reliable
 
 
 @needs_real_files
