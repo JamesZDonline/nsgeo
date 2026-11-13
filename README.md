@@ -111,7 +111,7 @@ release's notes list everything in it.
   ParaView scene.
 - **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
   Bartington Grad601 files onto magnetometer grids and see them as one mag
-  map in a new Mag panel, beside the GPR. Building. **Plan B:** export the
+  map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
 
 ### Next, in order
