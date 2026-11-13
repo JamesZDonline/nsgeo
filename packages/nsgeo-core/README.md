@@ -66,6 +66,10 @@ Coordinate frames and trace placement.
 | `GridPlacement` | A line positioned parametrically within a grid frame. |
 | `Placement` | How traces are positioned; the protocol placements satisfy. |
 | `fit_grid_from_corners` | Least-squares rigid fit of grid-local metres to world coordinates. |
+| `TrackPlacement` | A line placed along the RTK GPS track logged in its DZG. Only RTK-fixed fixes place traces; a dropout is bridged by a straight segment (`bridges`), the ends run on by wheel at the line's heading (`end_runs`), and `travel_shift` moves every trace forward along the walked path. |
+| `TrackFix` | One fix of a track: trace, projected x and y (NaN with no position), latitude and longitude as read, altitude, geoid height and quality. |
+| `Bridge` | A dropout: the anchor trace before and after it and the straight distance between them. |
+| `track_from_log` | Projects a `DzgLog` with an injected `to_xy(lon, lat)` into a `TrackPlacement`. Raises `ValueError` for no or one RTK-fixed position. |
 
 ### `nsgeo.processing`
 
