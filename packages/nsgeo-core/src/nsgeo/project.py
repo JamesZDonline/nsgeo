@@ -197,7 +197,7 @@ def _mag_file_from_dict(entry: Any, root: Path) -> MagFile:
         raise ProjectError(f"referenced file does not exist: {path} (stored as {entry['path']!r})")
     try:
         setup = MagSetup.from_dict(entry.get("setup", {}))
-    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, OverflowError, TypeError, ValueError) as exc:
         raise ProjectError(f"invalid setup for mag file {entry['path']!r}: {exc}") from exc
     try:
         mag = MagFile.open(path, grid_id, setup)
@@ -597,7 +597,7 @@ def load_site(path: str | Path) -> Site:
     if isinstance(mag_setup, dict):
         try:
             site.mag_setup = MagSetup.from_dict(mag_setup)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             site.mag_setup = None
 
     cuts = doc.get("cuts", [])

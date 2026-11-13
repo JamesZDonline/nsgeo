@@ -130,9 +130,7 @@ def test_the_six_real_grids_land_where_the_layout_puts_them():
         inside = (x >= ox + 0.5) & (x <= ox + 29.5) & (y >= oy + 0.5) & (y <= oy + 29.5)
         want = sample(values, bilinear_taps(frame, centres[inside]))
         got = flat[inside]
-        both = np.isfinite(want) & np.isfinite(got)
-        assert both.sum() > 0.4 * inside.sum(), name
-        np.testing.assert_allclose(got[both], want[both], atol=1e-4, err_msg=name)
+        np.testing.assert_allclose(got, want, atol=1e-4, equal_nan=True, err_msg=name)
 
 
 def test_real_neighbours_join_along_their_traverses():

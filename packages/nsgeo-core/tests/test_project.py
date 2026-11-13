@@ -1073,3 +1073,15 @@ def test_mag_colours_round_trip(tmp_path):
     path = tmp_path / "survey.nsgeo.json"
     save_site(site, path)
     assert load_site(path).slice_colours["mag"] == {"own": True, "style": "<qgis/>"}
+
+
+def test_an_overflowing_mag_setup_number_is_tolerated_or_a_project_error(tmp_path):
+    huge = int("9" * 400)
+    path, doc = _saved_mag_doc(tmp_path)
+    doc["mag_setup"] = {"spacing_m": huge}
+    path.write_text(json.dumps(doc))
+    assert load_site(path).mag_setup is None
+    doc["mag_files"][0]["setup"] = {"spacing_m": huge}
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectError, match="invalid setup for mag file 'data/a.dat'"):
+        load_site(path)
