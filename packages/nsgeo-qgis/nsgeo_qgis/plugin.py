@@ -2661,11 +2661,18 @@ class NsgeoPlugin:
         dialog.finished.connect(finished)
         dialog.destroyed.connect(clear_if_current)
         dialog.imported.connect(self._on_mag_imported)
-        dialog.new_grid_requested.connect(lambda: self.open_grid_dialog(None, instrument="mag"))
+        dialog.new_grid_requested.connect(self._new_mag_grid)
         self._mag_import_dialog = dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _new_mag_grid(self) -> None:
+        """The import dialog's New mag grid…: the grid dialog as a magnetometer. A slot."""
+        try:
+            self.open_grid_dialog(None, instrument="mag")
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not open the grid dialog: {exc}", Qgis.MessageLevel.Warning)
 
     def _on_mag_imported(self, done: list) -> None:
         """After an import: one message per file, then the Mag panel on the first grid. A slot."""

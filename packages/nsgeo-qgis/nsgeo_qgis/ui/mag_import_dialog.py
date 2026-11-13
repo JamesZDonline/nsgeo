@@ -228,9 +228,13 @@ class MagImportDialog(QDialog):
     def add_files(self, paths: list[Path]) -> None:
         """Add files to the table. An unreadable one goes to the status line instead."""
         error = ""
+        on_site: list[str] = []
         for path in paths:
             path = Path(path)
             if any(r.path == path for r in self._rows):
+                continue
+            if self._site_file_at(path) is not None:
+                on_site.append(path.name)
                 continue
             try:
                 probe = MagFile.open(path, "", MagSetup())
@@ -241,8 +245,18 @@ class MagImportDialog(QDialog):
             self._append_table_row()
         self._take_free_grids()
         self._refresh()
-        if error:
-            self.status.setText(error)
+        notes = [error] if error else []
+        if on_site:
+            notes.append(f"Already on the site, left out: {', '.join(on_site)}.")
+        if notes:
+            self.status.setText(" ".join(notes))
+
+    def _site_file_at(self, path: Path) -> MagFile | None:
+        """The site's mag file that is this file, if any."""
+        if not self._same_site():
+            return None
+        here = path.resolve()
+        return next((m for m in self.session.mag_files() if m.path.resolve() == here), None)
 
     def _append_table_row(self) -> None:
         r = self.table.rowCount()
@@ -384,16 +398,13 @@ class MagImportDialog(QDialog):
             self.status.setText(f"could not add the files: {exc}")
 
     def _request_new_grid(self) -> None:
-        try:
-            self.new_grid_requested.emit()
-        except Exception as exc:  # noqa: BLE001 -- a slot must never raise; the status line reports
-            self.status.setText(f"could not open the grid dialog: {exc}")
+        self.new_grid_requested.emit()
 
     # ---- accept ------------------------------------------------------------
     def accept(self) -> None:
         try:
             self._import()
-        except Exception as exc:  # noqa: BLE001 -- accept is reached from a button signal; report
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise; the status line reports
             self.status.setText(f"could not import: {exc}")
 
     def _import(self) -> None:
@@ -412,6 +423,13 @@ class MagImportDialog(QDialog):
         if duplicate:
             self.status.setText(duplicate)
             return
+        for i, row in enumerate(self._rows):
+            there = self._site_file_at(row.path)
+            if there is not None and there.grid_id != self.row_grid(i):
+                self.status.setText(
+                    f"{row.path.name} is already on grid {there.grid_id}; nothing was imported."
+                )
+                return
         if not self._rows:
             self.status.setText("Add a file to import.")
             return

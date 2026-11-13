@@ -323,6 +323,48 @@ def test_the_survey_panels_import_request_opens_the_dialog_on_that_grid(plugin, 
     assert plugin._mag_import_dialog is None
 
 
+def test_a_file_already_on_the_site_is_left_out_and_named(mag_site, dialog, folder):
+    dialog.add_files([folder / "m1.dat", synthetic_grad601(folder, "fresh.dat")])
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 0).text() == "fresh.dat"
+    assert dialog.status.text() == "Already on the site, left out: m1.dat."
+
+
+def test_a_file_that_moved_to_another_grid_after_adding_refuses_the_whole_import(
+    mag_site, dialog, folder
+):
+    from nsgeo.mag import MagFile
+
+    session, _ = mag_site
+    dialog.add_files([synthetic_grad601(folder, "a.dat")])
+    assert dialog.row_grid(0) == "M2"
+    session.set_mag_file(MagFile.open(folder / "a.dat", "M1", MagSetup()))  # a.dat now on M1
+    session.save()
+    before = session.mag_setup()
+    changes = []
+    session.mag_changed.connect(lambda: changes.append(1))
+    dialog.set_setup(dataclasses.replace(MagSetup(), far_x=True))
+    dialog.accept()
+    assert dialog.status.text() == "a.dat is already on grid M1; nothing was imported."
+    assert session.mag_file_on("M2") is None
+    assert session.mag_setup() == before
+    assert not session.dirty
+    assert changes == []
+
+
+def test_a_slot_failure_on_new_mag_grid_is_reported_not_raised(plugin, mag_site, monkeypatch):
+    _, root = mag_site
+    _open(plugin, root)
+    plugin.open_mag_import_dialog(None)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no grid dialog")
+
+    monkeypatch.setattr(plugin, "open_grid_dialog", boom)
+    plugin._mag_import_dialog.new_grid_requested.emit()
+    assert any("no grid dialog" in m for m in plugin.messages)
+
+
 def test_the_summary_says_how_many_readings_are_missing_and_where(plugin, mag_site):
     _, root = mag_site
     _open(plugin, root)
