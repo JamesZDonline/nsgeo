@@ -149,7 +149,9 @@ Grouped by area. The order within a group is not a priority.
   another grid in Edit lines ([#176]).
 - **Velocity:** a modifier-click for velocity points ([#88]); draw a box
   around a hyperbola and let the plugin mark it ([#140]); selecting a fit in
-  a velocity dialog shows its hyperbola on its own profile ([#185]).
+  a velocity dialog shows its hyperbola on its own profile ([#185]); a
+  layered velocity from fits at several depths ([#187]); exports record
+  where the grid's velocity came from ([#188]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
@@ -214,6 +216,8 @@ Grouped by area. The order within a group is not a priority.
 [#180]: https://github.com/JamesZDonline/nsgeo/issues/180
 [#183]: https://github.com/JamesZDonline/nsgeo/issues/183
 [#185]: https://github.com/JamesZDonline/nsgeo/issues/185
+[#187]: https://github.com/JamesZDonline/nsgeo/issues/187
+[#188]: https://github.com/JamesZDonline/nsgeo/issues/188
 
 ## Why
 
