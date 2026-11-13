@@ -509,8 +509,14 @@ def test_grid_dialog_an_untouched_apply_keeps_the_record_as_it_was(
 def test_grid_dialog_an_untouched_apply_writes_nothing(plugin, drive_dialog, message_log):
     s = plugin.session
     refs = _save_spread(plugin)
-    for record in (None, _record(plugin, refs[1:3])):
-        if record is None:
+    for with_record in (False, True):
+        # Set up each case inside the loop: building the record up front
+        # applied it before the bare-number case overwrote it, so the second
+        # pass re-tested a grid with no record.
+        if with_record:
+            _record(plugin, refs[1:3])
+            assert s.grid("A").velocity_source is not None
+        else:
             s.apply_grid_velocity("A", VelocityModel.constant(0.0912345), None)
         s._set_dirty(False)
         changed, dirtied = [], []

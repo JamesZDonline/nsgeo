@@ -1424,7 +1424,7 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
 def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
     """Final review, Minor 6. A contributing line can be deleted while a source
     stays prepared, and the cube's own arrays are still entirely correct. The
-    grid's velocity (`grid_depth_velocity`) hangs on its own record, else on
+    grid's velocity (`grid_depth_velocity`) is the grid's own velocity, else
     the first line left in survey order, so removing the first line moves the
     label to the new first line rather than raising. A `KeyError` escaping
     through `_update_readout` into `refresh_slice`'s broad `except` used to

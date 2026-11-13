@@ -907,10 +907,14 @@ class SlicesDock(QgsDockWidget):
                 # through `_resolved_velocity`, so a stale label here would
                 # name a different one.
                 # A hand-edited survey's spacing <= 0 (`SliceFinish.in_metres`,
-                # via the legend's limit) leaves nothing to relabel, as
-                # `_finish_moved` reads it.
-                with contextlib.suppress(ValueError):
+                # via the legend's limit) raises ValueError after the readout
+                # and the velocity label are already written, as
+                # `_finish_moved` reads it. Any ValueError is logged, never
+                # swallowed: a header dielectric <= 0 raises one too.
+                try:
                     self._update_readout(window)
+                except ValueError as exc:
+                    _log(f"could not relabel the slice after a velocity change: {exc}")
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -1348,13 +1352,13 @@ class SlicesDock(QgsDockWidget):
             # this question is answered, not assuming its callers can
             # never change.
             #
-            # KeyError (final review, Minor 6): provenance() also raises
-            # this once a prepared line has been removed from the session
-            # (it resolves the grid's velocity, `grid_depth_velocity`, which
-            # raises when the grid has neither a velocity nor a line). A
-            # "does not match" answer here is conservative and safe either
-            # way: both callers already treat a mismatch as "stale, not
-            # unprepared".
+            # KeyError (final review, Minor 6): provenance() resolves the
+            # grid's velocity through `grid_depth_velocity`, which raises
+            # KeyError when the grid has neither a velocity nor a line, but
+            # provenance() suppresses that and records no velocity. The
+            # catch stays as a defensive one. A "does not match" answer here
+            # is conservative and safe either way: both callers already
+            # treat a mismatch as "stale, not unprepared".
             return False
         return self._live_preset_steps(preset_name) == prepared_steps
 
