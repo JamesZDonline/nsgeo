@@ -353,6 +353,28 @@ def _clean_resolution(value: object) -> dict[str, float | str]:
     return out
 
 
+_VOLUME_POSITIVE = ("cell", "dz_ns", "stretch", "period_ns", "trend_m", "t1_ns")
+
+
+def _clean_volume(value: object) -> dict[str, float | str]:
+    """A grid's remembered 3-D settings (M16), each field kept only if usable.
+
+    Only the eight fields the export reads survive; a damaged one reads as unset
+    and the rest still restore, as `_clean_resolution` does.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float | str] = {}
+    for key in (*_VOLUME_POSITIVE, "blur_m"):
+        number = _finite(value.get(key))
+        if number is None or number < 0 or (number == 0 and key in _VOLUME_POSITIVE):
+            continue
+        out[key] = number
+    if isinstance(value.get("transform"), str):
+        out["transform"] = value["transform"]
+    return out
+
+
 def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if isinstance(entry.get("preset"), str):
@@ -369,6 +391,9 @@ def _clean_slice_source(entry: dict[str, Any]) -> dict[str, Any]:
     resolution = _clean_resolution(entry.get("resolution"))
     if resolution:
         out["resolution"] = resolution
+    volume = _clean_volume(entry.get("volume"))
+    if volume:
+        out["volume"] = volume
     return out
 
 

@@ -6,6 +6,7 @@ matrix (no QGIS) stays green while `.venv-qgis` and the Docker job run it.
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 import traceback
@@ -27,6 +28,9 @@ def qgis_app():
     app = QgsApplication([], False)
     app.initQgis()
     yield app
+    # A parentless dialog left in a reference cycle would otherwise be collected after
+    # exitQgis(), and its destruction then crashes the process.
+    gc.collect()
     app.exitQgis()
 
 

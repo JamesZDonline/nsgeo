@@ -484,6 +484,18 @@ class SiteEngine(QObject):
             return None
 
     # ---- preparation, one at a time ---------------------------------------
+    def add_exclusive(self, engine: SliceEngine) -> None:
+        """Hold dispatch back while `engine` has a live task (a preparation that is not
+        this site's own, e.g. the ParaView export's). Pair with `remove_exclusive`."""
+        if engine not in self._exclusive_with:
+            self._exclusive_with = (*self._exclusive_with, engine)
+
+    def remove_exclusive(self, engine: SliceEngine) -> None:
+        """Stop holding dispatch for `engine`; a queued grid starts on the next retry tick."""
+        self._exclusive_with = tuple(e for e in self._exclusive_with if e is not engine)
+        if self._queue and self._active:
+            self._retry.start()
+
     def _anything_live(self) -> bool:
         """The dispatch gate (Ruling 1, ruling T3-b): may any task still execute?
 

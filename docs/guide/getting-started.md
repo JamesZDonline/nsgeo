@@ -697,7 +697,78 @@ no longer fit the new section, so the profile leaves them out and its title
 counts them (*1 picks on another clock*). They stay on the map and in the picks
 table, and they come back when you turn the setting back.
 
-### Step 9: Save, and next time
+### Step 9: Export for ParaView
+
+ParaView is a free program for looking at 3-D data. **ParaView…** on the
+**nsgeo Slices** panel (beside **Save cube…** and **Export GeoTIFF…**) writes one
+grid's volume for it: a block you can slice, and an isosurface that draws each
+strong reflection as a surface. The button is on whenever a site is open, in
+either scope, and it needs no prepared slice source. Exporting never changes
+what the Slices panel shows.
+
+1. Click **ParaView…**. The dialog opens on the panel's grid.
+   - **3-D resolution** is this grid's own **Cell** and **Depth step**, kept
+     apart from the Slices panel's, which the hint beside each box shows. Cells
+     finer than the panel's make a bigger, sharper block. A cell so fine the
+     grid would pass four million cells is refused, with the finest that works.
+     **Down to** sets how deep the export goes, in ns; the first time it starts
+     from the Slices panel's z1, and after that browsing slices never changes it.
+   - **The volume** sets how the block is made. **Transform** is the amplitude
+     transform, as in Step 7. **Depth stretch** makes the block taller than it
+     is deep; a legend in ParaView still shows true depth in metres. **Wave
+     period** is how smooth each reflection becomes: one smooth body per
+     reflection. **Sideways blur** smooths across the grid. **Depth balance** is
+     the stretch of ground, in metres of depth, that the volume averages to
+     decide what is typical at each depth. Each value is divided by that, so a
+     deep reflection is not lost beside a strong shallow one.
+   - **What will be written** says, before anything runs, which folder it will
+     fill (and that it replaces the last export), the size of the block, which
+     fill method it uses (the grid's own, from Step 7), and how many picks and
+     lines go with it. **Size** gives the export's size and the fill it keeps for
+     quick re-exports. **Disk** gives the free space. When the free space is less
+     than the export and its fill plus half a gigabyte to spare, the line turns
+     red and says how much is needed, and **Export** stays on, so you decide.
+     When the fill and the export would not fit at all (the fill needs its size
+     plus half a gigabyte or a tenth, whichever is more, free), the line says so
+     and both **Export** buttons are off: a disk that fills while the fill is
+     written can close QGIS.
+   - **ParaView** is the program, if you want nsgeo to start it. Use **Browse…**.
+     nsgeo remembers it for next time.
+2. Click **Export** to write the folder, or **Export and open** to write it and
+   start ParaView on it. With no ParaView set, only **Export** is offered.
+   If the lines are not already prepared in the Slices panel, nsgeo prepares them
+   first and shows **Preparing lines…**; that step cannot be cancelled. After it,
+   the progress can be. A cancelled export leaves the grid's previous export as it
+   was.
+
+The folder is `paraview/<grid>/` in the site folder. It holds:
+
+| File | What it is |
+|---|---|
+| `cube.vti` | The block: strength, amplitude and true depth. |
+| `picks.vtp` | Your picks, in 3-D. |
+| `lines.vtp` | The recorded lines at ground level, and the grid's outline. |
+| `export.json` | Every number the scene needs. |
+| `open_scene.py`, `open.sh`, `open.bat`, `README.md` | The scene, its launchers, and notes. |
+
+To open an export later, run `open.sh` (macOS and Linux) or `open.bat`
+(Windows) in the folder, or use **Export and open** again. They start ParaView
+with the scene set up. The fill, which is the slow part, is kept in
+`paraview/.cache/`, so exporting again with a different stretch, wave period, blur or
+balance takes a fraction of the time. Changing the cell, depth step, Down to, transform, preset or
+fill changes the fill, and so it is made again.
+On Windows, close ParaView before exporting the same grid again: it holds the
+folder, and nsgeo says so rather than replace it.
+
+**Where the volume starts.** It starts from the grid's own preset: its whole
+processing stack, gain steps included, and the transform you chose. The depth
+balance comes after the gain. A gain curve that already evens out the fade
+leaves the balance little to do. With automatic gain (AGC) a strong isolated
+reflection can be squeezed twice, once by the gain and once by the balance.
+To calibrate, export once with your usual preset and once with a lighter-gain
+preset, and compare the two at the isosurface value 2.5.
+
+### Step 10: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
@@ -714,6 +785,7 @@ Everything for a site lives in its site folder:
 | `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
 | `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
+| `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,

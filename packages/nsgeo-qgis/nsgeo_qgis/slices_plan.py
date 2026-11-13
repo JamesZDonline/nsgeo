@@ -36,9 +36,11 @@ from nsgeo.slices import (
     NEIGHBOURS_PER_QUADRANT,
     FinishSettings,
     SliceWindow,
+    VolumeSettings,
     ZAxis,
     plan_windows,
 )
+from nsgeo.vtkxml import image_data_bytes
 
 #: The Transform combo's "no transform" entry. Spec 6.2 and GPRSLICE's own
 #: `xfrm_method=NONE` both allow it: the slice is then a signed mean, drawn
@@ -853,3 +855,107 @@ def limit_windows(
     # The step is more than one window, so the rounded positions are distinct.
     picks = [int(round(i * (n - 1) / (max_windows - 1))) for i in range(max_windows)]
     return tuple(windows[i] for i in picks)
+
+
+# ---- the 3-D export (M16) ---------------------------------------------------
+
+#: The depth stretch a 3-D export starts at (spec call 5).
+DEFAULT_STRETCH = 3.0
+
+
+def _positive(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0.0
+    )
+
+
+@dataclass(frozen=True)
+class VolumeChoice:
+    """A grid's 3-D settings (spec decision 8): its own cell and depth step, the
+    transform it is binned with, the depth stretch and the volume's parameters."""
+
+    cell: float
+    dz_ns: float
+    transform: str
+    stretch: float = DEFAULT_STRETCH
+    settings: VolumeSettings = VolumeSettings()
+    #: How deep the export goes, in ns on the cube's clock; None is to the end of the record.
+    t1_ns: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("cell", "dz_ns", "stretch"):
+            if not _positive(getattr(self, name)):
+                raise ValueError(f"{name} must be finite and > 0, got {getattr(self, name)!r}")
+        if self.t1_ns is not None and not _positive(self.t1_ns):
+            raise ValueError(f"t1_ns must be None or finite and > 0, got {self.t1_ns!r}")
+
+    def to_record(self) -> dict[str, float | str]:
+        """The fields `Site.slice_sources[grid]["volume"]` remembers."""
+        record: dict[str, float | str] = {
+            "cell": self.cell,
+            "dz_ns": self.dz_ns,
+            "transform": self.transform,
+            "stretch": self.stretch,
+            **self.settings.to_dict(),
+        }
+        if self.t1_ns is not None:
+            record["t1_ns"] = self.t1_ns
+        return record
+
+
+def volume_choice(
+    record: Mapping[str, Any] | None,
+    *,
+    cell_default: float,
+    dz_default: float,
+    transform_default: str,
+    t1_default: float | None = None,
+) -> VolumeChoice:
+    """The grid's 3-D choice: the defaults on first use, then the record, field by field.
+
+    A field that is missing or unusable in `record` reads as unset and takes its default
+    (for the deepest time, `t1_default`, which may be None: to the end of the record).
+    """
+    rec: Mapping[str, Any] = record or {}
+
+    def number(key: str, default: float) -> float:
+        value = rec.get(key)
+        if isinstance(value, (int, float)) and _positive(value):
+            return float(value)
+        return default
+
+    transform = rec.get("transform")
+    return VolumeChoice(
+        cell=number("cell", cell_default),
+        dz_ns=number("dz_ns", dz_default),
+        # "none" is how a combo spells no transform; a record that kept it reads as "".
+        transform=(NO_TRANSFORM if transform == "none" else transform)
+        if isinstance(transform, str)
+        else transform_default,
+        stretch=number("stretch", DEFAULT_STRETCH),
+        settings=VolumeSettings.from_dict(dict(rec)),
+        t1_ns=_positive_or(rec.get("t1_ns"), t1_default),
+    )
+
+
+def _positive_or(value: object, default: float | None) -> float | None:
+    if isinstance(value, (int, float)) and _positive(value):
+        return float(value)
+    return default if default is not None and _positive(default) else None
+
+
+def export_size_bytes(nx: int, ny: int, nd: int) -> int:
+    """What `cube.vti` takes on disk: three float32 arrays. Picks and lines are small
+    enough to ignore."""
+    return image_data_bytes((nx, ny, nd), 3)
+
+
+def too_fine_for_export(cell: float, grid_id: str, cells: int, safe: float) -> str:
+    """Why a 3-D cell cannot be used, and what would work (as the Slices panel says it)."""
+    return (
+        f"a {cell:g} m cell over grid {grid_id!r} is {cells:,} cells, too fine "
+        f"to export; use {safe:g} m or coarser"
+    )

@@ -32,6 +32,7 @@ the scope left.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -213,6 +214,7 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    paraview_requested = pyqtSignal()
     #: #180: open the slice layer's Symbology page (the plugin has `iface`).
     symbology_requested = pyqtSignal()
 
@@ -270,6 +272,16 @@ class SlicesDock(QgsDockWidget):
         #: This grid's `_on_prepared` arriving while the site showed.
         self._grid_prepare_pending = False
         self._grid_prepared_away = False
+        #: Preparations that are not this dock's (the ParaView export's engine): held
+        #: against like the site's, for the span of `foreign_preparation`.
+        self._foreign: list[Any] = []
+        #: Foreign engines whose span ended with a task still alive: kept registered (as the
+        #: site engine keeps its `_retiring`) until `_reap_foreign` sees the task end.
+        self._foreign_retiring: list[Any] = []
+        self._foreign_reaper = QTimer(self)
+        self._foreign_reaper.setSingleShot(True)
+        self._foreign_reaper.setInterval(50)
+        self._foreign_reaper.timeout.connect(self._reap_foreign)
         #: #70: a grid switch left the engine on the grid that was left; its
         #: resolution is the spins' to apply once the new grid is prepared.
         self._resolution_owed = False
@@ -704,8 +716,13 @@ class SlicesDock(QgsDockWidget):
         self.export_button = QPushButton("Export GeoTIFF…")
         self.save_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        # The 3-D export prepares its own volume (it needs no prepared source), so it is
+        # on whenever a site is open, in either scope.
+        self.paraview_button = QPushButton("ParaView\u2026")
+        self.paraview_button.setEnabled(session.is_open)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.export_button)
+        button_row.addWidget(self.paraview_button)
         outer.addLayout(button_row)
 
         outer.addStretch(1)
@@ -752,6 +769,7 @@ class SlicesDock(QgsDockWidget):
         self.choose_button.clicked.connect(lambda: self.choose_lines_requested.emit())
         self.save_button.clicked.connect(lambda: self.save_cube_requested.emit())
         self.export_button.clicked.connect(lambda: self.export_requested.emit())
+        self.paraview_button.clicked.connect(lambda: self.paraview_requested.emit())
         self.cube_combo.currentTextChanged.connect(self._on_cube_changed)
         self.grid_combo.currentTextChanged.connect(self._on_source_changed)
         self.preset_combo.currentTextChanged.connect(self._on_source_changed)
@@ -881,6 +899,7 @@ class SlicesDock(QgsDockWidget):
             # nothing to choose lines FROM without a site open.
             self.choose_button.setEnabled(self.session.is_open)
             self.site_scope_button.setEnabled(self.session.is_open)
+            self.paraview_button.setEnabled(self.session.is_open)
             if (
                 self.source_choice() is not None
                 and not self.engine.is_prepared
@@ -1448,7 +1467,7 @@ class SlicesDock(QgsDockWidget):
         # is showing, nor while a site task may still run (a cancel whose
         # bounded wait gave up): two preparations at once segfault (trap 1).
         # The preparation is owed, and run by `_run_pending_grid_prepare`.
-        if self._scope == "site" or self.site_engine.has_live_task:
+        if self._scope == "site" or self.site_engine.has_live_task or self._foreign_live():
             self._grid_prepare_pending = True
             if self._scope == "grid":
                 self._grid_retry.start()
@@ -3313,6 +3332,76 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- called from a grids_changed slot
             _log(f"could not mark the slice source stale: {exc}")
 
+    def _foreign_live(self) -> bool:
+        return any(e.has_live_task for e in self._foreign)
+
+    @property
+    def foreign_preparing(self) -> bool:
+        """Whether an engine registered through `foreign_preparation` may still be running
+        (a span that ended with its task alive included): a caller must not start another."""
+        return self._foreign_live()
+
+    @contextlib.contextmanager
+    def refining_paused(self) -> Iterator[None]:
+        """The ParaView export's cover: no refine runs inside it, and the scope redraws after.
+
+        That export fills every level itself on the GUI thread (M16 A), so the refine
+        worker is stopped first, through the active scope's flow, not a bare
+        `refiner.cancel()`: a flow that still believed a list ran, and a status line still
+        saying "Refining...", would outlive the cancel. Afterwards, whatever the outcome
+        (done, cancelled, failed), the scope is redrawn once, so a preview that still
+        stands arms its rest again. That redraw is logged if it fails, never raised:
+        raised here, it would replace the export's own outcome. (The GeoTIFF exports
+        stopped needing this when they moved to a background task, #175.)
+        """
+        if self._scope == "site":
+            self._site.refine.stop()
+        else:
+            self._end_refine()
+        self.show_refine()
+        try:
+            yield
+        finally:
+            try:
+                self.refresh_slice()
+            except Exception as exc:  # noqa: BLE001 -- see the docstring
+                _log(f"could not redraw the slice after the export: {exc}")
+
+    @contextlib.contextmanager
+    def foreign_preparation(self, engine: Any) -> Iterator[None]:
+        """For the span of a preparation made by an engine this dock does not own, hold both
+        of its own engines back (two real preparations at once segfault). Work held meanwhile
+        runs through the existing retry timers once the engine has no live task."""
+        self._foreign.append(engine)
+        self.site_engine.add_exclusive(engine)
+        try:
+            yield
+        finally:
+            if engine.has_live_task:
+                # An abandoned task may still be reading: stay registered until it ends.
+                self._foreign_retiring.append(engine)
+                self._foreign_reaper.start()
+            else:
+                self._unregister_foreign(engine)
+
+    def _unregister_foreign(self, engine: Any) -> None:
+        self.site_engine.remove_exclusive(engine)
+        if engine in self._foreign:
+            self._foreign.remove(engine)
+        if self._grid_prepare_pending and self._scope == "grid":
+            self._grid_retry.start()
+
+    def _reap_foreign(self) -> None:
+        """The reaper timer's slot: unregister retired foreign engines whose task has ended."""
+        try:
+            for engine in [e for e in self._foreign_retiring if not e.has_live_task]:
+                self._foreign_retiring.remove(engine)
+                self._unregister_foreign(engine)
+            if self._foreign_retiring:
+                self._foreign_reaper.start()
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            _log(f"could not release a foreign preparation: {exc}")
+
     def _run_pending_grid_prepare(self) -> None:
         """Run the owed This-grid preparation once no site task is live, else
         retry in 50 ms. Never blocks. Also the retry timer's slot.
@@ -3324,7 +3413,7 @@ class SlicesDock(QgsDockWidget):
         try:
             if self._scope != "grid":
                 return
-            if self.site_engine.has_live_task:
+            if self.site_engine.has_live_task or self._foreign_live():
                 self._grid_retry.start()
                 return
             self.engine.on_grid_moved = None  # R-P5: M11's self re-preparation again

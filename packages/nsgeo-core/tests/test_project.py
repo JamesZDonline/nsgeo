@@ -539,7 +539,21 @@ def _two_grid_site():
 def test_slice_sources_and_site_view_round_trip(tmp_path):
     site = _two_grid_site()
     site.slice_sources = {
-        "A": {"preset": "slice-standard", "lines": ["data/L0.DZT"], "gain": 1.5},
+        "A": {
+            "preset": "slice-standard",
+            "lines": ["data/L0.DZT"],
+            "gain": 1.5,
+            "volume": {
+                "cell": 0.05,
+                "dz_ns": 0.2,
+                "transform": "amp_square",
+                "stretch": 4.0,
+                "period_ns": 3.0,
+                "blur_m": 0.0,
+                "trend_m": 0.2,
+                "t1_ns": 40.0,
+            },
+        },
         "B": {"preset": "slice-raw", "lines": None},
     }
     site.site_view = {"grids": ["A", "B"], "transform": "amp_envelope", "normalisation": "edge"}
@@ -548,6 +562,36 @@ def test_slice_sources_and_site_view_round_trip(tmp_path):
     loaded = load_site(path)
     assert loaded.slice_sources == site.slice_sources
     assert loaded.site_view == site.site_view
+
+
+def test_a_volume_entry_drops_unknown_keys_and_unusable_values(tmp_path):
+    site = _two_grid_site()
+    path = tmp_path / "survey.nsgeo.json"
+    save_site(site, path)
+    doc = json.loads(path.read_text())
+    doc["slice_sources"] = {
+        "A": {
+            "preset": "p",
+            "volume": {
+                "cell": 0.05,
+                "dz_ns": -1,
+                "transform": 3,
+                "stretch": "bad",
+                "period_ns": 2.5,
+                "blur_m": -0.1,
+                "trend_m": 0,
+                "t1_ns": 0,
+                "extra": 1,
+            },
+        },
+        "B": {"volume": "nope"},
+    }
+    path.write_text(json.dumps(doc))
+    loaded = load_site(path)
+    assert loaded.slice_sources == {
+        "A": {"preset": "p", "volume": {"cell": 0.05, "period_ns": 2.5}},
+        "B": {},
+    }
 
 
 _FULL_RESOLUTION = {
@@ -686,8 +730,8 @@ def test_a_wrong_typed_inner_value_reads_as_unset(tmp_path):
     save_site(site, path)
     doc = json.loads(path.read_text())
     doc["slice_sources"] = {
-        "A": {"preset": 3, "lines": "L0", "gain": -2.0},
-        "B": {"preset": "ok", "gain": 0.0},
+        "A": {"preset": 3, "lines": "L0", "gain": -2.0, "volume": [1]},
+        "B": {"preset": "ok", "gain": 0.0, "volume": {"cell": "x", "stretch": None}},
         "GONE": 7,
     }
     doc["site_view"] = {"grids": "A", "transform": 4}

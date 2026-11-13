@@ -111,6 +111,7 @@ several grids' slices into one site view.
 | `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
+| `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
 | `SEAM_WIDTH_SPACINGS` | A seam's width, in multiples of the pair's larger line spacing. |
 | `CROP_MAX_DISTANCE_SPACINGS` | The most a section's max distance may be, in line spacings, for its minimum curvature to be solved on crops; above it the whole frame is solved. |
@@ -125,6 +126,8 @@ several grids' slices into one site view.
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
+| `VolumeSettings` | How a volume is prepared: the RMS wave period, the sideways blur and the depth-trend window. |
+| `VolumeStopped` | Preparing a volume gave up because its progress callback asked it to stop. |
 | `ZAxis` | The cube's vertical axis, in two-way travel time. |
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
@@ -133,7 +136,9 @@ several grids' slices into one site view.
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
 | `curvature_margin_cells` | The crop margin, in cells, that a minimum-curvature section needs. |
+| `depth_axis` | A uniform depth axis from time zero, and each depth's fractional source level, through a velocity model. |
 | `edge_match_solve` | Per-grid gains from a weighted least squares over the seams. |
+| `fill_levels` | Fill every level of a cube as the Slices panel does and write squared amplitude into an array. |
 | `find_seams` | Every pair of grids with enough populated cells on each side of their seam. |
 | `finest_fitting_cell` | The finest cell, rounded up to 0.01 m, at which the site draws in full under both size limits. |
 | `finish_section` | Every level of a cube, finished and read along a section's columns, as the slice picture would show it. |
@@ -152,6 +157,7 @@ several grids' slices into one site view.
 | `plan_line` | Precompute the resampling and grouping for one line. |
 | `plan_section_curvature` | One minimum-curvature plan per crop of a cut, built once for every level. |
 | `plan_windows` | Every window of a thickness, at a step. |
+| `prepare_volume` | Take the RMS over a wave period, blur and balance a filled cube against its depth trend. |
 | `sample` | The bilinear blend of a slice at each tap, blank where the nearest cell is blank. |
 | `sample_counts` | The largest corner count at each tap, so a line one cell wide stays visible. |
 | `save_cube` | Write a cube to disk. |
@@ -265,3 +271,13 @@ Where a line's or a grid's velocity came from: the saved fits that made it.
 | `SourceFit` | One member of a record: the line key, fit id and `fitted_at` that identify the fit, and a copy of its numbers (t0, velocity, standard error, zero) as used, so the record holds after the fit is deleted or its line changes. `of` copies a `StoredFit`. |
 | `weighted_mean` | Inverse-variance mean of velocity and standard-error pairs, with its standard error. Raises `ValueError` for no fits or a standard error that is zero, negative or not finite. |
 | `METHOD_FIT`, `METHOD_WEIGHTED_MEAN` | The two ways a record's velocity is made: one picked fit, or the weighted mean of several. |
+
+### `nsgeo.vtkxml`
+
+Streaming VTK XML writers, numpy only, for files ParaView opens directly.
+
+| Name | Purpose |
+|---|---|
+| `write_image_data` | Writes float32 point arrays on a regular grid (`.vti`), each array fed as chunks so a volume never sits in memory whole. Written to a `.part` file and renamed; an array of the wrong length raises `ValueError` and leaves no file. Returns the bytes written. |
+| `write_poly_data` | Writes points, point arrays and vertex, line and polygon cells (`.vtp`). An empty point set is a valid file. Returns the bytes written. |
+| `image_data_bytes` | The exact payload `write_image_data` will write for a shape and array count, plus a fixed 4096-byte header allowance. |

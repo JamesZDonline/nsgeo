@@ -1273,6 +1273,17 @@ class SiteSession(QObject):
         if merged is not None:
             self._update_source(grid_id, resolution=merged)
 
+    def volume_record(self, grid_id: str) -> dict[str, float | str]:
+        """A copy of the grid's remembered 3-D settings (M16), or {}."""
+        entry = self._require_site().slice_sources.get(grid_id) or {}
+        return dict(entry.get("volume", {}))
+
+    def remember_volume(self, grid_id: str, **fields: float | str) -> None:
+        """Merge the given 3-D fields into the grid's record. Marks the site dirty only
+        when something changed; keeps the preset, lines, gain and resolution."""
+        merged = {**self.volume_record(grid_id), **fields}
+        self._update_source(grid_id, volume=merged)
+
     def grid_gain(self, grid_id: str) -> float:
         entry = self._require_site().slice_sources.get(grid_id, {})
         return float(entry.get("gain", 1.0))
