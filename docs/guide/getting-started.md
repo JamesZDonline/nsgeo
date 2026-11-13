@@ -679,6 +679,8 @@ what the Slices panel shows.
      apart from the Slices panel's, which the hint beside each box shows. Cells
      finer than the panel's make a bigger, sharper block. A cell so fine the
      grid would pass four million cells is refused, with the finest that works.
+     **Down to** sets how deep the export goes, in ns; the first time it starts
+     from the Slices panel's z1, and after that browsing slices never changes it.
    - **The volume** sets how the block is made. **Transform** is the amplitude
      transform, as in Step 7. **Depth stretch** makes the block taller than it
      is deep; a legend in ParaView still shows true depth in metres. **Wave
@@ -721,7 +723,7 @@ To open an export later, run `open.sh` (macOS and Linux) or `open.bat`
 (Windows) in the folder, or use **Export and open** again. They start ParaView
 with the scene set up. The fill, which is the slow part, is kept in
 `paraview/.cache/`, so exporting again with a different stretch, wave period, blur or
-balance takes a fraction of the time. Changing the cell, depth step, transform, preset or
+balance takes a fraction of the time. Changing the cell, depth step, Down to, transform, preset or
 fill changes the fill, and so it is made again.
 On Windows, close ParaView before exporting the same grid again: it holds the
 folder, and nsgeo says so rather than replace it.
