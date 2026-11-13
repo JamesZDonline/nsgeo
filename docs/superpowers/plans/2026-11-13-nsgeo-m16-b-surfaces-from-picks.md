@@ -120,7 +120,7 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
 6. **"The volume parameters" in staleness are the wave period and the depth-balance window.** The sideways blur is left out, because a surface never uses it (call 17).
 7. **Sub-sample peak:** a parabola through the peak and its two neighbours, clamped to half a step and to the window. It is used for the offset and for tracking alike.
 8. **Outliers** are picks more than the window away from the surface, or on a hole.
-9. **The feature list** is a Surfaces dock, tabbed with Slices. This follows option A of the mockup, pending the user's review (Task 5).
+9. **The feature list** is a Surfaces dock, tabbed with Slices, as in the mockup's option A, which the user chose (Task 5).
 
 ---
 
@@ -466,7 +466,12 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
 
 ### Task 5: The Surfaces panel, the New surface dialog, the toolbar action and the guide
 
-**Human checkpoint first.** The layout is settled by the user's review of `.lavish/surfaces.html` (spec call 15). The controller records the answers in the ledger and in this task's brief before dispatching it. This text assumes option A, every grid with a Grid filter, and an outlier click that selects the pick on the map. Follow the recorded answers where they differ.
+**The mockup review is done** (spec call 15; `.lavish/surfaces.html`, 2026-11-13). The user chose:
+- **layout A,** with the list and the details together in the panel;
+- **every grid's surfaces listed,** with a Grid filter that defaults to All grids;
+- **clicking an outlier** selects that pick on the map **and** opens its line in the Profile panel (`session.open_line(key)`), at the pick's trace.
+
+Follow the mockup's wording for the dialog, the refusals, the fit rows and the delete question.
 
 **Files:**
 - Create: `packages/nsgeo-qgis/nsgeo_qgis/ui/surfaces_dock.py`, `packages/nsgeo-qgis/nsgeo_qgis/ui/new_surface_dialog.py`
@@ -499,7 +504,7 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
     - **Behaviour:**
       - Rebuild acts on every selected surface. The plugin groups the ids by grid and builds each group in turn, under one progress dialog.
       - Changing a setting saves it at once (`set_settings`), and the surface shows as stale.
-      - Clicking an outlier selects that pick on the map.
+      - Clicking an outlier selects that pick on the map, opens its line in the Profile panel and moves to the pick's trace. A pick whose line is no longer in the site is only selected.
       - It refreshes on the same signals as `SurfaceLayers`.
       - Its contents sit in a `QScrollArea(widgetResizable=True)`, and long sentences go in tooltips (the dock-size rule in the environment notes).
 
@@ -512,7 +517,7 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
   - `test_create_and_build_adds_the_surface_and_its_layer`
   - `test_the_panel_lists_surfaces_with_fit_and_state`
   - `test_changing_a_setting_marks_it_stale_and_rebuild_clears_it`
-  - `test_clicking_an_outlier_selects_its_pick_on_the_map`
+  - `test_clicking_an_outlier_selects_its_pick_and_opens_its_line`
   - `test_delete_asks_first_and_keeps_the_picks`
   - `test_rename_refuses_a_taken_name`
   - `test_the_panels_menu_lists_surfaces`
