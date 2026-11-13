@@ -44,13 +44,14 @@ _MIN_BOX = 8  # traces and samples
 _DETECT_RATIO = 2.0
 #: A trace's window peak must beat the box's median |amplitude| by this factor...
 _FAINT_RATIO = 3.0
-#: ...and be at least this fraction of the strongest traces' window peaks.
-_FAINT_FRACTION = 0.15
+#: ...and be at least this fraction of the traces nearest the apex. The faded
+#: ends of a leg are the noisiest dots and the longest levers on v, so they are
+#: left out rather than thinned to.
+_FAINT_FRACTION = 0.5
 #: Residuals beyond this many median absolute residuals are dropped.
 _OUTLIER_MADS = 3.0
 #: ...but never closer than this many samples, so a near-perfect fit keeps all.
 _OUTLIER_FLOOR_SAMPLES = 0.5
-_HALF = 3  # the edge is read from a polynomial through 2*_HALF - 2 samples
 _PERIODS_BEFORE = 1.0  # edge window: from this many periods before the curve
 _PERIODS_AFTER = 0.5  # ...to this many after it
 
@@ -63,73 +64,35 @@ class TraceBox:
     bottom_ns: float
 
 
-def _cubic_crossing(amp: np.ndarray, times: np.ndarray, j: int, level: float) -> float | None:
-    """Time in (times[j-1], times[j]] where a cubic through four samples
-    reaches ``level``, or None when the window has no neighbours to use.
-
-    A straight line between samples cuts the corner of a curved onset, and that
-    always reads the edge early, by a few hundredths of a sample: small, but
-    the same way on every trace, so it tilts the fitted velocity.
-    """
-    if j < _HALF - 1 or j + _HALF - 1 >= amp.size:
-        return None
-    ts = times[j - _HALF + 1 : j + _HALF]
-    ys = amp[j - _HALF + 1 : j + _HALF] - level
-
-    def poly(t: float) -> float:
-        total = 0.0
-        for k in range(2 * _HALF - 2):
-            term = ys[k]
-            for m in range(2 * _HALF - 2):
-                if m != k:
-                    term *= (t - ts[m]) / (ts[k] - ts[m])
-            total += term
-        return total
-
-    lo, hi = float(times[j - 1]), float(times[j])
-    if poly(lo) >= 0.0 or poly(hi) < 0.0:
-        return None
-    for _ in range(40):
-        mid = 0.5 * (lo + hi)
-        if poly(mid) < 0.0:
-            lo = mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
-
-
-def _refined_peak(amp: np.ndarray) -> float:
-    """The window's peak, read between samples by a parabola through the top
-    three. The highest sample can sit up to half a sample from the true crest,
-    which would put the fraction level a little low and the edge a little early
-    by the same amount on every trace."""
-    k = int(np.argmax(amp))
-    if k == 0 or k == amp.size - 1:
-        return float(amp[k])
-    left, mid, right = float(amp[k - 1]), float(amp[k]), float(amp[k + 1])
-    curv = left - 2.0 * mid + right
-    if curv >= 0.0:
-        return mid
-    return mid - (right - left) ** 2 / (8.0 * curv)
-
-
 def _window_edge(seg: np.ndarray, times: np.ndarray, fraction: float) -> tuple[float | None, float]:
-    """(edge time or None, window peak) of one window's samples."""
+    """(edge time or None, window peak) of one window's samples.
+
+    The edge is None when the window holds no signal, or when the signal is
+    already at the level on its first sample: the onset lies before the window,
+    and its start is not the edge.
+    """
     amp = np.abs(seg)
     peak = float(amp.max()) if amp.size else 0.0
     if peak <= 0.0 or amp.size < 2:
         return None, peak
-    peak = _refined_peak(amp)
     level = fraction * peak
     j = int(np.flatnonzero(amp >= level)[0])
     if j == 0:
-        return float(times[0]), peak
-    refined = _cubic_crossing(amp, times, j, level)
-    if refined is not None:
-        return refined, peak
+        return None, peak
     a0, a1 = float(amp[j - 1]), float(amp[j])
     frac = (level - a0) / (a1 - a0)
     return float(times[j - 1] + frac * (times[j] - times[j - 1])), peak
+
+
+def _too_few(n: int) -> str:
+    return f"Too few points were left after cleaning ({n}); a fit needs at least {MIN_DOTS}."
+
+
+def _check_fraction(fraction: float) -> None:
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(
+            f"The edge fraction must be between 0 and 1 (not including either); got {fraction}."
+        )
 
 
 def edge_time(
@@ -140,8 +103,11 @@ def edge_time(
     fraction: float,
 ) -> float | None:
     """First time in ``[start_ns, stop_ns]`` where |amplitude| reaches
-    ``fraction`` of the window's peak, read between samples (cubic through
-    the four nearest, linear at a window's end). None when the window holds no signal."""
+    ``fraction`` of the window's peak, read between samples by linear
+    interpolation. None when the window holds no signal, or when the signal is
+    already at that level on the window's first sample (the onset is earlier).
+    ``fraction`` must lie strictly between 0 and 1."""
+    _check_fraction(fraction)
     times = np.asarray(times_ns, dtype=float)
     keep = (times >= start_ns) & (times <= stop_ns)
     edge, _ = _window_edge(np.asarray(trace, dtype=float)[keep], times[keep], fraction)
@@ -251,6 +217,7 @@ def trace_hyperbola(
     clock the fit uses; ``distance_m`` is each trace's distance along the line
     (spacing may be uneven). Raises ``ValueError`` with a plain reason.
     """
+    _check_fraction(fraction)
     data = np.asarray(data, dtype=float)
     times = np.asarray(times_ns, dtype=float)
     dist = np.asarray(distance_m, dtype=float)
@@ -307,28 +274,29 @@ def trace_hyperbola(
     edges = np.array([f[1] for f in found])[strong]
 
     # Clean: fit, drop the edges that disagree, refit.
+    if cols.size < MIN_DOTS:
+        raise ValueError(_too_few(int(cols.size)))
     x_e = x_box[cols]
     fit = fit_hyperbola(x_e, edges, apex_x)
     resid = np.abs(edges - hyperbola_time(fit, x_e))
     limit = max(_OUTLIER_MADS * float(np.median(resid)), _OUTLIER_FLOOR_SAMPLES * dt)
     keep = resid <= limit
     if int(keep.sum()) < MIN_DOTS:
-        raise ValueError(
-            f"Too few points were left after cleaning ({int(keep.sum())}); a fit needs "
-            f"at least {MIN_DOTS}."
-        )
+        raise ValueError(_too_few(int(keep.sum())))
     cols, edges, x_e = cols[keep], edges[keep], x_e[keep]
     fit = fit_hyperbola(x_e, edges, apex_x)
 
-    # Thin: evenly spaced along the traced extent, keeping the apex-nearest.
+    # Thin: evenly spaced along the traced extent, each target taking the
+    # nearest survivor not already taken, and keeping the apex-nearest.
     apex_i = int(np.argmin(np.abs(x_e - fit.apex_x_m)))
     chosen = {apex_i}
     if cols.size > max_dots:
-        targets = np.linspace(x_e[0], x_e[-1], max_dots)
-        picks = sorted({int(np.argmin(np.abs(x_e - t))) for t in targets})
+        picks: list[int] = []
+        for target in np.linspace(x_e[0], x_e[-1], max_dots):
+            free = [k for k in range(cols.size) if k not in picks]
+            picks.append(min(free, key=lambda k: abs(x_e[k] - target)))
         if apex_i not in picks:
-            nearest = min(picks, key=lambda k: abs(x_e[k] - x_e[apex_i]))
-            picks.remove(nearest)
+            picks.remove(min(picks, key=lambda k: abs(x_e[k] - x_e[apex_i])))
         chosen = set(picks) | {apex_i}
     rest = sorted(chosen - {apex_i})
     order = [apex_i, *rest]

@@ -9,8 +9,9 @@ The constants below describe the instrument, not a site. They were measured on
 - ``REAL_PERIOD_NS``: 1 / the frequency of the peak of the mean (over traces)
   amplitude spectrum, DC excluded.
 - ``REAL_NOISE_RATIO``: the standard deviation of the deepest 150 samples (no
-  reflections left) divided by the peak |amplitude| deeper than 10 ns
-  (the reflections, not the ground wave).
+  reflections left) divided by the median, over traces, of each trace's peak
+  |amplitude| deeper than 10 ns. A diffraction is a typical reflection, not the
+  file's single strongest sample (that reference gives 0.00115).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import numpy as np
 REAL_DT_NS = 0.2165
 REAL_DX_M = 1.0 / 60.0
 REAL_PERIOD_NS = 3.13
-REAL_NOISE_RATIO = 0.00115
+REAL_NOISE_RATIO = 0.0054
 
 __all__ = [
     "REAL_DT_NS",

@@ -247,7 +247,7 @@ Trace a diffraction hyperbola from a box, as dots on the outer edge of its top b
 |---|---|
 | `TraceBox` | The box: first and last trace, earliest and latest time on the clock the fit uses. |
 | `trace_hyperbola` | The strongest hyperbola in a box as at most `MAX_DOTS` `(trace, time)` dots, the apex-nearest first, ready for `fit_hyperbola`. Raises `ValueError` with a plain reason when the box is too small, too big, empty, too faint or leaves too few points. |
-| `edge_time` | The first time in a window where the signal reaches a fraction of the window's peak, read between samples; the same rule as the Time zero step's first break. |
+| `edge_time` | The first time in a window where the signal reaches a fraction of the window's peak, linearly interpolated between samples (None when there is no signal or the onset is before the window); the same rule as the Time zero step's first break. |
 | `MAX_DOTS` | The most dots one trace returns (10). |
 | `MIN_DOTS` | The fewest dots a trace may leave after cleaning (4). |
 | `MAX_BOX_CELLS` | The largest box, in traces times samples, that is traced. |
