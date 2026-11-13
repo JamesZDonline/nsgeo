@@ -28,7 +28,6 @@ import json
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -67,7 +66,7 @@ from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.session import Pick, SiteSession
-from nsgeo_qgis.surface_plan import FeatureRecord
+from nsgeo_qgis.surface_plan import FeatureRecord, settings_json
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
 _KIND = {
@@ -292,6 +291,11 @@ def _attr(feature: QgsFeature, name: str) -> Any:
     return feature[name] if feature.fields().indexOf(name) >= 0 else NULL
 
 
+def _provider_reason(provider: Any) -> str:
+    """The provider's own message, or a plain reason when it gives none."""
+    return provider.error().message() or "the GeoPackage refused the write (is it read-only?)"
+
+
 def _clamped(coords: list[QgsPointXY], trace: int) -> QgsPointXY:
     """The point of `trace`, or of the nearest trace the line has: the trace
     index IS the vertex index, and a pick past either end sits on that end."""
@@ -387,6 +391,7 @@ class SiteLayers(QObject):
         # The `features` table (see FEATURES): held here, never in `layers` or
         # the project, so `detach` and `_on_layers_removed` leave it to us.
         self._features: QgsVectorLayer | None = None
+        self._features_problem = ""
         session.site_opened.connect(self._on_site_opened)
         session.site_closed.connect(self.detach)
         session.grids_changed.connect(self.refresh)
@@ -488,6 +493,7 @@ class SiteLayers(QObject):
                 self.project.removeMapLayers(ids)
             self.layers.clear()
         self._features = None
+        self._features_problem = ""
         group = self.group
         if group is not None:
             parent = group.parent()
@@ -940,7 +946,9 @@ class SiteLayers(QObject):
                 _log(f"could not prepare table {name!r}: {exc}", Qgis.MessageLevel.Critical)
         try:
             self._ensure_features_table(path)
+            self._features_problem = ""
         except Exception as exc:  # noqa: BLE001 -- see rule 4 above
+            self._features_problem = str(exc)
             _log(f"could not prepare table {FEATURES!r}: {exc}", Qgis.MessageLevel.Critical)
         group = self.group
         if group is None:
@@ -1945,10 +1953,29 @@ class SiteLayers(QObject):
         layer = self._picks_layer()
         return [] if layer is None else sorted(layer.selectedFeatureIds())
 
+    def unsaved_among(self, fids: Iterable[int]) -> set[int]:
+        """The `fids` the picks layer holds only in its edit buffer: rows added
+        there (negative fids), and saved rows with a pending attribute or
+        geometry change or a pending delete. Their saved values are not what
+        the user sees, so a surface must not be built from them."""
+        wanted = {int(f) for f in fids}
+        out = {f for f in wanted if f < 0}
+        layer = self._picks_layer()
+        buffer = None if layer is None else layer.editBuffer()
+        if buffer is not None:
+            pending = (
+                set(buffer.changedAttributeValues())
+                | set(buffer.changedGeometries())
+                | set(buffer.deletedFeatureIds())
+            )
+            out |= wanted & pending
+        return out
+
     def pick_rows(self, fids: Iterable[int]) -> list[PickRow]:
-        """The committed rows among `fids` as `PickRow`s, by fid. An unsaved,
-        deleted or unreadable row is simply absent, so `len(result) < len(fids)`
-        says some could not be used."""
+        """The committed, readable rows among `fids` as `PickRow`s, by fid. An
+        unsaved, deleted or unreadable row is simply absent, so `len(result) <
+        len(fids)` says some could not be used; `unreadable_pick_ids` tells
+        which of the absent ones are saved rows with no trace or time."""
         layer = self._picks_layer()
         wanted = sorted({int(f) for f in fids if int(f) >= 0})
         if layer is None or not wanted:
@@ -1958,7 +1985,25 @@ class SiteLayers(QObject):
             row for row in map(self._pick_row, layer.dataProvider().getFeatures(request)) if row
         ]
 
+    def unreadable_pick_ids(self, fids: Iterable[int]) -> set[int]:
+        """The committed rows among `fids` that cannot be a `Pick` (no trace or
+        time: a point digitised by hand with blank attributes)."""
+        layer = self._picks_layer()
+        wanted = sorted({int(f) for f in fids if int(f) >= 0})
+        if layer is None or not wanted:
+            return set()
+        request = QgsFeatureRequest().setFilterFids(wanted)
+        return {
+            f.id()
+            for f in layer.dataProvider().getFeatures(request)
+            if _attr(f, "trace") == NULL or _attr(f, "time_ns") == NULL
+        }
+
     def _pick_row(self, feature: QgsFeature) -> PickRow | None:
+        # Checked here too so a read made only to count never logs a line per
+        # unreadable row (`_row_to_pick` logs, for the reads that skip a row).
+        if _attr(feature, "trace") == NULL or _attr(feature, "time_ns") == NULL:
+            return None
         pick = self._row_to_pick(feature, _as_str(_attr(feature, "line_key")))
         if pick is None:
             return None
@@ -2004,7 +2049,7 @@ class SiteLayers(QObject):
         if not changes:
             return
         if not provider.changeAttributeValues(changes):
-            raise RuntimeError(f"could not update the picks: {provider.error().message()}")
+            raise RuntimeError(f"could not update the picks: {_provider_reason(provider)}")
         layer.triggerRepaint()
 
     def _feature_fid(self, feature_id: str) -> int:
@@ -2014,6 +2059,21 @@ class SiteLayers(QObject):
                 if _as_str(_attr(feature, "feature_id")) == feature_id:
                     return int(feature.id())
         raise KeyError(f"no feature with id {feature_id!r}")
+
+    def clear_pick_feature(self, feature_id: str) -> int:
+        """Set `feature_id` to NULL on every committed row that names it, read
+        raw (not through `_row_to_pick`), so a row with a blank time that was
+        once a member cannot keep naming a deleted surface. Returns the count."""
+        layer = self._picks_layer()
+        if layer is None:
+            return 0
+        fids = [
+            f.id()
+            for f in layer.dataProvider().getFeatures()
+            if _as_opt_str(_attr(f, "feature_id")) == feature_id
+        ]
+        self.set_pick_feature(fids, None)
+        return len(fids)
 
     def feature_records(self) -> list[FeatureRecord]:
         """Every row of `features`, oldest first."""
@@ -2030,7 +2090,10 @@ class SiteLayers(QObject):
     def write_feature(self, record: FeatureRecord) -> None:
         layer = self._features_layer()
         if layer is None:
-            raise RuntimeError("the features table is not open; no site with a grid is loaded")
+            raise RuntimeError(
+                "the features table is not available: "
+                + (self._features_problem or "no site with a grid is loaded")
+            )
         feature = QgsFeature(layer.fields())
         for name, value in record.to_row().items():
             feature[name] = value
@@ -2052,7 +2115,7 @@ class SiteLayers(QObject):
         if name is not None:
             values[provider.fieldNameIndex("name")] = name
         if settings is not None:
-            values[provider.fieldNameIndex("settings_json")] = json.dumps(settings.to_dict())
+            values[provider.fieldNameIndex("settings_json")] = settings_json(settings)
         if values and not provider.changeAttributeValues({fid: values}):
             raise RuntimeError(f"could not update the feature: {provider.error().message()}")
 
@@ -2066,14 +2129,6 @@ class SiteLayers(QObject):
             raise RuntimeError(
                 f"could not delete the feature: {layer.dataProvider().error().message()}"
             )
-
-    @staticmethod
-    def new_feature_id() -> str:
-        return uuid.uuid4().hex
-
-    @staticmethod
-    def now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
     # ---- derived tables ---------------------------------------------------
     def refill_grids(self) -> None:

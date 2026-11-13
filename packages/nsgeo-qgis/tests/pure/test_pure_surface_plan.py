@@ -90,3 +90,21 @@ def test_remove_and_delete_wording():
     assert remove_refusal(2) and "2" in remove_refusal(2)
     q = delete_question("Bowl", 88)
     assert q.startswith("Delete “Bowl”? Its 88 picks stay")
+
+
+def test_unreadable_picks_have_their_own_wording_and_come_after_unsaved():
+    base = {"n": 5, "unsaved": 0, "on_cuts": 0, "grids": {"A"}, "spans_area": True}
+    assert selection_refusal(**base, unreadable=1) == (
+        "1 of these picks has no trace or time; edit or delete it in the picks layer."
+    )
+    assert "3 of these picks have no trace or time" in selection_refusal(**base, unreadable=3)
+    assert selection_refusal(**{**base, "unsaved": 1}, unreadable=2).startswith("Save")
+    assert "cut" not in selection_refusal(**{**base, "on_cuts": 2}, unreadable=1)
+
+
+def test_move_note_says_when_a_surface_is_left_too_small():
+    note = move_note({"Bowl": 4, "Ditch": 2}, 6, {"Bowl": 0, "Ditch": 5})
+    assert note.endswith("“Bowl” is left with 0 picks, too few to rebuild.")
+    assert "Ditch” is left" not in note
+    assert "too few" not in move_note({"Bowl": 4}, 30, {"Bowl": 3})
+    assert "left with 1 pick," in move_note({"Bowl": 4}, 30, {"Bowl": 1})

@@ -26,6 +26,8 @@ from nsgeo_qgis.surface_plan import (
     clean_name,
     grid_mismatch_refusal,
     name_refusal,
+    new_feature_id,
+    now_iso,
     remove_refusal,
     selection_refusal,
 )
@@ -45,6 +47,8 @@ class SelectionCheck:
     grid_id: str | None
     moving: dict[str, int] = field(default_factory=dict)
     n: int = 0
+    # What each surface in `moving` keeps after the move (under 3 cannot rebuild).
+    left: dict[str, int] = field(default_factory=dict)
 
 
 class Surfaces:
@@ -84,9 +88,14 @@ class Surfaces:
     def check(self, fids: Iterable[int], *, into: str | None = None) -> SelectionCheck:
         """Whether `fids` (picks-layer fids) can make a surface, or join the
         surface `into`. Nothing is written."""
-        fids = list(fids)
-        rows = self.layers.pick_rows(fids)
-        unsaved = len(fids) - len(rows)
+        fids = list(dict.fromkeys(int(f) for f in fids))
+        # Unsaved: added in editing mode, edited there, or gone from the table.
+        # Saved but blank (no trace or time) is a different problem, worded so.
+        pending = self.layers.unsaved_among(fids)
+        saved = [f for f in fids if f not in pending]
+        rows = self.layers.pick_rows(saved)
+        unreadable = self.layers.unreadable_pick_ids(saved)
+        unsaved = len(fids) - len(rows) - len(unreadable)
         on_cuts = 0
         no_grid = 0
         grids: set[str] = set()
@@ -111,6 +120,7 @@ class Surfaces:
             unsaved=unsaved,
             on_cuts=on_cuts,
             no_grid=no_grid,
+            unreadable=len(unreadable),
             grids=grids,
             spans_area=spans,
             minimum=1 if joining is not None else 3,
@@ -119,12 +129,17 @@ class Surfaces:
         if not refusal and joining is not None and grid_id != joining.grid_id:
             refusal = grid_mismatch_refusal(joining.name, joining.grid_id, str(grid_id))
         names = {r.feature_id: r.name for r in self.records()}
+        held = self.layers.members_by_feature()
         moving: dict[str, int] = {}
+        left: dict[str, int] = {}
         for row in rows:
             owner = row.pick.feature_id
             if owner in names and owner != into:
                 moving[names[owner]] = moving.get(names[owner], 0) + 1
-        return SelectionCheck(refusal, grid_id, moving, len(fids))
+        for owner, name in names.items():
+            if name in moving:
+                left[name] = len(held.get(owner, [])) - moving[name]
+        return SelectionCheck(refusal, grid_id, moving, len(fids), left)
 
     # ---- changes ------------------------------------------------------------
     def _refuse_name(self, name: str, own: str | None = None) -> str:
@@ -147,12 +162,12 @@ class Surfaces:
             raise ValueError(found.refusal)
         assert found.grid_id is not None
         record = FeatureRecord(
-            feature_id=self.layers.new_feature_id(),
+            feature_id=new_feature_id(),
             name=name,
             grid_id=found.grid_id,
             kind=KIND_SURFACE,
             settings=settings or SurfaceSettings(),
-            created=self.layers.now_iso(),
+            created=now_iso(),
         )
         # The row first, then the picks: a failure between them leaves a row
         # with no picks (removed below), never picks naming nothing.
@@ -181,7 +196,11 @@ class Surfaces:
         found = self.check(fids, into=feature_id)
         if found.refusal:
             raise ValueError(found.refusal)
-        self.layers.set_pick_feature(fids, feature_id)
+        already = {r.fid for r in self.members(feature_id)}
+        fresh = [f for f in dict.fromkeys(fids) if f not in already]
+        if not fresh:
+            return
+        self.layers.set_pick_feature(fresh, feature_id)
         self._changed()
 
     def remove_picks(self, feature_id: str, fids: Iterable[int]) -> None:
@@ -201,6 +220,6 @@ class Surfaces:
         a failure partway leaves a surface with fewer picks, never picks that
         name a surface which is gone."""
         self._record(feature_id)
-        self.layers.set_pick_feature([row.fid for row in self.members(feature_id)], None)
+        self.layers.clear_pick_feature(feature_id)
         self.layers.remove_feature(feature_id)
         self._changed()

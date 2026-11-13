@@ -150,6 +150,7 @@ def test_picks_already_in_a_surface_move_and_the_check_says_so(site):
     bowl = surfaces.create("Bowl", fids[:6])
     found = surfaces.check(fids[2:8])
     assert found.refusal == "" and found.moving == {"Bowl": 4} and found.n == 6
+    assert found.left == {"Bowl": 2}
     other = surfaces.create("Higher", fids[2:8])
     owners = _feature_ids(layers)
     assert {f for f, o in owners.items() if o == other.feature_id} == set(fids[2:8])
@@ -286,7 +287,11 @@ def test_names_are_unique_trimmed_and_never_used_in_paths(site):
     surfaces.rename(second.feature_id, "x" * 80)
     with pytest.raises(ValueError, match="80"):
         surfaces.rename(second.feature_id, "x" * 81)
-    assert not any(name in str(p) for p in session.gpkg_path.parent.rglob("*"))
+    # Files are named by feature id: no path under the site holds any of it.
+    root = session.gpkg_path.parent
+    for path in root.rglob("*"):
+        parts = path.relative_to(root).parts
+        assert not any("Bowl" in part or "north" in part for part in parts), path
 
 
 def test_a_feature_and_its_picks_survive_closing_without_save(site):
@@ -328,3 +333,124 @@ def test_features_changed_follows_each_write(site):
     with pytest.raises(ValueError):
         surfaces.create("", fids)
     assert len(seen) == 6  # a refused change emits nothing
+
+
+def _blank_row(layers: SiteLayers, **extra) -> int:
+    """A saved row with no trace or time, as a hand-digitised point leaves it."""
+    row = QgsFeature(layers.layers["picks"].fields())
+    row.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.3, 700.2)))
+    row["line_key"] = KEYS_A[0]
+    for name, value in extra.items():
+        row[name] = value
+    assert layers.layers["picks"].dataProvider().addFeatures([row])[0]
+    return max(_fids(layers))
+
+
+def test_a_saved_pick_with_blank_attributes_is_named_as_such_not_as_unsaved(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 4)
+    blank = _blank_row(layers)
+    found = surfaces.check([*fids, blank])
+    assert found.refusal == (
+        "1 of these picks has no trace or time; edit or delete it in the picks layer."
+    )
+    assert "Save" not in found.refusal
+    with pytest.raises(ValueError, match="no trace or time"):
+        surfaces.create("Bowl", [*fids, blank])
+    assert surfaces.check(fids).refusal == ""
+
+
+def test_checking_a_blank_row_writes_no_log_line(site):
+    from plugin_testing import connect_message_log
+
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 4)
+    blank = _blank_row(layers)
+    seen: list[str] = []
+    disconnect = connect_message_log(lambda msg, tag, level: seen.append(msg))
+    try:
+        surfaces.check([*fids, blank])
+        surfaces.members("nothing")
+    finally:
+        disconnect()
+    assert not [m for m in seen if "no trace or time" in m]
+
+
+def test_delete_clears_a_member_whose_time_was_blanked_after_it_joined(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 5)
+    record = surfaces.create("Bowl", fids)
+    picks = layers.layers["picks"].dataProvider()
+    assert picks.changeAttributeValues({fids[0]: {picks.fieldNameIndex("time_ns"): NULL}})
+    assert len(surfaces.members(record.feature_id)) == 4  # the blank one reads as absent
+    surfaces.delete(record.feature_id)
+    assert set(_feature_ids(layers).values()) == {None}
+
+
+def test_moving_every_pick_of_a_surface_says_it_is_left_too_small(site):
+    from nsgeo_qgis.surface_plan import move_note
+
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    surfaces.create("Bowl", fids)
+    found = surfaces.check(fids)
+    assert found.refusal == "" and found.moving == {"Bowl": 6} and found.left == {"Bowl": 0}
+    note = move_note(found.moving, found.n, found.left)
+    assert "“Bowl” is left with 0 picks, too few to rebuild" in note
+    surfaces.create("Higher", fids)  # allowed
+    assert surfaces.members(surfaces.records()[0].feature_id) == []
+
+
+def test_picks_with_pending_edits_in_the_layer_are_unsaved(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 5)
+    picks = layers.layers["picks"]
+    assert picks.startEditing()
+    try:
+        assert picks.changeAttributeValue(fids[0], picks.fields().indexOf("note"), "edited")
+        found = surfaces.check(fids)
+        assert found.refusal == (
+            "Save the picks layer's edits first; 1 of these picks is not saved yet."
+        )
+        assert surfaces.check(fids[1:]).refusal == ""
+        assert picks.changeGeometry(fids[1], QgsGeometry.fromPointXY(QgsPointXY(1, 1)))
+        assert "2 of these picks are not saved yet" in surfaces.check(fids).refusal
+        picks.deleteFeature(fids[2])
+        assert "3 of these picks are not saved yet" in surfaces.check(fids).refusal
+        assert picks.commitChanges()
+    except BaseException:
+        picks.rollBack()
+        raise
+
+
+def test_a_duplicate_fid_is_not_unsaved_and_re_adding_members_changes_nothing(site):
+    session, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 5)
+    assert surfaces.check([*fids, fids[0]]).refusal == ""
+    record = surfaces.create("Bowl", fids)
+    seen: list[int] = []
+    session.features_changed.connect(lambda: seen.append(1))
+    surfaces.add_picks(record.feature_id, fids[:2])
+    assert seen == []
+
+
+def test_an_older_features_table_gains_missing_fields_and_reads_correctly(site):
+    session, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    record = surfaces.create("Bowl", fids, SurfaceSettings(join="idw"))
+    layers.detach()
+    with sqlite3.connect(session.gpkg_path) as db:
+        db.execute(f"ALTER TABLE {FEATURES} DROP COLUMN created")
+        db.execute(f"ALTER TABLE {FEATURES} DROP COLUMN kind")
+        db.commit()
+    layers.refresh()
+    disk = QgsVectorLayer(f"{session.gpkg_path}|layername={FEATURES}", FEATURES, "ogr")
+    names = {f.name() for f in disk.fields()}
+    assert {"created", "kind"} <= names
+    (got,) = surfaces.records() if surfaces.records() else [None]
+    assert got is not None
+    assert got.name == "Bowl" and got.feature_id == record.feature_id
+    assert got.settings.join == "idw" and got.kind == "surface"  # a missing kind reads as surface
+    surfaces.rename(record.feature_id, "Basin")
+    assert surfaces.records()[0].name == "Basin"
+    assert len(surfaces.members(record.feature_id)) == 6

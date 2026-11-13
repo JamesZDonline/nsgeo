@@ -9,8 +9,10 @@ and the dialog shows it unchanged.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from nsgeo.slices import SurfaceSettings
@@ -18,6 +20,19 @@ from nsgeo.slices import SurfaceSettings
 KIND_SURFACE = "surface"
 MAX_NAME = 80
 MIN_PICKS = 3
+
+
+def new_feature_id() -> str:
+    return uuid.uuid4().hex
+
+
+def now_iso() -> str:
+    """UTC ISO 8601 to the second, as the picks' `created`."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def settings_json(settings: SurfaceSettings) -> str:
+    return json.dumps(settings.to_dict())
 
 
 @dataclass(frozen=True)
@@ -37,7 +52,7 @@ class FeatureRecord:
             "name": self.name,
             "grid_id": self.grid_id,
             "kind": self.kind,
-            "settings_json": json.dumps(self.settings.to_dict()),
+            "settings_json": settings_json(self.settings),
             "created": self.created,
         }
 
@@ -102,6 +117,7 @@ def selection_refusal(
     grids: Collection[str],
     spans_area: bool,
     no_grid: int = 0,
+    unreadable: int = 0,
     minimum: int = MIN_PICKS,
 ) -> str:
     """Why the selected picks cannot make (or join) a surface, or "". Checked
@@ -117,6 +133,11 @@ def selection_refusal(
         return (
             "Save the picks layer's edits first; "
             f"{unsaved} of these picks {'is' if unsaved == 1 else 'are'} not saved yet."
+        )
+    if unreadable:
+        return (
+            f"{_count(unreadable, 'has', 'have')} no trace or time; edit or delete "
+            f"{'it' if unreadable == 1 else 'them'} in the picks layer."
         )
     if on_cuts:
         return (
@@ -150,9 +171,10 @@ def grid_mismatch_refusal(name: str, surface_grid: str, picks_grid: str) -> str:
     )
 
 
-def move_note(moving: Mapping[str, int], n: int) -> str:
+def move_note(moving: Mapping[str, int], n: int, left: Mapping[str, int] | None = None) -> str:
     """The warning that picks already in surfaces will move (call 3): `moving`
-    maps each such surface's name to how many of the `n` picks it holds."""
+    maps each such surface's name to how many of the `n` picks it holds, and
+    `left` to how many it keeps; one left with fewer than 3 cannot be rebuilt."""
     items = [(name, k) for name, k in moving.items() if k > 0]
     if not items:
         return ""
@@ -165,7 +187,15 @@ def move_note(moving: Mapping[str, int], n: int) -> str:
             for i, (name, k) in enumerate(items)
         ]
         held = _and(parts)
-    return f"{held}; they will move to this surface, and {names} will need a rebuild."
+    note = f"{held}; they will move to this surface, and {names} will need a rebuild."
+    short = [
+        f"“{name}” is left with {k} pick{'' if k == 1 else 's'}"
+        for name, _ in items
+        if left is not None and (k := left.get(name, MIN_PICKS)) < MIN_PICKS
+    ]
+    if short:
+        note += f" {_and(short)}, too few to rebuild."
+    return note
 
 
 def remove_refusal(left: int) -> str:
