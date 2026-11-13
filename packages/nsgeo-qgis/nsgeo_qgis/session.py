@@ -24,7 +24,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
 from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
@@ -687,6 +687,13 @@ class SiteSession(QObject):
                 raise ValueError(f"line {key!r} is already in the site")
             existing.add(key)
             keyed.append((key, line))
+        if site.crs is None and any(isinstance(ln.placement, TrackPlacement) for ln in lines):
+            # The first GPS line pins the CRS the site is in right now, so a
+            # later edit of the first grid cannot move it (R9).
+            pinned = self.site_crs()
+            if pinned is None:
+                raise ValueError("GPS lines need the site's CRS, but the site has none")
+            site.crs = pinned
         site.lines.extend(lines)
         self._lines_by_key.update(keyed)
         self._set_dirty(True)

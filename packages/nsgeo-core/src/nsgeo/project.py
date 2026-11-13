@@ -338,6 +338,13 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
     crs = site.effective_crs() if has_gps else None
     if has_gps and crs is None:
         raise ProjectError("GPS lines need the site's CRS, but the site has none")
+    if has_gps:
+        for line in site.lines:
+            placed = getattr(line.placement, "crs", None)
+            if isinstance(line.placement, TrackPlacement) and placed != crs:
+                raise ProjectError(
+                    f"line {line.path.name} is placed in {placed}, but the site is in {crs}"
+                )
     has_record = any(g.velocity_source is not None for g in site.grids) or any(
         ln.velocity_source is not None for ln in site.lines
     )
@@ -578,7 +585,7 @@ def load_site(path: str | Path) -> Site:
     if file_crs is not None and not isinstance(file_crs, str):
         raise ProjectError(f"{path}: 'crs' must be text, got {type(file_crs).__name__}")
     site = Site(grids=grids, lines=lines)
-    site.crs = file_crs if file_crs is not None else (grids[0].crs if grids else None)
+    site.crs = file_crs
     site.stacks = stacks
 
     cuts = doc.get("cuts", [])

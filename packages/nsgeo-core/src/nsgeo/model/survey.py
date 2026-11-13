@@ -199,19 +199,17 @@ class Site:
     #: and lives apart from `lines`, so line-only code never sees one.
     cuts: list[Cut] = field(default_factory=list)
 
-    #: The CRS GPS lines are placed in (P9). Read from the file's `"crs"`,
-    #: else from the first grid; None for a site with neither.
-    #: `effective_crs()` is the answer to ask.
+    #: The site's PINNED CRS (P9, R9): the file's `"crs"`, the CRS fixed when
+    #: the site gained its first GPS line, or one set on a grid-free site.
+    #: Never copied from a grid on load. `effective_crs()` is the answer to ask.
     crs: str | None = None
 
     def has_gps_lines(self) -> bool:
         return any(isinstance(ln.placement, TrackPlacement) for ln in self.lines)
 
     def effective_crs(self) -> str | None:
-        """The CRS the site is in: its own once GPS lines rely on it, else the
-        first grid's (so editing the first grid's CRS still moves a site that
-        has no GPS lines), else `crs`, else None."""
-        if self.crs is not None and (self.has_gps_lines() or not self.grids):
+        """The pinned CRS, else the first grid's, else None."""
+        if self.crs is not None:
             return self.crs
         return self.grids[0].crs if self.grids else None
 

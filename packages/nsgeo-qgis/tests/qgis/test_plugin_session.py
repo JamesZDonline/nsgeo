@@ -2093,3 +2093,79 @@ def test_layers_crs_follows_the_site_crs_on_a_grid_free_site(session):
     finally:
         layers.detach()
         QgsProject.instance().clear()
+
+
+def _gps_line(folder, name, crs):
+    from nsgeo.geometry.track import TrackFix, TrackPlacement
+
+    p = synthetic_dzt(folder / "raw", name, n_traces=60)
+    fixes = (TrackFix(0, 0.0, 0.0, 45.2, 10.5), TrackFix(59, 0.0, 5.0, 45.2, 10.5))
+    return Line.open(p, TrackPlacement(fixes=fixes, crs=crs))
+
+
+def _grid_in(crs):
+    return Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, crs, 0.5)
+
+
+def test_adding_gps_lines_pins_the_crs_and_a_later_grid_edit_cannot_move_it(session, tmp_path):
+    from nsgeo_qgis.layers import SiteLayers
+    from qgis.core import QgsProject
+
+    layers = SiteLayers(session, project=QgsProject.instance())
+    try:
+        session.add_grid(_grid_in("EPSG:32632"))
+        assert session.site.crs is None
+        session.add_lines([_gps_line(tmp_path, "G1.DZT", "EPSG:32632")])
+        assert session.site.crs == "EPSG:32632"
+        session.replace_grid(_grid_in("EPSG:32616"))
+        session.site.validate()
+        assert session.site_crs() == "EPSG:32632"
+        assert layers.crs().authid() == "EPSG:32632"
+        session.save()
+    finally:
+        layers.detach()
+        QgsProject.instance().clear()
+
+
+def test_a_loaded_tape_site_whose_grid_was_edited_pins_the_crs_it_reported(session, tmp_path):
+    session.add_grid(_grid_in("EPSG:32616"))
+    session.save()
+    session.close_site()
+    session.open_site(tmp_path / SURVEY_FILE)
+    assert session.site.crs is None
+    session.replace_grid(_grid_in("EPSG:32632"))
+    assert session.site_crs() == "EPSG:32632"
+    session.add_lines([_gps_line(tmp_path, "G2.DZT", "EPSG:32632")])
+    assert session.site.crs == "EPSG:32632"
+    session.site.validate()
+    session.save()
+
+
+def test_removing_the_first_grid_then_adding_gps_lines_pins_the_new_effective_crs(
+    session, tmp_path
+):
+    session.add_grid(_grid_in("EPSG:32616"))
+    session.add_grid(Grid("B", (900.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32632", 0.5))
+    session.remove_grid("A")
+    assert session.site_crs() == "EPSG:32632"
+    session.add_lines([_gps_line(tmp_path, "G3.DZT", "EPSG:32632")])
+    assert session.site.crs == "EPSG:32632"
+    session.site.validate()
+
+
+def test_a_tape_only_site_follows_its_first_grids_crs_with_no_pin(session):
+    session.add_grid(_grid_in("EPSG:32616"))
+    session.replace_grid(_grid_in("EPSG:32632"))
+    assert session.site.crs is None and session.site_crs() == "EPSG:32632"
+
+
+def test_gps_lines_on_a_site_with_no_crs_are_refused_and_nothing_is_added(session, tmp_path):
+    with pytest.raises(ValueError, match="need the site's CRS"):
+        session.add_lines([_gps_line(tmp_path, "G4.DZT", "EPSG:32632")])
+    assert session.site.lines == [] and session.site.crs is None
+
+
+def test_adding_tape_lines_does_not_pin_the_crs(session, tmp_path):
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.add_lines(_lines(tmp_path, 1))
+    assert session.site.crs is None

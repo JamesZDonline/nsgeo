@@ -1186,7 +1186,7 @@ def test_a_site_without_gps_lines_saves_exactly_as_before(tmp_path, site):
     assert "crs" not in doc and doc["schema_version"] == 1
     first = out.read_text()
     back = load_site(out)
-    assert back.crs == "EPSG:32616"  # derived on load...
+    assert back.crs is None and back.effective_crs() == "EPSG:32616"  # never pinned by a load
     save_site(back, out)
     assert out.read_text() == first  # ...and never written back
 
@@ -1211,10 +1211,13 @@ def test_a_site_without_gps_lines_saves_exactly_as_before(tmp_path, site):
     assert doc["schema_version"] == 3 and "crs" not in doc
 
 
-def test_an_older_site_takes_its_crs_from_its_first_grid(tmp_path, site):
+def test_an_older_file_loads_with_no_pinned_crs_and_follows_its_first_grid(tmp_path, site):
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)
-    assert load_site(out).crs == site.grids[0].crs
+    back = load_site(out)
+    assert back.crs is None and back.effective_crs() == site.grids[0].crs
+    back.grids[0] = dataclasses.replace(back.grids[0], crs="EPSG:32617")
+    assert back.crs is None and back.effective_crs() == "EPSG:32617"
 
 
 def test_a_site_with_no_grids_and_no_crs_key_has_no_crs(tmp_path):
@@ -1283,3 +1286,21 @@ def test_a_gps_line_in_another_crs_is_refused_on_load(tmp_path):
     out.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="is placed in EPSG:32632, but the site is in EPSG:32616"):
         load_site(out)
+
+
+def test_a_direct_save_refuses_a_gps_line_in_another_crs(tmp_path):
+    site, _ = _gps_site(tmp_path)
+    site.crs = "EPSG:32616"
+    with pytest.raises(ProjectError, match="placed in EPSG:32632, but the site is in EPSG:32616"):
+        save_site(site, tmp_path / "survey.nsgeo.json")
+    assert not (tmp_path / "survey.nsgeo.json").exists()
+
+
+def test_a_pinned_crs_survives_an_edit_of_the_first_grid_through_save_and_load(tmp_path, site):
+    grid = dataclasses.replace(site.grids[0], crs=_TRACK_CRS)
+    gps, _ = _gps_site(tmp_path, grids=[grid])  # pinned: site.crs is _TRACK_CRS
+    gps.grids[0] = dataclasses.replace(grid, crs="EPSG:32616")
+    gps.validate()
+    out = tmp_path / "survey.nsgeo.json"
+    save_site(gps, out)
+    assert load_site(out).crs == _TRACK_CRS
