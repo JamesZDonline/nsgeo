@@ -17,13 +17,11 @@ from nsgeo.model.survey import Line
 from nsgeo.slices import SurfaceSettings
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import paraview_export
-from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.paraview_export import ParaViewExportCancelled, place_picks
 from nsgeo_qgis.session import Pick
 from nsgeo_qgis.surface_plan import INPUTS, STALE_REASONS
 from nsgeo_qgis.surfaces import Surfaces
 from plugin_testing import STEPS_RADAR, STEPS_ZERO, synthetic_dzt
-from qgis.core import QgsProject
 
 GRID = "Grid A"
 #: Four picks on the two lines: (line index, trace, two-way time in ns).
@@ -47,20 +45,6 @@ def _pick(key: str, trace: int, time_ns: float, zero_ns: float | None = None) ->
         created="2026-11-13T00:00:00+00:00",
         zero_ns=zero_ns,
     )
-
-
-@pytest.fixture
-def built_site(synth_site):
-    """`(session, dock, export, layers, surfaces)`; surfaces build through `export`."""
-    session, dock, export = synth_site
-    project = QgsProject.instance()
-    project.clear()
-    layers = SiteLayers(session, project=project)
-    layers.refresh()  # the site is already open
-    surfaces = Surfaces(session, layers, export_for=lambda: export)
-    yield session, dock, export, layers, surfaces
-    layers.detach()
-    project.clear()
 
 
 def _fids(layers) -> list[int]:

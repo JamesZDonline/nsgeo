@@ -1,6 +1,5 @@
 """M16 B Task 4: built surfaces as mesh layers on the map (synthetic lines, a real GeoPackage)."""
 
-# ruff: noqa: F811  (built_site is the surface-build tests' fixture, imported by name)
 from __future__ import annotations
 
 import json
@@ -25,12 +24,11 @@ from test_plugin_surface_build import (
     _noop,
     _surface,
     _write,
-    built_site,  # noqa: F401  (the fixture, by its own name)
 )
 
 
 @pytest.fixture
-def shown(built_site):  # noqa: F811
+def shown(built_site):
     """`(session, layers, surfaces, surface_layers, project)`."""
     session, _, _, layers, surfaces = built_site
     project = QgsProject.instance()
@@ -54,6 +52,26 @@ def _depth_index(layer) -> int:
         if layer.datasetGroupMetadata(QgsMeshDatasetIndex(i)).name() == DEPTH_GROUP
     ]
     return i
+
+
+def _rendered_colours(layer) -> int:
+    """How many distinct colours the layer draws on a small white canvas."""
+    from qgis.core import QgsMapRendererSequentialJob, QgsMapSettings
+    from qgis.PyQt.QtCore import QSize
+    from qgis.PyQt.QtGui import QColor
+
+    ms = QgsMapSettings()
+    ms.setLayers([layer])
+    ms.setDestinationCrs(layer.crs())
+    ms.setExtent(layer.extent())
+    ms.setOutputSize(QSize(60, 60))
+    ms.setBackgroundColor(QColor(255, 255, 255))
+    ms.setTransformContext(QgsProject.instance().transformContext())
+    job = QgsMapRendererSequentialJob(ms)
+    job.start()
+    job.waitForFinished()
+    image = job.renderedImage()
+    return len({image.pixelColor(x, y).name() for x in range(0, 60, 3) for y in range(0, 60, 3)})
 
 
 def _surfaces_group(layers):
@@ -94,6 +112,15 @@ def test_a_built_surface_is_a_mesh_layer_coloured_by_depth(built_site, shown):
     turbo = QgsStyle.defaultStyle().colorRamp("Turbo")
     assert ramp.color(0.0).name() == turbo.color(1.0).name()
     assert ramp.color(1.0).name() == turbo.color(0.0).name()
+    # The layer's own shader has colour stops (a shader made with a range alone has none, and
+    # the layer then draws nothing), the first of them Turbo's last colour.
+    shader = settings.scalarSettings(index).colorRampShader()
+    stops = shader.colorRampItemList()
+    assert len(stops) > 2
+    assert stops[0].color.name() == turbo.color(1.0).name()
+    assert stops[0].value == pytest.approx(scalar.classificationMinimum())
+    assert stops[-1].color.name() == turbo.color(0.0).name()
+    assert _rendered_colours(layer) > 1
     # It sits in a "Surfaces" group in the site's group, directly below picks.
     group = _surfaces_group(layers)
     kids = layers.group.children()
@@ -265,3 +292,71 @@ def test_dispose_removes_its_layers_and_group_and_stops_listening(built_site, sh
     session.features_changed.emit()
     QApplication.processEvents()
     assert _mesh_layers(project) == []
+
+
+def test_a_sync_leaves_a_layer_styled_by_hand_alone(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    record, _ = _build(built_site)
+    sl.sync()
+    (layer,) = _by_feature(project, record.feature_id)
+    index = _depth_index(layer)
+    settings = layer.rendererSettings()
+    scalar = settings.scalarSettings(index)
+    scalar.setClassificationMinimumMaximum(0.0, 9.0)
+    settings.setScalarSettings(index, scalar)
+    layer.setRendererSettings(settings)
+    sl.sync()
+    assert layer.rendererSettings().scalarSettings(index).classificationMaximum() == 9.0
+
+
+def test_no_sync_sweeps_while_a_build_runs(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    record, first = _build(built_site)
+    sl.sync()
+    seen = []
+
+    def pump(done, total):
+        session.picks_changed.emit()
+        for _ in range(3):
+            QApplication.processEvents()
+        seen.append(sorted(p.name for p in surfaces.folder(GRID).iterdir()))
+        return True
+
+    (second,) = surfaces.build([record.feature_id], progress=pump)
+    assert seen and surfaces.building == 0
+    # the first build's files stayed untouched during the build, the second's complete after
+    assert all(set(first.report["files"].values()) <= set(names) for names in seen)
+    folder = surfaces.folder(GRID)
+    assert all((folder / n).is_file() for n in second.report["files"].values())
+    assert all((folder / n).is_file() for n in first.report["files"].values())
+    sl.sync()  # after the build the sweep is normal again
+    assert not any((folder / n).exists() for n in first.report["files"].values())
+    assert all((folder / n).is_file() for n in second.report["files"].values())
+
+
+def test_a_saved_group_with_the_old_property_is_never_adopted_or_deleted(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    record, _ = _build(built_site)
+    from nsgeo_qgis.surface_layers import _GROUP_PROP
+
+    stray = project.layerTreeRoot().insertGroup(0, "Surfaces")
+    stray.setCustomProperty(_GROUP_PROP, "1")
+    sl.sync()
+    (layer,) = _by_feature(project, record.feature_id)
+    assert stray.children() == []
+    assert layers.group.findLayer(layer.id()) is not None
+    session.close_site()
+    assert _mesh_layers(project) == []
+    assert stray.parent() is not None  # the project's own group is still there
+
+
+def test_a_cleared_project_does_not_count_as_removing_layers_by_hand(built_site, shown):
+    session, layers, surfaces, sl, project = shown
+    record, _ = _build(built_site)
+    sl.sync()
+    assert len(_by_feature(project, record.feature_id)) == 1
+    project.removeAllMapLayers()
+    project.cleared.emit()
+    layers.refresh()
+    sl.sync()
+    assert len(_by_feature(project, record.feature_id)) == 1

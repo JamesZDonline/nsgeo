@@ -415,3 +415,20 @@ def mesh_dat(values: np.ndarray, n_elements: int) -> str:
     lines += [f"{v:.5f}" for v in values]
     lines.append("ENDDS")
     return "\n".join(lines) + "\n"
+
+
+#: Appended to a surface's map layer name when its inputs have changed since its build.
+STALE_SUFFIX = " (stale)"
+
+
+def layer_name(name: str, stale: bool) -> str:
+    """The map layer's name: the surface's, labelled when it shows an out-of-date build."""
+    return name + STALE_SUFFIX if stale else name
+
+
+def merge_range(shared: tuple[float, float] | None, low: float, high: float) -> tuple[float, float]:
+    """`shared` widened to take in the depths `low` to `high`: the one range every surface of a
+    grid is coloured over, so equal colours mean equal depths."""
+    if shared is None:
+        return (low, high)
+    return (min(shared[0], low), max(shared[1], high))

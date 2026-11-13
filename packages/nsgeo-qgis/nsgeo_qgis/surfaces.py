@@ -139,6 +139,9 @@ class Surfaces:
         # Used from Task 3, where the plugin passes a factory bound to the
         # Slices dock; membership never needs it.
         self.export_for = export_for
+        #: Greater than 0 while `build` runs: nothing may delete a grid's surface files then
+        #: (`SurfaceLayers.sync` holds back its sweep).
+        self.building = 0
 
     # ---- reading ------------------------------------------------------------
     def records(self) -> list[FeatureRecord]:
@@ -468,6 +471,7 @@ class Surfaces:
         grid_id = records[0].grid_id
         folder = self.folder(grid_id)
         made: list[Path] = []
+        self.building += 1
         try:
             choice, results = self._compute(export, grid_id, records, members, progress)
             # One snapshot, taken after the choice is remembered; `_write` reads nothing else.
@@ -503,6 +507,8 @@ class Surfaces:
                 with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
             raise
+        finally:
+            self.building -= 1
         return out
 
     def _compute(

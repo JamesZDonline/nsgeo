@@ -588,3 +588,21 @@ def synth_site(qgis_app, tmp_path):
     dock = Dock(session)
     yield session, dock, ParaViewExport(session, dock)
     dock.dispose()
+
+
+@pytest.fixture
+def built_site(synth_site):
+    """`(session, dock, export, layers, surfaces)`; surfaces build through `export`."""
+    from nsgeo_qgis.layers import SiteLayers
+    from nsgeo_qgis.surfaces import Surfaces
+    from qgis.core import QgsProject
+
+    session, dock, export = synth_site
+    project = QgsProject.instance()
+    project.clear()
+    layers = SiteLayers(session, project=project)
+    layers.refresh()  # the site is already open
+    surfaces = Surfaces(session, layers, export_for=lambda: export)
+    yield session, dock, export, layers, surfaces
+    layers.detach()
+    project.clear()

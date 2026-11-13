@@ -1,7 +1,6 @@
 """Export for ParaView (M16 A): the folder, its cube at its own resolution, picks on the cube's
 clock, the fill cache, cancelling and the refusals. Real DZT lines, real files on disk."""
 
-# ruff: noqa: F811  (built_site is the surface-build tests' fixture, imported by name)
 from __future__ import annotations
 
 import json
@@ -32,7 +31,6 @@ from plugin_testing import (
     needs_real_data,
     spin_until,
 )
-from test_plugin_surface_build import built_site  # noqa: F401
 
 
 @pytest.fixture
@@ -966,3 +964,55 @@ def test_the_summary_counts_the_surfaces_and_the_stale_ones(built_site):
     export.surfaces = None
     summary = export.summary("Grid A", export.defaults("Grid A"))
     assert (summary.n_surfaces, summary.n_stale_surfaces) == (0, 0)
+
+
+def test_a_surface_built_in_another_crs_is_moved_into_the_exports(built_site):
+    import dataclasses
+
+    from nsgeo.slices import surface_mesh
+    from qgis.core import (
+        QgsCoordinateReferenceSystem,
+        QgsCoordinateTransform,
+        QgsPointXY,
+        QgsProject,
+    )
+    from tests.vtk_reader import read_vtk_xml
+
+    session, export, surfaces, a, b, _ = _two_surfaces(built_site)
+    frame_crs = session.grid("Grid A").crs
+    other = "EPSG:4326"
+    real = surfaces.built
+
+    def elsewhere(fid):
+        built = real(fid)
+        if fid != a.feature_id:
+            return built
+        # the same surface, described in geographic coordinates
+        to = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem(frame_crs),
+            QgsCoordinateReferenceSystem(other),
+            QgsProject.instance().transformContext(),
+        )
+        o = to.transform(QgsPointXY(*built.origin))
+        return dataclasses.replace(built, origin=(o.x(), o.y()), crs=other)
+
+    surfaces.built = elsewhere
+    folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)
+    doc = read_vtk_xml(folder / "features.vtp")
+    mine = doc["point_data"]["feature"] == 0
+    local, _, _ = surface_mesh(real(a.feature_id).depth_m, real(a.feature_id).cell)
+    # the origin is a single point moved and back; the offsets then follow the frame's axes
+    assert int(mine.sum()) == len(local) > 0
+    assert export.skipped_surfaces == []
+    assert np.allclose(
+        doc["points"][mine][:, 2], -local[:, 2] * export.defaults("Grid A").stretch, rtol=1e-4
+    )
+    assert np.isfinite(doc["points"][mine]).all()
+    # a CRS nobody knows leaves the surface out, and says so
+    surfaces.built = lambda fid: (
+        dataclasses.replace(real(fid), crs="nonsense") if fid == a.feature_id else real(fid)
+    )
+    folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)
+    assert export.skipped_surfaces == ["A"]
+    rec = json.loads((folder / "export.json").read_text())
+    assert [f["name"] for f in rec["features"]] == ["B"]

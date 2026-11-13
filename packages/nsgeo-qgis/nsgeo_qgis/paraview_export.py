@@ -57,6 +57,12 @@ from nsgeo.slices import (
     surface_mesh,
 )
 from nsgeo.vtkxml import write_image_data, write_poly_data
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+)
 from qgis.PyQt.QtCore import QEventLoop
 
 from nsgeo_qgis.paraview_scene import (
@@ -257,6 +263,8 @@ class ParaViewExport:
         self._pick_counts: dict[str, int] = {}
         #: Lines of the last `run` that could not be prepared and so are not in its export.
         self.skipped_lines: list[str] = []
+        #: Surfaces of the last `run` left out of features.vtp (their CRS cannot be reached).
+        self.skipped_surfaces: list[str] = []
 
     # ---- settings ----------------------------------------------------------
     def defaults(self, grid_id: str) -> VolumeChoice:
@@ -378,7 +386,7 @@ class ParaViewExport:
         for record in self.surfaces.records():
             if record.grid_id == grid_id:
                 state = self.surfaces.state(record.feature_id)
-                if state.built:
+                if state.built and self.surfaces.built(record.feature_id) is not None:
                     out.append(state)
         return out
 
@@ -888,6 +896,7 @@ class ParaViewExport:
         stale: list[np.ndarray] = []
         polys: list[list[int]] = []
         entries: list[dict[str, Any]] = []
+        self.skipped_surfaces = []
         count = 0
         records = [] if self.surfaces is None else self.surfaces.records()
         for record in records:
@@ -910,6 +919,11 @@ class ParaViewExport:
                     + local[:, :1] * x_hat
                     + local[:, 1:2] * y_hat
                 )
+                if str(built.crs) != str(frame.crs):
+                    world = self._reproject(world, str(built.crs), str(frame.crs))
+                    if world is None:
+                        self.skipped_surfaces.append(record.name)
+                        continue
                 xy = frame.to_local(world)
                 points.append(np.column_stack([xy, -local[:, 2] * choice.stretch]))
                 depth.append(local[:, 2].astype(np.float32))
@@ -940,6 +954,21 @@ class ParaViewExport:
             polys=polys,
         )
         return entries
+
+    @staticmethod
+    def _reproject(world: np.ndarray, source: str, target: str) -> np.ndarray | None:
+        """`world` (n, 2) from the CRS `source` to `target`; None when either is unknown or a
+        point cannot be moved."""
+        src, dst = QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target)
+        if not (src.isValid() and dst.isValid()):
+            return None
+        transform = QgsCoordinateTransform(src, dst, QgsProject.instance().transformContext())
+        try:
+            moved = [transform.transform(QgsPointXY(float(x), float(y))) for x, y in world]
+        except Exception:  # noqa: BLE001 -- QgsCsException: a point outside the CRS's domain
+            return None
+        out = np.array([[p.x(), p.y()] for p in moved], dtype=float)
+        return out if np.isfinite(out).all() else None
 
     @staticmethod
     def _write_lines(
