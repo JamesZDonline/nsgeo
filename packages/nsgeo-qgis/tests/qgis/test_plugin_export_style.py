@@ -74,3 +74,26 @@ def test_a_second_write_replaces_the_first(qgis_app, tif):
     write_style(tif, limit=2.0, colormap_name="amp_heat", unipolar=False)
     layer = QgsRasterLayer(str(tif), "export", "gdal")
     assert layer.renderer().classificationMax() == pytest.approx(2.0)
+
+
+# ---- #180: the user's own colours go to the style file ----------------------------------
+
+
+def test_the_users_own_style_goes_to_the_file(qgis_app, tif):
+    from nsgeo_qgis.own_colours import seed_style, set_range, style_text
+
+    source = QgsRasterLayer(str(tif), "source", "gdal")
+    seed_style(source, "seismic", 1.0, False)
+    set_range(source, -2.0, 5.0)
+    write_style(
+        tif, limit=0.8, colormap_name="amp_heat", unipolar=False, own_style=style_text(source)
+    )
+    layer = QgsRasterLayer(str(tif), "export", "gdal")
+    assert layer.renderer().classificationMin() == pytest.approx(-2.0)
+    assert layer.renderer().classificationMax() == pytest.approx(5.0)
+    assert [i.color.name() for i in _items(layer)] == ["#0000ff", "#ffffff", "#ff0000"]
+
+
+def test_an_unreadable_own_style_is_an_os_error(qgis_app, tif):
+    with pytest.raises(OSError):
+        write_style(tif, limit=1.0, colormap_name="amp_heat", unipolar=False, own_style="<nope")

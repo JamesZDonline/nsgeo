@@ -25,6 +25,8 @@ __all__ = [
     "colormap",
     "colormap_names",
     "decimate_columns",
+    "display_range",
+    "gradient_stops",
     "row_envelope",
     "section_rgba8",
     "to_index8",
@@ -370,3 +372,77 @@ def row_envelope(data: np.ndarray, percentile: float, max_traces: int = 2048) ->
     if has.any():
         out[has] = np.nanpercentile(mags[has], percentile, axis=1)
     return out
+
+
+def gradient_stops(
+    lut: np.ndarray, tolerance: float = 1.0
+) -> list[tuple[float, tuple[int, int, int]]]:
+    """The fewest colour stops that redraw `lut` by straight-line blending.
+
+    A (256, 3) table becomes `[(position, (r, g, b)), ...]`, positions from
+    0.0 to 1.0, where table entry `i` sits at `i / 255`. Blending each channel
+    linearly between neighbouring stops gives back every entry to within
+    `tolerance` (in 0-255 units). A straight table keeps its two ends; a bent
+    one keeps a stop at each bend. Used to hand a table to a front end's own
+    gradient editor (#180), where 256 stops would be unusable to edit.
+    """
+    table = np.asarray(lut, dtype=float)
+    if table.shape != (256, 3):
+        raise ValueError(f"expected a (256, 3) table, got shape {table.shape}")
+    ends = [0]
+    start = 0
+    while start < 255:
+        end = start + 1
+        while end < 255:
+            nxt = end + 1
+            t = (np.arange(start, nxt + 1) - start) / (nxt - start)
+            line = table[start] + t[:, None] * (table[nxt] - table[start])
+            if np.abs(line - table[start : nxt + 1]).max() > tolerance:
+                break
+            end = nxt
+        ends.append(end)
+        start = end
+    return [(i / 255.0, (int(table[i, 0]), int(table[i, 1]), int(table[i, 2]))) for i in ends]
+
+
+_RANGE_KINDS = ("minimum_maximum", "cumulative_cut", "std_dev")
+
+
+def display_range(
+    values: np.ndarray,
+    kind: str,
+    *,
+    lower: float = 0.02,
+    upper: float = 0.98,
+    sd_factor: float = 2.0,
+    max_samples: int | None = None,
+) -> tuple[float, float] | None:
+    """The colour range a GIS would compute for `values`, by one of its rules.
+
+    `kind` is `"minimum_maximum"`, `"cumulative_cut"` (the `lower` and `upper`
+    fractions of the values, e.g. 2 % and 98 %) or `"std_dev"` (the mean plus
+    and minus `sd_factor` standard deviations): QGIS's three computed min/max
+    settings, so a slice coloured with QGIS's own symbology can have its range
+    worked out again on every new slice (#180). NaN and infinities are nodata.
+    `max_samples` takes a strided subsample of a larger array, as QGIS's
+    "Estimate" accuracy does; `None` uses every value. Returns `None` when
+    there is no range to fit: no finite value, or all of them equal.
+    """
+    if kind not in _RANGE_KINDS:
+        raise ValueError(f"unknown range kind {kind!r}; expected one of {_RANGE_KINDS}")
+    flat = np.asarray(values, dtype=float).ravel()
+    if max_samples is not None and flat.size > max_samples:
+        flat = flat[:: int(math.ceil(flat.size / max_samples))]
+    finite = flat[np.isfinite(flat)]
+    if finite.size == 0:
+        return None
+    if kind == "minimum_maximum":
+        lo, hi = float(finite.min()), float(finite.max())
+    elif kind == "cumulative_cut":
+        lo, hi = (float(v) for v in np.percentile(finite, [lower * 100.0, upper * 100.0]))
+    else:
+        mean, sd = float(finite.mean()), float(finite.std())
+        lo, hi = mean - sd_factor * sd, mean + sd_factor * sd
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        return None
+    return lo, hi

@@ -361,18 +361,16 @@ def readout(z: ZAxis, window: SliceWindow, thickness_levels: int, step_levels: i
 
 
 def grid_velocity(session: Any, engine: Any) -> VelocityModel | None:
-    """A grid's velocity, resolved as M11's `_resolved_velocity` resolves it."""
+    """A grid's depth velocity: the one rule cuts and slices share
+    (`SiteSession.grid_depth_velocity`), never a line's override."""
     if engine is None:
         return None
     try:
-        keys = engine.provenance().line_keys
+        choice = engine.choice
+        if choice is None:
+            return None
+        return session.grid_depth_velocity(choice.grid_id)
     except (RuntimeError, KeyError):
-        return None
-    if not keys:
-        return None
-    try:
-        return session.resolved_velocity(keys[0])
-    except (KeyError, RuntimeError):
         return None
 
 
@@ -1126,8 +1124,10 @@ class SiteScope:
             if refine.provisional:
                 current = self.engine.pending_solves(top, thickness_ns, finish, drawn=drawn)
             stretch: list[PendingSolve] = []
-            if dock.stretch_combo.currentIndex() != 1 and not refine.stretch_final(
-                self.stretch_key(z)
+            if (
+                dock.stretch_combo.currentIndex() != 1
+                and not dock.own_colours_on()  # #180: no shared stretch to measure
+                and not refine.stretch_final(self.stretch_key(z))
             ):
                 stretch = self.engine.stretch_solves(thickness_ns, finish)
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
@@ -1182,6 +1182,10 @@ class SiteScope:
 
     def update_legend(self) -> None:
         dock = self.dock
+        if dock.own_colours_on() and not dock.coverage_check.isChecked():
+            # #180: the plugin names the style's range once it has drawn.
+            dock.legend_label.setText("your own colours")
+            return
         limit = self.display_limit()
         if dock.coverage_check.isChecked():
             dock.legend_label.setText(f"1 – {limit:.3g} traces per cell · blank = no line crossed")

@@ -601,6 +601,115 @@ def test_open_grid_dialog_edits_an_existing_grid(fake_iface, tmp_path, answer_mo
     plugin.unload()
 
 
+def _grid_record(v: float) -> Any:
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+
+    member = SourceFit("raw/FILE__001.DZT", "fit-1", "t", "FILE__001", 20.0, v, 0.002, 0.0)
+    return VelocitySource.from_fits([member], applied_at="2026-11-12T00:00:00Z")
+
+
+@pytest.fixture
+def grid_plugin(fake_iface, tmp_path, answer_modal, message_log):
+    """`make(velocity, record)`: a plugin on a new site with grid A, unloaded
+    after the test even when it fails. The log is cleared once the site is
+    made (OGR names the new GeoPackage's layers it cannot find yet), so a
+    test's `message_log` holds only what its own slots logged."""
+    import nsgeo_qgis
+
+    made = []
+
+    def make(velocity: Any, record: Any = None) -> Any:
+        plugin = nsgeo_qgis.classFactory(fake_iface)
+        plugin.initGui()
+        made.append(plugin)
+        plugin.session.new_site(tmp_path)
+        plugin.session.add_grid(
+            Grid(
+                "A",
+                (1.0, 2.0),
+                45.0,
+                3.0,
+                4.0,
+                "EPSG:32616",
+                0.25,
+                velocity=velocity,
+                velocity_source=record,
+            )
+        )
+        message_log.clear()
+        return plugin
+
+    yield make
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    for plugin in made:
+        plugin.unload()
+
+
+def test_edit_grid_ok_with_the_velocity_untouched_keeps_the_grids_record(grid_plugin, message_log):
+    record = _grid_record(0.0912345)
+    model = VelocityModel.constant(record.v_m_ns)
+    plugin = grid_plugin(model, record)
+
+    dialog = _open(plugin, "A")
+    assert dialog.velocity_unchanged()
+    dialog.azimuth.setValue(46.0)
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.azimuth == pytest.approx(46.0)
+    assert grid.velocity == model and grid.velocity_source == record
+    assert message_log == []
+
+
+def test_edit_grid_ok_with_the_velocity_untouched_keeps_a_velocity_set_meanwhile(
+    grid_plugin, message_log
+):
+    plugin = grid_plugin(VelocityModel.constant(0.1))
+    dialog = _open(plugin, "A")
+    # Edit grid is modeless: the grid velocity dialog (or the strip's Apply to
+    # grid) sets a velocity and its record while it is still open.
+    record = _grid_record(0.0912345)
+    plugin.session.apply_grid_velocity("A", VelocityModel.constant(record.v_m_ns), record)
+    dialog.azimuth.setValue(46.0)
+    assert dialog.velocity_unchanged()  # the box still shows what it opened with
+
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.azimuth == pytest.approx(46.0)
+    assert grid.velocity == VelocityModel.constant(0.0912345)
+    assert grid.velocity_source == record
+    assert message_log == []
+
+
+def test_edit_grid_ok_with_a_changed_velocity_writes_it_and_drops_the_record(
+    grid_plugin, message_log
+):
+    record = _grid_record(0.0912345)
+    plugin = grid_plugin(VelocityModel.constant(record.v_m_ns), record)
+    dialog = _open(plugin, "A")
+    dialog.velocity.setValue(0.085)
+    assert not dialog.velocity_unchanged()
+
+    dialog.accept()
+
+    grid = plugin.session.grid("A")
+    assert grid.velocity == VelocityModel.constant(0.085)
+    assert grid.velocity_source is None
+    assert message_log == []
+
+
+def test_velocity_unchanged_compares_the_box_to_its_opening_value_to_four_places(session):
+    session.add_grid(dataclasses.replace(SITE, velocity=VelocityModel.constant(0.08012345678)))
+    d = GridDialog(session, grid=session.grid("S"))
+    assert d.velocity_unchanged()
+    d.velocity.setValue(0.0802)
+    assert not d.velocity_unchanged()
+    d.velocity.setValue(0.0801)
+    assert d.velocity_unchanged()
+    assert GridDialog(session).velocity_unchanged()  # a new grid's box opens unset
+
+
 def test_a_grid_length_edit_says_its_reversed_lines_moved(
     fake_iface, tmp_path, answer_modal, message_log
 ):

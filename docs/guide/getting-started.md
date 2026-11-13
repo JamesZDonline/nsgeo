@@ -170,6 +170,18 @@ grid's velocity (right-click the grid, then **Set velocity…**). If the grid ha
 none either, it uses the dielectric in its file header. The profile names the
 source next to the velocity, for example `v = 0.080 m/ns (header ε 14)`.
 
+**Set velocity…** on a grid's right-click menu opens the grid's velocity dialog.
+It lists every velocity fit saved on the grid's lines, with the line each one is
+on. Tick the fits you want and click **Use average**: the box takes their
+average, weighted by each fit's ±, so tighter fits count for more. A warning
+says when ticked fits disagree, which can mean the ground is layered. You can
+also click one fit to use its velocity, or type a number. **Apply** sets the
+grid's velocity, and the grid remembers which fits it came from: the Survey
+panel shows, for example, `v 0.090 (average of 6 fits)`. Slices and cuts on the
+grid use the grid's velocity. Lines with their own override are starred, and
+**Apply** leaves their overrides alone. A line's **Set velocity override…** has
+the same ticks and **Use average** over that line's fits.
+
 ---
 
 ## 3. A first session
@@ -252,7 +264,8 @@ far (see [What the map shows](#what-the-map-shows)).
    box shows what the headers give, for example `header ε 14 ≈ 0.0801 m/ns`.
    The header value is only the instrument's setting, not a measurement, so
    enter a velocity when you have a better one, for example from a fit. You can
-   change it, or set it back to 0 to clear it, later with **Set velocity…**.
+   change it later with **Set velocity…** on the grid's right-click menu, or
+   clear it there with **Clear grid velocity**.
 7. Click **OK**. It stays greyed out until the Id, CRS and size are all usable.
 
 **The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until
@@ -531,8 +544,24 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    full detail. Past a size it draws a preview at a coarser pixel and says so in
    the panel. An export is not limited by the preview: it works out its own
    cells at the size you choose (see step 6).
-5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
-   many traces fell in each cell, rather than the amplitude. The number in a cell
+5. **Display** sets how the slice is coloured. **Colours** offers two choices:
+   - **nsgeo colours** uses the **Stretch** and **Palette** below it.
+   - **my own colours** keeps whatever you set on the slice layer's
+     **Symbology** page in QGIS. The **Symbology…** button beside the choice
+     opens that page, where you can pick a colour ramp, type a min and max, or
+     use a cumulative cut. Your colours start from what nsgeo was showing.
+     Numbers you type stay the same at every depth. A computed range (Min /
+     max, Cumulative cut, Mean ± standard deviation) is worked out again for
+     each slice, so a dim deep slice still uses the whole ramp. **Stretch** is
+     greyed out while your own colours are on.
+
+   This grid and Whole site each keep their own colours, and the site remembers
+   them; a saved cube keeps them too. **Palette** still colours cuts and the
+   coverage view.
+
+   **Show coverage** shows how many traces fell in each cell, rather than the
+   amplitude, always in nsgeo's colours: turn it off and your own colours come
+   back. The number in a cell
    is how many traces fell in it. A blank cell had no line through it. What counts
    as a low number depends on the cell size: at a fine cell, one or two traces a
    cell is normal, because a cell holds only a few traces along the line. Compare a
@@ -605,7 +634,10 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
    ending. Any QGIS project that opens the file draws it with the same colours,
    stretch and smooth drawing when zoomed in. Other GIS software, ArcGIS and
-   the rest, reads the values but chooses its own colours.
+   the rest, reads the values but chooses its own colours. With **my own
+   colours** on, the style file holds your colours as they were on screen when
+   the export started. The file keeps one range for every depth: the export
+   does not work a computed range out again band by band.
 
 ### Step 8: Draw a cut
 

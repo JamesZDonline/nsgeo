@@ -194,11 +194,11 @@ def test_a_cut_after_a_line_has_no_shown_zero(profile):
     assert pd._shown_radargram is None
 
 
-def test_the_depth_axis_uses_the_cut_velocity(profile):
+def test_the_depth_axis_uses_the_grid_depth_velocity(profile):
     pd, dock, session, sections = profile
     key = session.add_cut("A", H)
     session.open_line(key)
-    assert pd.view._velocity == session.cut_velocity("A")
+    assert pd.view._velocity == session.grid_depth_velocity("A")
 
 
 def test_a_section_change_redraws_the_shown_cut(profile, monkeypatch):

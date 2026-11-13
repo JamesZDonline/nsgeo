@@ -49,6 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -58,6 +59,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
+from nsgeo.geometry import Grid
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
@@ -87,7 +89,7 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
 )
 
-from nsgeo_qgis import build_label, plugin_version
+from nsgeo_qgis import build_label, own_colours, plugin_version
 from nsgeo_qgis.cut_sections import CutSections
 from nsgeo_qgis.export_flow import CountsClip, grid_preview, plain_export_error, site_preview
 from nsgeo_qgis.export_style import write_style
@@ -401,7 +403,7 @@ class NsgeoPlugin:
         self.survey_dock.add_grid_requested.connect(lambda: self.open_grid_dialog(None))
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
         self.survey_dock.import_requested.connect(self.open_import_dialog)
-        self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
+        self.survey_dock.grid_velocity_requested.connect(self.open_grid_velocity_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
@@ -486,6 +488,11 @@ class NsgeoPlugin:
         # concern that outlives any one dock widget and is torn down
         # outside-in in `unload()`, before `self.layers.detach()`.
         self.slice_layer = SliceLayer(self.layers)
+        # #180: the user's own colours, their edits remembered by the dock,
+        # their "Current canvas" min/max read from this map view.
+        self.slice_layer.own_style_changed.connect(self._on_own_style_changed)
+        self.slice_layer.extent_in = self._canvas_extent_in
+        self.slices_dock.symbology_requested.connect(self._open_slice_symbology)
         self.cut_sections = CutSections(self.session, self.slices_dock)
         self.profile_dock.set_cut_sections(self.cut_sections)
         self.map_link.set_sections(self.cut_sections)
@@ -1058,6 +1065,13 @@ class NsgeoPlugin:
             dock, layer = self.slices_dock, self.slice_layer
             if dock is None or layer is None:
                 return
+            # #180: counts are always drawn in the plugin's colours. The limit
+            # goes as a callable: under the user's own colours it is read only
+            # to start their style from what was shown, since measuring it is a
+            # pass over the cube.
+            own = dock.own_colours_on() and not dock.coverage_check.isChecked()
+            own_style = dock.own_style() if own else None
+            limit = dock.display_limit
             if dock.scope() == "site":
                 # M12 spec 4.5: one layer over every included grid, already
                 # north-up on the site lattice.
@@ -1069,28 +1083,74 @@ class NsgeoPlugin:
                     shown.array,
                     shown.lattice.geotransform,
                     shown.lattice.crs,
-                    limit=dock.display_limit(),
+                    limit=limit,
                     colormap_name=dock.palette_combo.currentText(),
                     unipolar=dock.display_unipolar(),
                     subtitle=dock.readout.text(),
                     name=SITE_LAYER_NAME,
+                    own=own,
+                    own_style=own_style,
                 )
-                return
-            values, frame = dock.current_values(), dock.current_frame()
-            if values is None or frame is None:
-                layer.clear()
-                return
-            layer.update(
-                values,
-                frame,
-                limit=dock.display_limit(),
-                colormap_name=dock.palette_combo.currentText(),
-                unipolar=dock.display_unipolar(),
-                subtitle=dock.readout.text(),
-                counts=dock.coverage_check.isChecked(),
-            )
+            else:
+                values, frame = dock.current_values(), dock.current_frame()
+                if values is None or frame is None:
+                    layer.clear()
+                    return
+                layer.update(
+                    values,
+                    frame,
+                    limit=limit,
+                    colormap_name=dock.palette_combo.currentText(),
+                    unipolar=dock.display_unipolar(),
+                    subtitle=dock.readout.text(),
+                    counts=dock.coverage_check.isChecked(),
+                    own=own,
+                    own_style=own_style,
+                )
+            if own:
+                dock.show_own_legend(own_colours.legend_text(layer.layer))
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not draw the slice: {exc}", Qgis.MessageLevel.Warning)
+
+    def _on_own_style_changed(self, text: str) -> None:
+        """`SliceLayer.own_style_changed`: remember the style for the scope on
+        screen, and say its range on the Legend line at once, since an edit in
+        Layer Properties redraws nothing in the panel (#180). A slot."""
+        try:
+            dock, layer = self.slices_dock, self.slice_layer
+            if dock is None or layer is None:
+                return
+            dock.set_own_style(text)
+            dock.show_own_legend(own_colours.legend_text(layer.layer))
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not remember the slice colours: {exc}", Qgis.MessageLevel.Warning)
+
+    def _open_slice_symbology(self) -> None:
+        """`SlicesDock.symbology_requested`: the slice layer's Symbology page
+        (#180). A slot: never raises."""
+        try:
+            layer = self.slice_layer.layer if self.slice_layer is not None else None
+            if layer is None or sip.isdeleted(layer):
+                self.message(
+                    "show a slice first: the Symbology page belongs to the slice layer.",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+            self.iface.showLayerProperties(layer, own_colours.SYMBOLOGY_PAGE)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(
+                f"could not open the slice's Symbology page: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def _canvas_extent_in(self, crs: QgsCoordinateReferenceSystem) -> tuple[float, ...] | None:
+        """The map view as (xmin, ymin, xmax, ymax) in `crs`, for a slice style
+        whose min/max is computed over the current canvas (#180)."""
+        canvas = self.iface.mapCanvas()
+        extent = canvas.extent()
+        transform = crs_transform(canvas.mapSettings().destinationCrs(), crs, self.layers.project)
+        if transform is not None:
+            extent = transform.transformBoundingBox(extent)
+        return (extent.xMinimum(), extent.yMinimum(), extent.xMaximum(), extent.yMaximum())
 
     # ---- Task 6: what leaves the plugin -----------------------------------
     def save_cube(self) -> None:
@@ -1215,7 +1275,7 @@ class NsgeoPlugin:
             self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        _key, velocity = dock._resolved_velocity()
+        _grid_id, velocity = dock._resolved_velocity()
         finish = dock.slice_finish()
         coverage = dock.coverage_check.isChecked()
         z = engine.z
@@ -1618,6 +1678,15 @@ class NsgeoPlugin:
             coverage=coverage,
         )
 
+    def _export_own_style(self, dock: SlicesDock) -> str | None:
+        """The user's own colours for an export's style file (#180), or None
+        for the plugin's: as the slice shows them now (this slice's computed
+        range included), else as remembered (Show coverage is on)."""
+        if not dock.own_colours_on():
+            return None
+        shown = self.slice_layer.own_style_now() if self.slice_layer is not None else None
+        return shown if shown is not None else dock.own_style()
+
     @staticmethod
     def _clip(unipolar: bool) -> Any:
         """The stretch rule of the panel's own view (`display_limit`)."""
@@ -1694,6 +1763,7 @@ class NsgeoPlugin:
         palette = dock.palette_combo.currentText()
         unipolar = dock.source_unipolar()
         counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+        own_style = self._export_own_style(dock)
 
         def on_done(result: ExportResult) -> None:
             self._finish_export(
@@ -1706,6 +1776,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 counts_palette=counts_palette,
                 removed=removed,
+                own_style=own_style,
             )
 
         task = ExportTask(
@@ -1760,6 +1831,7 @@ class NsgeoPlugin:
         unipolar: bool,
         counts_palette: str,
         removed: Sequence[tuple[str, Path]] = (),
+        own_style: str | None = None,
     ) -> None:
         """The export task's `on_done`, on the GUI thread; it never raises.
 
@@ -1784,6 +1856,7 @@ class NsgeoPlugin:
                     palette=palette,
                     unipolar=unipolar,
                     removed=removed,
+                    own_style=own_style,
                 )
                 return
             if not result.ok:
@@ -1821,6 +1894,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 temporal=job.temporal,
                 notes=style_notes,
+                own_style=own_style,
             )
             if problem is not None:
                 self.message(problem, Qgis.MessageLevel.Warning)
@@ -1872,6 +1946,7 @@ class NsgeoPlugin:
         palette: str,
         unipolar: bool,
         removed: Sequence[tuple[str, Path]],
+        own_style: str | None = None,
     ) -> None:
         """The values file replaced its target but the companion could not be written.
 
@@ -1904,6 +1979,7 @@ class NsgeoPlugin:
                 unipolar=unipolar,
                 temporal=job.temporal,
                 notes=style_notes,
+                own_style=own_style,
             )
             text += "; the new layer was added" if problem is None else f"; {problem}"
         if note:
@@ -1981,6 +2057,7 @@ class NsgeoPlugin:
         unipolar: bool,
         temporal: Callable[[Any], None] | None,
         notes: list[str] | None = None,
+        own_style: str | None = None,
     ) -> str | None:
         """Style file, then the layer, then its temporal properties; None when it worked.
 
@@ -1991,7 +2068,9 @@ class NsgeoPlugin:
         this file) and a sentence about it is appended to `notes`.
         """
         try:
-            write_style(path, limit=limit, colormap_name=palette, unipolar=unipolar)
+            write_style(
+                path, limit=limit, colormap_name=palette, unipolar=unipolar, own_style=own_style
+            )
         except Exception as exc:  # noqa: BLE001 -- the file is good; QGIS just draws it plainly
             QgsMessageLog.logMessage(
                 f"could not write the style file for {path}: {exc}",
@@ -2454,9 +2533,9 @@ class NsgeoPlugin:
         try:
             grid = self.session.grid(grid_id) if grid_id else None
         except KeyError as exc:
-            # edit_grid_requested/grid_velocity_requested carry a grid id
-            # captured when a context menu was built; it is stale if the
-            # grid was removed by then. This is a QAction.triggered-style
+            # edit_grid_requested carries a grid id captured when a context
+            # menu was built; it is stale if the grid was removed by then.
+            # This is a QAction.triggered-style
             # slot (see the module docstring), so this must not raise.
             self.message(str(exc), Qgis.MessageLevel.Critical)
             return
@@ -2514,6 +2593,7 @@ class NsgeoPlugin:
                             if grid is None:
                                 self.session.add_grid(new_grid)
                             else:
+                                new_grid = self._edited_grid_velocity(dialog, new_grid)
                                 report = self.session.replace_grid(new_grid)
                                 if report.message():
                                     self.message(
@@ -2948,14 +3028,29 @@ class NsgeoPlugin:
             Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info,
         )
 
+    def _edited_grid_velocity(self, dialog: GridDialog, edited: Grid) -> Grid:
+        """Edit grid's velocity at OK (grid velocity spec §7.2). The dialog is
+        modeless and holds the grid as it opened, so its box is compared with
+        the value it opened with. Unchanged: the grid's velocity and record as
+        they are NOW, so a velocity set meanwhile (the grid velocity dialog,
+        the strip's Apply to grid) is neither put back nor paired with the
+        wrong record. Changed: the box's number, with no record."""
+        if dialog.velocity_unchanged():
+            now = self.session.grid(edited.id)
+            return dataclasses.replace(
+                edited, velocity=now.velocity, velocity_source=now.velocity_source
+            )
+        return dataclasses.replace(edited, velocity_source=None)
+
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a
         saved fit. Modal: it is a short question about one line, and the answer
         is applied the moment it closes.
 
-        `velocity_from_fit` names the fit that produced the override, so every
-        route here keeps it true: applying a fit points at it, a typed number
-        clears it, and clearing the override clears both."""
+        The line's velocity source says which fits produced the override, so
+        every route here keeps it true (grid velocity spec §7.2): applying a
+        fit or an average records them, a typed number drops the record, and
+        clearing the override clears both."""
         try:
             dialog = VelocityDialog(self.session, key, parent=self.iface.mainWindow())
         except (KeyError, ProjectError) as exc:
@@ -2968,25 +3063,59 @@ class NsgeoPlugin:
             # loads fine and fails when its velocity is resolved.
             self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
             return
-        dock = self.profile_dock
+        self._run_velocity_dialog(
+            dialog,
+            lambda: self.session.apply_line_velocity(
+                key, dialog.velocity(), dialog.chosen_source()
+            ),
+        )
+
+    def open_grid_velocity_dialog(self, grid_id: str) -> None:
+        """Set or clear a grid's velocity, from a typed number, one fit on its
+        lines, or the average of the fits ticked (grid velocity spec §4). The
+        Survey panel's grid Set velocity... opens this; Edit grid stays on its
+        own menu item. Modal, like the line's dialog.
+
+        The grid's velocity source records the fits behind the number, as
+        `open_velocity_dialog` does for a line. Line overrides are left alone."""
         try:
-            # The selected fit is lit on the profile while the dialog is open,
-            # so its row can be matched to its curve.
+            dialog = VelocityDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+        except (KeyError, ProjectError) as exc:
+            # The id was captured when a context menu was built; the grid may
+            # be gone by now.
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self._run_velocity_dialog(
+            dialog,
+            lambda: self.session.apply_grid_velocity(
+                grid_id, dialog.velocity(), dialog.chosen_source()
+            ),
+        )
+
+    def _run_velocity_dialog(self, dialog: VelocityDialog, apply: Callable[[], None]) -> None:
+        """Show a velocity dialog, `apply` its answer if accepted, and dispose
+        of it. The selected fit is lit on the profile while the dialog is open,
+        so its row can be matched to its curve; the profile lights it only when
+        its line is the one shown."""
+        dock = self.profile_dock
+
+        def light(ref: tuple[str, str] | None) -> None:
             if dock is not None:
-                dialog.fit_highlighted.connect(lambda fit_id: dock.highlight_saved_fit(key, fit_id))
-                dock.highlight_saved_fit(key, dialog.highlighted_fit_id())
+                dock.highlight_saved_fit(*(ref if ref is not None else ("", None)))
+
+        try:
+            dialog.fit_highlighted.connect(light)
+            light(dialog.highlighted_ref())
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            model = dialog.velocity()
-            self.session.set_line_velocity(key, model)
-            self.session.set_velocity_from_fit(
-                key, dialog.selected_fit_id() if model is not None else None
-            )
+            apply()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
         finally:
-            if dock is not None:
-                dock.highlight_saved_fit(key, None)
+            light(None)
             dialog.deleteLater()
 
     def open_line_choice_dialog(self) -> None:

@@ -71,7 +71,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-12.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-13.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -95,42 +95,42 @@ release's notes list everything in it.
 | M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
-| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]) | next release |
+| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
+| | Colour a slice with QGIS's own symbology: a colour ramp, typed min/max or a cut that follows each depth, kept per scope and in the export ([#180]) | next release |
+| | A grid velocity from its fits: a grid's Set velocity… lists every saved fit on its lines, averages the ones you tick and remembers which fits it used; slices take their depths from the grid's velocity. A site that remembers its fits saves as schema 3, which 0.4.0 cannot open ([#127], [#86]) | next release |
 
 ### In progress
 
-- **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
-  the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
-  typed min/max, a cumulative cut) as you move through the depths; M19's
-  magnetometer maps will reuse it. Built, awaiting its walkthrough.
-- **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
-  lists every saved fit on the grid's lines, averages the ones you tick, and
-  remembers which fits made the grid's velocity. Slices take their depths
-  from the grid's velocity, as cuts already do. Designed, with a five-task
-  plan.
-- **M16, Plan A: Export for ParaView.** One action writes a grid's prepared
-  volume, picks and lines to a folder ParaView opens ready to explore. Being
-  built on `nsgeo-m16`.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView:** one action
+  writes a grid's prepared volume, picks and lines to a folder ParaView opens
+  ready to explore. Built, awaiting its walkthrough. **Plan B, surfaces from
+  picks:** select picks on the map and nsgeo builds the surface they name,
+  leaving holes where the radar saw nothing; it shows on the map, in the
+  ParaView export and in a Surfaces panel with its fit. Planned, with the
+  panel's mockup under review. Then the QGIS 3-D view, and cuts in the
+  ParaView scene.
+- **M19a: magnetometer grids on the map**, in two plans. **Plan A:** import
+  Bartington Grad601 files onto magnetometer grids and see them as one mag
+  map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
+  mag map, destagger in Edit lines, and change a file's setup after import.
 
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
 than reworking M16–M17 afterwards.
 
-1. **M16: 3-D.** Export a grid for ParaView to explore it as a volume (cloud,
-   isosurfaces, slices in any direction), build surfaces from your picks in
-   QGIS, and see them in a simple QGIS 3-D view. Designed
-   ([spec](docs/superpowers/specs/2026-11-11-nsgeo-m16-3d-design.md)). Plan A
-   is in progress (above); then surfaces from picks, the QGIS 3-D view, and
-   cuts in the ParaView scene.
-2. **How a line is identified** ([#89]), settled before M17 stores GPS
-   coordinates in it.
-3. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+1. **M16: 3-D.** In progress (above).
+2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-4. **M18: issue cleanup.** Work through the backlog of open bugs and review
+3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-5. **M19: magnetometer data.** The first instrument other than GPR.
+4. **M19: magnetometer data.** The first instrument other than GPR:
+   Bartington Grad601 grids placed on the map with the GPR, cleaned up in
+   the Processing panel (zero, destripe, despike) and Edit lines (destagger),
+   joined into one map with the grids levelled to each other, and a mag strip
+   above the radargram on lines and cuts. Designed, in three parts; the first
+   is ready to plan, now that [#180] has merged.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; the migration real-data test ([#125]), before M16
@@ -148,7 +148,10 @@ Grouped by area. The order within a group is not a priority.
   placement together is done); the scroll wheel no longer moves a line to
   another grid in Edit lines ([#176]).
 - **Velocity:** a modifier-click for velocity points ([#88]); draw a box
-  around a hyperbola and let the plugin mark it ([#140]).
+  around a hyperbola and let the plugin mark it ([#140]); selecting a fit in
+  a velocity dialog shows its hyperbola on its own profile ([#185]); a
+  layered velocity from fits at several depths ([#187]); exports record
+  where the grid's velocity came from ([#188]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
@@ -165,7 +168,8 @@ Grouped by area. The order within a group is not a priority.
   coarse previews, averaged previews, a memory estimate for This grid, refusals
   that stay on screen, and where the preview note sits ([#157]); exports of
   large sites at fine cells, holding one grid at a time so they fit in memory
-  ([#167]).
+  ([#167]); move the colour ramp's stops and watch the slice recolour as you
+  drag ([#183]).
 - **Cuts:** a faster minimum-curvature solve and first preview ([#169]); clear
   the picks a deleted cut leaves behind ([#170]); the review follow-ups
   ([#171]).
@@ -210,6 +214,10 @@ Grouped by area. The order within a group is not a priority.
 [#177]: https://github.com/JamesZDonline/nsgeo/issues/177
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
 [#180]: https://github.com/JamesZDonline/nsgeo/issues/180
+[#183]: https://github.com/JamesZDonline/nsgeo/issues/183
+[#185]: https://github.com/JamesZDonline/nsgeo/issues/185
+[#187]: https://github.com/JamesZDonline/nsgeo/issues/187
+[#188]: https://github.com/JamesZDonline/nsgeo/issues/188
 
 ## Why
 

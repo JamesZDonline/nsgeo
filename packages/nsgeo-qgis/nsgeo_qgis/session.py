@@ -31,6 +31,7 @@ from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
@@ -111,6 +112,15 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+#: The slice scopes that each keep their own colours (#180).
+COLOUR_SCOPES = ("grid", "site")
+
+
+def _check_colour_scope(scope: str) -> None:
+    if scope not in COLOUR_SCOPES:
+        raise ValueError(f"unknown slice scope {scope!r}; expected one of {COLOUR_SCOPES}")
+
+
 def _merge_resolution(
     old: dict[str, float | str], **fields: float | str | None
 ) -> dict[str, float | str] | None:
@@ -122,6 +132,12 @@ def _merge_resolution(
         **{k: v if isinstance(v, str) else float(v) for k, v in fields.items() if v is not None},
     }
     return None if new == old else new
+
+
+def _fit_number(fit_id: str) -> int:
+    """N of an id of the form `fit-N`; any other id counts as 0."""
+    match = re.fullmatch(r"fit-(\d+)", fit_id)
+    return int(match.group(1)) if match else 0
 
 
 class SiteSession(QObject):
@@ -635,7 +651,21 @@ class SiteSession(QObject):
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         # The report is empty: a velocity change moves no line.
-        self.replace_grid(dataclasses.replace(self.grid(grid_id), velocity=model))
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        self.replace_grid(
+            dataclasses.replace(self.grid(grid_id), velocity=model, velocity_source=None)
+        )
+
+    def apply_grid_velocity(
+        self, grid_id: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a grid's velocity and the record of where it came from, in one
+        `grids_changed`. Nothing changes, signals or marks the survey dirty when
+        the grid already holds both (an untouched Apply, spec 7.2 rule 1)."""
+        grid = self.grid(grid_id)
+        if grid.velocity == model and grid.velocity_source == source:
+            return
+        self.replace_grid(dataclasses.replace(grid, velocity=model, velocity_source=source))
 
     # ---- lines ------------------------------------------------------------
     def add_lines(self, lines: list[Line]) -> None:
@@ -854,9 +884,26 @@ class SiteSession(QObject):
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
         site = self._require_site()
         line = self.line_for_key(key)
-        new_line = dataclasses.replace(line, velocity=model)
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=None)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line  # same key: only the object changed
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
+    def apply_line_velocity(
+        self, key: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a line's velocity and the record of where it came from, in one
+        `lines_changed`. Nothing changes, signals or marks the survey dirty when
+        the line already holds both (an untouched Apply, spec 7.2 rule 1)."""
+        site = self._require_site()
+        line = self.line_for_key(key)
+        if line.velocity == model and line.velocity_source == source:
+            return
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=source)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 
@@ -865,46 +912,64 @@ class SiteSession(QObject):
         Stores only: no velocity changes (`set_line_velocity` does that)."""
         site = self._require_site()
         line = self.line_for_key(key)
-        n = len(line.velocity_fits) + 1
-        while f"fit-{n}" in line.velocity_fits:
-            n += 1
+        highest = max((_fit_number(i) for i in line.velocity_fits), default=0)
+        n = max(line.fit_serial, highest) + 1
         fit_id = f"fit-{n}"
-        new_line = dataclasses.replace(line, velocity_fits={**line.velocity_fits, fit_id: fit})
+        new_line = dataclasses.replace(
+            line, velocity_fits={**line.velocity_fits, fit_id: fit}, fit_serial=n
+        )
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
         return fit_id
 
-    def set_velocity_from_fit(self, key: str, fit_id: str | None) -> None:
-        site = self._require_site()
-        line = self.line_for_key(key)
-        if fit_id is not None and fit_id not in line.velocity_fits:
-            raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
-        new_line = dataclasses.replace(line, velocity_from_fit=fit_id)
-        site.lines[site.lines.index(line)] = new_line
-        self._lines_by_key[key] = new_line
-        self._set_dirty(True)
-        self.lines_changed.emit()
-
     def remove_velocity_fit(self, key: str, fit_id: str) -> None:
-        """Delete a stored fit. A velocity it set stays: it was applied
-        deliberately, and only the claim that this fit produced it goes."""
+        """Delete a stored fit. A velocity it set stays, and so does the record
+        of it: the record copies the fit's numbers, so it stays reproducible
+        and shows the member as deleted (grid velocity spec §7.3)."""
         site = self._require_site()
         line = self.line_for_key(key)
         if fit_id not in line.velocity_fits:
             raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
         fits = {i: f for i, f in line.velocity_fits.items() if i != fit_id}
-        pointer = None if line.velocity_from_fit == fit_id else line.velocity_from_fit
-        new_line = dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=pointer)
+        new_line = dataclasses.replace(line, velocity_fits=fits)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 
+    def member_state(self, member: SourceFit, grid_id: str | None = None) -> str:
+        """Where a record's member stands now: `"present"`, `"deleted"`,
+        `"line removed"`, `f"line moved to grid {gid}"` (only when `grid_id` is
+        given and the line is on another grid) or `"line moved off this grid"`
+        (the line is no longer on any grid)."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return "line removed"
+        if not any(member.names(i, f) for i, f in line.velocity_fits.items()):
+            return "deleted"
+        if grid_id is not None:
+            now = getattr(line.placement, "grid_id", None)
+            if now is None:
+                return "line moved off this grid"
+            if now != grid_id:
+                return f"line moved to grid {now}"
+        return "present"
+
+    def member_fit(self, member: SourceFit) -> StoredFit | None:
+        """The stored fit `member` copied, or None unless it is still `"present"`."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return None
+        fit = line.velocity_fits.get(member.fit_id)
+        return fit if fit is not None and member.names(member.fit_id, fit) else None
+
     def resolved_velocity(self, key: str) -> VelocityModel:
         if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)
-            return self.cut_velocity(self.cut_for_key(key).grid_id)
+            return self.grid_depth_velocity(self.cut_for_key(key).grid_id)
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
 
@@ -988,12 +1053,12 @@ class SiteSession(QObject):
         self._announce_dropped(*self._reset_cuts([key]))
         self.cuts_changed.emit()
 
-    def cut_velocity(self, grid_id: str) -> VelocityModel:
-        """The velocity every cut on `grid_id` uses (cut spec call 16): the
-        grid's own, else the HEADER velocity of the grid's first line in
-        survey order. That line's own override is ignored: a line override
-        must never move a cut pick. A cut is not a line, so it has none of
-        its own. `KeyError` when the grid has neither."""
+    def grid_depth_velocity(self, grid_id: str) -> VelocityModel:
+        """The velocity every cut and every slice on `grid_id` uses (cut spec
+        call 16; grid velocity spec 10): the grid's own, else the HEADER
+        velocity of the grid's first line in survey order. That line's own
+        override is ignored: a line override must never move a cut pick or a
+        slice's depths. `KeyError` when the grid has neither."""
         grid = self.grid(grid_id)
         if grid.velocity is not None:
             return grid.velocity
@@ -1262,6 +1327,33 @@ class SiteSession(QObject):
         if new == view:
             return
         self._require_site().site_view = new
+        self._set_dirty(True)
+
+    def slice_colours(self, scope: str) -> dict[str, Any]:
+        """A copy of a slice scope's remembered colours (#180), or {}.
+
+        `scope` is `"grid"` (This grid) or `"site"` (Whole site). The record is
+        `{"own": bool, "style": str}`, each key optional: `own` is True when the
+        slice uses the user's own QGIS symbology, `style` that symbology."""
+        _check_colour_scope(scope)
+        return dict(self._require_site().slice_colours.get(scope, {}))
+
+    def set_slice_colours(
+        self, scope: str, *, own: bool | None = None, style: str | None = None
+    ) -> None:
+        """Merge the given colour choices into a scope's record; None leaves a
+        field as it is. Marks the site unsaved only when something changed."""
+        _check_colour_scope(scope)
+        colours = self._require_site().slice_colours
+        old = colours.get(scope, {})
+        new = dict(old)
+        if own is not None:
+            new["own"] = bool(own)
+        if style is not None:
+            new["style"] = style
+        if new == old:
+            return
+        colours[scope] = new
         self._set_dirty(True)
 
     def site_resolution(self) -> dict[str, float | str]:
@@ -1601,7 +1693,7 @@ class SiteSession(QObject):
         """
         cut = self.cut_for_key(key)
         try:
-            model = self.cut_velocity(cut.grid_id)
+            model = self.grid_depth_velocity(cut.grid_id)
         except KeyError:
             return (None, None)
         times = [time_ns]

@@ -380,7 +380,7 @@ class Surfaces:
             "volume": input_hash(
                 {"period_ns": choice.settings.period_ns, "trend_m": choice.settings.trend_m}
             ),
-            "velocity": input_hash(session.resolved_velocity(source.line_keys[0]).to_dict()),
+            "velocity": input_hash(session.grid_depth_velocity(record.grid_id).to_dict()),
         }
 
     def _read_report(self, record: FeatureRecord) -> dict[str, Any] | None:

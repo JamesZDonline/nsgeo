@@ -545,3 +545,35 @@ def test_one_too_small_surface_never_blocks_its_grids_rebuild(built_site):
     # with nothing buildable the refusal is the error, as before
     with pytest.raises(ValueError, match="too few to rebuild"):
         surfaces.build([small.feature_id], progress=_noop)
+
+
+def _mean_depth(surfaces, record) -> float:
+    report = surfaces.state(record.feature_id).report
+    folder = surfaces.folder(GRID)
+    with np.load(folder / report["files"]["npz"]) as npz:
+        return float(np.nanmean(npz["depth_m"]))
+
+
+def test_a_surface_follows_the_grid_velocity_not_a_lines_override(built_site):
+    """The build and its staleness input both use the grid's depth velocity, as the export
+    does: a line's own override moves neither, the grid's velocity moves both."""
+    session, _, _, layers, surfaces = built_site
+    keys = session.keys()
+    session.set_grid_velocity(GRID, VelocityModel(layers=((0.0, 0.05),)))
+    session.set_line_velocity(keys[0], VelocityModel(layers=((0.0, 0.2),)))
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    slow = _mean_depth(surfaces, record)
+    # the same build with no override on any line: the depths are the grid velocity's alone
+    session.set_line_velocity(keys[0], None)
+    surfaces.build([record.feature_id], progress=_noop)
+    assert _mean_depth(surfaces, record) == pytest.approx(slow, rel=1e-6)
+    session.set_line_velocity(keys[0], VelocityModel(layers=((0.0, 0.2),)))
+    assert surfaces.state(record.feature_id).stale == ()
+    session.set_line_velocity(keys[0], VelocityModel(layers=((0.0, 0.3),)))
+    session.set_line_velocity(keys[1], VelocityModel(layers=((0.0, 0.25),)))
+    assert surfaces.state(record.feature_id).stale == ()
+    session.set_grid_velocity(GRID, VelocityModel(layers=((0.0, 0.1),)))
+    assert surfaces.state(record.feature_id).stale == ("velocity",)
+    surfaces.build([record.feature_id], progress=_noop)
+    assert _mean_depth(surfaces, record) == pytest.approx(2.0 * slow, rel=0.05)

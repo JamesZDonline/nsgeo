@@ -223,6 +223,8 @@ Amplitude to pixels, with no Qt.
 | `colormap` | A 256-entry RGB lookup table, by name. |
 | `colormap_names` | The table names, optionally filtered by polarity. |
 | `decimate_columns` | Block-mean along the trace axis to a maximum width. |
+| `display_range` | The colour range for an array by one of QGIS's computed rules: minimum and maximum, cumulative cut, or mean ± standard deviations. |
+| `gradient_stops` | The fewest colour stops that redraw a lookup table by straight-line blending, for a GIS gradient editor. |
 | `row_envelope` | Per-row percentile of amplitude magnitude over the traces (strided above a cap), for showing headroom against the display limit. |
 | `section_rgba8` | A section's values to (H, W, 4) uint8, transparent wherever blank, in either polarity. |
 | `to_index8` | Map amplitudes to 0..255, zero at 128. |
@@ -274,6 +276,17 @@ Radar velocity from a diffraction hyperbola, with its standard error.
 | `radar_clock_note` | The note for a fit made on the radar's own clock when the first break is more than half a sample from zero; says what the velocity would be from the first break. |
 | `applied_fit_note` | Says so when a velocity applied from a fit is no longer what that fit measures. |
 | `unusable_fit_note` | The text for a stored fit that cannot be fitted again at the line's current time zero, with the reason. |
+
+### `nsgeo.velocity_source`
+
+Where a line's or a grid's velocity came from: the saved fits that made it.
+
+| Name | Purpose |
+|---|---|
+| `VelocitySource` | The record on a `Line` or `Grid`: how the velocity was made (`fit` or `weighted mean`), its member fits, the velocity and its standard error, and when it was applied. `from_fits` builds it, `summary` names it, `to_dict` and `from_dict` give the survey-JSON form. |
+| `SourceFit` | One member of a record: the line key, fit id and `fitted_at` that identify the fit, and a copy of its numbers (t0, velocity, standard error, zero) as used, so the record holds after the fit is deleted or its line changes. `of` copies a `StoredFit`. |
+| `weighted_mean` | Inverse-variance mean of velocity and standard-error pairs, with its standard error. Raises `ValueError` for no fits or a standard error that is zero, negative or not finite. |
+| `METHOD_FIT`, `METHOD_WEIGHTED_MEAN` | The two ways a record's velocity is made: one picked fit, or the weighted mean of several. |
 
 ### `nsgeo.vtkxml`
 

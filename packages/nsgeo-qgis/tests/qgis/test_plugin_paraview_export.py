@@ -455,7 +455,7 @@ def _picks_case(session, export, monkeypatch, steps, pick_zero):
     column = np.where(np.isfinite(column), column, -np.inf)
     peak = int(np.argmax(column))
     peak_depth = float(depth_col[peak])
-    velocity = session.resolved_velocity(line.key)
+    velocity = session.grid_depth_velocity("Grid A")
     times = np.linspace(0.0, 150.0, 6001)
     t_cube = float(np.interp(peak_depth, velocity.depth_at(times), times))
     time_ns = t_cube + line.zero_ns - pick_zero
@@ -504,7 +504,7 @@ def test_pick_depths_use_the_volume_velocity(site, monkeypatch):
         zero = {ln.key: ln.zero_ns for ln in probe.prepared_lines()}[key]
     finally:
         probe.dispose()
-    velocity = session.resolved_velocity(key)
+    velocity = session.grid_depth_velocity("Grid A")
     expected = velocity.depth_at(np.array([10.0, 30.0, 55.0]) - zero)
     assert depth == pytest.approx(expected, rel=1e-4)
     assert zs == pytest.approx(-expected * choice.stretch, rel=1e-4)
@@ -833,7 +833,7 @@ def test_panel_values_end_with_the_records_end_time(synth_site):
     cell, dt, end = export.panel_values("Grid A")
     assert cell is None and dt > 0 and end > 0
     assert export.summary("Grid A", _choice(session)).max_depth_m == pytest.approx(
-        float(session.resolved_velocity(session.keys()[0]).depth_at(np.asarray([end]))[0])
+        float(session.grid_depth_velocity("Grid A").depth_at(np.asarray([end]))[0])
     )
 
 
@@ -1016,3 +1016,27 @@ def test_a_surface_built_in_another_crs_is_moved_into_the_exports(built_site):
     assert export.skipped_surfaces == ["A"]
     rec = json.loads((folder / "export.json").read_text())
     assert [f["name"] for f in rec["features"]] == ["B"]
+
+
+def test_depths_follow_the_grids_velocity_not_a_lines_override(synth_site):
+    """The export converts with the grid's depth velocity, as the Slices panel does."""
+    session, _dock, export = synth_site
+    keys = session.keys()
+    choice = _choice(session)
+    base = export.summary("Grid A", choice)
+    # A line override on the first line must move nothing ...
+    session.set_line_velocity(keys[0], VelocityModel([(0.0, 0.2)]))
+    assert export.summary("Grid A", choice).max_depth_m == pytest.approx(base.max_depth_m)
+    # ... while the grid's own velocity moves the volume's depth.
+    session.set_grid_velocity("Grid A", VelocityModel([(0.0, 0.05)]))
+    grid_vel = session.grid_depth_velocity("Grid A")
+    summary = export.summary("Grid A", choice)
+    end = _full_end_ns(export, session)
+    assert summary.max_depth_m == pytest.approx(
+        float(grid_vel.depth_at(np.asarray([end]))[0]), rel=1e-6
+    )
+    assert summary.max_depth_m != pytest.approx(base.max_depth_m, rel=0.05)
+    folder = export.run("Grid A", choice, progress=_noop)
+    extent, _origin, _spacing, arrays = read_vti(folder / "cube.vti")
+    assert extent[5] + 1 == summary.nd
+    assert float(arrays["true_depth_m"][0, 0, 0]) == pytest.approx(summary.max_depth_m, rel=0.05)

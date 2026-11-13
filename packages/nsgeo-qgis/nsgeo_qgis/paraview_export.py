@@ -355,7 +355,7 @@ class ParaViewExport:
         source = self._source(grid_id, choice)
         t0, t1 = self._time_range(source, choice)
         _z, nd = _levels(t0, t1, choice)
-        velocity = self.session.resolved_velocity(source.line_keys[0])
+        velocity = self.session.grid_depth_velocity(grid_id)
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
         if grid_id not in self._pick_counts:
@@ -559,7 +559,7 @@ class ParaViewExport:
         t0, t1 = _clip(t0, record_end, choice)
         z, _nd = _levels(t0, t1, choice)
         finish = self._finish(grid_id)
-        velocity = self.session.resolved_velocity(lines[0].key)
+        velocity = self.session.grid_depth_velocity(grid_id)
         announce(frame, z)
         cache_dir = folder.parent / ".cache"
         cache_part: Path | None = None
