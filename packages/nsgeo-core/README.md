@@ -19,15 +19,21 @@ between minor releases.
 
 ### `nsgeo.io`
 
-DZT and DZX readers.
+DZT, DZX and DZG readers.
 
 | Name | Purpose |
 |---|---|
+| `DzgError` | Raised when a DZG's trace numbers cannot be trusted. |
+| `DzgFix` | One GPS fix: its DZT trace, time, position, quality, satellites, HDOP, altitude and geoid separation. |
+| `DzgLog` | The fixes of a DZG in file order, with counts of dropped and unpaired sentences. |
 | `DztError` | Raised when a DZT file is malformed or unsupported. |
 | `DztHeader` | The parsed DZT header. |
 | `DzxError` | Raised when a DZX sidecar exists but cannot be parsed. |
 | `DzxInfo` | What the DZX sidecar records: name, scan range, dielectric, system and marks. |
 | `DzxMark` | One marker from a DZX sidecar. |
+| `RTK_FIXED` | The GGA fix quality of an RTK fixed solution (4). |
+| `dzg_for` | The DZG beside a DZT, either case; None when there is none. |
+| `read_dzg` | Parse a DZG into one fix per GGA sentence, checking trace numbers. |
 | `read_dzx` | Parse the sidecar for a DZT, or return None when there is none. |
 | `read_header` | Read only the header, cheaply. |
 | `read_samples` | Read all samples as (channels, samples, traces). |
