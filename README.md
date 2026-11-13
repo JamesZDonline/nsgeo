@@ -117,6 +117,11 @@ release's notes list everything in it.
   (`.DZG`) beside each DZT and place the line along the track it was
   walked, with no grid: import, the map (with stretches that had no RTK
   fix marked), the Survey panel, and a destagger you can type. Building.
+- **Trace a hyperbola from a box** ([#140], [#88]). In velocity mode,
+  drag a box around a diffraction hyperbola and the plugin marks about ten
+  dots on the outer edge of its top band, ready to edit and save like
+  clicked ones. Ctrl+click (Cmd+click on a Mac) places velocity dots without
+  switching velocity mode on first. Being designed.
 
 ### Next, in order
 
@@ -151,11 +156,9 @@ Grouped by area. The order within a group is not a priority.
   velocity override for a selection of lines at once ([#58]; editing their
   placement together is done); the scroll wheel no longer moves a line to
   another grid in Edit lines ([#176]).
-- **Velocity:** a modifier-click for velocity points ([#88]); draw a box
-  around a hyperbola and let the plugin mark it ([#140]); selecting a fit in
-  a velocity dialog shows its hyperbola on its own profile ([#185]); a
-  layered velocity from fits at several depths ([#187]); exports record
-  where the grid's velocity came from ([#188]).
+- **Velocity:** selecting a fit in a velocity dialog shows its hyperbola on
+  its own profile ([#185]); a layered velocity from fits at several depths
+  ([#187]); exports record where the grid's velocity came from ([#188]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
