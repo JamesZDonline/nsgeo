@@ -122,7 +122,8 @@ def test_move_note_says_when_a_surface_is_left_too_small():
 
 
 def test_stale_text_names_every_reason():
-    assert set(STALE_REASONS) == set(INPUTS)
+    assert set(STALE_REASONS) == {*INPUTS, "unavailable"}
+    assert stale_text(n for n in ["picks", "fill"]).count("changed") == 2  # a generator is fine
     assert STALE_REASONS["picks"] == "its picks changed"
     assert STALE_REASONS["resolution"] == "the grid's 3-D cell or depth step changed"
     assert stale_text(()) == ""

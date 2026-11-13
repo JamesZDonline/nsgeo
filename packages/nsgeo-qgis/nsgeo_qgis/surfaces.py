@@ -50,6 +50,10 @@ from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.surface_plan import (
     INPUTS,
     KIND_SURFACE,
+    MULTI_GRID_REFUSAL,
+    WHY_NO_DEPTH,
+    WHY_NO_LINE,
+    WHY_NO_POSITION,
     FeatureRecord,
     clean_name,
     grid_mismatch_refusal,
@@ -62,6 +66,7 @@ from nsgeo_qgis.surface_plan import (
     rebuild_refusal,
     remove_refusal,
     selection_refusal,
+    skipped_refusal,
 )
 
 if TYPE_CHECKING:
@@ -335,11 +340,12 @@ class Surfaces:
                     "grid": [list(grid.origin), grid.azimuth, grid.size_x, grid.size_y, grid.crs],
                 }
             ),
+            # The record's own depth, never the Slices panel's z1 or its engine's bounds (R10).
             "resolution": input_hash(
                 {
                     "cell": choice.cell,
                     "dz_ns": choice.dz_ns,
-                    "t1_ns": export.effective_t1(record.grid_id, choice),
+                    "t1_ns": session.volume_record(record.grid_id).get("t1_ns"),
                 }
             ),
             "fill": input_hash(
@@ -376,9 +382,9 @@ class Surfaces:
             return SurfaceState(False, (), None)
         try:
             now = self.inputs(feature_id)
-        except ValueError:
-            # No preset, or lines that share no time range: what it was built from is gone.
-            return SurfaceState(True, ("source",), report)
+        except (KeyError, OSError, ValueError, RuntimeError):
+            # The grid or a line is gone, or a file cannot be reached: say so, never raise.
+            return SurfaceState(True, ("unavailable",), report)
         then = report.get("inputs", {})
         stale = tuple(name for name in INPUTS if now.get(name) != then.get(name))
         return SurfaceState(True, stale, report)
@@ -414,7 +420,7 @@ class Surfaces:
             return []
         keep: set[str] = set()
         for record in self.records():
-            if record.grid_id != grid_id:
+            if _safe(record.grid_id) != _safe(grid_id):  # "Grid 1" and "Grid_1" share a folder
                 continue
             path = self._json_path(record)
             if not path.exists():
@@ -452,7 +458,7 @@ class Surfaces:
         records = [self._record(i) for i in ids]
         grids = {r.grid_id for r in records}
         if len(grids) > 1:
-            raise ValueError("a build is of one grid's surfaces; these are on more than one grid")
+            raise ValueError(MULTI_GRID_REFUSAL)
         members = {r.feature_id: self.members(r.feature_id) for r in records}
         for record in records:
             text = rebuild_refusal(record.name, len(members[record.feature_id]))
@@ -460,15 +466,16 @@ class Surfaces:
                 raise ValueError(text)
         export = self._export()
         grid_id = records[0].grid_id
-        choice = export.defaults(grid_id)
-        self.session.remember_volume(grid_id, **choice.to_record())
         folder = self.folder(grid_id)
         made: list[Path] = []
         try:
-            results = self._compute(export, grid_id, choice, records, members, progress)
+            choice, results = self._compute(export, grid_id, records, members, progress)
+            # One snapshot, taken after the choice is remembered; `_write` reads nothing else.
+            inputs = {r.feature_id: self.inputs(r.feature_id) for r in records}
             folder.mkdir(parents=True, exist_ok=True)
             reports = [
-                self._write(folder, record, results[record.feature_id], made) for record in records
+                self._write(folder, r, results[r.feature_id], choice, inputs[r.feature_id], made)
+                for r in records
             ]
             # The jsons last: a build is complete exactly when its json names its files.
             out = []
@@ -478,6 +485,9 @@ class Surfaces:
                 part.write_text(json.dumps(report, indent=2), encoding="utf-8")
                 os.replace(part, self._json_path(record))
                 made.remove(part)
+                # This record is complete: a later record's failure must not delete its files.
+                for name in report["files"].values():
+                    made.remove(folder / name)
                 out.append(
                     BuildReport(
                         record.feature_id,
@@ -499,12 +509,13 @@ class Surfaces:
         self,
         export: ParaViewExport,
         grid_id: str,
-        choice: Any,
         records: list[FeatureRecord],
         members: dict[str, list[PickRow]],
         progress: Callable[[int, int], bool],
-    ) -> dict[str, dict[str, Any]]:
-        """Fill, volume and the core builder for each record, in memory; nothing is written."""
+    ) -> tuple[Any, dict[str, dict[str, Any]]]:
+        """Fill, volume and the core builder for each record, in memory; nothing is written.
+        Returns the choice the build used (remembered, with its depth) and each result."""
+        choice = export.defaults(grid_id)
 
         def report(done: float) -> None:
             if not progress(int(done), 100):
@@ -515,6 +526,15 @@ class Surfaces:
             return True
 
         got = export.fill(grid_id, choice, progress=fill_progress)
+        # Remember the choice with the depth the fill actually reached, as an explicit number
+        # (rounded up, so the next fill is clipped at nothing it was not clipped at now): the
+        # Slices panel's z1 never reaches a surface (R10).
+        end = math.ceil(got.t1_ns * 1e4 - 1e-6) / 1e4
+        end = round(end, 4)
+        if end < got.t1_ns:
+            end = round(end + 1e-4, 4)
+        self.session.remember_volume(grid_id, **{**choice.to_record(), "t1_ns": end})
+        choice = export.defaults(grid_id)
         window = max(1, int(round(choice.settings.period_ns / got.z.dz_ns)))
         vol = surface_volume(
             got.filled,
@@ -536,17 +556,16 @@ class Surfaces:
             skipped: list[dict[str, str]] = []
             for (key, pick), spot in zip(rows, placed):
                 if spot is None:
-                    why = (
-                        "its line is not among the lines used for 3-D"
-                        if key not in prepared
-                        else "its depth could not be found"
-                    )
+                    why = WHY_NO_LINE if key not in prepared else WHY_NO_DEPTH
                 elif not (math.isfinite(spot.x_m) and math.isfinite(spot.y_m)):
-                    why = "its position on the line could not be found"
+                    why = WHY_NO_POSITION
                 else:
                     used.append((pick, spot))
                     continue
                 skipped.append({"line_key": key, "why": why})
+            text = skipped_refusal(record.name, len(used), skipped)
+            if text:
+                raise ValueError(text)
             try:
                 surface = build_surface(
                     vol,
@@ -565,14 +584,20 @@ class Surfaces:
             }
             report(_VOLUME_SHARE + (100 - _VOLUME_SHARE) * (k + 1) / len(records))
         del vol, got
-        return out
+        return choice, out
 
     def _label(self, key: str) -> str:
         line = self.session.line_for_key(key)
         return str(getattr(line.placement, "label", None) or line.path.stem)
 
     def _write(
-        self, folder: Path, record: FeatureRecord, result: dict[str, Any], made: list[Path]
+        self,
+        folder: Path,
+        record: FeatureRecord,
+        result: dict[str, Any],
+        choice: Any,
+        inputs: dict[str, str],
+        made: list[Path],
     ) -> dict[str, Any]:
         """Write one surface's three files (each `.part`, then renamed; every path is added
         to `made` so a failure can remove them) and return its json document."""
@@ -629,7 +654,6 @@ class Surfaces:
                     "reason": o.reason,
                 }
             )
-        choice = self._export().defaults(record.grid_id)
         return {
             "feature_id": record.feature_id,
             "name": record.name,
@@ -637,7 +661,7 @@ class Surfaces:
             "kind": record.kind,
             "built_utc": now_iso(),
             "nsgeo_version": nsgeo.__version__,
-            "inputs": self.inputs(record.feature_id),
+            "inputs": inputs,
             "resolution": {"cell": choice.cell, "dz_ns": choice.dz_ns},
             "settings": record.settings.to_dict(),
             "offset_m": float(surface.offset_m),

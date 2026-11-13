@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -224,6 +224,31 @@ def rebuild_refusal(name: str, members: int) -> str:
     )
 
 
+MULTI_GRID_REFUSAL = "A build is of one grid's surfaces; these are on more than one grid."
+WHY_NO_LINE = "their line isn't in this grid's slices"
+WHY_NO_DEPTH = "their depth could not be found"
+WHY_NO_POSITION = "their position on the line could not be found"
+
+
+def skipped_text(skipped: Sequence[Mapping[str, Any]]) -> str:
+    """`2 picks could not be placed (their line isn't in this grid's slices)`, or ""."""
+    if not skipped:
+        return ""
+    why = list(dict.fromkeys(str(s.get("why", "")) for s in skipped))
+    n = len(skipped)
+    return f"{n} pick{'' if n == 1 else 's'} could not be placed ({_and([w for w in why if w])})"
+
+
+def skipped_refusal(name: str, usable: int, skipped: Sequence[Mapping[str, Any]]) -> str:
+    """Why skipping left too few picks to build, or "" when it did not."""
+    if not skipped or usable >= MIN_PICKS:
+        return ""
+    return (
+        f"“{name}”: {skipped_text(skipped)}, which leaves {usable} usable; "
+        f"a surface needs at least {MIN_PICKS}. Check which lines the grid's slices use."
+    )
+
+
 # ---- what a build depends on -------------------------------------------------------------
 #: What a surface's numbers depend on, in the order the panel lists them (spec call 9).
 INPUTS = ("picks", "settings", "source", "resolution", "fill", "volume", "velocity")
@@ -236,6 +261,7 @@ STALE_REASONS: dict[str, str] = {
     "fill": "the grid's fill method or distances changed",
     "volume": "the 3-D wave period or depth balance changed",
     "velocity": "the grid's velocity changed",
+    "unavailable": "its grid or lines can't be read right now",
 }
 
 
@@ -247,8 +273,10 @@ def input_hash(value: Any) -> str:
 
 def stale_text(stale: Iterable[str]) -> str:
     """The line the panel shows for a stale surface ("" when nothing changed)."""
-    reasons = [STALE_REASONS.get(name, f"{name} changed") for name in INPUTS if name in set(stale)]
-    reasons += [f"{n} changed" for n in stale if n not in STALE_REASONS]
+    names = set(stale)
+    order = (*INPUTS, "unavailable")
+    reasons = [STALE_REASONS[name] for name in order if name in names]
+    reasons += [f"{n} changed" for n in sorted(names) if n not in STALE_REASONS]
     if not reasons:
         return ""
     return (
@@ -300,6 +328,7 @@ def fit_rows(report: Mapping[str, Any]) -> list[tuple[str, str]]:
     if int(fit.get("at_edge", 0)):
         parts.append(f"{int(fit['at_edge'])} at the window's edge")
     parts.append(f"{int(fit.get('on_holes', 0))} on holes")
+    skipped = skipped_text(report.get("skipped", []))
     cells, region = int(report.get("cells", 0)), int(report.get("region_cells", 0))
     if region > 0 and cells >= region:
         cover = f"all {cells:,} cells; no holes"
@@ -310,7 +339,7 @@ def fit_rows(report: Mapping[str, Any]) -> list[tuple[str, str]]:
         cover = "no cell was inside the picks' area"
     res = report.get("resolution", {})
     built = str(report.get("built_utc", ""))[:16].replace("T", " ")
-    return [
+    rows = [
         ("Picks", " · ".join(parts)),
         ("Offset", offset_text(report)),
         ("Cover", cover),
@@ -320,6 +349,9 @@ def fit_rows(report: Mapping[str, Any]) -> list[tuple[str, str]]:
             f"{float(res.get('dz_ns', 0.0)):g} ns",
         ),
     ]
+    if skipped:
+        rows.insert(1, ("Skipped", skipped))
+    return rows
 
 
 def outlier_line(outlier: Mapping[str, Any]) -> str:
@@ -345,7 +377,9 @@ def built_message(name: str, report: Mapping[str, Any]) -> str:
         f"within 2 cm, {int(fit.get('on_holes', 0))} on holes."
     )
     offset = offset_text(report)
-    return f"{text} {offset[0].upper()}{offset[1:]}."
+    text = f"{text} {offset[0].upper()}{offset[1:]}."
+    skipped = skipped_text(report.get("skipped", []))
+    return f"{text} {skipped}." if skipped else text
 
 
 def empty_message(name: str) -> str:

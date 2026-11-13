@@ -217,6 +217,19 @@ def test_picks_on_another_clock_land_on_the_cube_clock(built_site, steps):
     assert placed[0] is not None and placed[1] is not None
     assert placed[0].depth_m == pytest.approx(placed[1].depth_m)
     assert (placed[0].x_m, placed[0].y_m) == (placed[1].x_m, placed[1].y_m)
+    # The target clock matters: a radar-clock pick (no zero) and one measured from the line's
+    # own zero are one moment, and land where the cube's clock puts it.
+    zero = got.lines[0].zero_ns
+    target = zero if steps is STEPS_ZERO else 0.0
+    radar = _pick(key, 20, 10.0)
+    from_zero = _pick(key, 20, 10.0 - zero, zero_ns=zero)
+    r1, r2 = place_picks(
+        [(key, radar), (key, from_zero)], got.lines, got.prov, got.frame, got.velocity
+    )
+    want = float(got.velocity.depth_at(np.asarray([10.0 - target]))[0])
+    assert r1.depth_m == pytest.approx(want) and r2.depth_m == pytest.approx(want)
+    if steps is STEPS_ZERO:
+        assert zero != 0.0
     # and a pick on a line that is not among the prepared lines is None
     assert place_picks([("raw/none.DZT", a)], got.lines, got.prov, got.frame, got.velocity) == [
         None
@@ -262,15 +275,121 @@ def test_each_input_marks_the_surface_stale_with_its_reason(built_site, name):
 
 
 def test_the_blur_and_the_slices_panel_never_make_a_surface_stale(built_site):
-    session, dock, _, _, surfaces = built_site
+    session, dock, export, _, surfaces = built_site
     record, _ = _surface(built_site)
     surfaces.build([record.feature_id], progress=_noop)
     session.remember_volume(GRID, blur_m=0.3)
     session.remember_volume(GRID, stretch=2.0)
     session.remember_slice_resolution(GRID, cell=0.31, dz_ns=0.77)
     dock.transform_combo = types.SimpleNamespace(value=lambda: "amp_abs")
-    dock.grid_id = "elsewhere"
     assert surfaces.state(record.feature_id).stale == ()
+    # the panel's z1: not stale, and a rebuild keeps the remembered depth
+    kept = session.volume_record(GRID)["t1_ns"]
+    session.remember_slice_resolution(GRID, t1_ns=kept / 2)
+    assert surfaces.state(record.feature_id).stale == ()
+    (again,) = surfaces.build([record.feature_id], progress=_noop)
+    assert session.volume_record(GRID)["t1_ns"] == kept
+    assert surfaces.state(record.feature_id).stale == ()
+    assert again.report["inputs"] == surfaces.inputs(record.feature_id)
+
+
+def test_the_panel_engine_holding_this_grid_or_another_never_changes_the_depth_input(built_site):
+    session, dock, export, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    source = export.source_choice(GRID, export.defaults(GRID))
+    t0, end = export._record_range(source)
+    real = dock.engine
+    try:
+        for bounds in ((t0, end - 1.0), None):
+            dock.engine = types.SimpleNamespace(
+                choice=source if bounds else None,
+                is_prepared=True,
+                has_live_task=False,
+                prepared_z_bounds=lambda b=bounds: b,
+            )
+            assert surfaces.state(record.feature_id).stale == ()
+    finally:
+        dock.engine = real
+
+
+def test_a_failed_second_json_leaves_the_first_surface_whole(built_site, monkeypatch):
+    from nsgeo_qgis import surfaces as surfaces_mod
+
+    session, _, _, layers, surfaces = built_site
+    a, _ = _surface(built_site, name="A")
+    fids = _write(layers, session, [(0, 10, 10.0), (0, 50, 11.0), (1, 10, 10.5), (1, 50, 11.5)])
+    b = surfaces.create("B", fids, SurfaceSettings(strength=0.0))
+    surfaces.build([a.feature_id, b.feature_id], progress=_noop)
+    folder = surfaces.folder(GRID)
+    old_b = (folder / f"{b.feature_id}.json").read_bytes()
+    real = surfaces_mod.os.replace
+    seen = []
+
+    def flaky(src, dst):
+        if str(dst).endswith(".json"):
+            seen.append(dst)
+            if len(seen) == 2:
+                raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(surfaces_mod.os, "replace", flaky)
+    with pytest.raises(OSError):
+        surfaces.build([a.feature_id, b.feature_id], progress=_noop)
+    monkeypatch.setattr(surfaces_mod.os, "replace", real)
+    assert (folder / f"{b.feature_id}.json").read_bytes() == old_b
+    for rec in (a, b):
+        doc = json.loads((folder / f"{rec.feature_id}.json").read_text())
+        assert all((folder / n).is_file() for n in doc["files"].values()), rec.name
+        assert surfaces.built(rec.feature_id) is not None
+    assert not [p for p in folder.iterdir() if p.name.endswith(".part")]
+
+
+def test_state_never_raises_when_the_grid_is_gone(built_site):
+    session, _, _, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    surfaces.build([record.feature_id], progress=_noop)
+    session.remove_grid(GRID, with_lines=True)
+    state = surfaces.state(record.feature_id)
+    assert state.built and state.stale == ("unavailable",)
+
+
+def test_sweep_spares_a_grid_that_shares_the_folder(built_site):
+    import dataclasses
+
+    session, _, _, _, surfaces = built_site
+    record, _ = _surface(built_site)
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    twin = dataclasses.replace(record, feature_id="f" * 32, name="Twin", grid_id="Grid_A")
+    surfaces.layers.write_feature(twin)
+    # the twin's files, named in its own json, in the same folder ("Grid A" and "Grid_A")
+    folder = surfaces.folder(GRID)
+    assert surfaces.folder("Grid_A") == folder
+    owned = folder / f"{'f' * 32}-12345678.npz"
+    owned.write_bytes(b"x")
+    (folder / f"{'f' * 32}.json").write_text(json.dumps({"files": {"npz": owned.name}}))
+    assert surfaces.sweep(GRID) == []
+    assert owned.exists() and surfaces.built(record.feature_id) is not None
+    del made
+
+
+def test_skipped_picks_are_reported_and_too_many_refuse(built_site):
+    session, _, _, layers, surfaces = built_site
+    path = synthetic_dzt(Path(session.root) / "raw", "FILE__003.DZT", n_traces=60)
+    session.add_lines([Line.open(path, GridPlacement(GRID, "y", 2.5, 0.0, 1, path.stem))])
+    keys = session.keys()
+    fids = _write(layers, session, PICKS + [(2, 30, 10.0)])
+    record = surfaces.create("Bowl", fids, SurfaceSettings(strength=0.0))
+    session.remember_slice_source(GRID, preset="p", lines=tuple(keys[:2]))
+    (made,) = surfaces.build([record.feature_id], progress=_noop)
+    from nsgeo_qgis.surface_plan import built_message, fit_rows
+
+    assert "1 pick could not be placed" in dict(fit_rows(made.report))["Skipped"]
+    assert "could not be placed" in built_message("Bowl", made.report)
+    # leave the surface three picks of which two cannot be placed
+    session.remember_slice_source(GRID, preset="p", lines=(keys[0],))
+    with pytest.raises(ValueError, match="could not be placed"):
+        surfaces.build([record.feature_id], progress=_noop)
 
 
 def test_a_member_deleted_by_hand_marks_the_surface_stale(built_site):
@@ -311,7 +430,9 @@ def test_building_remembers_the_grids_3d_choice(built_site):
     assert session.volume_record(GRID) == {}
     choice = export.defaults(GRID)
     surfaces.build([record.feature_id], progress=_noop)
-    assert session.volume_record(GRID) == choice.to_record()
+    record = session.volume_record(GRID)
+    assert isinstance(record.pop("t1_ns"), float)  # the depth the fill used, explicit
+    assert record == choice.to_record()
 
 
 def test_a_build_is_refused_while_slices_prepare(built_site):

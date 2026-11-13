@@ -194,6 +194,8 @@ class FilledGrid:
     velocity: Any
     filled: np.ndarray
     skipped_lines: list[str]
+    #: Where the fill's depth axis ends, in ns on the cube's clock (the lines' end, or earlier).
+    t1_ns: float
 
 
 @dataclass(frozen=True)
@@ -295,12 +297,6 @@ class ParaViewExport:
     def fill_settings(self, grid_id: str) -> Any:
         """The grid's fill: method, max distance, search radius and smoothing."""
         return self._finish(grid_id)
-
-    def effective_t1(self, grid_id: str, choice: VolumeChoice) -> float | None:
-        """`choice`'s deepest time as it affects the fill (None: the end of the record);
-        prepares nothing."""
-        source = self._source(grid_id, choice)
-        return _effective_t1(choice, self._record_range(source)[1])
 
     def _frame(self, grid_id: str, choice: VolumeChoice) -> CubeFrame:
         grid = self.session.grid(grid_id)
@@ -556,12 +552,14 @@ class ParaViewExport:
                     if old != cache:
                         old.unlink(missing_ok=True)
             filled = np.lib.format.open_memmap(cache, mode="r")
-        except BaseException:
+        except BaseException as exc:
+            # As `run` does: let go of the frames (and the map they hold) before deleting.
+            traceback.clear_frames(exc.__traceback__)
             if cache_part is not None:
                 with contextlib.suppress(OSError):
                     cache_part.unlink(missing_ok=True)
             raise
-        return FilledGrid(lines, prov, frame, z, velocity, filled, list(self.skipped_lines))
+        return FilledGrid(lines, prov, frame, z, velocity, filled, list(self.skipped_lines), t1)
 
     # ---- the run -------------------------------------------------------------
     def run(
