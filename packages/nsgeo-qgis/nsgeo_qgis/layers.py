@@ -1953,6 +1953,13 @@ class SiteLayers(QObject):
         layer = self._picks_layer()
         return [] if layer is None else sorted(layer.selectedFeatureIds())
 
+    def select_picks(self, fids: Iterable[int]) -> None:
+        """Make `fids` (picks-layer fids) the picks layer's selection, as QGIS's own Select
+        tool would; an empty list clears it."""
+        layer = self._picks_layer()
+        if layer is not None:
+            layer.selectByIds(sorted({int(f) for f in fids}))
+
     def unsaved_among(self, fids: Iterable[int]) -> set[int]:
         """The `fids` the picks layer holds only in its edit buffer: rows added
         there (negative fids), and saved rows with a pending attribute or

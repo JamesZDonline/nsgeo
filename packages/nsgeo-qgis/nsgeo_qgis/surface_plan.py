@@ -432,3 +432,91 @@ def merge_range(shared: tuple[float, float] | None, low: float, high: float) -> 
     if shared is None:
         return (low, high)
     return (min(shared[0], low), max(shared[1], high))
+
+
+# ---- the New surface dialog and the Surfaces panel ---------------------------------------
+def selection_label(n: int, grid_id: str | None, labels: Sequence[str]) -> str:
+    """`88 picks selected, all on Grid 1 (lines FILE__020 to FILE__033).`"""
+    if n <= 0:
+        return "No picks selected."
+    text = f"{n} pick{'' if n == 1 else 's'} selected"
+    if grid_id is None:
+        return text + "."
+    labels = sorted(set(labels))
+    where = f"on Grid {grid_id}" if n == 1 else f"all on Grid {grid_id}"
+    if len(labels) == 1:
+        return f"{text}, {where} (line {labels[0]})."
+    if len(labels) > 1:
+        return f"{text}, {where} (lines {labels[0]} to {labels[-1]})."
+    return f"{text}, {where}."
+
+
+_JOIN_NAMES = {"min_curvature": "smooth", "idw": "inverse-distance"}
+
+
+def join_name(join: str) -> str:
+    return _JOIN_NAMES.get(join, join)
+
+
+def settings_summary(settings: SurfaceSettings) -> str:
+    """The folded Settings' one line: `smooth join · window ±2 cm · ...`."""
+    smoothing = (
+        "no smoothing" if settings.smoothing_m <= 0 else f"smoothing {settings.smoothing_m:.2f} m"
+    )
+    return (
+        f"{join_name(settings.join)} join · window ±{settings.window_m * 100:g} cm · "
+        f"strength {settings.strength:.1f} × typical · {smoothing}"
+    )
+
+
+def state_text(built: bool, stale: Iterable[str]) -> str:
+    """The panel's state column: "not built", "stale" or nothing."""
+    if not built:
+        return "not built"
+    return "stale" if list(stale) else ""
+
+
+def fit_short(report: Mapping[str, Any] | None) -> str:
+    """`80/84`: picks within 2 cm over picks placed, "" before a build."""
+    if not report:
+        return ""
+    fit = _fit(report)
+    return f"{int(fit.get('within_2cm', 0))}/{int(fit.get('picks', 0))}"
+
+
+LOCKED_PICKS_TEXT = (
+    "The site file is locked, most likely because the picks layer has unsaved edits. "
+    "Save the picks layer's edits, or leave editing mode on it, and try again."
+)
+
+
+def write_failure_text(message: str) -> str:
+    """A refused write as the user should read it: QGIS's "database is locked" (a picks layer in
+    editing mode under the project's automatic transaction groups) says what to do."""
+    return LOCKED_PICKS_TEXT if "locked" in message.lower() else message
+
+
+def build_outcome(name: str, report: Mapping[str, Any]) -> tuple[str, bool]:
+    """The message after one surface's build and whether it is a warning: an empty surface, an
+    offset that could not be trusted, picks left out, or picks at the window's edge."""
+    if int(report.get("cells", 0)) <= 0:
+        return empty_message(name), True
+    fit = _fit(report)
+    warn = (
+        not report.get("offset_reliable", True)
+        or bool(report.get("skipped"))
+        or int(fit.get("at_edge", 0)) > 0
+    )
+    return built_message(name, report), warn
+
+
+def skipped_surfaces_text(names: Sequence[str]) -> str:
+    """What the export's message says of surfaces it could not put in the scene, or ""."""
+    if not names:
+        return ""
+    listed = _and([f"“{n}”" for n in names])
+    noun = "Surface" if len(names) == 1 else "Surfaces"
+    return (
+        f"{noun} {listed} {'was' if len(names) == 1 else 'were'} left out: "
+        "the coordinate system of the build could not be converted to this export's."
+    )

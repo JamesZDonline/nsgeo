@@ -131,17 +131,27 @@ from nsgeo_qgis.slice_export import (
 )
 from nsgeo_qgis.slice_layer import SITE_LAYER_NAME, SliceLayer, apply_smooth_resampling
 from nsgeo_qgis.slices_plan import name_list, smallest_safe_cell
+from nsgeo_qgis.surface_layers import SurfaceLayers
+from nsgeo_qgis.surface_plan import (
+    build_outcome,
+    selection_label,
+    skipped_surfaces_text,
+    write_failure_text,
+)
+from nsgeo_qgis.surfaces import Surfaces
 from nsgeo_qgis.ui.edit_lines_dialog import EditLinesDialog
 from nsgeo_qgis.ui.export_dialog import ExportDialog
 from nsgeo_qgis.ui.finish_panel import busy_cursor
 from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
+from nsgeo_qgis.ui.new_surface_dialog import NewSurfaceDialog
 from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
 from nsgeo_qgis.ui.site_scope import source_keys
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui.surfaces_dock import SurfacesDock
 from nsgeo_qgis.ui.survey_dock import SurveyDock
 from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
@@ -166,6 +176,9 @@ CUT_TIP = "Cut tool: draw a path on the map to see the cube's vertical section b
 #: Where the one-shot "Slices has been tabbed onto Processing once" flag
 #: lives, in the QGIS profile's own settings. See `_tabify_slices_dock`.
 _TABIFIED_KEY = "nsgeo/slicesDockTabified"
+#: The same one-shot flag for tabbing the Surfaces panel onto Slices (a profile that already
+#: tabbed Slices still gets the newer panel tabbed once).
+_SURFACES_TABIFIED_KEY = "nsgeo/surfacesDockTabified"
 #: The ParaView program the export dialog last used (profile settings, like the key above).
 _PARAVIEW_KEY = "nsgeo/paraviewPath"
 
@@ -259,11 +272,17 @@ class NsgeoPlugin:
         self.profile_dock: ProfileDock | None = None
         self.processing_dock: ProcessingDock | None = None
         self.slices_dock: SlicesDock | None = None
+        self.surfaces_dock: SurfacesDock | None = None
+        #: The site's surfaces, and their layers on the map (M16 B); made in `initGui` beside
+        #: `layers`, which they read, and disposed before it detaches.
+        self.surfaces: Surfaces | None = None
+        self.surface_layers: SurfaceLayers | None = None
         #: A cut's section, read from the Slices panel's cube (cut spec §4.3).
         self.cut_sections: CutSections | None = None
         #: Whether this session should still tab Slices onto Processing.
         #: Read from settings in `initGui`; see `_tabify_slices_dock`.
         self._want_tabify = False
+        self._want_tabify_surfaces = False
         self.slice_layer: SliceLayer | None = None
         self.depth_scroll: CanvasDepthScroll | None = None
         self.act_new: QAction | None = None
@@ -274,6 +293,7 @@ class NsgeoPlugin:
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
+        self.act_surface: QAction | None = None
         #: The Cut map tool while the toggle is on (cut spec §4.1).
         self._cut_tool: CutTool | None = None
         #: The toolbar's Panels button (the toolbar's own action for it)
@@ -336,6 +356,10 @@ class NsgeoPlugin:
             self.iface.mapCanvas(),
             on_info=lambda msg: self.message(msg, Qgis.MessageLevel.Info),
         )
+        # Surfaces read the site's layers and build through a ParaView export over the Slices
+        # dock, which exists only below: the factory looks the dock up when a build asks.
+        self.surfaces = Surfaces(self.session, self.layers, export_for=self._surface_export)
+        self.surface_layers = SurfaceLayers(self.session, self.layers, self.surfaces)
         main = self.iface.mainWindow()
 
         self.toolbar = self.iface.addToolBar("nsgeo")
@@ -358,6 +382,10 @@ class NsgeoPlugin:
         self.act_cut = self._toolbar_action("Cut", self._toggle_cut_tool)
         self.act_cut.setCheckable(True)
         self.act_cut.setToolTip(CUT_TIP)
+        self.act_surface = self._toolbar_action("Surface from picks…", self.new_surface)
+        self.act_surface.setToolTip(
+            "Make a surface from the picks selected on the map (the picks layer current)."
+        )
 
         about = QAction("About nsgeo", main)
         about.triggered.connect(self.show_about)
@@ -417,7 +445,16 @@ class NsgeoPlugin:
         # attempt would set it and the second would then decline to undo
         # QGIS's overwrite.
         self._want_tabify = not QgsSettings().value(_TABIFIED_KEY, False, type=bool)
-        if self._want_tabify:
+        self.surfaces_dock = SurfacesDock(self.session, self.surfaces, main)
+        self.surfaces_dock.problem.connect(lambda msg: self.message(msg, Qgis.MessageLevel.Warning))
+        self.surfaces_dock.new_requested.connect(self.new_surface)
+        self.surfaces_dock.build_requested.connect(self.build_surfaces)
+        self.surfaces_dock.select_picks_requested.connect(self._select_picks)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.surfaces_dock)
+        self._want_tabify_surfaces = not QgsSettings().value(
+            _SURFACES_TABIFIED_KEY, False, type=bool
+        )
+        if self._want_tabify or self._want_tabify_surfaces:
             # `initializationCompleted` is QGIS's own "startup is over"
             # signal, and restoring the saved window layout is part of
             # that startup -- measured in a real QGIS 3.44 on this repo's
@@ -435,6 +472,7 @@ class NsgeoPlugin:
             # sticks.
             QTimer.singleShot(0, self._tabify_slices_dock)
         self.docks.append(self.slices_dock)
+        self.docks.append(self.surfaces_dock)
         self._build_panels_menu()
 
         # The active slice on the map: owned here (not by the dock) for
@@ -512,15 +550,24 @@ class NsgeoPlugin:
                 return
             if sip.isdeleted(dock) or sip.isdeleted(processing):
                 return
-            if not self._want_tabify:
-                return
             main = self.iface.mainWindow()
-            if dock not in main.tabifiedDockWidgets(processing):
-                main.tabifyDockWidget(processing, dock)
-            processing.raise_()
-            QgsSettings().setValue(_TABIFIED_KEY, True)
+            if self._want_tabify:
+                if dock not in main.tabifiedDockWidgets(processing):
+                    main.tabifyDockWidget(processing, dock)
+                processing.raise_()
+                QgsSettings().setValue(_TABIFIED_KEY, True)
+            # Surfaces joins Slices's tab group (a first start, or a profile from before it).
+            surfaces = self.surfaces_dock
+            if self._want_tabify_surfaces and surfaces is not None and not sip.isdeleted(surfaces):
+                if surfaces not in main.tabifiedDockWidgets(dock):
+                    main.tabifyDockWidget(dock, surfaces)
+                    if self._want_tabify:
+                        processing.raise_()  # Processing stays the raised tab on a first start
+                QgsSettings().setValue(_SURFACES_TABIFIED_KEY, True)
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
-            self.message(f"could not tab the Slices panel: {exc}", Qgis.MessageLevel.Warning)
+            self.message(
+                f"could not tab the Slices and Surfaces panels: {exc}", Qgis.MessageLevel.Warning
+            )
 
     def _build_panels_menu(self) -> None:
         """#84: the toolbar's Panels button -- each panel by name, then
@@ -543,6 +590,7 @@ class NsgeoPlugin:
             ("Profile", self.profile_dock),
             ("Processing", self.processing_dock),
             ("Slices", self.slices_dock),
+            ("Surfaces", self.surfaces_dock),
         )
         for text, dock in named:
             entry = menu.addAction(text)
@@ -712,6 +760,8 @@ class NsgeoPlugin:
                 "could not save changes before unloading; unsaved changes will be lost",
                 Qgis.MessageLevel.Critical,
             )
+        if self.surfaces_dock is not None:
+            self.surfaces_dock.dispose()
         if self.slices_dock is not None:
             # SliceEngine(session, ...) is built with no `parent=`, and it
             # closes over this dock's own bound methods as callbacks
@@ -748,6 +798,7 @@ class NsgeoPlugin:
         self.profile_dock = None
         self.processing_dock = None
         self.slices_dock = None
+        self.surfaces_dock = None
         for action in self.menu_actions:
             self.iface.removePluginMenu(MENU, action)
             action.deleteLater()
@@ -763,6 +814,7 @@ class NsgeoPlugin:
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
+        self.act_surface = None
         self.act_panels = None
         if self.panels_menu is not None:
             # Parented to the main window, which outlives this plugin; its
@@ -788,6 +840,11 @@ class NsgeoPlugin:
             # is orphaned by this plugin unloading around it.
             self.slice_layer.dispose()
             self.slice_layer = None
+        if self.surface_layers is not None:
+            # Before layers.detach(): its group lives inside the site's, which detach removes.
+            self.surface_layers.dispose()
+            self.surface_layers = None
+        self.surfaces = None
         if self.layers is not None:
             self.layers.detach()
             self.layers = None
@@ -813,7 +870,7 @@ class NsgeoPlugin:
     def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
-            for act in (self.act_save, self.act_add_grid, self.act_import):
+            for act in (self.act_save, self.act_add_grid, self.act_import, self.act_surface):
                 if act is not None:
                     act.setEnabled(is_open)
             # A crosshair over an empty profile invites a click that can
@@ -1253,7 +1310,7 @@ class NsgeoPlugin:
                 return
             dock = self.slices_dock
             session = self.session
-            export = ParaViewExport(session, dock)
+            export = ParaViewExport(session, dock, self.surfaces)
             grids = [g.id for g in session.site.grids if source_keys(session, g.id)]
             if not grids:
                 self.message("no grid has lines to export for ParaView.", Qgis.MessageLevel.Warning)
@@ -1304,22 +1361,141 @@ class NsgeoPlugin:
                 bar.deleteLater()
             windows = sys.platform.startswith("win")
             skipped = list(export.skipped_lines)
-            level = Qgis.MessageLevel.Warning if skipped else Qgis.MessageLevel.Info
+            # Surfaces the scene could not take are named in the same message.
+            left_out = skipped_surfaces_text(export.skipped_surfaces)
+            extra = f" {left_out}" if left_out else ""
+            level = Qgis.MessageLevel.Warning if skipped or left_out else Qgis.MessageLevel.Info
             if not paraview:
                 self.message(
-                    how_to_open_message(grid_id, folder, windows=windows, skipped=skipped), level
+                    how_to_open_message(grid_id, folder, windows=windows, skipped=skipped) + extra,
+                    level,
                 )
             elif open_after and not launch_paraview(paraview, folder):
                 self.message(
                     launch_failed_message(
                         grid_id, folder, paraview, windows=windows, skipped=skipped
-                    ),
+                    )
+                    + extra,
                     Qgis.MessageLevel.Warning,
                 )
             else:
-                self.message(exported_message(grid_id, folder, skipped), level)
+                self.message(exported_message(grid_id, folder, skipped) + extra, level)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not export for ParaView: {exc}", Qgis.MessageLevel.Critical)
+
+    # ---- surfaces from picks (M16 B) --------------------------------------
+    def _surface_export(self) -> ParaViewExport:
+        """The export a surface build gets its lines and fill from (Surfaces' factory)."""
+        if self.session is None or self.slices_dock is None:
+            raise RuntimeError("surfaces cannot be built here: no site is open")
+        return ParaViewExport(self.session, self.slices_dock, self.surfaces)
+
+    def _select_picks(self, fids: list[int]) -> None:
+        """Select these picks on the picks layer, as QGIS's Select tool would."""
+        try:
+            if self.layers is not None:
+                self.layers.select_picks(fids)
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot
+            self.message(f"could not select the picks: {exc}", Qgis.MessageLevel.Warning)
+
+    def new_surface(self, *_checked: Any) -> None:
+        """ "Surface from picks…": the New surface dialog on the picks selected on the map, then
+        create the surface and build it."""
+        try:
+            if (
+                self.session is None
+                or not self.session.is_open
+                or self.surfaces is None
+                or self.layers is None
+            ):
+                return
+            fids = self.layers.selected_pick_ids()
+            check = self.surfaces.check(fids)
+            labels = [
+                self.surfaces.line_label(row.pick.line_key) for row in self.layers.pick_rows(fids)
+            ]
+            dialog = NewSurfaceDialog(
+                check,
+                selection_label(check.n, check.grid_id, labels),
+                self.iface.mainWindow(),
+                taken=[r.name for r in self.surfaces.records()],
+            )
+            try:
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                name, settings = dialog.name(), dialog.settings()
+            finally:
+                dialog.deleteLater()
+            if not accepted:
+                return
+            try:
+                record = self.surfaces.create(name, fids, settings)
+            except (ValueError, RuntimeError) as exc:
+                self.message(write_failure_text(str(exc)), Qgis.MessageLevel.Warning)
+                return
+            self.build_surfaces([record.feature_id])
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not make a surface: {exc}", Qgis.MessageLevel.Critical)
+
+    def build_surfaces(self, feature_ids: list[str]) -> None:
+        """Build the surfaces of `feature_ids`, one grid's at a time, under one progress dialog
+        (Rebuild with surfaces of several grids is several builds)."""
+        try:
+            if (
+                self.session is None
+                or self.surfaces is None
+                or self.slices_dock is None
+                or not feature_ids
+            ):
+                return
+            surfaces, dock = self.surfaces, self.slices_dock
+            grid_of = {r.feature_id: r.grid_id for r in surfaces.records()}
+            groups: dict[str, list[str]] = {}
+            for fid in dict.fromkeys(feature_ids):
+                if fid in grid_of:
+                    groups.setdefault(grid_of[fid], []).append(fid)
+            title = "Building surface" if len(feature_ids) == 1 else "Building surfaces"
+            progress, bar = self._export_progress(title, 100, show_now=True)
+            done: list[Any] = []
+            failure: str | None = None
+            try:
+                bar.setLabelText("Preparing lines\u2026")
+                progress(0, 100)
+
+                def one_group(index: int) -> Callable[[int, int], bool]:
+                    def part(at: int, of: int) -> bool:
+                        if at > 0 and bar.labelText() != title:
+                            bar.setLabelText(title)
+                        return progress(int((index * of + at) * 100 / (len(groups) * of)), 100)
+
+                    return part
+
+                with busy_cursor(), dock.refining_paused():
+                    for index, group in enumerate(groups.values()):
+                        done += surfaces.build(group, progress=one_group(index))
+            except ParaViewExportCancelled:
+                failure = CANCELLED_MESSAGE
+            except (RuntimeError, ValueError) as exc:
+                failure = write_failure_text(str(exc))
+            finally:
+                bar.close()
+                bar.deleteLater()
+            # A sync owed during the build is deferred, never self-triggered: do it now.
+            if self.surface_layers is not None:
+                self.surface_layers.sync()
+            if self.surfaces_dock is not None:
+                self.surfaces_dock.refresh()
+            for built in done:
+                text, warn = build_outcome(built.name, built.report)
+                self.message(text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info)
+            if failure is not None:
+                self.message(
+                    failure,
+                    Qgis.MessageLevel.Info
+                    if failure == CANCELLED_MESSAGE
+                    else Qgis.MessageLevel.Warning,
+                )
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not build the surfaces: {exc}", Qgis.MessageLevel.Critical)
 
     def _export_site(self) -> None:
         """`export_geotiff` in site scope: one GeoTIFF over every included grid.

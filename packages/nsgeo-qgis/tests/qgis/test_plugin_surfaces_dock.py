@@ -1,0 +1,352 @@
+"""M16 B Task 5: the Surfaces panel, its place among the panels, and the export with surfaces.
+
+The plugin runs over a synthetic site (conftest `surface_plugin`)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from nsgeo.slices import SurfaceSettings
+from nsgeo_qgis.surface_layers import PROP_FEATURE
+from nsgeo_qgis.ui.surfaces_dock import ALL_GRIDS
+from qgis.core import QgsProject
+from qgis.PyQt.QtCore import QCoreApplication
+from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox, QScrollArea
+from tests.vtk_reader import read_vtk_xml
+
+
+def _shown(plugin) -> str:
+    item = plugin.iface.messageBar().currentItem()
+    return item.text() if item is not None else ""
+
+
+def _layers_of(fid):
+    return [
+        lyr
+        for lyr in QgsProject.instance().mapLayers().values()
+        if lyr.customProperty(PROP_FEATURE) == fid
+    ]
+
+
+def _rows(dock):
+    return [
+        [dock.table.item(r, c).text() for c in range(dock.table.columnCount())]
+        for r in range(dock.table.rowCount())
+    ]
+
+
+def _made(plugin, name="Bowl", build=True, **settings):
+    """A surface of the four picks, built when asked (strength 0: synthetic data)."""
+    settings.setdefault("strength", 0.0)
+    record = plugin.surfaces.create(name, plugin.pick_fids, SurfaceSettings(**settings))
+    if build:
+        plugin.build_surfaces([record.feature_id])
+    QCoreApplication.processEvents()
+    plugin.surfaces_dock.refresh()
+    return record
+
+
+def test_the_panels_menu_lists_surfaces(surface_plugin):
+    plugin = surface_plugin
+    entries = [a.text() for a in plugin.panels_menu.actions() if a.text()]
+    assert "Surfaces" in entries
+    entry = next(a for a in plugin.panels_menu.actions() if a.text() == "Surfaces")
+    assert entry.isCheckable() and plugin.surfaces_dock in plugin.docks
+    assert plugin.surfaces_dock.windowTitle() == "nsgeo Surfaces"
+
+
+def test_the_panel_is_tabbed_with_slices(surface_plugin, fake_iface):
+    plugin = surface_plugin
+    main = fake_iface.mainWindow()
+    main.resize(1400, 900)
+    main.show()
+    try:
+        deadline = 200
+        while plugin.surfaces_dock not in main.tabifiedDockWidgets(plugin.slices_dock):
+            QCoreApplication.processEvents()
+            deadline -= 1
+            assert deadline, "Surfaces never joined Slices's tab group"
+    finally:
+        main.close()
+
+
+def test_the_panel_lists_surfaces_with_fit_and_state(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    assert dock.table.rowCount() == 0
+    fresh = _made(plugin, build=False)
+    dock.refresh()
+    assert _rows(dock) == [["Bowl", "Grid A", "4", "", "not built"]]
+    plugin.build_surfaces([fresh.feature_id])
+    row = _rows(dock)[0]
+    report = plugin.surfaces.state(fresh.feature_id).report
+    within = report["fit"]["within_2cm"]
+    assert row == ["Bowl", "Grid A", "4", f"{within}/4", ""]
+    assert dock.grid_combo.itemText(0) == ALL_GRIDS and dock.grid_combo.count() == 2
+    # the grid filter narrows the list
+    dock.grid_combo.setCurrentText("Grid A")
+    assert dock.table.rowCount() == 1
+    dock.grid_combo.setCurrentIndex(0)
+    assert dock.table.rowCount() == 1
+    # the contents scroll
+    assert isinstance(dock.widget(), QScrollArea) and dock.widget().widgetResizable()
+
+
+def test_the_selected_surface_shows_its_fit_and_settings(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    record = _made(plugin, window_m=0.035)
+    assert dock.details.isHidden()
+    dock.table.selectRow(0)
+    assert not dock.details.isHidden() and dock.details.title() == "Bowl"
+    assert dock.form.window_spin.value() == 3.5
+    labels = [dock.fit_form.itemAt(i, dock.fit_form.ItemRole.LabelRole) for i in range(4)]
+    assert [w.widget().text() for w in labels] == ["Picks", "Offset", "Cover", "Built"]
+    assert dock.stale_label.isHidden()
+    assert record.feature_id in dock.selected_ids()
+
+
+def test_changing_a_setting_marks_it_stale_and_rebuild_clears_it(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    record = _made(plugin)
+    dock.table.selectRow(0)
+    first_build = plugin.surfaces.state(record.feature_id).report["files"]["npz"]
+    dock.form.smoothing_spin.setValue(0.25)  # saved at once
+    assert plugin.surfaces.records()[0].settings.smoothing_m == 0.25
+    QCoreApplication.processEvents()
+    assert _rows(dock)[0][4] == "stale"
+    assert dock.stale_label.text().startswith("Stale: its settings changed")
+    assert not dock.stale_label.isHidden()
+    assert dock.table.selectedItems()  # the selection survived the refresh
+    dock.rebuild_button.click()
+    QCoreApplication.processEvents()
+    assert _rows(dock)[0][4] == ""
+    assert plugin.surfaces.state(record.feature_id).report["files"]["npz"] != first_build
+    assert plugin.surfaces.state(record.feature_id).stale == ()
+    assert [lyr.name() for lyr in _layers_of(record.feature_id)] == ["Bowl"]
+
+
+def test_rebuild_with_surfaces_on_two_grids_builds_each_in_turn(surface_plugin, monkeypatch):
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.session import Pick
+    from plugin_testing import synthetic_dzt
+
+    plugin = surface_plugin
+    session = plugin.session
+    root = session.root
+    session.add_grid(Grid("Grid B", (20.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    extra = []
+    for i in range(2):
+        path = synthetic_dzt(root.parent / "raw", f"FILE__01{i}.DZT", n_traces=60)
+        extra.append(Line.open(path, GridPlacement("Grid B", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(extra)
+    keys = [
+        k for k in list(session.keys()) if session.line_for_key(k).placement.grid_id == "Grid B"
+    ]
+    before = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    for key, trace, time_ns in [(keys[0], 5, 10.0), (keys[0], 55, 11.0), (keys[1], 5, 10.5)]:
+        plugin.layers.write_pick(
+            Pick(key, trace, time_ns, None, None, None, "", "", "2026-11-13T00:00:00+00:00", None)
+        )
+    fids_b = sorted(
+        {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()} - before
+    )
+    a = _made(plugin, "A", build=False)
+    b = plugin.surfaces.create("B", fids_b, SurfaceSettings(strength=0.0))
+    calls = []
+    real = plugin.surfaces.build
+
+    def spy(ids, *, progress):
+        calls.append(list(ids))
+        return real(ids, progress=progress)
+
+    monkeypatch.setattr(plugin.surfaces, "build", spy)
+    plugin.surfaces_dock.refresh()
+    plugin.surfaces_dock.table.selectAll()
+    plugin.surfaces_dock.rebuild_button.click()
+    assert sorted(calls) == sorted([[a.feature_id], [b.feature_id]])  # one grid's at a time
+    assert all(plugin.surfaces.state(r.feature_id).built for r in (a, b))
+    assert len(_layers_of(a.feature_id)) == 1 and len(_layers_of(b.feature_id)) == 1
+
+
+def test_clicking_an_outlier_selects_its_pick_and_opens_its_line(surface_plugin, monkeypatch):
+    plugin = surface_plugin
+    # The map link also follows a selection to its line; hold the selection back so that what
+    # opens the line and the trace here is the panel itself.
+    selected = []
+    monkeypatch.setattr(plugin.layers, "select_picks", selected.append)
+    dock = plugin.surfaces_dock
+    session = plugin.session
+    record = _made(plugin, strength=1e9)  # every pick sits on a hole: all four are outliers
+    dock.table.selectRow(0)
+    assert dock.outlier_list.count() == 4
+    outlier = plugin.surfaces.state(record.feature_id).report["outliers"][2]
+    session.open_line(next(k for k in list(session.keys()) if k != outlier["line_key"]))
+    assert session.current_key != outlier["line_key"]
+    assert dock.outlier_list.item(2).text().endswith("on a hole")
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(2))
+    (row,) = [
+        r
+        for r in plugin.surfaces.members(record.feature_id)
+        if r.pick.line_key == outlier["line_key"] and r.pick.trace == outlier["trace"]
+    ]
+    assert selected == [[row.fid]]
+    assert session.current_key == outlier["line_key"]
+    assert session.current_trace == outlier["trace"]
+
+
+def test_an_outlier_on_a_line_that_left_the_site_is_only_selected(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    session = plugin.session
+    record = _made(plugin, strength=1e9)
+    dock.table.selectRow(0)
+    outliers = plugin.surfaces.state(record.feature_id).report["outliers"]
+    gone = outliers[0]["line_key"]
+    other = next(k for k in list(session.keys()) if k != gone)
+    session.open_line(other)
+    session.remove_lines([gone])
+    QCoreApplication.processEvents()
+    dock.refresh()
+    dock.table.selectRow(0)
+    index = next(i for i, o in enumerate(dock._outliers) if o["line_key"] == gone)
+    dock.outlier_list.itemClicked.emit(dock.outlier_list.item(index))
+    assert gone not in list(session.keys())
+    assert session.current_key == other  # its line is gone: nothing was opened
+    assert len(plugin.layers.selected_pick_ids()) == 1  # but the pick is selected
+
+
+def test_select_its_picks_and_add_and_remove_selected(surface_plugin):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    fids = plugin.pick_fids
+    record = plugin.surfaces.create("Bowl", fids[:3], SurfaceSettings(strength=0.0))
+    dock.refresh()
+    dock.table.selectRow(0)
+    dock.select_button.click()
+    assert plugin.layers.selected_pick_ids() == sorted(fids[:3])
+    plugin.layers.select_picks([fids[3]])
+    dock.add_button.click()
+    assert sorted(r.fid for r in plugin.surfaces.members(record.feature_id)) == sorted(fids)
+    plugin.layers.select_picks([fids[0]])
+    dock.remove_button.click()
+    assert sorted(r.fid for r in plugin.surfaces.members(record.feature_id)) == sorted(fids[1:])
+    # a refusal is shown, not raised: three picks is the least a surface may keep
+    plugin.layers.select_picks([fids[1]])
+    dock.remove_button.click()
+    assert "at least 3 picks" in _shown(plugin)
+    assert len(plugin.surfaces.members(record.feature_id)) == 3
+
+
+def test_delete_asks_first_and_keeps_the_picks(surface_plugin, answer_modal):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    record = _made(plugin)
+    dock.table.selectRow(0)
+    asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    dock.delete_button.click()
+    assert len(asked) == 1
+    assert "Delete “Bowl”? Its 4 picks stay" in asked[0][0][2]
+    assert [r.name for r in plugin.surfaces.records()] == ["Bowl"]  # declined: kept
+    folder = plugin.surfaces.folder("Grid A")
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    dock.delete_button.click()
+    QCoreApplication.processEvents()
+    assert plugin.surfaces.records() == []
+    assert dock.table.rowCount() == 0
+    saved = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    assert set(plugin.pick_fids) <= saved  # the picks all stay
+    assert _layers_of(record.feature_id) == []
+    assert not [p for p in folder.glob(f"{record.feature_id}*")]
+
+
+def test_rename_refuses_a_taken_name(surface_plugin, answer_modal):
+    plugin = surface_plugin
+    dock = plugin.surfaces_dock
+    plugin.surfaces.create("Bowl", plugin.pick_fids[:3], SurfaceSettings())
+    other = plugin.surfaces.create("Ridge", plugin.pick_fids, SurfaceSettings())
+    dock.refresh()
+    ridge_row = [r[0] for r in _rows(dock)].index("Ridge")
+    dock.table.selectRow(ridge_row)
+    answer_modal(QInputDialog, "getText", (" bowl ", True))
+    dock.rename_button.click()
+    assert "already exists" in _shown(plugin)
+    assert {r.name for r in plugin.surfaces.records()} == {"Bowl", "Ridge"}
+    answer_modal(QInputDialog, "getText", ("Crest", True))
+    dock.rename_button.click()
+    QCoreApplication.processEvents()
+    assert {r.name for r in plugin.surfaces.records()} == {"Bowl", "Crest"}
+    assert other.feature_id in dock.selected_ids()  # still the selected row
+
+
+def test_the_export_includes_surfaces_from_the_plugin(surface_plugin, drive_dialog, monkeypatch):
+    from nsgeo_qgis import plugin as plugin_module
+    from nsgeo_qgis.ui.paraview_dialog import ParaViewExportDialog
+    from qgis.PyQt.QtWidgets import QDialog
+
+    plugin = surface_plugin
+    record = _made(plugin)
+    seen = {}
+    real = plugin_module.ParaViewExport
+
+    def spy(session, dock, surfaces=None):
+        export = real(session, dock, surfaces)
+        seen["export"] = export
+        return export
+
+    monkeypatch.setattr(plugin_module, "ParaViewExport", spy)
+
+    def driver(dialog):
+        assert isinstance(dialog, ParaViewExportDialog)
+        dialog.accept()
+
+    drive_dialog(QDialog, "exec", driver)
+    plugin.export_paraview()
+    export = seen["export"]
+    assert export.surfaces is plugin.surfaces and export.skipped_surfaces == []
+    message = _shown(plugin)
+    assert message.startswith("Exported Grid A for ParaView to ")
+    folder = Path(message.split(" to ", 1)[1].split(". ")[0].rstrip("."))
+    record_json = json.loads((folder / "export.json").read_text())
+    assert [f["name"] for f in record_json["features"]] == [record.name]
+    assert read_vtk_xml(folder / "features.vtp")["NumberOfPoints"] > 0
+
+
+def test_an_export_names_the_surfaces_it_left_out(surface_plugin, drive_dialog, monkeypatch):
+    from nsgeo_qgis import plugin as plugin_module
+    from qgis.PyQt.QtWidgets import QDialog
+
+    plugin = surface_plugin
+    _made(plugin)
+    real = plugin_module.ParaViewExport
+
+    def leaving(session, dock, surfaces=None):
+        export = real(session, dock, surfaces)
+        inner = export.run
+
+        def run(*a, **k):
+            folder = inner(*a, **k)
+            export.skipped_surfaces = ["Bowl"]
+            return folder
+
+        export.run = run
+        return export
+
+    monkeypatch.setattr(plugin_module, "ParaViewExport", leaving)
+    drive_dialog(QDialog, "exec", lambda dialog: dialog.accept())
+    plugin.export_paraview()
+    assert "“Bowl” was left out" in _shown(plugin)
+
+
+def test_unloading_disposes_the_surface_layers_and_the_panel(surface_plugin):
+    plugin = surface_plugin
+    record = _made(plugin)
+    assert len(_layers_of(record.feature_id)) == 1
+    plugin.unload()
+    assert plugin.surfaces is None and plugin.surface_layers is None
+    assert plugin.surfaces_dock is None
+    assert _layers_of(record.feature_id) == []

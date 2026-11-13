@@ -10,7 +10,7 @@ backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do no
 need to install anything else.
 
 1. [Install](#1-install)
-2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
+2. [The toolbar and the panels](#2-the-toolbar-and-the-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
 5. [Known issues in 0.4.0](#5-known-issues-in-040)
@@ -94,7 +94,7 @@ stay exactly where they are.
 
 ---
 
-## 2. The toolbar and the four panels
+## 2. The toolbar and the panels
 
 ### The nsgeo toolbar
 
@@ -108,14 +108,15 @@ stay exactly where they are.
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
+| **Surface from picks…** | Makes a surface from the picks you have selected on the map (see [Making a surface from picks](#making-a-surface-from-picks)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
-site is open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…**, **Cut** and **Surface from picks…**
+stay greyed out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
-QGIS docks the four panels around the map. You can drag, float or close them like
+QGIS docks the nsgeo panels around the map. You can drag, float or close them like
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
@@ -145,16 +146,18 @@ any other QGIS panel.
   **Presets**.
 - **nsgeo Slices** (right) builds time and depth slices across a grid. The first
   time nsgeo starts, it sits as a tab behind **nsgeo Processing**.
+- **nsgeo Surfaces** (right) lists the surfaces you have made from picks, and
+  shows how well each one fits. It sits as a tab beside **nsgeo Slices**.
 
 **Panels ▾** on the nsgeo toolbar ticks each panel that is open, including one
 sitting behind another tab. Tick a panel to bring it back in front, or untick it
 to close it. Below the ticks are three layouts:
 
 - **Profile work** keeps **nsgeo Survey** and **nsgeo Profile**, and closes
-  Processing and Slices.
-- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile
-  and Processing.
-- **Show all** opens all four again.
+  Processing, Slices and Surfaces.
+- **Slices work** keeps **nsgeo Survey** and **nsgeo Slices**, and closes Profile,
+  Processing and Surfaces.
+- **Show all** opens all five again.
 
 A layout only opens and closes panels: each one comes back at the size and in
 the place you left it, and QGIS's own panels are left alone. **View → Panels**
@@ -736,6 +739,50 @@ reflection can be squeezed twice, once by the gain and once by the balance.
 To calibrate, export once with your usual preset and once with a lighter-gain
 preset, and compare the two at the isosurface value 2.5.
 
+### Making a surface from picks
+
+A surface follows one reflection across a grid. You mark where the reflection is
+with picks, and nsgeo draws a surface through them that stays on the reflection
+and leaves holes where the radar saw nothing. A surface shows on the map coloured
+by depth, goes into the next ParaView export (Step 9), and stays listed in the
+**nsgeo Surfaces** panel.
+
+**Pick only where the reflection is clear, and the same part of the wave each
+time.** A surface is only as good as its picks: pick the same peak or trough on
+every line, and leave a line out where you cannot tell. Picks on one grid only.
+Picks on cuts cannot be used yet.
+
+1. Make the **picks** layer current in QGIS and select picks with QGIS's own
+   Select tool: a box, a polygon, or by expression. At least three, not all in a
+   straight line, and saved (an unsaved pick is refused until you save the picks
+   layer's edits).
+2. Click **Surface from picks…**. Name the surface. **Settings** are folded away
+   and show their values; open them only to change how the surface is drawn
+   between your picks, how far it may follow the reflection from a pick (the
+   window), or the strength test that decides which cells are holes.
+   A pick belongs to at most one surface, so picks already in another surface move
+   to this one, and the dialog says so before anything changes.
+3. Click **Create and build**. It builds at the grid's 3-D resolution, the one its
+   ParaView export uses. If the grid was exported at those settings the build
+   takes seconds; otherwise the first one fills the grid, which takes longer.
+   Cancelling keeps the previous build.
+4. **Read the fit.** Select the surface in the **nsgeo Surfaces** panel. **Fit,
+   last build** says how many picks lie within 2 cm of the surface, how many are on
+   holes, and where your picks sit against the strongest swing of the wave. The
+   list under it names the picks that are more than the window from the surface.
+   Click one to select it on the map and open its line in the Profile panel, at
+   that pick: you can see whether it sits on the wrong reflection.
+5. **Rebuild after changes.** Changing a surface's picks, its settings, or the
+   grid's processing, lines, 3-D cell or velocity makes it **stale**: the map and
+   the next export keep showing the last build, and the panel says what changed.
+   Nothing rebuilds by itself, so a scene never changes in the middle of showing it.
+   Select the surface (or several) and click **Rebuild**. Browsing slices never
+   makes a surface stale.
+
+**Select its picks**, **Add selected picks** and **Remove selected picks** change
+which picks a surface holds. **Rename…** and **Delete…** are beside the list;
+deleting a surface never deletes a pick.
+
 ### Step 10: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
@@ -751,7 +798,8 @@ Everything for a site lives in its site folder:
 | In the site folder | What it holds |
 |---|---|
 | `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**, and the list of your surfaces. |
+| `surfaces` | One folder per grid with each surface's last build: a mesh, its depths and a fit report. Regenerable: **Rebuild** writes them again. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | `paraview` | One folder per grid for ParaView (Step 9), and a `.cache` of the fill that makes a second export quick. Safe to delete; **ParaView…** writes it again. |
 | your DZT files | Read by nsgeo, never changed. |
@@ -761,6 +809,11 @@ cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
 whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
+
+**Surfaces are saved as you go**, like picks: each surface's name, settings and
+picks are written to `site.nsgeo.gpkg` the moment you change them, with no need to
+**Save site**. The built surfaces and the exports are regenerable files in the
+site folder (`surfaces` and `paraview`), so deleting them loses nothing.
 
 A few things to know:
 

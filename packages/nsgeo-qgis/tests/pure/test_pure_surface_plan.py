@@ -235,3 +235,47 @@ def test_the_mesh_files():
         and dat[7:-1] == ["0.50000", "0.60000", "0.55000"]
     )
     assert mesh_2dm(np.empty((0, 2)), np.empty(0), np.empty((0, 3), dtype=int)) == "MESH2D\n"
+
+
+def test_the_dialog_and_panel_wording():
+    from nsgeo_qgis.surface_plan import (
+        build_outcome,
+        fit_short,
+        selection_label,
+        settings_summary,
+        skipped_surfaces_text,
+        state_text,
+        write_failure_text,
+    )
+
+    assert selection_label(0, None, []) == "No picks selected."
+    assert selection_label(1, "1", ["F__001"]) == "1 pick selected, on Grid 1 (line F__001)."
+    assert selection_label(88, "1", ["F__020", "F__033", "F__025"]) == (
+        "88 picks selected, all on Grid 1 (lines F__020 to F__033)."
+    )
+    assert selection_label(5, None, []) == "5 picks selected."
+    assert settings_summary(SurfaceSettings()) == (
+        "smooth join · window ±2 cm · strength 1.0 × typical · no smoothing"
+    )
+    assert settings_summary(SurfaceSettings(join="idw", window_m=0.035, smoothing_m=0.5)) == (
+        "inverse-distance join · window ±3.5 cm · strength 1.0 × typical · smoothing 0.50 m"
+    )
+    assert state_text(False, ()) == "not built"
+    assert state_text(True, ()) == ""
+    assert state_text(True, ("picks",)) == "stale"
+    assert fit_short(None) == ""
+    assert fit_short({"fit": {"within_2cm": 80, "picks": 84}}) == "80/84"
+    assert "database is locked" not in write_failure_text("could not write: database is locked")
+    assert "Save the picks layer" in write_failure_text("could not write: database is locked")
+    assert write_failure_text("disk full") == "disk full"
+    assert skipped_surfaces_text([]) == ""
+    assert "“Bowl”" in skipped_surfaces_text(["Bowl"]) and "left out" in skipped_surfaces_text(
+        ["Bowl"]
+    )
+    good = {"fit": {"picks": 4, "within_2cm": 4, "on_holes": 0}, "offset_votes": 4, "cells": 9}
+    text, warn = build_outcome("Bowl", good)
+    assert text.startswith("Built “Bowl”") and not warn
+    assert build_outcome("Bowl", {**good, "cells": 0}) == (empty_message("Bowl"), True)
+    assert build_outcome("Bowl", {**good, "offset_reliable": False})[1]
+    assert build_outcome("Bowl", {**good, "skipped": [{"why": "x"}]})[1]
+    assert build_outcome("Bowl", {**good, "fit": {**good["fit"], "at_edge": 1}})[1]

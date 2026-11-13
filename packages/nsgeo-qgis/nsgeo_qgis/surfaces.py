@@ -592,7 +592,7 @@ class Surfaces:
         del vol, got
         return choice, out
 
-    def _label(self, key: str) -> str:
+    def line_label(self, key: str) -> str:
         line = self.session.line_for_key(key)
         return str(getattr(line.placement, "label", None) or line.path.stem)
 
@@ -653,8 +653,9 @@ class Surfaces:
             outliers.append(
                 {
                     "line_key": spot.line_key,
-                    "label": self._label(spot.line_key),
+                    "label": self.line_label(spot.line_key),
                     "distance_m": pick.distance_m,
+                    "trace": pick.trace,
                     "picked_m": o.picked_m,
                     "surface_m": o.surface_m,
                     "reason": o.reason,

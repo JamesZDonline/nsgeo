@@ -606,3 +606,62 @@ def built_site(synth_site):
     yield session, dock, export, layers, surfaces
     layers.detach()
     project.clear()
+
+
+@pytest.fixture
+def surface_plugin(fake_iface, tmp_path, answer_modal):
+    """The plugin over a synthetic site (two lines on `Grid A`, a preset `p`) with four saved
+    picks on its picks layer, none in a surface. Yields the plugin; `plugin.pick_fids` lists
+    the picks' fids in the order `PICKS` gives them."""
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.plugin import NsgeoPlugin
+    from nsgeo_qgis.session import Pick
+    from plugin_testing import GRID, STEPS_ZERO, synthetic_dzt
+    from qgis.core import QgsProject, QgsSettings
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    QgsProject.instance().clear()
+    QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+    QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
+    plugin = NsgeoPlugin(fake_iface)
+    plugin.initGui()
+    session = plugin.session
+    folder = tmp_path / "my site"
+    folder.mkdir()
+    session.new_site(folder)
+    session.add_grid(GRID)
+    lines = []
+    for i in range(2):
+        path = synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        lines.append(Line.open(path, GridPlacement("Grid A", "y", 0.5 + i, 0.0, 1, path.stem)))
+    session.add_lines(lines)
+    session.site.presets["p"] = list(STEPS_ZERO)
+    keys = session.keys()
+    before = {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()}
+    for line, trace, time_ns in [(0, 5, 10.0), (0, 55, 11.0), (1, 5, 10.5), (1, 55, 11.5)]:
+        plugin.layers.write_pick(
+            Pick(
+                line_key=keys[line],
+                trace=trace,
+                time_ns=time_ns,
+                distance_m=None,
+                depth_m=None,
+                velocity_m_ns=None,
+                stack_json="",
+                note="",
+                created="2026-11-13T00:00:00+00:00",
+                zero_ns=None,
+            )
+        )
+    plugin.pick_fids = sorted(
+        {f.id() for f in plugin.layers.layers["picks"].dataProvider().getFeatures()} - before
+    )
+    try:
+        yield plugin
+    finally:
+        plugin.unload()
+        QgsProject.instance().clear()
+        QgsSettings().setValue("nsgeo/slicesDockTabified", False)
+        QgsSettings().setValue("nsgeo/surfacesDockTabified", False)
