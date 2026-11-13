@@ -104,12 +104,21 @@ several grids' slices into one site view.
 | `CurvaturePlan` | Where minimum curvature solves and its operator; solves any slice's values. |
 | `FillWeights` | Where to fill and from which neighbours, with weights; applied to any slice's values. |
 | `FinishSettings` | How a slice is finished: interpolation method and distances, then smoothing. |
+| `FIT_CLOSE_M` | How near a pick must sit to the surface to count as fitting: 2 cm. |
+| `FIT_NEAR_M` | The looser fit distance, 5 cm. |
 | `Footprint` | Where one grid lands on a site lattice: a window, and the bilinear taps of its pixels. |
+| `HULL_MARGIN_M` | How far past the picks' convex hull a surface may reach: 0.3 m. |
+| `IDW_MIN_DISTANCE_M` | The nearest distance inverse-distance joining uses, 5 cm, so a pick does not spike. |
+| `JOIN_REACH_M` | How far from a pick the minimum-curvature join reaches: 2 m. |
+| `JOINS` | The ways picks can be joined into a guide: `min_curvature`, `idw`. |
+| `JUMP_M` | The depth step between neighbouring cells above which a surface mesh does not join them: 6 cm. |
 | `LinePlan` | Everything about one line that does not change when the window moves. |
 | `METHODS` | The interpolation methods: none, IDW, kriging, minimum curvature. |
 | `MIN_SEAM_CELLS` | Populated cells a seam needs on each side. |
 | `NEIGHBOURS_PER_QUADRANT` | How many nearest data cells each of the four quadrants contributes to a fill. |
 | `NORMALISATION_METHODS` | The method names `normalise` accepts. |
+| `OFFSET_SEARCH_M` | How far from a pick the strongest swing is sought when measuring the offset: 5 cm. |
+| `Outlier` | A pick the surface does not honour: on a hole, or further than the window. |
 | `PreparedLine` | One line, processed and transformed, ready to bin. |
 | `PreparedVolume` | A cube turned into one body per reflection: the depth trend and geometry, with strength on demand by depth slab. |
 | `Provenance` | What a reader needs to trust a cube. |
@@ -125,6 +134,9 @@ several grids' slices into one site view.
 | `SliceFill` | A planned fill, whichever method built it: what finishing a slice needs. |
 | `SliceWindow` | A half-open level range, the unit a slice is cut from. |
 | `SolveStopped` | A minimum-curvature solve gave up because it was asked to stop. |
+| `Surface` | A built surface: depth, strength, the joined-picks guide, the region, the offset and the fit. |
+| `SurfaceFit` | How a surface sits against its picks: counts within 2 cm, within 5 cm, further and on holes, and the outliers. |
+| `SurfaceSettings` | How a surface is built: the join, the tracking window, the strength test and the smoothing. |
 | `Taps` | Where world points sit among a frame's cells: nearest cell and bilinear weights. |
 | `VolumeSettings` | How a volume is prepared: the RMS wave period, the sideways blur and the depth-trend window. |
 | `VolumeStopped` | Preparing a volume gave up because its progress callback asked it to stop. |
@@ -132,6 +144,7 @@ several grids' slices into one site view.
 | `background_level` | The mean of the weakest `|values|` over populated cells. |
 | `bilinear_taps` | The taps of world points on a frame, for blending the four cells around each. |
 | `build_cube` | Bin every line into a resident cube. |
+| `build_surface` | Follow the reflection a set of picks names, leave holes where it fades, and report the fit. |
 | `compose_footprints` | Sample each grid over its own footprint and average the overlaps. |
 | `covered_cells` | How many distinct in-frame cells the lines fall in; the size of a packed cube. |
 | `covered_pixels` | About how many lattice pixels the grids' windows hold together at a pixel size. |
@@ -152,6 +165,7 @@ several grids' slices into one site view.
 | `max_pool_counts` | Each count becomes the largest within a reach, so a preview pixel cannot skip a one-cell line. |
 | `normalise` | An affine gain and offset per grid, by a named method, with any manual multiplier folded in. |
 | `npz_path` | Normalise a path to the `.npz` name the store writes. |
+| `picks_span_an_area` | Whether picks are enough to join: at least three, not all on one line. |
 | `plan_curvature` | Plan a minimum-curvature solve near the data, within a max distance of it. |
 | `plan_fill` | Plan the interpolation of empty cells within a max distance of data. |
 | `plan_line` | Precompute the resampling and grouping for one line. |
@@ -174,6 +188,8 @@ several grids' slices into one site view.
 | `solve_section_level_whole` | One level solved by minimum curvature on the whole frame and read along a cut's columns. |
 | `stretching_grids` | The grids whose omission alone lets the site draw at full detail under both size limits. |
 | `stream_slice` | One slice, binned straight from the lines, holding no cube. |
+| `surface_mesh` | Points, triangles and flat cell ids of a surface's kept cells, never joining cells that jump in depth. |
+| `surface_volume` | `prepare_volume` without the sideways blur, the volume a surface is built on. |
 | `to_north_up` | Resample a grid-local slice into a north-up raster, bilinear at the cell size. |
 | `uses_crops` | Whether a section's max distance is small enough for its minimum curvature to be solved on crops. |
 | `window_depths_m` | A window in metres, through a velocity model. |

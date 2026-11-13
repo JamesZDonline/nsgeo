@@ -185,6 +185,31 @@ class PreparedVolume:
             out[j] = lo if frac[j] == 0.0 else (1.0 - frac[j]) * lo + frac[j] * rms[low[j] + 1 - a]
         return out
 
+    def swing(self, j0: int, j1: int) -> np.ndarray:
+        """The filled squared amplitude on the depth axis, levels `j0..j1`, float32.
+
+        `(j1 - j0, ny, nx)`. It is read between source levels as `slab` reads
+        them, but straight from `filled`: no RMS over a wave period and no
+        blur, so each reflection keeps its separate half-cycles. NaN off
+        `covered`.
+        """
+        nd = self.depths_m.size
+        if not 0 <= j0 < j1 <= nd:
+            raise ValueError(f"swing must satisfy 0 <= j0 < j1 <= {nd}, got {j0}, {j1}")
+        src = self.source_level[j0:j1]
+        low = np.floor(src).astype(int)
+        frac = src - low
+        out = np.empty((j1 - j0,) + self.covered.shape, dtype=np.float32)
+        for j in range(j1 - j0):
+            level = np.asarray(self.filled[low[j]], dtype=np.float64)
+            if frac[j] != 0.0:
+                level = (1.0 - frac[j]) * level + frac[j] * np.asarray(
+                    self.filled[low[j] + 1], dtype=np.float64
+                )
+            out[j] = level
+        out[:, ~self.covered] = np.nan
+        return out
+
     def slab(self, j0: int, j1: int) -> tuple[np.ndarray, np.ndarray]:
         """`(amplitude, strength)` for depth levels `j0..j1`, each `(j1 - j0, ny, nx)` float32.
 
