@@ -95,6 +95,9 @@ every fit.
    feels in the walkthrough.
 7. **A saved fit keeps only its dots, as before.** It records nothing about being traced, the
    box or the edge rule.
+8. **The real-data tests use the author's own saved hand fits** (§10). Those are hyperbolas the
+   author picked out themselves, each with their hand dots. The tests read them locally and
+   commit nothing from those sites.
 
 ## 4. The tracer (core)
 
@@ -129,9 +132,14 @@ pin the outcomes (§10).
 ### 4.2 Mark the edge on each trace
 
 On each trace in the box, look at the reflection band near the chosen curve, within about one
-wavelet period. The edge is where the signal first reaches **0.2** of that trace's peak in the
-band. It is read between samples by linear interpolation. 0.2 is the Time zero step's fraction,
-so the two offsets cancel *(my call)*.
+wavelet period. The edge is where the signal first reaches a set fraction of that trace's peak in
+the band. It is read between samples by linear interpolation.
+
+**The fraction is the line's own Time zero fraction,** so the two offsets cancel *(my call)*. The
+panel reads it from the working stack's enabled `time_zero` step in `first_break` mode (its
+`threshold` parameter). With no such step, or in `sample` mode, the fraction is **0.2**, the
+step's default, and §6's note says why the offsets may not cancel. The tracer takes the fraction
+as a parameter.
 
 Two traps the rule must avoid:
 - **a zero crossing inside the band**, which would put the edge on a later lobe and bias the
@@ -232,6 +240,15 @@ Times convert to the radar clock with `retime_ns`, exactly as a clicked dot's do
 **A refusal or a failed trace leaves the working dots as they were** *(my call: a box never
 destroys dots without giving new ones)*. The reason shows in the note.
 
+**When the clocks may not match, it traces anyway and says so** *(my call)*:
+- **With no Time zero step,** times run from the radar's own zero. The strip already shows the
+  radar-clock note for hand dots (`radar_clock_note`), and a traced fit gets the same note.
+- **In Time zero's `sample` mode,** 0 ns sits wherever the author chose, so it may not be the
+  first break. The note says that time zero was set at a sample, so the traced edge may not
+  line up with it.
+
+Hand dots carry the same risk today, so this is a note, not a refusal.
+
 ## 7. The Ctrl/Cmd shortcut (plugin)
 
 When the view asks for velocity mode, the plugin checks `act_velocity`. Its existing toggle turns
@@ -292,14 +309,43 @@ walkthrough.
   - **Uneven trace spacing:** still traced correctly.
   - **At most about 10 dots**, apex-nearest first.
 
-**Core tests on real data, local only** (the DZTs are gitignored, so CI skips these).
-- Process with #125's recipe: `time_zero`, `dewow`, `background_mean`.
-- Use #125's candidates: FILE__003 near trace 283 at about 15.6 ns, FILE__006 near trace 544,
-  and FILE__008 near trace 370.
-- **Repeatability:** three boxes about 20% different in size and position give velocities that
-  agree pairwise within their combined σ.
-- **Plausibility:** the velocities fall within 0.04–0.15 m/ns.
-- **Speed:** the largest box is timed (§4.5).
+**Core tests on real data, local only.** These use the author's saved hand fits (decision 8).
+CI has no such data and skips them.
+
+**The source.** There are 22 distinct saved fits:
+- 13 at Nashville City Cemetery 2023, Grids 2 and 7, in
+  `~/nsgeo-m4-check/Nashville_City_Cemetery (Copy)/survey.nsgeo.json` (schema 3). The
+  non-copy file holds 9 of the same fits.
+- 9 at Sunnyside 2023, Grids 1, 7 and 9, in `~/nsgeo-m4-check/Sunnyside/survey.nsgeo.json`.
+
+The fits run from 0.044 to 0.106 m/ns, with 4–9 dots each. The DZTs are under
+`/mnt/DataStorage/VISR/`.
+
+**The test data.** A small script builds a gitignored folder under `tests/data/local/` in the
+pattern of `GRID2_LINES` (`tests/real_data.py`):
+- links to the DZTs;
+- a manifest listing each fit's line, its processing stack as saved, its dots, its v and σ, and
+  its `zero_ns`.
+
+Key the manifest by path, never by file stem: both sites reuse names like `FILE__003.DZT` (#141).
+Nothing from these sites is committed: not the manifest, the dots or the numbers.
+
+**For each fit:**
+1. Rebuild the line's saved stack.
+2. Box the hand dots' extent, with a margin.
+3. Trace.
+4. Fit the traced dots and the hand dots at the same zero (`fit_at_zero`).
+- **Agreement:** |v_traced − v_hand| ≤ 2·√(σ_traced² + σ_hand²).
+- **Repeatability:** three boxes about 20% different in margin and offset agree pairwise by the
+  same rule.
+- **Speed:** the largest of these boxes is timed (§4.5).
+
+**When a traced fit disagrees with the hand fit,** the builder lists it in the ledger and the
+walkthrough, and the author looks at it. The author rules either "my hand fit was off", which is
+recorded in the manifest so the test skips that comparison and names why, or "the tracer is
+wrong", which is a bug to fix. Until the author rules, the test marks it as a strict expected
+failure that names it. **Never tune the tracer just to make a disagreement pass.** A fit the
+tracer cannot trace at all is listed the same way.
 
 **Plugin tests (QGIS tier).** Use real `QTest` mouse events, not calls to the handlers.
 - A drag in velocity mode emits the box. A wobble shorter than the drag distance places a dot.
@@ -332,7 +378,17 @@ walkthrough.
 7. **On a Mac, if one is available:** Cmd+click and Cmd+drag. If none is available, the
    walkthrough and the PR record that it was not checked.
 8. A big box: how long it takes.
-9. Optional, for #125: look at its four candidates and say which are real diffractions.
+9. **Rule on each disagreement** the local tests listed (§10): was the hand fit off, or the
+   tracer?
+10. Optional, for #125: look at its four candidates and say which are real diffractions. They
+    are on the campus lines in `tests/data/local`, after Time zero, Dewow and Background mean:
+
+    | Line | Trace | Time |
+    |---|---|---|
+    | FILE__003 | 283 | 15.6 ns |
+    | FILE__006 | 544 | 14.9 ns |
+    | FILE__008 | 370 | 15.1 ns |
+    | FILE__004 | 577 | 23.3 ns (30 traces from the line's end) |
 
 ## 12. Left to the builder
 
@@ -347,7 +403,8 @@ walkthrough.
 ## 13. Size and order
 
 Three tasks, then the walkthrough:
-1. **The tracer in the core**, test-first, against the real lines and the planted hyperbolas.
+1. **The tracer in the core**, test-first, against the author's saved hand fits and the planted
+   hyperbolas. The local test data is built here too.
 2. **The box:** the gesture in the view, the panel's wiring and refusals, and the plugin tests.
 3. **The Ctrl/Cmd shortcut:** the press order, the plugin's mode switch, the tooltips and the
    guide row.
