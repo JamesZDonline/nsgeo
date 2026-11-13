@@ -949,7 +949,7 @@ class SiteSession(QObject):
 
     def resolved_velocity(self, key: str) -> VelocityModel:
         if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)
-            return self.cut_velocity(self.cut_for_key(key).grid_id)
+            return self.grid_depth_velocity(self.cut_for_key(key).grid_id)
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
 
@@ -1033,12 +1033,12 @@ class SiteSession(QObject):
         self._announce_dropped(*self._reset_cuts([key]))
         self.cuts_changed.emit()
 
-    def cut_velocity(self, grid_id: str) -> VelocityModel:
-        """The velocity every cut on `grid_id` uses (cut spec call 16): the
-        grid's own, else the HEADER velocity of the grid's first line in
-        survey order. That line's own override is ignored: a line override
-        must never move a cut pick. A cut is not a line, so it has none of
-        its own. `KeyError` when the grid has neither."""
+    def grid_depth_velocity(self, grid_id: str) -> VelocityModel:
+        """The velocity every cut and every slice on `grid_id` uses (cut spec
+        call 16; grid velocity spec 10): the grid's own, else the HEADER
+        velocity of the grid's first line in survey order. That line's own
+        override is ignored: a line override must never move a cut pick or a
+        slice's depths. `KeyError` when the grid has neither."""
         grid = self.grid(grid_id)
         if grid.velocity is not None:
             return grid.velocity
@@ -1634,7 +1634,7 @@ class SiteSession(QObject):
         """
         cut = self.cut_for_key(key)
         try:
-            model = self.cut_velocity(cut.grid_id)
+            model = self.grid_depth_velocity(cut.grid_id)
         except KeyError:
             return (None, None)
         times = [time_ns]

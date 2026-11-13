@@ -106,8 +106,8 @@ release's notes list everything in it.
 - **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
   lists every saved fit on the grid's lines, averages the ones you tick, and
   remembers which fits made the grid's velocity. Slices take their depths
-  from the grid's velocity, as cuts already do. Designed, with a five-task
-  plan.
+  from the grid's velocity, as cuts already do. Built; the walkthrough is
+  next.
 
 ### Next, in order
 

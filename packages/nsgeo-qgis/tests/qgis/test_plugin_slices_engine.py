@@ -1457,6 +1457,30 @@ def test_provenance_velocity_is_none_when_all_prepared_lines_removed(sourced):
     assert engine.cube() is not None  # arrays are still there
 
 
+def _override_every_line(session, velocity=0.12):
+    """The hazard input: the grid's first line in survey order, and the first
+    prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def test_slice_provenance_velocity_is_the_grids_not_the_first_lines_override(sourced):
+    engine, session, errors, _ = sourced
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+    assert errors == []
+
+
+def test_slice_provenance_velocity_falls_back_to_the_grids_first_line_header(sourced):
+    engine, session, errors, _ = sourced
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == session.grid_depth_velocity("A").to_dict()
+    assert engine.provenance().velocity != VelocityModel.constant(0.12).to_dict()
+
+
 # ---- M12: the hooks the site engine composes this engine through ----------
 
 

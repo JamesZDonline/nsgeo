@@ -1005,6 +1005,22 @@ def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, o
     assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
 
 
+def test_whole_site_uses_each_grids_velocity(plugin, message_log):
+    session = plugin.session
+    v_a = VelocityModel.constant(0.09)
+    session.set_grid_velocity("A", v_a)
+    # the hazard: every line, first of each grid included, overrides
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(0.12))
+    dock = whole_site(plugin)
+    velocities = dock.site_velocities()
+    assert velocities["A"] == v_a == session.grid_depth_velocity("A")
+    for grid_id in ("B", "C"):
+        assert velocities[grid_id] == session.grid_depth_velocity(grid_id)
+        assert velocities[grid_id] != VelocityModel.constant(0.12)
+    assert message_log == []
+
+
 def test_the_profile_band_follows_the_site_window(plugin):
     dock = whole_site(plugin)
     windows: list[tuple[float, float]] = []

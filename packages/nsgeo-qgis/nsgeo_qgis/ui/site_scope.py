@@ -361,18 +361,16 @@ def readout(z: ZAxis, window: SliceWindow, thickness_levels: int, step_levels: i
 
 
 def grid_velocity(session: Any, engine: Any) -> VelocityModel | None:
-    """A grid's velocity, resolved as M11's `_resolved_velocity` resolves it."""
+    """A grid's depth velocity: the one rule cuts and slices share
+    (`SiteSession.grid_depth_velocity`), never a line's override."""
     if engine is None:
         return None
     try:
-        keys = engine.provenance().line_keys
+        choice = engine.choice
+        if choice is None:
+            return None
+        return session.grid_depth_velocity(choice.grid_id)
     except (RuntimeError, KeyError):
-        return None
-    if not keys:
-        return None
-    try:
-        return session.resolved_velocity(keys[0])
-    except (KeyError, RuntimeError):
         return None
 
 

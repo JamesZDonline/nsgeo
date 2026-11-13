@@ -130,7 +130,7 @@ from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
-from nsgeo_qgis.velocity_records import applied_now, fit_record
+from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
 
 PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
 KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
@@ -231,6 +231,23 @@ def velocity_source(session: SiteSession, key: str) -> str:
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
+
+
+def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
+    """What the Slices panel says a grid's depths come from: "Grid G2" with
+    ", average of 6 fits" or ", fit on FILE__003" when it remembers its fits,
+    else the header dielectric of the grid's first line, named, the line
+    `SiteSession.grid_depth_velocity` takes it from. `KeyError` as that does."""
+    grid = session.grid(grid_id)
+    if grid.velocity is not None:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
+        return f"Grid {grid.id}"
+    keys = session.keys_on_grid(grid_id)
+    if not keys:
+        raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+    line = session.line_for_key(keys[0])
+    return f"header ε {line.header.epsr:g}, {line_label(line)}"
 
 
 class ProfileDock(QgsDockWidget):

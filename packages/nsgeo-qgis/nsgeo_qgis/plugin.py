@@ -1119,7 +1119,7 @@ class NsgeoPlugin:
             self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        _key, velocity = dock._resolved_velocity()
+        _grid_id, velocity = dock._resolved_velocity()
         finish = dock.slice_finish()
         coverage = dock.coverage_check.isChecked()
         z = engine.z
