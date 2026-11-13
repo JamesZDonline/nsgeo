@@ -79,8 +79,10 @@ were throwaway; every number here can be re-derived from the files.
   area is 3.5% holes inside the area, against 0.09% for the same lines placed by tape. They stay
   visible (decision 12).
 
-**What we do not have:** a DZG with float or plain fixes, other NMEA talkers (`$GPGGA`) or
-sentences, a multi-channel DZT with a DZG, or a time-triggered (no wheel) line with a DZG.
+**What we do not have:** other NMEA talkers (`$GPGGA`) or sentences, a multi-channel DZT with a
+DZG, or a time-triggered (no wheel) line with a DZG. *(Updated 2026-11-13: a second GPS survey now
+sits in `tests/data/local/grid2/` — 60 lines, 2,523 fixes, same structure — and it holds the first
+real dropouts, see §15.)*
 
 ---
 
@@ -372,6 +374,9 @@ are in `docs/superpowers/notes/2026-11-06-stagger-spike.md`.
 
 ## 8. Where the code stands
 
+*Written 2026-11-06. Main has moved since; §15 lists what changed and supersedes this section
+where they differ.*
+
 - **`Placement` protocol** with one implementation, `GridPlacement`. `nsgeo/project.py` serialises
   only that.
 - **Grid membership** is `getattr(line.placement, "grid_id", None)` across the plugin (`session.py`
@@ -486,3 +491,43 @@ The delay spike and the builder check raised three questions; the user answered 
 2026-11-06: the along-track correction (decision 10), true-distance profiles (decision 11) and
 gaps in GPS slices (decision 12). The builder check's other two questions became Claude's calls
 C12 (a site-level CRS) and C13 (the outline is #130's perimeter, on any grid).
+
+---
+
+## 15. What main changed before planning (2026-11-13)
+
+Main moved ~300 commits between this design and the M17a plan. What matters here:
+
+- **Line editing is merged** (PR #137, in 0.3.0): Edit lines…, Move to grid ▸ and picks that follow
+  their line through any move or re-import. M17c's dependency is met.
+- **Placement corrections and destagger are merged** (#3 and #47 in PR #160, #159 in PR #168).
+  `GridPlacement` now has `scale` and `travel_shift`; `travel_shift` is metres, moving every trace
+  forward along the line's own direction of travel, stored apart from `start_along`. That is exactly
+  decision 10's model, so **`TrackPlacement` takes a `travel_shift` with the same name and meaning**,
+  and the Survey panel names it "destagger" for both kinds of line. **Measure** in Edit lines
+  (`nsgeo.destagger.measure`) reads `GridPlacement` fields (`axis`, `offset`, `direction`), so it
+  works on grid lines only; extending it to GPS lines in an area is M17c's.
+- **Cuts are merged** (M15, PR #172), with schema 2 for a site with cuts. **Velocity sources** took
+  schema 3 (PR #186). A site with GPS lines therefore saves as **schema 4**.
+- **M19a (magnetometer grids) is built on its own branch, not merged.** It adds `Grid.instrument`
+  (`"gpr"` / `"mag"`), mag files on `Site`, its own schema bump (numbered 3 on its branch, so it must
+  renumber when it meets main), and mag rows in the Survey panel. Whichever of M17a and M19a merges
+  second renumbers its schema constant to the next free number and expects conflicts in
+  `project.py`, `session.py` and `ui/survey_dock.py`. GPS lines never join a mag grid (M17c).
+- **Slices changed underneath** (#113 packed cube, #111 multigrid, #107/#108 whole site at fine
+  cells). M17c's outline mask must be re-checked against the packed cube's covered-cells model when
+  its plan is written.
+- **Real data:** `tests/real_data.py` now lists each survey separately (#141): `GPS_LINES` (this
+  spec's 60 lines) and `GRID2_LINES` (a second 60-line survey from the same site, with DZGs). The
+  second survey holds the first real dropouts:
+  - `FILE__039`: three float fixes (quality 5) at traces 190, 212, 239, between RTK fixes at traces
+    149 and 246, 1.83 m apart. The float fixes sit 1–37 cm off the straight bridge, which supports
+    decision 7 (float is not trusted).
+  - `FILE__042`: two float fixes at traces 1753 and 1754, between RTK fixes at 1739 and 1755 (the
+    last trace), 0.39 m apart.
+  These become real-data tests for bridges, so dropout behaviour no longer rests on synthetic data
+  alone.
+- **The CRS rule** (#62) lives in `GridDialog` methods (`_choose_crs`, `_usable_at`, `_crs_check`,
+  `_crs_scale_error`), reading the site's CRS as `site.grids[0].crs`. M17a moves the rule into a
+  module both dialogs use, and gives the site its own CRS (C12).
+
