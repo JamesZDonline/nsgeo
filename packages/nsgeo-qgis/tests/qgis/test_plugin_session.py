@@ -2051,3 +2051,45 @@ def test_slice_colours_survive_save_and_reopen(session):
     reopened = SiteSession()
     reopened.open_site(session.root / SURVEY_FILE)
     assert reopened.slice_colours("site") == {"own": True, "style": "<qgis>s</qgis>"}
+
+
+def test_site_crs_is_the_first_grids_until_the_site_has_its_own(session):
+    assert session.site_crs() is None
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 10.0, "EPSG:32616", 0.5))
+    assert session.site_crs() == "EPSG:32616"
+
+
+def test_a_grid_free_site_takes_its_crs_once_and_is_dirty(session):
+    session.save()
+    assert session.site_crs() is None and not session.dirty
+    session.set_site_crs("EPSG:32632")
+    assert session.site_crs() == "EPSG:32632" and session.dirty
+
+
+def test_set_site_crs_refuses_to_change_a_set_crs(session):
+    session.set_site_crs("EPSG:32632")
+    session.save()
+    with pytest.raises(ValueError, match="the site already uses EPSG:32632"):
+        session.set_site_crs("EPSG:32616")
+    assert session.site_crs() == "EPSG:32632" and not session.dirty
+
+
+def test_set_site_crs_refuses_on_a_site_whose_grid_has_a_crs(session):
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 10.0, 10.0, "EPSG:32616", 0.5))
+    with pytest.raises(ValueError, match="the site already uses EPSG:32616"):
+        session.set_site_crs("EPSG:32632")
+
+
+def test_layers_crs_follows_the_site_crs_on_a_grid_free_site(session):
+    from nsgeo_qgis.layers import SiteLayers
+    from qgis.core import QgsProject
+
+    layers = SiteLayers(session, project=QgsProject.instance())
+    try:
+        assert layers.crs() is None
+        session.set_site_crs("EPSG:32632")
+        crs = layers.crs()
+        assert crs is not None and crs.authid() == "EPSG:32632"
+    finally:
+        layers.detach()
+        QgsProject.instance().clear()

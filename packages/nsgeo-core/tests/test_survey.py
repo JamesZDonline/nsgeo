@@ -168,3 +168,43 @@ def test_index_finds_the_line_it_is_given_not_an_equal_copy(tmp_path):
     copy = dataclasses.replace(line)
     site = Site(lines=[copy, line])
     assert site.lines.index(line) == 1
+
+
+def _gps_line(tmp_path, crs):
+    from nsgeo.geometry.track import TrackFix, TrackPlacement
+
+    line = _line(tmp_path, name="gps.DZT")
+    fixes = (
+        TrackFix(0, 0.0, 0.0, 45.2, 10.5),
+        TrackFix(line.n_traces - 1, 0.0, 5.0, 45.2, 10.5),
+    )
+    return Line.open(line.path, TrackPlacement(fixes=fixes, crs=crs))
+
+
+def test_a_gps_line_in_another_crs_is_refused_by_validate(tmp_path):
+    site = Site(lines=[_gps_line(tmp_path, "EPSG:32632")], crs="EPSG:32616")
+    with pytest.raises(
+        ValueError, match=r"line gps.DZT is placed in EPSG:32632, but the site is in EPSG:32616"
+    ):
+        site.validate()
+
+
+def test_validate_compares_a_gps_line_with_the_first_grids_crs_when_the_site_has_none(
+    tmp_path, grid
+):
+    line = _gps_line(tmp_path, "EPSG:32632")
+    with pytest.raises(ValueError, match=f"but the site is in {grid.crs}"):
+        Site(grids=[grid], lines=[line]).validate()
+    Site(grids=[dataclasses.replace(grid, crs="EPSG:32632")], lines=[line]).validate()
+
+
+def test_a_gps_line_with_no_site_crs_at_all_is_refused(tmp_path):
+    site = Site(lines=[_gps_line(tmp_path, "EPSG:32632")])
+    with pytest.raises(
+        ValueError, match="line gps.DZT is placed in EPSG:32632, but the site has no CRS"
+    ):
+        site.validate()
+
+
+def test_a_gps_line_in_the_sites_crs_validates(tmp_path):
+    Site(lines=[_gps_line(tmp_path, "EPSG:32632")], crs="EPSG:32632").validate()

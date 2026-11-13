@@ -17,6 +17,7 @@ import numpy as np
 
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
+from nsgeo.geometry.track import TrackPlacement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
 from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
@@ -198,6 +199,22 @@ class Site:
     #: and lives apart from `lines`, so line-only code never sees one.
     cuts: list[Cut] = field(default_factory=list)
 
+    #: The CRS GPS lines are placed in (P9). Read from the file's `"crs"`,
+    #: else from the first grid; None for a site with neither.
+    #: `effective_crs()` is the answer to ask.
+    crs: str | None = None
+
+    def has_gps_lines(self) -> bool:
+        return any(isinstance(ln.placement, TrackPlacement) for ln in self.lines)
+
+    def effective_crs(self) -> str | None:
+        """The CRS the site is in: its own once GPS lines rely on it, else the
+        first grid's (so editing the first grid's CRS still moves a site that
+        has no GPS lines), else `crs`, else None."""
+        if self.crs is not None and (self.has_gps_lines() or not self.grids):
+            return self.crs
+        return self.grids[0].crs if self.grids else None
+
     @property
     def frames(self) -> dict[str, Grid]:
         return {g.id: g for g in self.grids}
@@ -209,10 +226,22 @@ class Site:
         if dupes:
             raise ValueError(f"duplicate grid ids: {sorted(dupes)}")
         known = set(ids)
+        site_crs = self.effective_crs()
         for line in self.lines:
             grid_id = getattr(line.placement, "grid_id", None)
             if grid_id is not None and grid_id not in known:
                 raise ValueError(f"line {line.path.name} references unknown grid {grid_id!r}")
+            if isinstance(line.placement, TrackPlacement):
+                placed = line.placement.crs
+                if site_crs is None:
+                    raise ValueError(
+                        f"line {line.path.name} is placed in {placed}, but the site has no CRS"
+                    )
+                if placed != site_crs:
+                    raise ValueError(
+                        f"line {line.path.name} is placed in {placed}, "
+                        f"but the site is in {site_crs}"
+                    )
         cut_ids = [c.id for c in self.cuts]
         cut_dupes = {i for i in cut_ids if cut_ids.count(i) > 1}
         if cut_dupes:

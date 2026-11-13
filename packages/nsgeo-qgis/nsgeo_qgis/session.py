@@ -536,6 +536,21 @@ class SiteSession(QObject):
         grid_id = getattr(line.placement, "grid_id", None)
         return self._require_site().frames.get(grid_id) if grid_id is not None else None
 
+    # ---- the site's CRS ---------------------------------------------------
+    def site_crs(self) -> str | None:
+        """The CRS the site is in: its own, else the first grid's, else None (P9)."""
+        site = self._site
+        return None if site is None else site.effective_crs()
+
+    def set_site_crs(self, crs: str) -> None:
+        """Give a site with no CRS one. It is never changed once set."""
+        site = self._require_site()
+        current = self.site_crs()
+        if current is not None:
+            raise ValueError(f"the site already uses {current}")
+        site.crs = crs
+        self._set_dirty(True)
+
     # ---- grids ------------------------------------------------------------
     def add_grid(self, grid: Grid) -> None:
         site = self._require_site()

@@ -754,8 +754,10 @@ class SiteEngine(QObject):
         return SiteLattice.covering(list(extents.values()), pixel, self._site_crs())
 
     def _site_crs(self) -> str:
-        """Spec 4.7: the site's CRS is the one its GeoPackage uses, `grids[0].crs`."""
-        return str(self.session.site.grids[0].crs)
+        """Spec 4.7: the site's CRS is the one its GeoPackage uses."""
+        crs = self.session.site_crs()
+        assert crs is not None
+        return crs
 
     def _grid_extents(
         self, ready: Sequence[str], cell: float

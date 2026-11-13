@@ -1175,10 +1175,8 @@ class GridDialog(QDialog):
         return self._lonlat(extent.center(), self.canvas.mapSettings().destinationCrs())
 
     def _site_crs(self) -> QgsCoordinateReferenceSystem | None:
-        site = self.session.site
-        if site is None or not site.grids:
-            return None
-        return QgsCoordinateReferenceSystem(site.grids[0].crs)
+        crs = self.session.site_crs()
+        return None if crs is None else QgsCoordinateReferenceSystem(crs)
 
     def _project_reason(
         self, crs: QgsCoordinateReferenceSystem, kind: str | None, scale_error: float | None
