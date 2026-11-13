@@ -699,6 +699,58 @@ def test_apply_after_deleting_the_fit_behind_the_velocity_keeps_the_velocity_exa
     assert line.velocity_from_fit is None
 
 
+def test_an_untouched_apply_on_a_line_with_no_override_creates_none(
+    plugin, drive_dialog, message_log
+):
+    """Spec 7.2 rule 1: an untouched Apply changes nothing. The box shows the
+    velocity in force (the grid's or the header's) and Apply used to pin it,
+    rounded to 4 dp, as the line's own override."""
+    s, key = plugin.session, plugin.session.keys()[0]
+    assert s.line_for_key(key).velocity is None
+    drive_dialog(QDialog, "exec", lambda d: d.accept())
+
+    plugin.open_velocity_dialog(key)
+
+    line = s.line_for_key(key)
+    assert line.velocity is None and line.velocity_source is None
+    assert message_log == []
+
+    s.set_grid_velocity("A", VelocityModel.constant(0.0912345))
+    plugin.open_velocity_dialog(key)
+    line = s.line_for_key(key)
+    assert line.velocity is None and line.velocity_source is None
+    assert message_log == []
+
+
+def test_an_untouched_apply_writes_nothing(plugin, drive_dialog, message_log):
+    s, key = plugin.session, plugin.session.keys()[0]
+    for override in (None, VelocityModel.constant(0.09123456)):
+        s.apply_line_velocity(key, override, None)
+        s._set_dirty(False)
+        changed, dirtied = [], []
+        s.lines_changed.connect(lambda changed=changed: changed.append(1))
+        s.dirty_changed.connect(dirtied.append)
+        drive_dialog(QDialog, "exec", lambda d: d.accept())
+
+        plugin.open_velocity_dialog(key)
+
+        assert changed == [] and dirtied == []
+        assert not s.dirty
+        assert s.line_for_key(key).velocity == override
+    assert message_log == []
+
+
+def test_a_number_typed_on_a_line_with_no_override_sets_one(plugin, drive_dialog, message_log):
+    s, key = plugin.session, plugin.session.keys()[0]
+    drive_dialog(QDialog, "exec", lambda d: (d.spin.setValue(0.0950), d.accept()))
+
+    plugin.open_velocity_dialog(key)
+
+    assert s.line_for_key(key).velocity == VelocityModel.constant(0.095)
+    assert s.line_for_key(key).velocity_source is None
+    assert message_log == []
+
+
 def test_a_number_typed_over_the_untouched_override_still_applies(plugin, drive_dialog):
     s, key = plugin.session, plugin.session.keys()[0]
     s.set_line_velocity(key, VelocityModel.constant(0.09123456))

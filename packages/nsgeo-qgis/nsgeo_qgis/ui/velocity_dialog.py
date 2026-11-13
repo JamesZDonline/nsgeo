@@ -691,6 +691,17 @@ class VelocityDialog(QDialog):
                 # The fit's own velocity, not the spin box's 4-dp rounding of it.
                 return VelocityModel.constant(source.v_m_ns), source
         current, record = self._scope_velocity()
+        if (
+            current is None
+            and self.grid_id is None
+            and self._fill_kind == "none"
+            and box == round(self._velocity_in_force(), 4)
+        ):
+            # A line with no override, opened and applied untouched: the box
+            # holds the grid's or the header's velocity, and pinning it would
+            # make an override of it (§7.2 rule 1: an untouched Apply changes
+            # nothing).
+            return None, None
         if current is not None and box == round(current.surface_velocity, 4):
             # The velocity in force, untouched: kept to the last digit, with
             # its record as it was.

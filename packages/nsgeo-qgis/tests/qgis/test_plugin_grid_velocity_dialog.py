@@ -4,6 +4,7 @@ and the grid's velocity set from them (grid velocity spec §4, §7)."""
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 import time
 
@@ -505,6 +506,49 @@ def test_grid_dialog_an_untouched_apply_keeps_the_record_as_it_was(
     assert message_log == []
 
 
+def test_grid_dialog_an_untouched_apply_writes_nothing(plugin, drive_dialog, message_log):
+    s = plugin.session
+    refs = _save_spread(plugin)
+    for record in (None, _record(plugin, refs[1:3])):
+        if record is None:
+            s.apply_grid_velocity("A", VelocityModel.constant(0.0912345), None)
+        s._set_dirty(False)
+        changed, dirtied = [], []
+        s.grids_changed.connect(lambda changed=changed: changed.append(1))
+        s.dirty_changed.connect(dirtied.append)
+        before = s.grid("A")
+        drive_dialog(QDialog, "exec", lambda d: d.accept())
+
+        plugin.open_grid_velocity_dialog("A")
+
+        assert changed == [] and dirtied == []
+        assert not s.dirty
+        assert s.grid("A") == before
+    assert message_log == []
+
+
+def test_grid_dialog_the_note_names_a_member_that_cannot_be_measured(plugin, message_log):
+    s = plugin.session
+    k1, _, _, _ = _keys(plugin)
+    good = _hyperbola_fit(plugin, k1)
+    bad = dataclasses.replace(
+        good, points=tuple((tr, 0.1 + 0.01 * i) for i, (tr, _) in enumerate(good.points))
+    )
+    fit_id = s.add_velocity_fit(k1, bad)
+    line = s.line_for_key(k1)
+    record = VelocitySource.from_fits(
+        [SourceFit.of(k1, fit_id, line.path.stem, bad)], applied_at="2026-11-01T00:00:00Z"
+    )
+    s.apply_grid_velocity("A", VelocityModel.constant(record.v_m_ns), record)
+    s.append_step(k1, build_step("time_zero", mode="sample", sample=51))
+
+    note = _dialog(plugin).source_note_text()
+
+    assert f"{record.members[0].line_label}'s fit at {bad.t0_ns:.1f} ns: " in note
+    assert note.endswith("cannot be measured at the current time zero")
+    assert message_log == []
+
+
 def test_grid_dialog_a_typed_number_drops_the_record(plugin, drive_dialog, message_log):
     s = plugin.session
     refs = _save_spread(plugin)
@@ -728,7 +772,7 @@ def test_real_grid2_lines_list_and_average_their_fits(qgis_app, tmp_path, messag
     cached, so the dialog reads each line to find its zero: the numbers it
     lists are each fit measured from its own line's zero, and Apply records
     those."""
-    from nsgeo_qgis.session import SiteSession
+    from nsgeo_qgis.session import SURVEY_FILE, SiteSession
     from nsgeo_qgis.ui.velocity_dialog import VelocityDialog
 
     s = SiteSession()
@@ -789,6 +833,14 @@ def test_real_grid2_lines_list_and_average_their_fits(qgis_app, tmp_path, messag
         assert m.zero_ns == expected[m.line_key].zero_ns
     mean, _ = weighted_mean([(f.v_m_ns, f.v_stderr_m_ns) for f in expected.values()])
     assert s.grid("G2").velocity.surface_velocity == pytest.approx(mean, rel=1e-12)
+    # The record and the velocity survive a save and a reload, in schema 3.
+    s.save(allow_absolute=True)  # the real lines live outside the temporary site
+    saved = json.loads((tmp_path / SURVEY_FILE).read_text())
+    assert saved["schema_version"] == 3
+    back = SiteSession()
+    back.open_site(tmp_path / SURVEY_FILE)
+    assert back.grid("G2").velocity_source == record
+    assert back.grid("G2").velocity == s.grid("G2").velocity
     # Reported, not asserted: P9 is pinned by test_grid_dialog_reads_each_fitted_lines_zero_once,
     # since timing tests have flaked here before (#165).
     print(f"grid velocity dialog over 4 uncached Grid 2 lines opened in {opened:.2f} s")

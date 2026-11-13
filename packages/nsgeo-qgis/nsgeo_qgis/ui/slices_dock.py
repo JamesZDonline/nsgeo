@@ -892,6 +892,25 @@ class SlicesDock(QgsDockWidget):
                 # (interpolation spec §8). Direct, like the sliders: no
                 # resolution change to debounce.
                 self.refresh_slice()
+            elif (
+                self._scope == "grid"
+                and self.engine.is_prepared
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and self._values is not None
+                and (window := self.current_window()) is not None
+            ):
+                # A grid Apply (or a line edit) can change the velocity the
+                # label and the readout's metres state, never the slice
+                # itself: relabel depths only, as Whole site's
+                # `on_session_changed` does. Export reads the live velocity
+                # through `_resolved_velocity`, so a stale label here would
+                # name a different one.
+                # A hand-edited survey's spacing <= 0 (`SliceFinish.in_metres`,
+                # via the legend's limit) leaves nothing to relabel, as
+                # `_finish_moved` reads it.
+                with contextlib.suppress(ValueError):
+                    self._update_readout(window)
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -1330,9 +1349,9 @@ class SlicesDock(QgsDockWidget):
             # never change.
             #
             # KeyError (final review, Minor 6): provenance() also raises
-            # this once the FIRST prepared line has been removed from the
-            # session -- see `_resolved_velocity`'s own docstring, which
-            # widens the identical catch for the identical reason. A
+            # this once a prepared line has been removed from the session
+            # (it resolves the grid's velocity, `grid_depth_velocity`, which
+            # raises when the grid has neither a velocity nor a line). A
             # "does not match" answer here is conservative and safe either
             # way: both callers already treat a mismatch as "stale, not
             # unprepared".
@@ -2786,7 +2805,7 @@ class SlicesDock(QgsDockWidget):
         two-argument call here had simply never passed one, so the
         readout stated ns only. `_resolved_velocity()` is the one place
         that resolves it, shared with `velocity_label` so the two always
-        describe the same line's velocity.
+        describe the same grid velocity (`grid_depth_velocity`).
 
         Final review, Minor 5: `plan_windows` is called with `thickness_
         step_levels()[0]` (the SAME unclamped thickness `export_geotiff`

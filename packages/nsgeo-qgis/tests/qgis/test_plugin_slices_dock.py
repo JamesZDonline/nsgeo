@@ -1422,14 +1422,13 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
 
 
 def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
-    """Final review, Minor 6. `engine.provenance()` resolves velocity
-    against the FIRST prepared line's key and raises `KeyError` once that
-    line has been removed from the session -- a contributing line can be
-    deleted while a source stays prepared, and the cube's own arrays are
-    still entirely correct. `_resolved_velocity`'s catch used to guard
-    only `RuntimeError`, so the `KeyError` escaped through `_update_
-    readout` into `refresh_slice`'s broad `except`, which reported
-    `error: '<key>'` and cleared the map for a still-good slice."""
+    """Final review, Minor 6. A contributing line can be deleted while a source
+    stays prepared, and the cube's own arrays are still entirely correct. The
+    grid's velocity (`grid_depth_velocity`) hangs on its own record, else on
+    the first line left in survey order, so removing the first line moves the
+    label to the new first line rather than raising. A `KeyError` escaping
+    through `_update_readout` into `refresh_slice`'s broad `except` used to
+    report `error: '<key>'` and clear the map for a still-good slice."""
     dock, session = docked
     _ready(dock)
     dock.slice_slider.setValue(5)
@@ -1502,6 +1501,58 @@ def test_slice_label_names_the_grids_record(docked, message_log):
     _ready(dock)
     dock.slice_slider.setValue(10)
     assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_live_grid_apply_relabels_the_prepared_slice(docked, message_log):
+    """Final review, Important: `grids_changed` reached `rebuild_source`, which
+    only refreshed a slice whose finish had moved, so a grid Apply left the
+    label and the readout's metres standing while Export GeoTIFF (through
+    `_resolved_velocity`) already used the new velocity."""
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+
+    def metres(v):
+        lo, hi = window_depths_m(dock.engine.z, window, VelocityModel.constant(v))
+        return f"{lo:.2f}-{hi:.2f} m"
+
+    assert metres(0.09) in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), None)
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A)"
+    assert metres(0.12) in dock.readout.text()
+    assert metres(0.09) not in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), _two_fit_record(session))
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_slice_survives_losing_every_line_of_a_grid_with_no_velocity(docked, message_log):
+    """The `KeyError` guards in `_resolved_velocity` and `_update_velocity_label`:
+    a grid with no velocity and no line has nothing to resolve, and that must
+    neither blank a still-valid slice nor leave an old label standing."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    for key in list(session.keys_on_grid("A")):
+        session.remove_line(key)
+    dock.slice_slider.setValue(6)
+    assert dock.current_values() is not None
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert "error:" not in dock.readout.text()
+    assert dock.velocity_label.text() == ""
+    # `_resolved_velocity` returns first on this path, so the label's own guard
+    # is reached only when it is handed a velocity the grid can no longer name.
+    dock.velocity_label.setText("stale")
+    dock._update_velocity_label("A", VelocityModel.constant(0.1))
+    assert dock.velocity_label.text() == ""
     assert message_log == []
 
 

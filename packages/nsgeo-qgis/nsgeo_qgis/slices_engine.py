@@ -1091,7 +1091,7 @@ class SliceEngine(QObject):
         When the fingerprint has NOT changed, `replace_grid` may still
         have run -- `set_grid_velocity` goes through it too, and
         `grids_changed` carries no information about which grid or which
-        field changed. `provenance()` reads `resolved_velocity` LIVE, but
+        field changed. `provenance()` reads `grid_depth_velocity` LIVE, but
         `cube()` freezes a `Provenance` snapshot into the `SliceCube` the
         moment it is built; a resident cube built before a velocity edit
         would otherwise export the STALE velocity forever, while a

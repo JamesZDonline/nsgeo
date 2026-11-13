@@ -645,10 +645,12 @@ class SiteSession(QObject):
         self, grid_id: str, model: VelocityModel | None, source: VelocitySource | None
     ) -> None:
         """Set a grid's velocity and the record of where it came from, in one
-        `grids_changed`."""
-        self.replace_grid(
-            dataclasses.replace(self.grid(grid_id), velocity=model, velocity_source=source)
-        )
+        `grids_changed`. Nothing changes, signals or marks the survey dirty when
+        the grid already holds both (an untouched Apply, spec 7.2 rule 1)."""
+        grid = self.grid(grid_id)
+        if grid.velocity == model and grid.velocity_source == source:
+            return
+        self.replace_grid(dataclasses.replace(grid, velocity=model, velocity_source=source))
 
     # ---- lines ------------------------------------------------------------
     def add_lines(self, lines: list[Line]) -> None:
@@ -878,9 +880,12 @@ class SiteSession(QObject):
         self, key: str, model: VelocityModel | None, source: VelocitySource | None
     ) -> None:
         """Set a line's velocity and the record of where it came from, in one
-        `lines_changed`."""
+        `lines_changed`. Nothing changes, signals or marks the survey dirty when
+        the line already holds both (an untouched Apply, spec 7.2 rule 1)."""
         site = self._require_site()
         line = self.line_for_key(key)
+        if line.velocity == model and line.velocity_source == source:
+            return
         new_line = dataclasses.replace(line, velocity=model, velocity_source=source)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
