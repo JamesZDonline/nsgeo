@@ -112,3 +112,50 @@ def test_dzg_for_finds_either_case_and_none_when_absent(tmp_path: Path):
     (tmp_path / "a.DZG").write_bytes(b"")
     found = dzg_for(dzt)
     assert found is not None and found.name in {"a.DZG", "a.dzg"}
+
+
+def _gga(t: float = 100.0) -> str:
+    return nmea(gga_body(t, 45.2, 10.5, 4))
+
+
+def _bad(sentence: str) -> str:
+    return sentence[:-2] + ("00" if not sentence.endswith("00") else "01")
+
+
+def _read(tmp_path: Path, *lines: str):
+    p = tmp_path / "x.DZG"
+    p.write_text("\r\n".join(lines) + "\r\n")
+    return read_dzg(p)
+
+
+def test_a_gssis_followed_by_a_gssis_is_unpaired(tmp_path: Path):
+    log = _read(tmp_path, "$GSSIS,5,-1", "$GSSIS,9,-1", _gga())
+    assert [f.trace for f in log.fixes] == [9]
+    assert log.unpaired == 1
+
+
+def test_a_dropped_gga_does_not_pair_the_next_gga_with_its_gssis(tmp_path: Path):
+    log = _read(tmp_path, "$GSSIS,5,-1", _bad(_gga()), _gga(101.0))
+    assert log.fixes == ()
+    assert log.bad_checksum == 1
+    assert log.unpaired == 2
+
+
+def test_a_file_ending_in_a_gssis_counts_it_unpaired(tmp_path: Path):
+    log = _read(tmp_path, "$GSSIS,5,-1", _gga(), "$GSSIS,9,-1")
+    assert [f.trace for f in log.fixes] == [5]
+    assert log.unpaired == 1
+
+
+def test_a_corrupt_other_sentence_between_a_pair_keeps_the_fix(tmp_path: Path):
+    rmc = nmea("GNRMC,163915.40,A,4512.3456789,N,01030.1234567,E,0.0,0.0,131126,,,R")
+    log = _read(tmp_path, "$GSSIS,5,-1", _bad(rmc), _gga())
+    assert [f.trace for f in log.fixes] == [5]
+    assert log.bad_checksum == 1
+    assert log.unpaired == 0
+
+
+def test_a_gssis_with_an_unreadable_trace_is_unpaired_and_takes_no_fix(tmp_path: Path):
+    log = _read(tmp_path, "$GSSIS,abc,-1", _gga())
+    assert log.fixes == ()
+    assert log.unpaired == 2  # the GSSIS itself, then the GGA with nothing before it
