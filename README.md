@@ -96,14 +96,10 @@ release's notes list everything in it.
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
 | | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
+| | Colour a slice with QGIS's own symbology: a colour ramp, typed min/max or a cut that follows each depth, kept per scope and in the export ([#180]) | next release |
 
 ### In progress
 
-- **Colour a slice with QGIS's own symbology** ([#180]): a Colours choice in
-  the Slices panel keeps the slice layer's own QGIS style (a colour ramp, a
-  typed min/max, a cumulative cut) as you move through the depths; M19's
-  magnetometer maps will reuse it. Walkthrough passed; one note to
-  settle before the merge.
 - **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
   lists every saved fit on the grid's lines, averages the ones you tick, and
   remembers which fits made the grid's velocity. Slices take their depths
@@ -134,7 +130,7 @@ than reworking M16–M17 afterwards.
    the Processing panel (zero, destripe, despike) and Edit lines (destagger),
    joined into one map with the grids levelled to each other, and a mag strip
    above the radargram on lines and cuts. Designed, in three parts; the first
-   is planned once [#180] merges.
+   is ready to plan, now that [#180] has merged.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; the migration real-data test ([#125]), before M16
