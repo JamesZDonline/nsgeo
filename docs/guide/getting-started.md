@@ -3,7 +3,8 @@
 nsgeo is a QGIS plugin for processing GPR surveys in their map context. You import
 GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
-build time and depth slices across a grid.
+build time and depth slices across a grid. It also maps magnetometer grids from
+Bartington Grad601 files.
 
 This guide covers nsgeo 0.4.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
@@ -129,7 +130,11 @@ any other QGIS panel.
   select them. Press Delete to remove them, or right-click the selection. Lines
   on one grid offer **Edit N lines…**. Any lines offer **Move N lines to grid**
   and **Remove N lines from site**. Removing never deletes the DZT files, and
-  the site file isn't changed until you choose **Save site**.
+  the site file isn't changed until you choose **Save site**. A magnetometer grid
+  has its own row, with one file row under it once a file is imported. Click
+  either to show the grid in **nsgeo Mag**. Right-click the grid for **Edit
+  grid…**, **Import magnetometer file…** and **Remove grid**, or the file row for
+  **Remove file from site**, which never deletes the `.dat` file.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. Every line on a grid is
@@ -741,6 +746,7 @@ Everything for a site lives in its site folder:
 | `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | your DZT files | Read by nsgeo, never changed. |
+| your magnetometer `.dat` files | Read where they are, never changed or rewritten. The site stores each one's path relative to the survey file, as it does for DZT files. |
 
 **Picks are different from everything else.** nsgeo redraws the grids, lines,
 cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
@@ -753,6 +759,8 @@ A few things to know:
 - **Keep DZT files inside the site folder.** If they are elsewhere, **Save site**
   asks whether to record them by their full path, and the site will then open
   only on a computer where that path exists.
+- **A site with magnetometer data saves in a newer survey-file version.** nsgeo
+  0.4.0 and earlier cannot open it. A site with only GPR data saves as before.
 - **A pick follows its line.** Editing a grid or a line moves its picks too, and
   dragging a pick on the map does not move it.
 - **A cut follows its grid.** Move or turn a grid and its cuts move with it, and
