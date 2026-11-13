@@ -107,3 +107,13 @@ def test_a_mosaic_in_another_crs_is_refused(tmp_path):
 def test_display_centre_is_the_median_of_finite_values():
     assert display_centre(np.array([1.0, 2.0, np.nan, 10.0])) == 2.0
     assert display_centre(np.full(3, np.nan)) == 0.0
+
+
+def test_a_rotated_grid_far_from_the_origin_bins_each_traverse_in_one_column(tmp_path):
+    grid = Grid("M", (512345.0, 4512345.0), 17.0, 4.0, 4.0, CRS, 0.5, instrument="mag")
+    path = write_grad601(tmp_path / "a.dat", np.full((8, 32), 5.0))
+    mag = MagFile.open(path, "M", MagSetup(spacing_m=0.5, first_offset_m=0.25, sensors=1))
+    frame, binned = grid_map(mag, grid, 0.125, FinishSettings("none", 0.0, 0.0))
+    per_column = np.isfinite(binned).sum(axis=0)
+    assert (per_column > 0).sum() == 8
+    assert set(per_column[per_column > 0]) == {32}

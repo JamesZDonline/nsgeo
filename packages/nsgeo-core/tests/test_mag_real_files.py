@@ -93,18 +93,22 @@ LAYOUT = {
 }
 
 
-def _map_of(name, origin):
+def _map_of(name, origin, setup=None):
     (path,) = [p for p in MAG_FILES if p.name == name]
     grid = Grid(name, origin, 0.0, 30.0, 30.0, CRS, 0.5, instrument="mag")
-    setup = MagSetup(axis="x", far_y=True, far_x=False)
+    setup = setup or MagSetup(axis="x", far_y=True, far_x=False)
     return grid_map(MagFile.open(path, name, setup), grid, DEFAULT_CELL_M, FINISH)
 
 
 def test_a_real_grid_map_covers_its_grid():
-    _, one = _map_of("example1.dat", (0.0, 0.0))
-    _, three = _map_of("example3.dat", (0.0, 0.0))
+    _, one = _map_of("example1.dat", (0.0, 0.0), MagSetup())
+    _, three = _map_of("example3.dat", (0.0, 0.0), MagSetup())
     assert np.isfinite(one).mean() >= 0.98
     assert 0.45 <= np.isfinite(three).mean() <= 0.55
+    # Traverses run along Y, so the missing far end of each is the grid's far half in Y.
+    half = three.shape[0] // 2
+    assert np.isfinite(three[:half]).mean() > 0.75
+    assert np.isfinite(three[half:]).mean() < 0.25
 
 
 def _six():

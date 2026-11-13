@@ -42,7 +42,7 @@ Bartington Grad601 magnetometer files: reading them, marking missing data, and p
 |---|---|
 | `DEFAULT_CELL_M` | The default map cell, 0.125 m. |
 | `MISSING_RUN` | The default run of consecutive 0.00 readings (4) that counts as missing data. |
-| `MagFile` | One Grad601 file on a mag grid: cached readings, per-traverse `scales` and `shifts`, and `points(grid)` in world coordinates. |
+| `MagFile` | One Grad601 file on a mag grid: cached readings, per-traverse `scales` and `shifts`, `local_points(grid)` in grid-local metres and `points(grid)` in world coordinates. |
 | `MagFileError` | Raised, naming the file and row, for a file that does not look like a Grad601 grid file. |
 | `MagSetup` | How a download was walked: traverse axis and starting corner, spacing, readings per metre, sensors, zigzag, flipped. `to_dict` and `from_dict` give the survey-JSON form. |
 | `Traverse` | One file row with its `GridPlacement`, and whether its stored order is the reverse of walked. |

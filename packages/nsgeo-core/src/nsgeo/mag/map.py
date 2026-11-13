@@ -31,14 +31,8 @@ from nsgeo.slices import (
 DEFAULT_CELL_M = 0.125
 
 
-def bin_readings(frame: CubeFrame, world: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """float32 `(ny, nx)`: the mean of the readings in each cell, NaN where none.
-
-    Readings outside the frame are dropped.
-    """
-    world = np.asarray(world, dtype=float).reshape(-1, 2)
-    values = np.asarray(values, dtype=float)
-    ids = frame.cell_index(world)
+def _mean_per_cell(ids: np.ndarray, values: np.ndarray, frame: CubeFrame) -> np.ndarray:
+    """float32 `(ny, nx)` mean of `values` by flat cell id; ids below 0 are dropped."""
     keep = ids >= 0
     total = np.bincount(ids[keep], weights=values[keep], minlength=frame.n_cells)
     count = np.bincount(ids[keep], minlength=frame.n_cells)
@@ -47,13 +41,31 @@ def bin_readings(frame: CubeFrame, world: np.ndarray, values: np.ndarray) -> np.
     return out.reshape(frame.ny, frame.nx)
 
 
+def bin_readings(frame: CubeFrame, world: np.ndarray, values: np.ndarray) -> np.ndarray:
+    """float32 `(ny, nx)`: the mean of the readings in each cell, NaN where none.
+
+    Readings outside the frame are dropped.
+    """
+    world = np.asarray(world, dtype=float).reshape(-1, 2)
+    return _mean_per_cell(frame.cell_index(world), np.asarray(values, dtype=float), frame)
+
+
 def grid_map(
     mag: MagFile, grid: Grid, cell: float, settings: FinishSettings
 ) -> tuple[CubeFrame, np.ndarray]:
-    """The frame over `grid` and its finished float32 `(ny, nx)` map."""
+    """The frame over `grid` and its finished float32 `(ny, nx)` map.
+
+    Readings are binned in grid-local metres, never through world coordinates:
+    traverses sit exactly on cell boundaries, and the round trip through a
+    rotated, far-from-zero world position adds noise that scatters them.
+    """
     frame = CubeFrame.for_grid(grid, cell)
-    world, values = mag.points(grid)
-    binned = bin_readings(frame, world, values)
+    local, values = mag.local_points(grid)
+    cols = np.floor(local[:, 0] / cell).astype(np.int64)
+    rows = np.floor(local[:, 1] / cell).astype(np.int64)
+    inside = (cols >= 0) & (cols < frame.nx) & (rows >= 0) & (rows < frame.ny)
+    ids = np.where(inside, rows * frame.nx + cols, -1)
+    binned = _mean_per_cell(ids, values, frame)
     weights = plan_fill(
         np.isfinite(binned),
         cell,

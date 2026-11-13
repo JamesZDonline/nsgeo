@@ -94,8 +94,8 @@ class MagFile:
     def traverses(self, grid: Grid) -> tuple[Traverse, ...]:
         return traverses(self.setup, grid, self.n_rows, self.n_readings, self.scales, self.shifts)
 
-    def points(self, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
-        """Every finite reading as ((m, 2) world coordinates, (m,) values)."""
+    def local_points(self, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
+        """Every finite reading as ((m, 2) grid-local metres, (m,) values), in walked order."""
         readings = self.readings()
         per_metre = self.setup.readings_per_metre
         xy: list[np.ndarray] = []
@@ -103,9 +103,13 @@ class MagFile:
         for t in self.traverses(grid):
             row = t.walked(readings[t.row])
             keep = np.isfinite(row)
-            local = t.placement.local(self.n_readings, per_metre)
-            xy.append(grid.to_world(local[keep]))
+            xy.append(t.placement.local(self.n_readings, per_metre)[keep])
             values.append(row[keep])
         if not xy:
             return np.empty((0, 2)), np.empty(0)
         return np.concatenate(xy), np.concatenate(values)
+
+    def points(self, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
+        """Every finite reading as ((m, 2) world coordinates, (m,) values)."""
+        local, values = self.local_points(grid)
+        return grid.to_world(local), values
