@@ -93,21 +93,32 @@ class SurfaceSettings:
 
 @dataclass(frozen=True)
 class Outlier:
-    """A pick the surface does not honour: on a hole (`surface_m` is None), or so far from the
-    reflection that the surface is held at the edge of its window."""
+    """A pick the surface does not honour, and why (`reason`).
+
+    "hole": the cell is empty (`surface_m` is None). "edge": the surface is held at the edge
+    of its window, so the reflection lies further from the pick than the window allows.
+    "far": the surface is more than the window from the pick.
+    """
 
     index: int
     picked_m: float
     surface_m: float | None
+    reason: str
 
 
 @dataclass(frozen=True)
 class SurfaceFit:
-    """How the surface sits against its picks, in the picks' input order."""
+    """How the surface sits against its picks, in the picks' input order.
+
+    Every pick is counted once: `on_holes`, `at_edge` (kept, with the surface held at the
+    window's edge), or else by its distance to the surface in `within_close`, `within_near`
+    or `further`. The `outliers` are the hole, edge and far picks.
+    """
 
     within_close: int
     within_near: int
     further: int
+    at_edge: int
     on_holes: int
     outliers: tuple[Outlier, ...]
 
@@ -352,27 +363,30 @@ def _guide(
     return np.where(np.isfinite(joined), joined.astype(float), float(np.nanmean(mean)))
 
 
-def _fit(picked: np.ndarray, surface: np.ndarray, window_m: float) -> SurfaceFit:
-    """`surface` holds the surface depth in each pick's cell, NaN on a hole or off the grid."""
+def _fit(picked: np.ndarray, surface: np.ndarray, guide: np.ndarray, window_m: float) -> SurfaceFit:
+    """`surface` and `guide` hold each pick's cell's values, NaN on a hole or off the grid."""
     on_hole = ~np.isfinite(surface)
     miss = np.abs(surface - picked) - _FIT_SLACK  # distance, less float32 rounding
     with np.errstate(invalid="ignore"):
-        close = ~on_hole & (miss <= FIT_CLOSE_M)
-        near = ~on_hole & (miss > FIT_CLOSE_M) & (miss <= FIT_NEAR_M)
-        far = ~on_hole & (miss > FIT_NEAR_M)
-        # a surface pinned to the edge of its window had to be held there: the reflection
-        # lies further from the pick than the window allows
-        bad = on_hole | (miss >= window_m - _FIT_SLACK)
-    outliers = tuple(
-        Outlier(int(i), float(picked[i]), None if on_hole[i] else float(surface[i]))
-        for i in np.flatnonzero(bad)
-    )
+        edge = ~on_hole & (np.abs(surface - guide) >= window_m - _FIT_SLACK)
+        kept = ~on_hole & ~edge
+        close = kept & (miss <= FIT_CLOSE_M)
+        near = kept & (miss > FIT_CLOSE_M) & (miss <= FIT_NEAR_M)
+        far = kept & (miss > FIT_NEAR_M)
+        beyond = kept & (miss > window_m)
+    outliers = []
+    for i in np.flatnonzero(on_hole | edge | beyond):
+        reason = "hole" if on_hole[i] else "edge" if edge[i] else "far"
+        outliers.append(
+            Outlier(int(i), float(picked[i]), None if on_hole[i] else float(surface[i]), reason)
+        )
     return SurfaceFit(
         within_close=int(close.sum()),
         within_near=int(near.sum()),
         further=int(far.sum()),
+        at_edge=int(edge.sum()),
         on_holes=int(on_hole.sum()),
-        outliers=outliers,
+        outliers=tuple(outliers),
     )
 
 
@@ -452,14 +466,17 @@ def build_surface(
 
     in_surface = np.full(depth.size, np.nan)
     in_surface[usable] = final32[iy, ix]
+    guide32 = np.where(region, guide, np.nan).astype(np.float32)
+    at_guide = np.full(depth.size, np.nan)
+    at_guide[usable] = guide32[iy, ix]
     return Surface(
         depth_m=final32,
         strength=strength.astype(np.float32),
-        guide_m=np.where(region, guide, np.nan).astype(np.float32),
+        guide_m=guide32,
         region=region,
         offset_m=offset,
         cell=float(cell),
-        fit=_fit(depth, in_surface, settings.window_m),
+        fit=_fit(depth, in_surface, at_guide, settings.window_m),
     )
 
 

@@ -137,7 +137,7 @@ def test_surface_follows_a_dipping_reflector_and_returns_to_the_picks():
     assert kept.sum() > 100
     assert np.abs(s.depth_m[kept] - truth[kept]).max() <= 0.005
     assert s.fit.within_close == 12
-    assert s.fit.on_holes == 0 and s.fit.outliers == ()
+    assert s.fit.on_holes == 0 and s.fit.at_edge == 0 and s.fit.outliers == ()
     assert s.depth_m.dtype == np.float32 and s.strength.dtype == np.float32
     assert s.region.shape == s.depth_m.shape == s.guide_m.shape == (NY, NX)
     assert s.cell == C
@@ -201,7 +201,7 @@ def test_a_pick_outside_the_depth_range_or_frame_is_reported_not_fatal():
     bd = np.append(d, [-0.01, vol.depths_m[-1] + 0.5, 0.6])
     s = build_surface(vol, bx, by, bd, SurfaceSettings())
     assert [o.index for o in s.fit.outliers] == [12, 13, 14]
-    assert all(o.surface_m is None for o in s.fit.outliers)
+    assert all(o.surface_m is None and o.reason == "hole" for o in s.fit.outliers)
     assert s.fit.on_holes == 3 and s.fit.within_close == 12
     np.testing.assert_array_equal(s.depth_m, base.depth_m)
     assert s.offset_m == base.offset_m
@@ -211,9 +211,31 @@ def test_a_surface_with_no_cell_passing_is_empty_not_an_error():
     s = _build(strength=1e9)
     assert np.isnan(s.depth_m).all()
     assert s.fit.on_holes == 12 and s.fit.within_close == 0
-    assert len(s.fit.outliers) == 12 and all(o.surface_m is None for o in s.fit.outliers)
+    assert len(s.fit.outliers) == 12 and all(o.reason == "hole" for o in s.fit.outliers)
     points, triangles, cells = surface_mesh(s.depth_m, s.cell)
     assert points.shape == (0, 3) and triangles.shape == (0, 3) and cells.shape == (0,)
+
+
+def _categories(fit) -> int:
+    return fit.within_close + fit.within_near + fit.further + fit.at_edge + fit.on_holes
+
+
+def test_fit_categories_are_disjoint_and_edge_picks_are_named():
+    vol = _volume()
+    x, y, d = _picks()
+    d = d.copy()
+    d[4] += 0.015  # the reflection lies 1.5 cm below the offset-corrected pick: inside the window
+    d[5] += 0.03  # 3 cm: the surface can only be held at the edge of its window
+    s = build_surface(vol, x, y, d, SurfaceSettings())
+    fit = s.fit
+    assert _categories(fit) == 12
+    edge = [o for o in fit.outliers if o.reason == "edge"]
+    assert 5 in [o.index for o in edge]
+    assert all(o.surface_m is not None for o in edge)
+    assert fit.within_close + fit.within_near + fit.further + fit.at_edge + fit.on_holes == 12
+    assert [o.index for o in fit.outliers] == sorted(o.index for o in fit.outliers)
+    for o in fit.outliers:
+        assert o.reason in ("hole", "edge", "far")
 
 
 def test_mesh_never_joins_cells_more_than_6_cm_apart():
@@ -388,7 +410,9 @@ def test_real_pick_on_another_reflection_is_reported():
     d[7] += 0.15
     s = build_surface(vol, x, y, d, SurfaceSettings())
     print("outliers", s.fit.outliers)
-    assert 7 in [o.index for o in s.fit.outliers]
+    assert [o.index for o in s.fit.outliers if o.index == 7] != []
+    assert _categories(s.fit) == 15
+    assert [o.reason for o in s.fit.outliers if o.index == 7] == ["edge"]
 
 
 @needs_real_files
