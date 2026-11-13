@@ -140,7 +140,7 @@ def included_grids(
     session: Any, by_grid: Mapping[str | None, tuple[str, ...]] | None = None
 ) -> tuple[str, ...]:
     """The remembered included grids, in site order; every grid with lines if none."""
-    ids = [grid.id for grid in session.site.grids]
+    ids = [grid.id for grid in session.gpr_grids()]
     stored = session.site_view().get("grids")
     if stored is None:
         wanted = set(by_grid if by_grid is not None else keys_by_grid(session))
@@ -242,7 +242,7 @@ def site_rows(
         by_grid = keys_by_grid(session)
     chosen = set(included)
     rows = []
-    for grid in session.site.grids:
+    for grid in session.gpr_grids():
         every = grid_keys(session, grid.id, by_grid)
         keys = source_keys(session, grid.id, by_grid)
         if not every:

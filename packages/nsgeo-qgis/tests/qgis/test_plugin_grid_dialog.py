@@ -2694,3 +2694,65 @@ def test_dispose_is_idempotent_and_setters_then_do_nothing(session, project_crs,
     d.overlay.dispose()
     _type_row(d, 0, *SITE_CORNERS[0])  # a late slot must not raise
     assert d.overlay.corners == [None] * 4
+
+
+# ---- M19a: the instrument ---------------------------------------------------------
+
+
+def test_a_new_grid_can_be_a_magnetometer_grid(session):
+    d = GridDialog(session, instrument="mag")
+    d.id_edit.setText("M")
+    d.crs_widget.setCrs(UTM16)
+    assert d.instrument_combo.currentText() == "Magnetometer"
+    assert d.instrument_combo.isEnabled()
+    assert [d.instrument_combo.itemText(i) for i in range(2)] == ["GPR", "Magnetometer"]
+    assert d.result_grid().instrument == "mag"
+    assert d.result_grid().velocity is None
+    # The Velocity row is hidden for a magnetometer grid, label and all.
+    assert d.velocity.isHidden() and d._velocity_label.isHidden() and d.velocity_hint.isHidden()
+    # A GPR grid is as it was.
+    g = GridDialog(session)
+    g.id_edit.setText("G")
+    g.crs_widget.setCrs(UTM16)
+    assert g.result_grid().instrument == "gpr"
+    assert not g.velocity.isHidden() and not g._velocity_label.isHidden()
+
+
+def test_a_new_mag_grid_starts_at_the_usual_setup(session):
+    d = GridDialog(session, instrument="mag")
+    assert (d.size_x.value(), d.size_y.value(), d.spacing.value()) == (30.0, 30.0, 0.5)
+    assert d.sizes_typed() == (False, False)
+    assert (GridDialog(session).size_x.value(), GridDialog(session).size_y.value()) == (10.0, 10.0)
+
+
+def test_switching_a_new_grids_instrument_follows_until_sizes_are_typed(session):
+    d = GridDialog(session)
+    d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("mag"))
+    assert (d.size_x.value(), d.size_y.value()) == (30.0, 30.0)
+    assert d.velocity.isHidden()
+    d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("gpr"))
+    assert (d.size_x.value(), d.size_y.value()) == (10.0, 10.0)
+    assert not d.velocity.isHidden()
+    d.size_x.setValue(12.0)
+    d.instrument_combo.setCurrentIndex(d.instrument_combo.findData("mag"))
+    assert d.size_x.value() == 12.0
+
+
+def test_an_existing_grids_instrument_is_shown_and_fixed(session):
+    session.add_grid(dataclasses.replace(SITE, id="M", instrument="mag"))
+    session.add_grid(dataclasses.replace(SITE, id="G"))
+    d = GridDialog(session, grid=session.grid("M"))
+    assert d.instrument_combo.currentText() == "Magnetometer"
+    assert not d.instrument_combo.isEnabled()
+    assert d.velocity.isHidden()
+    # Even asked for the other kind, an existing grid keeps its own.
+    assert GridDialog(session, grid=session.grid("M"), instrument="gpr").instrument == "mag"
+    # Editing a mag grid through the dialog leaves it a mag grid.
+    d.size_x.setValue(25.0)
+    edited = d.result_grid()
+    assert edited.instrument == "mag" and edited.size_x == 25.0
+    session.replace_grid(edited)
+    assert session.grid("M").instrument == "mag"
+    g = GridDialog(session, grid=session.grid("G"))
+    assert g.instrument_combo.currentText() == "GPR" and not g.instrument_combo.isEnabled()
+    assert g.result_grid().instrument == "gpr"

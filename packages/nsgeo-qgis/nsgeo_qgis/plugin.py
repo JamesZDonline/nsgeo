@@ -1899,7 +1899,7 @@ class NsgeoPlugin:
         assert site is not None
         canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
         first = points[0]
-        for grid in site.grids:
+        for grid in self.session.gpr_grids():
             try:
                 transform = crs_transform(
                     canvas_crs, QgsCoordinateReferenceSystem(grid.crs), self.layers.project
@@ -2124,7 +2124,7 @@ class NsgeoPlugin:
             return False
 
     # ---- dialogs (provided by later tasks) --------------------------------
-    def open_grid_dialog(self, grid_id: str | None) -> None:
+    def open_grid_dialog(self, grid_id: str | None, *, instrument: str = "gpr") -> None:
         # Fix round 4, Finding 1 (critical): GridDialog must be
         # modeless. QDialog.exec()'s application-modal event loop
         # terminates the instant the dialog is hidden -- verified
@@ -2174,6 +2174,7 @@ class NsgeoPlugin:
             grid=grid,
             parent=self.iface.mainWindow(),
             canvas=self.iface.mapCanvas(),
+            instrument=instrument,
         )
         # Fix round 5, Finding 2: modeless means the toolbar stays
         # clickable while the dialog is open, so the site it was opened
@@ -2536,8 +2537,8 @@ class NsgeoPlugin:
         assert self.session is not None
         if not self.session.is_open:
             return
-        if not (self.session.site and self.session.site.grids):
-            self.message("Add a grid before importing lines.", Qgis.MessageLevel.Warning)
+        if not (self.session.site and self.session.gpr_grids()):
+            self.message("Add a GPR grid before importing lines.", Qgis.MessageLevel.Warning)
             return
         if self._import_dialog is not None:
             if grid_id is not None:

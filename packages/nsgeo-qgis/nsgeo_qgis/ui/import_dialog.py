@@ -311,7 +311,7 @@ class ImportDialog(QDialog):
     def _fill_grid_combo(self) -> None:
         self.grid_combo.clear()
         site = self.session.site
-        for g in site.grids if site else []:
+        for g in self.session.gpr_grids() if site else []:
             self.grid_combo.addItem(g.id, g.id)
 
     def options(self) -> ImportOptions:

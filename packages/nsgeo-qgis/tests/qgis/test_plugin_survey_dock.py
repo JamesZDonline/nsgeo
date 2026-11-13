@@ -1546,3 +1546,112 @@ def test_a_plain_click_on_a_cut_opens_it_and_a_ctrl_click_does_not(dock, message
     _click(dock, dock.item_for_key(other))
     assert session.current_key == other and opened == [key, other]
     assert message_log == []
+
+
+# ---- M19a: magnetometer grids in the Survey panel ------------------------------
+
+
+@pytest.fixture
+def mag_dock(mag_site):
+    session, root = mag_site
+    dock = SurveyDock(session)
+    yield session, dock
+    dock.hide()
+    dock.deleteLater()
+
+
+def _mag_items(dock):
+    """The tree's grid rows by id, and the one file row under M1."""
+    root = dock.tree.topLevelItem(0)
+    grids = {dock.grid_id_of(root.child(i)): root.child(i) for i in range(root.childCount())}
+    return grids
+
+
+def test_a_mag_grid_shows_its_file_as_one_row(mag_dock):
+    from nsgeo.mag import MagFile, MagSetup
+    from plugin_testing import synthetic_grad601
+
+    session, dock = mag_dock
+    grids = _mag_items(dock)
+    assert grids["M1"].text(0) == "M1 · 4 × 4 m · magnetometer"
+    assert grids["M2"].text(0) == "M2 · 4 × 4 m · magnetometer · empty"
+    (file_row,) = [grids["M1"].child(i) for i in range(grids["M1"].childCount())]
+    assert file_row.text(0) == "m1.dat · 8 traverses × 32 readings"
+    assert file_row.data(0, ROLE_KIND) == "magfile"
+    assert grids["M2"].childCount() == 0
+    # The GPR grid is as it was: no instrument wording.
+    assert "magnetometer" not in grids["G1"].text(0)
+    # Missing readings are counted in the file row.
+    path = synthetic_grad601(session.root / "raw" / "mag", "m2.dat", missing=((0, 4, 8),))
+    session.set_mag_file(MagFile.open(path, "M2", MagSetup()))
+    grids = _mag_items(dock)
+    assert grids["M2"].text(0) == "M2 · 4 × 4 m · magnetometer"
+    assert grids["M2"].child(0).text(0) == "m2.dat · 8 traverses × 32 readings · 8 missing"
+
+
+def test_a_mag_grid_menu_offers_mag_import_not_dzt(mag_dock, answer_modal, message_log):
+    session, dock = mag_dock
+    answer_modal(QMenu, "exec", None)
+    asked = []
+    dock.mag_import_requested.connect(asked.append)
+    grids = _mag_items(dock)
+    menu = _right_click(dock, grids["M2"])
+    assert _texts(menu) == ["Edit grid…", "Import magnetometer file…", "Remove grid"]
+    assert menu.actions()[-2].isSeparator()
+    _action(menu, "Import magnetometer file…").trigger()
+    assert asked == ["M2"]
+    # The file row's one action.
+    menu = _right_click(dock, grids["M1"].child(0))
+    assert _texts(menu) == ["Remove file from site"]
+    # A GPR grid still offers DZT import.
+    assert "Import DZT files…" in _texts(_right_click(dock, grids["G1"]))
+    assert message_log == []
+
+
+def test_clicking_a_mag_row_selects_its_grid(mag_dock):
+    session, dock = mag_dock
+    picked = []
+    dock.mag_grid_selected.connect(picked.append)
+    grids = _mag_items(dock)
+    _click(dock, grids["M2"])
+    assert picked == ["M2"] and dock.target_mag_grid_id() == "M2"
+    _click(dock, grids["M1"].child(0))
+    assert picked == ["M2", "M1"] and dock.target_mag_grid_id() == "M1"
+    # Neither opens a line, and the DZT import has no target on a mag row.
+    assert session.current_key is None
+    assert dock.target_grid_id() is None
+    _click(dock, grids["G1"])
+    assert dock.target_grid_id() == "G1" and dock.target_mag_grid_id() is None
+    assert picked == ["M2", "M1"]
+
+
+def test_removing_a_mag_grid_takes_its_file_after_asking(mag_dock, answer_modal):
+    from nsgeo.project import load_site
+
+    session, dock = mag_dock
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    dock.remove_grid_action("M1")
+    assert calls[0][0][2] == "Remove grid M1 and its magnetometer file m1.dat?"
+    assert session.mag_files() == []
+    assert [g.id for g in session.mag_grids()] == ["M2"]
+    session.save()
+    assert [g.id for g in load_site(session.json_path).grids] == ["G1", "M2"]
+
+
+def test_declining_keeps_the_mag_grid_and_its_file(mag_dock, answer_modal):
+    session, dock = mag_dock
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.No)
+    dock.remove_grid_action("M1")
+    assert session.mag_file_on("M1") is not None
+
+
+def test_a_file_row_removes_only_the_file(mag_dock, answer_modal):
+    session, dock = mag_dock
+    calls = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Yes)
+    item = _mag_items(dock)["M1"].child(0)
+    dock.tree.setCurrentItem(item)
+    item.setSelected(True)
+    dock.remove_selected_action()
+    assert "m1.dat" in calls[0][0][2]
+    assert session.mag_files() == []
+    assert "M1" in [g.id for g in session.mag_grids()]

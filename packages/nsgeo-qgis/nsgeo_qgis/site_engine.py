@@ -755,7 +755,8 @@ class SiteEngine(QObject):
 
     def _site_crs(self) -> str:
         """Spec 4.7: the site's CRS is the one its GeoPackage uses, `grids[0].crs`."""
-        return str(self.session.site.grids[0].crs)
+        grids = self.session.gpr_grids() or self.session.site.grids
+        return str(grids[0].crs)
 
     def _grid_extents(
         self, ready: Sequence[str], cell: float
@@ -823,7 +824,7 @@ class SiteEngine(QObject):
             return {}
         return {
             grid.id: (self._fingerprint(grid), float(grid.default_spacing))
-            for grid in self.session.site.grids
+            for grid in self.session.gpr_grids()
         }
 
     def _drop_stale_caches(self) -> None:

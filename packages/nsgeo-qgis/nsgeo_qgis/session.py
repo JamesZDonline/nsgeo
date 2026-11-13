@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.mag import MagFile, MagSetup
 from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
 from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
@@ -112,7 +113,7 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
 
 
 #: The slice scopes that each keep their own colours (#180).
-COLOUR_SCOPES = ("grid", "site")
+COLOUR_SCOPES = ("grid", "site", "mag")
 
 
 def _check_colour_scope(scope: str) -> None:
@@ -140,6 +141,7 @@ class SiteSession(QObject):
     grids_changed = pyqtSignal()
     lines_changed = pyqtSignal()
     cuts_changed = pyqtSignal()
+    mag_changed = pyqtSignal()
     line_opened = pyqtSignal(str)  # "" when no line is current
     line_loaded = pyqtSignal(str)
     trace_changed = pyqtSignal(str, int)
@@ -502,6 +504,82 @@ class SiteSession(QObject):
         self._require_site()
         return list(self._lines_by_key)
 
+    # ---- magnetometer grids and files ---------------------------------------
+    def gpr_grids(self) -> list[Grid]:
+        return [g for g in self._require_site().grids if g.instrument == "gpr"]
+
+    def mag_grids(self) -> list[Grid]:
+        return [g for g in self._require_site().grids if g.instrument == "mag"]
+
+    def mag_key(self, mag: MagFile) -> str:
+        return line_key(mag.path, self.root, allow_absolute=True)
+
+    def mag_files(self) -> list[MagFile]:
+        return list(self._require_site().mag_files)
+
+    def mag_file_on(self, grid_id: str) -> MagFile | None:
+        for m in self._require_site().mag_files:
+            if m.grid_id == grid_id:
+                return m
+        return None
+
+    def mag_for_key(self, key: str) -> MagFile:
+        for m in self._require_site().mag_files:
+            if self.mag_key(m) == key:
+                return m
+        raise KeyError(f"no magnetometer file with key {key!r}")
+
+    def set_mag_file(self, mag: MagFile) -> MagFile | None:
+        """Put `mag` on its grid, replacing and returning that grid's file.
+        The grid must exist and be a magnetometer grid; one file is never
+        on two grids."""
+        site = self._require_site()
+        grid = next((g for g in site.grids if g.id == mag.grid_id), None)
+        if grid is None:
+            raise ValueError(f"mag file {mag.path.name} references unknown grid {mag.grid_id!r}")
+        if grid.instrument != "mag":
+            raise ValueError(
+                f"mag file {mag.path.name} is on grid {mag.grid_id!r}, which is a GPR grid"
+            )
+        key = self.mag_key(mag)
+        for other in site.mag_files:
+            if other.grid_id != mag.grid_id and self.mag_key(other) == key:
+                raise ValueError(f"{mag.path.name} is already on grid {other.grid_id!r}")
+        old = self.mag_file_on(mag.grid_id)
+        site.mag_files = [m for m in site.mag_files if m is not old] + [mag]
+        self._set_dirty(True)
+        self.mag_changed.emit()
+        return old
+
+    def remove_mag_file(self, key: str) -> None:
+        site = self._require_site()
+        gone = self.mag_for_key(key)
+        site.mag_files = [m for m in site.mag_files if m is not gone]
+        self._set_dirty(True)
+        self.mag_changed.emit()
+
+    def mag_setup(self) -> MagSetup | None:
+        return self._require_site().mag_setup
+
+    def remember_mag_setup(self, setup: MagSetup) -> None:
+        site = self._require_site()
+        if site.mag_setup == setup:
+            return
+        site.mag_setup = setup
+        self._set_dirty(True)
+
+    def mag_view(self) -> dict[str, Any]:
+        return copy.deepcopy(self._require_site().mag_view)
+
+    def set_mag_view(self, **fields: Any) -> None:
+        """Merge the Mag panel's remembered choices; dirty only when changed."""
+        site = self._require_site()
+        new = {**site.mag_view, **copy.deepcopy(fields)}
+        if new == site.mag_view:
+            return
+        site.mag_view = new
+        self._set_dirty(True)
+
     def keys_on_grid(self, grid_id: str) -> list[str]:
         """The keys of every line placed on `grid_id`, in survey order.
         `KeyError` for a grid the site does not have."""
@@ -553,6 +631,8 @@ class SiteSession(QObject):
         for i, g in enumerate(site.grids):
             if g.id == grid.id:
                 old = g
+                if g.instrument != grid.instrument:
+                    raise ValueError("a grid's instrument cannot change")
                 site.grids[i] = grid
                 break
         else:
@@ -611,9 +691,16 @@ class SiteSession(QObject):
         site = self._require_site()
         grid = self.grid(grid_id)
         keys = self.keys_on_grid(grid_id)
-        if keys and not with_lines:
-            raise ValueError(f"grid {grid_id!r} still has {len(keys)} line(s); remove them first")
+        mags = [m for m in site.mag_files if m.grid_id == grid_id]
+        if (keys or mags) and not with_lines:
+            raise ValueError(
+                f"grid {grid_id!r} still has {len(keys) + len(mags)} line(s); remove them first"
+            )
         site.grids.remove(grid)
+        # A mag file is the mag grid's one "line": it goes with the grid.
+        site.mag_files = [m for m in site.mag_files if m.grid_id != grid_id]
+        if site.mag_view.get("grid") == grid_id:
+            site.mag_view = {k: v for k, v in site.mag_view.items() if k != "grid"}
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
@@ -635,6 +722,8 @@ class SiteSession(QObject):
             self.lines_changed.emit()
         if gone_cuts:
             self.cuts_changed.emit()
+        if mags:
+            self.mag_changed.emit()
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
         # The report is empty: a velocity change moves no line.
@@ -645,7 +734,13 @@ class SiteSession(QObject):
         site = self._require_site()
         existing = set(self._lines_by_key)
         keyed: list[tuple[str, Line]] = []
+        mag_ids = {g.id for g in site.grids if g.instrument == "mag"}
         for line in lines:
+            grid_id = getattr(line.placement, "grid_id", None)
+            if grid_id in mag_ids:
+                raise ValueError(
+                    f"grid {grid_id!r} is a magnetometer grid; DZT lines go on GPR grids"
+                )
             key = self.line_key(line)
             if key in existing:
                 raise ValueError(f"line {key!r} is already in the site")

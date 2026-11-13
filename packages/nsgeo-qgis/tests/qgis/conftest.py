@@ -564,3 +564,36 @@ def site3_factory(qgis_app, tmp_path):
 def site3(site3_factory):
     """Three adjacent 6 x 6 m synthetic grids, A, B and C, four lines each."""
     return site3_factory()
+
+
+# ---- M19: a site with GPR and magnetometer grids ----------------------------
+
+
+@pytest.fixture
+def mag_site(qgis_app, tmp_path):
+    """A GPR grid `G1` (20 x 20 m, two synthetic DZT lines), a mag grid `M1`
+    (4 x 4 m at (100, 100)) holding a synthetic Grad601 file, and an empty
+    mag grid `M2` (4 x 4 m at (104, 100)). Yields `(session, root)`."""
+    from nsgeo.geometry.grid import Grid
+    from nsgeo.geometry.placement import GridPlacement
+    from nsgeo.mag import MagFile, MagSetup
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.session import SiteSession
+    from plugin_testing import synthetic_dzt, synthetic_grad601
+
+    root = tmp_path / "mag_site"
+    root.mkdir()
+    session = SiteSession()
+    session.new_site(root)
+    session.add_grid(Grid("G1", (500.0, 700.0), 0.0, 20.0, 20.0, "EPSG:32616", 1.0))
+    session.add_grid(Grid("M1", (100.0, 100.0), 0.0, 4.0, 4.0, "EPSG:32616", 0.5, instrument="mag"))
+    session.add_grid(Grid("M2", (104.0, 100.0), 0.0, 4.0, 4.0, "EPSG:32616", 0.5, instrument="mag"))
+    lines = []
+    for i, offset in enumerate((3.0, 8.0)):
+        path = synthetic_dzt(root / "raw" / "G1", f"FILE__00{i + 1}.DZT")
+        lines.append(Line.open(path, GridPlacement("G1", "y", offset, 0.05, 1, path.stem)))
+    session.add_lines(lines)
+    m1 = synthetic_grad601(root / "raw" / "mag", "m1.dat")
+    session.set_mag_file(MagFile.open(m1, "M1", MagSetup()))
+    session.save()
+    yield session, root

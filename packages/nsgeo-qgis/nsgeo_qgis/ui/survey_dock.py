@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 from nsgeo.model import is_cut_key
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
@@ -59,6 +60,7 @@ _CHORD_MODIFIERS = (
     Qt.KeyboardModifier.ShiftModifier,
 )
 # The cut prompts (cut spec §4.8). One constant each, so the tests quote them.
+MAG_GRID_REMOVAL_TEXT = "Remove grid {id} and its magnetometer file {name}?"
 DELETE_CUT_TEXT = "Delete {name}?"
 CUT_ONE_PICK_TEXT = " Its 1 pick stays on the map."
 CUT_PICKS_TEXT = " Its {n} picks stay on the map."
@@ -85,6 +87,8 @@ class SurveyDock(QgsDockWidget):
     add_grid_requested = pyqtSignal()
     edit_grid_requested = pyqtSignal(str)
     import_requested = pyqtSignal(str)
+    mag_import_requested = pyqtSignal(str)  # a mag grid id
+    mag_grid_selected = pyqtSignal(str)  # a click on a mag grid row or its file row
     grid_velocity_requested = pyqtSignal(str)
     line_velocity_requested = pyqtSignal(str)
     # (grid id, line keys to select); keys may be empty (line editing spec §3 call 7).
@@ -139,6 +143,7 @@ class SurveyDock(QgsDockWidget):
         session.grids_changed.connect(self.rebuild)
         session.lines_changed.connect(self.rebuild)
         session.cuts_changed.connect(self.rebuild)
+        session.mag_changed.connect(self.rebuild)
         session.dirty_changed.connect(self._update_status)
         session.line_opened.connect(self._follow_current)
         self.rebuild()
@@ -184,6 +189,9 @@ class SurveyDock(QgsDockWidget):
             grid_id = getattr(line.placement, "grid_id", None)
             by_grid.get(grid_id, loose).append((key, line))
         for grid in site.grids:
+            if grid.instrument == "mag":
+                root.addChild(self._mag_grid_item(grid, known_grids))
+                continue
             v = f" · v {grid.velocity.surface_velocity:.3f}" if grid.velocity else ""
             lines = by_grid[grid.id]
             text = (
@@ -226,6 +234,35 @@ class SurveyDock(QgsDockWidget):
             root.addChild(self._line_item(key, line))
         self._restore_selection(selected)
         self._update_status()
+
+    def _mag_grid_item(self, grid: Any, known_grids: dict[str, bool]) -> QTreeWidgetItem:
+        """A magnetometer grid row, with its one file (if any) beneath it."""
+        mag = self.session.mag_file_on(grid.id)
+        text = f"{grid.id} · {grid.size_x:g} × {grid.size_y:g} m · magnetometer"
+        if mag is None:
+            text += " · empty"
+        item = QTreeWidgetItem([text])
+        item.setData(0, ROLE_KIND, "grid")
+        item.setData(0, ROLE_ID, grid.id)
+        if mag is not None:
+            file_text = f"{mag.path.name} · {mag.n_rows} traverses × {mag.n_readings} readings"
+            try:
+                missing = int(np.isnan(mag.readings()).sum())
+            except Exception as exc:  # noqa: BLE001 -- the count is only a courtesy
+                _log(
+                    f"could not count missing readings in {mag.path.name}: {exc}",
+                    Qgis.MessageLevel.Warning,
+                )
+                missing = 0
+            if missing > 0:
+                file_text += f" · {missing} missing"
+            row = QTreeWidgetItem([file_text])
+            row.setData(0, ROLE_KIND, "magfile")
+            row.setData(0, ROLE_ID, self.session.mag_key(mag))
+            row.setToolTip(0, str(mag.path))
+            item.addChild(row)
+        item.setExpanded(known_grids.get(grid.id, False))
+        return item
 
     def _line_item(self, key: str, line: Any) -> QTreeWidgetItem:
         p = line.placement
@@ -316,6 +353,8 @@ class SurveyDock(QgsDockWidget):
             return ("line", self.key_of(item))
         if kind == "cut":
             return ("cut", self.cut_key_of(item))
+        if kind == "magfile":
+            return ("magfile", self.mag_key_of(item))
         return None
 
     def _item_for_identity(self, ident: tuple[str, str | None]) -> QTreeWidgetItem | None:
@@ -324,11 +363,14 @@ class SurveyDock(QgsDockWidget):
             return self.tree.topLevelItem(0)
         if kind in ("line", "cut"):
             return self.item_for_key(ident_id) if ident_id else None
-        if kind == "grid":
+        if kind in ("grid", "magfile"):
             it = QTreeWidgetItemIterator(self.tree)
             while it.value():
                 item = it.value()
-                if self.kind_of(item) == "grid" and self.grid_id_of(item) == ident_id:
+                if kind == "grid" and self.kind_of(item) == "grid":
+                    if self.grid_id_of(item) == ident_id:
+                        return item
+                elif kind == "magfile" and self.mag_key_of(item) == ident_id:
                     return item
                 it += 1
         return None
@@ -357,6 +399,35 @@ class SurveyDock(QgsDockWidget):
     def grid_id_of(self, item: QTreeWidgetItem | None) -> str | None:
         return item.data(0, ROLE_ID) if self.kind_of(item) == "grid" else None
 
+    def mag_key_of(self, item: QTreeWidgetItem | None) -> str | None:
+        return item.data(0, ROLE_ID) if self.kind_of(item) == "magfile" else None
+
+    def _is_mag_grid(self, grid_id: str | None) -> bool:
+        try:
+            return grid_id is not None and self.session.grid(grid_id).instrument == "mag"
+        except KeyError:
+            return False
+
+    def _mag_grid_of_item(self, item: QTreeWidgetItem | None) -> str | None:
+        """The mag grid a grid row, or a file row under one, stands for."""
+        if self.kind_of(item) == "grid" and self._is_mag_grid(self.grid_id_of(item)):
+            return self.grid_id_of(item)
+        key = self.mag_key_of(item)
+        if key is not None:
+            return self.session.mag_for_key(key).grid_id
+        return None
+
+    def target_mag_grid_id(self) -> str | None:
+        """The magnetometer grid the selected row points at, for the toolbar's
+        Import mag: a selected mag grid row, or the grid a selected file row
+        sits on. Several different mag grids name none."""
+        try:
+            named = {g for g in (self._mag_grid_of_item(i) for i in self.tree.selectedItems()) if g}
+            return named.pop() if len(named) == 1 else None
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring: a toolbar slot
+            _log(f"could not read the selected mag grid: {exc}", Qgis.MessageLevel.Critical)
+            return None
+
     def target_grid_id(self) -> str | None:
         """The grid this panel points at, for the toolbar's Import DZT (#61).
 
@@ -371,7 +442,7 @@ class SurveyDock(QgsDockWidget):
                 key = self.key_of(item)
                 if key is not None:
                     line_grids.add(self._grid_of_line(key))
-                elif self.kind_of(item) == "grid":
+                elif self.kind_of(item) == "grid" and not self._is_mag_grid(self.grid_id_of(item)):
                     grid_rows.add(self.grid_id_of(item))
             line_grids.discard(None)  # a line placed on no grid names none
             for named in (grid_rows, line_grids):
@@ -421,6 +492,15 @@ class SurveyDock(QgsDockWidget):
         held = QApplication.keyboardModifiers()
         if held & Qt.KeyboardModifier.ControlModifier or held & Qt.KeyboardModifier.ShiftModifier:
             return
+        try:
+            mag_grid = self._mag_grid_of_item(item)
+            if mag_grid is not None:
+                # A mag row is not a line: nothing is opened in the profile.
+                self.mag_grid_selected.emit(mag_grid)
+                return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring: an itemClicked slot
+            _log(f"could not select the mag grid: {exc}", Qgis.MessageLevel.Critical)
+            return
         key = self.key_of(item) or self.cut_key_of(item)
         if key is not None and item.isSelected() and len(self.tree.selectedItems()) == 1:
             self._open_line(key)
@@ -453,7 +533,7 @@ class SurveyDock(QgsDockWidget):
             kind = self.kind_of(item)
             grid_ids, keys = self._selected_targets()
             if (
-                kind in ("grid", "line", "cut")
+                kind in ("grid", "line", "cut", "magfile")
                 and item.isSelected()
                 and len(self.tree.selectedItems()) > 1
                 and (grid_ids or keys)
@@ -463,7 +543,7 @@ class SurveyDock(QgsDockWidget):
                 # Qt before this runs: the press selects just that item.
                 # Editing and moving are for recorded lines; a selection that
                 # holds a cut offers removal only.
-                if keys and not any(is_cut_key(k) for k in keys):
+                if keys and not any(is_cut_key(k) or self._is_mag_key(k) for k in keys):
                     grids = {self._grid_of_key(k) for k in keys}
                     if len(grids) == 1:
                         grid = grids.pop()
@@ -481,6 +561,19 @@ class SurveyDock(QgsDockWidget):
                 )
             elif kind == "site" or item is None:
                 menu.addAction("Add grid…", self.add_grid_requested.emit)
+            elif kind == "grid" and self._is_mag_grid(self.grid_id_of(item)):
+                gid = self.grid_id_of(item) or ""
+                menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
+                menu.addAction(
+                    "Import magnetometer file…", lambda: self.mag_import_requested.emit(gid)
+                )
+                menu.addSeparator()
+                menu.addAction("Remove grid", lambda: self.remove_grid_action(gid))
+            elif kind == "magfile":
+                mag_key = self.mag_key_of(item) or ""
+                menu.addAction(
+                    "Remove file from site", lambda: self.remove_mag_file_action(mag_key)
+                )
             elif kind == "grid":
                 gid = self.grid_id_of(item) or ""
                 menu.addAction("Edit grid…", lambda: self.edit_grid_requested.emit(gid))
@@ -512,6 +605,13 @@ class SurveyDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not build the survey tree context menu: {exc}", Qgis.MessageLevel.Critical)
 
+    def _is_mag_key(self, key: str) -> bool:
+        try:
+            self.session.mag_for_key(key)
+        except KeyError:
+            return False
+        return True
+
     def _grid_of_key(self, key: str) -> str:
         return str(getattr(self.session.line_for_key(key).placement, "grid_id", ""))
 
@@ -538,13 +638,16 @@ class SurveyDock(QgsDockWidget):
         sub.setTitle(title)
         on = {k: self._grid_of_key(k) for k in keys}
         site = self.session.site
-        for grid in site.grids if site is not None else []:
+        for grid in self.session.gpr_grids() if site is not None else []:
             action = sub.addAction(grid.id, lambda g=grid.id: self._request_move(keys, g))
             action.setEnabled(any(g != grid.id for g in on.values()))
         menu.addMenu(sub)
 
     def remove_line_action(self, key: str, *, confirm: bool = True) -> None:
         self._remove([], [key], confirm=confirm, title="Remove line")
+
+    def remove_mag_file_action(self, key: str, *, confirm: bool = True) -> None:
+        self._remove([], [key], confirm=confirm, title="Remove magnetometer file")
 
     def remove_cut_action(self, key: str, *, confirm: bool = True) -> None:
         self._remove([], [key], confirm=confirm, title="Delete cut")
@@ -580,7 +683,10 @@ class SurveyDock(QgsDockWidget):
                 answer = QMessageBox.question(self, title, self._removal_text(grid_ids, keys))
                 if answer != QMessageBox.StandardButton.Yes:
                     return
-            line_keys = [k for k in keys if not is_cut_key(k)]
+            mag_keys = [k for k in keys if self._is_mag_key(k)]
+            line_keys = [k for k in keys if not is_cut_key(k) and k not in mag_keys]
+            for mag_key in mag_keys:
+                self.session.remove_mag_file(mag_key)
             if line_keys:
                 self.session.remove_lines(line_keys)
             for cut_key in (k for k in keys if is_cut_key(k)):
@@ -614,10 +720,15 @@ class SurveyDock(QgsDockWidget):
             it += 1
         keys = []
         cut_keys = []
+        mag_keys = []
         for item in items:
             key = self.key_of(item)
             cut_key = self.cut_key_of(item)
+            mag_key = self.mag_key_of(item)
             try:
+                if mag_key is not None:
+                    self.session.mag_for_key(mag_key)
+                    mag_keys.append(mag_key)
                 if key is not None:
                     self.session.line_for_key(key)
                     keys.append(key)
@@ -630,21 +741,25 @@ class SurveyDock(QgsDockWidget):
             return [], keys
         if cut_keys:
             return [], cut_keys
+        if mag_keys:
+            return [], mag_keys
         return [g for g in (self.grid_id_of(i) for i in items) if g is not None], []
 
-    @staticmethod
-    def _count_phrase(grid_ids: list[str], keys: list[str]) -> str:
+    def _count_phrase(self, grid_ids: list[str], keys: list[str]) -> str:
         if grid_ids:
             if len(grid_ids) == 1:
                 return "1 grid and its lines"
             return f"{len(grid_ids)} grids and their lines"
         n_cuts = sum(1 for k in keys if is_cut_key(k))
-        n_lines = len(keys) - n_cuts
+        n_mags = sum(1 for k in keys if self._is_mag_key(k))
+        n_lines = len(keys) - n_cuts - n_mags
         phrases = []
         if n_lines:
             phrases.append(f"{n_lines} line{'s' if n_lines != 1 else ''}")
         if n_cuts:
             phrases.append(f"{n_cuts} cut{'s' if n_cuts != 1 else ''}")
+        if n_mags:
+            phrases.append(f"{n_mags} magnetometer file{'s' if n_mags != 1 else ''}")
         return " and ".join(phrases)
 
     def _cut_removal_text(self, key: str) -> str:
@@ -688,8 +803,9 @@ class SurveyDock(QgsDockWidget):
         """The confirmation for a removal: exactly what goes, and what
         does not (#31)."""
         cut_keys = [k for k in keys if is_cut_key(k)]
-        keys = [k for k in keys if not is_cut_key(k)]
-        if len(cut_keys) == 1 and not keys and not grid_ids:
+        mag_keys = [k for k in keys if self._is_mag_key(k)]
+        keys = [k for k in keys if not is_cut_key(k) and k not in mag_keys]
+        if len(cut_keys) == 1 and not keys and not grid_ids and not mag_keys:
             return self._cut_removal_text(cut_keys[0])
         things = []
         n_lines = len(keys)
@@ -698,7 +814,12 @@ class SurveyDock(QgsDockWidget):
             grid_cut_keys += self.session.cut_keys_on_grid(grid_id)
             n = len(self.session.keys_on_grid(grid_id))
             n_lines += n
-            if n:
+            mag = self.session.mag_file_on(grid_id)
+            if mag is not None:
+                if len(grid_ids) == 1 and not keys and not cut_keys and not mag_keys:
+                    return MAG_GRID_REMOVAL_TEXT.format(id=grid_id, name=mag.path.name)
+                things.append(f"grid {grid_id} and its magnetometer file {mag.path.name}")
+            elif n:
                 things.append(f"grid {grid_id} and its {n} line{'s' if n != 1 else ''}")
             else:
                 things.append(f"grid {grid_id}")
@@ -706,6 +827,10 @@ class SurveyDock(QgsDockWidget):
             things.append(keys[0])
         elif keys:
             things.append(f"{len(keys)} lines")
+        if len(mag_keys) == 1:
+            things.append(f"magnetometer file {self.session.mag_for_key(mag_keys[0]).path.name}")
+        elif mag_keys:
+            things.append(f"{len(mag_keys)} magnetometer files")
         if len(cut_keys) == 1:
             things.append(self.session.cut_for_key(cut_keys[0]).name)
         elif cut_keys:

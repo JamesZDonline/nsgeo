@@ -865,7 +865,7 @@ class SlicesDock(QgsDockWidget):
             self._updating += 1
             try:
                 site = self.session.site
-                grid_ids = [g.id for g in site.grids] if site is not None else []
+                grid_ids = [g.id for g in self.session.gpr_grids()] if site is not None else []
                 preset_names = sorted(site.presets) if site is not None else []
                 self._refill(self.grid_combo, grid_ids)
                 self._refill(self.preset_combo, preset_names)

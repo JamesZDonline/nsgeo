@@ -37,6 +37,11 @@ KNOWN_UNCONSUMED = {
     "new_site_requested",
     "open_site_requested",
     "save_requested",
+    # M19a Plan A: the Survey panel emits these from Task 4; the plugin
+    # connects them in Task 5 (the import dialog) and Task 6 (the Mag
+    # panel), and each leaves this set in the task that does.
+    "mag_import_requested",
+    "mag_grid_selected",
 }
 
 # A signal name declared by more than one class cannot be judged by a

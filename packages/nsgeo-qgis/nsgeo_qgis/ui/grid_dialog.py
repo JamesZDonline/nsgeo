@@ -36,6 +36,7 @@ from qgis.gui import (
 )
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -107,8 +108,14 @@ def _spin(lo: float, hi: float, decimals: int, step: float, value: float = 0.0) 
 # Building every row's label from this one shared width keeps both
 # layouts' label columns aligned regardless of which form a given row
 # ends up in.
+#: A new magnetometer grid starts at the usual walked grid: 30 x 30 m, 0.5 m traverses.
+MAG_GRID_SIZE_M = 30.0
+MAG_GRID_SPACING_M = 0.5
+GPR_GRID_SIZE_M = 10.0
+
 _FORM_LABELS = (
     "Id",
+    "Instrument",
     "CRS",
     "Origin E, N",
     "Azimuth (° cw from N to +Y)",
@@ -160,6 +167,7 @@ class GridDialog(QDialog):
         grid: Grid | None = None,
         parent: QWidget | None = None,
         canvas: QgsMapCanvas | None = None,
+        instrument: str = "gpr",
     ) -> None:
         super().__init__(parent)
         self.session = session
@@ -215,6 +223,11 @@ class GridDialog(QDialog):
         form_top = QFormLayout()
         form_bottom = QFormLayout()
         self.id_edit = QLineEdit()
+        # A grid's instrument is fixed once it exists (the session refuses to
+        # change it), so an existing grid shows its own and the combo is off.
+        self.instrument_combo = QComboBox()
+        self.instrument_combo.addItem("GPR", "gpr")
+        self.instrument_combo.addItem("Magnetometer", "mag")
         self.crs_widget = QgsProjectionSelectionWidget()
         self.origin_x = _spin(-1e8, 1e8, 3, 0.1)
         self.origin_y = _spin(-1e8, 1e8, 3, 0.1)
@@ -239,8 +252,10 @@ class GridDialog(QDialog):
         vel_row = QHBoxLayout()
         vel_row.addWidget(self.velocity)
         vel_row.addWidget(self.velocity_hint)
+        self._velocity_label = _label("Velocity (m/ns)", 0)
         label_width = max(QLabel(text).sizeHint().width() for text in _FORM_LABELS)
         form_top.addRow(_label("Id", label_width), self.id_edit)
+        form_top.addRow(_label("Instrument", label_width), self.instrument_combo)
         form_top.addRow(_label("CRS", label_width), self.crs_widget)
         form_bottom.addRow(_label("Origin E, N", label_width), origin_row)
         form_bottom.addRow(_label("Azimuth (° cw from N to +Y)", label_width), self.azimuth)
@@ -256,7 +271,8 @@ class GridDialog(QDialog):
         self.use_measured_button.hide()
         form_bottom.addRow(_label("", label_width), hint_row)
         form_bottom.addRow(_label("Default spacing (m)", label_width), self.spacing)
-        form_bottom.addRow(_label("Velocity (m/ns)", label_width), vel_row)
+        self._velocity_label.setMinimumWidth(label_width)
+        form_bottom.addRow(self._velocity_label, vel_row)
         layout.addLayout(form_top)
         # Round 3, Finding 2: crs_hint sharing a row with crs_widget (in
         # a QHBoxLayout, the way velocity_hint shares with velocity)
@@ -317,11 +333,51 @@ class GridDialog(QDialog):
         if grid is not None:
             self._prefill(grid)
             self._typed = [True, True]
+            self._set_instrument(grid.instrument)
+            self.instrument_combo.setEnabled(False)
         else:
             self._settle_crs_at_open()
+            self._set_instrument(instrument)
+            self.instrument_combo.currentIndexChanged.connect(self._on_instrument_changed)
         self._validate()
         self._refresh_derived()
         self._refresh_overlay()
+
+    # ---- the instrument -----------------------------------------------------
+    @property
+    def instrument(self) -> str:
+        return str(self.instrument_combo.currentData())
+
+    def _set_instrument(self, instrument: str) -> None:
+        index = self.instrument_combo.findData(instrument)
+        if index < 0:
+            raise ValueError(f"unknown instrument {instrument!r}")
+        self.instrument_combo.setCurrentIndex(index)
+        self._apply_instrument(starting=True)
+
+    def _on_instrument_changed(self, _index: int) -> None:
+        try:
+            self._apply_instrument(starting=False)
+        except Exception as exc:  # noqa: BLE001 -- a slot: it must not raise (module docstring)
+            self.fit_status.setText(f"could not switch the instrument: {exc}")
+
+    def _apply_instrument(self, *, starting: bool) -> None:
+        """Hide the velocity row for a mag grid. A new grid whose sizes are
+        still the dialog's own gets the instrument's usual size and spacing."""
+        mag = self.instrument == "mag"
+        for w in (self._velocity_label, self.velocity, self.velocity_hint):
+            w.setVisible(not mag)
+        if self.existing is not None or (not starting and any(self._typed)):
+            return
+        self._sizing = True
+        try:
+            size = MAG_GRID_SIZE_M if mag else GPR_GRID_SIZE_M
+            self.size_x.setValue(size)
+            self.size_y.setValue(size)
+        finally:
+            self._sizing = False
+        if mag:
+            self.spacing.setValue(MAG_GRID_SPACING_M)
 
     # ---- the map overlay (spec 4.8) ----------------------------------------
     def _wire_overlay(self, canvas: QgsMapCanvas) -> None:
@@ -1431,6 +1487,7 @@ class GridDialog(QDialog):
             crs=self.crs_widget.crs().authid(),
             default_spacing=self.spacing.value(),
             velocity=self._result_velocity(),
+            instrument=self.instrument,
         )
 
     def _result_velocity(self) -> VelocityModel | None:
@@ -1439,7 +1496,7 @@ class GridDialog(QDialog):
         velocity to the box's four decimals nor flattens a layered model to
         its top layer; otherwise the typed number."""
         v = self.velocity.value()
-        if v == 0.0:
+        if v == 0.0 or self.instrument == "mag":
             return None
         stored = self.existing.velocity if self.existing is not None else None
         if stored is not None and round(v, 4) == round(stored.surface_velocity, 4):

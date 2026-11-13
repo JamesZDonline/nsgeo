@@ -174,7 +174,7 @@ class EditLinesDialog(QDialog):
         self._progress = QTimer(self)
         self._progress.timeout.connect(self._show_progress)
         try:
-            self._grid_ids = [g.id for g in session.site.grids] if session.site else []
+            self._grid_ids = [g.id for g in session.gpr_grids()] if session.site else []
             for key in session.keys_on_grid(grid_id):
                 line = session.line_for_key(key)
                 self._order.append(key)

@@ -36,6 +36,28 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     return path
 
 
+def synthetic_grad601(
+    folder: Path,
+    name: str,
+    rows: int = 8,
+    readings: int = 32,
+    value: float = 5.0,
+    missing: tuple[tuple[int, int, int], ...] = (),
+) -> Path:
+    """A small Grad601 file written into `folder`: tab-separated, 2 decimals, CRLF.
+
+    Each row ramps by 0.1 per reading from `value`; `missing` holds
+    `(row, col0, n)` runs of zeros (the download's no-data marker)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    values = value + 0.1 * np.arange(readings)[None, :] + np.zeros((rows, 1))
+    for row, col0, n in missing:
+        values[row, col0 : col0 + n] = 0.0
+    lines = ["\t".join(f"{v:.2f}" for v in r) for r in values]
+    path = folder / name
+    path.write_bytes(("\r\n".join(lines) + "\r\n").encode("ascii"))
+    return path
+
+
 def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None) -> None:
     """A mouse move sent *while a button is logically held* (between a
     `QTest.mousePress` and the matching `mouseRelease`) is not reliably
