@@ -113,6 +113,10 @@ release's notes list everything in it.
   Bartington Grad601 files onto magnetometer grids and see them as one mag
   map in a new Mag panel, beside the GPR. Built, awaiting its walkthrough. **Plan B:** export the
   mag map, destagger in Edit lines, and change a file's setup after import.
+- **M17a: GPS lines**, the first of three plans. Read the RTK GPS log
+  (`.DZG`) beside each DZT and place the line along the track it was
+  walked, with no grid: import, the map (with stretches that had no RTK
+  fix marked), the Survey panel, and a destagger you can type. Building.
 
 ### Next, in order
 
@@ -121,8 +125,8 @@ than reworking M16–M17 afterwards.
 
 1. **M16: 3-D.** In progress (above).
 2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
-   lines by their track ([#134]). Design drafted, in three parts: GPS lines,
-   profiles at true distance, and GPS areas.
+   lines by their track ([#134]). Designed, in three parts: GPS lines (in
+   progress, above), profiles at true distance, and GPS areas.
 3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
 4. **M19: magnetometer data.** The first instrument other than GPR:
