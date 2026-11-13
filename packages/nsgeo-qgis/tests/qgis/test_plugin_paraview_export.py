@@ -1,6 +1,7 @@
 """Export for ParaView (M16 A): the folder, its cube at its own resolution, picks on the cube's
 clock, the fill cache, cancelling and the refusals. Real DZT lines, real files on disk."""
 
+# ruff: noqa: F811  (built_site is the surface-build tests' fixture, imported by name)
 from __future__ import annotations
 
 import json
@@ -31,6 +32,7 @@ from plugin_testing import (
     needs_real_data,
     spin_until,
 )
+from test_plugin_surface_build import built_site  # noqa: F401
 
 
 @pytest.fixture
@@ -128,7 +130,14 @@ def test_export_writes_the_folder_ParaView_opens(site):
     assert folder == paraview_folder(session, "Grid A")
     assert folder == Path(session.root) / "paraview" / "Grid_A"
     files = {p.name for p in folder.iterdir()}
-    assert files == {"cube.vti", "picks.vtp", "lines.vtp", "export.json", *SCENE_FILES}
+    assert files == {
+        "cube.vti",
+        "picks.vtp",
+        "lines.vtp",
+        "features.vtp",
+        "export.json",
+        *SCENE_FILES,
+    }
     assert not list(folder.parent.glob("*.partial")) and not list(folder.parent.glob("*.old"))
     ext, origin, spacing, arrays = read_vti(folder / "cube.vti")
     nx, ny = 12, 48  # a 3 x 12 m grid at the 0.25 m cell
@@ -849,3 +858,111 @@ def test_a_new_panel_z1_after_the_first_export_does_not_change_the_defaults(synt
     )
     session.remember_slice_resolution("Grid A", t1_ns=30.0)
     assert export.defaults("Grid A").t1_ns == _full_end_ns(export, session)
+
+
+# ---- surfaces in the export (M16 B Task 4) -------------------------------------------------
+
+
+def _export_with_surfaces(built_site):
+    session, _, export, layers, surfaces = built_site
+    export.surfaces = surfaces
+    return session, export, layers, surfaces
+
+
+def _two_surfaces(built_site):
+    """A built and fresh, B built and then given another pick (stale); a pick on neither."""
+    from nsgeo.slices import SurfaceSettings
+
+    session, export, layers, surfaces = _export_with_surfaces(built_site)
+    a_fids = _surface_picks(layers, session, [(0, 5, 10.0), (0, 55, 11.0), (1, 5, 10.5)])
+    a = surfaces.create("A", a_fids, SurfaceSettings(strength=0.0))
+    b_fids = _surface_picks(layers, session, [(0, 10, 12.0), (0, 50, 12.5), (1, 10, 12.5)])
+    b = surfaces.create("B", b_fids, SurfaceSettings(strength=0.0))
+    surfaces.build([a.feature_id, b.feature_id], progress=_noop)
+    surfaces.add_picks(b.feature_id, _surface_picks(layers, session, [(1, 50, 13.0)]))
+    (loose,) = _surface_picks(layers, session, [(0, 30, 11.0)])
+    assert surfaces.state(a.feature_id).stale == ()
+    assert surfaces.state(b.feature_id).stale == ("picks",)
+    return session, export, surfaces, a, b, loose
+
+
+def _surface_picks(layers, session, specs):
+    from test_plugin_surface_build import _write
+
+    return _write(layers, session, specs)
+
+
+def test_the_export_writes_every_built_surface_with_its_stale_flag(built_site):
+    from nsgeo.slices import surface_mesh
+    from tests.vtk_reader import read_vtk_xml
+
+    session, export, surfaces, a, b, _ = _two_surfaces(built_site)
+    choice = export.defaults("Grid A")
+    folder = export.run("Grid A", choice, progress=_noop)
+    assert {p.name for p in folder.iterdir()} == {
+        "cube.vti",
+        "picks.vtp",
+        "lines.vtp",
+        "features.vtp",
+        "export.json",
+        *SCENE_FILES,
+    }
+    doc = read_vtk_xml(folder / "features.vtp")
+    feature, stale = doc["point_data"]["feature"], doc["point_data"]["stale"]
+    depth = doc["point_data"]["true_depth_m"]
+    assert feature.dtype == np.int32 and stale.dtype == np.uint8 and depth.dtype == np.float32
+    record = json.loads((folder / "export.json").read_text())
+    assert [(f["index"], f["name"], f["stale"]) for f in record["features"]] == [
+        (0, "A", False),
+        (1, "B", True),
+    ]
+    assert all(
+        set(f) == {"index", "name", "stale", "picks", "within_2cm", "on_holes"}
+        for f in record["features"]
+    )
+    assert record["features"][0]["picks"] == 3 and record["features"][1]["picks"] == 3
+    n_polys = 0
+    for index, rec in enumerate((a, b)):
+        built = surfaces.built(rec.feature_id)
+        local, triangles, _ = surface_mesh(built.depth_m, built.cell)
+        mine = feature == index
+        assert int(mine.sum()) == len(local) > 0
+        np.testing.assert_allclose(depth[mine], local[:, 2], rtol=1e-6)
+        assert set(stale[mine].tolist()) == {1 if index == 1 else 0}
+        points = doc["points"][mine]
+        np.testing.assert_allclose(points[:, :2], local[:, :2], atol=1e-4)
+        np.testing.assert_allclose(points[:, 2], -local[:, 2] * choice.stretch, rtol=1e-5)
+        n_polys += len(triangles)
+    assert len(doc["Polys_offsets"]) == n_polys
+    # triangles join points of one surface only
+    conn = doc["Polys_connectivity"].reshape(-1, 3)
+    assert all(len(set(feature[tri].tolist())) == 1 for tri in conn)
+
+
+def test_picks_vtp_names_each_picks_surface(built_site):
+    from tests.vtk_reader import read_vtk_xml
+
+    session, export, surfaces, a, b, loose = _two_surfaces(built_site)
+    folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)
+    doc = read_vtk_xml(folder / "picks.vtp")
+    feature = doc["point_data"]["feature"]
+    assert feature.dtype == np.int32 and len(feature) == 8
+    assert sorted(feature.tolist()) == [-1] + [0] * 3 + [1] * 4
+    # without surfaces: the same export writes an empty features.vtp and no feature on a pick
+    export.surfaces = None
+    folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)
+    assert set(read_vtk_xml(folder / "picks.vtp")["point_data"]["feature"].tolist()) == {-1}
+    assert read_vtk_xml(folder / "features.vtp")["NumberOfPoints"] == 0
+    assert json.loads((folder / "export.json").read_text())["features"] == []
+
+
+def test_the_summary_counts_the_surfaces_and_the_stale_ones(built_site):
+    from nsgeo_qgis.paraview_scene import summary_rows
+
+    session, export, surfaces, a, b, _ = _two_surfaces(built_site)
+    summary = export.summary("Grid A", export.defaults("Grid A"))
+    assert (summary.n_surfaces, summary.n_stale_surfaces) == (2, 1)
+    assert dict(summary_rows(summary))["Surfaces"] == "2 (1 stale)"
+    export.surfaces = None
+    summary = export.summary("Grid A", export.defaults("Grid A"))
+    assert (summary.n_surfaces, summary.n_stale_surfaces) == (0, 0)

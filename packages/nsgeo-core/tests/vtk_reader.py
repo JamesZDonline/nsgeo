@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-_DTYPES = {"Float32": "<f4", "Float64": "<f8", "Int32": "<i4", "Int64": "<i8"}
+_DTYPES = {"Float32": "<f4", "Float64": "<f8", "Int32": "<i4", "Int64": "<i8", "UInt8": "|u1"}
 
 
 def _floats(text: str) -> tuple[float, ...]:

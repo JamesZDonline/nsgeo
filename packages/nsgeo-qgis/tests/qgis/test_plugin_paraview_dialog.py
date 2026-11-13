@@ -114,6 +114,7 @@ def test_the_dialog_lists_what_will_be_written(plugin):
     assert "paraview" in dialog.folder_label.text() and "A" in dialog.folder_label.text()
     assert "cells" in dialog.volume_label.text() and "depths" in dialog.volume_label.text()
     assert dialog.also_label.text() == "0 picks, 3 lines"
+    assert dialog.surfaces_label.text() == "none"
     assert dialog.disk_label.text().endswith("free")
     assert dialog.trend_spin.value() > 0 and dialog.period_spin.value() > 0
 

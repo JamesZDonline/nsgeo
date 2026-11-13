@@ -156,6 +156,7 @@ class ParaViewExportDialog(QDialog):
         self.volume_label = _value_label()
         self.fill_label = _value_label()
         self.also_label = _value_label()
+        self.surfaces_label = _value_label()
         self.size_label = _value_label()
         self.disk_label = _value_label()
         self._row_labels = {
@@ -163,6 +164,7 @@ class ParaViewExportDialog(QDialog):
             "Volume": self.volume_label,
             "Fill": self.fill_label,
             "Also": self.also_label,
+            "Surfaces": self.surfaces_label,
             "Size": self.size_label,
             "Disk": self.disk_label,
         }

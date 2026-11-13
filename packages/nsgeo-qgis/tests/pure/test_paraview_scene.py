@@ -8,7 +8,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from nsgeo.vtkxml import write_image_data, write_poly_data
-from nsgeo_qgis.paraview_scene import SCENE_FILES, scene_record, write_scene_files
+from nsgeo_qgis.paraview_scene import (
+    SCENE_FILES,
+    feature_label,
+    scene_record,
+    write_scene_files,
+)
 
 PLUGIN = Path(__file__).parents[2] / "nsgeo_qgis"
 
@@ -35,6 +40,7 @@ FIELDS = dict(
     amplitude_range=[0.0, 4.0],
     slices={"depth_m": 0.6, "x_m": 5.0, "y_m": 4.0, "lines_along": "y"},
     n_picks=0,
+    features=[],
     nsgeo_version="0.0.0",
     written_utc="2026-01-01T00:00:00Z",
 )
@@ -89,6 +95,9 @@ src = open(os.path.join({folder!r}, "open_scene.py"), encoding="utf-8").read()
 exec(compile(src, "open_scene.py", "exec"), {{"__name__": "__main__"}})  # no __file__
 from paraview.simple import *
 print("NAMES:" + "|".join(sorted(name for name, _ in GetSources())))
+_view = GetActiveView()
+_shown = [n for (n, _), p in GetSources().items() if GetDisplayProperties(p, _view).Visibility]
+print("SHOWN:" + "|".join(sorted(_shown)))
 SaveScreenshot({shot!r}, GetActiveView(), ImageResolution=[400, 300])
 """
 
@@ -96,6 +105,31 @@ SaveScreenshot({shot!r}, GetActiveView(), ImageResolution=[400, 300])
 @pytest.mark.skipif(not os.environ.get("NSGEO_PVPYTHON"), reason="set NSGEO_PVPYTHON to a pvpython")
 @pytest.mark.parametrize("n_picks", [0, 3])
 def test_the_scene_opens_in_pvpython(tmp_path, n_picks):
+    _open_in_pvpython(tmp_path, n_picks, [])
+
+
+#: Quotes, a slash and an accent: nothing here may be pasted into script code.
+AWKWARD = 'Bowl "north" / é'
+
+
+@pytest.mark.skipif(not os.environ.get("NSGEO_PVPYTHON"), reason="set NSGEO_PVPYTHON to a pvpython")
+def test_scene_opens_with_a_surface_whose_name_has_quotes(tmp_path):
+    entries = [
+        dict(index=0, name=AWKWARD, stale=False, picks=3, within_2cm=3, on_holes=0),
+        dict(index=1, name=AWKWARD + " 2", stale=True, picks=3, within_2cm=2, on_holes=1),
+        dict(index=2, name="Empty", stale=False, picks=3, within_2cm=0, on_holes=3),
+    ]
+    out = _open_in_pvpython(tmp_path, 3, entries)
+    names = next(ln for ln in out.splitlines() if ln.startswith("NAMES:"))[6:].split("|")
+    visible = next(ln for ln in out.splitlines() if ln.startswith("SHOWN:"))[6:].split("|")
+    for entry in entries:
+        label = feature_label(entry["name"], entry["stale"])
+        assert label in names
+        assert label not in visible  # hidden at first
+    assert 'Surface: Bowl "north" / é' in names and 'Surface: Bowl "north" / é 2 (stale)' in names
+
+
+def _open_in_pvpython(tmp_path, n_picks, entries):
     nx, ny, nz = 20, 16, 30
     zz, yy, xx = np.meshgrid(np.arange(nz), np.arange(ny), np.arange(nx), indexing="ij")
     blob = 5.0 * np.exp(-(((xx - 10) / 4.0) ** 2 + ((yy - 8) / 4.0) ** 2 + ((zz - 15) / 5.0) ** 2))
@@ -130,7 +164,10 @@ def test_the_scene_opens_in_pvpython(tmp_path, n_picks):
         {},
         lines=[[0, 1]],
     )
-    write_scene_files(tmp_path, scene_record(**{**FIELDS, "n_picks": n_picks}), "paraview")
+    _write_features_vtp(tmp_path, entries)
+    write_scene_files(
+        tmp_path, scene_record(**{**FIELDS, "n_picks": n_picks, "features": entries}), "paraview"
+    )
     shot = tmp_path / "shot.png"
     check = tmp_path / "check_scene.py"
     check.write_text(_CHECK.format(folder=str(tmp_path), shot=str(shot)), encoding="utf-8")
@@ -164,6 +201,29 @@ def test_the_scene_opens_in_pvpython(tmp_path, n_picks):
     keep = os.environ.get("NSGEO_KEEP_SHOT")
     if keep:
         Path(keep).write_bytes(shot.read_bytes())
+    return run.stdout
+
+
+def _write_features_vtp(folder, entries):
+    """One small triangle per entry, the last with no cells at all (a surface with no kept cell)."""
+    pts, depth, feature, polys = [], [], [], []
+    for e in entries[:-1] if entries and entries[-1]["name"] == "Empty" else entries:
+        k = len(pts)
+        base = 2.0 * e["index"]
+        pts += [[base, 1.0, -0.9], [base + 1.0, 1.0, -1.2], [base, 2.0, -1.5]]
+        depth += [0.3, 0.4, 0.5]
+        feature += [e["index"]] * 3
+        polys.append([k, k + 1, k + 2])
+    write_poly_data(
+        folder / "features.vtp",
+        np.array(pts, dtype=np.float32).reshape(-1, 3),
+        {
+            "true_depth_m": np.array(depth, np.float32),
+            "feature": np.array(feature, np.int32),
+            "stale": np.zeros(len(pts), np.uint8),
+        },
+        polys=polys,
+    )
 
 
 def test_scene_title_names_the_grid_and_states_the_stretch():
@@ -189,6 +249,8 @@ def _summary(**over):
         fill_method="min_curvature",
         n_picks=1,
         n_lines=4,
+        n_surfaces=0,
+        n_stale_surfaces=0,
         export_bytes=1_500_000_000,
         cache_bytes=800_000_000,
         free_bytes=50_000_000_000,
@@ -201,10 +263,11 @@ def test_summary_rows_say_what_will_be_written():
     from nsgeo_qgis.paraview_scene import summary_rows
 
     rows = dict(summary_rows(_summary()))
-    assert list(rows) == ["Folder", "Volume", "Fill", "Also", "Size", "Disk"]
+    assert list(rows) == ["Folder", "Volume", "Fill", "Also", "Surfaces", "Size", "Disk"]
     assert rows["Volume"] == "120 × 48 cells × 300 depths, 0 – 2.40 m"
     assert rows["Fill"] == "Minimum curvature"
     assert rows["Also"] == "1 pick, 4 lines"
+    assert rows["Surfaces"] == "none"
     assert rows["Size"] == "about 1.5 GB, plus 800 MB fill kept for quick re-exports"
     assert rows["Disk"] == "50.0 GB free"
     assert "replaces" not in rows["Folder"] and "Grid A" in rows["Folder"]
@@ -331,3 +394,37 @@ def test_the_windows_launcher_does_not_hold_the_folder_and_keeps_crlf(tmp_path):
 def test_skipped_lines_are_recorded_in_the_scene_record():
     assert scene_record(**FIELDS)["skipped_lines"] == []
     assert scene_record(**FIELDS, skipped_lines=["a"])["skipped_lines"] == ["a"]
+
+
+def test_the_surfaces_row_counts_them_and_the_stale_ones():
+    from nsgeo_qgis.paraview_scene import summary_rows
+
+    def row(**over):
+        return dict(summary_rows(_summary(**over)))["Surfaces"]
+
+    assert row(n_surfaces=3, n_stale_surfaces=1) == "3 (1 stale)"
+    assert row(n_surfaces=2, n_stale_surfaces=0) == "2"
+    assert row(n_surfaces=2, n_stale_surfaces=2) == "2 (2 stale)"
+    assert row(n_surfaces=0, n_stale_surfaces=0) == "none"
+
+
+def test_a_surfaces_label_says_when_it_is_stale():
+    from nsgeo_qgis.paraview_scene import feature_label
+
+    assert feature_label("Bowl", False) == "Surface: Bowl"
+    assert feature_label("Bowl", True) == "Surface: Bowl (stale)"
+
+
+def test_scene_record_requires_features_and_checks_them():
+    fields = dict(FIELDS)
+    del fields["features"]
+    with pytest.raises(TypeError, match="features"):
+        scene_record(**fields)
+    entry = dict(index=0, name="Bowl", stale=False, picks=4, within_2cm=3, on_holes=0)
+    assert scene_record(**{**FIELDS, "features": [entry]})["features"] == [entry]
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "features": [{**entry, "extra": 1}]})
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "features": [{**entry, "index": 1}]})
+    with pytest.raises(ValueError):
+        scene_record(**{**FIELDS, "features": "Bowl"})

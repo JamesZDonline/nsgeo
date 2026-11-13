@@ -54,6 +54,7 @@ from nsgeo.slices import (
     plan_fill,
     plan_line,
     prepare_volume,
+    surface_mesh,
 )
 from nsgeo.vtkxml import write_image_data, write_poly_data
 from qgis.PyQt.QtCore import QEventLoop
@@ -243,11 +244,13 @@ def place_picks(
 
 
 class ParaViewExport:
-    """Writes a grid's ParaView folder. `dock` is the Slices dock (read only)."""
+    """Writes a grid's ParaView folder. `dock` is the Slices dock (read only). `surfaces` (a
+    `Surfaces`) puts the grid's built surfaces in features.vtp; without it that file is empty."""
 
-    def __init__(self, session: Any, dock: Any) -> None:
+    def __init__(self, session: Any, dock: Any, surfaces: Any = None) -> None:
         self.session = session
         self.dock = dock
+        self.surfaces = surfaces
         self._zero_probes: dict[tuple[str, str], float] = {}
         # picks_for scans every pick of the site, so a grid's count is read once for as long
         # as this object lives (the dialog's lifetime).
@@ -349,6 +352,7 @@ class ParaViewExport:
                 len(self.session.picks_for(k)) for k in source.line_keys
             )
         n_picks = self._pick_counts[grid_id]
+        states = self._surface_states(grid_id)
         return ExportSummary(
             folder=folder,
             replaces=folder.is_dir(),
@@ -359,10 +363,24 @@ class ParaViewExport:
             fill_method=str(self._finish(grid_id).method),
             n_picks=n_picks,
             n_lines=len(source.line_keys),
+            n_surfaces=len(states),
+            n_stale_surfaces=sum(1 for st in states if st.stale),
             export_bytes=self.estimate(grid_id, choice),
             cache_bytes=self.cache_bytes(grid_id, choice),
             free_bytes=int(shutil.disk_usage(Path(self.session.root)).free),
         )
+
+    def _surface_states(self, grid_id: str) -> list[Any]:
+        """The state of each built surface of the grid, in the surfaces' order."""
+        if self.surfaces is None:
+            return []
+        out = []
+        for record in self.surfaces.records():
+            if record.grid_id == grid_id:
+                state = self.surfaces.state(record.feature_id)
+                if state.built:
+                    out.append(state)
+        return out
 
     def cache_bytes(self, grid_id: str, choice: VolumeChoice) -> int:
         """The bytes the fill cache will add: 0 when this grid's cache for these settings is
@@ -620,10 +638,20 @@ class ParaViewExport:
                 shutil.rmtree(partial)
             partial.mkdir(parents=True)
             amp_p99 = self._write_cube(partial, vol, frame, choice, spans, step)
-            n_picks = self._write_picks(partial, lines, prov, frame, choice, velocity)
+            features = self._write_features(partial, grid_id, frame, choice)
+            n_picks = self._write_picks(
+                partial,
+                lines,
+                prov,
+                frame,
+                choice,
+                velocity,
+                {f["feature_id"]: f["index"] for f in features},
+            )
+            features = [{k: v for k, v in f.items() if k != "feature_id"} for f in features]
             self._write_lines(partial, lines, frame, grid)
             record = self._record(
-                grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks
+                grid, grid_id, choice, frame, lines, prov, finish, vol, amp_p99, n_picks, features
             )
             record["skipped_lines"] = list(self.skipped_lines)
             write_scene_files(partial, record, paraview_path)
@@ -817,11 +845,23 @@ class ParaViewExport:
         frame: CubeFrame,
         choice: VolumeChoice,
         velocity: Any,
+        feature_index: dict[str, int] | None = None,
     ) -> int:
-        """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity."""
+        """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity.
+        `feature` is the index (in export.json's `features`) of the pick's built surface, or -1."""
+        feature_index = feature_index or {}
         order = {line.key: i for i, line in enumerate(sorted(lines, key=lambda ln: ln.key))}
         rows = [(line.key, p) for line in lines for p in self.session.picks_for(line.key)]
-        placed = [p for p in place_picks(rows, lines, prov, frame, velocity) if p is not None]
+        spots = place_picks(rows, lines, prov, frame, velocity)
+        placed = [p for p in spots if p is not None]
+        feature = np.asarray(
+            [
+                feature_index.get(str(pick.feature_id), -1)
+                for (_key, pick), spot in zip(rows, spots)
+                if spot is not None
+            ],
+            dtype=np.int32,
+        )
         depth = np.asarray([p.depth_m for p in placed], dtype=float)
         local = np.asarray([[p.x_m, p.y_m] for p in placed], dtype=float).reshape(-1, 2)
         line_index = np.asarray([order[p.line_key] for p in placed], dtype=np.int32)
@@ -831,10 +871,75 @@ class ParaViewExport:
         write_poly_data(
             folder / "picks.vtp",
             points,
-            {"true_depth_m": depth.astype(np.float32), "line": line_index},
+            {"true_depth_m": depth.astype(np.float32), "line": line_index, "feature": feature},
             verts=[[i] for i in range(len(depth))],
         )
         return int(depth.size)
+
+    def _write_features(
+        self, folder: Path, grid_id: str, frame: CubeFrame, choice: VolumeChoice
+    ) -> list[dict[str, Any]]:
+        """features.vtp: every built surface of the grid, stale ones included (they show their
+        last build), as triangles at `(x, y, -depth * stretch)` in the cube's frame. Returns
+        each surface's scene entry (with its `feature_id`, which the caller removes)."""
+        points: list[np.ndarray] = []
+        depth: list[np.ndarray] = []
+        feature: list[np.ndarray] = []
+        stale: list[np.ndarray] = []
+        polys: list[list[int]] = []
+        entries: list[dict[str, Any]] = []
+        count = 0
+        records = [] if self.surfaces is None else self.surfaces.records()
+        for record in records:
+            if record.grid_id != grid_id:
+                continue
+            built = self.surfaces.built(record.feature_id)
+            if built is None:
+                continue
+            index = len(entries)
+            is_stale = bool(self.surfaces.state(record.feature_id).stale)
+            local, triangles, _cells = surface_mesh(built.depth_m, built.cell)
+            if len(local):
+                # The build's own frame to world, then to this export's frame: the same unless
+                # the grid has moved since the build.
+                x_hat, y_hat = CubeFrame(
+                    built.origin, built.azimuth, built.cell, 1, 1, built.crs
+                ).axes()
+                world = (
+                    np.asarray(built.origin, dtype=float)
+                    + local[:, :1] * x_hat
+                    + local[:, 1:2] * y_hat
+                )
+                xy = frame.to_local(world)
+                points.append(np.column_stack([xy, -local[:, 2] * choice.stretch]))
+                depth.append(local[:, 2].astype(np.float32))
+                feature.append(np.full(len(local), index, dtype=np.int32))
+                stale.append(np.full(len(local), 1 if is_stale else 0, dtype=np.uint8))
+                polys.extend((triangles + count).tolist())
+                count += len(local)
+            fit = built.report.get("fit", {})
+            entries.append(
+                {
+                    "feature_id": record.feature_id,
+                    "index": index,
+                    "name": record.name,
+                    "stale": is_stale,
+                    "picks": int(fit.get("picks", 0)),
+                    "within_2cm": int(fit.get("within_2cm", 0)),
+                    "on_holes": int(fit.get("on_holes", 0)),
+                }
+            )
+        write_poly_data(
+            folder / "features.vtp",
+            np.vstack(points) if points else np.empty((0, 3)),
+            {
+                "true_depth_m": np.concatenate(depth) if depth else np.empty(0, np.float32),
+                "feature": np.concatenate(feature) if feature else np.empty(0, np.int32),
+                "stale": np.concatenate(stale) if stale else np.empty(0, np.uint8),
+            },
+            polys=polys,
+        )
+        return entries
 
     @staticmethod
     def _write_lines(
@@ -871,6 +976,7 @@ class ParaViewExport:
         vol: Any,
         amp_p99: float,
         n_picks: int,
+        features: list[dict[str, Any]],
     ) -> dict[str, Any]:
         depths = vol.depths_m
         local = [frame.to_local(line.coords) for line in lines]
@@ -917,6 +1023,7 @@ class ParaViewExport:
                 "lines_along": along,
             },
             n_picks=int(n_picks),
+            features=features,
             nsgeo_version=str(nsgeo.__version__),
             written_utc=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )

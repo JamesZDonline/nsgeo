@@ -142,6 +142,30 @@ lines = XMLPolyDataReader(registrationName="Survey lines", FileName=[path("lines
 lines_d = Show(lines, view)
 try_set(lines_d, AmbientColor=[0.85, 0.85, 0.85], DiffuseColor=[0.85, 0.85, 0.85], LineWidth=1.5)
 
+# ---------------------------------------------------------------- surfaces built from picks
+# One source per surface, hidden at first. Names come from export.json and are only ever
+# handed to ParaView as data, never as code.
+FEATURES = INFO["features"]
+surfaces = XMLPolyDataReader(registrationName="Surfaces", FileName=[path("features.vtp")])
+surface_items = []
+for f in FEATURES:
+    label = "Surface: " + str(f["name"]) + (" (stale)" if f["stale"] else "")
+    thr = Threshold(registrationName=label, Input=surfaces)
+    index = int(f["index"])
+    try_set(thr, Scalars=["POINTS", "feature"])
+    try_set(thr, LowerThreshold=index, UpperThreshold=index)
+    try_set(thr, ThresholdMethod="Between")
+    thr_d = Show(thr, view)
+    # Named, not rescaled: a surface with no cells has no range to read, and the colours
+    # are set below for all of them.
+    try_set(
+        thr_d,
+        ColorArrayName=["POINTS", "true_depth_m"],
+        LookupTable=GetColorTransferFunction("true_depth_m"),
+    )
+    Hide(thr, view)
+    surface_items.append((thr, thr_d))
+
 # ---------------------------------------------------------------- colours, set last so nothing rescales them
 str_lut = GetColorTransferFunction("strength")
 apply_preset(str_lut, "Inferno", "Inferno (matplotlib)")

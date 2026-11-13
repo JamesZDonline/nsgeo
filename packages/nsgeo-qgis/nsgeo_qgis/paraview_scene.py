@@ -43,16 +43,26 @@ _REQUIRED = (
     "amplitude_range",
     "slices",
     "n_picks",
+    "features",
     "nsgeo_version",
     "written_utc",
 )
 _SLICE_KEYS = {"depth_m", "x_m", "y_m", "lines_along"}
+_FEATURE_KEYS = {"index", "name", "stale", "picks", "within_2cm", "on_holes"}
+
+
+def feature_label(name: str, stale: bool) -> str:
+    """What the scene calls a surface: "Surface: <name>", and " (stale)" when its inputs have
+    changed since it was built (it still shows that build)."""
+    return f"Surface: {name}" + (" (stale)" if stale else "")
 
 
 def scene_record(**fields: object) -> dict:
     """The content of export.json. Every key must be given except the five with defaults.
 
-    Raises TypeError for an unknown or missing key and ValueError for a bad `slices`.
+    Raises TypeError for an unknown or missing key and ValueError for a bad `slices` or a bad
+    `features` (a list of `{index, name, stale, picks, within_2cm, on_holes}`, `index` counting
+    from 0 in order).
     """
     known = set(_REQUIRED) | set(_DEFAULTS)
     unknown = sorted(set(fields) - known)
@@ -67,6 +77,13 @@ def scene_record(**fields: object) -> dict:
         raise ValueError(f"slices must have exactly the keys {sorted(_SLICE_KEYS)}")
     if slices["lines_along"] not in ("x", "y"):
         raise ValueError("slices['lines_along'] must be 'x' or 'y'")
+    features = record["features"]
+    if not isinstance(features, list) or any(
+        not isinstance(f, dict) or set(f) != _FEATURE_KEYS for f in features
+    ):
+        raise ValueError(f"features must be a list of dicts with exactly {sorted(_FEATURE_KEYS)}")
+    if [f["index"] for f in features] != list(range(len(features))):
+        raise ValueError("features must be numbered 0, 1, 2, ... in order")
     return record
 
 
@@ -110,6 +127,9 @@ class ExportSummary:
     fill_method: str
     n_picks: int
     n_lines: int
+    #: Built surfaces of the grid (all go in features.vtp), and how many of them are stale.
+    n_surfaces: int
+    n_stale_surfaces: int
     export_bytes: int
     cache_bytes: int
     free_bytes: int
@@ -193,6 +213,13 @@ def _count(n: int, noun: str) -> str:
     return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
+def surfaces_text(n_surfaces: int, n_stale: int) -> str:
+    """ "none", "2", or "3 (1 stale)": the surfaces the export will carry."""
+    if n_surfaces <= 0:
+        return "none"
+    return f"{n_surfaces} ({n_stale} stale)" if n_stale else str(n_surfaces)
+
+
 def summary_rows(summary: ExportSummary) -> list[tuple[str, str]]:
     """The dialog's read-only rows, label and text, in order."""
     folder = f"{summary.folder}{os.sep}"
@@ -207,6 +234,7 @@ def summary_rows(summary: ExportSummary) -> list[tuple[str, str]]:
         ),
         ("Fill", METHOD_LABELS.get(summary.fill_method, summary.fill_method)),
         ("Also", f"{_count(summary.n_picks, 'pick')}, {_count(summary.n_lines, 'line')}"),
+        ("Surfaces", surfaces_text(summary.n_surfaces, summary.n_stale_surfaces)),
         ("Size", size_text(summary)),
         ("Disk", disk_text(summary)),
     ]

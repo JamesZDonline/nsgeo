@@ -23,6 +23,7 @@ _TYPES = {
     np.dtype("float64"): "Float64",
     np.dtype("int32"): "Int32",
     np.dtype("int64"): "Int64",
+    np.dtype("uint8"): "UInt8",
 }
 
 
