@@ -190,3 +190,18 @@ def test_a_real_line_fitted_to_its_grid_ends_on_both_edges():
     assert (fwd[0], fwd[-1]) == (pytest.approx(0.0), pytest.approx(10.0, abs=1e-9))
     assert (rev[0], rev[-1]) == (pytest.approx(10.0), pytest.approx(0.0, abs=1e-9))
     assert h.traces_per_metre == pytest.approx(60.0)  # the header stays as recorded
+
+
+def test_along_and_local_are_the_placement_maths_without_a_header(tmp_path):
+    p = GridPlacement("G", "y", 1.5, start_along=2.0, direction=-1, scale=0.9, travel_shift=0.1)
+    np.testing.assert_allclose(p.along(5, 10.0), 2.0 - (0.9 * np.arange(5) / 10.0 + 0.1))
+    np.testing.assert_allclose(
+        p.local(5, 10.0), np.column_stack([np.full(5, 1.5), p.along(5, 10.0)])
+    )
+    q = GridPlacement("G", "x", 0.5, start_along=1.0)
+    np.testing.assert_allclose(
+        q.local(3, 10.0), np.column_stack([q.along(3, 10.0), np.full(3, 0.5)])
+    )
+    p10 = tmp_path / "t.DZT"
+    write_dzt(p10, np.zeros((512, 10), dtype=np.int32), traces_per_metre=10.0)
+    np.testing.assert_allclose(p.distance_along(5, read_header(p10)), p.along(5, 10.0))

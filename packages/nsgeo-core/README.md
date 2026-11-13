@@ -34,6 +34,23 @@ DZT and DZX readers.
 | `sidecar_for` | The DZX beside a DZT, or the path itself if it is one; None when there is none. |
 | `trace_count` | Number of traces, from the file size. |
 
+### `nsgeo.mag`
+
+Bartington Grad601 magnetometer files: reading them, marking missing data, and placing each traverse in its grid.
+
+| Name | Purpose |
+|---|---|
+| `MISSING_RUN` | The default run of consecutive 0.00 readings (4) that counts as missing data. |
+| `MagFileError` | Raised, naming the file and row, for a file that does not look like a Grad601 grid file. |
+| `MagSetup` | How a download was walked: traverse axis and starting corner, spacing, readings per metre, sensors, zigzag, flipped. `to_dict` and `from_dict` give the survey-JSON form. |
+| `Traverse` | One file row with its `GridPlacement`, and whether its stored order is the reverse of walked. |
+| `fit_problems` | What does not fit between a file's shape and its grid, as sentences; empty when it fits. |
+| `mark_missing` | A copy of the readings with NaN for each run of zeros at least `MISSING_RUN` long. |
+| `missing_summary` | One sentence naming the traverses that hold missing readings. |
+| `read_grad601` | A file as a float64 array of traverses by readings, as written. |
+| `traverses` | Every row placed in its grid, with optional per-traverse scales and shifts. |
+| `walked_direction` | Which way a row was walked, +1 or -1, from the setup. |
+
 ### `nsgeo.model`
 
 The survey data model.

@@ -69,6 +69,19 @@ class GridPlacement:
         if not math.isfinite(self.travel_shift):
             raise ValueError(f"travel_shift must be finite, got {self.travel_shift!r}")
 
+    def along(self, n: int, per_metre: float) -> np.ndarray:
+        """(n,) metres along the line for `n` readings `per_metre` per recorded metre."""
+        recorded = np.arange(n, dtype=float) / per_metre
+        return self.start_along + self.direction * (self.scale * recorded + self.travel_shift)
+
+    def local(self, n: int, per_metre: float) -> np.ndarray:
+        """(n, 2) grid-local metres; the offset sits on the axis the line does not run along."""
+        along = self.along(n, per_metre)
+        cross = np.full(n, self.offset, dtype=float)
+        if self.axis == "y":
+            return np.column_stack([cross, along])
+        return np.column_stack([along, cross])
+
     def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
         spm = header.traces_per_metre
         if not spm > 0:
@@ -77,18 +90,12 @@ class GridPlacement:
                 "recorded with time triggering and cannot be positioned by a "
                 "grid placement"
             )
-        recorded = np.arange(n_traces, dtype=float) / spm
-        return self.start_along + self.direction * (self.scale * recorded + self.travel_shift)
+        return self.along(n_traces, spm)
 
     def trace_coords(
         self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
     ) -> np.ndarray:
         if self.grid_id not in frames:
             raise KeyError(f"no grid frame named {self.grid_id!r}")
-        along = self.distance_along(n_traces, header)
-        cross = np.full(n_traces, self.offset, dtype=float)
-        if self.axis == "y":
-            local = np.column_stack([cross, along])
-        else:
-            local = np.column_stack([along, cross])
+        local = self.local(n_traces, header.traces_per_metre)
         return frames[self.grid_id].to_world(local)

@@ -33,3 +33,14 @@ GRID2_LINES = dzt_files(DATA / "grid2")
 """The sixty lines of Nashville City Cemetery 2023 Grid 2 (29.96 m), links to the raw files.
 
 Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey."""
+
+
+def dat_files(folder: Path) -> list[Path]:
+    """The `.dat` files directly inside `folder`, sorted; [] when it is missing."""
+    if not folder.is_dir():
+        return []
+    return sorted(p for p in folder.iterdir() if p.suffix.lower() == ".dat")
+
+
+MAG_FILES = dat_files(DATA / "mag-data")
+"""The six Grad601 grid files for M19 (60 traverses of 240 readings); key them by name."""
