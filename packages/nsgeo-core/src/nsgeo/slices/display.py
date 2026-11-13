@@ -22,13 +22,18 @@ import functools
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from nsgeo.render import Normalizer
 from nsgeo.slices.cube import SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis, slice_extent
+from nsgeo.slices.resample import Taps, bilinear_taps, sample, sample_counts
 from nsgeo.velocity import VelocityModel
+
+if TYPE_CHECKING:
+    from nsgeo.slices.site import SiteLattice
 
 
 @dataclass(frozen=True)
@@ -148,9 +153,9 @@ def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> fl
     The thickness is an argument and not a detail, because the stretch is
     a property of `(cube, thickness)` and NOT of the cube: a window mean
     has far lower variance than the levels it averages, so measuring over
-    `cube.mean` gives a limit that is systematically too high. Cheap
+    every raw level gives a limit that is systematically too high. Cheap
     cluster (M11 final review): cited from THIS repo's own corpus, not
-    another dataset -- `UnipolarClip().limit(cube.mean)` returned 2.585
+    another dataset -- `UnipolarClip().limit` over every raw level returned 2.585
     where the correct limit for the displayed 10-level slice was 1.274 --
     every slice then renders at about half its intended brightness,
     identically at every depth, so it reads as dim data rather than as a
@@ -190,7 +195,7 @@ def shared_limit(cube: SliceCube, thickness_levels: int, clip: Normalizer) -> fl
 
 
 def to_north_up(
-    values: np.ndarray, frame: CubeFrame
+    values: np.ndarray, frame: CubeFrame, *, counts: bool = False
 ) -> tuple[np.ndarray, tuple[float, float, float, float, float, float]]:
     """Resample a grid-local slice into a north-up raster and its geotransform.
 
@@ -217,42 +222,50 @@ def to_north_up(
       in-frame value would smear a real edge out across ground that was
       never surveyed.
 
-    Nearest neighbour, not bilinear: these values are already cell means
-    over real traces, and interpolation and smoothing (interpolation spec
-    §5, §6) are the places a user chooses to invent or blur anything, with
-    settings they can see. Interpolating again here would invent structure
-    below the cell size and do it invisibly.
+    The pixel is the frame's cell at every azimuth, and each pixel is read
+    bilinearly (`nsgeo.slices.resample`), blank wherever the cell under its
+    centre is blank. A nearest-cell gather at pitch = cell drops 15-18% of
+    a rotated frame's cells, and the old remedy of half the pitch made
+    four times the pixels for the same information. Bilinear at the cell
+    reads every cell on a rotated frame, and an axis-aligned frame, whose
+    pixel centres sit on the cell centres, comes back exactly. The blend is
+    only between neighbouring cell means, one cell wide: it does not
+    interpolate across a gap (`max_distance`) or smooth; those stay the
+    user's choices.
 
-    The pixel pitch follows Ruling 2 (interpolation spec §8): the cell for
-    an axis-aligned frame, half of it for a rotated one, because a backward
-    nearest-neighbour gather at pitch = cell drops 15-18% of a rotated
-    frame's cells. At half the pitch every cell holds a pixel centre.
+    `counts=True` is for a coverage raster: each pixel takes the largest
+    count among the in-frame cells that feed it (those with positive
+    weight), never a blend, so a count stays a whole number (or NaN). No
+    trace count is hidden, so a line one cell wide stays visible; a gap of
+    a cell or less beside data may close.
 
-    Which cell each pixel reads depends only on the frame, so it is planned
+    Which cells each pixel reads depends only on the frame, so it is planned
     once per frame (`_north_up_plan`) and each call after the first is one
-    gather. Solving it every call made a slider tick on a rotated frame 4-5 x
-    dearer than at full pitch; measured at 10.497 degrees, a tick on a 50 m
-    grid went from 52 ms to 2 ms at 0.2 m, and from 265 ms to 8 ms at 0.1 m.
-    The first call on a frame still costs what every call used to.
+    sample. Solving it every call made a slider tick on a rotated frame 4-5 x
+    dearer. Ticks on a 50 x 40 m frame at 0.05 m (1000 x 800 cells), plan
+    cached, median of 20: 4.6 ms at azimuth 0 and 36 ms at 10.497 degrees
+    (the first sampler took 139 ms there, and a 30 ms one was not exact on
+    constants; before bilinear: 2 ms at 0.2 m and 8 ms at 0.1 m, nearest cell
+    at half the cell). The first call on a frame
+    still costs the planning, about 0.4 s here.
     """
-    values = np.asarray(values, dtype=float)
+    values = np.asarray(values)
     if values.shape != (frame.ny, frame.nx):
         raise ValueError(
             f"values must be {(frame.ny, frame.nx)} to match the frame, got {values.shape}"
         )
-    safe, inside, shape, geotransform = _north_up_plan(frame)
-    out = np.where(inside, values.reshape(-1)[safe], np.nan).reshape(shape)
-    return out.astype(np.float32), geotransform
+    taps, shape, geotransform = _north_up_plan(frame)
+    out = sample_counts(values, taps) if counts else sample(values, taps)
+    return out.reshape(shape), geotransform
 
 
 #: Frames whose north-up plan is kept. The preview and an export of it share
-#: one; the second slot keeps the grid just left. Each plan is 5 bytes a
-#: pixel, about 1.7 MB for a rotated 50 m grid at 0.2 m, so a few are cheap,
-#: but a 4-million-cell frame's is near 90 MB: hence two, not more.
+#: one; the second slot keeps the grid just left. A plan is the frame's
+#: bilinear taps, about 52 bytes a point (`Taps.nbytes`), so a rotated 50 m
+#: grid at 0.05 m is tens of MB and a very large rotated frame of a few
+#: million pixels hundreds each, two plans together: hence two, not more.
 _NORTH_UP_PLANS = 2
-_NorthUpPlan = tuple[
-    np.ndarray, np.ndarray, tuple[int, int], tuple[float, float, float, float, float, float]
-]
+_NorthUpPlan = tuple[Taps, tuple[int, int], tuple[float, float, float, float, float, float]]
 
 
 @functools.lru_cache(maxsize=_NORTH_UP_PLANS)
@@ -262,17 +275,22 @@ def _north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     return _build_north_up_plan(frame)
 
 
-def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
-    """`(safe, inside, shape, geotransform)`: the frame cell each north-up
-    pixel reads (clipped in-bounds), which pixels lie inside the frame, the
-    raster's `(height, width)` and its geotransform. Read-only arrays."""
-    # Imported here: site.py imports this module.
-    from nsgeo.slices.site import lattice_pixel, snap_azimuth
+def frame_lattice(frame: CubeFrame, pixel: float) -> SiteLattice:
+    """The north-up lattice over `frame`'s own extent, at any `pixel`.
 
+    Anchored at the extent's north-west corner and snapped, so the width and
+    height of an axis-aligned frame are exact (`to_north_up`'s phantom row
+    and column, below). Unlike `SiteLattice.covering` it is anchored on the
+    frame, not on a multiple of the pixel, so at `pixel == frame.cell` an
+    axis-aligned frame's pixel centres sit on its cell centres and come back
+    exactly, at any pixel the grid is read bilinearly.
+    """
+    from nsgeo.slices.site import SiteLattice  # `site` imports this module
+
+    if not pixel > 0.0:
+        raise ValueError(f"pixel must be positive, got {pixel}")
     xmin, ymin, xmax, ymax = slice_extent(frame)
-    extent = math.hypot(frame.nx, frame.ny) * frame.cell
-    pixel = lattice_pixel(frame.cell, [snap_azimuth(frame.azimuth, extent, frame.cell)])
-    # `(xmax - xmin) / cell` is an exact integer for an axis-aligned frame,
+    # `(xmax - xmin) / pixel` is an exact integer for an axis-aligned frame,
     # but in floating point it lands a few ulps above one, so a plain
     # ceil() adds a phantom all-nodata row and column. Snap the ratio --
     # scale-free, unlike a tolerance in metres. Measured before the fix: a
@@ -290,23 +308,23 @@ def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
     # `cell_index` uses, converted from metres to pixels by dividing by
     # the pixel pitch.
     eps = 64.0 * np.finfo(float).eps * max(1.0, abs(xmin), abs(xmax), abs(ymin), abs(ymax)) / pixel
-    width = max(1, int(math.ceil((xmax - xmin) / pixel - eps)))
-    height = max(1, int(math.ceil((ymax - ymin) / pixel - eps)))
+    return SiteLattice(
+        x0=xmin,
+        y1=ymax,
+        pixel=pixel,
+        width=max(1, int(math.ceil((xmax - xmin) / pixel - eps))),
+        height=max(1, int(math.ceil((ymax - ymin) / pixel - eps))),
+        crs=frame.crs,
+    )
 
+
+def _build_north_up_plan(frame: CubeFrame) -> _NorthUpPlan:
+    """`(taps, shape, geotransform)`: the bilinear taps of every north-up
+    pixel centre, the raster's `(height, width)` and its geotransform."""
+    lattice = frame_lattice(frame, frame.cell)
     # Pixel CENTRES, so a sample lands in the middle of its output pixel
     # rather than on a boundary where round-off decides which cell it
     # reads -- the same reason `cell_index` has its own edge tolerance.
-    xs = xmin + (np.arange(width, dtype=float) + 0.5) * pixel
-    ys = ymax - (np.arange(height, dtype=float) + 0.5) * pixel  # row 0 is north
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    world = np.column_stack([grid_x.ravel(), grid_y.ravel()])
-
-    ids = frame.cell_index(world)
-    # `ids` is -1 outside; clip only so the gather is in-bounds, and let
-    # `inside` discard those pixels. Indexing with a raw -1 would silently
-    # read the frame's LAST cell instead.
-    safe = np.clip(ids, 0, frame.n_cells - 1).astype(np.int32)
-    inside = ids >= 0
-    safe.setflags(write=False)
-    inside.setflags(write=False)
-    return safe, inside, (height, width), (xmin, pixel, 0.0, ymax, 0.0, -pixel)
+    taps = bilinear_taps(frame, lattice.pixel_centres())
+    shape = (lattice.height, lattice.width)
+    return taps, shape, (lattice.x0, lattice.pixel, 0.0, lattice.y1, 0.0, -lattice.pixel)

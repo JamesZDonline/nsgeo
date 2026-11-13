@@ -15,6 +15,15 @@ against the active tool -- the same shape as the Plan 2 bug where a
 right-click committed a left-drag selection in the profile. Selection
 gives us a deliberate gesture for free instead (see `_on_selection`).
 
+Cuts (cut spec §4.3, plan calls 9 and 10). While the cuts layer is QGIS's
+current layer the link is in *cut mode* (the plugin sets it from
+`iface.currentLayerChanged`): hovering finds a cut instead of a line, and the
+pointer maps to a section column through the cut's distance
+(`Cut.locate`, then `CutSections.column_at`). Line mode ignores cuts, and cut
+mode ignores lines. The working cut stays open when the mode changes. Going
+the other way, a column's world position (the section's `columns.world`, in
+the grid's CRS) is transformed into the canvas CRS for the marker and band.
+
 Every slot here catches its own exceptions: PyQt cannot propagate an
 exception out of a slot invoked from C++, this build prints it and carries
 on, and the CI container routes it to qFatal(). See `session.py`.
@@ -23,11 +32,15 @@ on, and the CI container routes it to qFatal(). See `session.py`.
 from __future__ import annotations
 
 import contextlib
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
+from nsgeo.model import is_cut_key
 from qgis.core import (
     NULL,
     Qgis,
+    QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsGeometry,
     QgsMessageLog,
@@ -43,6 +56,11 @@ from qgis.PyQt.QtGui import QColor
 from .layers import SiteLayers
 from .session import SiteSession
 
+if TYPE_CHECKING:
+    from .cut_sections import CutSection, CutSections
+
+# Shown when a pick's cut is no longer in the site (cut spec call 3).
+CUT_GONE_TEXT = "This pick's cut no longer exists. The pick stays where it was drawn."
 MARKER_COLOUR = QColor("#e67e22")
 BAND_COLOUR = QColor("#e67e22")
 MARKER_SIZE_PX = 9
@@ -67,6 +85,29 @@ def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> 
     QgsMessageLog.logMessage(message, "nsgeo", level)
 
 
+class _NoTransform(Exception):  # noqa: N818 -- a signal, not an error to report
+    """A grid's CRS cannot be reached from the canvas's; already logged."""
+
+
+def crs_transform(
+    source: QgsCoordinateReferenceSystem, dest: QgsCoordinateReferenceSystem, project: Any
+) -> QgsCoordinateTransform | None:
+    """The transform from `source` to `dest`; None means "same CRS (or one is
+    invalid): do not transform". Raises `RuntimeError` when there is no
+    transform: `QgsCoordinateTransform.transform()` does not raise on an
+    invalid one, it leaves the point unchanged. The one rule the map link and
+    the plugin's Cut drawing share (cut spec §4.1, §4.3)."""
+    if not source.isValid() or not dest.isValid() or source == dest:
+        return None
+    transform = QgsCoordinateTransform(source, dest, project)
+    if not transform.isValid():
+        raise RuntimeError(
+            f"no coordinate transform between {source.authid() or source.toWkt()} and "
+            f"{dest.authid() or dest.toWkt()}"
+        )
+    return transform
+
+
 class MapLink(QObject):
     HOVER_DWELL_MS = HOVER_DWELL_MS
     HOVER_TOLERANCE_PX = HOVER_TOLERANCE_PX
@@ -77,11 +118,14 @@ class MapLink(QObject):
         layers: SiteLayers,
         canvas: QgsMapCanvas,
         parent: QObject | None = None,
+        on_info: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.session = session
         self.layers = layers
         self.canvas = canvas
+        #: Where a message for the user goes (the plugin's message bar).
+        self.on_info = on_info
 
         self._marker: QgsVertexMarker | None = QgsVertexMarker(canvas)
         self._marker.setIconType(QgsVertexMarker.ICON_CROSS)
@@ -100,6 +144,18 @@ class MapLink(QObject):
         # tolerance -- which is a pixel count times mapUnitsPerPixel -- is
         # in the same units as the distances it is compared against.
         self._geoms: dict[str, QgsGeometry] | None = None
+        # The same for the cuts layer, keyed by `cut_key` (cut spec §4.3).
+        self._cut_geoms: dict[str, QgsGeometry] | None = None
+        # Canvas <-> grid-CRS transforms, per grid id; None means "same CRS".
+        self._to_grid: dict[str, QgsCoordinateTransform | None] = {}
+        self._to_canvas: dict[str, QgsCoordinateTransform | None] = {}
+        # (grid id, to_grid) pairs with no transform: logged once, then answered
+        # as "no column" until the next invalidation, not once per mouse move.
+        self._no_transform: set[tuple[str, bool]] = set()
+        # A section's columns in canvas CRS, built once per section object.
+        self._columns_canvas: dict[str, tuple[Any, list[QgsPointXY]]] = {}
+        self._cut_mode = False
+        self._sections: CutSections | None = None
 
         self._last_point: QgsPointXY | None = None
         self._dwell = QTimer(self)
@@ -118,7 +174,12 @@ class MapLink(QObject):
             session.line_opened,
         ):
             signal.connect(self._on_session_changed)
-        for signal in (session.lines_changed, session.grids_changed, session.site_opened):
+        for signal in (
+            session.lines_changed,
+            session.grids_changed,
+            session.site_opened,
+            session.cuts_changed,
+        ):
             signal.connect(self._on_lines_changed)
         session.site_closed.connect(self._on_lines_changed)
         canvas.destinationCrsChanged.connect(self._on_lines_changed)
@@ -139,6 +200,7 @@ class MapLink(QObject):
             "lines": self._on_selection,
             "picks": self._on_pick_selection,
             "marks": self._on_mark_selection,
+            "cuts": self._on_cut_selection,
         }
         # None means "not yet bound"; tracked per layer, and separately
         # from each `layers.layers[...]` lookup, for the reason
@@ -152,6 +214,148 @@ class MapLink(QObject):
     # ---- cache ------------------------------------------------------------
     def _invalidate(self) -> None:
         self._geoms = None
+        self._cut_geoms = None
+        self._to_grid.clear()
+        self._to_canvas.clear()
+        self._no_transform.clear()
+        self._columns_canvas.clear()
+
+    # ---- cut mode and sections -----------------------------------------------
+    @property
+    def cut_mode(self) -> bool:
+        return self._cut_mode
+
+    def set_cut_mode(self, on: bool) -> None:
+        """Hover and select work on cuts (True) or on lines (False).
+
+        Whatever is previewed belongs to the old mode, so it is cleared; the
+        working line or cut is untouched (cut spec §4.3). The plugin calls
+        this from the current-layer switch.
+        """
+        try:
+            on = bool(on)
+            if on == self._cut_mode:
+                return
+            self._cut_mode = on
+            self._dwell.stop()
+            self.session.clear_preview()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not change the map link's mode: {exc}", Qgis.MessageLevel.Critical)
+
+    def set_sections(self, sections: CutSections | None) -> None:
+        """The service the link asks for a cut's columns (cut spec call 14)."""
+        old, self._sections = self._sections, sections
+        if old is not None:
+            with contextlib.suppress(TypeError, RuntimeError):
+                old.section_changed.disconnect(self._on_section_changed)
+        if sections is not None:
+            sections.section_changed.connect(self._on_section_changed)
+        self._columns_canvas.clear()
+
+    def _on_section_changed(self, *_: Any) -> None:
+        try:
+            self._columns_canvas.clear()
+            self._refresh()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not update the map link for a section: {exc}", Qgis.MessageLevel.Critical)
+
+    def _canvas_crs(self) -> QgsCoordinateReferenceSystem:
+        return self.canvas.mapSettings().destinationCrs()
+
+    def _grid_transform(self, grid_id: str, *, to_grid: bool) -> QgsCoordinateTransform | None:
+        """The canvas -> grid CRS transform (or the reverse); None for "same CRS".
+
+        Raises `_NoTransform` (quietly, after logging the first time) rather than
+        answering with an untransformed point, for the reason `crs_transform` gives.
+        """
+        cache = self._to_grid if to_grid else self._to_canvas
+        if grid_id in cache:
+            return cache[grid_id]
+        if (grid_id, to_grid) in self._no_transform:
+            raise _NoTransform
+        grid_crs = QgsCoordinateReferenceSystem(self.session.grid(grid_id).crs)
+        canvas_crs = self._canvas_crs()
+        source, dest = (canvas_crs, grid_crs) if to_grid else (grid_crs, canvas_crs)
+        try:
+            transform = crs_transform(source, dest, self.layers.project)
+        except RuntimeError as exc:
+            _log(f"cuts on grid {grid_id} cannot follow the pointer: {exc}")
+            self._no_transform.add((grid_id, to_grid))
+            raise _NoTransform from exc
+        cache[grid_id] = transform
+        return transform
+
+    def _cut_geometries(self) -> dict[str, QgsGeometry]:
+        """Every cut's geometry in the canvas CRS, from the `cuts` layer."""
+        if self._cut_geoms is not None:
+            return self._cut_geoms
+        geoms: dict[str, QgsGeometry] = {}
+        layer = self._selectable_layer("cuts")
+        if layer is not None:
+            try:
+                tr = self._transform(layer)
+            except RuntimeError as exc:
+                _log(
+                    f"could not build the map link's cut geometry cache: {exc}",
+                    Qgis.MessageLevel.Critical,
+                )
+                self._cut_geoms = geoms
+                return geoms
+            for feature in layer.getFeatures():
+                geom = QgsGeometry(feature.geometry())
+                if tr is not None:
+                    geom.transform(tr)
+                geoms[str(feature["cut_key"])] = geom
+        self._cut_geoms = geoms
+        return geoms
+
+    def _cut_column(self, key: str, canvas_point: QgsPointXY) -> int | None:
+        """The section column nearest `canvas_point`, a point on the cut (canvas
+        CRS), or None when there is no source to say (plan call 9).
+
+        Canvas CRS to grid CRS to grid metres, then `Cut.locate` for the
+        distance along the cut: the canvas may be in another CRS than the grid.
+        """
+        if self._sections is None:
+            return None
+        try:
+            cut = self.session.cut_for_key(key)
+        except KeyError:
+            return None
+        try:
+            transform = self._grid_transform(cut.grid_id, to_grid=True)
+        except _NoTransform:
+            return None
+        mapped = transform.transform(canvas_point) if transform else canvas_point
+        local = self.session.grid(cut.grid_id).to_local(
+            np.array([[mapped.x(), mapped.y()]], dtype=float)
+        )[0]
+        distance, _off = cut.locate((float(local[0]), float(local[1])))
+        return self._sections.column_at(key, distance)
+
+    def _cut_columns(self, key: str) -> list[QgsPointXY] | None:
+        """The columns of the cut's section as canvas points, or None without a section."""
+        if self._sections is None:
+            return None
+        section = self._sections.section(key, build_cube=False)
+        if isinstance(section, str):
+            return None
+        cached = self._columns_canvas.get(key)
+        if cached is not None and cached[0] is section:
+            return cached[1]
+        try:
+            columns = self._section_canvas_points(section)
+        except _NoTransform:
+            return None
+        self._columns_canvas[key] = (section, columns)
+        return columns
+
+    def _section_canvas_points(self, section: CutSection) -> list[QgsPointXY]:
+        transform = self._grid_transform(section.source.grid_id, to_grid=False)
+        points = [QgsPointXY(float(x), float(y)) for x, y in section.columns.world]
+        if transform is None:
+            return points
+        return [transform.transform(p) for p in points]
 
     def _geometries(self) -> dict[str, QgsGeometry]:
         if self._geoms is not None:
@@ -258,15 +462,27 @@ class MapLink(QObject):
         if self._marker is None or not self.session.is_open:
             return
         key = self.session.display_key
-        if key is None:
-            return
-        geom = self._geometries().get(key)
-        if geom is None or geom.isEmpty():
-            return
-        sq_dist, index = geom.closestVertexWithContext(point)
+        if key is None or is_cut_key(key) != self._cut_mode:
+            return  # a line in cut mode, or a cut in line mode: ignored (cut spec §4.3)
         tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
-        if index < 0 or sq_dist > tolerance * tolerance:
-            return  # off this line; the dwell decides what happens next
+        if self._cut_mode:
+            geom = self._cut_geometries().get(key)
+            if geom is None or geom.isEmpty():
+                return
+            near = self._nearest_on_cut(geom, point, tolerance)
+            if near is None:
+                return  # off this cut; the dwell decides what happens next
+            column = self._cut_column(key, near)
+            if column is None:
+                return  # no source: no cursor to move
+            index = column
+        else:
+            geom = self._geometries().get(key)
+            if geom is None or geom.isEmpty():
+                return
+            sq_dist, index = geom.closestVertexWithContext(point)
+            if index < 0 or sq_dist > tolerance * tolerance:
+                return  # off this line; the dwell decides what happens next
         if key == self.session.current_key:
             self.session.set_trace(key, index)
         else:
@@ -294,6 +510,11 @@ class MapLink(QObject):
                 return
             key, trace = hit
             if key == self.session.current_key:
+                if trace < 0:
+                    # A cut with no column to put a cursor on (no source): the
+                    # pointer is still over the working cut, so any preview ends.
+                    self.session.clear_preview()
+                    return
                 # The pointer is over the line already being worked on,
                 # which is NOT a preview. The working line's cursor is
                 # `current_trace`; routing it through `set_preview` would
@@ -359,7 +580,44 @@ class MapLink(QObject):
             _log(f"could not clear the preview on pointer leave: {exc}", Qgis.MessageLevel.Critical)
         return False
 
+    @staticmethod
+    def _nearest_on_cut(
+        geom: QgsGeometry, point: QgsPointXY, tolerance: float
+    ) -> QgsPointXY | None:
+        """The point on the cut nearest `point`, or None when it is further than `tolerance`.
+
+        The nearest point on a segment, not the nearest vertex: a cut has a
+        few vertices and a column every half cell between them.
+        """
+        sq_dist, nearest, _next, _side = geom.closestSegmentWithContext(point)
+        if sq_dist < 0 or sq_dist > tolerance * tolerance:
+            return None
+        return QgsPointXY(nearest)
+
     def _hit_test(self, point: QgsPointXY) -> tuple[str, int] | None:
+        if self._cut_mode:
+            return self._hit_test_cuts(point)
+        return self._hit_test_lines(point)
+
+    def _hit_test_cuts(self, point: QgsPointXY) -> tuple[str, int] | None:
+        """The (cut_key, column) under `point` in cut mode; the column is -1 with no source."""
+        tolerance = self.canvas.mapUnitsPerPixel() * self.HOVER_TOLERANCE_PX
+        limit = tolerance * tolerance
+        best: tuple[float, str, QgsPointXY] | None = None
+        for key, geom in self._cut_geometries().items():
+            if geom.isEmpty():
+                continue
+            sq_dist, nearest, _next, _side = geom.closestSegmentWithContext(point)
+            if sq_dist < 0 or sq_dist > limit:
+                continue
+            if best is None or sq_dist < best[0]:
+                best = (sq_dist, key, QgsPointXY(nearest))
+        if best is None:
+            return None
+        column = self._cut_column(best[1], best[2])
+        return best[1], -1 if column is None else column
+
+    def _hit_test_lines(self, point: QgsPointXY) -> tuple[str, int] | None:
         """The (line_key, trace) under `point`, or None if nothing is close
         enough. `point` is in canvas CRS, and so is the geometry cache.
 
@@ -459,6 +717,21 @@ class MapLink(QObject):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not open the selected line: {exc}", Qgis.MessageLevel.Critical)
 
+    def _on_cut_selection(self, *_: Any) -> None:
+        """Selecting a cut's feature opens it, as selecting a line opens the line."""
+        try:
+            layer = self._selectable_layer("cuts")
+            if layer is None or not self.session.is_open:
+                return
+            ids = layer.selectedFeatureIds()
+            if len(ids) != 1:
+                return  # as `_on_selection`: no single answer, nothing to do
+            key = str(layer.getFeature(ids[0])["cut_key"])
+            if key in self.session.cut_keys():
+                self.session.open_line(key)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not open the selected cut: {exc}", Qgis.MessageLevel.Critical)
+
     def _on_pick_selection(self, *_: Any) -> None:
         try:
             self._jump_to_feature("picks", "trace")
@@ -497,6 +770,9 @@ class MapLink(QObject):
             return
         feature = layer.getFeature(ids[0])
         key = str(feature["line_key"])
+        if is_cut_key(key):
+            self._jump_to_cut_pick(key, feature)
+            return
         if key not in self.session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
             # Reachable by design, not just corruption: `remove_line`
             # deliberately leaves a line's picks and marks in place
@@ -519,6 +795,22 @@ class MapLink(QObject):
             # right answer; `int(NULL)` raises, and this runs in a slot.
             return
         self.session.set_trace(key, int(trace))
+
+    def _jump_to_cut_pick(self, key: str, feature: Any) -> None:
+        """Select a cut's pick: open the cut and put the cursor on the column
+        its distance falls on now (cut spec §4.5, call 12). A pick whose cut
+        is gone says so and opens nothing (call 3)."""
+        if key not in self.session.cut_keys():
+            if self.on_info is not None:
+                self.on_info(CUT_GONE_TEXT)
+            return
+        self.session.open_line(key)
+        distance = feature["distance_m"]
+        if distance == NULL or self._sections is None:
+            return  # opening the cut is still the right answer
+        column = self._sections.column_at(key, float(distance))
+        if column is not None:
+            self.session.set_trace(key, column)
 
     # ---- drawing ----------------------------------------------------------
     def _on_lines_changed(self, *_: Any) -> None:
@@ -609,6 +901,16 @@ class MapLink(QObject):
 
     def _set_marker(self, key: str, trace: int) -> None:
         assert self._marker is not None
+        if is_cut_key(key):
+            # The column's own world position (plan call 9); with no section
+            # there is no column, so no cursor.
+            columns = self._cut_columns(key) if trace >= 0 else None
+            if columns is None or trace >= len(columns):
+                self._marker.setVisible(False)
+                return
+            self._marker.setCenter(columns[trace])
+            self._marker.setVisible(True)
+            return
         geom = self._geometries().get(key)
         if geom is None or trace < 0 or trace >= self._n_vertices(geom):
             self._marker.setVisible(False)
@@ -618,6 +920,23 @@ class MapLink(QObject):
 
     def _set_band(self, key: str, start: int, end: int) -> None:
         assert self._band is not None
+        if is_cut_key(key):
+            columns = self._cut_columns(key) if start >= 0 and end >= 0 else None
+            if columns is None:
+                self._band.reset(QgsWkbTypes.LineGeometry)
+                return
+            lo = max(0, min(start, end))
+            hi = min(len(columns) - 1, max(start, end))
+            if lo > hi:
+                self._band.reset(QgsWkbTypes.LineGeometry)
+                return
+            picked = columns[lo : hi + 1]
+            if len(picked) < 2:
+                # One column is a point, and a band needs a segment.
+                self._band.reset(QgsWkbTypes.LineGeometry)
+                return
+            self._band.setToGeometry(QgsGeometry.fromPolylineXY(picked), None)
+            return
         geom = self._geometries().get(key)
         if geom is None or start < 0 or end < 0:
             self._band.reset(QgsWkbTypes.LineGeometry)
@@ -696,6 +1015,7 @@ class MapLink(QObject):
                 self.canvas.xyCoordinates.disconnect(self._on_xy)
             with contextlib.suppress(TypeError, RuntimeError):
                 self.canvas.viewport().removeEventFilter(self)
+        self.set_sections(None)
         # The selectable layers are rebound across every site reopen (see
         # _rebind_layer), so disposal has to release whichever instances
         # are currently bound -- guarded the same way as the canvas above,

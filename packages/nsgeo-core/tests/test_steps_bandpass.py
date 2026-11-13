@@ -107,6 +107,29 @@ def test_mask_has_hard_edges_at_zero_taper_and_ramps_otherwise():
     assert np.all(np.diff(ramp) > 0)
 
 
+@pytest.mark.parametrize("low", [100.0, 50.0])
+def test_a_low_edge_below_the_taper_width_still_removes_dc(low):
+    """#117. At 100-600 the taper is 125 MHz wide, so a ramp of full width
+    would start at -25 MHz and still pass 9.5% at DC (71% at 50-600). The
+    ramp is narrowed to run from 0 MHz up to Low instead."""
+    freqs = np.linspace(0, 1000, 10001)
+    mask = Bandpass(low_mhz=low, high_mhz=600.0, taper_frac=0.25)._mask(freqs)
+    assert mask[0] == 0.0
+    ramp = mask[(freqs > 0.0) & (freqs < low)]
+    assert np.all(np.diff(ramp) > 0) and ramp[0] > 0.0 and ramp[-1] < 1.0
+    assert mask[freqs == low][0] == pytest.approx(1.0)
+
+
+def test_a_constant_offset_does_not_survive_a_low_edge_below_the_taper_width():
+    """What #117 looked like: real files sit about -300 counts off zero, and
+    with Low at 100 MHz a tenth of that offset came through (a constant 1000
+    came out at ~108), a grey cast in the quiet rows once AGC gains them."""
+    rg = Radargram(data=np.full((463, 3), 1000.0), dt_ns=0.2165, t0_ns=0.0)
+    out = build_step("bandpass", low_mhz=100.0, high_mhz=600.0).apply(rg).data
+    middle = out[rg.n_samples // 4 : 3 * rg.n_samples // 4]
+    assert np.abs(middle).max() < 1.0
+
+
 def cropped_direct_wave(n_samples=463, dt_ns=0.2165, freq_mhz=350.0, peak_ns=1.5):
     """What time_zero leaves on a real HS350 line: a record that opens partway
     up a direct wave of ~1e6 counts and is otherwise quiet. Real late-time

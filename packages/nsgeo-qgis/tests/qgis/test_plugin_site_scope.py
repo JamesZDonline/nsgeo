@@ -6,7 +6,6 @@ C, four lines each; the plugin opens it in its own session, as a user would.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import json
 import re
@@ -15,6 +14,7 @@ import time
 
 import numpy as np
 import pytest
+from nsgeo.processing import time_base_of
 from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices import (
     SliceWindow,
@@ -24,9 +24,10 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from nsgeo_qgis import plugin as plugin_module
 from nsgeo_qgis import site_engine as site_engine_module
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.export_task import running_export
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME
 from nsgeo_qgis.slices_engine import SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
@@ -39,13 +40,23 @@ from nsgeo_qgis.slices_plan import (
     default_cell,
     format_bytes,
     limit_windows,
+    mixed_clock_note,
 )
 from nsgeo_qgis.ui import site_scope as site_scope_module
 from nsgeo_qgis.ui.finish_panel import DISTANCE_TIP
 from osgeo import gdal
-from plugin_testing import LayoutProbe, LoadCounter, layout_width, slow_jobs, spin_until
-from qgis.PyQt.QtCore import QCoreApplication, Qt
-from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from plugin_testing import (
+    ExportGate,
+    LayoutProbe,
+    LoadCounter,
+    drive_export_dialog,
+    layout_width,
+    slow_jobs,
+    spin_until,
+    wait_for_export,
+)
+from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
+from qgis.PyQt.QtWidgets import QMessageBox
 
 GRID_X = {"A": (500.0, 506.0), "B": (506.0, 512.0), "C": (512.0, 518.0)}
 
@@ -70,6 +81,8 @@ def _close(plugin, answer_modal):
         dock.site_engine.wait_until_idle(20_000)
         dock.engine.wait_for_preparation(20_000)
     plugin.unload()
+    # The export dialog is deleted later; see test_plugin_export_dialog's `make`.
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture
@@ -110,6 +123,14 @@ def whole_site(plugin):
     assert dock.scope() == "site"
     settle(dock)
     return dock
+
+
+def export_via_dialog(plugin, drive_dialog, target, **options):
+    """Press Export, answer the export dialog as a user would, wait for the task."""
+    shown = drive_export_dialog(drive_dialog, path=target, **options)
+    plugin.slices_dock.export_button.click()
+    wait_for_export()
+    return shown
 
 
 def columns(shown, grid_id):
@@ -324,6 +345,9 @@ def test_this_grid_names_the_memory_the_site_view_still_holds(plugin):
     # Lines, and the weights each engine has built for the drawn slice.
     held = sum(site.engine_for(g).estimate.lines_bytes for g in "ABC")
     held += sum(site.engine_for(g).weights_nbytes for g in "ABC")
+    # And the taps of the gathers the drawn slice built on the site lattice.
+    held += sum(f.taps.nbytes for f in site._gathers.values())
+    assert site._gathers
     assert site.held_bytes == held
     dock.grid_scope_button.click()
     _events()
@@ -603,6 +627,283 @@ def test_a_source_edit_after_emptying_does_not_change_what_the_site_prepares(plu
     assert dock.site_engine.engine_for("A").line_count == before
 
 
+# ---- #100 #101: both scopes read a grid's line record the same way --------------------
+
+
+def _lines_for(session, keys):
+    return [session.line_for_key(k) for k in keys]
+
+
+def _reimport(session, lines):
+    """Import the same files again: the same keys, at the end of the survey."""
+    from nsgeo.model.survey import Line
+
+    session.add_lines([Line.open(line.path, line.placement) for line in lines])
+
+
+def test_a_reimported_line_brings_back_an_emptied_choice_in_both_scopes(plugin, site3):
+    """#100: removing every chosen line falls back to every line, but the
+    record still names the choice. A re-imported line it names is the choice
+    again, in both scopes, and after a This grid round trip too."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    assert dock.grid_combo.currentText() == "A"
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first, second))
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (first,)
+    assert dock.included_keys() == (first,)
+    dock.grid_combo.setCurrentText("B")
+    dock.grid_combo.setCurrentText("A")
+    assert dock.included_keys() == (first,)
+    assert site_scope.source_keys(session, "A") == (first,)
+
+
+def test_a_reimported_line_rejoins_a_choice_it_was_removed_from_in_both_scopes(plugin, site3):
+    """#100, after any import: removing one chosen line of two and importing it
+    again brings it back in both scopes, in survey order (it is imported last)."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    assert dock.included_keys() == (second,)
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (second, first)
+    assert dock.included_keys() == (second, first)
+
+
+def test_accepting_the_chooser_unchanged_after_a_reimport_writes_nothing(plugin, site3):
+    """#101: the record names the same lines in another order (the re-imported
+    one is last in the survey); OK on the unchanged chooser leaves it and the
+    survey's saved state alone."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first,))
+    _reimport(session, gone)
+    session.save()
+    record = session.slice_source("A")
+    plugin.open_line_choice_dialog()
+    plugin._line_choice_dialog.accept()
+    assert session.slice_source("A") == record
+    assert not session.dirty
+
+
+def test_a_choice_made_before_any_preset_survives_a_record_that_names_no_lines(plugin, site3):
+    """#100's reading takes only a record that names lines. With no preset a
+    line choice cannot be remembered, and a record holding only a resolution
+    says nothing about lines: the live choice stands."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    saved = dict(session.site.presets)
+    session.site.presets.clear()
+    session.presets_changed.emit()
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    assert session.slice_source("A") is None, "nothing could be remembered"
+    session.remember_slice_resolution("A", cell=0.1)
+    session.site.presets.update(saved)
+    session.presets_changed.emit()
+    assert dock.included_keys() == (first, second)
+
+
+def test_a_line_moved_onto_a_choice_that_names_it_re_prepares(plugin, site3):
+    """#100 with line editing (spec §4.5): A's record still names 001 after its
+    removal. Imported again onto B and the survey reopened, 001 is a site line
+    the engine has seen; moved to A, it is in the choice again, and This grid
+    re-prepares with it, as it does for a line moved onto a default source."""
+    from nsgeo.model.survey import Line
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.set_included_for("A", (first, second))
+    line = session.line_for_key(first)
+    session.remove_lines((first,))
+    session.add_lines([Line.open(line.path, dataclasses.replace(line.placement, grid_id="B"))])
+    assert dock.engine.wait_for_preparation(20_000)
+    session.save()
+    session.open_site(session.json_path)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.line_keys == (second,)
+    session.edit_lines([LineEdit(first, session.line_for_key(first).placement, grid_id="A")])
+    assert dock.included_keys() == (second, first)
+    assert spin_until(
+        lambda: dock.engine.is_prepared and first in dock.engine.choice.line_keys, 30_000
+    )
+
+
+def test_a_reimported_line_brings_back_an_emptied_choice_on_a_grid_opened_from_the_site(
+    plugin, site3
+):
+    """#100, final review D4's path: This grid opens A from the site list, which
+    remembers nothing, with every chosen line gone; then one comes back."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    first, second = site3.keys("A")[:2]
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=(first, second))
+    gone = _lines_for(session, (first,))
+    session.remove_lines((first, second))
+    whole_site(plugin)
+    dock.site_panel.select_grid("A")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "A"
+    _reimport(session, gone)
+    assert site_scope.source_keys(session, "A") == (first,)
+    assert dock.included_keys() == (first,)
+
+
+def test_accepting_the_line_chooser_unchanged_keeps_every_line_in_both_scopes(plugin, site3):
+    """#101: OK on an unchanged chooser is no narrower choice. A line removed
+    and imported again is in both scopes."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    plugin.open_line_choice_dialog()
+    plugin._line_choice_dialog.accept()
+    assert not session.dirty, "an unchanged OK writes nothing"
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+def test_ticking_every_line_again_takes_in_lines_imported_later(plugin, site3):
+    """#101, the user's ruling: every line ticked is every line, now and later,
+    however the chooser got there."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    dock.set_included_for("A", every[:2])
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    dock.set_included_for("A", every[:3])  # every line still on A
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+def test_ticking_every_line_in_the_site_takes_in_lines_imported_later(plugin, site3):
+    from nsgeo_qgis.ui import site_scope
+
+    session = plugin.session
+    every = site3.keys("B")
+    session.remember_slice_source("B", preset="p", lines=every[:2])
+    dock = whole_site(plugin)
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    dock.set_included_for("B", every[:3])  # every line still on B
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "B") == every
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.included_keys() == every
+
+
+def test_accepting_every_line_rewrites_an_old_full_list_as_every_line(plugin, site3):
+    """#101: a record naming every line (written before the ruling) restores
+    as an explicit choice; accepting it unchanged now means every line."""
+    from nsgeo_qgis.ui import site_scope
+
+    dock = plugin.slices_dock
+    session = plugin.session
+    every = site3.keys("A")
+    dock.grid_combo.setCurrentText("B")
+    session.remember_slice_source("A", preset="p", lines=every)
+    dock.grid_combo.setCurrentText("A")
+    dock.set_included_for("A", every)
+    last = _lines_for(session, every[-1:])
+    session.remove_lines(every[-1:])
+    _reimport(session, last)
+    assert site_scope.source_keys(session, "A") == every
+    assert dock.included_keys() == every
+
+
+# ---- #106 #103: the switch from the site opens the grid the site drew -----------------
+
+
+def test_this_grid_opens_an_unremembered_grid_on_the_preset_the_site_drew_it_with(plugin):
+    """#106: B has no record, so the site draws it with the first preset, "p".
+    This grid showed "raw" on A; opening B from the site list shows "p", and
+    the switch remembers nothing."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    dock.preset_combo.setCurrentText("raw")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert session.slice_source("B") is None
+    whole_site(plugin)
+    assert dock.site_engine.engine_for("B").choice.preset == "p"
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    assert dock.grid_combo.currentText() == "B"
+    assert dock.preset_combo.currentText() == "p"
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.choice.preset == "p"
+    assert session.slice_source("B") is None
+
+
+def _add_refused_preset(session) -> None:
+    """A preset carrying an amplitude step: every preparation with it is
+    refused. Named to sort last, so it is no grid's default (`default_preset`)."""
+    session.site.presets["zz_bad"] = [{"step": "amp_abs", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+
+
+def test_a_refused_preparation_on_the_switch_takes_the_site_picture_off_the_map(plugin):
+    """#103: B's remembered preset is refused. Opening B from the site list
+    shows the refusal, and the site's picture leaves the map: This grid has
+    nothing to draw."""
+    dock = plugin.slices_dock
+    session = plugin.session
+    _add_refused_preset(session)
+    session.remember_slice_source("B", preset="zz_bad", lines=None)
+    whole_site(plugin)
+    layer = plugin.slice_layer.layer
+    assert layer is not None and layer.name() == SITE_LAYER_NAME
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.site_panel.select_grid("B")
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.grid_combo.currentText() == "B"
+    assert any("Absolute value" in e for e in errors), errors
+    assert dock.engine.choice is None
+    assert plugin.slice_layer.layer is None
+
+
+def test_a_refused_preset_in_this_grid_takes_its_slice_off_the_map(plugin):
+    """#103's check on This grid alone: choosing a refused preset leaves no
+    slice of the old preset on the map."""
+    dock = plugin.slices_dock
+    _add_refused_preset(plugin.session)
+    _events()
+    layer = plugin.slice_layer.layer
+    assert layer is not None and layer.name() == LAYER_NAME
+    dock.preset_combo.setCurrentText("zz_bad")
+    _events()
+    assert dock.engine.choice is None
+    assert plugin.slice_layer.layer is None
+
+
 # ---- normalisation and gain -------------------------------------------------------
 
 
@@ -702,6 +1003,22 @@ def test_the_readout_names_each_grids_depth_and_any_absent_grid(site3_factory, o
     assert v_c not in (v_a, v_b), "C must not borrow another grid's velocity"
     assert dock.site_velocities() == {"A": v_a, "B": v_b, "C": v_c}
     assert dock.velocity_label.isHidden() and not dock.site_depths_label.isHidden()
+
+
+def test_whole_site_uses_each_grids_velocity(plugin, message_log):
+    session = plugin.session
+    v_a = VelocityModel.constant(0.09)
+    session.set_grid_velocity("A", v_a)
+    # the hazard: every line, first of each grid included, overrides
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(0.12))
+    dock = whole_site(plugin)
+    velocities = dock.site_velocities()
+    assert velocities["A"] == v_a == session.grid_depth_velocity("A")
+    for grid_id in ("B", "C"):
+        assert velocities[grid_id] == session.grid_depth_velocity(grid_id)
+        assert velocities[grid_id] != VelocityModel.constant(0.12)
+    assert message_log == []
 
 
 def test_the_profile_band_follows_the_site_window(plugin):
@@ -1275,17 +1592,18 @@ def test_the_site_view_survives_save_and_reopen(plugin):
 # ---- export -----------------------------------------------------------------------------
 
 
-def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, tmp_path):
+def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, drive_dialog, tmp_path):
     dock = whole_site(plugin)
     dock.normalisation_panel.method_combo.setCurrentIndex(1)
     _events()
     target = tmp_path / "out" / "site.tif"
     target.parent.mkdir()
-    calls = answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
     assert dock.export_button.isEnabled()
-    dock.export_button.click()
+    shown = export_via_dialog(plugin, drive_dialog, target)
 
-    assert calls[0][0][2].endswith("slices/site.tif"), calls[0]
+    assert shown[0].windowTitle() == "Export site GeoTIFF"
+    assert [r for r in shown[0].summary_rows() if r[0] == "Grids"], "the site summary names grids"
+    assert shown[0].path_edit.text() == str(target)
     ds = gdal.Open(str(target))
     try:
         md = ds.GetMetadata()
@@ -1306,11 +1624,11 @@ def test_export_routes_to_the_site_geotiff_in_site_scope(plugin, answer_modal, t
     )
 
 
-def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal, tmp_path):
+def test_the_site_export_writes_the_finish_the_panel_shows(plugin, drive_dialog, tmp_path):
     """The plugin hands the site export the site panel's finish, not the
     default. Set as a user would; the file must record it, and its bands must
-    be the site engine's own slices at that finish (the writer stores
-    `SiteSlice.array` as it comes, already on the site lattice)."""
+    be the site engine's own slices at that finish (the export, at the live cell
+    and pixel, equals them)."""
     dock = whole_site(plugin)
     panel = dock.site_finish
     panel.method_combo.setCurrentIndex(panel.method_combo.findData("idw"))
@@ -1319,8 +1637,7 @@ def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal,
     chosen = SliceFinish(method="idw", max_distance_spacings=1.5, smooth_y_m=0.3)
     assert panel.value() == chosen != SliceFinish()
     target = tmp_path / "finished.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
 
     site = dock.site_engine
@@ -1348,34 +1665,53 @@ def test_the_site_export_writes_the_finish_the_panel_shows(plugin, answer_modal,
     assert float(md["NSGEO_SITE_SMOOTH_X_M"]) == 0.0
     assert float(md["NSGEO_SITE_SMOOTH_Y_M"]) == 0.3
     for band, window in zip(bands, windows, strict=True):
-        np.testing.assert_array_equal(band, drawn(chosen, window))
+        np.testing.assert_allclose(
+            band, drawn(chosen, window), atol=1e-5, rtol=1e-5, equal_nan=True
+        )
     # The comparison can tell the two apart.
     assert not np.array_equal(bands[0], drawn(SliceFinish(), windows[0]), equal_nan=True)
 
 
-def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
-    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+def test_the_coverage_companion_is_written_styled_and_a_failure_of_it_is_its_own(
+    plugin, drive_dialog, tmp_path, monkeypatch, fake_iface
 ):
-    """M11's Ruling AH, for the site: the companion follows the coverage
-    toggle, and its failure is reported on its own terms, after the main
-    file has been written and added."""
+    """M11's Ruling AH, for the site: the companion follows the coverage toggle,
+    has its own style file, and a failure adding it is reported on its own terms,
+    after the main file has been written and added."""
     dock = whole_site(plugin)
     dock.coverage_check.setChecked(True)
     _events()
     target = tmp_path / "with_coverage.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert (tmp_path / "with_coverage_coverage.tif").exists()
+    export_via_dialog(plugin, drive_dialog, target)
+    companion = tmp_path / "with_coverage_coverage.tif"
+    assert companion.exists()
+    assert companion.with_suffix(".qml").exists() and target.with_suffix(".qml").exists()
     names = [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert {"with_coverage", "with_coverage_coverage"} <= set(names)
+    assert _metadata(companion)["NSGEO_SITE_RESAMPLING"] == "largest_count"
+    from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
+    from nsgeo.slices import limit_over_slices
+    from plugin_testing import assert_styled_as, read_bands
 
-    def broken(*args, **kwargs):
-        raise OSError("disk full")
+    palette = dock.palette_combo.currentText()
+    clip = UnipolarClip() if dock.source_unipolar() else PercentileClip()
+    limit = limit_over_slices(read_bands(target), clip)
+    layers = {lyr.name(): lyr for lyr in plugin.layers.project.mapLayers().values()}
+    assert_styled_as(layers["with_coverage"], palette, limit, dock.source_unipolar())
+    most = max(1.0, float(np.nanmax(read_bands(companion)[0])))
+    counts_palette = palette if palette in colormap_names(unipolar=True) else "amp_black_high"
+    assert_styled_as(layers["with_coverage_coverage"], counts_palette, most, True)
 
-    monkeypatch.setattr(plugin_module, "write_site_coverage", broken)
+    real = plugin._add_export_layer
+
+    def broken(path, **kwargs):
+        if path.name.endswith("_coverage.tif"):
+            raise OSError("disk full")
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(plugin, "_add_export_layer", broken)
     second = tmp_path / "second.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(second), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, second)
     assert second.exists()
     assert "second" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     texts = [
@@ -1383,7 +1719,28 @@ def test_the_coverage_companion_is_written_and_a_failure_of_it_is_its_own(
         for i in range(len(fake_iface.messageBar().items()))
     ]
     assert any("coverage companion" in t and "disk full" in t for t in texts), texts
-    assert not any("could not export the site GeoTIFF" in t for t in texts), texts
+    assert not any("could not export" in t for t in texts), texts
+
+
+def test_a_site_export_fits_the_temporal_controller_to_the_new_file(
+    plugin, drive_dialog, tmp_path, fake_iface
+):
+    from qgis.core import QgsTemporalNavigationObject
+
+    whole_site(plugin)
+    canvas = fake_iface.mapCanvas()
+    navigation = QgsTemporalNavigationObject(canvas)  # the canvas owns it, as in the app
+    canvas.setTemporalController(navigation)
+    target = tmp_path / "stepped.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    layer = next(v for v in plugin.layers.project.mapLayers().values() if v.source() == str(target))
+    n = layer.bandCount()
+    assert n > 1 and navigation.totalFrameCount() == n
+    props = layer.temporalProperties()
+    assert [
+        props.bandForTemporalRange(layer, navigation.dateTimeRangeForFrameNumber(k))
+        for k in range(n)
+    ] == list(range(1, n + 1))
 
 
 def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
@@ -1405,7 +1762,7 @@ def test_the_site_export_is_disabled_while_a_grid_prepares(plugin, monkeypatch):
 
 
 def test_the_export_message_names_a_grid_left_out(
-    plugin, site3, answer_modal, tmp_path, fake_iface
+    plugin, site3, drive_dialog, tmp_path, fake_iface
 ):
     """Ruling T4-a: an included grid with no lines is named in the success message."""
     session = plugin.session
@@ -1418,52 +1775,56 @@ def test_the_export_message_names_a_grid_left_out(
     settle(dock)
     assert dock.site_engine.grid_state("C") == "no lines"
     target = tmp_path / "left_out.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
     text = fake_iface.messageBar().currentItem().text()
     assert "exported" in text and "C (no lines)" in text, text
 
 
-def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, answer_modal, tmp_path):
+def test_the_site_file_records_an_included_grid_it_left_out(plugin, site3, drive_dialog, tmp_path):
     """Final review M4 (Ruling F-2): the file itself names an included grid
     it does not hold, with its state, and says nothing when none is left out."""
     session = plugin.session
     dock = whole_site(plugin)
     whole = tmp_path / "whole.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(whole), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, whole)
     assert "NSGEO_SITE_LEFT_OUT" not in _metadata(whole)
     session.set_site_view(grids=("A", "B", "C"))
     session.remove_lines(site3.keys("C"))  # no lines at all (#74)
     session.lines_changed.emit()
     settle(dock)
     part = tmp_path / "part.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(part), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, part)
     left = json.loads(_metadata(part)["NSGEO_SITE_LEFT_OUT"])
     assert left == {"C": dock.site_engine.grid_state("C")} == {"C": "no lines"}
 
 
 def test_a_failed_site_export_leaves_no_file_and_adds_no_layer(
-    plugin, answer_modal, tmp_path, monkeypatch, fake_iface
+    plugin, drive_dialog, tmp_path, monkeypatch, fake_iface
 ):
     """Ruling T4-b: a half-written GeoTIFF reads as valid zeros."""
-    dock = whole_site(plugin)
+    from nsgeo_qgis.site_export import GeoTiffSiteWriter
+
+    whole_site(plugin)
     target = tmp_path / "broken.tif"
+    real = GeoTiffSiteWriter.write_bands
 
-    def fail_part_way(site_engine, path, *args, **kwargs):
-        path.write_bytes(b"II*\x00 the first band, then the disk filled")
-        raise OSError("disk full")
+    def fills_up(self, path, plan, bands, **kwargs):
+        def first_only():
+            for index, band in enumerate(bands):
+                if index == 1:
+                    raise OSError(28, "No space left on device")
+                yield band
 
-    monkeypatch.setattr(plugin_module, "export_site", fail_part_way)
+        return real(self, path, plan, first_only(), **kwargs)
+
+    monkeypatch.setattr(GeoTiffSiteWriter, "write_bands", fills_up)
     before = set(plugin.layers.project.mapLayers())
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert not target.exists()
+    export_via_dialog(plugin, drive_dialog, target)
+    assert not target.exists() and not list(tmp_path.glob("*.partial*"))
     assert set(plugin.layers.project.mapLayers()) == before
     text = fake_iface.messageBar().currentItem().text()
-    assert "could not export the site GeoTIFF" in text and "disk full" in text
+    assert "could not export" in text and "free disk space" in text
 
 
 # ---- concurrency (trap 1, ruling R-P5) ------------------------------------------------------
@@ -2661,15 +3022,14 @@ def test_leaving_the_site_cancels_its_refine(plugin, monkeypatch):
     _pump_until(lambda: job.stopped_by_request, 2.0)
 
 
-def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal, tmp_path):
+def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, drive_dialog, tmp_path):
     """Every band is the full result, solved: finite on every cell a line
     crossed, and the site engine's own slice at that window."""
     dock = whole_site(plugin)
     _choose_method(dock.site_finish, "min_curvature")
     _wait_for_refine(dock)
     target = tmp_path / "curvature.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
+    export_via_dialog(plugin, drive_dialog, target)
     assert target.exists()
     assert "curvature" in [lyr.name() for lyr in plugin.layers.project.mapLayers().values()]
     assert _metadata(target)["NSGEO_SITE_INTERPOLATION"] == "min_curvature"
@@ -2702,179 +3062,231 @@ def test_a_site_with_minimum_curvature_exports_and_reopens(plugin, answer_modal,
                 method=dock.normalisation_panel.method(),
                 manual=dock.site_gains(),
             ).array
-            np.testing.assert_array_equal(band, full)
+            np.testing.assert_allclose(band, full, atol=1e-4, rtol=1e-4, equal_nan=True)
 
 
-# ---- exports: progress, cancel and no partial files (plan call 11) -----------------------
+# ---- exports: the task, cancel and no partial files -----------------------
 
 
-class _FakeProgressDialog:
-    def close(self) -> None:
-        pass
-
-    def deleteLater(self) -> None:  # noqa: N802 -- Qt's name
-        pass
-
-
-def _progress_calling(hook):
-    def make(title, total, **_options):
-        def callback(done, of):
-            return hook(done, of) is not False
-
-        return callback, _FakeProgressDialog()
-
-    return make
-
-
-def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(plugin, answer_modal, tmp_path):
+def test_a_cancelled_site_export_leaves_no_file_and_adds_no_layer(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
     from plugin_testing import connect_message_log
     from qgis.core import Qgis
 
     dock = whole_site(plugin)
-    plugin._export_progress = _progress_calling(lambda done, of: done < 1)
+    gate = ExportGate(monkeypatch)
     target = tmp_path / "cancelled.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    drive_export_dialog(drive_dialog, path=target)
     before = set(plugin.layers.project.mapLayers())
     levels: list = []
     disconnect = connect_message_log(lambda msg, tag, level: levels.append((msg, level)))
     try:
         dock.export_button.click()
+        gate.wait_entered()
+        running_export().cancel()  # the task list's Cancel
+        wait_for_export()
     finally:
         disconnect()
-    assert not target.exists()
+    assert not target.exists() and not list(tmp_path.glob("*.partial*"))
     assert set(plugin.layers.project.mapLayers()) == before
     assert ("export cancelled", Qgis.MessageLevel.Info) in [(m.lower(), lv) for m, lv in levels]
 
 
 def test_a_cancelled_site_export_never_removes_a_file_it_did_not_reach(
-    plugin, answer_modal, tmp_path, monkeypatch
+    plugin, drive_dialog, tmp_path, monkeypatch
 ):
-    from nsgeo_qgis.slice_export import ExportCancelled
-
     dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
     target = tmp_path / "theirs.tif"
     target.write_bytes(b"the user's own file")
-
-    def cancelled_before_writing(*args, **kwargs):
-        raise ExportCancelled()
-
-    monkeypatch.setattr(plugin_module, "export_site", cancelled_before_writing)
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    drive_export_dialog(drive_dialog, path=target)
     dock.export_button.click()
+    gate.wait_entered()
+    running_export().cancel()
+    wait_for_export()
     assert target.read_bytes() == b"the user's own file"
 
 
-def test_a_site_export_cancels_a_running_refine(plugin, answer_modal, tmp_path, monkeypatch):
-    """R13: through the site's flow; the status stops saying "Refining" and,
-    once the export ends with the slice unsolved, the preview stands again with
-    its rest armed."""
+def test_closing_the_site_cancels_the_site_export_and_adds_no_layer(
+    plugin, drive_dialog, tmp_path, monkeypatch, answer_modal
+):
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    target = tmp_path / "closing.tif"
+    drive_export_dialog(drive_dialog, path=target)
+    dock.export_button.click()
+    gate.wait_entered()
+    task = running_export()
+    assert task is not None
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.session.close_site()
+    wait_for_export()
+    assert task.isCanceled()
+    assert not target.exists()
+    assert not any(v.source() == str(target) for v in plugin.layers.project.mapLayers().values())
+
+
+def test_the_site_stays_usable_while_its_export_is_held(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """A slice tick runs while the task is held, and the held export is not a solve on
+    the GUI thread: the live site engine is not called by the task."""
+    dock = whole_site(plugin)
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "held.tif")
+    dock.export_button.click()
+    gate.wait_entered()
+    try:
+        ticks: list[int] = []
+        dock.slice_changed.connect(lambda: ticks.append(1))
+        before = dock.slice_slider.value()
+        dock.slice_slider.setValue(before + 1 if before < dock.slice_slider.maximum() else 0)
+        _events()
+        assert ticks, "a slice tick must run while the export task is held"
+        assert running_export() is not None
+    finally:
+        gate.release.set()
+        wait_for_export()
+
+
+def test_a_site_export_leaves_a_running_refine_alone(plugin, drive_dialog, tmp_path, monkeypatch):
+    """Nothing is solved on this thread by the export, so there is nothing to pause: the
+    site's refine goes on while the task is held."""
     dock = whole_site(plugin)
     job = _Looping()
     monkeypatch.setattr(dock.site_engine, "pending_solves", lambda *args, **kwargs: [job])
     _choose_method(dock.site_finish, "min_curvature")  # a new plan's first tick previews
     _pump_until(job.started.is_set)
     assert dock.refiner.busy
-
-    seen: list[tuple[bool, str]] = []
-
-    def hook(done, of):
-        if done == 0:
-            seen.append((dock.refiner.busy, dock.refine_label.text()))
-        if done == of:  # every band solved; the current slice is unsolved again
-            for grid_id in dock.site_engine.ready_grids:
-                engine = dock.site_engine.engine_for(grid_id)
-                engine._solved.clear()
-                engine._last_solve_ms = 500.0
-
-    plugin._export_progress = _progress_calling(hook)
-    target = tmp_path / "running.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+    gate = ExportGate(monkeypatch)
+    drive_export_dialog(drive_dialog, path=tmp_path / "running.tif")
     dock.export_button.click()
-    assert target.exists()
-    assert job.stopped_by_request
-    busy, text = seen[0]
-    assert busy is False
-    assert not text.startswith("Refining"), text
-    _events(3)
-    _pump_until(lambda: dock._site.provisional, 5.0)
-    assert dock._site.refine.rest.isActive()
-    dock.refiner.cancel()
+    gate.wait_entered()
+    try:
+        _events(3)
+        assert dock.refiner.busy and not job.stopped_by_request
+    finally:
+        gate.release.set()
+        wait_for_export()
+        dock.refiner.cancel()
 
 
-def test_a_site_export_shows_the_wait_cursor_throughout(
-    plugin, answer_modal, tmp_path, monkeypatch
-):
-    """Final review I-1: every band is solved on the GUI thread, a grid at a time."""
+def test_a_preview_site_exports_at_full_detail_through_the_dialog(plugin, drive_dialog, tmp_path):
+    """Milestone A refused this. The site is drawn at a coarser pixel, and the file is
+    written at the export cell and pixel, the full lattice's size."""
     dock = whole_site(plugin)
-    busy: list[int] = []
-    real_cursor = plugin_module.busy_cursor
-
-    @contextlib.contextmanager
-    def counting():
-        busy.append(1)
-        with real_cursor():
-            yield
-        busy.append(-1)
-
-    monkeypatch.setattr(plugin_module, "busy_cursor", counting)
-    during: list[int] = []
-    plugin._export_progress = _progress_calling(lambda done, of: during.append(sum(busy)))
-    target = tmp_path / "busy.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
-    dock.export_button.click()
-    assert target.exists()
-    assert during and all(depth == 1 for depth in during), during
-    assert busy == [1, -1]
-
-
-@pytest.mark.parametrize(("last_solve_ms", "shown"), [(30.0, True), (10.0, False), (None, True)])
-def test_a_slow_site_export_shows_its_progress_before_the_first_band(
-    plugin, answer_modal, tmp_path, monkeypatch, last_solve_ms, shown
-):
-    """Final review I-1: a site band solves every grid, so it is slow when the
-    grids' last solves add up to more than the live budget (30 ms each is 90 ms;
-    10 ms each is 30 ms), or one is not timed yet. The dialog is then shown, and
-    painted, before band 0; otherwise plan call 11's 500 ms rule stands."""
-    from qgis.PyQt.QtCore import QTimer
-
-    dock = whole_site(plugin)
-    _choose_method(dock.site_finish, "min_curvature")
-    _pump_until(
-        lambda: not dock._site.finish_debounce.isActive() and not dock._site.tick.isActive()
-    )
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
     site = dock.site_engine
-    assert len(site.ready_grids) == 3
+    assert site.is_preview
+    full = site.full_lattice
+    target = tmp_path / "preview.tif"
+    shown = export_via_dialog(plugin, drive_dialog, target)
+    assert len(shown) == 1, "the dialog opens: no refusal before it"
+    ds = gdal.Open(str(target))
+    try:
+        assert (ds.RasterXSize, ds.RasterYSize) == (full.width, full.height)
+        md = ds.GetMetadata()
+    finally:
+        ds.Close()
+    assert float(md["NSGEO_SITE_PIXEL_M"]) == full.pixel == dock.cell_spin.value()
+
+
+def test_a_site_export_at_a_finer_cell_names_it_and_differs_from_the_live_cell(
+    plugin, drive_dialog, tmp_path
+):
+    dock = whole_site(plugin)
+    live_cell = dock.cell_spin.value()
+    live = tmp_path / "live.tif"
+    fine = tmp_path / "fine.tif"
+    export_via_dialog(plugin, drive_dialog, live)
+    export_via_dialog(plugin, drive_dialog, fine, cell=live_cell / 2)
+    a, b = gdal.Open(str(live)), gdal.Open(str(fine))
+    try:
+        assert (b.RasterXSize, b.RasterYSize) == (2 * a.RasterXSize, 2 * a.RasterYSize)
+        md = b.GetMetadata()
+        assert float(md["NSGEO_SITE_CELL_M"]) == pytest.approx(live_cell / 2)
+        assert float(md["NSGEO_SITE_PIXEL_M"]) == pytest.approx(live_cell / 2)
+        assert md["NSGEO_SITE_RESAMPLING"] == "bilinear"
+        coarse = a.GetRasterBand(1).ReadAsArray()
+        finer = b.GetRasterBand(1).ReadAsArray()
+    finally:
+        a.Close()
+        b.Close()
+    assert np.isfinite(finer).any()
+    assert not np.array_equal(finer[::2, ::2], coarse, equal_nan=True)
+
+
+def test_a_real_site_export_touches_no_live_engine_or_session_off_the_gui_thread(
+    plugin, drive_dialog, tmp_path, monkeypatch
+):
+    """Review Focus 2, for the site: a recorder on every live engine, the site engine and
+    the session, then a real export. Nothing is read while the task runs."""
+    dock = whole_site(plugin)
+    site = dock.site_engine
+    session = plugin.session
+    main = threading.current_thread()
+    off_thread: list[str] = []
+
+    def spy(owner, name):
+        real = getattr(owner, name)
+
+        def wrapper(*args, **kwargs):
+            if threading.current_thread() is not main:
+                off_thread.append(f"{type(owner).__name__}.{name}")
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapper)
+
     for grid_id in site.ready_grids:
-        site.engine_for(grid_id)._last_solve_ms = last_solve_ms  # once the plans exist
-    real = plugin._export_progress
-    made: dict = {"calls": []}
-
-    def spying(title, total, **kwargs):
-        callback, dialog = real(title, total, **kwargs)
-        made["dialog"] = dialog
-        QTimer.singleShot(0, lambda: made.setdefault("pumped", True))  # an expose, say
-
-        def recorded(done, of):
-            made["calls"].append(done)
-            return callback(done, of)
-
-        return recorded, dialog
-
-    monkeypatch.setattr(plugin, "_export_progress", spying)
-    at_band_0: list[tuple[bool, bool]] = []
-    real_slice_at = site.slice_at
-
-    def first_band(*args, **kwargs):
-        if made["calls"] == [0] and not at_band_0:
-            at_band_0.append((made["dialog"].isVisible(), made.get("pumped", False)))
-        return real_slice_at(*args, **kwargs)
-
-    monkeypatch.setattr(site, "slice_at", first_band)
-    target = tmp_path / "slow.tif"
-    answer_modal(QFileDialog, "getSaveFileName", (str(target), "GeoTIFF (*.tif *.tiff)"))
+        engine = site.engine_for(grid_id)
+        for name in ("slice_at", "finish", "_slice", "cube", "prepared_lines", "finish_settings"):
+            spy(engine, name)
+    for name in ("slice_at", "lattice_at", "engine_for", "_gather", "_site_seams"):
+        spy(site, name)
+    for name in ("grid", "grid_gain"):
+        spy(session, name)
+    gate = ExportGate(monkeypatch)
+    target = tmp_path / "spied.tif"
+    drive_export_dialog(drive_dialog, path=target)
     dock.export_button.click()
+    gate.wait_entered()
+    gate.release.set()
+    wait_for_export()
     assert target.exists()
-    assert at_band_0 == [(shown, shown)]
+    assert off_thread == []
+    assert gate.threads and gate.threads[0] != main.name
+
+
+def test_the_site_export_dialog_gives_every_included_grids_limit_as_the_cell_floor(
+    plugin, drive_dialog
+):
+    from nsgeo_qgis.slices_plan import smallest_safe_cell
+
+    dock = whole_site(plugin)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    dock.export_button.click()
+    floor = max(
+        smallest_safe_cell(plugin.session.grid(g).size_x, plugin.session.grid(g).size_y)
+        for g in dock.site_engine.ready_grids
+    )
+    assert shown[0].cell_spin.minimum() == pytest.approx(floor, abs=0.001)
+    assert shown[0].cell_spin.value() == dock.cell_spin.value()
+    assert shown[0].path_edit.text().replace("\\", "/").endswith("slices/site.tif")
+
+
+def test_the_site_export_dialog_starts_at_the_cell_drawn_not_the_spin_box(plugin, drive_dialog):
+    """After a refused resolution the box can show a cell the picture is not at."""
+    dock = whole_site(plugin)
+    drawn = dock.site_engine.full_lattice.pixel
+    dock.cell_spin.blockSignals(True)
+    dock.cell_spin.setValue(dock.cell_spin.value() * 2)
+    dock.cell_spin.blockSignals(False)
+    assert dock.cell_spin.value() != pytest.approx(drawn)
+    shown = drive_export_dialog(drive_dialog, accept=False)
+    dock.export_button.click()
+    assert shown[0].cell_spin.value() == pytest.approx(drawn, abs=0.0005)
 
 
 # ---- the refine indicator (walkthrough round 1, W1-W3) ---------------------------
@@ -2975,3 +3387,502 @@ def test_the_site_layout_probe_sees_the_width_it_is_given(plugin):
         probe.settle()
         widths.append(probe.scroll.widget().width())
     assert widths[1] > widths[0], widths
+
+
+def test_a_placement_edit_re_prepares_only_that_grid_in_the_site_view(plugin, site3):
+    """Line editing spec §4.5: B's engine hands the move over to the site
+    engine, which re-queues B alone; A and C keep what they hold."""
+    dock = whole_site(plugin)
+    session = plugin.session
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    seen: list[dict[str, str]] = []
+    inner = dock.site_engine.on_changed
+
+    def record() -> None:
+        seen.append({g: dock.site_engine.grid_state(g) for g in "ABC"})
+        if inner is not None:
+            inner()
+
+    dock.site_engine.on_changed = record
+    key = site3.keys("B")[0]
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, offset=1.75)])
+    settle(dock)
+
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    assert any(state["B"] == "queued" for state in seen), seen
+    assert all(state["A"] == "ready" and state["C"] == "ready" for state in seen), seen
+    assert seen[-1]["B"] == "ready"
+
+
+def _capture_site_errors(dock) -> list[str]:
+    errors: list[str] = []
+    inner = dock.site_engine.on_error
+
+    def record(message: str) -> None:
+        errors.append(message)
+        if inner is not None:
+            inner(message)
+
+    dock.site_engine.on_error = record
+    return errors
+
+
+def _every_engine_holds_only_its_own_lines(dock, session) -> None:
+    for grid_id in "ABC":
+        engine = dock.site_engine.engine_for(grid_id)
+        held = {line.key for line in engine.prepared_lines()}
+        on_grid = {
+            session.line_key(line)
+            for line in session.site.lines
+            if getattr(line.placement, "grid_id", None) == grid_id
+        }
+        assert held == on_grid, grid_id
+
+
+def test_a_line_moved_while_the_site_view_is_prepared_and_idle_ends_on_its_new_grid(plugin, site3):
+    """Line editing spec §7, "a line moved while it is in a prepared source
+    on each grid": the site is idle, every grid ready."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    moved = site3.keys("B")[0]
+    plugin.move_lines([moved], "C")
+    settle(dock)
+    assert plugin.session.line_for_key(moved).placement.grid_id == "C"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, plugin.session)
+
+
+def test_a_line_moved_while_the_site_is_still_preparing_ends_on_its_new_grid(plugin, site3):
+    """The same, with a preparation in flight: B was just queued by an edit
+    and not yet settled when another of its lines moves to A."""
+    dock = whole_site(plugin)
+    errors = _capture_site_errors(dock)
+    session = plugin.session
+    b = site3.keys("B")
+    session.edit_lines([LineEdit(b[0], session.line_for_key(b[0]).placement, offset=1.75)])
+    assert dock.site_engine.grid_state("B") != "ready"  # the preparation has not finished
+    plugin.move_lines([b[1]], "A")
+    settle(dock)
+    assert session.line_for_key(b[1]).placement.grid_id == "A"
+    assert not [e for e in errors if "now on grid" in e], errors
+    assert dock.site_engine.ready_grids == ("A", "B", "C")
+    _every_engine_holds_only_its_own_lines(dock, session)
+
+
+# ---- the panel says why: preview note, not-drawn reason, export pixel size ----------------
+
+
+def _nudge_cell(dock) -> None:
+    """Change the cell so the site re-applies its resolution, then let it draw."""
+    dock.cell_spin.setValue(dock.cell_spin.value() + 0.05)
+    dock.flush_debounce()
+    settle(dock)
+
+
+def test_the_preview_note_shows_in_the_panel_while_the_site_is_a_preview(plugin):
+    dock = whole_site(plugin)
+    assert dock.site_note.text() == ""
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    engine = dock.site_engine
+    assert engine.is_preview and engine.preview_note
+    assert dock.site_note.text() == engine.preview_note
+    assert dock.site_note.isVisibleTo(dock)
+    # Milestone B exports a preview site at full detail, so the tooltip carries no refusal.
+    assert dock.site_note.toolTip() == engine.preview_note
+    assert "export" not in dock.site_note.toolTip().lower()
+
+
+def test_the_note_clears_when_the_site_fits_again(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.text()
+    dock.site_engine.max_pixels = 10**9
+    _nudge_cell(dock)
+    assert not dock.site_engine.is_preview
+    assert dock.site_note.text() == ""
+    assert dock.site_note.toolTip() == ""
+
+
+def test_the_note_clears_on_switching_to_this_grid(plugin):
+    dock = whole_site(plugin)
+    dock.site_engine.max_pixels = 100
+    _nudge_cell(dock)
+    assert dock.site_note.isVisibleTo(dock)
+    dock.grid_scope_button.click()
+    _events()
+    assert dock.scope() == "grid"
+    assert not dock.site_note.isVisibleTo(dock)
+
+
+def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
+    dock = plugin.slices_dock
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    def refuse(self, resolution):
+        raise RuntimeError("the lattice could not be built")
+
+    monkeypatch.setattr(site_engine_module.SiteEngine, "set_resolution", refuse)
+    dock.site_scope_button.click()
+    settle(dock)
+    scope = dock._site
+    assert dock.site_engine.lattice is None, "nothing is drawn"
+    scope.refresh_slice()
+    assert scope.problem == "the lattice could not be built"
+    assert any("the lattice could not be built" in e for e in errors), "the toast stays"
+    assert dock.site_note.text().startswith("Not drawn: ")
+    assert "the lattice could not be built" in dock.site_note.toolTip()
+
+
+def test_a_later_good_resolution_clears_the_problem(plugin, monkeypatch):
+    dock = whole_site(plugin)
+    scope = dock._site
+    scope.problem = "stale"
+    _nudge_cell(dock)
+    assert scope.problem is None
+    assert not dock.site_note.text().startswith("Not drawn")
+
+
+def test_the_site_note_never_widens_the_dock(plugin):
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    probe = LayoutProbe(dock)
+    probe.settle()
+    content = probe.scroll.widget()
+    before = content.minimumSizeHint().width()
+    height = dock.site_note.height()
+    longest = "a very long preview note " * 12
+    assert len(longest) >= 300
+    dock.site_note.setText(longest)
+    probe.settle()
+    assert content.minimumSizeHint().width() == before
+    assert dock.site_note.height() == height, "empty or full, the line keeps its height"
+    assert dock.site_note.text() == longest
+
+
+def test_export_messages_name_the_cell_and_the_pixel(plugin, drive_dialog, tmp_path):
+    dock = whole_site(plugin)
+    target = tmp_path / "site.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    assert target.exists()
+    cell = dock.cell_spin.value()
+    pixel = dock.site_engine.lattice.pixel
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({cell:g} m cell, {pixel:g} m pixels)" in text, text
+
+    dock.grid_scope_button.click()
+    _events()
+    if not dock.engine.is_prepared:
+        dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    grid_target = tmp_path / "grid.tif"
+    export_via_dialog(plugin, drive_dialog, grid_target)
+    assert grid_target.exists()
+    gcell = dock.engine.frame.cell
+    text = plugin.iface.messageBar().currentItem().text()
+    assert f"({gcell:g} m cell, {gcell:g} m pixels)" in text, text
+
+
+def test_a_line_zero_is_read_from_the_scope_on_screen(plugin):
+    """Under Whole site every grid's lines answer, not just This grid's (#97)."""
+    dock = plugin.slices_dock
+    assert dock.engine.wait_for_preparation(60_000)
+    here = dock.engine.choice.grid_id
+    session = plugin.session
+    others = [
+        k
+        for k in session.keys()  # noqa: SIM118 -- SiteSession.keys()
+        if session.line_for_key(k).placement.grid_id not in (None, here)
+    ]
+    assert others
+    key = others[0]
+    assert dock.line_zero_in_cube(key) is None  # This grid's engine does not hold it
+
+    whole_site(plugin)
+    zero = dock.line_zero_in_cube(key)
+    assert zero is not None
+    assert zero == dock.site_engine.line_zero(key)
+    assert dock.site_engine.line_zero("no-such-line.dzt") is None
+
+
+# ---- mixed clocks (#97) ------------------------------------------------------------------
+
+
+def _preset_per_grid(session, **presets) -> None:
+    for grid_id in "ABC":
+        session.remember_slice_source(grid_id, preset=presets.get(grid_id, "p"), lines=None)
+
+
+def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, A="radar", B="radar", C="radar")
+    dock = whole_site(plugin)
+    assert "Time zero" not in dock.site_note.text()
+    assert "Time zero" not in dock.site_note.toolTip()
+
+
+def test_grid_time_bases_reads_each_grids_preset(plugin):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, C="radar")
+    source = site_scope_module.site_source(session, "ABC", "amp_square")
+    assert site_scope_module.grid_time_bases(session, source) == {
+        "A": "time_zero",
+        "B": "time_zero",
+        "C": "radar",
+    }
+
+
+def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
+    """Ruling R15: saving over a preset does not re-prepare, so the drawn cubes
+    and the export keep the old steps; the note must say what they say."""
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    session.site.presets["radar"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+    _events()
+    engine = dock.site_engine
+    assert time_base_of(engine.engine_for("B").provenance().steps) == "radar"
+    assert mixed_clock_note(["B"]) in dock.site_note.text()
+    assert mixed_clock_note(["B"]) in dock.site_note.toolTip()
+
+
+def test_a_preset_losing_the_step_late_does_not_raise_a_false_warning(plugin):
+    session = plugin.session
+    _preset_per_grid(session, B="raw")  # both presets carry time_zero
+    dock = whole_site(plugin)
+    session.site.presets["raw"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    session.presets_changed.emit()
+    _events()
+    assert time_base_of(dock.site_engine.engine_for("B").provenance().steps) == "time_zero"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_a_grid_that_is_not_drawn_does_not_count_toward_a_mixed_clock(plugin):
+    session = plugin.session
+    _add_refused_preset(session)
+    _preset_per_grid(session, B="zz_bad")
+    dock = whole_site(plugin)
+    assert dock.site_engine.grid_state("B") != "ready"
+    assert "Time zero" not in dock.site_note.text()
+
+
+def test_the_clock_warning_is_its_own_sentence_after_a_preview_or_a_reason(plugin, monkeypatch):
+    session = plugin.session
+    session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
+    _preset_per_grid(session, B="radar")
+    dock = whole_site(plugin)
+    scope = dock._site
+    warning = mixed_clock_note(["B"])
+    monkeypatch.setattr(type(scope.engine), "preview_note", property(lambda s: "A preview"))
+    scope.show_note(drawn=True)
+    assert dock.site_note.text() == f"A preview. {warning}"
+    scope.problem = "no depth range"
+    scope.show_note(drawn=False)
+    assert dock.site_note.text() == f"Not drawn: no depth range. {warning}"
+    assert dock.site_note.toolTip().endswith(warning)
+
+
+# ---- #180: the slice coloured with the user's own QGIS symbology -------------------------
+
+
+def _own(dock):
+    dock.colours_combo.setCurrentIndex(1)
+    _events()
+
+
+def _range(plugin):
+    from nsgeo_qgis.own_colours import style_range
+
+    return style_range(plugin.slice_layer.layer)
+
+
+def test_the_display_section_offers_the_users_own_colours(plugin):
+    dock = plugin.slices_dock
+    assert [dock.colours_combo.itemText(i) for i in range(2)] == [
+        "nsgeo colours",
+        "my own colours",
+    ]
+    assert dock.colours_combo.currentIndex() == 0
+    assert dock.stretch_combo.isEnabled() and not dock.symbology_button.isEnabled()
+    _own(dock)
+    assert not dock.stretch_combo.isEnabled() and dock.symbology_button.isEnabled()
+    assert dock.palette_combo.isEnabled(), "the palette still colours cuts and coverage"
+    assert plugin.session.slice_colours("grid")["own"] is True
+    assert plugin.session.slice_colours("site") == {}
+
+
+def test_own_colours_start_from_what_was_shown_and_the_style_is_remembered(plugin):
+    from nsgeo_qgis.own_colours import style_text
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    dock = plugin.slices_dock
+    before = _range(plugin)
+    _own(dock)
+    layer = plugin.slice_layer.layer
+    assert _range(plugin) == pytest.approx(before)
+    assert layer.renderer().minMaxOrigin().limits() == QgsRasterMinMaxOrigin.Limits.NotSet
+    assert plugin.session.slice_colours("grid")["style"] == style_text(layer)
+    assert dock.legend_label.text().startswith("your own colours · ")
+
+
+def test_typed_numbers_hold_as_the_depth_slider_moves(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)  # as Layer Properties ▸ Apply would
+    dock.slice_slider.setValue(dock.slice_slider.value() + 5)
+    _events()
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+    assert dock.legend_label.text() == "your own colours · -2 – 5"
+
+
+def test_a_computed_range_follows_each_slice(plugin):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    dock = plugin.slices_dock
+    _own(dock)
+    layer = plugin.slice_layer.layer
+    shown = layer.renderer()
+    renderer = shown.clone()
+    renderer.setClassificationMin(shown.classificationMin())
+    renderer.setClassificationMax(shown.classificationMax())
+    origin = renderer.minMaxOrigin()
+    origin.setLimits(QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    origin.setStatAccuracy(QgsRasterMinMaxOrigin.StatAccuracy.Exact)
+    renderer.setMinMaxOrigin(origin)
+    layer.setRenderer(renderer)
+    ranges = []
+    for step in (3, 9):
+        dock.slice_slider.setValue(step)
+        _events()
+        values = dock.current_values()
+        finite = values[np.isfinite(values)]
+        assert _range(plugin) == pytest.approx((finite.min(), finite.max()), rel=1e-4)
+        ranges.append(_range(plugin))
+    assert ranges[0] != ranges[1]
+
+
+def test_coverage_keeps_the_plugin_colours_and_off_brings_the_users_back(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    dock.coverage_check.setChecked(True)
+    _events()
+    assert _range(plugin)[0] == 0.0, "counts are drawn in the plugin's colours"
+    assert dock.legend_label.text().endswith("traces per cell · blank = no line crossed")
+    dock.coverage_check.setChecked(False)
+    _events()
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+
+
+def test_the_symbology_button_opens_the_slice_layers_symbology_page(plugin, fake_iface):
+    dock = plugin.slices_dock
+    _own(dock)
+    dock.symbology_button.click()
+    assert fake_iface.layer_properties == [(plugin.slice_layer.layer, "mOptsPage_Style")]
+
+
+def test_each_scope_keeps_its_own_colours(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    whole_site(plugin)
+    assert dock.colours_combo.currentIndex() == 0
+    assert dock.stretch_combo.isEnabled()
+    assert _range(plugin) != pytest.approx((-2.0, 5.0))
+    _own(dock)
+    set_range(plugin.slice_layer.layer, 0.0, 9.0)
+    assert plugin.session.slice_colours("site")["own"] is True
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    _events()
+    assert dock.colours_combo.currentIndex() == 1
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+    whole_site(plugin)
+    assert _range(plugin) == pytest.approx((0.0, 9.0))
+    assert dock.legend_label.text() == "your own colours · 0 – 9"
+
+
+def test_switching_back_to_nsgeo_colours_keeps_the_style_for_later(plugin):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    dock.colours_combo.setCurrentIndex(0)
+    _events()
+    assert dock.stretch_combo.isEnabled()
+    assert _range(plugin) != pytest.approx((-2.0, 5.0))
+    _own(dock)
+    assert _range(plugin) == pytest.approx((-2.0, 5.0))
+
+
+def test_the_colours_come_back_with_a_reopened_survey(fake_iface, site3, answer_modal):
+    from nsgeo_qgis.own_colours import set_range
+
+    first = _open(fake_iface, site3, answer_modal)
+    _own(first.slices_dock)
+    set_range(first.slice_layer.layer, -2.0, 5.0)
+    first.session.save()
+    _close(first, answer_modal)
+    again = _open(fake_iface, site3, answer_modal)
+    try:
+        _events()
+        assert again.slices_dock.colours_combo.currentIndex() == 1
+        assert _range(again) == pytest.approx((-2.0, 5.0))
+    finally:
+        _close(again, answer_modal)
+
+
+def test_the_export_takes_the_users_own_colours(plugin, drive_dialog, tmp_path):
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    target = tmp_path / "mine.tif"
+    export_via_dialog(plugin, drive_dialog, target)
+    exported = next(
+        lyr for lyr in plugin.layers.project.mapLayers().values() if lyr.name() == "mine"
+    )
+    assert exported.renderer().classificationMin() == pytest.approx(-2.0)
+    assert exported.renderer().classificationMax() == pytest.approx(5.0)
+    assert exported.temporalProperties().isActive(), "it still steps through the depths"
+
+
+def test_the_legend_follows_an_edit_without_a_redraw(plugin):
+    """Review finding 4: Layer Properties ▸ Apply redraws nothing in the panel."""
+    from nsgeo_qgis.own_colours import set_range
+
+    dock = plugin.slices_dock
+    _own(dock)
+    set_range(plugin.slice_layer.layer, -2.0, 5.0)
+    assert dock.legend_label.text() == "your own colours · -2 – 5"

@@ -32,16 +32,18 @@ the scope left.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import numpy as np
+from nsgeo.processing import retime_ns, sets_time_zero
 from nsgeo.render import DEFAULT_COLORMAP, PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import (
     CubeFrame,
     FinishSettings,
     SliceWindow,
+    covered_cells,
     limit_over_slices,
     plan_windows,
     window_label,
@@ -81,20 +83,22 @@ from nsgeo_qgis.slices_plan import (
     DEFAULT_TRANSFORM,
     MAX_FRAME_CELLS,
     NO_TRANSFORM,
+    MemoryEstimate,
     Resolution,
     SiteSource,
     SliceFinish,
     SourceChoice,
     default_cell,
-    depth_scroll_delta,
+    depth_scroll_steps,
     estimate_memory,
     format_bytes,
     frame_cells,
+    old_cube_note,
     smallest_safe_cell,
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
-from nsgeo_qgis.ui.profile_dock import velocity_source
+from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
@@ -135,13 +139,17 @@ class ElidedLabel(QLabel):
         super().__init__("")
         self.full_text = ""
         self._hint = ""
+        self._hint_whole = False
         self.setWordWrap(False)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self._fit_height()
         self.setText(text)
 
-    def set_hint(self, hint: str) -> None:
+    def set_hint(self, hint: str, *, whole: bool = False) -> None:
+        """`whole`: the hint already contains the full text and more, so it is the
+        tooltip even when the text is elided (the site note's export refusal)."""
         self._hint = hint
+        self._hint_whole = whole
         self._elide()
 
     def setText(self, text: str | None) -> None:  # noqa: N802 -- Qt override
@@ -182,7 +190,7 @@ class ElidedLabel(QLabel):
         super().setText(shown)
         # The full text when it is cut short; the hint only while there is a
         # state to explain, so a blank line never carries one (walkthrough round 1).
-        if shown != self.full_text:
+        if shown != self.full_text and not (self._hint_whole and self._hint):
             self.setToolTip(self.full_text)
         else:
             self.setToolTip(self._hint if self.full_text else "")
@@ -205,6 +213,8 @@ class SlicesDock(QgsDockWidget):
     #: requested` already uses for `LineChoiceDialog`.
     save_cube_requested = pyqtSignal()
     export_requested = pyqtSignal()
+    #: #180: open the slice layer's Symbology page (the plugin has `iface`).
+    symbology_requested = pyqtSignal()
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Slices", parent)
@@ -316,12 +326,14 @@ class SlicesDock(QgsDockWidget):
         #: now say. A LATER `lines_changed`, with the grid still selected,
         #: must still pick up the lines that arrive after the seed -- this
         #: flag is what tells `_sync_included` it is still allowed to
-        #: re-seed rather than merely prune. Cleared the moment the user
-        #: makes an explicit, non-empty choice (`set_included`). Set again by
-        #: an actual grid change and by a prune that empties the user's
-        #: choice (#74); a restored line choice (`_restore_remembered_source`,
-        #: `restore_cube`, `_follow_record_changed_in_site`) sets it to
-        #: whether what it restored means every line.
+        #: re-seed rather than merely prune. A non-empty choice in the line
+        #: chooser (`set_included`) sets it to whether every line is ticked
+        #: (#101: every line, now and later). Set again by an actual grid
+        #: change and by a prune that empties the user's choice (#74); a
+        #: reading of the line record (`_read_remembered_lines`, from a
+        #: restore, `_sync_included` or `_follow_record_changed_in_site`)
+        #: and `restore_cube` set it to whether what they read means every
+        #: line, so a re-import can turn it back into a choice (#100).
         self._included_is_default = True
         #: The current slice's own values (post coverage/fill) and the
         #: `SliceWindow` they came from, as `refresh_slice()` last left
@@ -353,6 +365,11 @@ class SlicesDock(QgsDockWidget):
         #: `_on_prepared` fires and applies a palette that restore no
         #: longer has anything to do with.
         self._pending_palette: str | None = None
+        #: A restored record from before the time-zero clock, whose preset now
+        #: sets one: `_on_prepared` moves its z range by the median zero and
+        #: says so. Consumed by every `_on_prepared` (which also covers a preparation
+        #: with failed lines), and cleared by a manual source change.
+        self._pending_z_shift = False
 
         body = QWidget(self)
         outer = QVBoxLayout(body)
@@ -439,6 +456,14 @@ class SlicesDock(QgsDockWidget):
         self.refine_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         readout_row.addWidget(self.refine_label, 1)
         position_layout.addLayout(readout_row)
+
+        # Whole site only: the preview note, or why nothing is drawn. One
+        # elided line of fixed height (as `refine_label`), the full text in
+        # its tooltip, so a long reason never widens the dock or moves the
+        # scrolled panel.
+        self.site_note = ElidedLabel("")
+        self.site_note.setVisible(False)
+        position_layout.addWidget(self.site_note)
 
         self.velocity_label = QLabel("")
         velocity_font = self.velocity_label.font()
@@ -606,6 +631,23 @@ class SlicesDock(QgsDockWidget):
         self.display_group = QGroupBox("Display")
         display_form = QFormLayout(self.display_group)
 
+        # #180: the plugin's palette and stretch, or the user's own QGIS
+        # symbology on the slice layer. Each scope keeps its own choice, in
+        # the session (`SiteSession.slice_colours`); `_sync_colours` shows it.
+        self.colours_combo = QComboBox()
+        self.colours_combo.addItems(["nsgeo colours", "my own colours"])
+        self.colours_combo.setToolTip(
+            "nsgeo colours: the Palette and Stretch below.\n"
+            "My own colours: whatever you set in the slice layer's\n"
+            "Layer Properties ▸ Symbology stays as you move through the slices."
+        )
+        self.symbology_button = QPushButton("Symbology…")
+        self.symbology_button.setToolTip("Open the slice layer's Symbology page")
+        colours_row = QHBoxLayout()
+        colours_row.addWidget(self.colours_combo, 1)
+        colours_row.addWidget(self.symbology_button)
+        display_form.addRow("Colours", colours_row)
+
         self.stretch_combo = QComboBox()
         self.stretch_combo.addItems(["shared across the cube", "this slice"])
         display_form.addRow("Stretch", self.stretch_combo)
@@ -686,6 +728,7 @@ class SlicesDock(QgsDockWidget):
         # refills it with the real answer once a source actually exists.
         self._refill_palette_combo()
         self._update_resident_check_label()
+        self._sync_colours()
 
         # `transform_combo` filled itself when it was built, before the
         # connects just below: its options are the registry, not the site,
@@ -765,6 +808,11 @@ class SlicesDock(QgsDockWidget):
         # recomputes `_values` and re-emits `slice_changed`.
         self.stretch_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
         self.palette_combo.currentTextChanged.connect(lambda _text: self.refresh_slice())
+        self.colours_combo.currentIndexChanged.connect(self._on_colours_changed)
+        self.symbology_button.clicked.connect(lambda: self.symbology_requested.emit())
+        session.site_opened.connect(self._sync_colours)
+        session.site_closed.connect(self._sync_colours)
+        self.coverage_check.toggled.connect(lambda _checked: self._sync_colours())
         self.coverage_check.toggled.connect(lambda _checked: self.refresh_slice())
         # Not wired straight to refresh_slice(): the residency override
         # changes no pixel (spec 11's own property -- streaming and
@@ -812,6 +860,8 @@ class SlicesDock(QgsDockWidget):
         for why one was rejected.
         """
         try:
+            # A restore's owed shift belongs to the site it was made in.
+            self._pending_z_shift = False
             self._updating += 1
             try:
                 site = self.session.site
@@ -839,6 +889,23 @@ class SlicesDock(QgsDockWidget):
                 self.prepare()
             elif (
                 self._scope == "grid"
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and any(
+                    self.engine.had_line(k)
+                    for k in self._included
+                    if k not in self.engine.choice.line_keys
+                )
+            ):
+                # A line moved onto a grid whose source takes it -- every line,
+                # or a line record that names it (#100) -- is in the inclusion
+                # set but not in what the source was built from, and an edit
+                # is no `Prepare` button to wait for. One that
+                # was imported was never in the engine's snapshot, so it
+                # keeps today's "stale" status (line editing spec §4.5).
+                self.prepare()
+            elif (
+                self._scope == "grid"
                 and not self._resolution_owed
                 and self.engine.is_prepared
                 and self.engine.choice is not None
@@ -850,6 +917,29 @@ class SlicesDock(QgsDockWidget):
                 # (interpolation spec §8). Direct, like the sliders: no
                 # resolution change to debounce.
                 self.refresh_slice()
+            elif (
+                self._scope == "grid"
+                and self.engine.is_prepared
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and self._values is not None
+                and (window := self.current_window()) is not None
+            ):
+                # A grid Apply (or a line edit) can change the velocity the
+                # label and the readout's metres state, never the slice
+                # itself: relabel depths only, as Whole site's
+                # `on_session_changed` does. Export reads the live velocity
+                # through `_resolved_velocity`, so a stale label here would
+                # name a different one.
+                # A hand-edited survey's spacing <= 0 (`SliceFinish.in_metres`,
+                # via the legend's limit) raises ValueError after the readout
+                # and the velocity label are already written, as
+                # `_finish_moved` reads it. Any ValueError is logged, never
+                # swallowed: a header dielectric <= 0 raises one too.
+                try:
+                    self._update_readout(window)
+                except ValueError as exc:
+                    _log(f"could not relabel the slice after a velocity change: {exc}")
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -923,14 +1013,15 @@ class SlicesDock(QgsDockWidget):
 
     def _sync_included(self) -> None:
         """Reset the inclusion set when the selected grid actually
-        changed; otherwise, while it is still a seeded default (fix round
-        1, Important 1), re-seed it -- more lines may have arrived under
-        this same grid since it was last seeded -- and only once the user
-        has made an explicit choice does this fall back to pruning stale
-        keys, keeping survey order. A prune that empties a non-empty choice
-        (every chosen line removed) returns to the seeded default instead,
-        the reading `_restore_remembered_source` and the site give an
-        emptied choice (#74).
+        changed; otherwise read the grid's line record again
+        (`_read_remembered_lines`, the site's reading, #100) while the set
+        is still a seeded default (fix round 1, Important 1) -- more lines
+        may have arrived under this same grid since it was last seeded --
+        or whenever the grid's record names lines. Only an explicit choice
+        with no line record behind it falls back to pruning stale keys, keeping survey
+        order. A prune that empties a non-empty choice (every chosen line
+        removed) returns to the seeded default instead, the reading the
+        record and the site give an emptied choice (#74).
 
         An inclusion list carried over from a different grid means
         nothing here -- the whole point of `_default_included` is to
@@ -969,11 +1060,20 @@ class SlicesDock(QgsDockWidget):
             self._seed_resolution_defaults(grid_id)
             self._restore_remembered_source(grid_id)
             return
-        if self._included_is_default:
-            self._included = self._default_included(grid_id)
-            self._seed_dz_z_defaults(grid_id)
+        was_default = self._included_is_default
+        if was_default or self._record_has_lines(grid_id):
+            # #100: one reading of the record, the site's (`source_keys`),
+            # after any removal or import. A line removed from the choice and
+            # imported again is named there, so it is in the choice again;
+            # pruning the live set would have dropped it for good.
+            self._read_remembered_lines(grid_id)
+            if was_default:
+                self._seed_dz_z_defaults(grid_id)
             return
-        valid = set(self.session.keys()) if self.session.is_open else set()
+        # Only this grid's own lines: a line moved to another grid keeps its
+        # key, so "still in the site" would leave it in the choice (line
+        # editing spec §4.5).
+        valid = set(self._default_included(grid_id))
         pruned = tuple(k for k in self._included if k in valid)
         if self._included and not pruned:
             # #74: removal took every line the user had chosen. An empty set
@@ -991,12 +1091,7 @@ class SlicesDock(QgsDockWidget):
         a choice: the preset is selected inside the `_updating` guard so it
         does not read as a user change, and nothing is remembered here. A
         remembered preset that no longer exists is skipped; remembered line
-        keys are filtered to the ones still on the grid, in survey order. A
-        remembered `lines` of None means "every line", so it stays a
-        default and a line imported later is still picked up. So does one
-        that filters to nothing -- an empty choice, or lines that have all
-        left the grid (final review D4): an empty inclusion set would leave
-        This grid with nothing to prepare and no way back to the default."""
+        keys are read by `_read_remembered_lines`."""
         entry = self.session.slice_source(grid_id) if grid_id and self.session.is_open else None
         if entry is None:
             return
@@ -1011,13 +1106,30 @@ class SlicesDock(QgsDockWidget):
                 self.preset_combo.setCurrentText(preset)
             finally:
                 self._updating -= 1
-        lines = entry.get("lines")
-        if lines is not None:
-            wanted = set(lines)
-            every = self._default_included(grid_id)
-            kept = tuple(k for k in every if k in wanted)
-            self._included = kept if kept else every
-            self._included_is_default = not kept
+        self._read_remembered_lines(grid_id)
+
+    def _read_remembered_lines(self, grid_id: str | None) -> None:
+        """This grid's reading of the grid's remembered lines, the one
+        `site_scope.source_keys` gives the site (#74, #100). The keys still
+        on the grid, in survey order, are an explicit choice. A remembered
+        `lines` of None means "every line", so it is a default and a line
+        imported later is still picked up. So is one that filters to
+        nothing -- an empty choice, or lines that have all left the grid
+        (final review D4): an empty inclusion set would leave This grid
+        with nothing to prepare and no way back to the default. The record
+        still stands, so a line of it imported again is the choice again
+        (#100): `_sync_included`'s "still default" branch reads it here too."""
+        entry = self.session.slice_source(grid_id) if grid_id and self.session.is_open else None
+        lines = (entry or {}).get("lines")
+        every = self._default_included(grid_id)
+        if lines is None:
+            self._included = every
+            self._included_is_default = True
+            return
+        wanted = set(lines)
+        kept = tuple(k for k in every if k in wanted)
+        self._included = kept if kept else every
+        self._included_is_default = not kept
 
     def _remember_source(self, *, every_line: bool = False) -> None:
         """Record the user's own choice for the selected grid. Called only
@@ -1036,6 +1148,39 @@ class SlicesDock(QgsDockWidget):
             return
         lines = None if every_line or self._included_is_default else self._included
         self.session.remember_slice_source(grid_id, preset=preset, lines=lines)
+
+    def _included_estimate(self) -> MemoryEstimate:
+        """The memory the included lines will cost, before preparing them.
+
+        The one place the before-preparing count lives: the included label
+        and, until the engine holds lines, the residency checkbox both read
+        it. Each refreshes on its own triggers, though: `_apply_resolution`
+        refreshes only the checkbox, so after a cell-size change the label
+        can show the old size's figure until the next inclusion change or
+        `_on_prepared`. Between a grid change and `_on_prepared` the count
+        is made against the frame on screen, which is the old grid's until
+        preparation finishes (#113)."""
+        samples = 0
+        coords: list[np.ndarray] = []
+        frame = self.engine.frame
+        if self.session.is_open:
+            for key in self._included:
+                line = self.session.line_for_key(key)
+                samples += line.n_traces * line.header.n_samples
+                if frame is None:
+                    continue
+                try:
+                    coords.append(line.trace_coords(self.session.site.frames))
+                except Exception:  # noqa: BLE001 -- a missing grid; preparation skips it too
+                    continue
+        z = self.engine.z
+        n_cells = frame.n_cells if frame is not None else 0
+        nz = z.nz if z is not None else 0
+        # A resident cube stores only the cells the lines fall in (#113).
+        n_covered = covered_cells(frame, coords) if frame is not None else 0
+        # Minimum curvature holds two sets of weights (#148).
+        method = self.grid_finish.value().method
+        return estimate_memory(samples, n_cells, nz, n_covered, method=method)
 
     def _update_included_label(self) -> None:
         """Spec 9.1: report the resulting memory before committing to the
@@ -1064,32 +1209,33 @@ class SlicesDock(QgsDockWidget):
         grid_id = self.grid_combo.currentText() or None
         total = len(self._default_included(grid_id))
         included = self._included
-        samples = 0
-        if self.session.is_open:
-            for key in included:
-                line = self.session.line_for_key(key)
-                samples += line.n_traces * line.header.n_samples
-        frame = self.engine.frame
-        z = self.engine.z
-        n_cells = frame.n_cells if frame is not None else 0
-        nz = z.nz if z is not None else 0
-        estimate = estimate_memory(samples, n_cells, nz)
+        estimate = self._included_estimate()
         text = f"{len(included)} of {total} included · about {format_bytes(estimate.total_bytes)}"
         if estimate.total_bytes > DEFAULT_BUDGET_BYTES:
             text += " -- over the default budget; slices will stream rather than hold it all"
         self.included_label.setText(text)
-        self._update_resident_check_label()
+        self._update_resident_check_label(estimate)
 
-    def _update_resident_check_label(self) -> None:
+    def _update_resident_check_label(self, before: MemoryEstimate | None = None) -> None:
         """Spec 9.2's own wording for the residency override, with the
         cost it names filled in: `engine.estimate.cube_bytes` is what
         turning it on actually adds -- the prepared lines are already held
         in memory in EITHER mode, so the whole-volume checkbox's own cost
         is the cube alone, not the total. Called from `_update_included_
-        label` (every place that estimate could have changed) and from
+        label` (every place that estimate could have changed), from
         `_apply_resolution` (a resolution change moves `frame`/`z`, and so
-        `engine.estimate`, without necessarily touching `_included`)."""
-        mb = format_bytes(self.engine.estimate.cube_bytes)
+        `engine.estimate`, without necessarily touching `_included`), from
+        `prepare` (`set_source` empties the engine's lines, so the figure
+        falls back to the before-preparing one) and once at construction."""
+        # Until the engine holds lines its own estimate counts no covered
+        # cells; the before-preparing figure the included label shows is the
+        # honest one then (#113). `before` saves a second count when the
+        # caller just made it.
+        if self.engine.is_prepared:
+            cube_bytes = self.engine.estimate.cube_bytes
+        else:
+            cube_bytes = (before or self._included_estimate()).cube_bytes
+        mb = format_bytes(cube_bytes)
         # Short on the face, the full wording in the tooltip. A QCheckBox
         # cannot elide or wrap its own text, so its minimum width is the
         # width of that text -- "Keep the whole volume in memory for
@@ -1148,7 +1294,7 @@ class SlicesDock(QgsDockWidget):
         `ProcessingDock._on_form_committed` uses: clicking OK without
         actually changing anything must not spend another ~0.9 s.
 
-        Cheap cluster (final review): `_included_is_default` is cleared
+        Cheap cluster (final review): `_included_is_default` is set
         only for a NON-EMPTY `keys` -- clearing it unconditionally meant
         accepting the line chooser on a grid that is still EMPTY (`keys ==
         ()`, `self._included` already `()` too, so `changed` is `False`
@@ -1162,24 +1308,53 @@ class SlicesDock(QgsDockWidget):
         standing on a SIR-4000 file with a negative `position_ns`, giving
         `CoverageError` on every slice with no visible route back to a
         working default.
+
+        #101, the user's ruling: every line ticked is every line, now and
+        later, however the chooser got there -- a default, remembered as
+        `lines=None`, so a line imported later joins both scopes. Accepting
+        the chooser unchanged can still change what the record means (an
+        explicit list of every line becomes None), so with every line ticked
+        a record that names a line list is rewritten even when the keys did
+        not change. Nothing else is written for an unchanged OK.
         """
         keys = tuple(keys)
         changed = keys != self._included
         self._included = keys
         if keys:
-            self._included_is_default = False
+            grid_id = self.grid_combo.currentText() or None
+            self._included_is_default = set(keys) == set(self._default_included(grid_id))
         # Task 7: an explicit line-chooser choice is not a restore, and
         # must not inherit one still in flight -- see `_pending_palette`'s
         # own docstring for why a manual change clears it here and in
         # `_on_source_changed` rather than leaving `_on_prepared` to apply
         # a palette this choice has nothing to do with.
         self._pending_palette = None
+        self._pending_z_shift = False
         self._mark_cube_unsaved()
         self._update_included_label()
         self._refresh_source_status()
-        if changed:
+        if changed or (self._included_is_default and self._record_names_lines()):
             self._remember_source()
+        if changed:
             self.prepare()
+
+    def _record_has_lines(self, grid_id: str | None) -> bool:
+        """Whether the grid's record says anything about lines. One holding
+        only a gain or a resolution does not: a choice made while no preset
+        existed was never remembered (`_remember_source`), and stands."""
+        if not grid_id or not self.session.is_open:
+            return False
+        return "lines" in (self.session.slice_source(grid_id) or {})
+
+    def _record_names_lines(self) -> bool:
+        """Whether the selected grid's record names a line list. With every
+        line ticked, an unchanged OK rewrites only such a record, as None
+        (#101); a list in another order or with a removed key means the
+        same choice, and an empty one reads as every line already."""
+        grid_id = self.grid_combo.currentText()
+        if not grid_id or not self.session.is_open:
+            return False
+        return bool((self.session.slice_source(grid_id) or {}).get("lines"))
 
     def _live_preset_steps(self, preset_name: str) -> list[dict]:
         return list(self.session.site.presets.get(preset_name, [])) if self.session.is_open else []
@@ -1202,13 +1377,13 @@ class SlicesDock(QgsDockWidget):
             # this question is answered, not assuming its callers can
             # never change.
             #
-            # KeyError (final review, Minor 6): provenance() also raises
-            # this once the FIRST prepared line has been removed from the
-            # session -- see `_resolved_velocity`'s own docstring, which
-            # widens the identical catch for the identical reason. A
-            # "does not match" answer here is conservative and safe either
-            # way: both callers already treat a mismatch as "stale, not
-            # unprepared".
+            # KeyError (final review, Minor 6): provenance() resolves the
+            # grid's velocity through `grid_depth_velocity`, which raises
+            # KeyError when the grid has neither a velocity nor a line, but
+            # provenance() suppresses that and records no velocity. The
+            # catch stays as a defensive one. A "does not match" answer here
+            # is conservative and safe either way: both callers already
+            # treat a mismatch as "stale, not unprepared".
             return False
         return self._live_preset_steps(preset_name) == prepared_steps
 
@@ -1281,12 +1456,16 @@ class SlicesDock(QgsDockWidget):
         choice = self.source_choice()
         if (
             choice is not None
-            and choice == self.engine.choice
+            and choice.same_source(self.engine.choice)
             and self._prepared_steps_match(choice.preset)
         ):
             return
         try:
             self.engine.set_source(choice)
+            # `set_source` emptied the engine's lines, so the checkbox now
+            # takes the before-preparing figure rather than the old line
+            # set's (#113).
+            self._update_resident_check_label()
             self._refresh_source_status()
         except Exception as exc:  # noqa: BLE001 -- see the docstring above
             message = str(exc)
@@ -1300,6 +1479,11 @@ class SlicesDock(QgsDockWidget):
             self.save_button.setEnabled(self.engine.is_prepared)
             self.export_button.setEnabled(self.engine.is_prepared)
             self.error.emit(message)
+            # #103: nothing is prepared, so nothing may stay on the map --
+            # neither the slice of the source before this one nor, on a
+            # switch from Whole site, the site's picture. `refresh_slice`'s
+            # not-prepared path clears it (and leaves `source_status` alone).
+            self.refresh_slice()
 
     def _on_source_changed(self, _text: str = "") -> None:
         """Changing the grid, preset or transform re-runs preparation as
@@ -1323,6 +1507,7 @@ class SlicesDock(QgsDockWidget):
             # inherit a palette a still-preparing `restore_cube` owes a
             # DIFFERENT preparation.
             self._pending_palette = None
+            self._pending_z_shift = False
             self._mark_cube_unsaved()
             self._sync_included()
             self._remember_source()
@@ -1397,7 +1582,7 @@ class SlicesDock(QgsDockWidget):
         if current.transform != choice.transform:
             self.source_status.setText("stale · the transform changed since this was prepared")
             return
-        if current.line_keys != choice.line_keys:
+        if set(current.line_keys) != set(choice.line_keys):  # a reorder is no change
             self.source_status.setText("stale · the lines changed since this was prepared")
             return
         if not self._prepared_steps_match(choice.preset):
@@ -1415,6 +1600,60 @@ class SlicesDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not report slice-source progress: {exc}")
 
+    def _shift_z_by_median_zero(self) -> bool:
+        """Move both z spins to the time-zero clock for a restored old record.
+
+        The record's range was on the radar clock; `retime_ns(t, 0.0, median)`
+        puts a time on the clock of a line whose zero is `median` (the
+        median of the prepared lines' zeros). With nothing prepared there is
+        no median, so nothing moves and nothing is said. Signal-blocked
+        writes, as `_clamp_z_to_prepared` does, so the caller must push the
+        result at the engine (`_apply_resolution`) when this returns True."""
+        median = self.engine.median_zero()
+        if median is None:
+            return False
+        self._updating += 1
+        try:
+            for spin in (self.z0_spin, self.z1_spin):
+                spin.blockSignals(True)
+                try:
+                    spin.setValue(retime_ns(spin.value(), 0.0, median))
+                finally:
+                    spin.blockSignals(False)
+        finally:
+            self._updating -= 1
+        # The grid remembers the shifted range, not the record's radar-clock
+        # one (the spins were written with signals blocked, so nothing else
+        # would re-remember it). Remembered before the caller's clamp, as
+        # every restore remembers its record's range: the clamp is no edit
+        # (see `_clamp_z_to_prepared`), so the shown end may sit inside it.
+        grid_id = self._last_grid_id
+        if grid_id is not None:
+            self.session.remember_slice_resolution(
+                grid_id, t0_ns=self.z0_spin.value(), t1_ns=self.z1_spin.value()
+            )
+        self.error.emit(old_cube_note(-median))
+        return True
+
+    def _apply_owed_z_shift(self) -> None:
+        """After a `prepare()` that dispatched nothing: apply a shift a restore owes.
+
+        A preparation that IS running consumes the flag in `_on_prepared`
+        instead, so the shift lands exactly once either way."""
+        if self.engine.is_running or not self._pending_z_shift:
+            return
+        self._pending_z_shift = False
+        self._shift_z_by_median_zero()
+        # The shifted end can run past the new prepared bound (lines whose
+        # zeros differ by a sample); clamp as `_on_prepared` does, then push.
+        self._clamp_z_to_prepared()
+        self._apply_resolution()
+
+    def line_zero_in_cube(self, key: str) -> float | None:
+        """The zero of `key` in the cube on screen: This grid's engine, or the site's."""
+        engine = self.site_engine if self._scope == "site" else self.engine
+        return engine.line_zero(key)
+
     def _clamp_z_to_prepared(self) -> bool:
         """Pull `z0`/`z1` inside the range every PREPARED line covers.
 
@@ -1425,9 +1664,11 @@ class SlicesDock(QgsDockWidget):
         DZT header, which is the best estimate available before a
         preparation has run but is only right for a preset that leaves the
         sample axis alone. `time_zero` -- first in the ordinary preset,
-        not an exotic one -- crops rows off the FRONT, and on this repo's
+        not an exotic one -- crops rows off the FRONT (and relabels
+        the axis so the row it lands on reads 0 ns), and on this repo's
         own real files drops 49 of 512, moving the start from -11.086 ns
-        to -0.476 while the header still says -11.086. The cube then asked
+        to the prepared lines' own, much later start while the header
+        still says -11.086. The cube then asked
         for 10.6 ns of two-way time that no prepared line has, and the
         first slice raised `CoverageError` naming the line. Correcting it
         here, against `engine.prepared_z_bounds()`, is the only point
@@ -1483,10 +1724,14 @@ class SlicesDock(QgsDockWidget):
                 self._grid_refine.stretch = None
                 self._grid_prepared_away = True
                 return
+            # Consumed only on This grid: a switch to Whole site within the
+            # preparation window leaves the flag for This grid's preparation.
+            owed_shift, self._pending_z_shift = self._pending_z_shift, False
+            shifted = self._shift_z_by_median_zero() if owed_shift else False
             # Before anything asks the engine for a slice: the seeded z
             # range was read off a raw DZT header, and a preset that crops
             # the sample axis makes that range uncoverable. See the method.
-            clamped = self._clamp_z_to_prepared()
+            clamped = self._clamp_z_to_prepared() or shifted or owed_shift
             # A carried-over time no apply has placed yet (a reopened survey
             # prepares with nothing owed) lands on this axis now, else it
             # would override the user's next resolution change (#70).
@@ -1605,6 +1850,11 @@ class SlicesDock(QgsDockWidget):
             radius_m = 0.0
         else:
             radius_m = finish.max_distance_spacings * (self._grid_spacing() or 0.0)
+        # #180: This grid's colours; a cube is only ever saved from This grid.
+        # The style only under own colours, so restoring a cube saved under
+        # the plugin's never replaces a style refined since.
+        colours = self.session.slice_colours("grid") if self.session.is_open else {}
+        style = colours.get("style") if colours.get("own") else None
         return ViewSettings(
             thickness_ns=self.thickness_spin.value(),
             step_ns=self.step_spin.value(),
@@ -1616,6 +1866,8 @@ class SlicesDock(QgsDockWidget):
             palette=self.palette_combo.currentText(),
             stretch=self.stretch_combo.currentText(),
             coverage=self.coverage_check.isChecked(),
+            colours="own" if colours.get("own") else "nsgeo",
+            style=style if isinstance(style, str) else None,
         )
 
     def apply_view(self, view: ViewSettings, *, spacing_m: float) -> None:
@@ -1678,9 +1930,13 @@ class SlicesDock(QgsDockWidget):
             if view.stretch in stretch_names:
                 self.stretch_combo.setCurrentText(view.stretch)
             self.coverage_check.setChecked(view.coverage)
+            # #180: a record from before the colours were kept leaves them be.
+            if view.colours is not None and self.session.is_open:
+                self.session.set_slice_colours("grid", own=view.colours == "own", style=view.style)
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
+        self._sync_colours()
 
     def restore_cube(self, cube_id: str) -> None:
         """Bring every control back to the state that produced `cube_id`'s
@@ -1794,9 +2050,25 @@ class SlicesDock(QgsDockWidget):
                         spacing_m=self.session.grid(recipe.choice.grid_id).default_spacing,
                     )
                 self._pending_palette = recipe.view.palette if recipe.view is not None else None
-                self._included = recipe.choice.line_keys
+                self._pending_z_shift = recipe.time_base is None and sets_time_zero(
+                    self.session.site.presets.get(recipe.choice.preset, [])
+                )
+                # A line moved to another grid since the cube was saved is left
+                # out: its key still names a line, but it is no longer this
+                # grid's, and `set_source` would refuse it anyway (line
+                # editing spec §4.5). A key no longer in the site stays, for
+                # `set_source` to name.
+                moved = [
+                    k
+                    for k in recipe.choice.line_keys
+                    if k in self.session.keys()  # noqa: SIM118 -- SiteSession.keys()
+                    and getattr(self.session.line_for_key(k).placement, "grid_id", None)
+                    not in (None, recipe.choice.grid_id)
+                ]
+                kept_keys = tuple(k for k in recipe.choice.line_keys if k not in moved)
+                self._included = kept_keys
                 self._included_is_default = False
-                if not recipe.choice.line_keys:
+                if not kept_keys:
                     self._included = self._default_included(recipe.choice.grid_id)
                     self._included_is_default = True
                 self._last_grid_id = recipe.choice.grid_id
@@ -1844,7 +2116,12 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
-            self.flush_debounce()
+            if self._pending_z_shift:
+                # An old record's range is still on the radar clock: nothing
+                # is pushed at the engine until the shift has been applied.
+                self._debounce.stop()
+            else:
+                self.flush_debounce()
             self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
@@ -1858,6 +2135,20 @@ class SlicesDock(QgsDockWidget):
             # own docstring otherwise claims cannot happen.
             if not self.engine.is_running:
                 self._pending_palette = None
+                # No preparation is coming. If the engine already holds this
+                # source (the usual case: the restored source was the
+                # remembered one), the shift is applied here; a preparation
+                # still owed (R-P5) keeps the flag for its `_on_prepared`.
+                if not self._grid_prepare_pending:
+                    self._apply_owed_z_shift()
+            if moved:
+                labels = ", ".join(
+                    self.session.line_for_key(k).placement.label or Path(k).stem for k in moved
+                )
+                self.error.emit(
+                    f"cube {cube_id!r}: {len(moved)} line(s) moved to another grid "
+                    f"since it was saved and were left out: {labels}"
+                )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             message = f"could not restore cube {cube_id!r}: {exc}"
             self.source_status.setText(message)
@@ -2147,6 +2438,8 @@ class SlicesDock(QgsDockWidget):
                 grid_id = self.grid_combo.currentText()
                 if grid_id and self.session.is_open:
                     self.session.remember_slice_resolution(grid_id, **{field: value})
+            if field == "method":
+                self._update_included_label()  # the weights it counts follow the method (#148)
             self._finish_debounce.start()
         except Exception as exc:  # noqa: BLE001 -- a slot on `FinishPanel.edited`
             _log(f"could not remember the interpolation setting: {exc}")
@@ -2401,33 +2694,6 @@ class SlicesDock(QgsDockWidget):
         self._refine_key = None
         return self._grid_refine.stop()
 
-    @contextlib.contextmanager
-    def refining_paused(self) -> Iterator[None]:
-        """An export's cover: no refine runs inside it, and the scope redraws after.
-
-        The export solves every band itself on the GUI thread (plan call 11),
-        so the worker is stopped first, through the active scope's flow, not
-        a bare `refiner.cancel()`: a flow that still believed a list ran, and
-        a status line still saying "Refining...", would outlive the cancel.
-        Afterwards, whatever the outcome (done, cancelled, failed), the scope
-        is redrawn once, so a preview that still stands arms its rest again.
-        That redraw is logged if it fails, never raised: raised here, it would
-        replace the export's own outcome, so a good export's file would be
-        removed as a failure's, and a cancel reported as a Critical.
-        """
-        if self._scope == "site":
-            self._site.refine.stop()
-        else:
-            self._end_refine()
-        self.show_refine()
-        try:
-            yield
-        finally:
-            try:
-                self.refresh_slice()
-            except Exception as exc:  # noqa: BLE001 -- see the docstring
-                _log(f"could not redraw the slice after the export: {exc}")
-
     @property
     def provisional(self) -> bool:
         """Whether what This grid draws is a kriging preview, refined once
@@ -2497,8 +2763,10 @@ class SlicesDock(QgsDockWidget):
                 if job is not None:
                     current.append(job)
             stretch: list[PendingSolve] = []
-            if self.stretch_combo.currentText() != "this slice" and not refine.stretch_final(
-                self._stretch_key(window, finish)
+            if (
+                self.stretch_combo.currentText() != "this slice"
+                and not self.own_colours_on()  # #180: no shared stretch to measure
+                and not refine.stretch_final(self._stretch_key(window, finish))
             ):
                 stretch = self.engine.stretch_solves(window.n_levels, finish)
             if refine.rested(current, stretch, self._on_landed, self._on_refine_error):
@@ -2543,8 +2811,10 @@ class SlicesDock(QgsDockWidget):
         have no way to ask. The profile band is the case that needs it:
         it is a property of the slice -- one window, identical on every
         line -- but it lives in per-line view state that
-        `ProfileView.clear()` resets, and `window_changed` only fires
-        when the window CHANGES, which it has not. Walkthrough round 2,
+        `ProfileView.clear()` resets, and the view has no way to ask for it
+        again. (`window_changed` fires on every slice refresh, site redraw and
+        this call, whether or not the window moved, so listeners must compare
+        what they are given.) Walkthrough round 2,
         W8: once the view had been cleared, every line opened afterwards
         showed no band until the slider was nudged.
 
@@ -2577,7 +2847,7 @@ class SlicesDock(QgsDockWidget):
         two-argument call here had simply never passed one, so the
         readout stated ns only. `_resolved_velocity()` is the one place
         that resolves it, shared with `velocity_label` so the two always
-        describe the same line's velocity.
+        describe the same grid velocity (`grid_depth_velocity`).
 
         Final review, Minor 5: `plan_windows` is called with `thickness_
         step_levels()[0]` (the SAME unclamped thickness `export_geotiff`
@@ -2602,50 +2872,51 @@ class SlicesDock(QgsDockWidget):
         # it degrades gracefully to "the last slice" there rather than
         # raising.
         index = min(len(windows) - 1, window.k0 // step_levels)
-        key, velocity = self._resolved_velocity()
+        grid_id, velocity = self._resolved_velocity()
         label = window_label(z, window, velocity)  # falls back to ns-only when velocity is None
         self.readout.setText(f"slice {index + 1} / {len(windows)} · {label}")
-        self._update_velocity_label(key, velocity)
+        self._update_velocity_label(grid_id, velocity)
         self._update_legend_label()
 
     def _resolved_velocity(self) -> tuple[str | None, VelocityModel | None]:
-        """The line key and the velocity resolved against it, shared by
-        the readout (spec 9.2's ns-and-m format) and `velocity_label`
-        (spec 9.2's "provenance, not state") so the two never describe
-        two different lines. `None, None` before anything is prepared.
+        """The grid id and the grid's depth velocity, shared by the readout
+        (spec 9.2's ns-and-m format) and `velocity_label` (spec 9.2's
+        "provenance, not state") so the two never describe two different
+        velocities. A slice takes its grid's velocity, never a line's
+        override (grid velocity spec 10). `None, None` before anything is
+        prepared.
 
-        Final review, Minor 6: also `None, None` when `engine.provenance()`
-        raises `KeyError`, not just `RuntimeError` -- `provenance()`
-        resolves velocity against the FIRST prepared line's key, and that
-        raises `KeyError` once that line has been removed from the session
-        (a contributing line can be deleted while a source stays prepared;
-        the cube's own arrays are still entirely correct). Before this,
-        deleting any such line blanked an otherwise still-valid slice --
-        `refresh_slice()`'s broad `except` caught the `KeyError` escaping
-        from here, reported `error: '<key>'`, and cleared the map -- for a
-        reason that has nothing to do with whether the slice itself is
-        still good.
+        Also `None, None` when the grid is gone (`KeyError`) or the engine
+        has no source (`RuntimeError`): a contributing line can be deleted
+        while a source stays prepared, and that must not blank a
+        still-valid slice.
         """
-        try:
-            keys = self.engine.provenance().line_keys
-        except (RuntimeError, KeyError):
+        choice = self.engine.choice
+        if choice is None:
             return None, None
-        if not keys:
-            return None, None
-        key = keys[0]
         try:
-            return key, self.session.resolved_velocity(key)
+            return choice.grid_id, self.session.grid_depth_velocity(choice.grid_id)
         except (KeyError, RuntimeError):
             return None, None
 
-    def _update_velocity_label(self, key: str | None, velocity: VelocityModel | None) -> None:
-        if key is None or velocity is None:
+    def _update_velocity_label(self, grid_id: str | None, velocity: VelocityModel | None) -> None:
+        if grid_id is None or velocity is None:
             self.velocity_label.setText("")
             return
-        source = velocity_source(self.session, key)
+        try:
+            source = grid_velocity_label(self.session, grid_id)
+        except (KeyError, RuntimeError):
+            self.velocity_label.setText("")
+            return
         self.velocity_label.setText(f"v = {velocity.surface_velocity:.3f} m/ns ({source})")
 
     def _update_legend_label(self) -> None:
+        if self.own_colours_on() and not self.coverage_check.isChecked():
+            # #180: no limit of the plugin's applies, and measuring one would
+            # cost a pass over the cube. The plugin names the style's range
+            # once it has drawn (`show_own_legend`).
+            self.legend_label.setText("your own colours")
+            return
         limit = self.display_limit()
         if self.coverage_check.isChecked():
             # Ruling AB: a count map's legend states a count scale, not
@@ -2742,9 +3013,79 @@ class SlicesDock(QgsDockWidget):
         number rather than the colour)."""
         if self.coverage_check.isChecked():
             return True
+        return self.source_unipolar()
+
+    def source_unipolar(self) -> bool:
+        """Whether the amplitude bands have no negative side, whatever view is
+        showing: what an export's colour ramp is built for."""
         if self._scope == "site":
             return self._site.unipolar()
         return self.engine.output_unipolar
+
+    # ---- #180: the slice coloured with the user's own QGIS symbology -------
+    def own_colours_on(self) -> bool:
+        """Whether this scope's slice wears the user's own QGIS colours."""
+        if not self.session.is_open:
+            return False
+        return bool(self.session.slice_colours(self._scope).get("own", False))
+
+    def own_style(self) -> str | None:
+        """This scope's remembered own style (QGIS style XML), or None before
+        one exists: the slice layer then starts one from the palette."""
+        if not self.session.is_open:
+            return None
+        style = self.session.slice_colours(self._scope).get("style")
+        return style if isinstance(style, str) else None
+
+    def set_own_style(self, text: str) -> None:
+        """`SliceLayer.own_style_changed`: remember the user's edited (or newly
+        seeded) style for the scope on screen. A slot: never raises."""
+        try:
+            if self.session.is_open and self.own_colours_on():
+                self.session.set_slice_colours(self._scope, style=text)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            _log(f"could not remember the slice colours: {exc}")
+
+    def show_own_legend(self, text: str) -> None:
+        """The Legend line under the user's own colours, which only the slice
+        layer can describe; the plugin calls this after each draw."""
+        if self.own_colours_on() and not self.coverage_check.isChecked():
+            self.legend_label.setText(text)
+
+    def _on_colours_changed(self, index: int) -> None:
+        """`colours_combo`: remember the choice for this scope, then redraw."""
+        try:
+            if self.session.is_open:
+                self.session.set_slice_colours(self._scope, own=index == 1)
+            self._sync_colours()
+            self.refresh_slice()
+        except Exception as exc:  # noqa: BLE001 -- a slot on currentIndexChanged
+            self.error.emit(f"could not change the slice colours: {exc}")
+
+    def _sync_colours(self) -> None:
+        """Show this scope's colour choice: the combo, Stretch greyed out and
+        the Symbology button live under the user's own colours. The Palette
+        stays: it still colours cuts and the coverage view. The button is off
+        while Show coverage draws counts: an edit then would land on the
+        plugin's coverage colours and be lost."""
+        own = self.own_colours_on()
+        self.colours_combo.blockSignals(True)
+        try:
+            self.colours_combo.setCurrentIndex(1 if own else 0)
+        finally:
+            self.colours_combo.blockSignals(False)
+        self.colours_combo.setEnabled(self.session.is_open)
+        self.stretch_combo.setEnabled(not own)
+        coverage = self.coverage_check.isChecked()
+        self.symbology_button.setEnabled(own and not coverage)
+        self.symbology_button.setToolTip(
+            "Untick Show coverage to edit your own colours"
+            if own and coverage
+            else "Open the slice layer's Symbology page"
+        )
+        self.palette_combo.setToolTip(
+            "Colours cuts and Show coverage. The slice wears your own colours." if own else ""
+        )
 
     # ---- M12: the scope switch (spec 4.1) ----------------------------------
     #
@@ -2799,6 +3140,7 @@ class SlicesDock(QgsDockWidget):
             # preparation, rather than re-preparing beside the site's.
             self.engine.on_grid_moved = self._mark_grid_stale
             site_scope.show_scope_widgets(self)
+            self._sync_colours()
             self._site.enter(top)
         else:
             self._scope = "grid"  # first: the site's cancel spins the event loop
@@ -2808,6 +3150,7 @@ class SlicesDock(QgsDockWidget):
             # whose bounded wait gave up leaves the site's task reading, and
             # M11's self re-preparation on a move would start beside it.
             site_scope.show_scope_widgets(self)
+            self._sync_colours()
             self._resume_grid(top)
         self.show_refine()
 
@@ -2899,11 +3242,19 @@ class SlicesDock(QgsDockWidget):
         choice, so nothing is remembered (`_remember_source`); and its
         preparation is owed through `_grid_prepare_pending` rather than
         started here, so `_run_pending_grid_prepare` runs it only once no
-        site task is live (R-P5)."""
+        site task is live (R-P5).
+
+        It opens on the preset the site drew the grid with (#106): its
+        remembered one, else the first (`site_scope.default_preset`), not
+        whatever This grid's preset combo showed for the grid it left."""
         self._pending_palette = None  # a source change, not a restore
+        self._pending_z_shift = False
         self._updating += 1
         try:
             self.grid_combo.setCurrentText(grid_id)
+            preset = site_scope.default_preset(self.session, grid_id)
+            if preset is not None:
+                self.preset_combo.setCurrentText(preset)
         finally:
             self._updating -= 1
         self._mark_cube_unsaved()
@@ -2994,6 +3345,7 @@ class SlicesDock(QgsDockWidget):
                 # grid opened from the site list (#70) still holds the left
                 # grid's, whatever the spins' own change signals did.
                 self._apply_resolution()
+            self._apply_owed_z_shift()  # a restore made while this was owed
             self._sync_grid_slider()
         except Exception as exc:  # noqa: BLE001 -- a QTimer slot
             _log(f"could not prepare the slice source: {exc}")
@@ -3096,6 +3448,9 @@ class CanvasDepthScroll(QObject):
     Without shift the event is not consumed, so plain scrolling remains
     the map's zoom.
 
+    One Step per notch, however many events the wheel splits the notch
+    into (#109, `depth_scroll_steps`).
+
     `eventFilter` is a Qt-invoked virtual, the same hazard class as
     `paintEvent`: an exception escaping it is swallowed locally and
     reaches `qFatal()` in the CI container, so the body is guarded.
@@ -3105,6 +3460,7 @@ class CanvasDepthScroll(QObject):
         super().__init__(parent)
         self._canvas = canvas
         self._dock = dock
+        self._pending = 0  # the part-notch turned so far, in angleDelta units
         canvas.viewport().installEventFilter(self)
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802
@@ -3112,11 +3468,16 @@ class CanvasDepthScroll(QObject):
             if event.type() != QEvent.Type.Wheel:
                 return False
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            delta = depth_scroll_delta(int(event.angleDelta().y()), shift)
-            if delta == 0:
+            angle = int(event.angleDelta().y())
+            if not shift or angle == 0:
+                self._pending = 0
                 return False
-            self._dock.step_slice(delta)
-            return True  # consumed: the map must not also zoom
+            steps, self._pending = depth_scroll_steps(self._pending, angle)
+            if steps:
+                self._dock.step_slice(steps)
+            # Consumed even for a part-notch: the map must not zoom by the
+            # first half of a notch that is moving the depth.
+            return True
         except Exception as exc:  # noqa: BLE001 -- see the class docstring
             _log(f"could not step the slice from the canvas: {exc}")
             return False

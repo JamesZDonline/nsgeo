@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import sys
 from pathlib import Path
 
 import nsgeo_qgis.layers as layers_module
+import numpy as np
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.io.dzx import read_dzx
 from nsgeo.model.survey import Line
+from nsgeo.processing import build_step
+from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_fit import StoredFit
 from nsgeo_qgis.layers import (
     _PICKS_BACKUP,
     _PICKS_REBUILD,
@@ -18,11 +23,13 @@ from nsgeo_qgis.layers import (
     TABLES,
     SiteLayers,
 )
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.lookup import ImportOptions, plan_import, rows_to_lines
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 from plugin_testing import (
     REAL_DZT,
+    apply_fit,
     connect_message_log,
     drag_in_layers_panel,
     needs_real_data,
@@ -108,7 +115,7 @@ def test_layers_are_grouped_in_the_project_under_the_site_name(populated):
     session, layers, project = populated
     group = project.layerTreeRoot().findGroup(f"nsgeo · {session.site_name}")
     assert group is not None
-    assert len(group.findLayers()) == 4
+    assert len(group.findLayers()) == 5
 
 
 def test_refill_never_touches_the_picks_table(populated):
@@ -394,68 +401,7 @@ def test_a_migrated_picks_table_comes_out_styled(qgis_app, tmp_path):
     layers2.detach()
 
 
-# --- M8 acceptance walkthrough, Finding C: the moved-grid warning reached
-# only `QgsMessageLog` -- the Log Messages Panel, closed by default -- so
-# the author went looking for it and could not find it ("Where does this
-# warning exist?"). `on_warning`, following `LineLoader.on_error`'s own
-# precedent, is how `SiteLayers` reaches the plugin's message bar instead.
-# The log entry stays; this is IN ADDITION to it, never instead. ---
-
 _MOVED_GRID = Grid("A", (501.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5)
-
-
-def test_on_warning_receives_the_moved_grid_warning(populated):
-    session, layers, _ = populated
-    layers.write_pick(_a_pick())
-    seen: list[str] = []
-    layers.on_warning = seen.append
-
-    session.replace_grid(_MOVED_GRID)
-
-    # `replace_grid` drives TWO refreshes (`grids_changed` then
-    # `lines_changed`) -- exactly one warning, not two, because the
-    # first refresh already updates `_last_grid_placements` to match the
-    # new placement before the second one runs (see
-    # `_warn_if_a_placed_grid_moved`'s own docstring).
-    assert len(seen) == 1
-    assert "A" in seen[0]
-    assert "changed position" in seen[0]
-
-
-def test_on_warning_is_not_called_when_no_grid_actually_moved(populated):
-    session, layers, _ = populated
-    layers.write_pick(_a_pick())
-    seen: list[str] = []
-    layers.on_warning = seen.append
-
-    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
-
-    assert seen == []
-
-
-def test_on_warning_defaults_to_none_and_behaves_exactly_as_before(populated, message_log):
-    session, layers, _ = populated
-    assert layers.on_warning is None
-    layers.write_pick(_a_pick())
-
-    session.replace_grid(_MOVED_GRID)  # must not raise with no callback attached
-
-    assert any("changed position" in m for m in message_log)
-
-
-def test_a_raising_on_warning_does_not_escape_or_break_the_refresh(populated, message_log):
-    session, layers, _ = populated
-    layers.write_pick(_a_pick())
-
-    def boom(msg: str) -> None:
-        raise RuntimeError("the message bar is unavailable")
-
-    layers.on_warning = boom
-
-    session.replace_grid(_MOVED_GRID)  # must not raise, must not abort the refresh
-
-    assert layers.feature_count("lines") == 3  # the rest of refresh() still ran
-    assert any("on_warning callback raised" in m for m in message_log)
 
 
 # --- fix round 1: the package CRS is the *first* grid's, and that grid's
@@ -1191,7 +1137,10 @@ def test_picks_survive_multiple_refills_with_attributes_intact(populated):
     assert survivor["time_ns"] == pytest.approx(43.1)
     assert survivor["note"] == "a hand-picked reflector"
     pt = survivor.geometry().asPoint()
-    assert (pt.x(), pt.y()) == pytest.approx((501.0, 705.0))
+    # The pick follows its line (line editing spec §4.4): trace 12 of FILE__001.
+    assert (pt.x(), pt.y()) == pytest.approx(
+        _line_point(session, "raw/FILE__001.DZT", 12), abs=1e-9
+    )
 
     # And prove the three mutations actually landed in the derived tables
     # -- a silently aborted refresh (see the "refill containment" tests
@@ -2150,6 +2099,291 @@ def test_a_package_with_the_pre_m8_picks_schema_migrates_with_its_rows_intact(
     layers2.detach()
 
 
+def test_a_pre_time_zero_picks_table_migrates_with_its_rows_intact(qgis_app, tmp_path, message_log):
+    """#97 adds `zero_ns` to `picks`, the one table that cannot be
+    regenerated: the two authored rows keep every value, with `zero_ns` NULL
+    (the radar clock), and opening the site does not dirty it."""
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    session.save()
+    package = session.gpkg_path
+    layers.detach()
+    project.clear()
+
+    old_spec = [(name, kind) for name, kind in TABLES["picks"][1] if name != "zero_ns"]
+    assert len(old_spec) == len(TABLES["picks"][1]) - 1
+    old_fields = QgsFields()
+    kinds = {
+        "str": QMetaType.Type.QString,
+        "int": QMetaType.Type.Int,
+        "float": QMetaType.Type.Double,
+    }
+    for name, kind in old_spec:
+        old_fields.append(QgsField(name, kinds[kind]))
+    opts = QgsVectorFileWriter.SaveVectorOptions()
+    opts.driverName = "GPKG"
+    opts.layerName = "picks"
+    opts.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+    writer = QgsVectorFileWriter.create(
+        str(package),
+        old_fields,
+        QgsWkbTypes.Type.Point,
+        QgsCoordinateReferenceSystem("EPSG:32616"),
+        project.transformContext(),
+        opts,
+    )
+    assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
+    del writer
+    old = QgsVectorLayer(f"{package}|layername=picks", "picks", "ogr")
+    rows = []
+    for i, (trace, time_ns) in enumerate([(4, 11.0), (33, 26.5)]):
+        f = QgsFeature(old.fields())
+        f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(500.0 + i, 700.0 + i)))
+        f["line_key"] = "raw/FILE__001.DZT"
+        f["trace"] = trace
+        f["time_ns"] = time_ns
+        f["depth_m"] = 0.5 + i
+        f["note"] = f"note {i}"
+        rows.append(f)
+    assert old.dataProvider().addFeatures(rows)[0]
+    del old
+
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project)
+    again.open_site(tmp_path / SURVEY_FILE)
+
+    names = [f.name() for f in layers2.layers["picks"].fields() if f.name() != "fid"]
+    assert names == [name for name, _ in TABLES["picks"][1]]
+    assert names[names.index("time_ns") + 1] == "zero_ns"
+    got = sorted(layers2.layers["picks"].getFeatures(), key=lambda f: f["trace"])
+    assert [(f["trace"], f["time_ns"], f["note"]) for f in got] == [
+        (4, 11.0, "note 0"),
+        (33, 26.5, "note 1"),
+    ]
+    assert [f["zero_ns"] for f in got] == [NULL, NULL]
+    assert not got[0].geometry().isNull()
+    assert [p.zero_ns for p in again.picks_for("raw/FILE__001.DZT")] == [None, None]
+    assert [p.time_ns for p in again.picks_for("raw/FILE__001.DZT")] == [11.0, 26.5]
+    assert not again.dirty
+    assert not _criticals(message_log)
+    layers2.detach()
+
+
+def _criticals(message_log):
+    return [m for m in message_log if "could not move the picks" in str(m)]
+
+
+KEY1 = "raw/FILE__001.DZT"
+KEY2 = "raw/FILE__002.DZT"
+
+
+def _loaded_pick(session, key=KEY1, trace=30, time_ns=20.0):
+    """Open `key`, load its profiles and author a pick on the radar clock."""
+    session.open_line(key)
+    session.set_profiles(key, session.line_for_key(key).load())
+    return session.add_pick(key, trace, time_ns)
+
+
+def test_adding_time_zero_moves_a_rows_time_but_not_its_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    zero = session.line_zero(KEY1)
+    assert zero != 0.0
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] == pytest.approx(20.0 - zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+    model = session.resolved_velocity(KEY1)
+    assert row["depth_m"] == pytest.approx(model.depth_at([20.0 - zero])[0])
+    assert layers.follow_zero(KEY1, zero) == 0  # nothing left to move
+
+
+def test_changing_the_threshold_keeps_picks_on_their_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.replace_step(KEY1, 0, build_step("time_zero", mode="sample", sample=60))
+    zero = session.line_zero(KEY1)
+    assert zero == pytest.approx(-11.0864 + 60 * 0.216531, abs=1e-3)
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+
+
+def test_disabling_the_time_zero_step_keeps_a_pick_on_its_sample(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert session.line_zero(KEY1) != 0.0
+    session.set_step_enabled(KEY1, 0, False)
+    assert session.line_zero(KEY1) == 0.0
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(20.0)
+    assert row["time_ns"] == pytest.approx(20.0 - row["zero_ns"])
+    model = session.resolved_velocity(KEY1)
+    assert row["depth_m"] == pytest.approx(model.depth_at([row["time_ns"]])[0])
+    assert row["time_ns"] == pytest.approx(20.0)  # the radar clock again
+
+
+def test_applying_a_stack_to_the_grid_moves_picks_on_lines_not_open(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))  # radar clock, zero NULL
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")
+    zero = session.line_zero(KEY2, load=True)
+    assert zero == pytest.approx(-0.0433, abs=1e-3)
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] == pytest.approx(15.0 - zero)
+
+
+def test_a_hover_load_never_rewrites_picks(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.append_step(KEY2, build_step("time_zero", mode="sample", sample=51))
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    before = [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ]
+    session.set_preview(KEY2, 5)
+    assert session.preview_key == KEY2 != session.current_key
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())
+    after = [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ]
+    assert after == before
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    # a stale hover load: the pointer left (preview cleared) before it landed
+    session.set_preview(KEY2, 5)
+    session.clear_preview()
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())
+    assert [
+        (f["time_ns"], f["zero_ns"], f["depth_m"], f["velocity_m_ns"])
+        for f in layers.layers["picks"].getFeatures()
+    ] == before
+
+
+def test_promoting_a_hover_loaded_line_follows_its_zero(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.append_step(KEY2, build_step("time_zero", mode="sample", sample=51))
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.set_profiles(KEY2, session.line_for_key(KEY2).load())  # the hover load
+    assert _rows(layers)[KEY2]["zero_ns"] == NULL
+    session.open_line(KEY2)  # samples cached: no second load
+    zero = session.line_zero(KEY2)
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(zero)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_applying_a_stack_to_a_previewed_line_moves_its_picks(populated):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    session.set_preview(KEY2, 5)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")
+    row = _rows(layers)[KEY2]
+    assert row["zero_ns"] == pytest.approx(session.line_zero(KEY2, load=True))
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(15.0)
+
+
+def test_a_time_typed_in_edit_mode_is_not_shifted_by_a_new_zero(populated):
+    session, layers, _ = populated
+    _loaded_pick(session)
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, picks.fields().indexOf("time_ns"), 25.0)
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    assert picks.commitChanges()
+    row = _rows(layers)[KEY1]
+    assert row["time_ns"] == 25.0
+    assert row["zero_ns"] == pytest.approx(0.0)  # still measured from its stored zero
+
+
+def test_a_channel_switch_moves_picks_to_the_new_channels_zero(populated):
+    session, layers, _ = populated
+    p0 = session.line_for_key(KEY1).load()[0]
+    p1 = dataclasses.replace(p0, data=np.roll(p0.data, 10, axis=0))
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, [p0, p1])
+    session.append_step(KEY1, build_step("time_zero", mode="first_break", threshold=0.25))
+    pick = session.add_pick(KEY1, 30, 20.0)
+    radar = pick.radar_ns
+    first = _rows(layers)[KEY1]["zero_ns"]
+    session.set_channel(KEY1, 1)
+    row = _rows(layers)[KEY1]
+    assert row["zero_ns"] == pytest.approx(first + 10 * 0.216531, abs=1e-3)
+    assert row["time_ns"] + row["zero_ns"] == pytest.approx(radar)
+
+
+def test_a_line_that_cannot_be_read_leaves_its_picks_alone(populated, message_log):
+    session, layers, _ = populated
+    session.open_line(KEY1)
+    session.set_profiles(KEY1, session.line_for_key(KEY1).load())
+    layers.write_pick(_a_pick(key=KEY2, trace=10, time_ns=15.0))
+    path = session.line_for_key(KEY2).path
+    path.rename(path.with_suffix(".gone"))
+    session.append_step(KEY1, build_step("time_zero", mode="sample", sample=51))
+    session.apply_stack_to_grid(KEY1, "A")  # must not raise
+    row = _rows(layers)[KEY2]
+    assert (row["time_ns"], row["zero_ns"]) == (15.0, NULL)
+    assert not _criticals(message_log)
+
+
+def test_follow_zero_skips_rows_with_no_trace_or_time(populated):
+    session, layers, _ = populated
+    _add_row(layers, 1.0, 2.0, line_key=KEY1, time_ns=5.0)  # no trace
+    _add_row(layers, 1.0, 2.0, line_key=KEY1, trace=3)  # no time
+    assert layers.follow_zero(KEY1, -0.5) == 0
+    rows = list(layers.layers["picks"].getFeatures())
+    assert sorted(str(f["time_ns"]) for f in rows) == sorted([str(NULL), "5.0"])
+    assert all(f["zero_ns"] == NULL for f in rows)
+
+
+@needs_real_data
+def test_on_a_real_line_adding_time_zero_moves_a_pick_by_its_first_break(qgis_app, tmp_path):
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        session.add_grid(Grid("A", (530000.0, 4300000.0), 0.0, 5.0, 12.0, "EPSG:32616", 0.5))
+        session.add_lines([Line.open(REAL_DZT[0], GridPlacement("A", "y", 0.0, 0.0, 1))])
+        key = session.keys()[0]
+        session.open_line(key)
+        session.set_profiles(key, session.line_for_key(key).load())
+        trace = session.line_for_key(key).n_traces // 2
+        session.add_pick(key, trace, 20.0)
+        old = _rows(layers)[key]
+        old_depth = old["depth_m"]
+        session.append_step(key, build_step("time_zero"))
+        row = _rows(layers)[key]
+        assert row["time_ns"] == pytest.approx(20.0 + 0.4764, abs=1e-3)
+        assert row["zero_ns"] == pytest.approx(-0.4764, abs=1e-3)
+        assert row["depth_m"] > old_depth
+    finally:
+        layers.detach()
+        project.clear()
+
+
 def test_the_layers_register_themselves_as_the_sessions_pick_store(populated):
     """Spec §4.1 names `session.add_pick`, but the session holds no
     layers and the parent spec forbids a second OGR handle on a package
@@ -2340,7 +2574,7 @@ def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
 
 def test_the_group_draws_points_over_lines_over_grid_outlines(populated):
     _, layers, _ = populated
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
@@ -2349,7 +2583,7 @@ def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populated):
@@ -2379,7 +2613,7 @@ def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == ["imagery", name]  # not moved back, no second group
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
     assert layers.feature_count("lines") == 3
 
     layers.detach()
@@ -2396,7 +2630,7 @@ def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == [f"nsgeo · {session.site_name}"]
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(populated, tmp_path):
@@ -2411,7 +2645,7 @@ def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(popula
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
 
 
 def test_lines_and_marks_hide_beyond_1_800_per_metre_of_line_spacing(populated, tmp_path):
@@ -2437,3 +2671,442 @@ def test_lines_and_marks_hide_beyond_1_800_per_metre_of_line_spacing(populated, 
     session.add_lines([Line.open(p, GridPlacement("B", "y", 0.0, 0.0, 1, p.stem))])
     for name in ("lines", "marks"):
         assert layers.layers[name].minimumScale() == pytest.approx(200.0), name
+
+
+# --- picks follow their line (line editing spec §4.4, #35) -------------------
+
+
+def _line_point(session, key, trace):
+    x, y = session.line_for_key(key).trace_coords(session.site.frames)[trace]
+    return (float(x), float(y))
+
+
+def _rows(layers):
+    return {f["line_key"]: f for f in layers.layers["picks"].getFeatures()}
+
+
+def _add_row(layers, x, y, **values):
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+    for name, value in values.items():
+        f[name] = value
+    assert picks.dataProvider().addFeatures([f])[0]
+
+
+def test_a_pick_follows_its_line_when_the_grid_moves(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=30, note="the wall"))
+    session.replace_grid(_MOVED_GRID)
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(
+        _line_point(session, "raw/FILE__001.DZT", 30), abs=1e-9
+    )
+    assert f["distance_m"] == pytest.approx(0.5)  # trace 30 at 60 traces per metre
+    assert (f["trace"], f["note"], f["created"]) == (30, "the wall", "2026-09-19T10:00:00+00:00")
+    assert f["time_ns"] == pytest.approx(12.5) and "dewow" in f["stack_json"]
+
+
+def test_a_pick_follows_a_destagger_and_a_scale_edit(populated):
+    session, layers, _ = populated
+    key = "raw/FILE__001.DZT"
+    layers.write_pick(_a_pick(trace=30, note="the wall"))
+    placement = session.line_for_key(key).placement
+    session.edit_lines([LineEdit(key, placement, travel_shift=0.24, scale=0.95)])
+    f = _rows(layers)[key]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    assert f["distance_m"] == pytest.approx(session.line_for_key(key).distance_along()[30])
+    assert (f["trace"], f["note"]) == (30, "the wall")
+
+
+def test_a_pick_follows_its_line_through_remove_and_re_import(populated):
+    session, layers, _ = populated
+    key = "raw/FILE__003.DZT"
+    layers.write_pick(_a_pick(key=key, trace=10))
+    path = session.line_for_key(key).path
+    before = _rows(layers)[key].geometry().asPoint()
+    session.remove_line(key)
+    assert _rows(layers)[key].geometry().asPoint() == before  # no line: left exactly as it is
+    session.add_lines([Line.open(path, GridPlacement("A", "y", 2.0, 0.0, 1, path.stem))])
+    pt = _rows(layers)[key].geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 10), abs=1e-9)
+
+
+def test_a_pick_on_a_key_that_is_not_a_site_line_is_left_exactly_as_it_is(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=4))
+    picks = layers.layers["picks"]
+    f = QgsFeature(picks.fields())
+    f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(1.0, 2.0)))
+    for name, value in (
+        ("line_key", "cut:7"),
+        ("trace", 3),
+        ("time_ns", 5.0),
+        ("distance_m", 9.0),
+        ("depth_m", 0.7),
+        ("velocity_m_ns", 0.1),
+    ):
+        f[name] = value
+    assert picks.dataProvider().addFeatures([f])[0]
+    session.replace_grid(_MOVED_GRID)
+    cut = _rows(layers)["cut:7"]
+    assert (cut.geometry().asPoint().x(), cut.geometry().asPoint().y()) == (1.0, 2.0)
+    assert (cut["distance_m"], cut["depth_m"], cut["velocity_m_ns"]) == (9.0, 0.7, 0.1)
+
+
+def test_a_pick_on_a_line_with_no_distance_axis_keeps_its_place_but_follows_the_velocity(populated):
+    session, layers, _ = populated
+    bad_key = "raw/FILE__099.DZT"
+    bad = synthetic_dzt(session.root / "raw", "FILE__099.DZT", n_traces=40, traces_per_metre=0.0)
+    session.add_lines([Line.open(bad, GridPlacement("A", "y", 10.0, 0.0, 1, "FILE__099"))])
+    layers.write_pick(_a_pick(key=bad_key, trace=3))
+    layers.write_pick(_a_pick(trace=5))
+    session.replace_grid(_MOVED_GRID)
+    rows = _rows(layers)
+    assert rows[bad_key].geometry().isEmpty()
+    # Decision 7 outranks the "untouched" wording, which was about position.
+    for _ in range(2):  # after the grid move, then after a velocity change
+        depth, velocity = session.derived_pick_fields(bad_key, 3, 12.5)[1:]
+        row = _rows(layers)[bad_key]
+        assert row.geometry().isEmpty()
+        assert row["depth_m"] == pytest.approx(depth, abs=1e-12)
+        assert row["velocity_m_ns"] == pytest.approx(velocity, abs=1e-12)
+        session.set_line_velocity(bad_key, VelocityModel.constant(0.07))
+    assert _rows(layers)[bad_key]["velocity_m_ns"] == pytest.approx(0.07)
+    assert layers.follow_lines() == 0
+    pt = rows["raw/FILE__001.DZT"].geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 5), abs=1e-9)
+
+
+@pytest.mark.parametrize("source", ["grid", "override", "fit"])
+def test_a_picks_depth_and_velocity_follow_the_lines_velocity(populated, source):
+    session, layers, _ = populated
+    key = "raw/FILE__001.DZT"
+    layers.write_pick(_a_pick(trace=7, time_ns=12.5))
+    if source == "grid":
+        session.set_grid_velocity("A", VelocityModel.constant(0.07))
+        expected = 0.07
+    elif source == "override":
+        session.set_line_velocity(key, VelocityModel.constant(0.11))
+        expected = 0.11
+    else:
+        fit_id = session.add_velocity_fit(
+            key, StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
+        )
+        apply_fit(session, key, fit_id)
+        expected = 0.09
+    f = _rows(layers)[key]
+    depth, velocity = session.derived_pick_fields(key, 7, 12.5)[1:]
+    assert f["depth_m"] == pytest.approx(depth, abs=1e-12)
+    assert f["velocity_m_ns"] == pytest.approx(velocity, abs=1e-12)
+    assert f["velocity_m_ns"] == pytest.approx(expected)
+
+
+def test_a_pick_dragged_on_the_map_goes_back_to_its_line_when_the_edit_is_saved(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=20))
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.changeGeometry(fid, QgsGeometry.fromPointXY(QgsPointXY(510.0, 720.0)))
+    assert picks.changeAttributeValue(fid, picks.fields().indexOf("note"), "moved by hand")
+    assert picks.commitChanges()
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(
+        _line_point(session, "raw/FILE__001.DZT", 20), abs=1e-9
+    )
+    assert f["note"] == "moved by hand"
+
+
+def test_a_note_typed_in_editing_mode_survives_a_refresh_that_moves_its_pick(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=9))
+    picks = layers.layers["picks"]
+    fid = next(picks.getFeatures()).id()
+    assert picks.startEditing()
+    assert picks.changeAttributeValue(fid, picks.fields().indexOf("note"), "typed, not saved")
+    session.replace_grid(_MOVED_GRID)
+    assert picks.isEditable() and picks.isModified()
+    assert picks.commitChanges()
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    assert f["note"] == "typed, not saved"
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 9), abs=1e-9)
+
+
+def test_follow_lines_writes_only_the_picks_whose_fields_change(populated, monkeypatch):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=3))
+    layers.write_pick(_a_pick(key="raw/FILE__002.DZT", trace=4))
+    assert layers.follow_lines() == 2
+    assert layers.follow_lines() == 0
+    real = layers.follow_lines
+    counts: list[int] = []
+    monkeypatch.setattr(layers, "follow_lines", lambda: counts.append(real()) or counts[-1])
+    session.set_line_velocity("raw/FILE__002.DZT", VelocityModel.constant(0.12))
+    assert counts == [1]
+
+
+def _reopen(session, layers, project, **kw):
+    _add_row(
+        layers,
+        0.0,
+        0.0,
+        line_key="raw/FILE__001.DZT",
+        trace=12,
+        time_ns=30.0,
+    )
+    session.save()
+    layers.detach()
+    again = SiteSession()
+    layers2 = SiteLayers(again, project=project, **kw)
+    again.open_site(session.root / SURVEY_FILE)
+    return again, layers2
+
+
+def test_opening_a_site_reports_once_how_many_picks_it_put_back_on_their_lines(populated):
+    session, layers, project = populated
+    told: list[str] = []
+    again, layers2 = _reopen(session, layers, project, on_info=told.append)
+    try:
+        assert told == ["updated 1 pick(s) to sit on their lines and cuts, at the current velocity"]
+        again.replace_grid(_MOVED_GRID)
+        assert len(told) == 1
+    finally:
+        layers2.detach()
+
+
+def test_a_raising_on_info_does_not_break_the_refresh(populated, message_log):
+    session, layers, project = populated
+
+    def boom(msg: str) -> None:
+        raise RuntimeError("the message bar is unavailable")
+
+    again, layers2 = _reopen(session, layers, project, on_info=boom)
+    try:
+        assert layers2.feature_count("lines") == 3
+        assert any("on_info callback raised" in m for m in message_log)
+    finally:
+        layers2.detach()
+
+
+def test_a_pick_past_the_end_of_its_line_sits_on_the_last_trace_with_no_distance(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=500))
+    layers.follow_lines()
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(
+        _line_point(session, "raw/FILE__001.DZT", 59), abs=1e-9
+    )
+    assert f["distance_m"] == NULL
+
+
+def test_a_pick_with_a_negative_trace_sits_on_the_first_trace_with_no_distance(populated):
+    session, layers, _ = populated
+    layers.write_pick(_a_pick(trace=-3))
+    layers.follow_lines()
+    f = _rows(layers)["raw/FILE__001.DZT"]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__001.DZT", 0), abs=1e-9)
+    assert f["distance_m"] == NULL
+
+
+def test_a_hand_digitised_row_with_no_trace_is_left_alone_and_the_rest_still_follow(populated):
+    session, layers, _ = populated
+    _add_row(layers, 1.0, 2.0, line_key="raw/FILE__001.DZT", time_ns=5.0)
+    layers.write_pick(_a_pick(key="raw/FILE__002.DZT", trace=8))
+    session.replace_grid(_MOVED_GRID)
+    hand = next(f for f in layers.layers["picks"].getFeatures() if f["trace"] == NULL)
+    assert (hand.geometry().asPoint().x(), hand.geometry().asPoint().y()) == (1.0, 2.0)
+    pt = _rows(layers)["raw/FILE__002.DZT"].geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, "raw/FILE__002.DZT", 8), abs=1e-9)
+
+
+def test_a_pick_follows_a_line_edit_and_a_move_to_a_grid_with_another_velocity(populated):
+    session, layers, _ = populated
+    key = "raw/FILE__001.DZT"
+    session.add_grid(
+        Grid(
+            "B", (600.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5,
+            velocity=VelocityModel.constant(0.08),
+        )
+    )  # fmt: skip
+    layers.write_pick(_a_pick(trace=30))
+    session.edit_lines([LineEdit(key, session.line_for_key(key).placement, offset=1.75)])
+    pt = _rows(layers)[key].geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    session.move_lines([key], "B")
+    f = _rows(layers)[key]
+    pt = f.geometry().asPoint()
+    assert (pt.x(), pt.y()) == pytest.approx(_line_point(session, key, 30), abs=1e-9)
+    assert session.line_for_key(key).placement.grid_id == "B"
+    assert f["velocity_m_ns"] == pytest.approx(0.08)
+
+
+@needs_real_data
+def test_real_lines_carry_their_picks_through_a_grid_move_a_flip_and_a_move_to_another_grid(
+    qgis_app, tmp_path
+):
+    """Real DZT files at a UTM-sized origin: every point is computed from
+    coordinates near 4.3e6, where a 1e-9 comparison would be about one ulp
+    and rewrite rows on every refresh (line editing spec §4.4)."""
+    project = QgsProject.instance()
+    project.clear()
+    session = SiteSession()
+    session.new_site(tmp_path)
+    layers = SiteLayers(session, project=project)
+    try:
+        crs = "EPSG:32616"
+        session.add_grid(Grid("A", (530000.0, 4300000.0), 0.0, 5.0, 12.0, crs, 0.5))
+        session.add_grid(Grid("B", (530020.0, 4300010.0), 30.0, 5.0, 12.0, crs, 0.5))
+        lines = []
+        for i, path in enumerate(REAL_DZT[:4]):
+            fwd = i % 2 == 0
+            placement = GridPlacement("A", "y", i * 0.5, 0.0 if fwd else 12.0, 1 if fwd else -1)
+            lines.append(Line.open(path, placement))
+        session.add_lines(lines)
+        key = session.keys_on_grid("A")[1]  # a reversed line
+        trace = session.line_for_key(key).n_traces // 2
+        distance, depth, velocity = session.derived_pick_fields(key, trace, 20.0)
+        layers.write_pick(
+            _a_pick(
+                key=key,
+                trace=trace,
+                time_ns=20.0,
+                distance_m=distance,
+                depth_m=depth,
+                velocity_m_ns=velocity,
+            )
+        )
+
+        def check(step):
+            row = _rows(layers)[key]
+            pt = row.geometry().asPoint()
+            want = _line_point(session, key, trace)
+            assert (pt.x(), pt.y()) == pytest.approx(want, abs=1e-6), step
+            depth, velocity = session.derived_pick_fields(key, trace, 20.0)[1:]
+            assert row["depth_m"] == pytest.approx(depth, abs=1e-9), step
+            assert layers.follow_lines() == 0, step
+
+        check("placed")
+        before = _rows(layers)[key].geometry().asPoint()
+        session.replace_grid(Grid("A", (530001.5, 4300002.0), 15.0, 5.0, 13.0, crs, 0.5))
+        check("grid moved")
+        assert _rows(layers)[key].geometry().asPoint() != before
+        session.edit_lines(
+            [LineEdit(key, session.line_for_key(key).placement).flipped(session.site.frames)]
+        )
+        check("flipped")
+        session.move_lines([key], "B")
+        assert session.line_for_key(key).placement.grid_id == "B"
+        check("moved to B")
+    finally:
+        layers.detach()
+        project.clear()
+
+
+# --- M15, cut spec §4.8: cuts are drawn on the map from the survey file,
+# in grid metres, so they follow their grid. ------------------------------
+
+_CUT = [(1.0, 1.0), (6.0, 1.0)]
+
+
+def _cut_features(layers):
+    return list(layers.layers["cuts"].getFeatures())
+
+
+def test_cuts_table_has_the_declared_fields_and_is_read_only(populated):
+    session, layers, _ = populated
+    assert TABLES["cuts"][0] == QgsWkbTypes.Type.LineString
+    assert TABLES["cuts"][1] == [
+        ("cut_key", "str"),
+        ("name", "str"),
+        ("grid_id", "str"),
+        ("length_m", "float"),
+    ]
+    assert "cuts" in DERIVED
+    lyr = layers.layers["cuts"]
+    assert lyr.readOnly()
+    assert [f.name() for f in lyr.fields() if f.name() != "fid"] == [
+        "cut_key",
+        "name",
+        "grid_id",
+        "length_m",
+    ]
+    symbol = lyr.renderer().symbol()
+    assert symbol.color().name() == "#e6550d"
+    assert symbol.width() == pytest.approx(0.6)
+    assert lyr.labelsEnabled()
+    assert lyr.labeling().settings().fieldName == "name"
+
+
+def test_legend_order_puts_cuts_between_marks_and_lines(populated):
+    session, layers, _ = populated
+    assert LEGEND_ORDER == ("picks", "marks", "cuts", "lines", "grids")
+    assert _names(layers.group) == list(LEGEND_ORDER)
+
+
+def test_refill_cuts_places_a_cut_in_world_coordinates(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    (feat,) = _cut_features(layers)
+    assert (feat["cut_key"], feat["name"], feat["grid_id"]) == (key, "Cut 1", "A")
+    assert feat["length_m"] == pytest.approx(5.0)
+    first = feat.geometry().asPolyline()[0]
+    expected = GRID.to_world([[1.0, 1.0]])[0]
+    assert (first.x(), first.y()) == pytest.approx(tuple(expected), abs=1e-6)
+    session.remove_cut(key)
+    assert layers.feature_count("cuts") == 0
+
+
+def test_a_moved_grid_moves_its_cuts(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    before = _cut_features(layers)[0].geometry().asPolyline()
+    session.replace_grid(_MOVED_GRID)
+    after = _cut_features(layers)[0].geometry().asPolyline()
+    for b, a in zip(before, after):
+        assert (a.x() - b.x(), a.y() - b.y()) == pytest.approx((1.0, 0.0), abs=1e-6)
+    assert session.cut_for_key(key).vertices == ((1.0, 1.0), (6.0, 1.0))
+
+
+def test_opening_a_cut_runs_no_time_zero_follow(populated, monkeypatch, message_log):
+    """A cut's picks are on its cube's clock, which no line's zero moves (cut spec call 18)."""
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    session.open_line(key)
+    session.add_cut_pick(key, 3, 2.0, 12.0, '{"kind": "cut"}')
+    assert layers.feature_count("picks") == 1
+    followed = []
+    # Whatever the session says a cut's zero is, only the guard keeps `follow_zero` away.
+    monkeypatch.setattr(session, "line_zero", lambda k, *, load=False: 5.0)
+    monkeypatch.setattr(layers, "follow_zero", lambda k, z: followed.append((k, z)) or 0)
+    session.open_line(session.keys()[0])
+    session.open_line(key)  # the cut is the working item, with a pick row on it
+    layers._on_stack_changed(key)
+    layers._on_line_loaded(key)
+    assert session.current_key == key
+    assert followed == []
+    assert not [m for m in message_log if "time zero" in m or key in m], message_log
+
+
+def test_a_crs_rebuild_refills_the_cuts(populated):
+    session, layers, _ = populated
+    key = session.add_cut("A", _CUT)
+    session.replace_grid(Grid("A", (-86.8, 36.4), 0.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    assert layers.layers["cuts"].crs().authid() == "EPSG:4326"
+    assert [f["cut_key"] for f in _cut_features(layers)] == [key]
+
+
+def test_removing_the_last_grid_empties_the_cuts_table(populated):
+    session, layers, _ = populated
+    session.add_cut("A", _CUT)
+    assert layers.feature_count("cuts") == 1
+    for key in list(session.keys()):
+        session.remove_line(key)
+    session.remove_grid("A")
+    assert layers.feature_count("cuts") == 0

@@ -1,0 +1,126 @@
+### Task 1: Core — cuts in the survey file, and the section maths
+
+**Files:**
+- Create: `packages/nsgeo-core/src/nsgeo/model/cut.py`, `packages/nsgeo-core/src/nsgeo/slices/section.py`
+- Modify:
+  - `packages/nsgeo-core/src/nsgeo/model/survey.py` (`Site.cuts`, `validate`)
+  - `packages/nsgeo-core/src/nsgeo/model/__init__.py`
+  - `packages/nsgeo-core/src/nsgeo/geometry/grid.py` (`Grid.to_local`)
+  - `packages/nsgeo-core/src/nsgeo/project.py`
+  - `packages/nsgeo-core/src/nsgeo/slices/__init__.py`
+  - `packages/nsgeo-core/src/nsgeo/render.py` (`section_rgba8`)
+- Test:
+  - Create: `packages/nsgeo-core/tests/test_cut.py`, `packages/nsgeo-core/tests/test_slices_section.py`
+  - Modify: `packages/nsgeo-core/tests/test_project.py`, `test_grid.py`, `test_render.py`
+
+**Interfaces:**
+- Produces, in `nsgeo.model.cut` (re-exported from `nsgeo.model`):
+  - `CUT_KEY_PREFIX: str`
+  - `cut_key(cut_id: str) -> str`
+  - `is_cut_key(key: str) -> bool`
+  - `@dataclass(frozen=True) class Cut`:
+    - fields: `id: str`, `name: str`, `grid_id: str`, `vertices: tuple[tuple[float, float], ...]` (grid-local metres, drawn order)
+    - `key -> str`
+    - `length_m -> float`
+    - `point_at(distance_m: float) -> tuple[float, float]` (clamped to `[0, length_m]`)
+    - `locate(local: tuple[float, float]) -> tuple[float, float]`, returning `(distance_m, offset_m)` of the nearest point on the path
+    - `classmethod new(grid_id: str, vertices: Sequence[tuple[float, float]], name: str) -> Cut`. It gives a fresh id and drops consecutive duplicate vertices. It raises `ValueError` if fewer than two distinct vertices remain, or if any is non-finite.
+- `Site.cuts: list[Cut]`.
+- `Grid.to_local(world: np.ndarray) -> np.ndarray`: (n, 2) in, (n, 2) out, the inverse of `to_world`.
+- In `nsgeo.project`: `CUTS_SCHEMA_VERSION = 2`, `READABLE_SCHEMA_VERSIONS = (1, 2)`.
+- Produces, in `nsgeo.slices.section` (re-exported from `nsgeo.slices`):
+  - `SECTION_MARGIN_M: float = 1.0`, `SECTION_PIECE_M: float = 4.0`
+  - `@dataclass(frozen=True) class SectionColumns`, with fields:
+    - `distance_m: np.ndarray`, shape (n,)
+    - `local: np.ndarray`, shape (n, 2)
+    - `world: np.ndarray`, shape (n, 2)
+    - `cells: np.ndarray`, shape (n,), intp; −1 outside the frame (equal to `taps.nearest`)
+    - `taps: Taps`, from `nsgeo.slices.resample.bilinear_taps(frame, world)` (#107)
+    - `tap_cells -> np.ndarray`: sorted unique flat ids of `taps.ids` over the inside columns, the only cells a section reads
+  - `section_columns(frame: CubeFrame, path_local: np.ndarray, step_m: float | None = None) -> SectionColumns`. `step_m` defaults to `frame.cell / 2`. It raises `ValueError` if the step is ≤ 0 or > `frame.cell / 2`, or if the path has fewer than 2 points or zero length.
+  - `@dataclass(frozen=True) class SectionCrop`:
+    - fields: `rows: tuple[int, int]`, `cols: tuple[int, int]` (half-open), `columns: np.ndarray` (indices into the `SectionColumns`)
+    - `shape -> tuple[int, int]`
+    - `flat_cells(nx: int) -> np.ndarray`
+  - `smoothing_reach_cells(settings: FinishSettings, cell: float) -> int`
+  - `section_crops(columns: SectionColumns, frame: CubeFrame, margin_cells: int, piece_m: float = SECTION_PIECE_M) -> tuple[SectionCrop, ...]`
+  - `finish_section(cube: SliceCube, fill: FillWeights, columns: SectionColumns, settings: FinishSettings) -> np.ndarray`. It reads each level with `cube.level(k)`, (ny, nx), and takes the frame from `cube.frame`. Returns (nz, n) float32. It raises `TypeError` for a `CurvaturePlan`.
+  - `plan_section_curvature(populated: np.ndarray, crops: Sequence[SectionCrop], cell: float, max_distance_m: float) -> tuple[CurvaturePlan, ...]`
+  - `solve_section_level(level: np.ndarray, columns: SectionColumns, crops: Sequence[SectionCrop], plans: Sequence[CurvaturePlan], settings: FinishSettings, cell: float, should_stop: Callable[[], bool] | None = None) -> np.ndarray`. `level` is (ny, nx); returns (n,) float32.
+- Produces, in `nsgeo.render`: `section_rgba8(values: np.ndarray, percentile: float, lut: np.ndarray, *, unipolar: bool) -> np.ndarray`, giving (H, W, 4) uint8.
+
+- [ ] **Step 1: Write the failing tests for `Cut` and `Grid.to_local`** (`test_cut.py`, `test_grid.py`)
+  - `test_length_and_point_at_follow_the_drawn_order`: vertices `[(0,0),(3,0),(3,4)]` → `length_m == 7`, `point_at(5) == (3, 2)`, `point_at(-1) == (0, 0)`, `point_at(99) == (3, 4)`.
+  - `test_locate_projects_onto_the_nearest_segment`: same cut, `locate((4, 2)) == (5.0, 1.0)` within 1e-12.
+  - `test_new_drops_consecutive_duplicates_and_refuses_too_few`:
+    - `Cut.new("A", [(0,0),(0,0),(1,0)], "Cut 1").vertices == ((0,0),(1,0))`;
+    - `[(1,1)]` and `[(1,1),(1,1)]` raise `ValueError`;
+    - a NaN vertex raises.
+  - `test_keys_are_prefixed_and_never_a_dzt_path`:
+    - `cut.key == "cut:" + cut.id`, `len(cut.id) == 32`;
+    - `is_cut_key(cut.key)`;
+    - `not is_cut_key("raw/FILE__001.DZT")`.
+  - `test_to_local_inverts_to_world` at azimuth 10.497 and a UTM origin: round trip within 1e-6 m.
+- [ ] **Step 2: Run them and see them fail.** Run `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest packages/nsgeo-core/tests/test_cut.py packages/nsgeo-core/tests/test_grid.py -q -p no:cacheprovider`. Expected: import errors and `AttributeError: to_local`.
+- [ ] **Step 3: Implement `nsgeo/model/cut.py` and `Grid.to_local`.**
+  - `Cut.__post_init__` validates finiteness, at least two vertices, and a non-empty id and name.
+  - `new` uses `uuid.uuid4().hex`.
+- [ ] **Step 4: Write the failing survey-file tests** (`test_project.py`)
+  - `test_cuts_round_trip_and_bump_the_schema_only_when_present`:
+    - a site with one cut saves `schema_version == 2` and loads an equal `Cut`;
+    - the same site with `cuts = []` saves 1 and has no `"cuts"` key.
+  - `test_loads_schema_1_and_2_and_refuses_3`.
+  - `test_a_malformed_cut_entry_is_a_project_error`: a missing `vertices`, a vertex that isn't a pair, a non-finite number, and a single vertex.
+  - `test_a_cut_on_an_unknown_grid_is_a_project_error`.
+  - `test_duplicate_cut_ids_fail_validate`.
+- [ ] **Step 5: Run them and see them fail.**
+- [ ] **Step 6: Implement** `Site.cuts`, the two `validate` checks, and `save_site`/`load_site` per plan call 3. Update `test_rejects_future_schema_version` to use 3.
+- [ ] **Step 7: Write the failing section tests** (`test_slices_section.py`)
+  - **Real data.** Use `tests.real_lines`: `prepared_lines(range(10), to_world)`, `plan_line`, `build_cube` and `AXIS`.
+  - **Frames.** An axis-aligned frame is `CubeFrame((0, 0), 0, 0.2, 100, 25, crs)`. A rotated one is `CubeFrame.for_grid(Grid("G", (500000.0, 4000000.0), 10.497, 20.0, 5.0, crs, 0.5), 0.2)`, with `to_world = grid.to_world`. Each test uses `needs_real_files`.
+  - **Tests:**
+    - `test_columns_start_at_zero_end_at_the_length_and_step_at_half_a_cell`: a 3.05 m path at cell 0.2. `distance_m[0] == 0`, `distance_m[-1] == 3.05`, the inner steps equal 0.1, and the last step is ≤ 0.1.
+    - `test_columns_land_in_the_cells_cell_index_finds` (spec test 2): on the rotated frame, an oblique path. `cells` equals `frame.cell_index(columns.world)`, and `frame.to_local(columns.world)` equals `columns.local` within 1e-9. `columns.taps.ids` and `.weights` equal those of `bilinear_taps(frame, columns.world)`, and `tap_cells` holds exactly their ids at the inside columns.
+    - `test_columns_past_the_frame_edge_are_minus_one`: a path from (19, 2) to (23, 2). Columns beyond x = 20 give −1.
+    - `test_a_step_over_half_a_cell_and_a_zero_length_path_are_refused`.
+    - `test_a_hundred_vertex_cut_and_a_long_cut`: 100 vertices zig-zagging inside the frame give `len(distance_m) == ceil(length / 0.1) + 1`. A 1 km path gives columns that are almost all −1, with no error.
+    - `test_every_inside_column_is_in_one_crop_and_crops_stay_in_the_frame`: for the diagonal and along-x paths, at margins 0 and 5 cells:
+      - the union of `crop.columns` is exactly the inside columns, with no repeats;
+      - every crop's span along the cut is ≤ `SECTION_PIECE_M`;
+      - every crop lies within `[0, ny) × [0, nx)`;
+      - every column's four tap cells are inside its crop, with at least `min(margin, distance to the frame edge)` cells to spare around its nearest cell.
+    - `test_a_cut_along_a_recorded_line_reads_that_lines_cells` (spec test 1, the anchor): method `none`, a path along the cell-centre row the recorded line at y = 0.25 + 3 · 0.5 binned into, starting on a cell centre, from x = 0.1 to 19.9.
+      - At every level, the columns that sit on a cell centre (every other one) equal `cube.values_at(columns.cells)[k]` exactly.
+      - Every column equals `resample.sample(canvas, columns.taps)` of the binned level, which is the blend of its two along-line neighbours (call 11).
+      - At least half the columns are finite.
+    - `test_columns_blend_as_the_slice_picture_does` (call 11): on the rotated frame at cell 0.2, for an oblique path and kriging, `finish_section(...)[k]` equals `resample.sample(finish_slice(cube.level(k), …), bilinear_taps(frame, columns.world))` for three levels. A column whose nearest cell is blank is NaN, even with three finite neighbours.
+    - `test_section_equals_the_finished_slice_at_every_level` (parametrised over `none`, `idw`, `kriging`, × smoothing `(0, 0)` and `(0, 0.1)`), on the rotated frame. For each level k, `finish_section(...)[k]` equals `resample.sample(finish_slice(cube.level(k), fill, cell, settings), columns.taps)`, with `np.testing.assert_allclose(rtol=0, atol=1e-5 * range)` and `equal_nan=True`.
+    - `test_window_average_of_a_section_equals_the_slice_window` (spec test 11) on the same parameters. For each `WINDOWS` entry `(k0, k1)`, `nanmean` over the section's rows `k0:k1` equals `resample.sample(finish_slice(cube.slice_levels(k0, k1), …), columns.taps)`. The blend is linear and its blanks are the same at every level, so averaging commutes with it. (`slice_levels` returns the (ny, nx) slice itself, so there is no `[0]`.)
+    - `test_blank_beyond_max_distance_and_outside_the_frame` (spec test 3):
+      - a cut along a gap with max distance 0.1 m (below the half gap of 0.25 m) is NaN off the lines;
+      - with 0.375 m it is finite;
+      - the columns past the frame edge are NaN.
+    - `test_finish_section_refuses_a_curvature_plan`.
+    - `test_curvature_on_crops_matches_the_whole_frame_solve` (spec test 12a): at cell 0.05 on the axis-aligned frame, with max distance 0.25. For three paths (along x, along y, diagonal) and three levels, `solve_section_level` is within `1e-3 · (nanmax − nanmin)` of `resample.sample(plan_fill(..., "min_curvature", ...).solve(level)[0], columns.taps)`. Crops come from `section_crops(..., margin_cells=ceil(SECTION_MARGIN_M / 0.05) + 1)`. The spike measured 0.0015% at 0.05 m and 0.07% at 0.2 m with #111's solver.
+    - `test_curvature_on_crops_with_smoothing_matches_the_whole_frame` at `smooth_y_m = 0.1`, same tolerance.
+  - **Rendering**, in `test_render.py`: `test_section_rgba8_makes_blanks_transparent_in_both_polarities`.
+    - `values = [[1.0, nan], [0.5, 2.0]]`. With `unipolar=True` and `False`, `alpha[0, 1] == 0` and the other alphas are 255.
+    - An all-NaN array gives all-zero alpha, with no error.
+    - An all-zero array does not raise.
+- [ ] **Step 8: Run them and see them fail.**
+- [ ] **Step 9: Implement `section.py` and `section_rgba8`.**
+  - `finish_section` (where `level_2d = cube.level(k)`; plan call 4's canvas):
+    - with no smoothing, it calls `fill.apply_at(level_2d, columns.tap_cells)` per level, writes those into a NaN (ny, nx) canvas, and calls `sample(canvas, columns.taps)`;
+    - with smoothing, it works per crop (margin = `smoothing_reach_cells + 1`): `fill.apply_at(level_2d, crop.flat_cells(nx))`, then reshape, then `smooth`. The crop goes into the canvas, then `sample`, keeping the crop's columns.
+  - `solve_section_level` runs, per crop, `plans[i].solve(level[r0:r1, c0:c1], should_stop)[0]`, then `smooth` with the settings. The crop goes into a canvas, then `sample`, keeping the crop's columns. `SolveStopped` propagates.
+  - `section_rgba8`:
+    - The limit comes from `UnipolarClip` or `PercentileClip` over the finite values. A limit ≤ 0 or non-finite becomes 1.0.
+    - It calls `to_rgba8(..., unipolar=unipolar)`.
+    - Alpha is set to 0 wherever the value is not finite.
+  - Add a module docstring in the style of `interpolate.py`, recording the spike's measurements from cut spec §5.
+- [ ] **Step 10: Run the core + pure suite, lint and types.** Expected: all pass, baseline count + the new tests.
+- [ ] **Step 11: Commit**, then push:
+  `git commit -m "feat(core): cuts in the survey file, and sections finished as slices are (cut spec §3, §4.7)"`
+
+---
+

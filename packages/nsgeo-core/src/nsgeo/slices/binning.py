@@ -14,12 +14,12 @@ deliberately not this module's business.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
 
-from nsgeo.slices.cube import Provenance, SliceCube
+from nsgeo.slices.cube import CubeBlock, Provenance, SliceCube
 from nsgeo.slices.frame import CubeFrame, ZAxis
 
 
@@ -41,6 +41,8 @@ class PreparedLine:
     dt_ns: float
     t0_ns: float
     coords: np.ndarray
+    #: Radar-clock time the axis calls 0 (`Radargram.zero_ns`); 0.0 on the radar clock.
+    zero_ns: float = 0.0
 
     def __post_init__(self) -> None:
         if self.data.ndim != 2:
@@ -131,8 +133,12 @@ def accumulate(
     count: np.ndarray,
     line: PreparedLine,
     plan: LinePlan,
+    columns: np.ndarray,
 ) -> None:
     """Add one line's contribution over the whole axis, in place.
+
+    `total` and `count` are packed over the cube's covered cells, and
+    `columns` is where each of `plan.cells` sits in them (#113).
 
     Takes the level count from `total.shape[0]` rather than a caller-given
     (k0, k1): `build_cube` is the only caller and always covers the full
@@ -143,8 +149,8 @@ def accumulate(
     the caller that legitimately wants one.
     """
     block = resample_window(line, plan, 0, total.shape[0])
-    total[:, plan.cells] += np.add.reduceat(block, plan.starts, axis=1)
-    count[plan.cells] += plan.counts
+    total[:, columns] += np.add.reduceat(block, plan.starts, axis=1)
+    count[columns] += plan.counts
 
 
 def _check_plans_current(
@@ -194,12 +200,39 @@ def build_cube(
     if len(lines) != len(plans):
         raise ValueError(f"got {len(lines)} lines and {len(plans)} plans")
     _check_plans_current(lines, plans, frame, z)
-    total = np.zeros((z.nz, frame.n_cells), dtype=np.float32)
-    count = np.zeros(frame.n_cells, dtype=np.int32)
+    # The covered cells are the union of every plan's cells: lines that
+    # cross, or share a cell wider than their spacing, count that cell once.
+    # Nothing here is sized by the frame, so the peak is one packed array
+    # plus one line's resampled block (#113).
+    if plans:
+        cells = np.unique(np.concatenate([p.cells for p in plans])).astype(np.int64, copy=False)
+    else:
+        cells = np.empty(0, dtype=np.int64)
+    total = np.zeros((z.nz, cells.size), dtype=np.float32)
+    count = np.zeros(cells.size, dtype=np.int32)
     for line, plan in zip(lines, plans):
-        accumulate(total, count, line, plan)
-    mean = np.divide(total, count, out=np.full_like(total, np.nan), where=count > 0)
-    return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=provenance)
+        accumulate(total, count, line, plan, np.searchsorted(cells, plan.cells))
+    np.divide(total, count, out=total)
+    return SliceCube(
+        frame=frame,
+        z=z,
+        blocks=(CubeBlock(cells=cells, mean=total, count=count),),
+        provenance=provenance,
+    )
+
+
+def covered_cells(frame: CubeFrame, coords: Iterable[np.ndarray]) -> int:
+    """The number of distinct in-frame cells any trace falls in.
+
+    `coords` is one `(n_traces, 2)` world-coordinate array per line. This is
+    the cell count of `build_cube`'s block for the same lines, so the plugin
+    can size a packed cube before building it (#113). A trace outside the
+    frame is `cell_index == -1` and is ignored, so this never raises for one.
+    """
+    seen = [idx[idx >= 0] for idx in (frame.cell_index(xy) for xy in coords)]
+    if not seen:
+        return 0
+    return int(np.unique(np.concatenate(seen)).size)
 
 
 def stream_slice(

@@ -78,13 +78,37 @@ ordinary view (the result, or a selected cutoff's bypass) is shown instead.
 from __future__ import annotations
 
 import datetime as _dt
+import json
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from nsgeo.processing import Radargram, StepStack, build_step
-from nsgeo.render import DEFAULT_COLORMAP, colormap_names, row_envelope
+from nsgeo.model import is_cut_key
+from nsgeo.processing import (
+    TIME_BASE_RADAR,
+    Radargram,
+    StepStack,
+    build_step,
+    first_break_ns,
+    retime_ns,
+)
+from nsgeo.render import (
+    DEFAULT_COLORMAP,
+    colormap,
+    colormap_names,
+    row_envelope,
+    section_rgba8,
+)
 from nsgeo.velocity import VelocityModel, resolve_velocity
-from nsgeo.velocity_fit import HyperbolaFit, StoredFit, fit_hyperbola, hyperbola_time
+from nsgeo.velocity_fit import (
+    HyperbolaFit,
+    StoredFit,
+    fit_at_zero,
+    fit_hyperbola,
+    hyperbola_time,
+    radar_clock_note,
+)
+from nsgeo.velocity_source import METHOD_WEIGHTED_MEAN, VelocitySource
 from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
@@ -98,12 +122,31 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from nsgeo_qgis.cut_sections import CutSection, CutSections
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.render.qimage import RadargramImage
+from nsgeo_qgis.render.qimage import RadargramImage, rgba_to_qimage
 from nsgeo_qgis.session import SiteSession
+from nsgeo_qgis.slices_plan import METHOD_LABELS
 from nsgeo_qgis.ui.gain_strip import GainStrip, Headroom
 from nsgeo_qgis.ui.profile_view import MARGIN_TOP, ProfileView
 from nsgeo_qgis.ui.ruler import Ruler, metres_to_trace, ruler_for, trace_to_metres
+from nsgeo_qgis.velocity_records import applied_now, fit_record, line_label
+
+PALETTE_ON_CUT_TIP = "A cut uses the Slices panel's palette."
+KRIGING_PREVIEW_ON_PREVIEW = "Kriging preview (minimum curvature when opened)"
+KRIGING_PREVIEW_SOLVING = "Kriging preview · minimum curvature {done} of {total} depths"
+SITE_VIEW_SUFFIX = " · site view, not normalised"
+OTHER_CLOCK_SUFFIX = " · {n} picks on another clock"
+
+
+def _time_base_of_provenance(provenance_json: str) -> str:
+    """The clock a cut's provenance JSON names; "radar" when it names none (a
+    pick from before the clock was recorded) or cannot be read."""
+    try:
+        base = json.loads(provenance_json).get("time_base")
+    except (ValueError, AttributeError):
+        return TIME_BASE_RADAR
+    return base if isinstance(base, str) else TIME_BASE_RADAR
 
 
 def time_param_name(step: Any) -> str | None:
@@ -126,10 +169,24 @@ def curve_param_name(step: Any) -> str | None:
     return None
 
 
+def _fit_t0_at_line_zero(session: SiteSession, key: str, line: Any, fit: StoredFit) -> float:
+    """`fit`'s t0 measured from the line's current time zero; the stored t0
+    when that zero is unknown, equal to the fit's, or the refit fails."""
+    zero = session.line_zero(key)
+    if zero is None or zero == fit.zero_ns:
+        return fit.t0_ns
+    try:
+        return fit_at_zero(fit, line.distance_along(), zero).t0_ns
+    except ValueError:
+        return fit.t0_ns
+
+
 def velocity_source(session: SiteSession, key: str) -> str:
     """Name whichever tier `nsgeo.velocity.resolve_velocity` actually used:
     "line override" (or "line override (fit at 18.4 ns)" when the override
-    was measured from a stored fit), "Grid <id>", a header-dielectric fallback, or
+    was measured from a stored fit, "line override, average of 3 fits" from
+    several), "Grid <id>" (with ", average of 6 fits" or ", fit on FILE__003"
+    when the grid remembers its fits), a header-dielectric fallback, or
     "unknown source" when none of those three account for the result.
 
     This mirrors `resolve_velocity`'s own precedence (line override, then
@@ -160,15 +217,37 @@ def velocity_source(session: SiteSession, key: str) -> str:
     resolved = resolve_velocity(line, grid)
     if resolved == line.velocity:
         # A measured velocity stays distinguishable from a typed one (spec §6.1).
+        record = line.velocity_source
+        if record is not None and record.method == METHOD_WEIGHTED_MEAN:
+            return f"line override, {record.summary()}"
         fit = line.velocity_fits.get(line.velocity_from_fit) if line.velocity_from_fit else None
         if fit is not None:
-            return f"line override (fit at {fit.t0_ns:.1f} ns)"
+            return f"line override (fit at {_fit_t0_at_line_zero(session, key, line, fit):.1f} ns)"
         return "line override"
     if grid is not None and resolved == grid.velocity:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
         return f"Grid {grid.id}"
     if resolved == VelocityModel.from_dielectric(line.header.epsr):
         return f"header ε {line.header.epsr:g}"
     return "unknown source"
+
+
+def grid_velocity_label(session: SiteSession, grid_id: str) -> str:
+    """What the Slices panel says a grid's depths come from: "Grid G2" with
+    ", average of 6 fits" or ", fit on FILE__003" when it remembers its fits,
+    else the header dielectric of the grid's first line, named, the line
+    `SiteSession.grid_depth_velocity` takes it from. `KeyError` as that does."""
+    grid = session.grid(grid_id)
+    if grid.velocity is not None:
+        if grid.velocity_source is not None:
+            return f"Grid {grid.id}, {grid.velocity_source.summary()}"
+        return f"Grid {grid.id}"
+    keys = session.keys_on_grid(grid_id)
+    if not keys:
+        raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+    line = session.line_for_key(keys[0])
+    return f"header ε {line.header.epsr:g}, {line_label(line)}"
 
 
 class ProfileDock(QgsDockWidget):
@@ -189,12 +268,20 @@ class ProfileDock(QgsDockWidget):
         # The hyperbola points clicked so far, in view units (trace, ns).
         # The dock owns this list; the view only paints it.
         self._velocity_points: list[tuple[int, float]] = []
+        # (line key, fit id) of the fit Save fit just stored, while the working
+        # points are empty after it (#128). Apply to line / grid act on that
+        # fit; every reset of `_velocity_points` ends it too.
+        self._just_saved: tuple[str, str] | None = None
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
         # (line key, fit id) the velocity dialog has selected, drawn bold.
         self._highlighted_fit: tuple[str, str] | None = None
         self._working_key: str | None = None
+        self._shown_placement: Any = None  # the placement `_show_line` last drew
         self._axes_key: str | None = None  # the line the view's axes were last set for
+        self._shown_radargram: Radargram | None = None  # what `_render` last drew
+        self._slice_band: tuple[float, float] | None = None  # cube clock, as announced
+        self._cube_zero_lookup: Callable[[str], float | None] | None = None
         # ruler key -> (lo_m, hi_m, time_lo, time_hi): the window last shown on
         # it. A None pair means the whole ruler (metres) or the whole record
         # (time) was showing, so the next line starts from its own fit there.
@@ -204,12 +291,21 @@ class ProfileDock(QgsDockWidget):
         ] = {}
         self._preview_key: str | None = None
         self._strip_was_visible = False
-        self._deferred_strip: tuple[list[list[float]], Any] | None = None
+        self._deferred_strip: tuple[list[list[float]], Any, float | None] | None = None
         # The Processing panel's selected row, and the step object the
         # cutoff line was last read from. Neither says which step is the
         # cutoff: see `_cutoff_row` and the module docstring.
         self._selected_row = -1
         self._cutoff_step: Any = None
+        # A cut's section, from the Slices panel's cube (cut spec §4.3). While
+        # one is shown `image` stays None: a section is drawn by `_draw_cut`.
+        self._cut_sections: CutSections | None = None
+        self._cut_shown: CutSection | None = None
+        #: The shown cut's title without the picks count, and the picks left out
+        #: for being on another clock (cut spec call 18). The title is built in
+        #: `_apply_cut_title` alone.
+        self._cut_title: str | None = None
+        self._cut_other_clock = 0
 
         body = QWidget(self)
         layout = QVBoxLayout(body)
@@ -354,6 +450,20 @@ class ProfileDock(QgsDockWidget):
         session.site_closed.connect(self._clear)
         session.preview_changed.connect(self._on_preview_changed)
 
+    def set_cut_sections(self, sections: CutSections) -> None:
+        """Where a cut's section comes from. Its `section_changed` redraws the cut on show."""
+        self._cut_sections = sections
+        sections.section_changed.connect(self._on_section_changed)
+
+    def _on_section_changed(self, key: str) -> None:
+        """A shown cut's section moved (a setting, the source, the cut): show it again."""
+        if key != self._key:
+            return
+        try:
+            self._show_line(key, is_preview=self._preview_key is not None)
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not redraw cut {key!r}: {exc}", Qgis.MessageLevel.Critical)
+
     # ---- display settings ---------------------------------------------
     @property
     def percentile(self) -> float:
@@ -388,6 +498,12 @@ class ProfileDock(QgsDockWidget):
 
     def _display_changed(self, *_: Any) -> None:
         self.percentile_label.setText(f"{self.percentile:.1f} %")
+        if self._cut_shown is not None:
+            try:
+                self._draw_cut()
+            except Exception as exc:  # noqa: BLE001 -- see the module docstring
+                _log(f"could not apply the display change: {exc}", Qgis.MessageLevel.Critical)
+            return
         if self.image is None:
             return
         try:
@@ -456,15 +572,21 @@ class ProfileDock(QgsDockWidget):
         old_ruler = view.ruler
         old_key = self._axes_key
         self._file_window()
-        ruler = self._ruler_for(self.session.line_for_key(key), distance) if key else None
+        # A cut is not a line, and #67's ruler is a line's grid: a cut is drawn
+        # against its own distance along the path (cut spec call 5).
+        ruler = (
+            None
+            if not key or is_cut_key(key)
+            else self._ruler_for(self.session.line_for_key(key), distance)
+        )
         view.set_axes(n_traces, n_samples, t0_ns, dt_ns, distance, ruler)
         new = view.transform
         if (
             old is not None
             and new is not None
             and key == old_key
-            and (new.n_traces, new.n_samples, new.bounds, new.mirrored)
-            == (old.n_traces, old.n_samples, old.bounds, old.mirrored)
+            and (new.n_traces, new.n_samples, new.bounds, new.mirrored, new.t0_ns, new.dt_ns)
+            == (old.n_traces, old.n_samples, old.bounds, old.mirrored, old.t0_ns, old.dt_ns)
         ):
             view.transform = old
         elif ruler is not None and ruler.key in self._held:
@@ -473,7 +595,12 @@ class ProfileDock(QgsDockWidget):
             old is not None
             and ruler is None
             and old_ruler is None
-            and (old.n_traces, old.n_samples) == (n_traces, n_samples)
+            # A cut opens fitted to its own length (cut spec §4.3): another
+            # cut's zoom, or a cut's t0 and dt on a line, is not carried over.
+            and not is_cut_key(key)
+            and not (old_key and is_cut_key(old_key))
+            and (old.n_traces, old.n_samples, old.t0_ns, old.dt_ns)
+            == (n_traces, n_samples, t0_ns, dt_ns)
         ):
             view.transform = old
         self._axes_key = key
@@ -526,7 +653,13 @@ class ProfileDock(QgsDockWidget):
                 line = self.session.line_for_key(key)
             except KeyError:
                 return  # removed in the same change; line_opened follows
-            if self._ruler_for(line, self._safe_distance(line)) != self.view.ruler:
+            # A label or an offset edit leaves the ruler alone but changes
+            # what the title says, so a changed placement shows the line
+            # again too (line editing spec §4.2).
+            if (
+                self._ruler_for(line, self._safe_distance(line)) != self.view.ruler
+                or line.placement != self._shown_placement
+            ):
                 self._show_line(key, is_preview=self._preview_key is not None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(
@@ -564,6 +697,7 @@ class ProfileDock(QgsDockWidget):
         # hyperbola cannot span two lines, and a stale point would be fitted
         # as if it belonged here.
         self._velocity_points = []
+        self._just_saved = None
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
@@ -651,7 +785,12 @@ class ProfileDock(QgsDockWidget):
         in this milestone. The caller already knows which case it is;
         saying so directly is the honest version.
         """
+        if is_cut_key(key):
+            self._show_cut(key, is_preview=is_preview)
+            return
+        self._set_cut_chrome(False)
         line = self.session.line_for_key(key)
+        self._shown_placement = line.placement
         label = getattr(line.placement, "label", None) or line.path.stem
         shown = f"PREVIEW: {label}" if is_preview else label
         self.setWindowTitle(f"nsgeo Profile · {shown} · {line.n_traces} traces")
@@ -674,6 +813,7 @@ class ProfileDock(QgsDockWidget):
             # dragged with nothing behind it to write to. `line_loaded`'s
             # render puts it back.
             self._cutoff_step = None
+            self._shown_radargram = None
             self.view.set_cutoff(None)
             self._set_axes_holding(
                 key,
@@ -684,8 +824,110 @@ class ProfileDock(QgsDockWidget):
                 self._safe_distance(line),
             )
             self.view.set_image(None)
+            self._refresh_picks()  # no `_render` on this branch to do it
+        self._refresh_velocity()
+
+    # ---- cuts (cut spec §4.3, §4.4) ---------------------------------------
+    def _set_cut_chrome(self, on: bool) -> None:
+        """What a cut takes away and a line gives back: the palette (a cut uses
+        the Slices panel's, plan call 5), the channels, the cutoff handle and
+        the gain strip."""
+        if not on:
+            self._cut_shown = None
+            self._cut_title = None
+        else:
+            # A cut is on its cube's clock, not any line's: no line's radargram
+            # may leave its zero behind (cut spec call 18).
+            self._shown_radargram = None
+        self.colormap_combo.setEnabled(not on)
+        self.colormap_combo.setToolTip(PALETTE_ON_CUT_TIP if on else "")
+        if on:
+            self.channel_combo.hide()
+            self._cutoff_step = None
+            self.view.set_cutoff(None)
+            self.gain_strip.set_headroom(None)
+            self.gain_strip.hide()
+
+    def _cut_method_text(self, section: CutSection, *, is_preview: bool) -> str:
+        if not section.standing_in:
+            return METHOD_LABELS[section.method]
+        if is_preview:
+            return KRIGING_PREVIEW_ON_PREVIEW
+        done, total = section.solved
+        if done >= total:
+            return METHOD_LABELS["min_curvature"]
+        return KRIGING_PREVIEW_SOLVING.format(done=done, total=total)
+
+    def _show_cut(self, key: str, *, is_preview: bool) -> None:
+        """Show a cut's section, or the message that stands in for it.
+
+        A preview never builds the grid's cube; opening the cut does, under a
+        wait cursor (cut spec §5). Every time on a cut is on its cube's clock,
+        so the slice band and the axes are drawn as they are.
+        """
+        cut = self.session.cut_for_key(key)
+        sections = self._cut_sections
+        result: CutSection | str = (
+            "" if sections is None else sections.section(key, build_cube=not is_preview)
+        )
+        prefix = "PREVIEW: " if is_preview else ""
+        head = f"nsgeo Profile · {prefix}cut: {cut.name} · {cut.grid_id}"
+        tip = f"Preview: {cut.name} — select it to work on it" if is_preview else ""
+        self._shown_placement = None
+        if isinstance(result, str):
+            self._clear_view_only()
+            self._set_cut_chrome(True)
+            self._cut_title = head
+            self._cut_other_clock = 0
+            self._apply_cut_title()
+            self.setToolTip(tip)
+            self.view.set_message(result)
+            self._refresh_velocity()
+            return
+        section = result
+        self._cut_shown = section
+        self.image = None
+        self._set_cut_chrome(True)
+        suffix = SITE_VIEW_SUFFIX if section.source.scope == "site" else ""
+        method = self._cut_method_text(section, is_preview=is_preview)
+        self._cut_title = f"{head} · {cut.length_m:.1f} m · {method}{suffix}"
+        self._apply_cut_title()
+        self.setToolTip(tip)
+        self.view.set_direction(1)
+        z = section.z
+        self._set_axes_holding(
+            key,
+            section.columns.distance_m.size,
+            z.nz,
+            z.t0_ns,
+            z.dz_ns,
+            section.columns.distance_m,
+        )
+        self._draw_cut()
         self._refresh_velocity()
         self._refresh_picks()
+
+    def _apply_cut_title(self) -> None:
+        """The one place a cut's window title is set: the text built for the
+        section, then the picks left out for another clock, when there are any."""
+        if self._cut_title is None:
+            return
+        n = self._cut_other_clock
+        self.setWindowTitle(self._cut_title + (OTHER_CLOCK_SUFFIX.format(n=n) if n else ""))
+
+    def _draw_cut(self) -> None:
+        """Draw the shown section: `section_rgba8` makes blank columns and
+        depths transparent, so the view's hatch shows through them."""
+        section = self._cut_shown
+        if section is None:
+            return
+        rgba = section_rgba8(
+            section.values,
+            self.percentile,
+            colormap(section.source.palette),
+            unipolar=section.source.unipolar,
+        )
+        self.view.set_image(rgba_to_qimage(rgba))
 
     def _on_line_loaded(self, key: str) -> None:
         if key != self._key:
@@ -726,7 +968,59 @@ class ProfileDock(QgsDockWidget):
         if key is None:
             self.view.set_picks([])
             return
-        self.view.set_picks([(p.trace, p.time_ns) for p in self.session.picks_for(key)])
+        if is_cut_key(key):
+            points, other = self._cut_pick_points(key)
+            self.view.set_picks(points)
+            if other != self._cut_other_clock:
+                self._cut_other_clock = other
+                self._apply_cut_title()
+            return
+        shown = self.shown_zero_ns()
+        # Each pick is placed by its radar time, whatever zero it was stored
+        # against.
+        self.view.set_picks(
+            [(p.trace, retime_ns(p.radar_ns, 0.0, shown)) for p in self.session.picks_for(key)]
+        )
+
+    def shown_cut_section(self, key: str) -> CutSection | None:
+        """The section on screen for cut `key`, or None when the dock shows
+        none for it (a message, a line, another cut). A pick takes its
+        distance from exactly these columns, the ones the user clicked."""
+        shown = self._cut_shown
+        return shown if shown is not None and shown.key == key else None
+
+    def _cut_pick_points(self, key: str) -> tuple[list[tuple[int, float]], int]:
+        """A cut's picks as (column, time) on the section on screen, and how
+        many were left out for being on another clock.
+
+        A pick whose provenance `time_base` differs from the shown section's
+        (a missing one reads as "radar") was made on a cube with another zero;
+        its time means nothing on this axis, so it is counted, not drawn, and
+        its row is untouched (cut spec call 18).
+
+        A pick is a distance and a time (cut spec call 12), so its column is
+        found afresh from the distance under the section's own step; the
+        stored `trace` is never used. The time is drawn as stored: it is
+        already on the cube's clock, as the section's axis is (call 18).
+        Nothing is shown when no section is (a message, or no source).
+        """
+        sections = self._cut_sections
+        shown = self.shown_cut_section(key)
+        if sections is None or shown is None:
+            return [], 0
+        base = _time_base_of_provenance(shown.provenance_json)
+        points: list[tuple[int, float]] = []
+        other = 0
+        for pick in self.session.picks_for(key):
+            if pick.distance_m is None:
+                continue
+            if _time_base_of_provenance(pick.stack_json) != base:
+                other += 1
+                continue
+            column = sections.column_at(key, pick.distance_m)
+            if column is not None:
+                points.append((column, pick.time_ns))
+        return points, other
 
     def _on_trace_changed(self, key: str, index: int) -> None:
         if key != self._key:
@@ -757,6 +1051,7 @@ class ProfileDock(QgsDockWidget):
         # unlike `_open`'s ordering.
         self._working_key = None
         self._preview_key = None
+        self._shown_radargram = None
         # A deferred strip payload belongs to the line that was working
         # when it arrived. Promotion and a site close both change which
         # line that is, so the payload is not merely stale, it is wrong:
@@ -781,13 +1076,16 @@ class ProfileDock(QgsDockWidget):
     def _clear_view_only(self) -> None:
         self._file_window()  # the next line on this ruler starts from it
         self._axes_key = None
+        self._shown_radargram = None
         self.image = None
+        self._set_cut_chrome(False)
         self.gain_strip.set_headroom(None)
         self.view.clear()
         self.setWindowTitle("nsgeo Profile")
         self.setToolTip("")
         self.velocity_label.setText("")
         self._velocity_points = []
+        self._just_saved = None
         self._update_velocity_fit()
         self.channel_combo.hide()
 
@@ -886,6 +1184,8 @@ class ProfileDock(QgsDockWidget):
         """Turn the profile's velocity-fit mode on or off, and show or hide
         the strip with it."""
         self._velocity_mode = bool(flag)
+        if not self._velocity_mode:
+            self._just_saved = None
         self.view.set_velocity_fit_mode(self._velocity_mode)
         self.velocity_strip.setVisible(self._velocity_mode)
         self._update_velocity_fit()
@@ -913,7 +1213,10 @@ class ProfileDock(QgsDockWidget):
         try:
             if self._refuse_velocity_edit_on_preview():
                 return
-            self._velocity_points.append((int(trace), float(time_ns)))
+            self._just_saved = None
+            self._velocity_points.append(
+                (int(trace), float(retime_ns(float(time_ns), self.shown_zero_ns(), 0.0)))
+            )
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
@@ -940,62 +1243,99 @@ class ProfileDock(QgsDockWidget):
         calibration, and for one too short to have a trace spacing."""
         if self._working_key is None:
             raise ValueError("no line is open")
+        if is_cut_key(self._working_key):
+            raise ValueError("a cut has no velocity fit")
         distance = self.session.line_for_key(self._working_key).distance_along()
         if len(distance) < 2:
             raise ValueError("this line has fewer than two traces, so it has no trace spacing")
         return distance, float(distance[0]), float(distance[1] - distance[0])
 
-    def velocity_points_in_metres(self) -> tuple[Any, Any]:
+    def velocity_points_in_metres(self, zero: float | None = None) -> tuple[Any, Any]:
         """The working points as (metres along the line, two-way ns) arrays,
-        in click order, so the first is still the apex guess."""
+        in click order, so the first is still the apex guess. The times are on
+        the line's own clock, the one its stack calls 0 (`zero`, when the
+        caller already has it)."""
         distance, _, _ = self._velocity_axis()
         last = len(distance) - 1
         x_m = np.array([distance[min(max(t, 0), last)] for t, _ in self._velocity_points])
-        t_ns = np.array([ns for _, ns in self._velocity_points], dtype=float)
+        if zero is None:
+            zero = self._line_zero()
+        t_ns = np.array(
+            [float(retime_ns(ns, 0.0, zero)) for _, ns in self._velocity_points], dtype=float
+        )
         return x_m, t_ns
 
+    def _line_zero(self) -> float:
+        """The radar-clock time the working line's own stack calls 0 (0.0
+        when it is not known, as for a line with no time zero step)."""
+        if self._working_key is None or not self.session.is_open:
+            return 0.0
+        zero = self.session.line_zero(self._working_key)
+        return 0.0 if zero is None else zero
+
     def velocity_curve_points(
-        self, fit: HyperbolaFit, distance: Any = None
+        self, fit: HyperbolaFit, distance: Any = None, zero: float | None = None
     ) -> list[tuple[float, float]]:
-        """`fit` sampled across the line's traces as (trace, ns) pairs.
-        `distance` is the line's axis when the caller already has it, so a
-        loop over several fits does not rebuild it for each."""
+        """`fit`, which is on the line's clock, sampled across the line's traces
+        as (trace, ns) pairs on the shown radargram's clock. `distance` is the
+        line's axis when the caller already has it, so a loop over several fits
+        does not rebuild it for each, and `zero` is the line's zero likewise."""
         if distance is None:
             distance, _, _ = self._velocity_axis()
+        if zero is None:
+            zero = self._line_zero()
         traces = np.linspace(0.0, len(distance) - 1, self._CURVE_SAMPLES)
-        t = hyperbola_time(fit, trace_to_metres(distance, traces))
+        t = retime_ns(
+            hyperbola_time(fit, trace_to_metres(distance, traces)),
+            zero,
+            self.shown_zero_ns(),
+        )
         return [(float(a), float(b)) for a, b in zip(traces, t, strict=True)]
 
-    def _saved_velocity_curves(self) -> list[list[tuple[float, float]]]:
+    def _saved_velocity_curves(self, zero: float | None = None) -> list[list[tuple[float, float]]]:
         """The working line's stored fits as (trace, ns) curves. Empty for a
         line with no distance calibration, which could not have been fitted."""
         if self._working_key is None or not self.session.is_open:
+            return []
+        if is_cut_key(self._working_key):
             return []
         fits = self.session.line_for_key(self._working_key).velocity_fits
         try:
             distance, _, _ = self._velocity_axis()
         except ValueError:
             return []
-        return [
-            self.velocity_curve_points(
-                HyperbolaFit(
-                    apex_x_m=float(trace_to_metres(distance, float(f.apex_trace))),
-                    t0_ns=f.t0_ns,
-                    v_m_ns=f.v_m_ns,
-                    v_stderr_m_ns=f.v_stderr_m_ns,
-                    rms_ns=f.rms_ns,
-                    n_points=len(f.points),
-                ),
-                distance,
+        if zero is None:
+            zero = self._line_zero()
+        curves = []
+        for f in fits.values():
+            try:
+                at_zero = fit_at_zero(f, distance, zero)
+            except ValueError:
+                curves.append([])  # keeps the curves aligned with the line's fit order
+                continue
+            curves.append(
+                self.velocity_curve_points(
+                    HyperbolaFit(
+                        apex_x_m=float(trace_to_metres(distance, float(at_zero.apex_trace))),
+                        t0_ns=at_zero.t0_ns,
+                        v_m_ns=at_zero.v_m_ns,
+                        v_stderr_m_ns=at_zero.v_stderr_m_ns,
+                        rms_ns=at_zero.rms_ns,
+                        n_points=len(at_zero.points),
+                    ),
+                    distance,
+                    zero,
+                )
             )
-            for f in fits.values()
-        ]
+        return curves
 
     def _highlighted_index(self) -> int | None:
         """Where the dialog's selected fit sits in `_saved_velocity_curves`,
         which follows the line's own fit order; None when it is not on the
         working line."""
         if self._highlighted_fit is None or self._working_key is None:
+            return None
+        if is_cut_key(self._working_key):
             return None
         key, fit_id = self._highlighted_fit
         if key != self._working_key:
@@ -1012,17 +1352,33 @@ class ProfileDock(QgsDockWidget):
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not highlight the fit: {exc}", Qgis.MessageLevel.Critical)
 
-    def _velocity_time_zero_note(self) -> str:
-        t = self.view.transform
-        # time_zero crops whole samples, so half a sample is the closest
-        # any user can get; a fixed ns tolerance would be unreachable on a
-        # coarse-sampled file.
-        if t is None or abs(t.t0_ns) <= 0.5 * t.dt_ns:
+    def _velocity_time_zero_note(self, v_now: float | None, zero: float) -> str:
+        """Why a fit's times may not be measured from the first break: said when
+        the working line's own stack sets no time zero and its first break is
+        more than half a sample from the radar's zero. Quiet otherwise.
+
+        The first break is read from the stack's SOURCE, not its result: a
+        background-removal or gain step can erase the direct wave, and the
+        source is what a Time zero step placed first would actually pick."""
+        key = self._working_key
+        if key is None or not self.session.is_open or is_cut_key(key):
+            return ""  # a cut has no stack, and no velocity fit to explain
+        stack = self.session.stack_for(key, insert=False)
+        rg = stack.source
+        if rg is None or stack.sets_time_zero():
             return ""
-        return (
-            f"Time zero is at {t.t0_ns:.1f} ns, so a hyperbola's time is not its "
-            "two-way time to the reflector. Add the time_zero step first."
-        )
+        first_break = first_break_ns(rg)
+        v_from_break = None
+        if v_now is not None and self._velocity_points:
+            try:
+                x_m, _ = self.velocity_points_in_metres(zero)
+                shifted = np.array(
+                    [float(retime_ns(t, 0.0, first_break)) for _, t in self._velocity_points]
+                )
+                v_from_break = fit_hyperbola(x_m, shifted, float(x_m[0])).v_m_ns
+            except ValueError:
+                v_from_break = None  # no corrected velocity
+        return radar_clock_note(first_break, rg.dt_ns, v_now, v_from_break)
 
     def _update_velocity_fit(self) -> None:
         """Refit the working points and repaint the curve, read-out and
@@ -1030,18 +1386,27 @@ class ProfileDock(QgsDockWidget):
         try:
             self._velocity_fit = None
             curve: list[tuple[float, float]] = []
-            self.velocity_note.setText(self._velocity_time_zero_note())
+            zero = self._line_zero()  # once per repaint: a broken stack logs once
+            saved = None if self._velocity_points else self._saved_fit_now()
             if not self._velocity_points:
-                self.velocity_readout.setText(
-                    "Click the hyperbola's apex, then points down both limbs."
-                    if self._working_key is not None
-                    else ""
-                )
+                if saved is not None:
+                    self.velocity_readout.setText(
+                        f"Fit saved: v = {saved.v_m_ns:6.4f} ± {saved.v_stderr_m_ns:6.4f} m/ns."
+                        " Find it in the line's Set velocity override\u2026 dialog"
+                        " (right-click the line in the Survey panel)."
+                        " Click the profile to start the next hyperbola."
+                    )
+                else:
+                    self.velocity_readout.setText(
+                        "Click the hyperbola's apex, then points down both limbs."
+                        if self._working_key is not None and not is_cut_key(self._working_key)
+                        else ""
+                    )
             else:
                 try:
-                    x_m, t_ns = self.velocity_points_in_metres()
+                    x_m, t_ns = self.velocity_points_in_metres(zero)
                     fit = fit_hyperbola(x_m, t_ns, float(x_m[0]))
-                    curve = self.velocity_curve_points(fit)
+                    curve = self.velocity_curve_points(fit, zero=zero)
                     self._velocity_fit = fit
                     readout = (
                         f"v = {fit.v_m_ns:6.4f} ± {fit.v_stderr_m_ns:6.4f} m/ns"
@@ -1064,8 +1429,17 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
+            self.velocity_note.setText(
+                self._velocity_time_zero_note(
+                    None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
+                )
+            )
             if self._preview_key is None and self._velocity_mode:
-                self.view.set_velocity_fit(self._velocity_points, curve)
+                shown = self.shown_zero_ns()
+                self.view.set_velocity_fit(
+                    [(tr, float(retime_ns(t, 0.0, shown))) for tr, t in self._velocity_points],
+                    curve,
+                )
             else:
                 # The points and curve belong to the working line; painting
                 # them over a hovered one would put them on the wrong axes.
@@ -1075,19 +1449,50 @@ class ProfileDock(QgsDockWidget):
             # Saved fits belong to the working line too, never a hovered one.
             if self._preview_key is None:
                 self.view.set_saved_velocity_fits(
-                    self._saved_velocity_curves(), self._highlighted_index()
+                    self._saved_velocity_curves(zero), self._highlighted_index()
                 )
             else:
                 self.view.set_saved_velocity_fits([])
             fit_ok = self._velocity_fit is not None
-            self.apply_line_button.setEnabled(fit_ok)
+            can_apply = fit_ok or saved is not None
+            self.apply_line_button.setEnabled(can_apply)
             self.save_fit_button.setEnabled(fit_ok)
-            self.apply_grid_button.setEnabled(fit_ok and self._working_grid_id() is not None)
+            self.apply_grid_button.setEnabled(can_apply and self._working_grid_id() is not None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not update the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 
+    def _saved_fit_now(self) -> StoredFit | None:
+        """The fit Save fit just stored, measured from the line's current time
+        zero, if it is still the working line's and still in the store.
+
+        The store is asked rather than remembered, so a fit deleted from the
+        velocity dialog meanwhile ends the state. The zero is asked too: a Time
+        zero step added after the save moves the fit's numbers, and this is the
+        number the read-out shows and Apply applies -- the same one the velocity
+        dialog shows and applies (`fit_at_zero`). A fit that can no longer be
+        measured at the current zero ends the state, as the dialog never applies
+        one."""
+        if self._just_saved is None:
+            return None
+        key, fit_id = self._just_saved
+        if key == self._working_key and self.session.is_open and not is_cut_key(key):
+            line = self.session.line_for_key(key)
+            stored = line.velocity_fits.get(fit_id)
+            if stored is not None:
+                zero = self.session.line_zero(key)
+                if zero is None:
+                    return stored  # the dialog's rule: an unknown zero shows the fit as stored
+                try:
+                    return fit_at_zero(stored, line.distance_along(), zero)
+                except ValueError:
+                    pass  # not measurable at this zero: never applied
+        self._just_saved = None
+        return None
+
     def _line_has_no_distance_calibration(self) -> bool:
         if self._working_key is None or not self.session.is_open:
+            return False
+        if is_cut_key(self._working_key):
             return False
         try:
             self.session.line_for_key(self._working_key).distance_along()
@@ -1098,39 +1503,81 @@ class ProfileDock(QgsDockWidget):
     def _working_grid_id(self) -> str | None:
         if self._working_key is None or not self.session.is_open:
             return None
+        if is_cut_key(self._working_key):
+            return None
         grid = self.session.grid_for_line(self.session.line_for_key(self._working_key))
         return None if grid is None else str(grid.id)
 
+    def _saved_record(self) -> tuple[str, float, VelocitySource] | None:
+        """After Save fit, with no new points: the saved fit's line, its
+        velocity at the line's current zero, and its record. None once that
+        state has ended (the store is asked, so a deleted fit is never applied
+        or named)."""
+        saved = None if self._velocity_points else self._saved_fit_now()
+        if saved is None or self._just_saved is None:
+            return None
+        key, fit_id = self._just_saved
+        # One member, made by `fit` (grid velocity spec §7.4).
+        record = fit_record(self.session, [(key, fit_id, saved)], applied_at=applied_now())
+        return key, saved.v_m_ns, record
+
+    def _stored_twin_record(self, key: str) -> VelocitySource | None:
+        """The record for an unsaved working fit applied to its line: a stored
+        fit with these very points, else none -- a bare "line override" is
+        better than a provenance the velocity does not have. Same points, same
+        fit: the working points and a stored fit's points are both on the radar
+        clock, whatever the line's time zero is, so equal points are the same
+        clicks. The fit is measured at the zero the working fit used, so the
+        record copies the number applied."""
+        points = tuple(self._velocity_points)
+        line = self.session.line_for_key(key)
+        stored = [i for i, f in line.velocity_fits.items() if f.points == points]
+        if not stored:
+            return None
+        fit_id = stored[-1]
+        try:
+            at_zero = fit_at_zero(
+                line.velocity_fits[fit_id], line.distance_along(), self._line_zero()
+            )
+        except ValueError:
+            return None  # not measurable at this zero: the dialog never applies it either
+        return fit_record(self.session, [(key, fit_id, at_zero)], applied_at=applied_now())
+
     def _apply_velocity_to_line(self, *_: Any) -> None:
         try:
+            saved = self._saved_record()
+            if saved is not None:
+                # Just saved: the working points are gone, and the stored fit
+                # is the one being applied, with its record.
+                key, v, record = saved
+                self.session.apply_line_velocity(key, VelocityModel.constant(v), record)
+                return
             fit = self._velocity_fit
-            if fit is not None and self._working_key is not None:
-                self.session.set_line_velocity(
-                    self._working_key, VelocityModel.constant(fit.v_m_ns)
-                )
-                # `velocity_from_fit` is the fit that produced the override:
-                # a stored fit with these very points, else none -- a bare
-                # "line" is better than a provenance the velocity does not
-                # have. Same points, same fit: a fit reads nothing else of
-                # the line that could have changed, and no processing step
-                # moves a sample's time (time_zero crops rows, it does not
-                # rebase them). The store is asked rather than remembered,
-                # so a deleted fit is never named.
-                points = tuple(self._velocity_points)
-                fits = self.session.line_for_key(self._working_key).velocity_fits
-                stored = [i for i, f in fits.items() if f.points == points]
-                self.session.set_velocity_from_fit(
-                    self._working_key, stored[-1] if stored else None
+            working = self._working_key
+            if fit is not None and working is not None:
+                self.session.apply_line_velocity(
+                    working,
+                    VelocityModel.constant(fit.v_m_ns),
+                    self._stored_twin_record(working),
                 )
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the line: {exc}", Qgis.MessageLevel.Critical)
 
     def _apply_velocity_to_grid(self, *_: Any) -> None:
+        """A saved fit is recorded as the grid's source; an unsaved working fit
+        sets a bare number, with no record (grid velocity spec §7.4)."""
         try:
-            fit = self._velocity_fit
             grid_id = self._working_grid_id()
-            if fit is not None and grid_id is not None:
-                self.session.set_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns))
+            if grid_id is None:
+                return
+            saved = self._saved_record()
+            if saved is not None:
+                _, v, record = saved
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(v), record)
+                return
+            fit = self._velocity_fit
+            if fit is not None:
+                self.session.apply_grid_velocity(grid_id, VelocityModel.constant(fit.v_m_ns), None)
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not apply the velocity to the grid: {exc}", Qgis.MessageLevel.Critical)
 
@@ -1139,7 +1586,8 @@ class ProfileDock(QgsDockWidget):
         saved fit is a measurement, and applying it is a separate choice."""
         try:
             fit = self._velocity_fit
-            if fit is None or self._working_key is None:
+            key = self._working_key  # once: the store call below emits lines_changed
+            if fit is None or key is None:
                 return
             distance, _, _ = self._velocity_axis()
             stored = StoredFit(
@@ -1150,21 +1598,21 @@ class ProfileDock(QgsDockWidget):
                 apex_trace=round(float(metres_to_trace(distance, fit.apex_x_m))),
                 points=tuple(self._velocity_points),
                 fitted_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+                zero_ns=self._line_zero(),
             )
-            self.session.add_velocity_fit(self._working_key, stored)
-            # A saved fit goes quietly into the line's record; say where to
-            # find it. The next fit action rewrites the read-out.
-            self.velocity_readout.setText(
-                self.velocity_readout.text().split(" Fit saved:")[0]
-                + " Fit saved: find it in the line's Set velocity override\u2026 dialog"
-                " (right-click the line in the Survey panel)."
-            )
+            fit_id = self.session.add_velocity_fit(key, stored)
+            # The points are spent: clear them, ready for the next hyperbola.
+            # The read-out says where the fit went (`_update_velocity_fit`).
+            self._velocity_points = []
+            self._just_saved = (key, fit_id)
+            self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
 
     def _clear_velocity_points(self, *_: Any) -> None:
         try:
             self._velocity_points = []
+            self._just_saved = None
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)
@@ -1199,12 +1647,41 @@ class ProfileDock(QgsDockWidget):
         # exception here never reaches `emit()`, it is swallowed locally
         # and reaches `qFatal()` in the CI container.
         try:
-            self.view.set_slice_band(lo_ns, hi_ns)
+            self._slice_band = (lo_ns, hi_ns)
+            self._push_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not draw the slice band: {exc}", Qgis.MessageLevel.Critical)
 
+    def set_cube_zero_lookup(self, fn: Callable[[str], float | None] | None) -> None:
+        """How to find the zero of a line in the cube on screen (the slices dock's)."""
+        self._cube_zero_lookup = fn
+
+    def _push_slice_band(self) -> None:
+        """Draw the stored cube-clock band on the clock of the line shown.
+
+        The band is in the cube's time; the cube's own zero for the line on
+        screen (else the shown radargram's) moves it onto the axis drawn."""
+        if self._slice_band is None:
+            return
+        if self._key is not None and is_cut_key(self._key):
+            # A cut's axis is the cube's own clock: the band is drawn as it is
+            # (cut spec call 18), whatever the lookup would say for the key.
+            lo, hi = self._slice_band
+            self.view.set_slice_band(float(lo), float(hi))
+            return
+        shown = self.shown_zero_ns()
+        cube_zero = None
+        if self._cube_zero_lookup is not None and self._key is not None:
+            cube_zero = self._cube_zero_lookup(self._key)
+        source = shown if cube_zero is None else cube_zero
+        lo, hi = self._slice_band
+        self.view.set_slice_band(
+            float(retime_ns(lo, source, shown)), float(retime_ns(hi, source, shown))
+        )
+
     def clear_slice_band(self) -> None:
         try:
+            self._slice_band = None
             self.view.clear_slice_band()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the slice band: {exc}", Qgis.MessageLevel.Critical)
@@ -1281,6 +1758,9 @@ class ProfileDock(QgsDockWidget):
             self.difference_cleared.emit()
 
     def _render(self) -> None:
+        if self._key is not None and is_cut_key(self._key):
+            self._draw_cut()  # a section has no stack: only the display changes
+            return
         rg = self.current_radargram()
         if rg is None:
             self.view.set_cutoff(None)
@@ -1291,6 +1771,7 @@ class ProfileDock(QgsDockWidget):
             line = self.session.line_for_key(self._key)
             if rg.n_traces == line.n_traces:
                 distance = self._safe_distance(line)
+        self._shown_radargram = rg
         self._set_axes_holding(
             self._key or "", rg.n_traces, rg.n_samples, rg.t0_ns, rg.dt_ns, distance
         )
@@ -1309,7 +1790,30 @@ class ProfileDock(QgsDockWidget):
         self._sync_strip_mapping()
         self._show_cutoff()
         self._update_velocity_fit()
+        self._refresh_picks()
+        self._push_slice_band()
         self._push_headroom()
+
+    def shown_zero_ns(self) -> float:
+        """The radar-clock time the drawn radargram's axis calls 0 (0.0 when
+        nothing is drawn)."""
+        rg = self._shown_radargram
+        return 0.0 if rg is None else rg.zero_ns
+
+    def step_input_zero_ns(self, row: int) -> float:
+        """The `zero_ns` of what the working stack's step at `row` receives:
+        the step before it, or the source for row 0. 0.0 with no source or
+        when the stack cannot evaluate."""
+        if self._working_key is None or not self.session.is_open:
+            return 0.0
+        stack = self.session.stack_for(self._working_key, insert=False)
+        try:
+            if row == 0:
+                src = stack.source
+                return 0.0 if src is None else src.zero_ns
+            return stack.intermediate(row - 1).zero_ns
+        except ValueError:
+            return 0.0
 
     def _scale_reference(self, shown: Radargram) -> Radargram:
         """The radargram the display limit is taken from: `shown` itself
@@ -1339,6 +1843,8 @@ class ProfileDock(QgsDockWidget):
         row = self._selected_row if row is None else row
         if self._preview_key is not None or self._working_key is None or row < 0:
             return -1
+        if is_cut_key(self._working_key):  # a cut has no stack, so no cutoff
+            return -1
         # `close_site` drops the site before it emits `line_opened("")`, so
         # a slot that runs before this dock's own `_open` (the Processing
         # panel's `step_selected(-1)`, when that panel was built first) can
@@ -1360,7 +1866,13 @@ class ProfileDock(QgsDockWidget):
         name = time_param_name(step)
         assert name is not None
         self._cutoff_step = step
-        self.view.set_cutoff(float(step.params[name]))
+        self.view.set_cutoff(
+            float(
+                retime_ns(
+                    float(step.params[name]), self.step_input_zero_ns(row), self.shown_zero_ns()
+                )
+            )
+        )
 
     def set_selected_step(self, row: int) -> None:
         """`ProcessingDock.step_selected`: remember the row, and re-render
@@ -1391,10 +1903,17 @@ class ProfileDock(QgsDockWidget):
             if step is not self._cutoff_step:
                 return
             name = time_param_name(step)
-            if name is None or step.params[name] == end_ns:
+            if name is None:
+                return
+            shown, input_zero = self.shown_zero_ns(), self.step_input_zero_ns(row)
+            drawn = float(retime_ns(float(step.params[name]), input_zero, shown))
+            if end_ns == drawn:
+                return  # an unmoved handle writes nothing, on any clock
+            value = float(retime_ns(end_ns, shown, input_zero))
+            if value == step.params[name]:
                 return
             try:
-                new = build_step(step.name, **{**step.params, name: end_ns})
+                new = build_step(step.name, **{**step.params, name: value})
             except ValueError as exc:
                 self.error.emit(str(exc))
                 return
@@ -1409,7 +1928,12 @@ class ProfileDock(QgsDockWidget):
         if self.view.transform is not None:
             self.gain_strip.set_time_mapping(self.view.transform, MARGIN_TOP)
 
-    def show_gain_strip(self, points: list[list[float]] | None, owner: Any = None) -> None:
+    def show_gain_strip(
+        self,
+        points: list[list[float]] | None,
+        owner: Any = None,
+        input_zero_ns: float | None = None,
+    ) -> None:
         """Show the strip editing `points`, or hide it (`points is None`, the
         selected step is not a curve, or nothing has rendered yet so there
         is no axis to share).
@@ -1435,9 +1959,15 @@ class ProfileDock(QgsDockWidget):
         (the working line finishing a load mid-preview) that
         `_exit_preview` must still honour once the preview ends, rather
         than re-showing whatever was on screen before it started.
+
+        `input_zero_ns` says which clock `points` are on: the `zero_ns` of
+        what the curve step receives. They are moved onto the shown clock
+        at the moment they are drawn (so a payload deferred through a
+        preview lands on the working line's clock, not the preview's).
+        None means `points` are already on the shown clock.
         """
         if self._preview_key is not None:
-            self._deferred_strip = None if points is None else (points, owner)
+            self._deferred_strip = None if points is None else (points, owner, input_zero_ns)
             if points is None:
                 # An explicit "hide" that arrives mid-preview is still an
                 # instruction: without this, _exit_preview's
@@ -1450,6 +1980,9 @@ class ProfileDock(QgsDockWidget):
             self.gain_strip.hide()
             return
         self._sync_strip_mapping()
+        if input_zero_ns is not None:
+            shown = self.shown_zero_ns()
+            points = [[float(retime_ns(float(t), input_zero_ns, shown)), g] for t, g in points]
         self.gain_strip.set_points(points, owner)
         self.gain_strip.show()
         self._push_headroom()
@@ -1515,11 +2048,17 @@ class ProfileDock(QgsDockWidget):
         if self._key is not None and self.session.is_open:
             try:
                 model: VelocityModel = self.session.resolved_velocity(self._key)
-                label = velocity_source(self.session, self._key)
+                label = (
+                    "cut velocity"
+                    if is_cut_key(self._key)
+                    else velocity_source(self.session, self._key)
+                )
                 self.view.set_velocity(model)
                 self.velocity_label.setText(f"v = {model.surface_velocity:.3f} m/ns ({label})")
             except KeyError:
-                pass
+                if is_cut_key(self._key):  # no velocity on the grid and no line to take one from
+                    self.view.set_velocity(None)
+                    self.velocity_label.setText("")
             except Exception as exc:  # noqa: BLE001 -- see the module docstring
                 _log(f"could not resolve the line's velocity: {exc}", Qgis.MessageLevel.Critical)
         # Every path, the early ones included, resets the strip: a line that

@@ -9,21 +9,30 @@ import numpy as np
 import pytest
 from nsgeo.slices import METHODS, plan_fill
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     DEFAULT_BUDGET_BYTES,
     FRAME_BUDGET_MS,
     METHOD_LABELS,
+    PREVIEW_METHOD,
     STREAM_MS_PER_LINE,
     STREAM_MS_PER_TRACE,
+    TIME_BASE_MIXED,
     WEIGHT_BYTES_PER_CELL,
     MemoryEstimate,
     Resolution,
     SliceFinish,
     SourceChoice,
+    bands_detail,
     choose_residency,
+    combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
+    mixed_clock_note,
+    name_list,
+    old_cube_note,
     preset_transform_conflict,
+    preview_note,
     transform_names,
 )
 from plugin_testing import REAL_DZT, needs_real_data
@@ -87,9 +96,12 @@ def test_memory_estimate_counts_the_lines_and_the_cube_separately():
     """Spec 7.4's inversion: by 120 lines the cached LINES cost more than
     the cube. A policy that only attacks the cube does nothing for a large
     site, so the two are reported apart."""
-    est = estimate_memory(prepared_samples=10_000_000, n_cells=90_000, nz=230)
+    est = estimate_memory(
+        prepared_samples=10_000_000, n_cells=90_000, nz=230, n_covered=18_000, method="kriging"
+    )
     assert est.lines_bytes == 10_000_000 * 4
-    assert est.cube_bytes == 230 * 90_000 * 4 + 90_000 * 4
+    assert est.cube_bytes == 230 * 18_000 * 4 + 18_000 * 4 + 18_000 * 8
+    assert est.weights_bytes == 90_000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
 
 
@@ -156,7 +168,15 @@ def test_the_ten_real_lines_still_stream():
     lines = [Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem)) for p in REAL_DZT[:10]]
     n_traces = sum(line.n_traces for line in lines)
     assert 6000 < n_traces < 6700
-    est = estimate_memory(sum(ln.n_traces * ln.header.n_samples for ln in lines), 120 * 120, 230)
+    # n_covered is a deliberate upper bound: the trace-count branch of
+    # choose_residency answers before it reads the estimate.
+    est = estimate_memory(
+        sum(ln.n_traces * ln.header.n_samples for ln in lines),
+        120 * 120,
+        230,
+        120 * 120,
+        method="kriging",
+    )
     assert choose_residency(est, n_traces) == "streaming"
     assert n_traces * STREAM_MS_PER_TRACE < 2.0
 
@@ -203,18 +223,44 @@ def test_the_value_objects_validate_themselves():
     assert choice.line_keys == ("a", "b")
 
 
-def test_shift_scroll_steps_deeper_downward_and_is_inert_without_shift():
+def test_shift_scroll_steps_deeper_downward_one_step_per_notch():
     """Spec 9.2: shift + scroll on the canvas cycles depth, which is the
     convention users of other packages already have. The direction is the
     one the world uses -- scrolling down goes deeper -- and the rule is a
     plain function so it is pinned without synthesising a Qt event, whose
     constructor signature differs between Qt 5 and Qt 6."""
-    from nsgeo_qgis.slices_plan import depth_scroll_delta
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
 
-    assert depth_scroll_delta(-120, shift_held=True) == 1  # down: deeper
-    assert depth_scroll_delta(120, shift_held=True) == -1  # up: shallower
-    assert depth_scroll_delta(-120, shift_held=False) == 0  # plain scroll is a map zoom
-    assert depth_scroll_delta(0, shift_held=True) == 0  # a horizontal-only wheel
+    assert depth_scroll_steps(0, -120) == (1, 0)  # down: deeper
+    assert depth_scroll_steps(0, 120) == (-1, 0)  # up: shallower
+    assert depth_scroll_steps(0, -240) == (2, 0)  # two notches Qt delivered as one event
+    assert depth_scroll_steps(-60, 0) == (0, -60)  # a horizontal-only wheel changes nothing
+
+
+def test_a_high_resolution_wheel_steps_once_per_notch_not_once_per_event():
+    """#109: a high-resolution wheel (the user's Logitech M720 under libinput)
+    reports one notch as several smaller events. Stepping once per event
+    moved the depth two Steps per notch. Qt's `angleDelta` documentation
+    says to add the deltas up until they reach 120, one notch."""
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
+
+    assert depth_scroll_steps(0, -60) == (0, -60)  # half a notch: wait for the rest
+    assert depth_scroll_steps(-60, -60) == (1, 0)
+
+    pending, moved = 0, 0
+    for _ in range(8):  # one notch in eighths
+        steps, pending = depth_scroll_steps(pending, -15)
+        moved += steps
+    assert (moved, pending) == (1, 0)
+
+
+def test_turning_the_wheel_back_drops_the_part_notch():
+    """A part-notch left over from scrolling down must not swallow the first
+    notch back up: the reversal takes effect on that notch."""
+    from nsgeo_qgis.slices_plan import depth_scroll_steps
+
+    assert depth_scroll_steps(-60, 120) == (-1, 0)
+    assert depth_scroll_steps(60, -120) == (1, 0)
 
 
 # ---- the cell-size floor (walkthrough round 2, W7: a crash) ---------------
@@ -465,16 +511,18 @@ def test_updated_accepts_an_int_as_a_number():
 
 @pytest.mark.parametrize("method", ["idw", "kriging", "min_curvature"])
 def test_the_weights_estimate_covers_building_them(method, monkeypatch):
-    """The over-budget warning counts `WEIGHT_BYTES_PER_CELL` before any weights
-    exist (interpolation spec §7), so building them must not need much more:
-    within half as much again. Measured on wandering 0.5 m lines over 50 m at
-    0.05 m: 105-107 B a cell, against 466-561 B before `plan_fill` chunked its
-    working set. Small chunks here, so their fixed few megabytes do not swamp a
-    grid this size.
+    """The over-budget warning counts the weights `estimate_memory` names for
+    the method before any exist (interpolation spec §7), so building them must
+    not need much more: within half as much again. Measured on wandering 0.5 m
+    lines over 50 m at 0.05 m: 105-107 B a cell for IDW or kriging, against
+    466-561 B before `plan_fill` chunked its working set. Small chunks here, so
+    their fixed few megabytes do not swamp a grid this size.
 
-    Minimum curvature's plan is only about 55 B a cell, but its solve needs
-    buffers of its own, so it is measured over the plan and one `apply`
-    together (plan call 9): about 103 B a cell. IDW's and kriging's `apply` is
+    Minimum curvature holds two sets (#148): its plan, about 95-98 B a cell with
+    its multigrid levels, and the kriging preview built with it, about 95. Its
+    solve needs buffers of its own, so it is measured over the plan, the
+    preview and one `apply` together, as the engine holds them (plan call 9):
+    about 233 B a cell against the 192 counted. IDW's and kriging's `apply` is
     a slice's transient, the 55 B a cell `MAX_FRAME_CELLS` already counts, so
     they are measured over building alone, as before."""
     from nsgeo.slices import interpolate
@@ -482,18 +530,21 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     monkeypatch.setattr(interpolate, "_PLAN_CHUNK", 1024, raising=False)
     monkeypatch.setattr(interpolate, "_SOLVE_CHUNK", 256)
     settings = SliceFinish(method=method).in_metres(0.5)
+    md, sr = settings.max_distance_m, settings.search_radius_m
     pop = _binned_rows(0.5, 0.05, nx=200)
     # Varying data, so the solve really runs: constant data leave nothing to
     # solve (b = 0) and the CG buffers would never be allocated.
     yy, xx = np.indices(pop.shape)
     values = np.where(pop, np.sin(xx * 0.05) + np.cos(yy * 0.03), np.nan).astype(np.float32)
     out = None
+    preview = None
     tracemalloc.start()
     try:
         tracemalloc.reset_peak()
         before, _ = tracemalloc.get_traced_memory()
-        fw = plan_fill(pop, 0.05, method, settings.max_distance_m, settings.search_radius_m)
+        fw = plan_fill(pop, 0.05, method, md, sr)
         if method == "min_curvature":
+            preview = plan_fill(pop, 0.05, PREVIEW_METHOD, md, sr)
             out = fw.apply(values)
         _, peak = tracemalloc.get_traced_memory()
     finally:
@@ -503,7 +554,13 @@ def test_the_weights_estimate_covers_building_them(method, monkeypatch):
     else:
         assert fw.solve(values)[1] > 0, "the measured solve must have iterated"
     assert (np.isfinite(out) & ~pop).sum() > 0.8 * pop.size
-    assert (peak - before) / pop.size <= 1.5 * WEIGHT_BYTES_PER_CELL
+    counted = estimate_memory(0, pop.size, 0, 0, method=method).weights_bytes / pop.size
+    assert (peak - before) / pop.size <= 1.5 * counted
+    if preview is not None:
+        # What the engine holds once both are built, less the solved slices
+        # (`SlicesEngine.weights_nbytes`): counted, not merely bounded.
+        held = (fw.nbytes + preview.nbytes) / pop.size
+        assert held == pytest.approx(counted, rel=0.1)
 
 
 def test_method_labels_follow_methods():
@@ -512,7 +569,266 @@ def test_method_labels_follow_methods():
     assert METHOD_LABELS["min_curvature"] == "Minimum curvature"
 
 
-def test_the_estimate_counts_the_fill_weights():
-    est = estimate_memory(0, 1000, 10)
+@pytest.mark.parametrize("method", ["idw", "kriging"])
+def test_the_estimate_counts_the_fill_weights(method):
+    est = estimate_memory(0, 1000, 10, 100, method=method)
     assert est.weights_bytes == 1000 * WEIGHT_BYTES_PER_CELL
     assert est.total_bytes == est.lines_bytes + est.cube_bytes + est.weights_bytes
+
+
+def test_minimum_curvature_counts_its_plan_beside_its_kriging_preview():
+    """#148: the engine builds the kriging preview with the plan and holds
+    both, so minimum curvature counts its plan on top of kriging's weights."""
+    kriging = estimate_memory(0, 1000, 10, 100, method="kriging")
+    curvature = estimate_memory(0, 1000, 10, 100, method="min_curvature")
+    assert curvature.weights_bytes == kriging.weights_bytes + 1000 * CURVATURE_PLAN_BYTES_PER_CELL
+    assert curvature.lines_bytes == kriging.lines_bytes
+    assert curvature.cube_bytes == kriging.cube_bytes
+
+
+def test_name_list_reads_as_a_sentence():
+    assert name_list(["A"]) == "A"
+    assert name_list(["A", "B"]) == "A and B"
+    assert name_list(["A", "B", "C"]) == "A, B and C"
+
+
+def test_preview_note_is_exact_copy():
+    base = (
+        "Preview at 0.4 m pixels: the grids are at 0.05 m, but the site "
+        "(1234 \u00d7 568 m) is too big to draw at full detail. "
+        "It draws in full at a 0.12 m cell or coarser."
+    )
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, []) == base
+    assert preview_note(0.4, 0.05, 1234.4, 567.6, 0.12, ["C", "D"]) == (
+        base + " Leaving out C and D would also let it draw in full."
+    )
+
+
+def test_the_estimate_matches_the_cube_it_describes():
+    """The figure the checkbox shows is the cube's real size (#113)."""
+    from nsgeo.slices import (
+        CubeFrame,
+        PreparedLine,
+        Provenance,
+        ZAxis,
+        build_cube,
+        covered_cells,
+        plan_line,
+    )
+
+    rng = np.random.default_rng(0)
+    lines = []
+    for i in range(8):
+        t = np.linspace(0.05, 9.9, 60)
+        across = np.full(60, 0.25 + 0.5 * (i % 4))
+        xy = [t, across] if i < 4 else [across, t]
+        lines.append(
+            PreparedLine(
+                key=f"l{i}",
+                data=(rng.random((30, 60)) + 0.5).astype(np.float32),
+                dt_ns=1.0,
+                t0_ns=0.0,
+                coords=np.column_stack(xy),
+            )
+        )
+    frame = CubeFrame(origin=(0.0, 0.0), azimuth=0.0, cell=0.5, nx=20, ny=20, crs="EPSG:32633")
+    z = ZAxis(t0_ns=0.0, dz_ns=1.0, nz=24)
+    prov = Provenance(
+        line_keys=("a",),
+        preset_name="p",
+        steps=(),
+        transform="amp_abs",
+        velocity=None,
+        built_utc="2026-11-10T00:00:00Z",
+        core_version="0.1.0.dev0",
+    )
+    cube = build_cube(lines, [plan_line(ln, frame, z) for ln in lines], frame, z, prov)
+    n_covered = covered_cells(frame, (ln.coords for ln in lines))
+    assert n_covered < frame.n_cells
+    assert (
+        estimate_memory(0, frame.n_cells, z.nz, n_covered, method="kriging").cube_bytes
+        == cube.nbytes
+    )
+
+
+# ---- the export dialog's summary and the finest fit ------------------------
+
+
+def _preview(**over):
+    from nsgeo_qgis.slices_plan import ExportPreview
+
+    base = dict(
+        cell=0.025,
+        pixel=0.0125,
+        width_px=2582,
+        height_px=3035,
+        bands=18,
+        bands_detail="every 2.5 ns from −1.8 to 45 ns, 5 ns thick",
+        slices="kriging, max distance 0.75 × spacing, no smoothing",
+        grids=("A", "B"),
+        normalisation="edge match",
+        file_bytes=600_000_000,
+        held_bytes=1_000_000_000,
+    )
+    base.update(over)
+    return ExportPreview(**base)
+
+
+def test_the_summary_for_a_two_grid_site_is_exact():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    assert summary_lines(_preview()) == [
+        ("Bands", "18, every 2.5 ns from −1.8 to 45 ns, 5 ns thick"),
+        ("Picture", "2582 × 3035 pixels at 0.0125 m"),
+        ("Grids", "2 included (A and B), rebuilt at 0.025 m"),
+        ("Slices", "kriging, max distance 0.75 × spacing, no smoothing"),
+        ("Normalisation", "edge match, measured again at 0.025 m"),
+        ("Memory", "about 1.0 GB of the 1.5 GB allowed"),
+        ("File", "about 600 MB before compression, plus a style file"),
+    ]
+
+
+def test_the_memory_row_stays_when_the_export_is_over_budget():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(held_bytes=2_400_000_000)))
+    assert rows["Memory"] == "about 2.4 GB of the 1.5 GB allowed"
+
+
+def test_the_summary_does_not_say_measured_again_for_no_normalisation():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = dict(summary_lines(_preview(normalisation="none")))
+    assert rows["Normalisation"] == "none"
+
+
+def test_the_summary_for_one_grid_drops_the_site_rows():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    rows = summary_lines(_preview(grids=None, normalisation=None))
+    assert [k for k, _ in rows] == ["Bands", "Picture", "Slices", "Memory", "File"]
+
+
+def test_the_summary_for_a_big_site_counts_grids_without_naming_them():
+    from nsgeo_qgis.slices_plan import summary_lines
+
+    names = tuple(f"G{i}" for i in range(10))
+    assert dict(summary_lines(_preview(grids=names)))["Grids"] == (
+        "10 included, rebuilt at 0.025 m"
+    )
+
+
+def _counting(held):
+    calls = []
+
+    def held_at(cell, pixel):
+        calls.append((cell, pixel))
+        return held(cell, pixel)
+
+    return held_at, calls
+
+
+def test_finest_pixel_is_the_smallest_millimetre_that_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held falls as the pixel grows and fits from 15 mm up.
+    held_at, calls = _counting(lambda c, p: 1_500_000_000 * 15 // round(p * 1000))
+    _, pixel = finest_fits(held_at, 0.025, 0.0125, 1_500_000_000)
+    assert pixel == 0.015
+    assert len(calls) < 30
+
+
+def test_finest_pixel_is_none_when_pixel_equals_cell_or_nothing_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.025, 10**9)[1] is None
+    assert finest_fits(lambda c, p: 10**12, 0.025, 0.0125, 10**9)[1] is None
+
+
+def test_finest_cell_doubles_then_bisects_to_a_millimetre():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Held = k / cell^2 with pixel = cell; fits from a 0.037 m cell up.
+    budget = 10**9
+    k = budget * 0.037**2
+
+    held_at, calls = _counting(lambda c, p: int(k / (c * c)) if p == c else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, budget)
+    assert cell == pytest.approx(0.037)
+    assert len(calls) < 30
+
+
+def test_finest_cell_is_none_past_eight_times_the_current_cell():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits only from 0.25 m; 8 x 0.025 = 0.2.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.25 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] is None
+    # ... and exactly at the reach it is found.
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.2 - 1e-9 else 10**12)
+    assert finest_fits(held_at, 0.025, 0.025, 10**9)[0] == pytest.approx(0.2)
+
+
+def test_finest_cell_is_none_when_the_current_cell_already_fits():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    # Fits from a 20 mm pixel; at pixel = cell the 25 mm cell is well inside budget.
+    budget = 10**9
+    held_at, _ = _counting(lambda c, p: int(budget * 0.02 / p))
+    assert finest_fits(held_at, 0.025, 0.0125, budget) == (None, 0.02)
+
+
+def test_finest_cell_is_still_offered_when_the_current_cell_does_not_fit():
+    from nsgeo_qgis.slices_plan import finest_fits
+
+    held_at, _ = _counting(lambda c, p: 0 if c >= 0.03 - 1e-9 else 10**12)
+    cell, _ = finest_fits(held_at, 0.025, 0.0125, 10**9)
+    assert cell == pytest.approx(0.03)
+
+
+def test_the_bands_line_of_the_export_summary():
+    windows = [(-1.8 + 2.5 * k, 5.0) for k in range(18)]
+    assert bands_detail(windows) == "every 2.5 ns from \u22121.8 to 45.7 ns, 5 ns thick"
+    assert bands_detail([(10.0, 5.0)]) == "from 10 to 15 ns, 5 ns thick"
+    assert bands_detail([]) == ""
+
+
+def test_the_slices_line_of_the_export_summary():
+    from nsgeo_qgis.slices_plan import SliceFinish, slices_text
+
+    assert slices_text(SliceFinish()) == "kriging, max distance 0.75 \u00d7 spacing, no smoothing"
+    assert slices_text(SliceFinish(method="none")) == "no interpolation, no smoothing"
+    assert (
+        slices_text(
+            SliceFinish(
+                method="min_curvature", max_distance_spacings=1.5, smooth_x_m=0.2, smooth_y_m=0.3
+            )
+        )
+        == "minimum curvature, max distance 1.5 \u00d7 spacing, smoothing 0.2 \u00d7 0.3 m"
+    )
+
+
+def test_the_old_cube_note_names_the_shift_with_its_sign():
+    assert old_cube_note(-2.4) == (
+        "This cube was saved before times were measured from each line's first break. "
+        "It was rebuilt that way, with its range moved by -2.40 ns."
+    )
+    assert old_cube_note(1.0).endswith("moved by +1.00 ns.")
+
+
+def test_mixed_clock_note_names_the_radar_grids():
+    assert mixed_clock_note([]) == ""
+    assert mixed_clock_note(["A"]).startswith("Grid A has no Time zero step")
+    assert mixed_clock_note(["A", "C"]).startswith("Grids A and C have no Time zero step")
+    assert mixed_clock_note(["A"]) == (
+        "Grid A has no Time zero step, so its times are from the radar's own zero "
+        "and will not line up with the other grids."
+    )
+
+
+def test_combined_time_base_is_one_rule_for_a_set_of_grids():
+    assert combined_time_base(["time_zero", "time_zero"]) == "time_zero"
+    assert combined_time_base(["radar"]) == "radar"
+    assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
+    with pytest.raises(ValueError):
+        combined_time_base([])

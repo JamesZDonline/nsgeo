@@ -10,6 +10,7 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.render import PercentileClip, colormap_names, to_index8
 from nsgeo.velocity import VelocityModel
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SURVEY_FILE, SiteSession
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, velocity_source
@@ -2162,3 +2163,38 @@ def test_the_held_windows_are_forgotten_when_the_site_closes(opened, tmp_path):
     session.open_line(nkey)
     t = dock.view.transform
     assert (t.trace_lo, t.trace_hi) == pytest.approx(t.trace_bounds)
+
+
+def test_a_line_edit_reaches_the_open_profile_even_when_its_ruler_is_unchanged(opened):
+    session, dock, key, line = opened
+    assert "wall line" not in dock.windowTitle()
+    session.edit_lines([LineEdit(key, line.placement, label="wall line")])
+    assert "wall line" in dock.windowTitle()
+
+
+def test_a_time_zero_that_crops_nothing_still_moves_the_axis(opened):
+    session, dock, key, line = opened
+    session.set_profiles(key, line.load())
+    assert dock.view.transform.t0_ns == pytest.approx(-11.086, abs=1e-3)
+    session.append_step(key, build_step("time_zero", mode="sample", sample=0))
+    assert dock.view.transform.t0_ns == 0.0
+
+
+def test_picks_stay_on_their_sample_when_time_zero_is_added(dock_with_picks):
+    dock, session, layers, keys = dock_with_picks
+    key = keys[0]
+    session.set_profiles(key, session.line_for_key(key).load())
+    session.add_pick(key, 30, 20.0)  # radar clock: no step yet
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    zero = dock.shown_zero_ns()
+    assert zero != 0.0
+    assert dock.view._picks == [(30, pytest.approx(20.0 - zero))]
+
+
+def test_a_relabelled_axis_with_no_ruler_is_not_put_back(opened):
+    session, dock, key, line = opened
+    dock._set_axes_holding("", 100, 200, -11.0, 0.2, None)
+    before = dock.view.transform
+    dock._set_axes_holding("", 100, 200, 0.0, 0.2, None)
+    assert dock.view.transform is not before
+    assert dock.view.transform.t0_ns == 0.0

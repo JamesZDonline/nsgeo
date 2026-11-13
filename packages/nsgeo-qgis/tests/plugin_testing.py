@@ -10,14 +10,13 @@ from typing import Any, Callable
 
 import numpy as np
 import pytest
+from tests.real_data import CAMPUS_LINES
 
 CORE_DIR = Path(__file__).resolve().parent.parent.parent / "nsgeo-core"
 LOCAL_DATA = CORE_DIR / "tests" / "data" / "local"
-REAL_DZT = (
-    sorted(p for p in LOCAL_DATA.rglob("*") if p.suffix.lower() == ".dzt")
-    if LOCAL_DATA.exists()
-    else []
-)
+#: The ten campus lines only. The other surveys under tests/data/local reuse
+#: their file names (#141); each has its own list in the core's real_data.py.
+REAL_DZT = CAMPUS_LINES
 
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
@@ -35,6 +34,19 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     path = folder / name
     write_dzt(path, data, **kw)
     return path
+
+
+def apply_fit(session: Any, key: str, fit_id: str, applied_at: str | None = None) -> Any:
+    """Set line `key`'s velocity from its stored fit `fit_id`, with a
+    one-member record of it: what the strip's Apply to line does after Save
+    fit. Returns the record."""
+    from nsgeo.velocity import VelocityModel
+    from nsgeo_qgis.velocity_records import fit_record
+
+    fit = session.line_for_key(key).velocity_fits[fit_id]
+    record = fit_record(session, [(key, fit_id, fit)], applied_at=applied_at)
+    session.apply_line_velocity(key, VelocityModel.constant(fit.v_m_ns), record)
+    return record
 
 
 def send_move_while_pressed(widget: Any, local_pos: Any, held_button: Any = None) -> None:
@@ -91,6 +103,37 @@ def send_hover(widget: Any, local_pos: Any) -> None:
     from qgis.PyQt.QtCore import Qt
 
     send_move_while_pressed(widget, local_pos, held_button=Qt.MouseButton.NoButton)
+
+
+def click_table_cell(table: Any, row: int, column: int, *, right_edge: bool = False) -> None:
+    """A real left click in a table cell, at its centre or (`right_edge`) one
+    pixel in from its right edge: in a checkable cell, off the check box. The
+    table must be shown, so its cells have their real geometry."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    rect = table.visualRect(table.model().index(row, column))
+    x = rect.right() - 1 if right_edge else rect.center().x()
+    QTest.mouseClick(
+        table.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, rect.center().y()),
+    )
+
+
+def click_header_section(header: Any, section: int) -> None:
+    """A real left click in the middle of a shown header's section."""
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtTest import QTest
+
+    x = header.sectionViewportPosition(section) + header.sectionSize(section) // 2
+    QTest.mouseClick(
+        header.viewport(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+        QPoint(x, header.height() // 2),
+    )
 
 
 def connect_message_log(slot: Callable[[str, str, int], None]) -> Callable[[], None]:
@@ -426,3 +469,128 @@ def slow_jobs(monkeypatch: Any, engine: Any, names: tuple[str, ...], pause: floa
             return slowed(out)
 
         monkeypatch.setattr(engine, name, wrapper)
+
+
+SUNNYSIDE = LOCAL_DATA / "sunnyside.nsgeo.json"
+needs_sunnyside = pytest.mark.skipif(
+    not SUNNYSIDE.exists(), reason="no Sunnyside survey in tests/data/local"
+)
+
+
+# ---- the export dialog and the background export task -------------------------------
+
+
+def drive_export_dialog(
+    drive_dialog: Any,
+    *,
+    path: Any = None,
+    cell: float | None = None,
+    pixel: float | None = None,
+    replace: bool = False,
+    accept: bool = True,
+) -> list[Any]:
+    """Answer the next `ExportDialog.exec()` as a user would: type the path and the
+    cell and pixel, press Export (and Replace when asked). Returns the dialogs shown.
+
+    A dialog that stays refused (Export disabled, or Replace not pressed) is
+    rejected, so `exec()` always returns.
+    """
+    from nsgeo_qgis.ui.export_dialog import ExportDialog
+    from qgis.PyQt.QtWidgets import QDialog
+
+    def driver(dialog: Any) -> None:
+        if path is not None:
+            dialog.path_edit.setText(str(path))
+        if cell is not None:
+            dialog.cell_spin.setValue(cell)
+        if pixel is not None:
+            dialog.pixel_spin.setValue(pixel)
+        dialog.refresh_now()
+        if accept:
+            dialog.export_button.click()
+            if replace and dialog.confirm_strip.isVisibleTo(dialog):
+                dialog.replace_button.click()
+        if dialog.result() != QDialog.DialogCode.Accepted:
+            dialog.reject()
+
+    return drive_dialog(ExportDialog, "exec", driver)
+
+
+def wait_for_export(timeout_s: float = 60.0) -> None:
+    """Pump events until no export is held (its `on_done` has then run)."""
+    from nsgeo_qgis.export_task import running_export
+    from qgis.PyQt.QtCore import QCoreApplication
+
+    deadline = time.monotonic() + timeout_s
+    while running_export() is not None:
+        if time.monotonic() > deadline:
+            raise AssertionError("the export did not finish")
+        QCoreApplication.processEvents()
+        time.sleep(0.005)
+
+
+class ExportGate:
+    """Holds the next export inside its worker thread until `release` is set.
+
+    Replaces `export_task.run_export` by a generator that waits, polling the task's
+    `should_stop` (so a cancel still lands), then carries on with the real pipeline.
+    """
+
+    def __init__(self, monkeypatch: Any) -> None:
+        from nsgeo_qgis import export_task
+
+        self.real = export_task.run_export
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.threads: list[str] = []
+        monkeypatch.setattr(export_task, "run_export", self)
+
+    def __call__(self, spec: Any, *, should_stop: Any, progress: Any) -> Any:
+        from nsgeo_qgis.export_pipeline import ExportCancelled
+
+        self.threads.append(threading.current_thread().name)
+        self.entered.set()
+        while not self.release.is_set():
+            if should_stop():
+                raise ExportCancelled()
+            time.sleep(0.005)
+        yield from self.real(spec, should_stop=should_stop, progress=progress)
+
+    def wait_entered(self, timeout_s: float = 20.0) -> None:
+        from qgis.PyQt.QtCore import QCoreApplication
+
+        deadline = time.monotonic() + timeout_s
+        while not self.entered.is_set():
+            if time.monotonic() > deadline:
+                raise AssertionError("the export task never started")
+            QCoreApplication.processEvents()
+            time.sleep(0.005)
+
+
+def read_bands(path: Any) -> list[Any]:
+    """Every band of a GeoTIFF as arrays, the dataset closed before anything asserts."""
+    from osgeo import gdal
+
+    ds = gdal.Open(str(path))
+    try:
+        return [ds.GetRasterBand(i + 1).ReadAsArray() for i in range(ds.RasterCount)]
+    finally:
+        ds.Close()
+
+
+def assert_styled_as(layer: Any, palette: str, limit: float, unipolar: bool) -> None:
+    """The layer's ramp is the plugin's own for `palette` over `limit`: the range, and the
+    first and last colour stops of the named colour map."""
+    from nsgeo.render import colormap
+
+    renderer = layer.renderer()
+    assert renderer.type() == "singlebandpseudocolor"
+    assert renderer.classificationMax() == pytest.approx(limit)
+    assert renderer.classificationMin() == pytest.approx(0.0 if unipolar else -limit)
+    items = renderer.shader().rasterShaderFunction().colorRampItemList()
+    lut = colormap(palette)
+    assert len(items) == 256
+    assert items[0].color.getRgb()[:3] == tuple(int(v) for v in lut[0])
+    assert items[-1].color.getRgb()[:3] == tuple(int(v) for v in lut[255])
+    assert items[0].value == pytest.approx(0.0 if unipolar else -limit)
+    assert items[-1].value == pytest.approx(limit)

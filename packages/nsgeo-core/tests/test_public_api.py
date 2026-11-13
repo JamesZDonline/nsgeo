@@ -11,6 +11,7 @@ import pytest
 
 CORE = Path(nsgeo.__file__).parents[2]
 EXPECTED_PUBLIC = {
+    "destagger",
     "io",
     "model",
     "geometry",
@@ -20,6 +21,7 @@ EXPECTED_PUBLIC = {
     "render",
     "velocity",
     "velocity_fit",
+    "velocity_source",
 }
 
 

@@ -1,14 +1,13 @@
 """Layered velocity: boundaries in two-way time, depth by integration.
 
-Depth is measured from time zero. Before a time_zero step a real SIR-4000
-file (position -11.09 ns) therefore has negative depth at the top. That is
-correct, and the last test pins it against a real header.
+Depth is measured from 0 on the radargram's own clock. Without a time_zero
+step a real SIR-4000 file (position -11.09 ns) therefore has negative depth at
+the top. That is correct, and the last test pins it against a real header.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,10 +18,8 @@ from nsgeo.model.survey import Line, Site
 from nsgeo.project import ProjectError, load_site, save_site
 from nsgeo.velocity import C_M_PER_NS, VelocityModel, resolve_velocity
 
+from tests.real_data import CAMPUS_LINES
 from tests.synthetic import write_dzt
-
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
 
 
 def test_constant_velocity_depth_is_half_v_t():
@@ -207,9 +204,9 @@ def test_malformed_velocity_block_raises_project_error(tmp_path):
         load_site(out)
 
 
-@pytest.mark.skipif(not FILES, reason="no real DZT files in tests/data/local")
+@pytest.mark.skipif(not CAMPUS_LINES, reason="no real DZT files in tests/data/local")
 def test_real_header_suggestion_puts_the_top_of_the_record_below_zero_depth():
-    h = read_header(FILES[0])
+    h = read_header(CAMPUS_LINES[0])
     m = VelocityModel.from_dielectric(h.epsr)
     top = float(m.depth_at(np.array([h.position_ns]))[0])
     assert -0.46 < top < -0.43  # -11.09 ns at 0.0801 m/ns

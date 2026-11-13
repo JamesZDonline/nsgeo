@@ -484,3 +484,20 @@ def test_the_profile_band_is_drawn_on_a_line_opened_after_the_window_moved(
         )
     finally:
         plugin.unload()
+
+
+def test_closing_with_an_unsaved_cut_prompts(fake_iface, tmp_path, answer_modal):
+    # Cut spec test 6: a cut is survey state, so drawing one dirties the site
+    # and unloading asks the existing save question.
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    plugin.session.save()
+    assert not plugin.session.dirty
+    plugin.session.add_cut("A", [(1.0, 1.0), (4.0, 1.0)])
+    assert plugin.session.dirty
+    asked = answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin.unload()
+    assert len(asked) == 1
+    assert asked[0][0][1:3] == ("Unsaved changes", "Save the site before continuing?")

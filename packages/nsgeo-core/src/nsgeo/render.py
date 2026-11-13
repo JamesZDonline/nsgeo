@@ -25,7 +25,10 @@ __all__ = [
     "colormap",
     "colormap_names",
     "decimate_columns",
+    "display_range",
+    "gradient_stops",
     "row_envelope",
+    "section_rgba8",
     "to_index8",
     "to_index8_unipolar",
     "to_rgb8",
@@ -103,11 +106,11 @@ class UnipolarClip:
     For slice display, the shared stretch is a property of (cube,
     thickness), not of the cube alone: `limit()` must be computed over
     slices actually taken at the display thickness, never over
-    `cube.mean` (the raw, per-level array). A window mean has far lower
+    every raw level (the per-level arrays). A window mean has far lower
     variance than the individual levels it averages, so a limit taken
     over raw levels is systematically too high for a multi-level window --
-    on one realistic cube, `UnipolarClip().limit(cube.mean)` returned 2.59
-    where the correct limit for the displayed 10-level slice was 0.87.
+    on one realistic cube, `UnipolarClip().limit` over every raw level
+    returned 2.59 where the correct limit for the displayed 10-level slice was 0.87.
     Because that bias is uniform across depth, it does not look like a
     bug: every slice renders at roughly a third of its intended
     brightness, identically at every depth, so it reads as "the data is
@@ -288,6 +291,26 @@ def to_rgba8(data: np.ndarray, limit: float, lut: np.ndarray, *, unipolar: bool)
     return np.ascontiguousarray(np.concatenate([rgb, alpha[..., None]], axis=-1))
 
 
+def section_rgba8(
+    values: np.ndarray, percentile: float, lut: np.ndarray, *, unipolar: bool
+) -> np.ndarray:
+    """(H, W, 4) uint8 for a section: blank columns and depths are transparent.
+
+    The limit is the percentile of the finite values, as the slice panel
+    takes it, falling back to 1.0 when it is not positive and finite (an empty
+    or all-zero section). Alpha is 0 wherever a value is not finite, in either
+    polarity: unlike a radargram, a section has real nodata (cut spec §3).
+    """
+    values = np.asarray(values, dtype=float)
+    norm = UnipolarClip(percentile) if unipolar else PercentileClip(percentile)
+    limit = norm.limit(values)
+    if not (math.isfinite(limit) and limit > 0.0):
+        limit = 1.0
+    rgba = to_rgba8(values, limit, lut, unipolar=unipolar)
+    rgba[..., 3] = np.where(np.isfinite(values), rgba[..., 3], 0)
+    return rgba
+
+
 def decimate_columns(data: np.ndarray, max_width: int) -> np.ndarray:
     """Block-mean along the trace axis until there are at most `max_width`
     columns. Happens after processing, never before, so the view is a
@@ -349,3 +372,77 @@ def row_envelope(data: np.ndarray, percentile: float, max_traces: int = 2048) ->
     if has.any():
         out[has] = np.nanpercentile(mags[has], percentile, axis=1)
     return out
+
+
+def gradient_stops(
+    lut: np.ndarray, tolerance: float = 1.0
+) -> list[tuple[float, tuple[int, int, int]]]:
+    """The fewest colour stops that redraw `lut` by straight-line blending.
+
+    A (256, 3) table becomes `[(position, (r, g, b)), ...]`, positions from
+    0.0 to 1.0, where table entry `i` sits at `i / 255`. Blending each channel
+    linearly between neighbouring stops gives back every entry to within
+    `tolerance` (in 0-255 units). A straight table keeps its two ends; a bent
+    one keeps a stop at each bend. Used to hand a table to a front end's own
+    gradient editor (#180), where 256 stops would be unusable to edit.
+    """
+    table = np.asarray(lut, dtype=float)
+    if table.shape != (256, 3):
+        raise ValueError(f"expected a (256, 3) table, got shape {table.shape}")
+    ends = [0]
+    start = 0
+    while start < 255:
+        end = start + 1
+        while end < 255:
+            nxt = end + 1
+            t = (np.arange(start, nxt + 1) - start) / (nxt - start)
+            line = table[start] + t[:, None] * (table[nxt] - table[start])
+            if np.abs(line - table[start : nxt + 1]).max() > tolerance:
+                break
+            end = nxt
+        ends.append(end)
+        start = end
+    return [(i / 255.0, (int(table[i, 0]), int(table[i, 1]), int(table[i, 2]))) for i in ends]
+
+
+_RANGE_KINDS = ("minimum_maximum", "cumulative_cut", "std_dev")
+
+
+def display_range(
+    values: np.ndarray,
+    kind: str,
+    *,
+    lower: float = 0.02,
+    upper: float = 0.98,
+    sd_factor: float = 2.0,
+    max_samples: int | None = None,
+) -> tuple[float, float] | None:
+    """The colour range a GIS would compute for `values`, by one of its rules.
+
+    `kind` is `"minimum_maximum"`, `"cumulative_cut"` (the `lower` and `upper`
+    fractions of the values, e.g. 2 % and 98 %) or `"std_dev"` (the mean plus
+    and minus `sd_factor` standard deviations): QGIS's three computed min/max
+    settings, so a slice coloured with QGIS's own symbology can have its range
+    worked out again on every new slice (#180). NaN and infinities are nodata.
+    `max_samples` takes a strided subsample of a larger array, as QGIS's
+    "Estimate" accuracy does; `None` uses every value. Returns `None` when
+    there is no range to fit: no finite value, or all of them equal.
+    """
+    if kind not in _RANGE_KINDS:
+        raise ValueError(f"unknown range kind {kind!r}; expected one of {_RANGE_KINDS}")
+    flat = np.asarray(values, dtype=float).ravel()
+    if max_samples is not None and flat.size > max_samples:
+        flat = flat[:: int(math.ceil(flat.size / max_samples))]
+    finite = flat[np.isfinite(flat)]
+    if finite.size == 0:
+        return None
+    if kind == "minimum_maximum":
+        lo, hi = float(finite.min()), float(finite.max())
+    elif kind == "cumulative_cut":
+        lo, hi = (float(v) for v in np.percentile(finite, [lower * 100.0, upper * 100.0]))
+    else:
+        mean, sd = float(finite.mean()), float(finite.std())
+        lo, hi = mean - sd_factor * sd, mean + sd_factor * sd
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi <= lo:
+        return None
+    return lo, hi

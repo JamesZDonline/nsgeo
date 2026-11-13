@@ -13,8 +13,11 @@ import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
+from nsgeo.processing import retime_ns
 from nsgeo.render import PercentileClip, UnipolarClip, colormap_names
 from nsgeo.slices import SliceWindow, plan_fill, plan_windows, window_depths_m, window_times_ns
+from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_export import ViewSettings, cube_record
 from nsgeo_qgis.slices_engine import solve_key
@@ -24,11 +27,14 @@ from nsgeo_qgis.slices_plan import (
     PREVIEW_INDICATOR,
     REFINE_REST_MS,
     REFINING_SLICE_INDICATOR,
+    Resolution,
     SliceFinish,
     limit_windows,
+    old_cube_note,
     transform_names,
 )
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
     REAL_DZT,
     LayoutProbe,
@@ -40,25 +46,61 @@ from plugin_testing import (
 )
 from qgis.PyQt.QtCore import QCoreApplication, QEvent, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
+from tests.real_data import GRID2_LINES
 
 GRID = Grid("A", (500.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
 PRESET = [{"step": "dewow", "params": {}, "enabled": True}]
 
 
+TIME_ZERO_PRESET = [{"step": "time_zero", "params": {}, "enabled": True}]
+
+
 @pytest.fixture
 def docked(qgis_app, tmp_path):
+    yield from _docked_with(tmp_path, PRESET)
+
+
+@pytest.fixture
+def docked_zeroed(qgis_app, tmp_path):
+    """The same three lines, prepared with a preset that sets time zero (#97)."""
+    yield from _docked_with(tmp_path, TIME_ZERO_PRESET)
+
+
+@pytest.fixture
+def docked_banded(qgis_app, tmp_path):
+    """Time-zero preset on lines whose flat bands sit at rows 40, 40 and 41:
+    two lines on the earlier zero, one a sample later (the GPS survey's case)."""
+    yield from _docked_with(tmp_path, TIME_ZERO_PRESET, band_rows=(40, 40, 41))
+
+
+def _banded_dzt(folder, name, band_row):
+    import zlib
+
+    from tests.synthetic import write_dzt
+
+    folder.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(zlib.crc32(name.encode()))
+    data = (rng.normal(size=(512, 60)) * 1e4).astype(np.int32)  # quiet: the band is the break
+    data[band_row : band_row + 4, :] = 5_000_000
+    write_dzt(folder / name, data)
+    return folder / name
+
+
+def _docked_with(tmp_path, preset, band_rows=None):
     session = SiteSession()
     session.new_site(tmp_path)
     session.add_grid(GRID)
     lines = [
         Line.open(
-            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60),
+            synthetic_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+            if band_rows is None
+            else _banded_dzt(tmp_path / "raw", f"FILE__00{i + 1}.DZT", band_rows[i]),
             GridPlacement("A", "y", 1.0 + i, 0.0, 1, f"L{i}"),
         )
         for i in range(3)
     ]
     session.add_lines(lines)
-    session.site.presets["p"] = list(PRESET)
+    session.site.presets["p"] = list(preset)
     session.presets_changed.emit()
     dock = SlicesDock(session)
     yield dock, session
@@ -121,6 +163,155 @@ def test_the_dock_reports_the_memory_before_committing_to_preparing_it(docked):
     text = dock.included_label.text()
     assert text.startswith(f"{len(session.keys())} of {len(session.keys())} included")
     assert "MB" in text or "GB" in text
+
+
+def _spy_on_the_estimate(monkeypatch):
+    """Record every `estimate_memory` call the dock makes, then delegate.
+
+    The label shows whole MB, and this fixture's cube rounds to "1 MB"
+    whatever the covered count is, so the label cannot tell a packed figure
+    from a dense one. The arguments can."""
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real = dock_module.estimate_memory
+    calls: list[tuple[int, int, int, int, str]] = []
+
+    def spy(prepared_samples, n_cells, nz, n_covered, *, method):
+        calls.append((prepared_samples, n_cells, nz, n_covered, method))
+        return real(prepared_samples, n_cells, nz, n_covered, method=method)
+
+    monkeypatch.setattr(dock_module, "estimate_memory", spy)
+    return calls
+
+
+def _covered_by_the_included_lines(dock, session):
+    from nsgeo.slices import covered_cells
+
+    frame = dock.engine.frame
+    assert frame is not None
+    coords = [session.line_for_key(k).trace_coords(session.site.frames) for k in dock._included]
+    return covered_cells(frame, coords), frame
+
+
+def test_the_included_label_counts_only_covered_cells(docked, monkeypatch):
+    """Before preparing, the label's figure counts the cells the included
+    lines fall in, not every cell of the frame (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    calls = _spy_on_the_estimate(monkeypatch)
+    dock._update_included_label()
+    covered, frame = _covered_by_the_included_lines(dock, session)
+    assert 0 < covered < frame.n_cells
+    assert calls and calls[0][3] == covered
+    assert dock.included_label.text().startswith("3 of 3 included")
+
+
+def test_the_included_label_counts_the_method_chosen(docked, monkeypatch):
+    """#148: minimum curvature holds its plan beside a kriging preview, so the
+    over-budget warning counts the method the Interpolation panel shows, and
+    choosing another method counts again."""
+    dock, _ = docked
+    calls = _spy_on_the_estimate(monkeypatch)
+    combo = dock.grid_finish.method_combo
+    combo.setCurrentIndex(combo.findData("min_curvature"))
+    assert calls and calls[-1][4] == "min_curvature"
+    del calls[:]
+    combo.setCurrentIndex(combo.findData("idw"))
+    assert calls and calls[-1][4] == "idw"
+
+
+def test_the_checkbox_cost_before_preparing_is_the_packed_figure(docked, monkeypatch):
+    """While no lines are prepared the engine's own estimate counts no cells
+    (it reads 1 MB), so the checkbox shows the before-preparing figure the
+    included label uses, and the two agree (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    monkeypatch.setattr(dock.engine, "_lines", [])  # the unprepared window
+    assert not dock.engine.is_prepared
+    calls = _spy_on_the_estimate(monkeypatch)
+    shown: list[int] = []
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    dock._update_included_label()
+    covered, frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    cube_bytes = nz * covered * 4 + covered * 4 + covered * 8
+    assert covered < frame.n_cells
+    assert all(c[3] == covered for c in calls)
+    assert cube_bytes in shown, "the checkbox must be sized from the packed count"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(cube_bytes)})"
+
+
+def test_the_checkbox_does_not_show_the_old_line_sets_figure_while_re_preparing(
+    docked, monkeypatch
+):
+    """`set_included` refreshes the label while the old lines are still in the
+    engine, then `prepare()` empties them. The checkbox must be refreshed
+    after that, from the before-preparing estimate of the NEW line set, not
+    left on the old set's `engine.estimate` until `_on_prepared` (#113)."""
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    dock.prepare()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.is_prepared
+    import nsgeo_qgis.ui.slices_dock as dock_module
+
+    shown: list[int] = []
+    real_format = dock_module.format_bytes
+    monkeypatch.setattr(
+        dock_module, "format_bytes", lambda n: (shown.append(int(n)), real_format(n))[1]
+    )
+    # Hold the engine unprepared once `set_source` has emptied it.
+    real_set_source = dock.engine.set_source
+
+    def set_source_and_stay_empty(choice):
+        real_set_source(choice)
+        dock.engine._lines = []
+
+    monkeypatch.setattr(dock.engine, "set_source", set_source_and_stay_empty)
+    old_cube = dock.engine.estimate.cube_bytes
+    fewer = tuple(session.keys())[:-1]
+    shown.clear()
+    dock.set_included(fewer)
+    assert not dock.engine.is_prepared
+    covered, _frame = _covered_by_the_included_lines(dock, session)
+    nz = dock.engine.z.nz
+    expected = nz * covered * 4 + covered * 4 + covered * 8
+    assert expected != old_cube, "the fixture must tell the old and new figures apart"
+    assert shown[-1] == expected, "the last refresh must be the new line set's figure"
+    assert dock.resident_check.text() == f"Keep the volume in memory ({real_format(expected)})"
+
+
+def test_a_line_whose_position_cannot_be_computed_is_left_out_of_the_count(docked, monkeypatch):
+    """Preparation skips a line whose trace positions cannot be computed (for
+    example `traces_per_metre <= 0`); the estimate skips it too, instead of
+    raising inside a slot where QGIS would swallow it (#113)."""
+    from nsgeo.slices import covered_cells
+
+    dock, session = docked
+    dock.engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    keys = list(dock._included)
+    bad = session.line_for_key(keys[0])
+
+    real_coords = type(bad).trace_coords
+
+    def maybe_boom(self, frames):  # Line is frozen, so patch the class
+        if self is bad:
+            raise ValueError("traces_per_metre must be positive")
+        return real_coords(self, frames)
+
+    monkeypatch.setattr(type(bad), "trace_coords", maybe_boom)
+    calls = _spy_on_the_estimate(monkeypatch)
+    dock._update_included_label()  # must not raise
+    frame = dock.engine.frame
+    others = [real_coords(session.line_for_key(k), session.site.frames) for k in keys[1:]]
+    assert calls
+    assert calls[0][3] == covered_cells(frame, others)
+    assert covered_cells(frame, others) > 0
 
 
 def test_the_keep_resident_checkbox_wires_to_the_engine_and_shows_its_cost(docked):
@@ -1231,14 +1422,13 @@ def test_an_error_during_refresh_clears_the_stale_slice_and_readout(docked):
 
 
 def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked):
-    """Final review, Minor 6. `engine.provenance()` resolves velocity
-    against the FIRST prepared line's key and raises `KeyError` once that
-    line has been removed from the session -- a contributing line can be
-    deleted while a source stays prepared, and the cube's own arrays are
-    still entirely correct. `_resolved_velocity`'s catch used to guard
-    only `RuntimeError`, so the `KeyError` escaped through `_update_
-    readout` into `refresh_slice`'s broad `except`, which reported
-    `error: '<key>'` and cleared the map for a still-good slice."""
+    """Final review, Minor 6. A contributing line can be deleted while a source
+    stays prepared, and the cube's own arrays are still entirely correct. The
+    grid's velocity (`grid_depth_velocity`) is the grid's own velocity, else
+    the first line left in survey order, so removing the first line moves the
+    label to the new first line rather than raising. A `KeyError` escaping
+    through `_update_readout` into `refresh_slice`'s broad `except` used to
+    report `error: '<key>'` and clear the map for a still-good slice."""
     dock, session = docked
     _ready(dock)
     dock.slice_slider.setValue(5)
@@ -1254,7 +1444,147 @@ def test_deleting_a_contributing_line_does_not_blank_a_still_valid_slice(docked)
     assert dock.current_values() is not None, "a still-valid slice must not be blanked"
     assert not dock.readout.text().startswith("error:"), dock.readout.text()
     assert not any(removed_key in e for e in errors), errors
-    assert dock.velocity_label.text() == "", "the velocity provenance has nothing left to name"
+    # The grid's velocity does not hang on the removed line: the label stays,
+    # and names the grid's new first line.
+    new_first = session.keys_on_grid("A")[0]
+    epsr = session.line_for_key(new_first).header.epsr
+    assert dock.velocity_label.text().endswith(
+        f"(header ε {epsr:g}, {line_label(session.line_for_key(new_first))})"
+    )
+
+
+def _override_every_line(session, velocity=0.12):
+    """The hazard input (spec 12): the grid's first line in survey order, and
+    the first prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def _two_fit_record(session):
+    members = [
+        SourceFit(
+            key,
+            "fit-1",
+            "2026-11-12T00:00:00+00:00",
+            line_label(session.line_for_key(key)),
+            20.0,
+            0.09,
+            0.002,
+            0.0,
+        )
+        for key in session.keys_on_grid("A")[:2]
+    ]
+    return VelocitySource.from_fits(members, applied_at=None)
+
+
+def test_slice_label_and_readout_use_the_grids_velocity(docked, message_log):
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+    lo_m, hi_m = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.09))
+    text = dock.readout.text()
+    assert f"{lo_m:.2f}" in text and f"{hi_m:.2f}" in text
+    lo_o, hi_o = window_depths_m(dock.engine.z, window, VelocityModel.constant(0.12))
+    assert f"{lo_o:.2f}–{hi_o:.2f} m" not in text
+    assert message_log == []
+
+
+def test_slice_label_names_the_grids_record(docked, message_log):
+    dock, session = docked
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_live_grid_apply_relabels_the_prepared_slice(docked, message_log):
+    """Final review, Important: `grids_changed` reached `rebuild_source`, which
+    only refreshed a slice whose finish had moved, so a grid Apply left the
+    label and the readout's metres standing while Export GeoTIFF (through
+    `_resolved_velocity`) already used the new velocity."""
+    dock, session = docked
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _ready(dock)
+    dock.thickness_spin.setValue(4.0)
+    dock.slice_slider.setValue(10)
+    assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid A)"
+    window = dock.current_window()
+
+    def metres(v):
+        lo, hi = window_depths_m(dock.engine.z, window, VelocityModel.constant(v))
+        return f"{lo:.2f}-{hi:.2f} m"
+
+    assert metres(0.09) in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), None)
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A)"
+    assert metres(0.12) in dock.readout.text()
+    assert metres(0.09) not in dock.readout.text()
+
+    session.apply_grid_velocity("A", VelocityModel.constant(0.12), _two_fit_record(session))
+    assert dock.velocity_label.text() == "v = 0.120 m/ns (Grid A, average of 2 fits)"
+    assert message_log == []
+
+
+def test_a_slice_survives_losing_every_line_of_a_grid_with_no_velocity(docked, message_log):
+    """The `KeyError` guards in `_resolved_velocity` and `_update_velocity_label`:
+    a grid with no velocity and no line has nothing to resolve, and that must
+    neither blank a still-valid slice nor leave an old label standing."""
+    dock, session = docked
+    _ready(dock)
+    dock.slice_slider.setValue(5)
+    assert dock.current_values() is not None
+    for key in list(session.keys_on_grid("A")):
+        session.remove_line(key)
+    dock.slice_slider.setValue(6)
+    assert dock.current_values() is not None
+    assert not dock.readout.text().startswith("error:"), dock.readout.text()
+    assert "error:" not in dock.readout.text()
+    assert dock.velocity_label.text() == ""
+    # `_resolved_velocity` returns first on this path, so the label's own guard
+    # is reached only when it is handed a velocity the grid can no longer name.
+    dock.velocity_label.setText("stale")
+    dock._update_velocity_label("A", VelocityModel.constant(0.1))
+    assert dock.velocity_label.text() == ""
+    assert message_log == []
+
+
+def test_slice_label_without_a_grid_velocity_names_the_header_and_line(docked, message_log):
+    dock, session = docked
+    _override_every_line(session)
+    _ready(dock)
+    dock.slice_slider.setValue(10)
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    v = session.grid_depth_velocity("A").surface_velocity
+    assert dock.velocity_label.text() == (
+        f"v = {v:.3f} m/ns (header ε {first.header.epsr:g}, {line_label(first)})"
+    )
+    assert v != pytest.approx(0.12)
+    assert message_log == []
+
+
+def test_grid_velocity_label_covers_each_tier(docked):
+    from nsgeo_qgis.ui.profile_dock import grid_velocity_label
+
+    _, session = docked
+    first = session.line_for_key(session.keys_on_grid("A")[0])
+    assert (
+        grid_velocity_label(session, "A") == f"header ε {first.header.epsr:g}, {line_label(first)}"
+    )
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    assert grid_velocity_label(session, "A") == "Grid A"
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), _two_fit_record(session))
+    assert grid_velocity_label(session, "A") == "Grid A, average of 2 fits"
+    one = VelocitySource.from_fits(_two_fit_record(session).members[:1], applied_at=None)
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), one)
+    assert grid_velocity_label(session, "A") == f"Grid A, fit on {one.members[0].line_label}"
 
 
 def test_moving_the_slider_announces_the_window_it_averaged(docked):
@@ -1289,12 +1619,12 @@ class _WheelStub:
     """The minimal `QWheelEvent`-shaped surface `eventFilter` reads.
 
     Not a real `QWheelEvent`: its constructor signature differs between
-    Qt 5 and Qt 6 (the same reason `depth_scroll_delta` itself is a plain
+    Qt 5 and Qt 6 (the same reason `depth_scroll_steps` itself is a plain
     function tested without one), but `eventFilter`'s own body only ever
     calls `.type()`, `.modifiers()` and `.angleDelta().y()` on the event
     it is handed -- so a stub exposing exactly those three is a Qt-version-
     independent way to exercise the filter directly, the same way
-    `depth_scroll_delta`'s own pure test needs no event at all.
+    `depth_scroll_steps`'s own pure test needs no event at all.
     """
 
     def __init__(self, angle_delta_y: int, shift: bool) -> None:
@@ -1324,13 +1654,13 @@ class _NonWheelStub:
 
 
 def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(fake_iface, docked):
-    """Minor 3 (Task 5 review): `depth_scroll_delta` was pinned as a pure
+    """Minor 3 (Task 5 review): `depth_scroll_steps` was pinned as a pure
     function, but nothing pinned `CanvasDepthScroll.eventFilter` itself --
     the thing that actually decides whether an event is consumed. A
     mutant that returns `True` before the `delta == 0` check would take
     the map's zoom away entirely (every wheel event on the canvas
     swallowed, shift or not) and would survive the whole suite without
-    this test: `depth_scroll_delta`'s own test never touches the filter,
+    this test: `depth_scroll_steps`'s own test never touches the filter,
     and nothing else calls `eventFilter` at all.
     """
     dock, _ = docked
@@ -1355,10 +1685,30 @@ def test_canvas_depth_scroll_consumes_shift_wheel_and_leaves_plain_scroll_alone(
         filt.dispose()
 
 
+def test_canvas_depth_scroll_moves_one_step_per_notch_of_a_hi_res_wheel(fake_iface, docked):
+    """#109: one notch of the user's wheel arrives as two events of 60.
+    The depth moves one Step for the notch, not one per event, and the
+    first half is still consumed so that the map does not zoom by half a
+    notch in between."""
+    dock, _ = docked
+    _ready(dock)
+    filt = CanvasDepthScroll(fake_iface.mapCanvas(), dock)
+    try:
+        start = dock.slice_slider.value()
+        step_levels = dock.thickness_step_levels()[1]
+
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start, "half a notch must not move the depth"
+        assert filt.eventFilter(None, _WheelStub(-60, shift=True)) is True
+        assert dock.slice_slider.value() == start + step_levels
+    finally:
+        filt.dispose()
+
+
 # ---- Task 7 fix round 1: restore_cube, driven through the real widgets ----
 
 
-def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
+def _save_cube(dock, session, cube_id: str, view: ViewSettings, time_base: str = "radar") -> dict:
     """Build a record from the dock's own, already-prepared engine and
     drop it straight into `session.site.cubes`, then refresh the combo --
     no `.npz` needs to exist on disk for `restore_cube` to read the
@@ -1371,6 +1721,7 @@ def _save_cube(dock, session, cube_id: str, view: ViewSettings) -> dict:
         view,
         session.root / "slices" / f"{cube_id}.npz",
         line_keys=dock.engine.provenance().line_keys,
+        time_base=time_base,
     )
     session.site.cubes[cube_id] = record
     dock.refresh_cube_combo()
@@ -1455,7 +1806,8 @@ def test_restore_cube_brings_every_control_back_ruling_al(docked):
     assert dock.z1_spin.value() == record["z"]["t1_ns"]  # Ruling AJ
     assert dock.z0_spin.value() == record["z"]["t0_ns"]
     assert dock.cell_spin.value() == record["cell"]
-    assert dock.view_settings() == view
+    # A record without colours (#180) leaves them as they were: the default.
+    assert dock.view_settings() == dataclasses.replace(view, colours="nsgeo")
 
 
 def test_restore_cube_refuses_a_missing_grid(docked):
@@ -1571,8 +1923,10 @@ def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_ap
     header says, and the dock seeded `z0`/`z1` from that raw header.
 
     On this repo's own real files `time_zero` drops 49 of 512 rows, so a
-    prepared line spans -0.476..99.561 ns while the seeded cube asked for
-    -11.086..99.546 -- and the first slice raised, verbatim:
+    prepared line spanned -0.476..99.561 ns (on the radar clock this was
+    found on; since #97 the same line reads 0 to about 100 ns, measured from its
+    first break) while the seeded cube asked for -11.086..99.546 -- and the
+    first slice raised, verbatim:
 
         line 'FILE__001.DZT' spans -0.476..99.561 ns, which does not cover
         the cube's -11.086..99.546 ns; shrink the z range or exclude the line
@@ -1629,7 +1983,9 @@ def test_the_seeded_z_range_survives_a_preset_that_crops_the_sample_axis(qgis_ap
 def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path):
     """Three lines whose time-zero lands on a different sample each -- the
     ordinary consequence of antenna coupling changing across a survey, and
-    what `time_zero(mode="first_break")` is for.
+    what `time_zero(mode="first_break")` is for. Each starts at 0 ns, but
+    they END at three different times (each line's first break is cropped
+    off its front), so the shared range is the earliest end.
 
     This repo's ten real DZT files are byte-identical in the sample axis
     (all -11.086..99.561 ns, 512 samples, and all cropped to exactly 463 by
@@ -1677,9 +2033,12 @@ def test_prepared_z_bounds_is_the_intersection_not_the_union(qgis_app, tmp_path)
         prepared = list(dock.engine.prepared_lines())
         starts = {round(line.t0_ns, 6) for line in prepared}
         ends = {round(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns, 6) for line in prepared}
-        # Without this the test could pass on lines that happen to agree,
-        # which is exactly how the real files hid the bug.
-        assert len(starts) == 3, starts
+        # Every line reads 0 at its own first break (#97), so the starts
+        # agree; what differs is where each line's zero sits on the radar
+        # clock. Without three different zeros the test could pass on lines
+        # that happen to agree, which is exactly how the real files hid it.
+        assert starts == {0.0}, starts
+        assert len({round(line.zero_ns, 6) for line in prepared}) == 3
         assert len(ends) == 3, ends
 
         bounds = dock.engine.prepared_z_bounds()
@@ -2819,7 +3178,7 @@ def test_a_failed_refine_is_reported_and_leaves_the_preview(docked, monkeypatch)
     dock.slice_slider.setValue(20)
     preview = dock.current_values()
     _wait_for_refine(dock)
-    assert seen == ["minimum curvature failed: no convergence"]
+    assert seen == ["minimum curvature failed: ValueError: no convergence"]
     assert dock.provisional, "the preview stays on screen"
     assert dock.current_values() is preview
     assert dock.status_label.text() == dock._grid_status_text()
@@ -2870,7 +3229,7 @@ def test_a_provisional_stretch_left_by_a_failed_refine_is_retried_at_the_next_dr
     dock.error.connect(errors.append)
     dock.stretch_combo.setCurrentText("shared across the cube")
     _wait_for_refine(dock)
-    assert errors == ["minimum curvature failed: no convergence"]
+    assert errors == ["minimum curvature failed: ValueError: no convergence"]
     assert dock._grid_refine.stretch is not None and dock._grid_refine.stretch[2] is False
     assert not dock.refiner.busy and not dock._grid_refine.rest.isActive()
 
@@ -3275,3 +3634,543 @@ def test_a_list_for_a_slice_left_behind_does_not_name_it(docked, monkeypatch):
     # Nothing left to say, so neither the line nor its tooltip says anything.
     assert dock.refine_label.text() == ""
     assert dock.refine_label.toolTip() == ""
+
+
+# ---- line editing (spec §4.5) ------------------------------------------------
+
+
+def test_a_line_moved_off_the_grid_leaves_an_explicit_choice(docked_two_grids):
+    dock, session = docked_two_grids
+    a_keys = _grid_keys(session, "A")
+    dock.set_included(a_keys[:2])
+    assert dock.engine.wait_for_preparation(20_000)
+
+    session.move_lines([a_keys[1]], "B")
+    assert dock.included_keys() == (a_keys[0],)
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.source_status.text() == "prepared \u00b7 1 lines"
+
+
+def test_a_line_moved_onto_a_default_grid_re_prepares_it(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    b_key = _grid_keys(session, "B")[0]
+
+    session.move_lines([b_key], "A")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert b_key in dock.engine.choice.line_keys
+    assert dock.engine.line_count == 4
+    assert dock.source_status.text().startswith("prepared")
+
+
+def test_a_line_imported_onto_a_default_grid_still_shows_stale(docked_two_grids, tmp_path):
+    """Today's behaviour, pinned: an imported line was never in the engine's
+    snapshot, so nothing re-prepares for it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.add_lines([_line(tmp_path, "A", "FILE__099", 9.0)])
+    assert not dock.engine.is_running
+    assert dock.source_status.text().startswith("stale")
+
+
+def test_restoring_a_cube_drops_a_line_now_on_another_grid_and_says_so(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    _save_cube(
+        dock, session, "A__m", ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    session.move_lines([a_keys[2]], "B")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__m")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert a_keys[2] not in dock.included_keys()
+    assert any("moved to another grid since it was saved" in e for e in errors), errors
+
+
+def test_a_reorder_alone_is_no_change_to_a_default_source(docked_two_grids):
+    """Line editing spec §4.5: a cube is a sum over lines, so the survey
+    order is not part of what it was built from. No re-preparation, and no
+    false "stale" with no Prepare button to clear it."""
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    before = dock.engine.choice
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines([], grid_id="A", order=list(reversed(a_keys)))
+    assert dock.included_keys() == tuple(reversed(a_keys))
+    assert not dock.engine.is_running
+    assert dock.engine.wait_for_preparation(2_000)
+    assert count == []
+    assert dock.engine.choice == before
+    assert dock.source_status.text() == "prepared · 3 lines"
+
+
+def test_a_reorder_with_an_offset_edit_re_prepares_once_and_reads_prepared(docked_two_grids):
+    from nsgeo_qgis.line_edit import LineEdit
+
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    a_keys = _grid_keys(session, "A")
+    count = []
+    inner = dock.engine.on_prepared
+    dock.engine.on_prepared = lambda: (count.append(1), inner())
+
+    session.edit_lines(
+        [LineEdit(a_keys[0], session.line_for_key(a_keys[0]).placement, offset=1.5)],
+        grid_id="A",
+        order=list(reversed(a_keys)),
+    )
+    assert dock.engine.wait_for_preparation(20_000)
+    assert count == [1]
+    assert dock.engine.choice.line_keys == tuple(reversed(a_keys))
+    assert dock.source_status.text() == "prepared · 3 lines"
+
+
+# ---- #97: cubes on the time-zero clock ------------------------------------
+
+
+def _owed_record(dock, session, cube_id="A__old", time_base=None, z=None):
+    """A record as an earlier build wrote it: no `time_base`, z on the radar clock."""
+    record = _save_cube(
+        dock, session, cube_id, ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    )
+    record.pop("time_base", None)
+    if time_base is not None:
+        record["time_base"] = time_base
+    record["z"] = z or {"t0_ns": 5.0, "t1_ns": 40.0, "dz_ns": 0.5}
+    return record
+
+
+def test_a_cube_built_with_time_zero_starts_at_zero(docked_zeroed):
+    dock, _session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.engine.prepared_z_bounds()[0] == 0.0
+    assert dock.z0_spin.value() == 0.0
+
+
+def _prepared_with_owed_record(dock, session, clear=True, **kw):
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _owed_record(dock, session, **kw)
+    if clear:
+        dock.engine.clear()
+
+
+def _clock_start_record(dock, session, cube_id="A__old"):
+    """An old record built the way the old clock saved it, with no `time_base`:
+    z0 the latest-starting line's radar-clock start (below 0), z1 the radar-clock
+    end every line shares (the line that crops the most rows ends first on the
+    new clock, at `high`), slices one sample apart. Shifted by a median zero
+    below the latest one, its end overshoots `high`, so only the clamp after
+    the shift keeps the cube inside the data (final review residual R-a)."""
+    keys = dock.engine.choice.line_keys
+    zeros = [dock.engine.line_zero(k) for k in keys]
+    low, high = dock.engine.prepared_z_bounds()
+    dt = session.line_for_key(keys[0]).header.dt_ns
+    z = {"t0_ns": low + max(zeros), "t1_ns": high + max(zeros), "dz_ns": dt}
+    assert z["t0_ns"] < 0.0, z
+    return _owed_record(dock, session, cube_id=cube_id, z=z)
+
+
+def _assert_a_clean_old_restore(dock, errors):
+    median = dock.engine.median_zero()
+    assert not [m for m in errors if "does not cover" in m or "could not" in m], errors
+    assert errors.count(old_cube_note(-median)) == 1, errors
+    low, high = dock.engine.prepared_z_bounds()
+    assert low - 1e-9 <= dock.engine.z.t0_ns < dock.engine.z.t_end_ns <= high + 1e-9
+    assert dock.current_values() is not None
+
+
+def test_a_realistic_old_record_restores_inside_the_bounds_when_the_engine_holds_its_source(
+    docked_banded,
+):
+    dock, session = docked_banded
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    zeros = [dock.engine.line_zero(k) for k in dock.engine.choice.line_keys]
+    assert len({round(z, 6) for z in zeros}) == 2, zeros  # one sample apart
+    record = _clock_start_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert not dock.engine.is_running
+
+    _assert_a_clean_old_restore(dock, errors)
+    # The grid remembers the record's range moved onto the time-zero clock, not
+    # its radar-clock one. Like any restore it remembers the record's range,
+    # not the clamped one on show: the clamp is no edit (`_clamp_z_to_prepared`),
+    # so a later change that frees the data brings the record's end back.
+    median = dock.engine.median_zero()
+    remembered = session.slice_resolution("A")
+    spin = 5e-4  # the z spins hold three decimals
+    for end in ("t0_ns", "t1_ns"):
+        shifted = retime_ns(record["z"][end], 0.0, median)
+        assert remembered[end] == pytest.approx(shifted, abs=spin)
+    assert dock.z1_spin.value() < remembered["t1_ns"]  # the shifted end overshot
+
+
+def test_a_realistic_old_record_restores_inside_the_bounds_when_a_preparation_runs(
+    docked_banded,
+):
+    dock, session = docked_banded
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    _clock_start_record(dock, session)
+    dock.engine.clear()
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_a_clean_old_restore(dock, errors)
+
+
+@needs_real_data
+def test_a_real_data_old_record_restores_without_a_coverage_error(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+            for i in range(4)
+        ]
+    )
+    session.site.presets["p"] = [
+        {"step": "time_zero", "params": {}, "enabled": True},
+        {"step": "dewow", "params": {}, "enabled": True},
+    ]
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        assert dock.engine.wait_for_preparation(60_000)
+        dock.flush_debounce()
+        assert dock.engine.wait_for_preparation(60_000)
+        _clock_start_record(dock, session)
+        errors: list[str] = []
+        dock.error.connect(errors.append)
+
+        dock.restore_cube("A__old")
+        assert dock.engine.wait_for_preparation(60_000)
+
+        _assert_a_clean_old_restore(dock, errors)
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_the_owed_shift_survives_a_switch_to_whole_site_before_the_preparation_lands(
+    docked_zeroed,
+):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock._pending_z_shift is True
+    dock._scope = "site"
+    try:
+        dock._on_prepared()  # the preparation lands while Whole site is showing
+    finally:
+        dock._scope = "grid"
+    assert dock._pending_z_shift is True
+    assert not errors.count(old_cube_note(-(dock.engine.median_zero() or 0.0)))
+
+    assert dock.engine.wait_for_preparation(20_000)
+    dock._on_prepared()  # This grid's preparation lands
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_the_owed_shift_helper_steps_aside_while_a_preparation_runs(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)  # engine cleared: the restore dispatches
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("A__old")
+    assert dock.engine.is_running
+    assert dock._pending_z_shift is True
+
+    dock._apply_owed_z_shift()  # must not consume the flag or say anything
+
+    assert dock._pending_z_shift is True
+    assert not [m for m in errors if "first break" in m], errors
+    assert dock.engine.wait_for_preparation(20_000)
+    _assert_shifted_once(dock, errors)
+
+
+def _assert_shifted_once(dock, errors):
+    median = dock.engine.median_zero()
+    assert median is not None
+    assert dock.z0_spin.value() == pytest.approx(5.0 - median, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0 - median, abs=1e-3)
+    # The engine, not just the spins: the slice and Save cube read this.
+    assert dock.engine.z.t0_ns == pytest.approx(5.0 - median, abs=1e-3)
+    assert errors.count(old_cube_note(-median)) == 1, errors
+    assert dock._pending_z_shift is False
+
+
+def test_an_old_recipe_with_time_zero_restores_its_range_moved_by_the_median_zero(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_an_old_recipe_restores_shifted_when_the_engine_already_holds_its_source(docked_zeroed):
+    """The ordinary case: `prepare()` is a no-op, so no `_on_prepared` follows."""
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert not dock.engine.is_running
+
+    _assert_shifted_once(dock, errors)
+
+
+def test_an_old_recipe_keeps_its_shift_while_a_preparation_is_owed(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, clear=False)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock._grid_prepare_pending = True  # R-P5: a site task is still live
+    dock.restore_cube("A__old")
+    assert dock._pending_z_shift is True
+
+    dock._run_pending_grid_prepare()  # the engine holds the source: a no-op prepare
+
+    _assert_shifted_once(dock, errors)
+
+    # Exactly once: a later unrelated preparation leaves a user-set range alone.
+    for spin, value in ((dock.z0_spin, 20.0), (dock.z1_spin, 30.0)):
+        spin.setValue(value)
+    dock.flush_debounce()
+    dock._on_prepared()
+    assert dock.z0_spin.value() == pytest.approx(20.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(30.0, abs=1e-3)
+    assert errors.count(old_cube_note(-dock.engine.median_zero())) == 1
+
+
+def test_rebuilding_the_source_drops_an_owed_shift(docked_zeroed):
+    dock, _session = docked_zeroed
+    dock._pending_z_shift = True
+    dock.rebuild_source()
+    assert dock._pending_z_shift is False
+
+
+def test_a_failed_line_does_not_drop_the_shift(docked_zeroed, tmp_path):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    next(iter(sorted((tmp_path / "raw").glob("*.DZT")))).rename(tmp_path / "raw" / "gone.x")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.line_count == 2
+    _assert_shifted_once(dock, errors)
+
+
+def test_a_marked_record_is_not_shifted(docked_zeroed):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session, time_base="time_zero")
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+
+
+def test_an_old_recipe_without_time_zero_restores_unchanged(docked):
+    dock, session = docked
+    _prepared_with_owed_record(dock, session)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    assert dock.engine.wait_for_preparation(20_000)
+
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert dock.z1_spin.value() == pytest.approx(40.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+
+
+def test_an_old_recipe_with_nothing_prepared_is_not_shifted(docked_zeroed, tmp_path, message_log):
+    dock, session = docked_zeroed
+    _prepared_with_owed_record(dock, session)
+    for path in (tmp_path / "raw").glob("*.DZT"):
+        path.rename(path.with_suffix(".gone"))
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+
+    dock.restore_cube("A__old")
+    dock.engine.wait_for_preparation(20_000)
+
+    assert dock.engine.median_zero() is None
+    assert dock.z0_spin.value() == pytest.approx(5.0, abs=1e-3)
+    assert not [m for m in errors if "first break" in m], errors
+    assert dock._pending_z_shift is False
+    assert not [m for m in message_log if "could not" in m], message_log
+
+
+def test_the_slice_band_marks_the_same_samples_on_a_line_whose_stack_differs(
+    docked_zeroed, qgis_app
+):
+    """The band is on the cube clock. A line with no steps (radar clock) draws
+    it at (10 + line_zero, 12 + line_zero); a line with the cube's own time-zero
+    step draws it at (10, 12), through `set_slice_band` and through a repaint."""
+    from nsgeo.processing import build_step
+    from nsgeo_qgis.ui.profile_dock import ProfileDock
+
+    dock, session = docked_zeroed
+    assert dock.engine.wait_for_preparation(20_000)
+    profile = ProfileDock(session)
+    profile.set_cube_zero_lookup(dock.line_zero_in_cube)
+    try:
+        key = session.keys()[0]
+        zero = dock.line_zero_in_cube(key)
+        assert zero is not None
+        assert zero != 0.0
+        session.set_profiles(key, session.line_for_key(key).load())
+        session.open_line(key)
+        assert profile._shown_radargram is not None
+        assert profile.shown_zero_ns() == 0.0
+        profile.set_slice_band(10.0, 12.0)
+        lo, hi = profile.view._slice_band
+        assert lo == pytest.approx(10.0 + zero)
+        assert hi == pytest.approx(12.0 + zero)
+
+        # The same line with the cube's own step: shown zero == cube zero.
+        session.append_step(key, build_step("time_zero"))
+        assert profile.shown_zero_ns() == pytest.approx(zero)
+        profile.view._slice_band = None  # a repaint alone must redraw it
+        profile._render()
+        assert profile.view._slice_band == pytest.approx((10.0, 12.0))
+
+        profile.clear_slice_band()
+        profile._render()
+        assert profile.view._slice_band is None
+    finally:
+        profile.hide()
+        profile.deleteLater()
+
+
+@pytest.mark.skipif(len(GRID2_LINES) < 3, reason="needs Grid 2 in tests/data/local/grid2")
+def test_real_grid2_slice_depth_follows_the_grid_with_an_override_on_the_first_line(
+    qgis_app, tmp_path, message_log
+):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("G2", (500.0, 700.0), 0.0, 2.0, 29.96, "EPSG:32616", 0.5))
+    session.add_lines(
+        [
+            Line.open(p, GridPlacement("G2", "y", 0.25 + 0.5 * k, 0.0, 1, p.stem))
+            for k, p in enumerate(GRID2_LINES[:3])
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.set_grid_velocity("G2", VelocityModel.constant(0.09))
+    session.set_line_velocity(session.keys_on_grid("G2")[0], VelocityModel.constant(0.12))
+    dock = SlicesDock(session)
+    try:
+        _ready(dock)
+        dock.thickness_spin.setValue(4.0)
+        dock.slice_slider.setValue(10)
+        assert dock.velocity_label.text() == "v = 0.090 m/ns (Grid G2)"
+        assert dock.engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+        lo_m, hi_m = window_depths_m(
+            dock.engine.z, dock.current_window(), VelocityModel.constant(0.09)
+        )
+        assert f"{lo_m:.2f}" in dock.readout.text()
+        assert message_log == []
+    finally:
+        dock.engine.wait_for_preparation(60_000)
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+# ---- #180: a saved cube carries This grid's colours ---------------------------------------
+
+
+def test_view_settings_carry_this_grids_colours(docked):
+    dock, session = docked
+    assert (dock.view_settings().colours, dock.view_settings().style) == ("nsgeo", None)
+    session.set_slice_colours("grid", own=True, style="<qgis>mine</qgis>")
+    session.set_slice_colours("site", own=False, style="<qgis>site</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("own", "<qgis>mine</qgis>")
+
+
+def test_apply_view_restores_the_colours_and_an_older_record_leaves_them(docked):
+    dock, session = docked
+    view = dock.view_settings()
+    dock.apply_view(
+        dataclasses.replace(view, colours="own", style="<qgis>mine</qgis>"), spacing_m=0.5
+    )
+    assert session.slice_colours("grid") == {"own": True, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 1 and not dock.stretch_combo.isEnabled()
+    dock.apply_view(dataclasses.replace(view, colours=None, style=None), spacing_m=0.5)
+    assert session.slice_colours("grid")["own"] is True
+    dock.apply_view(dataclasses.replace(view, colours="nsgeo", style=None), spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>mine</qgis>"}
+    assert dock.colours_combo.currentIndex() == 0 and dock.stretch_combo.isEnabled()
+
+
+def test_the_colours_choice_needs_an_open_survey(qgis_app):
+    dock = SlicesDock(SiteSession())
+    try:
+        assert not dock.colours_combo.isEnabled()
+        assert not dock.own_colours_on() and dock.own_style() is None
+    finally:
+        dock.engine.dispose()
+        dock.deleteLater()
+
+
+def test_a_cube_saved_under_the_plugin_colours_keeps_no_style(docked):
+    """Review finding 6: restoring it must not replace a style refined since."""
+    dock, session = docked
+    session.set_slice_colours("grid", own=False, style="<qgis>refined</qgis>")
+    view = dock.view_settings()
+    assert (view.colours, view.style) == ("nsgeo", None)
+    dock.apply_view(view, spacing_m=0.5)
+    assert session.slice_colours("grid") == {"own": False, "style": "<qgis>refined</qgis>"}
+
+
+def test_the_symbology_button_is_off_while_coverage_shows(docked):
+    """Review finding 5: an edit on the coverage colours would be lost."""
+    dock, session = docked
+    dock.colours_combo.setCurrentIndex(1)
+    assert dock.symbology_button.isEnabled()
+    dock.coverage_check.setChecked(True)
+    assert not dock.symbology_button.isEnabled()
+    assert "Show coverage" in dock.symbology_button.toolTip()
+    dock.coverage_check.setChecked(False)
+    assert dock.symbology_button.isEnabled()

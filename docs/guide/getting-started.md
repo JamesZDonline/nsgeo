@@ -5,7 +5,7 @@ GSSI DZT files into a grid placed on the map, then view and process each profile
 while the map shows where you are on the line. You can also pick reflections and
 build time and depth slices across a grid.
 
-This guide covers nsgeo 0.2.0. It is **experimental**, so keep
+This guide covers nsgeo 0.4.0. It is **experimental**, so keep
 backups of your site folders. You need QGIS 3.40 to 3.44, or QGIS 4.x. You do not
 need to install anything else.
 
@@ -13,7 +13,7 @@ need to install anything else.
 2. [The toolbar and the four panels](#2-the-toolbar-and-the-four-panels)
 3. [A first session](#3-a-first-session)
 4. [Where your data lives](#4-where-your-data-lives)
-5. [Known issues in 0.2.0](#5-known-issues-in-020)
+5. [Known issues in 0.4.0](#5-known-issues-in-040)
 6. [Reporting a problem](#6-reporting-a-problem)
 
 ---
@@ -22,7 +22,7 @@ need to install anything else.
 
 ### Windows
 
-1. Download `nsgeo_qgis-0.2.0.zip` from the
+1. Download `nsgeo_qgis-0.4.0.zip` from the
    [Releases page](https://github.com/JamesZDonline/nsgeo/releases). It is listed
    under **Assets**. Download that file, not the *Source code* downloads listed
    beside it, which will not install. Do not unzip it, because QGIS installs the
@@ -39,7 +39,7 @@ need to install anything else.
 5. When QGIS reports *Plugin installed successfully*, close the Plugins window
    and **restart QGIS**: close it completely and open it again.
 6. To check the install, choose **Plugins → nsgeo → About nsgeo**. The message
-   bar above the map should show `plugin 0.2.0 · core 0.2.0 · build`, followed by
+   bar above the map should show `plugin 0.4.0 · core 0.4.0 · build`, followed by
    a 12-character code.
 
 Restarting matters. Until QGIS restarts, it can keep parts of an earlier nsgeo
@@ -54,7 +54,7 @@ Install Plugins… → Installed** and tick **nsgeo**.
 The steps are the same, from the **Plugins** menu inside QGIS. Safari unzips
 downloads by itself, leaving a folder where QGIS needs the zip file, so turn off
 **Open "safe" files after downloading** in Safari's **Settings → General** before
-you download, or use another browser. nsgeo 0.2.0 has not been tried on a Mac.
+you download, or use another browser. nsgeo 0.4.0 has not been tried on a Mac.
 If you try it, please report what happens, whether it works or not (see
 [Reporting a problem](#6-reporting-a-problem)).
 
@@ -67,7 +67,24 @@ QGIS 3.40, QGIS 3.44 and QGIS 4.2 on Linux.
 
 Install the new zip exactly as above. QGIS replaces the old version. Then
 **restart QGIS** and check **Plugins → nsgeo → About nsgeo** for the new
-version number. Upgrading does not touch your site folders.
+version number. Upgrading does not touch your site folders. The first time
+nsgeo 0.4.0 opens a site, the picks table gains a `zero_ns` column. Nothing is
+converted: a pick with no zero was measured on the radar's clock, and keeps
+reading that way. If the site has picks, it also puts any pick that had drifted
+off its line back onto it, with its depth at the line's current velocity, and
+the message bar says how many picks it updated.
+
+Two things stop an older version reading a site that 0.4.0 has saved:
+
+- **After you open a site in 0.4.0, do not reopen it in 0.3.0.** 0.3.0 drops
+  the picks table's `zero_ns` column. A pick made or moved on a profile that
+  Time zero relabelled would then read 0.5 to 1.5 ns off.
+- **A site with cuts saves as schema version 2, and 0.3.0 refuses to open it.**
+  A site without cuts still saves as version 1.
+
+A cube saved before 0.4.0, whose preset has a Time zero step, comes back
+shifted by the median line zero when you restore it, so its slices sit at the
+depths they showed before, and the Slices panel says so.
 
 ### Uninstalling
 
@@ -90,10 +107,11 @@ stay exactly where they are.
 | **Import DZT…** | Imports DZT files into a grid. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
+| **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…** and **Import DZT…** stay greyed out until a site is
-open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
+site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -101,13 +119,16 @@ QGIS docks the four panels around the map. You can drag, float or close them lik
 any other QGIS panel.
 
 - **nsgeo Survey** (left) lists the site, its grids and the lines in each grid.
-  Click a line to open it. Right-click a grid for **Edit grid…**, **Import DZT
-  files…**, **Set velocity…** and **Remove grid**, which removes the grid along
-  with its lines. Right-click a line for **Open** and **Remove line from site**.
-  To remove several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click
-  to select them, then press Delete or right-click the selection. Removing never
-  deletes the DZT files, and the site file isn't changed until you choose
-  **Save site**.
+  Click a line to open it. Right-click a grid for **Edit grid…**, **Edit
+  lines…**, **Import DZT files…**, **Set velocity…** and **Remove grid**, which
+  removes the grid along with its lines. **Edit lines…** is greyed out while the
+  grid has no lines. Right-click a line for **Open**, **Edit line…**, **Set
+  velocity override…**, **Move to grid** and **Remove line from site**. To work
+  on several lines at once, Ctrl-click (⌘-click on a Mac) or Shift-click to
+  select them. Press Delete to remove them, or right-click the selection. Lines
+  on one grid offer **Edit N lines…**. Any lines offer **Move N lines to grid**
+  and **Remove N lines from site**. Removing never deletes the DZT files, and
+  the site file isn't changed until you choose **Save site**.
 - **nsgeo Profile** (bottom) shows the open line's radargram. Its title names the
   line and its trace count. The **Display gain** slider and the colour table
   change only how the profile looks, never the data. Every line on a grid is
@@ -142,7 +163,21 @@ works too. The toolbar is under **View → Toolbars → nsgeo**.
 **Set velocity override…** on a line's right-click menu sets or clears that line's
 own velocity. It also lists the velocity fits you have measured on the line, and
 you can apply one of them as the override. Without an override, the line uses its
-grid's velocity (right-click the grid, then **Set velocity…**).
+grid's velocity (right-click the grid, then **Set velocity…**). If the grid has
+none either, it uses the dielectric in its file header. The profile names the
+source next to the velocity, for example `v = 0.080 m/ns (header ε 14)`.
+
+**Set velocity…** on a grid's right-click menu opens the grid's velocity dialog.
+It lists every velocity fit saved on the grid's lines, with the line each one is
+on. Tick the fits you want and click **Use average**: the box takes their
+average, weighted by each fit's ±, so tighter fits count for more. A warning
+says when ticked fits disagree, which can mean the ground is layered. You can
+also click one fit to use its velocity, or type a number. **Apply** sets the
+grid's velocity, and the grid remembers which fits it came from: the Survey
+panel shows, for example, `v 0.090 (average of 6 fits)`. Slices and cuts on the
+grid use the grid's velocity. Lines with their own override are starred, and
+**Apply** leaves their overrides alone. A line's **Set velocity override…** has
+the same ticks and **Use average** over that line's fits.
 
 ---
 
@@ -221,11 +256,14 @@ far (see [What the map shows](#what-the-map-shows)).
    says so, for example `the corners measure 20.41 × 19.87 m · your size is kept`.
    Click **Use these** to take the measured size instead. Check **Default spacing
    (m)** too. The azimuth is measured clockwise from north to the grid's +Y axis.
-6. Enter **Velocity (m/ns)**. It is required, and it sets the depth scale for the
-   grid's profiles and slices. A working estimate is fine, because you can change
-   it later with **Set velocity…**.
-7. Click **OK**. It stays greyed out until the Id, CRS, size and velocity are all
-   usable.
+6. **Velocity (m/ns)** is optional. Left at **from line headers**, each line
+   uses the dielectric in its own file header for depths. The note beside the
+   box shows what the headers give, for example `header ε 14 ≈ 0.0801 m/ns`.
+   The header value is only the instrument's setting, not a measurement, so
+   enter a velocity when you have a better one, for example from a fit. You can
+   change it later with **Set velocity…** on the grid's right-click menu, or
+   clear it there with **Clear grid velocity**.
+7. Click **OK**. It stays greyed out until the Id, CRS and size are all usable.
 
 **The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until
 you choose one yourself, nsgeo uses the first of these that suits the map's
@@ -271,18 +309,87 @@ and its **Import** button name the grid the lines will go into.
    begins), and the **Direction**: **alternate (zigzag)**, **all +1** or
    **all -1**. **First line at** starts at half the spacing, so the first line
    sits in the middle of its strip like the others, and follows **Spacing
-   across** until you type a value of your own.
+   across** until you type a value of your own. Tick **Stretch or compress each
+   line to the grid's length** if your lines were walked edge to edge but the
+   wheel read long or short; it greys out **Start along**, because a fitted line starts
+   on the grid's edge. It is off by default, so lines run long or short on
+   purpose stay as recorded.
 3. Click **Add files…** and choose the DZT files. Each file gets a row, with
    nsgeo's guess at its offset and direction.
 4. Correct the table where the field day did not go to plan. Untick the box at
    the left of a row to leave out an abandoned line, and edit a row's **Label**,
    **Offset (m)** or **Dir**. Use **↑** and **↓** to fix the order. Leaving out
    a redone line moves the later files up into its place, unless you have edited
-   them by hand.
+   them by hand. The **Note** column flags a file whose header dielectric is
+   outside 1–81, which no soil has. Such a line still imports, but its depths
+   need a grid or line velocity.
 5. Click **Import**. The lines appear on the map and under the grid in **nsgeo
    Survey**. They are drawn as thin dashed lines in the grid's colour, and are
    hidden when you zoom out far enough that they would run together (beyond
    1:400 at 0.5 m spacing). Grid outlines and picks stay at every scale.
+
+#### Fixing lines after import
+
+If a line went in with the wrong start, offset, direction or grid, right-click
+the grid and choose **Edit lines…**. A table opens with every line on the grid,
+in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
+**Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
+panel shows.
+
+The panel under the table changes every selected line at once. Type a start and
+press **Set**, press **Snap to grid edge**, type an amount and press **Shift**
+to move the offsets, press **Flip** to reverse the direction, or choose a grid
+and press **Move**.
+
+The **Note** column flags a line that starts off its edge, or that lies outside
+the grid's width. Nothing changes until you click **OK**, and then everything
+changes as one step. Picks move with their lines.
+
+Changing a grid's length in **Edit grid…** moves its reversed lines with the far
+edge. The message bar tells you how many moved.
+
+A wheel on rough ground, or one that is slightly out of calibration, makes a
+line read longer or shorter than the grid. **Scale** is the number that corrects
+it: the grid metres for each metre the wheel recorded. Type a value in a row, or
+select lines and press **Fit to grid edges** to put each line's first and last
+trace on the grid's two edges. The recorded file is not touched, so setting
+**Scale** back to 1 undoes the stretch (after **Fit to grid edges**, **Start**
+has moved too, so reset that as well). A fitted line stays fitted when you
+change the grid's length in **Edit grid…**. The **Note** column flags a scale
+more than 20% from 1, so a deliberately short line caught in a selection stands
+out before you click **OK**.
+
+Fit lines before you measure velocity. A velocity fitted on a line before its
+scale changes keeps the value measured at the old spacing, so refit it
+afterwards. Migration still uses the trace spacing recorded in the file, not the
+fitted one. A site with corrections opened in nsgeo 0.3.0 draws the lines
+uncorrected, and drops the corrections if that version saves it.
+
+Stagger shows as a feature that jumps back and forth between lines walked out
+and back. **Destagger (m)** moves every trace of a line forward along that
+line's own direction of travel. If features on lines walked one way sit behind
+the same features on lines walked the other way, increase it. Set it on every
+line first (select all, type an amount, press **Set**), then adjust single
+lines. Start is not changed: it stays where the line was recorded to begin.
+
+Fit a grid's lines before you destagger them. Fitting removes the squeeze a
+wheel that reads short or long puts on each line, and that squeeze looks like
+stagger itself, so the destagger a grid needs can change sign once its lines
+are fitted. On one real grid, unfitted lines looked best at +0.15 m and the
+same lines fitted at −0.15 m.
+
+**Measure** works the amount out from the data instead. Select the lines to fill
+and press it. Whatever is selected, it compares every line on the grid with its
+neighbours walked the other way, over the whole record: a line is judged against
+the lines beside it, and the grid's value is steadier from all of them. The
+selection only chooses which rows get filled. The first press reads every line,
+about 10 seconds for 60 lines; the dialog keeps what it read, so pressing again is
+quick. The grid's value goes in the Destagger box, and each selected row
+gets its own line's value (a line that changes partway along, or matches nothing,
+gets the grid's value and is named on the status line). Nothing changes until you
+press OK, and the numbers are a starting point: look at the lines, then adjust.
+Lines Measure cannot use are left as they were and named in the status, with the
+reason. While it runs the button reads **Stop**, and pressing it changes nothing.
 
 ### Step 4: Open a line and use the map
 
@@ -358,10 +465,10 @@ line, the depth and the velocity.
 - The picks layer can be edited with QGIS's ordinary editing tools, to add a
   note or delete a pick. Read
   [#22](https://github.com/JamesZDonline/nsgeo/issues/22) under
-  [Known issues](#5-known-issues-in-020) before you do.
-- Do not drag a pick to a new place on the map. It keeps the trace, time and
-  distance it was made at, so the point and its record would no longer agree.
-  To move a pick, delete it and pick again on the profile.
+  [Known issues](#5-known-issues-in-040) before you do.
+- A pick follows its line, so dragging it on the map does not move it: it goes
+  back onto its line when you save the layer's edits. To move a pick along its
+  line, delete it and pick again on the profile.
 
 ### Step 7: Build slices
 
@@ -373,7 +480,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    slices, or **None** for the signed mean. These transforms are only offered
    here, not in **Add step**. Preparing starts by itself, and the status line
    reads *prepared* when it is done.
-   **Choose…** sets which of the grid's lines are included.
+   **Choose…** sets which of the grid's lines are included. With every line
+   ticked, lines you import onto the grid later are included too.
 2. Under **Position**, move the slider to step down through the record. The
    current slice is drawn on the map. The readout gives the window in
    nanoseconds, plus metres of depth from the grid's velocity. **Thickness** and
@@ -427,13 +535,169 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    max distance; at a fine cell that can take a few seconds, and it shows a
    wait cursor while it does. Stepping through the slices, the smoothing and
    **dz**, **z0** and **z1** reuse the fill already prepared.
-5. **Display** sets the **Stretch** and **Palette**. **Show coverage** shows how
-   many traces fell in each cell, rather than the amplitude.
+
+   Each picture blends the cells around every pixel, so it is drawn smooth when
+   you zoom in. **Whole site** can cover more ground than a fine cell allows at
+   full detail. Past a size it draws a preview at a coarser pixel and says so in
+   the panel. An export is not limited by the preview: it works out its own
+   cells at the size you choose (see step 6).
+5. **Display** sets how the slice is coloured. **Colours** offers two choices:
+   - **nsgeo colours** uses the **Stretch** and **Palette** below it.
+   - **my own colours** keeps whatever you set on the slice layer's
+     **Symbology** page in QGIS. The **Symbology…** button beside the choice
+     opens that page, where you can pick a colour ramp, type a min and max, or
+     use a cumulative cut. Your colours start from what nsgeo was showing.
+     Numbers you type stay the same at every depth. A computed range (Min /
+     max, Cumulative cut, Mean ± standard deviation) is worked out again for
+     each slice, so a dim deep slice still uses the whole ramp. **Stretch** is
+     greyed out while your own colours are on.
+
+   This grid and Whole site each keep their own colours, and the site remembers
+   them; a saved cube keeps them too. **Palette** still colours cuts and the
+   coverage view.
+
+   **Show coverage** shows how many traces fell in each cell, rather than the
+   amplitude, always in nsgeo's colours: turn it off and your own colours come
+   back. The number in a cell
+   is how many traces fell in it. A blank cell had no line through it. What counts
+   as a low number depends on the cell size: at a fine cell, one or two traces a
+   cell is normal, because a cell holds only a few traces along the line. Compare a
+   cell with its neighbours, or with the line spacing and the cell size, and
+   look for the cells that stand out as low.
+   Use it to spot gaps and thin coverage between lines before you trust a slice
+   in that spot. With **Show coverage** ticked, an export also writes the
+   counts as a second file beside it, named like the export with
+   `_coverage` added (`name_coverage.tif`), and adds it to the map.
 6. **Save cube…** keeps the prepared volume in the site folder (click **Save
    site** afterwards so the site remembers it). **Export GeoTIFF…** writes every
-   slice as one multi-band GeoTIFF and adds it to the map.
+   slice as one multi-band GeoTIFF and adds it to the map. It works for **This
+   grid** and for **Whole site**, and opens a dialog first:
+   - **Save to** is the file. **…** lets you browse for it.
+   - **Export cell** is how finely nsgeo works out each grid for the file. It
+     starts at the cell you are viewing and can go no finer than every grid
+     allows. A finer cell gives more detail, and more memory and time.
+   - **Export pixel** is how finely the file is written. It starts at the cell
+     and can be finer, never coarser. A finer pixel makes a smoother picture
+     when you zoom in, in any GIS, without working out the grids again.
+   - **What will be written** lists the bands, the picture size, the grids, how
+     the slices are made, the normalisation, the memory the export needs (and
+     the most it is allowed) and the file size.
+   - **Export** is greyed out, with the reason shown in the box, when the
+     export would need more memory than it is allowed, or more free disk space
+     than there is. The message says which cell or pixel would fit.
+   - If the file, or its style or coverage file, is already open in the project,
+     the dialog asks whether to **Replace** it. The old layer comes off the
+     map while the export runs. If you cancel the export, or it fails, the old
+     layer is put back from the file, which is untouched, with its time
+     slider setting where the file records it (files from older versions do
+     not, and nsgeo says so). If the picture was written but its coverage file
+     could not be, nsgeo says so, adds the new layer and puts back only the
+     coverage layer.
 
-### Step 8: Save, and next time
+   The export runs in the background. Its progress, the band and the grid it is
+   on, shows in QGIS's task list at the bottom right, and you can keep working
+   meanwhile. Cancel it from the task list. A cancelled or failed export leaves
+   any file already there as it was. Only one export runs at a time, and closing
+   the site cancels the one running.
+
+   At a finer cell, normalisation is measured again on the export's own data,
+   so its factors can differ slightly from the ones on screen. Manual
+   multipliers carry over as you typed them.
+
+   **Stepping through depths.** With nsgeo installed and enabled, an exported
+   file steps one band at a time in QGIS's Temporal Controller, however it gets
+   into the project: straight after an export, when you reopen a saved project,
+   or when you add it yourself with **Layer → Add Layer → Add Raster Layer**.
+   Layers already in the project when you enable nsgeo are set up too. nsgeo
+   reads the band times from the file and sets the controller to match. Open it
+   with **View → Panels → Temporal Controller**, or its clock button, then press
+   play or drag the slider. Adding one of these files replaces whatever the
+   controller was set to.
+
+   If you point a layer at its file again after opening a project (**Handle
+   Unavailable Layers**, or **Change Data Source**), it picks its band times up
+   the next time you open the project, or when you remove it and add it again.
+
+   The times it shows are nanoseconds written as seconds after midnight on
+   1 January 1970, so 00:00:05 is 5 ns. Times before 0 ns show as the last
+   seconds of 31 December 1969, so -1.8 ns is 23:59:58.
+
+   Where nsgeo is not installed and enabled, the file carries no time setting
+   for QGIS. A project saved with nsgeo and opened without it keeps QGIS's own
+   band times, rounded to whole seconds, so the controller there skips some
+   bands and repeats others. In both cases step through the bands with the band
+   choice in the layer's **Symbology**, or with another GIS's band list.
+
+   Beside the GeoTIFF nsgeo writes a style file with the same name and a `.qml`
+   ending. Any QGIS project that opens the file draws it with the same colours,
+   stretch and smooth drawing when zoomed in. Other GIS software, ArcGIS and
+   the rest, reads the values but chooses its own colours. With **my own
+   colours** on, the style file holds your colours as they were on screen when
+   the export started. The file keeps one range for every depth: the export
+   does not work a computed range out again band by band.
+
+### Step 8: Draw a cut
+
+A line you recorded shows what the radar saw along that one path. A **cut** is
+a line you draw yourself, anywhere on a grid. The profile then shows the
+vertical section beneath it, read from the same volume as the slices. Use it to
+follow a feature across the lines you recorded, or to see a slice's reflection
+from the side.
+
+1. Show the grid in the **nsgeo Slices** panel first (Step 7). A cut reads the
+   panel's volume, and uses the panel's **Interpolation** settings and
+   **Palette**, so it looks like the slice, cut another way. Until the grid is
+   shown the profile tells you which grid to show.
+2. Turn on **Cut** in the toolbar. Click inside a grid to start, click to add
+   points, and right-click or press Enter to finish. Backspace removes the last
+   point, and Esc cancels. The cut goes on the grid you first clicked in. It
+   appears in the **cuts** layer on the map, and under its grid in **nsgeo
+   Survey**, where a right-click renames or deletes it.
+3. The profile opens it. Its title reads **nsgeo Profile · cut:**, followed by
+   the name, the grid and the length. The distance along the cut runs left to
+   right from where you started. The depth axis is the grid's. The pale blue
+   band shows the slice you are looking at in **nsgeo Slices**, so you can see
+   which reflection a slice is made from. Blank stretches are places the cut
+   passes outside the grid, or farther than the **Max distance to data** from
+   any line.
+
+If the grid is being prepared again, the profile says so and redraws the cut
+when it is ready. A grid whose volume is too large to hold in memory cannot be
+cut: use a coarser cell or a shorter depth range in **nsgeo Slices**.
+
+With **Minimum curvature** chosen, a cut shows the **Kriging** fill at first,
+and the title says so: *Kriging preview · minimum curvature n of N depths*,
+where N is how many depths the section has and n how many are finished so far.
+The finished section replaces it a depth at a time, starting at the slice you
+are looking at, and the title then reads *Minimum curvature*. It can take up to
+a minute or two for a long cut at a fine cell, and longer when **Max distance
+to data** is more than half the line spacing, because each depth
+is then solved over the whole grid. Move the slice window and the work turns to
+the new depth once the window has rested. Change a setting while it works and
+it starts again; changing the palette or renaming the cut does not. Only the
+cut you have opened is finished: hovering another one shows its kriging
+preview.
+
+The map works on cuts while the **cuts** layer is the current layer, and on
+lines otherwise. With **cuts** current, moving the pointer along a cut moves the
+profile cursor, and hovering a cut previews it. Selecting a cut with QGIS's
+Select tool opens it, and so does clicking its name in **nsgeo Survey**. Choose
+another layer, and the map goes back to following your recorded lines.
+
+**Pick** works on a cut as it does on a line: click the profile, and the pick
+lands on the cut's path on the map. A pick on a cut records its distance along
+the cut and its time, with a note of how the section was made. If you pick while
+the section is still the kriging preview, the pick says so. Picks on a cut use
+the grid's velocity, or its first line's if the grid has none, and a cut is not
+processed: the steps in **nsgeo Processing** belong to recorded lines.
+
+A cut's times are on the clock of the volume it was cut from. If you turn the
+preset's **Time zero** step on or off after making picks on a cut, those picks
+no longer fit the new section, so the profile leaves them out and its title
+counts them (*1 picks on another clock*). They stay on the map and in the picks
+table, and they come back when you turn the setting back.
+
+### Step 9: Save, and next time
 
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
@@ -447,14 +711,14 @@ Everything for a site lives in its site folder:
 
 | In the site folder | What it holds |
 |---|---|
-| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **marks** and **picks**. |
+| `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | your DZT files | Read by nsgeo, never changed. |
 
-**Picks are different from everything else.** nsgeo redraws the grids, lines and
-marks layers from `survey.nsgeo.json` and your DZT and DZX files whenever it
-needs to, so those layers are read-only. The **picks** layer is your own work,
+**Picks are different from everything else.** nsgeo redraws the grids, lines,
+cuts and marks layers from `survey.nsgeo.json` and your DZT and DZX files
+whenever it needs to, so those layers are read-only. The **picks** layer is your own work,
 and its only copy is in `site.nsgeo.gpkg`. It cannot be regenerated, so back up
 the site folder.
 
@@ -463,11 +727,20 @@ A few things to know:
 - **Keep DZT files inside the site folder.** If they are elsewhere, **Save site**
   asks whether to record them by their full path, and the site will then open
   only on a computer where that path exists.
-- **A pick's map position is fixed when you make it.** If you later move, resize
-  or rotate its grid with **Edit grid…**, the line is redrawn in its new place but
-  the pick stays where it was. nsgeo shows a warning when this happens. The
-  warning says to see "the Picking section of the README"; this paragraph is
-  what it means. So finish placing a grid before you start picking on its lines.
+- **A pick follows its line.** Editing a grid or a line moves its picks too, and
+  dragging a pick on the map does not move it.
+- **A cut follows its grid.** Move or turn a grid and its cuts move with it, and
+  so do the picks on them. If you make a grid smaller, a cut that runs past its
+  edge stays, and shows blank where it is outside.
+- **A pick on a deleted cut stays on the map.** Deleting a cut never deletes its
+  picks, so they remain in the **picks** layer, where you can see them and
+  remove them yourself. The pick's note still says which cut it was made on.
+  Removing a grid deletes its cuts too, and asks first.
+- **A site with cuts does not open in nsgeo 0.3.0 or earlier.** Those versions
+  would drop the cuts the next time you saved, so they refuse to open it. They
+  say the site's file declares schema version 2, but that they read version 1.
+  A site with no cuts still opens in them. Update nsgeo on every computer that
+  opens the site.
 - **Move, copy or back up the whole site folder, with QGIS closed.** Never move
   `site.nsgeo.gpkg` on its own (see
   [#23](https://github.com/JamesZDonline/nsgeo/issues/23) below). Renaming the
@@ -476,7 +749,7 @@ A few things to know:
 
 ---
 
-## 5. Known issues in 0.2.0
+## 5. Known issues in 0.4.0
 
 These three can lose work or give a wrong-looking result without a warning. Each
 has a simple way around it.
@@ -537,8 +810,8 @@ its window. Your DZT files are untouched.
 
 ## 6. Reporting a problem
 
-1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.2.0 · core
-   0.2.0 · build` followed by a 12-character code appears on the message bar
+1. Choose **Plugins → nsgeo → About nsgeo**. A line like `plugin 0.4.0 · core
+   0.4.0 · build` followed by a 12-character code appears on the message bar
    above the map. If it says `development checkout` instead of a build code,
    the copy you are running did not come from a release zip.
 2. The message bar clears itself after a few seconds. To copy the text, open

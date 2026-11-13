@@ -26,13 +26,16 @@ from nsgeo.slices import (
 )
 from nsgeo.velocity import VelocityModel
 from nsgeo_qgis import slices_engine
+from nsgeo_qgis.line_edit import LineEdit
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slices_engine import PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
+    CURVATURE_PLAN_BYTES_PER_CELL,
     LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
     SITE_LIMIT_WINDOWS,
     SOLVED_SLICES_KEPT,
+    WEIGHT_BYTES_PER_CELL,
     Resolution,
     SliceFinish,
     SourceChoice,
@@ -96,6 +99,29 @@ def test_preparation_applies_the_preset_and_appends_the_transform(sourced):
     assert covered.size > 0
     assert np.isfinite(covered).all()
     assert (covered >= 0.0).all(), "an envelope is unipolar; a negative means it was not applied"
+
+
+def test_the_estimate_follows_a_new_cell_size_and_a_new_line_set(sourced):
+    """The checkbox and status figures count the covered cells, and follow a
+    new cell size and a re-prepared line set rather than a cached count (#113)."""
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    first = engine.estimate.cube_bytes
+    assert first == engine.cube().nbytes
+
+    engine.set_resolution(Resolution(cell=0.5, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
+    second = engine.estimate.cube_bytes
+    assert second == engine.cube().nbytes
+    assert second != first
+
+    keys = tuple(session.keys())[:-1]
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=keys)
+    )
+    assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    assert errors == []
+    assert engine.line_count == 3
+    assert engine.estimate.cube_bytes == engine.cube().nbytes
 
 
 def test_no_transform_leaves_the_data_bipolar_and_says_so(sourced):
@@ -225,8 +251,9 @@ def test_shared_limit_measures_the_filled_array_actually_displayed(qgis_app, tmp
         for i in range(4)
     ]
     session.add_lines(lines)
-    # No `time_zero`: it crops rows off the front of the radargram, which
-    # would shrink the line's own t0_ns below the header's raw
+    # No `time_zero`: it crops rows off the front of the radargram and
+    # relabels the axis to read 0 at the first break, so the line's own
+    # t0_ns would no longer equal the header's raw
     # `position_ns` this test seeds `z0` from directly (the dock's own
     # `_seed_dz_z_defaults` formula) -- `dewow`/`background_mean`/
     # `gain_agc` all leave the sample axis untouched, so `header.position_
@@ -610,18 +637,37 @@ def test_the_cache_keeps_at_most_sixteen_and_drops_with_the_plan(sourced, solves
     # A z-only edit keeps the plan, so it keeps what was solved on it.
     engine.set_resolution(Resolution(cell=0.25, dz_ns=0.5, t0_ns=2.0, t1_ns=28.0))
     assert len(engine._solved) == SOLVED_SLICES_KEPT
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     # A new cell is a new plan: nothing solved on the old one is kept.
     engine.set_resolution(Resolution(cell=0.2, dz_ns=0.5, t0_ns=2.0, t1_ns=30.0))
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
     engine.finish(*engine.slice_at(SliceWindow(4, 14)), MC)
     assert len(engine._solved) == 1
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     engine.set_source(engine.choice)
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
     assert engine.wait_for_preparation(20_000)
+
+
+def test_asking_for_a_solved_slice_s_job_keeps_it_cached(sourced, solves):
+    """A list's stretch windows already solved make no job, and asking marks
+    them recently used: what the list lands then evicts other slices, never
+    the windows it is completing (#120)."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    slices = [engine.slice_at(SliceWindow(k, k + 1)) for k in range(SOLVED_SLICES_KEPT + 1)]
+    for values, coverage in slices[:-1]:
+        engine.finish(values, coverage, MC)
+    assert len(engine._solved) == SOLVED_SLICES_KEPT
+    assert engine.pending_solve(*slices[0], MC) is None  # solved: no job
+    engine.finish(*slices[-1], MC)  # one more evicts the least recently used
+    solved = len(solves)
+    engine.finish(*slices[0], MC)
+    assert len(solves) == solved, "the slice asked for must still be cached"
+    engine.finish(*slices[1], MC)
+    assert len(solves) == solved + 1, "the next oldest went instead"
 
 
 def test_finish_is_slow_follows_the_last_solve(sourced):
@@ -631,7 +677,7 @@ def test_finish_is_slow_follows_the_last_solve(sourced):
     fresh = engine.slice_at(SliceWindow(20, 30))
     assert engine.finish_is_slow(*fresh, MC), "no plan yet, so no solve is timed on it"
     engine.finish(*cached, MC)  # builds the plan (which resets the timing), then solves
-    assert engine.last_solve_ms is not None
+    assert engine._last_solve_ms is not None
     for ms, slow in ((None, True), (10.0, False), (80.0, True)):
         engine._last_solve_ms = ms
         assert engine.finish_is_slow(*fresh, MC) is slow, ms
@@ -662,7 +708,7 @@ def test_a_pending_solve_lands_in_the_cache(sourced, solves):
     assert job.land() is True
     drawn = engine.finish(values, coverage, MC)
     assert len(solves) == 1, "a landed solve must be served from the cache"
-    assert engine.last_solve_ms == job.ms
+    assert engine._last_solve_ms == job.ms
     np.testing.assert_array_equal(drawn, job.solved)
     assert engine.pending_solve(values, coverage, MC) is None
     assert engine.pending_solve(values, coverage, SliceFinish(method="kriging")) is None
@@ -689,7 +735,7 @@ def test_a_solve_for_a_dropped_plan_does_not_land(sourced, change):
     assert job.solved is not None
     assert job.land() is False
     assert len(engine._solved) == 0
-    assert engine.last_solve_ms is None
+    assert engine._last_solve_ms is None
 
 
 def test_the_minimum_curvature_stretch_is_measured_over_twelve_windows_at_most(sourced, solves):
@@ -760,6 +806,22 @@ def test_weights_nbytes_counts_the_plan_the_preview_and_the_cache(sourced):
     assert engine.weights_nbytes == plan.nbytes + preview.nbytes + solved.nbytes
     engine.finish(values, coverage, SliceFinish())  # kriging holds its weights alone
     assert engine.weights_nbytes == preview.nbytes
+
+
+def test_the_estimate_counts_the_method_of_the_weights_held(sourced):
+    """#148: once a minimum-curvature plan is held, the status line and the
+    residency choice count it beside its kriging preview. The engine is handed
+    a finish only when it draws, so before that it counts one set of weights."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    one_set = engine.frame.n_cells * WEIGHT_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set
+    values, coverage = engine.slice_at(SliceWindow(4, 14))
+    engine.finish(values, coverage, MC)
+    plan = engine.frame.n_cells * CURVATURE_PLAN_BYTES_PER_CELL
+    assert engine.estimate.weights_bytes == one_set + plan
+    engine.finish(values, coverage, SliceFinish(method="idw"))
+    assert engine.estimate.weights_bytes == one_set
 
 
 def test_provenance_names_the_lines_that_were_actually_prepared(sourced):
@@ -1395,6 +1457,30 @@ def test_provenance_velocity_is_none_when_all_prepared_lines_removed(sourced):
     assert engine.cube() is not None  # arrays are still there
 
 
+def _override_every_line(session, velocity=0.12):
+    """The hazard input: the grid's first line in survey order, and the first
+    prepared line, each carry an override unlike the grid's velocity."""
+    for key in session.keys():  # noqa: SIM118 -- SiteSession.keys(), not a dict
+        session.set_line_velocity(key, VelocityModel.constant(velocity))
+
+
+def test_slice_provenance_velocity_is_the_grids_not_the_first_lines_override(sourced):
+    engine, session, errors, _ = sourced
+    session.set_grid_velocity("A", VelocityModel.constant(0.09))
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == VelocityModel.constant(0.09).to_dict()
+    assert errors == []
+
+
+def test_slice_provenance_velocity_falls_back_to_the_grids_first_line_header(sourced):
+    engine, session, errors, _ = sourced
+    _override_every_line(session)
+    _prepare(engine, session)
+    assert engine.provenance().velocity == session.grid_depth_velocity("A").to_dict()
+    assert engine.provenance().velocity != VelocityModel.constant(0.12).to_dict()
+
+
 # ---- M12: the hooks the site engine composes this engine through ----------
 
 
@@ -1552,6 +1638,136 @@ def test_residency_is_chosen_from_the_prepared_trace_count(sourced, monkeypatch)
     assert engine.mode == "resident"
 
 
+# ---- line editing (spec §4.5): a source follows a line that moved ----------
+
+GRID_B = Grid("B", (600.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5)
+
+
+def _edit(session, key, **changes):
+    return session.edit_lines([LineEdit(key, session.line_for_key(key).placement, **changes)])
+
+
+def test_a_placement_edit_to_a_prepared_line_re_prepares(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    count = len(prepared)
+    key = session.keys()[0]
+
+    _edit(session, key, offset=1.5)
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1
+    line = next(p for p in engine.prepared_lines() if p.key == key)
+    expected = session.line_for_key(key).trace_coords(session.site.frames)
+    assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
+    assert errors == []
+
+
+def test_a_scale_or_destagger_edit_to_a_prepared_line_re_prepares(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    key = session.keys()[0]
+    for change in ({"scale": 0.95}, {"travel_shift": 0.2}):
+        count = len(prepared)
+        _edit(session, key, **change)
+        assert engine.wait_for_preparation(20_000)
+        assert len(prepared) == count + 1
+        line = next(p for p in engine.prepared_lines() if p.key == key)
+        expected = session.line_for_key(key).trace_coords(session.site.frames)
+        assert np.asarray(line.coords) == pytest.approx(np.asarray(expected), abs=1e-9)
+    assert errors == []
+
+
+def test_an_edit_to_a_line_outside_the_source_does_not_re_prepare(sourced):
+    engine, session, errors, prepared = sourced
+    keys = session.keys()
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(keys[:3]))
+    )
+    assert engine.wait_for_preparation(20_000)
+    count = len(prepared)
+
+    _edit(session, keys[3], offset=1.5)
+    assert not engine.is_running
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_label_only_edit_does_not_re_prepare(sourced):
+    engine, session, errors, prepared = sourced
+    _prepare(engine, session)
+    count = len(prepared)
+
+    _edit(session, session.keys()[0], label="the wall")
+    assert not engine.is_running
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_line_moved_to_another_grid_leaves_the_source(sourced):
+    engine, session, errors, prepared = sourced
+    session.add_grid(GRID_B)
+    _prepare(engine, session)
+    k3 = session.keys()[3]
+
+    session.move_lines([k3], "B")
+    assert engine.wait_for_preparation(20_000)
+    assert k3 not in engine.choice.line_keys
+    assert k3 not in [p.key for p in engine.prepared_lines()]
+    assert engine.line_count == 3
+    assert errors == []
+
+
+def test_with_a_grid_moved_hook_a_placement_edit_hands_over(sourced):
+    """Mirrors the grid-move hand-over: a re-preparation started from this
+    slot would sit outside the owner's queue (trap 1, R-P5)."""
+    engine, session, errors, prepared = sourced
+    moved: list[int] = []
+    engine.on_grid_moved = lambda: moved.append(1)
+    _prepare(engine, session)
+    count = len(prepared)
+
+    _edit(session, session.keys()[0], offset=1.5)
+    assert moved == [1]
+    assert not engine.is_running, "the engine dispatched the re-preparation itself"
+    assert not engine.is_prepared, "lines binned at the old placement were kept"
+    assert engine.choice is None
+    assert engine.wait_for_preparation(2_000)
+    assert len(prepared) == count
+    assert errors == []
+
+
+def test_a_grid_length_change_re_prepares_exactly_once(sourced):
+    """`replace_grid` moves the reversed lines, then emits `grids_changed`
+    (the fingerprint moved: one re-preparation) and `lines_changed` (which
+    finds the snapshot already current)."""
+    engine, session, errors, prepared = sourced
+    p = synthetic_dzt(session.root / "raw", "FILE__009.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 5.0, 6.0, -1, p.stem))])
+    _prepare(engine, session)
+    count = len(prepared)
+
+    session.replace_grid(dataclasses.replace(GRID, size_y=7.0))
+    assert engine.wait_for_preparation(20_000)
+    assert len(prepared) == count + 1
+    assert errors == []
+
+
+def test_set_source_leaves_out_a_key_now_on_another_grid_and_says_so(sourced):
+    engine, session, errors, prepared = sourced
+    session.add_grid(GRID_B)
+    keys = session.keys()
+    session.move_lines([keys[3]], "B")
+
+    engine.set_source(
+        SourceChoice(grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(keys))
+    )
+    assert engine.wait_for_preparation(20_000)
+    assert [p.key for p in engine.prepared_lines()] == list(keys[:3])
+    assert any("now on grid 'B', not 'A'" in msg for _, msg in errors), errors
+
+
 #: Migration in a preset. `sample` mode rather than `first_break` because
 #: the synthetic's flat band sits at row 40, nine samples earlier than a
 #: real first break (k=49 on every local line), which would leave t0 at
@@ -1609,3 +1825,57 @@ def test_migration_reaches_the_cube_through_the_preset_alone(qgis_app, tmp_path)
     # Each at its own trace count, so one preset really did serve two
     # differently shaped lines.
     assert sorted(a.shape[1] for a in migrated.values()) == [60, 97]
+
+
+def test_section_fills_reuse_the_held_weights(sourced, monkeypatch):
+    """A cut never plans weights of its own (cut spec §5): it takes the engine's."""
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    cube = engine.cube()
+    krig = SliceFinish(method="kriging", max_distance_spacings=2.0)
+    engine.finish(cube.level(3), cube.coverage(), krig)  # what the dock's draw does
+    held = engine._weights[1]
+    planned = []
+    real = slices_engine.plan_fill
+
+    def counting(*args, **kwargs):
+        planned.append(args[2])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(slices_engine, "plan_fill", counting)
+    fill, preview = engine.section_fills(krig)
+    assert fill is held and preview is None
+    assert planned == []
+    # Under minimum curvature the second element is the kriging stand-in.
+    mc = dataclasses.replace(krig, method="min_curvature")
+    engine.finish(cube.level(3), cube.coverage(), mc)
+    planned.clear()
+    plan, standin = engine.section_fills(mc)
+    assert isinstance(plan, CurvaturePlan)
+    assert standin is not None and standin is engine._weights[2]
+    assert planned == []
+    # A different finish builds through the engine's own path, and holds it.
+    other = dataclasses.replace(krig, max_distance_spacings=1.0)
+    fill2, _ = engine.section_fills(other)
+    assert fill2 is engine._weights[1]
+
+
+def test_section_fills_refuse_to_build_a_cube_and_the_generation_follows_it(sourced):
+    engine, session, _, _ = sourced
+    _prepare(engine, session)
+    engine.drop_cube()
+    assert not engine.has_cube
+    with pytest.raises(RuntimeError):
+        engine.section_fills(SliceFinish())
+    assert not engine.has_cube  # nothing was built through it
+    before = engine.cube_generation
+    engine.cube()
+    assert engine.cube_generation == before + 1
+    engine.section_fills(SliceFinish())
+    assert engine.cube_generation == before + 1  # reading the fills moves nothing
+    # A rebuild with the same choice, frame and axis is another generation.
+    choice, frame, z = engine.choice, engine.frame, engine.z
+    engine.drop_cube()
+    engine.cube()
+    assert (engine.choice, engine.frame, engine.z) == (choice, frame, z)
+    assert engine.cube_generation == before + 3

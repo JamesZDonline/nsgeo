@@ -18,8 +18,10 @@ import numpy as np
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import Placement
 from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
+from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import METHOD_FIT, VelocitySource
 
 #: How many lines' sample arrays stay resident. A 30x30 m grid at 0.5 m
 #: spacing is about 100 MB in total, so a bound of 16 lines is generous
@@ -64,9 +66,17 @@ def clear_profile_cache() -> None:
     _load_profiles.cache_clear()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Line:
-    """One collected survey line. Headers are eager, samples are lazy."""
+    """One collected survey line. Headers are eager, samples are lazy.
+
+    Equality and hash are identity (`eq=False`, #89): a line is this object,
+    and an edited line is a new object that is not equal to the old one.
+    Generated field equality would raise on a field that cannot be compared
+    (an array in a placement) and generated hashing already raises on the
+    `velocity_fits` dict. Across saves a line is named by its file, through
+    `nsgeo.project.line_key`. Comparing two lines' contents is a test
+    concern, done field by field."""
 
     path: Path
     header: DztHeader
@@ -74,7 +84,26 @@ class Line:
     n_traces: int
     velocity: VelocityModel | None = None
     velocity_fits: Mapping[str, StoredFit] = field(default_factory=dict)
-    velocity_from_fit: str | None = None
+    velocity_source: VelocitySource | None = None
+    #: The highest fit number this line has ever handed out, so a fit id is
+    #: never reused across deletes, saves and loads (spec §8).
+    fit_serial: int = 0
+
+    @property
+    def velocity_from_fit(self) -> str | None:
+        """The id of the one stored fit this line's velocity came from.
+
+        Read-only: None unless the record is a single `fit` member that is
+        still in `velocity_fits` with the same `fitted_at`.
+        """
+        source = self.velocity_source
+        if source is None or source.method != METHOD_FIT or len(source.members) != 1:
+            return None
+        member = source.members[0]
+        fit = self.velocity_fits.get(member.fit_id)
+        if fit is None or not member.names(member.fit_id, fit):
+            return None
+        return member.fit_id
 
     @classmethod
     def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:
@@ -157,6 +186,18 @@ class Site:
     #: Every key is optional; a missing key is the default.
     site_view: dict[str, Any] = field(default_factory=dict)
 
+    #: How each slice scope is coloured (#180), keyed `"grid"` (This grid)
+    #: and `"site"` (Whole site): `{"own": bool, "style": str}`. `own` is
+    #: True when the slice uses the user's own QGIS symbology rather than
+    #: the plugin's palette and stretch; `style` is that symbology as QGIS
+    #: style XML, kept while `own` is off so switching back restores it.
+    #: Every key is optional; a missing key is the default (plugin colours).
+    slice_colours: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    #: Cuts drawn on the grids, in drawing order. Each is keyed `cut:<id>`
+    #: and lives apart from `lines`, so line-only code never sees one.
+    cuts: list[Cut] = field(default_factory=list)
+
     @property
     def frames(self) -> dict[str, Grid]:
         return {g.id: g for g in self.grids}
@@ -172,3 +213,10 @@ class Site:
             grid_id = getattr(line.placement, "grid_id", None)
             if grid_id is not None and grid_id not in known:
                 raise ValueError(f"line {line.path.name} references unknown grid {grid_id!r}")
+        cut_ids = [c.id for c in self.cuts]
+        cut_dupes = {i for i in cut_ids if cut_ids.count(i) > 1}
+        if cut_dupes:
+            raise ValueError(f"duplicate cut ids: {sorted(cut_dupes)}")
+        for cut in self.cuts:
+            if cut.grid_id not in known:
+                raise ValueError(f"cut {cut.name!r} references unknown grid {cut.grid_id!r}")

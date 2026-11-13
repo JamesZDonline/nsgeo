@@ -1,18 +1,20 @@
 """The site GeoTIFF: one file over every included grid, which records what was done.
 
-Spec 4.7. Unlike `slice_export`'s per-grid file there is no resample here:
-`SiteEngine.slice_at` already returns an array on the site lattice, normalised
-and filled exactly as the dock shows it, so a band is written as it came.
-
-Written band by band, one `slice_at` per band, never a resident cube (spec
-9.4), like M11's `export_slices`.
+Spec 4.7 and 6. The bands are made by `export_pipeline.run_export` from a
+snapshot of the live site (`site_export_spec`), taken on the GUI thread, and
+written by `GeoTiffSiteWriter.write_bands` on the export task's worker thread:
+band by band, never a resident cube beyond what the memory budget allows.
 
 What the file records (Ruling 6; the key names are part of the format).
 Dataset level, all strings: `NSGEO_SITE_TRANSFORM`, `NSGEO_SITE_NORMALISATION`,
-`NSGEO_SITE_CELL_M`, `NSGEO_SITE_PIXEL_M`, `NSGEO_SITE_INTERPOLATION` (the method key),
+`NSGEO_SITE_CELL_M` (the export cell), `NSGEO_SITE_PIXEL_M` (the export pixel),
+`NSGEO_SITE_RESAMPLING` (`bilinear`; `largest_count` for the coverage companion),
+`NSGEO_SITE_INTERPOLATION` (the method key),
 `NSGEO_SITE_MAX_DISTANCE_SPACINGS`, `NSGEO_SITE_SMOOTH_X_M`, `NSGEO_SITE_SMOOTH_Y_M`
 (interpolation spec §8; the coverage companion carries none of the four),
-`NSGEO_SITE_Z_UNIT` (always `ns`) and `NSGEO_SITE_GRIDS` (compact JSON list of
+`NSGEO_SITE_Z_UNIT` (always `ns`), `NSGEO_SITE_TIME_BASE` (`time_zero`, `radar` or
+`mixed`: the clock the grids' times are on, #97; each `SiteGridRecord` carries its own
+`time_base`) and `NSGEO_SITE_GRIDS` (compact JSON list of
 `SiteGridRecord`s), and `NSGEO_SITE_LEFT_OUT` (Ruling F-2: a compact JSON object of
 grid id to `SiteEngine.grid_state`, such as `"no lines"` or `"failed: ..."`, for
 each included grid the file does not hold; present only when there is one). Band
@@ -24,19 +26,22 @@ Trap 5: every grid's depths, and the description, derive from that grid's own
 `window_on` result, never from the requested window -- a window overhanging a
 grid's axis is thinner there. A grid with no velocity has `null` depths and no
 depth text in the description. Normalisation is per slice, so the factors are
-those of the band's own `SiteSlice`.
+those the export measured on that band's own binned cells.
 """
 
 from __future__ import annotations
 
 import json
-import warnings
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+import numpy as np
+from nsgeo.processing import time_base_of
+from nsgeo.render import Normalizer
 from nsgeo.slices import (
+    CubeFrame,
     SiteLattice,
     SliceWindow,
     ZAxis,
@@ -46,12 +51,19 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from osgeo import gdal
-from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsRasterLayer
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsCoordinateTransformContext,
+    QgsPointXY,
+    QgsProject,
+    QgsRasterLayer,
+)
 
-from nsgeo_qgis.site_engine import SiteEngine, SiteSlice
-from nsgeo_qgis.slice_export import ExportCancelled, GeoTiffSliceWriter, band_time_range
-from nsgeo_qgis.slices_plan import SliceFinish
+from nsgeo_qgis.export_pipeline import ExportBand, ExportGrid, ExportSpec
+from nsgeo_qgis.site_engine import SiteEngine
+from nsgeo_qgis.slice_export import apply_band_windows, write_north_up
+from nsgeo_qgis.slices_plan import SliceFinish, combined_time_base
 
 _SEPARATORS = (",", ":")
 
@@ -67,6 +79,8 @@ class SiteGridRecord:
     line_spacing_m: float
     azimuth_deg: float
     crs: str
+    #: `time_zero` or `radar`: the clock this grid's times are on (#97).
+    time_base: str
 
 
 @dataclass(frozen=True)
@@ -94,6 +108,8 @@ class SiteExportPlan:
     grids: tuple[SiteGridRecord, ...]
     #: Ruling F-2: included grids the file does not hold, grid id to state.
     left_out: dict[str, str] = field(default_factory=dict)
+    #: A counts raster (the coverage companion): its resampling is the largest count.
+    coverage: bool = False
 
 
 def band_window_ns(site_z: ZAxis, window: SliceWindow) -> tuple[float, float]:
@@ -118,6 +134,8 @@ def plan_site_export(
     thickness_levels: int,
     step_levels: int,
     *,
+    cell: float,
+    lattice: SiteLattice,
     transform: str,
     method: str,
     finish: SliceFinish,
@@ -127,20 +145,19 @@ def plan_site_export(
 ) -> SiteExportPlan:
     """The bands a site export would write, without writing anything.
 
-    `left_out` maps each included grid the file will not hold to its state
-    (Ruling F-2); the caller knows what was included, the engine only what
-    it was sent.
+    `cell` and `lattice` are the export's own, never the live ones: the file
+    records the settings it was made with. `left_out` maps each included grid
+    the file will not hold to its state (Ruling F-2); the caller knows what was
+    included, the engine only what it was sent. GUI thread: it reads the live
+    engines and the session.
     """
-    lattice, site_z = site_engine.lattice, site_engine.site_z
+    site_z = site_engine.site_z
     ready = site_engine.ready_grids
-    if lattice is None or site_z is None or not ready:
+    if site_z is None or not ready:
         raise RuntimeError("no site geometry: prepare the grids and set a resolution first")
     records = []
-    cell = None
     for grid_id in ready:
         engine = site_engine.engine_for(grid_id)
-        if cell is None and engine.frame is not None:
-            cell = engine.frame.cell
         grid = site_engine.session.grid(grid_id)
         velocity = velocities.get(grid_id)
         records.append(
@@ -152,10 +169,9 @@ def plan_site_export(
                 line_spacing_m=float(grid.default_spacing),
                 azimuth_deg=float(grid.azimuth),
                 crs=grid.crs,
+                time_base=time_base_of(engine.provenance().steps),
             )
         )
-    if cell is None:
-        cell = lattice.pixel  # every grid lacks an axis: nothing is drawn anyway
     bands = []
     for window in plan_windows(site_z, thickness_levels, step_levels):
         top, thickness = band_window_ns(site_z, window)
@@ -187,136 +203,158 @@ def plan_site_export(
     )
 
 
-class SiteWriter(Protocol):
-    def write(
-        self, path: str | Path, plan: SiteExportPlan, slices: Iterable[SiteSlice]
-    ) -> None: ...
+def coverage_plan_of(plan: SiteExportPlan) -> SiteExportPlan:
+    """The counts companion's plan: the first band's window, raw counts.
+
+    No normalisation, no interpolation, no manual gain: its plan says so (method
+    "none", no finish, every recorded gain 1.0) rather than repeating the values
+    file's processing, and `coverage=True` tags its resampling `largest_count`.
+    """
+    first = plan.bands[0]
+    return replace(
+        plan,
+        bands=(replace(first, description="coverage: traces per cell"),),
+        method="none",
+        finish=None,
+        grids=tuple(replace(g, gain=1.0) for g in plan.grids),
+        coverage=True,
+    )
+
+
+def world_to_frame(
+    source: str, target: str, context: QgsCoordinateTransformContext
+) -> Callable[[np.ndarray], np.ndarray]:
+    """A function taking (n, 2) points in `source` to `target`, safe off the GUI thread.
+
+    It holds two authids and a copy of the project's transform context taken on
+    the GUI thread, and builds a fresh `QgsCoordinateTransform` on every call, so
+    no transform object is shared between threads. A missing transform raises: an
+    invalid `QgsCoordinateTransform` returns its input unchanged while reporting
+    success, which would draw a grid in the wrong place without a word.
+    """
+
+    def move(points: np.ndarray) -> np.ndarray:
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem(source), QgsCoordinateReferenceSystem(target), context
+        )
+        if not transform.isValid():
+            raise RuntimeError(f"no coordinate transform from {source} to {target}")
+        out = np.empty((len(points), 2), dtype=float)
+        for i, (x, y) in enumerate(np.asarray(points, dtype=float)):
+            moved = transform.transform(QgsPointXY(float(x), float(y)))
+            out[i] = (moved.x(), moved.y())
+        return out
+
+    return move
+
+
+def site_export_spec(
+    site_engine: SiteEngine,
+    cell: float,
+    pixel: float,
+    windows: tuple[tuple[float, float], ...],
+    *,
+    method: str,
+    finish: SliceFinish,
+    gains: Mapping[str, float],
+    coverage: bool = False,
+) -> ExportSpec:
+    """The whole-site export at `cell` and `pixel`, snapshotted on the GUI thread.
+
+    Reads the live engines and the session once. The grids carry the engines' OWN
+    prepared lines (not copies: `estimate_export` leaves them out of what it
+    holds on that basis), their frames at `cell`, their own time axes, and the
+    finish in each grid's metres. A grid in another CRS than the lattice gets
+    `world_to_frame`, built here from a copy of the project's transform context.
+    A ready grid with no axis at the site's resolution is absent from every band
+    and so left out of the spec. Nothing in the result refers back to an engine.
+    """
+    lattice = site_engine.lattice_at(cell, pixel)
+    session = site_engine.session
+    context = QgsProject.instance().transformContext()
+    grids = []
+    for grid_id in site_engine.ready_grids:
+        engine = site_engine.engine_for(grid_id)
+        if engine is None or engine.z is None:
+            continue
+        model = session.grid(grid_id)
+        frame = CubeFrame.for_grid(model, cell)
+        move = None if frame.crs == lattice.crs else world_to_frame(lattice.crs, frame.crs, context)
+        spacing = float(model.default_spacing)
+        grids.append(
+            ExportGrid(
+                grid_id=grid_id,
+                lines=engine.prepared_lines(),
+                frame=frame,
+                z=engine.z,
+                finish=finish.in_metres(spacing),
+                spacing_m=spacing,
+                gain=float(gains.get(grid_id, 1.0)),
+                world_to_frame=move,
+            )
+        )
+    return ExportSpec(
+        grids=tuple(grids),
+        lattice=lattice,
+        windows=tuple(windows),
+        method="none" if coverage else method,
+        coverage=coverage,
+    )
+
+
+def site_time_base(grids: Iterable[SiteGridRecord]) -> str:
+    """`time_zero` or `radar` when every grid is on that clock, else `mixed`."""
+    return combined_time_base(g.time_base for g in grids)
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, separators=_SEPARATORS)
 
 
-class GeoTiffSiteWriter:
-    """Writes a `SiteExportPlan`'s slices to a multi-band GeoTIFF, band by band."""
+@dataclass(frozen=True, eq=False)
+class SiteJob:
+    """What one site export hands the task: the snapshot and the plans, for the values
+    file and, when asked, the counts companion. Built on the GUI thread."""
 
-    #: M11's measured set, reused so the two files cannot drift apart.
-    OPTIONS = GeoTiffSliceWriter.OPTIONS
-
-    def write(self, path: str | Path, plan: SiteExportPlan, slices: Iterable[SiteSlice]) -> None:
-        if not plan.bands:
-            raise ValueError("an export plan needs at least one band")
-        lattice = plan.lattice
-        with warnings.catch_warnings():
-            # As `GeoTiffSliceWriter.write`: ExceptionMgr makes GDAL failures raise, and
-            # the filter silences the one-time UseExceptions FutureWarning.
-            warnings.simplefilter("ignore", FutureWarning)
-            with gdal.ExceptionMgr(useExceptions=True):
-                dataset = None
-                try:
-                    dataset = gdal.GetDriverByName("GTiff").Create(
-                        str(path),
-                        lattice.width,
-                        lattice.height,
-                        len(plan.bands),
-                        gdal.GDT_Float32,
-                        options=self.OPTIONS,
-                    )
-                    dataset.SetGeoTransform(lattice.geotransform)
-                    dataset.SetProjection(QgsCoordinateReferenceSystem(lattice.crs).toWkt())
-                    for key, value in {
-                        "NSGEO_SITE_TRANSFORM": plan.transform,
-                        "NSGEO_SITE_NORMALISATION": plan.method,
-                        "NSGEO_SITE_CELL_M": str(plan.cell_m),
-                        "NSGEO_SITE_PIXEL_M": str(lattice.pixel),
-                        "NSGEO_SITE_Z_UNIT": "ns",
-                        "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
-                    }.items():
-                        dataset.SetMetadataItem(key, value)
-                    if plan.left_out:
-                        # Ruling F-2: absent, not `{}`, when nothing was left out.
-                        dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
-                    if plan.finish is not None:
-                        # Absent, not zero, on a file that was never interpolated.
-                        for key, value in {
-                            "NSGEO_SITE_INTERPOLATION": plan.finish.method,
-                            "NSGEO_SITE_MAX_DISTANCE_SPACINGS": str(
-                                plan.finish.max_distance_spacings
-                            ),
-                            "NSGEO_SITE_SMOOTH_X_M": str(plan.finish.smooth_x_m),
-                            "NSGEO_SITE_SMOOTH_Y_M": str(plan.finish.smooth_y_m),
-                        }.items():
-                            dataset.SetMetadataItem(key, value)
-                    written = 0
-                    iterator = iter(slices)
-                    for index, (band_plan, shown) in enumerate(zip(plan.bands, iterator)):
-                        if shown.array.shape != (lattice.height, lattice.width):
-                            raise ValueError(
-                                f"band {index + 1} is {shown.array.shape}, not the lattice's "
-                                f"{(lattice.height, lattice.width)}"
-                            )
-                        band = dataset.GetRasterBand(index + 1)
-                        band.SetNoDataValue(float("nan"))
-                        band.SetDescription(band_plan.description)
-                        lo, hi = window_times_ns(plan.site_z, band_plan.window)
-                        band.SetMetadataItem("NSGEO_WINDOW_NS", f"{lo},{hi}")
-                        band.SetMetadataItem("NSGEO_GRID_DEPTHS_M", _json(_depths(band_plan)))
-                        band.SetMetadataItem(
-                            "NSGEO_GRID_FACTORS",
-                            _json(
-                                {
-                                    g.grid_id: list(shown.factors[g.grid_id])
-                                    if g.grid_id in shown.factors
-                                    else None
-                                    for g in plan.grids
-                                }
-                            ),
-                        )
-                        band.WriteArray(shown.array)
-                        written += 1
-                    if written != len(plan.bands):
-                        raise ValueError(
-                            f"expected {len(plan.bands)} slices (one per planned band), got "
-                            f"{written}"
-                        )
-                    if next(iterator, None) is not None:
-                        raise ValueError(f"more slices than the plan's {len(plan.bands)} bands")
-                finally:
-                    # Close() surfaces a write error that garbage collection would swallow.
-                    if dataset is not None:
-                        dataset.Close()
-                    dataset = None
+    spec: ExportSpec
+    plan: SiteExportPlan
+    coverage_spec: ExportSpec | None
+    coverage_plan: SiteExportPlan | None
 
 
-def _depths(band: SiteBand) -> dict[str, list[float] | None]:
-    return {g: list(d) if d is not None else None for g, d in band.depths.items()}
+def site_windows(plan: SiteExportPlan) -> tuple[tuple[float, float], ...]:
+    """Each band's `(top_ns, thickness_ns)` on the site's axis."""
+    return tuple(band_window_ns(plan.site_z, band.window) for band in plan.bands)
 
 
-def export_site(
+def site_export_job(
     site_engine: SiteEngine,
-    path: str | Path,
     thickness_levels: int,
     step_levels: int,
+    cell: float,
+    pixel: float,
     *,
     transform: str,
     method: str,
     finish: SliceFinish,
     gains: Mapping[str, float],
     velocities: Mapping[str, VelocityModel | None],
-    writer: SiteWriter | None = None,
     left_out: Mapping[str, str] | None = None,
-    progress: Callable[[int, int], bool] | None = None,
-) -> SiteExportPlan:
-    """Plan, then write one band at a time: one `slice_at` per band, no cube held.
+    coverage: bool = False,
+) -> SiteJob:
+    """Plan and snapshot a site export at `cell` and `pixel` (GUI thread, reads the engines).
 
-    `progress(done, total)` is called before each band and once more as
-    `(total, total)`; a False return raises `ExportCancelled` before the next
-    band is computed (`slice_export.export_slices`). `slice_at` is the full
-    result by default, so a band is never a preview (plan call 11)."""
+    The plan names the export's own cell and lattice; the spec is what
+    `run_export` makes the bands from. With `coverage`, the counts companion's
+    spec (the first band's window) and plan are built too.
+    """
+    lattice = site_engine.lattice_at(cell, pixel)
     plan = plan_site_export(
         site_engine,
         thickness_levels,
         step_levels,
+        cell=cell,
+        lattice=lattice,
         transform=transform,
         method=method,
         finish=finish,
@@ -324,61 +362,97 @@ def export_site(
         velocities=velocities,
         left_out=left_out,
     )
-    writer = writer if writer is not None else GeoTiffSiteWriter()
+    windows = site_windows(plan)
+    spec = site_export_spec(
+        site_engine, cell, pixel, windows, method=method, finish=finish, gains=gains
+    )
+    if not coverage:
+        return SiteJob(spec, plan, None, None)
+    counts = site_export_spec(
+        site_engine, cell, pixel, windows[:1], method="none", finish=finish, gains={}, coverage=True
+    )
+    return SiteJob(spec, plan, counts, coverage_plan_of(plan))
 
-    def _slices() -> Iterable[SiteSlice]:
-        total = len(plan.bands)
-        for done, band in enumerate(plan.bands):
-            if progress is not None and not progress(done, total):
-                raise ExportCancelled()
-            top, thickness = band_window_ns(plan.site_z, band.window)
-            yield site_engine.slice_at(top, thickness, finish=finish, method=method, manual=gains)
-        if progress is not None:
-            progress(total, total)
 
-    writer.write(path, plan, _slices())
-    return plan
+class GeoTiffSiteWriter:
+    """Writes a `SiteExportPlan`'s slices to a multi-band GeoTIFF, band by band."""
+
+    def write_bands(
+        self,
+        path: str | Path,
+        plan: SiteExportPlan,
+        bands: Iterable[ExportBand],
+        *,
+        clip: Normalizer,
+        progress_band: Callable[[int], None] | None = None,
+    ) -> float:
+        """Write `bands` (already on `plan.lattice`) and return the stretch limit.
+
+        `NSGEO_GRID_FACTORS` are each band's own factors, those the export
+        measured. Worker-thread safe (see `slice_export.write_north_up`).
+        """
+
+        def tag_dataset(dataset: Any) -> None:
+            _tag_dataset(dataset, plan)
+
+        def tag_band(band: Any, index: int, shown: ExportBand) -> None:
+            band_plan = plan.bands[index]
+            lo, hi = window_times_ns(plan.site_z, band_plan.window)
+            band.SetMetadataItem("NSGEO_WINDOW_NS", f"{lo},{hi}")
+            band.SetMetadataItem("NSGEO_GRID_DEPTHS_M", _json(_depths(band_plan)))
+            band.SetMetadataItem("NSGEO_GRID_FACTORS", _json(_factors(plan, shown.factors)))
+
+        return write_north_up(
+            path,
+            plan.lattice,
+            [band.description for band in plan.bands],
+            bands,
+            clip=clip,
+            tag_dataset=tag_dataset,
+            tag_band=tag_band,
+            progress_band=progress_band,
+        )
+
+
+def _tag_dataset(dataset: Any, plan: SiteExportPlan) -> None:
+    """The dataset-level keys: what was done, the export cell and pixel, the resampling."""
+    for key, value in {
+        "NSGEO_SITE_TRANSFORM": plan.transform,
+        "NSGEO_SITE_NORMALISATION": plan.method,
+        "NSGEO_SITE_CELL_M": str(plan.cell_m),
+        "NSGEO_SITE_PIXEL_M": str(plan.lattice.pixel),
+        "NSGEO_SITE_RESAMPLING": "largest_count" if plan.coverage else "bilinear",
+        "NSGEO_SITE_Z_UNIT": "ns",
+        "NSGEO_SITE_TIME_BASE": site_time_base(plan.grids),
+        "NSGEO_SITE_GRIDS": _json([vars(g) for g in plan.grids]),
+    }.items():
+        dataset.SetMetadataItem(key, value)
+    if plan.left_out:
+        # Ruling F-2: absent, not `{}`, when nothing was left out.
+        dataset.SetMetadataItem("NSGEO_SITE_LEFT_OUT", _json(plan.left_out))
+    if plan.finish is not None:
+        # Absent, not zero, on a file that was never interpolated.
+        for key, value in {
+            "NSGEO_SITE_INTERPOLATION": plan.finish.method,
+            "NSGEO_SITE_MAX_DISTANCE_SPACINGS": str(plan.finish.max_distance_spacings),
+            "NSGEO_SITE_SMOOTH_X_M": str(plan.finish.smooth_x_m),
+            "NSGEO_SITE_SMOOTH_Y_M": str(plan.finish.smooth_y_m),
+        }.items():
+            dataset.SetMetadataItem(key, value)
+
+
+def _factors(
+    plan: SiteExportPlan, factors: Mapping[str, tuple[float, float]]
+) -> dict[str, list[float] | None]:
+    return {
+        g.grid_id: list(factors[g.grid_id]) if g.grid_id in factors else None for g in plan.grids
+    }
+
+
+def _depths(band: SiteBand) -> dict[str, list[float] | None]:
+    return {g: list(d) if d is not None else None for g, d in band.depths.items()}
 
 
 def apply_site_temporal_properties(layer: QgsRasterLayer, plan: SiteExportPlan) -> None:
     """Wire the Temporal Controller to the site's bands, one-to-one (see M11's)."""
-    props = layer.temporalProperties()
-    ranges = {
-        index + 1: band_time_range(*window_times_ns(plan.site_z, band.window))
-        for index, band in enumerate(plan.bands)
-    }
-    props.setFixedRangePerBand(ranges)
-    props.setMode(Qgis.RasterTemporalMode.FixedRangePerBand)
-    props.setIsActive(True)
-
-
-def write_site_coverage(site_engine: SiteEngine, path: str | Path, plan: SiteExportPlan) -> Path:
-    """`<stem>_coverage.tif` beside `path`: one band, the composed coverage.
-
-    At the first band's window. Coverage is composed like values (Ruling 7);
-    `slice_at(coverage=True)` already gives NaN where nothing is covered.
-    """
-    path = Path(path)
-    out = path.with_name(f"{path.stem}_coverage.tif")
-    first = plan.bands[0]
-    top, thickness = band_window_ns(plan.site_z, first.window)
-    shown = site_engine.slice_at(
-        top,
-        thickness,
-        finish=SliceFinish(),  # coverage mode shows counts; the finish is not read
-        method="none",
-        manual={},
-        coverage=True,
-    )
-    # The companion is raw counts: no normalisation, no interpolation, no manual gain. Its
-    # plan says so (method "none", no finish, every recorded gain 1.0) rather
-    # than repeating the values file's processing.
-    coverage_plan = replace(
-        plan,
-        bands=(replace(first, description="coverage: traces per cell"),),
-        method="none",
-        finish=None,
-        grids=tuple(replace(g, gain=1.0) for g in plan.grids),
-    )
-    GeoTiffSiteWriter().write(out, coverage_plan, [shown])
-    return out
+    apply_band_windows(layer, [window_times_ns(plan.site_z, band.window) for band in plan.bands])

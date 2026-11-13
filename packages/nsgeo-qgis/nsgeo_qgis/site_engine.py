@@ -99,16 +99,19 @@ from nsgeo.slices import (
     SiteLattice,
     SliceWindow,
     ZAxis,
+    bilinear_taps,
     compose_footprints,
+    covered_pixels,
     find_seams,
+    finest_fitting_cell,
+    fitting_lattice,
     footprint,
     grid_axis,
-    lattice_pixel,
     limit_over_slices,
     normalise,
     site_axis,
     slice_extent,
-    snap_azimuth,
+    stretching_grids,
     window_on,
 )
 from qgis.core import (
@@ -122,13 +125,15 @@ from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 from nsgeo_qgis.slices_engine import _REDRAW_SMOOTHING, PendingSolve, SliceEngine, solve_key
 from nsgeo_qgis.slices_plan import (
     LIVE_SOLVE_BUDGET_MS,
-    MAX_FRAME_CELLS,
+    SITE_MAX_COVERED_PIXELS,
+    SITE_MAX_PIXELS,
     Resolution,
     SiteSource,
     SliceFinish,
     SourceChoice,
     format_bytes,
     limit_windows,
+    preview_note,
 )
 
 #: Ruling 1: how long the dispatcher waits before looking again while an
@@ -240,6 +245,12 @@ class SiteEngine(QObject):
         self._resolution: Resolution | None = None
         self._site_z: ZAxis | None = None
         self._lattice: SiteLattice | None = None
+        self._full_lattice: SiteLattice | None = None
+        self._preview_note: str | None = None
+        #: The most pixels the site is drawn at; past it, a coarser preview.
+        self.max_pixels: int = SITE_MAX_PIXELS
+        #: The most pixels the grids' windows hold together at the drawn pitch.
+        self.max_covered: int = SITE_MAX_COVERED_PIXELS
         self._gathers: dict[str, Footprint] = {}
         self._seams: tuple[Seam, ...] | None = None
         #: Each site grid's (registration, line spacing) as of the last
@@ -267,7 +278,23 @@ class SiteEngine(QObject):
 
     @property
     def lattice(self) -> SiteLattice | None:
+        """The lattice drawn: the full one, or a coarser preview of it."""
         return self._lattice
+
+    @property
+    def full_lattice(self) -> SiteLattice | None:
+        """The lattice at the cell, whether or not it is what is drawn."""
+        return self._full_lattice
+
+    @property
+    def is_preview(self) -> bool:
+        """Whether the drawn lattice is a coarser stand-in for the full one."""
+        lattice, full = self._lattice, self._full_lattice
+        return lattice is not None and full is not None and lattice.pixel != full.pixel
+
+    @property
+    def preview_note(self) -> str | None:
+        return self._preview_note
 
     @property
     def ready_grids(self) -> tuple[str, ...]:
@@ -340,7 +367,7 @@ class SiteEngine(QObject):
                 self._drop_engine(grid_id)
                 self._states[grid_id] = "no lines"
                 continue
-            if old.get(grid_id) == choice and grid_id in self._engines:
+            if choice.same_source(old.get(grid_id)) and grid_id in self._engines:
                 continue
             if grid_id == self._preparing:
                 self._preparing = None  # its cancelled callback is not a result
@@ -526,6 +553,14 @@ class SiteEngine(QObject):
             self._notify_changed()
             self._dispatch_again = True
 
+    def line_zero(self, key: str) -> float | None:
+        """The first non-None `line_zero` among the grid engines."""
+        for engine in self._engines.values():
+            zero = engine.line_zero(key)
+            if zero is not None:
+                return zero
+        return None
+
     def _on_engine_prepared(self, grid_id: str) -> None:
         """A grid's engine reached a terminal edge: mark it, redraw, go on."""
         try:
@@ -624,9 +659,8 @@ class SiteEngine(QObject):
     def set_resolution(self, resolution: Resolution | None) -> None:
         """Store the site resolution and re-derive the geometry.
 
-        Raises ValueError naming the pixel count when the lattice over the
-        ready grids exceeds `MAX_FRAME_CELLS` (spec 4.7); the geometry is
-        then empty until a coarser cell or fewer grids fit.
+        A lattice over `max_pixels` is drawn at a coarser pixel instead
+        (`is_preview`); an export has its own lattice (`lattice_at`).
         """
         self._resolution = resolution
         try:
@@ -645,28 +679,28 @@ class SiteEngine(QObject):
         self._drop_caches()
         self._site_z = None
         self._lattice = None
+        self._full_lattice = None
+        self._preview_note = None
         res = self._resolution
         ready = self.ready_grids
         if res is None or not ready or not self.session.is_open:
             return
-        lattice = self._covering_lattice(ready, res.cell)
-        if lattice.n_pixels > MAX_FRAME_CELLS:
-            # Final review M5: a rotated grid quarters the pixel (Ruling 2),
-            # often the real reason, so the refusal says so when it applies.
-            rotated = (
-                f" A rotated grid puts the site on a half-cell pitch ({lattice.pixel:g} m "
-                f"for a {res.cell:g} m cell), four times the pixels of the same grids "
-                "north-up."
-                if lattice.pixel < res.cell
-                else ""
+        site_crs = self._site_crs()
+        extents = self._grid_extents(ready, res.cell)
+        boxes = list(extents.values())
+        full = SiteLattice.covering(boxes, res.cell, site_crs)
+        lattice = full
+        note: str | None = None
+        if full.n_pixels > self.max_pixels or covered_pixels(boxes, res.cell) > self.max_covered:
+            lattice = fitting_lattice(boxes, res.cell, site_crs, self.max_pixels, self.max_covered)
+            width_m, height_m = full.width * full.pixel, full.height * full.pixel
+            finest = finest_fitting_cell(
+                boxes, res.cell, site_crs, self.max_pixels, self.max_covered
             )
-            raise ValueError(
-                f"the site lattice would be {lattice.width} x {lattice.height} = "
-                f"{lattice.n_pixels:,} pixels at {lattice.pixel:g} m, more than the "
-                f"{MAX_FRAME_CELLS:,} a slice can be drawn at: the included grids are too "
-                f"far apart for this cell size.{rotated} Choose a coarser cell or include "
-                "fewer grids"
+            stretching = stretching_grids(
+                extents, res.cell, site_crs, self.max_pixels, self.max_covered
             )
+            note = preview_note(lattice.pixel, res.cell, width_m, height_m, finest, stretching)
         bounds = {g: self._engines[g].prepared_z_bounds() for g in ready}
         site_z = site_axis(
             [b for b in bounds.values() if b is not None], res.t0_ns, res.t1_ns, res.dz_ns
@@ -682,8 +716,11 @@ class SiteEngine(QObject):
                 self._apply_resolution(
                     grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
                 )
+        # Together, last: a raise above never leaves a preview with no lattice.
         self._site_z = site_z
         self._lattice = lattice
+        self._full_lattice = full
+        self._preview_note = note
 
     def _apply_resolution(self, grid_id: str, want: Resolution | None) -> None:
         """Give an engine its resolution, unless it is already binned at exactly it.
@@ -704,22 +741,32 @@ class SiteEngine(QObject):
             return
         engine.set_resolution(want)
 
+    def lattice_at(self, cell: float, pixel: float) -> SiteLattice:
+        """The lattice an export at `cell` and `pixel` writes on: the ready grids'
+        frames at `cell`, in the site's CRS, anchored on multiples of `pixel`.
+
+        At the live cell and pixel of a site that is not a preview it is the
+        drawn lattice. Raises when no grid is ready."""
+        ready = self.ready_grids
+        if not ready:
+            raise RuntimeError("no site geometry: prepare the grids first")
+        extents = self._grid_extents(ready, cell)
+        return SiteLattice.covering(list(extents.values()), pixel, self._site_crs())
+
     def _site_crs(self) -> str:
         """Spec 4.7: the site's CRS is the one its GeoPackage uses, `grids[0].crs`."""
         return str(self.session.site.grids[0].crs)
 
-    def _covering_lattice(self, ready: Sequence[str], cell: float) -> SiteLattice:
+    def _grid_extents(
+        self, ready: Sequence[str], cell: float
+    ) -> dict[str, tuple[float, float, float, float]]:
+        """Each ready grid's extent in the site CRS, as its frame at `cell` spans."""
         site_crs = self._site_crs()
-        extents = []
-        azimuths = []
+        extents = {}
         for grid_id in ready:
             frame = CubeFrame.for_grid(self.session.grid(grid_id), cell)
-            extents.append(self._extent_in(frame, site_crs))
-            # Ruling F-5 (final review D3): a frame a hair off a right angle
-            # -- a datum-only CRS shift -- is axis-aligned in effect.
-            far_corner_m = math.hypot(frame.nx, frame.ny) * frame.cell
-            azimuths.append(snap_azimuth(self._azimuth_in(frame, site_crs), far_corner_m, cell))
-        return SiteLattice.covering(extents, lattice_pixel(cell, azimuths), site_crs)
+            extents[grid_id] = self._extent_in(frame, site_crs)
+        return extents
 
     @staticmethod
     def _transform(points: np.ndarray, source: str, target: str) -> np.ndarray:
@@ -766,25 +813,6 @@ class SiteEngine(QObject):
             float(moved[:, 1].max()),
         )
 
-    @classmethod
-    def _azimuth_in(cls, frame: CubeFrame, crs: str) -> float:
-        """The frame's bearing in the site CRS, for `lattice_pixel` (Ruling 2).
-
-        A grid laid north-up in another zone is turned by the difference in
-        meridian convergence, so it counts as rotated on the site lattice --
-        unless the turn is too small to move its far corner by 1% of a cell
-        (`snap_azimuth`, Ruling F-5), as for a datum-only shift.
-        """
-        if frame.crs == crs:
-            return frame.azimuth
-        _, y_hat = frame.axes()
-        origin = np.asarray(frame.origin, dtype=float)
-        ends = cls._transform(
-            np.array([origin, origin + y_hat * frame.ny * frame.cell]), frame.crs, crs
-        )
-        dx, dy = ends[1] - ends[0]
-        return math.degrees(math.atan2(dx, dy))
-
     def _drop_caches(self) -> None:
         self._gathers = {}
         self._seams = None
@@ -829,16 +857,14 @@ class SiteEngine(QObject):
         return tuple((grid_id, snapshot.get(grid_id)) for grid_id in self.ready_grids)
 
     def _gather(self, grid_id: str, lattice: SiteLattice) -> Footprint:
-        """`grid_id`'s frame cell under each lattice pixel, kept to its own window.
+        """`grid_id`'s bilinear taps under each lattice pixel, kept to its own window.
 
         Once per grid per lattice (spec 4.7). Only the pixels inside the
         frame's extent (plus one) are looked up, and, for a frame in
         another CRS, transformed into it first. The result is a
-        `Footprint`, the tight window around the placed pixels (final
-        review I1): every pixel outside it is outside the frame, so the
-        tick composes over the window alone. A whole-lattice array per
-        grid made a rotated site, at half the pitch (Ruling 2), cost a
-        full-lattice pass per grid per tick.
+        `Footprint`, the tight window around the pixels inside the frame
+        (final review I1): every pixel outside it is outside the frame, so
+        the tick composes over the window alone.
         """
         cached = self._gathers.get(grid_id)
         if cached is not None:
@@ -862,10 +888,10 @@ class SiteEngine(QObject):
             centres = np.column_stack([grid_x.ravel(), grid_y.ravel()])
             if frame.crs != lattice.crs:
                 centres = self._transform(centres, lattice.crs, frame.crs)
-            ids = frame.cell_index(centres).reshape(row1 - row0, col1 - col0)
-            gathered = footprint(ids, row0, col0)
+            taps = bilinear_taps(frame, centres)
+            gathered = footprint(taps, row1 - row0, col1 - col0, row0, col0)
         else:
-            gathered = footprint(np.empty((0, 0), dtype=np.intp))
+            gathered = footprint(bilinear_taps(frame, np.empty((0, 2))), 0, 0)
         self._gathers[grid_id] = gathered
         return gathered
 
@@ -1081,7 +1107,14 @@ class SiteEngine(QObject):
         windows, shown, factors = self._shown(
             top_ns, thickness_ns, method, manual, coverage, draw, sliced=sliced
         )
-        array = compose_footprints(lattice, [(self._gather(g, lattice), shown[g]) for g in shown])
+        res = self._resolution
+        per_pixel = max(1, round(lattice.pixel / res.cell)) if res is not None else 1
+        array = compose_footprints(
+            lattice,
+            [(self._gather(g, lattice), shown[g]) for g in shown],
+            counts=coverage,
+            cells_per_pixel=per_pixel,
+        )
         self._record_redraw((time.perf_counter() - started) * 1000.0)
         return SiteSlice(
             array=array,
@@ -1266,7 +1299,8 @@ class SiteEngine(QObject):
         """What the site holds in memory, as M11's `format_status` counts it.
 
         The prepared lines, plus a cube only where an engine keeps one
-        resident, plus the interpolation weights each engine has built.
+        resident, plus the interpolation weights each engine has built, plus
+        the taps of the site gathers (about 52 B a covered pixel).
         Counted from the weights themselves, not the estimate's
         `weights_bytes`: that is a worst case at the chosen cell, and the
         weights held are what the status line should name. Still held after
@@ -1282,6 +1316,7 @@ class SiteEngine(QObject):
             if engine.mode == "resident":
                 held += estimate.cube_bytes
             held += engine.weights_nbytes
+        held += sum(f.taps.nbytes for f in self._gathers.values())
         return held
 
     def status_text(self) -> str:
@@ -1346,6 +1381,8 @@ class SiteEngine(QObject):
         self._resolution = None
         self._site_z = None
         self._lattice = None
+        self._full_lattice = None
+        self._preview_note = None
         self._drop_caches()
         self._seen = {}
         self._redraw_ms = None

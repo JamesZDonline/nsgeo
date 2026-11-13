@@ -19,19 +19,38 @@ import dataclasses
 import datetime as _dt
 import json
 import math
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
-from nsgeo.geometry import Grid
-from nsgeo.model import Line, Profile, Site
-from nsgeo.processing import Radargram, StepStack
+from nsgeo.geometry import Grid, GridPlacement
+from nsgeo.model import Cut, Line, Profile, Site, is_cut_key
+from nsgeo.processing import Radargram, StepStack, retime_ns
 from nsgeo.project import ProjectError, line_key, load_site, save_site
 from nsgeo.slices import NORMALISATION_METHODS
 from nsgeo.velocity import VelocityModel, resolve_velocity
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import QObject, pyqtSignal
+
+from nsgeo_qgis.line_edit import (
+    CHANGED_ELSEWHERE,
+    REMOVED,
+    SAME_M,
+    START_TOLERANCE_M,
+    EditOutcome,
+    GridEditReport,
+    LineEdit,
+    Skipped,
+    followed_length,
+    is_fitted,
+    length_along,
+    same_placement,
+    span_m,
+    width_across,
+)
 
 SURVEY_FILE = "survey.nsgeo.json"
 # Fixed, not derived from the folder name. Final review, I5: the survey
@@ -79,10 +98,27 @@ class Pick:
     created: str
     feature_id: str | None = None
     seq: int | None = None
+    # #97: `time_ns` is measured from this radar-clock time. None means the
+    # radar clock itself (a row written before the column existed).
+    zero_ns: float | None = None
+
+    @property
+    def radar_ns(self) -> float:
+        """The pick's time on the radar clock, the one that never moves."""
+        return retime_ns(self.time_ns, self.zero_ns or 0.0, 0.0)
 
 
 def _log(message: str, level: Qgis.MessageLevel = Qgis.MessageLevel.Warning) -> None:
     QgsMessageLog.logMessage(message, "nsgeo", level)
+
+
+#: The slice scopes that each keep their own colours (#180).
+COLOUR_SCOPES = ("grid", "site")
+
+
+def _check_colour_scope(scope: str) -> None:
+    if scope not in COLOUR_SCOPES:
+        raise ValueError(f"unknown slice scope {scope!r}; expected one of {COLOUR_SCOPES}")
 
 
 def _merge_resolution(
@@ -98,12 +134,19 @@ def _merge_resolution(
     return None if new == old else new
 
 
+def _fit_number(fit_id: str) -> int:
+    """N of an id of the form `fit-N`; any other id counts as 0."""
+    match = re.fullmatch(r"fit-(\d+)", fit_id)
+    return int(match.group(1)) if match else 0
+
+
 class SiteSession(QObject):
     site_opened = pyqtSignal()
     site_closed = pyqtSignal()
     dirty_changed = pyqtSignal(bool)
     grids_changed = pyqtSignal()
     lines_changed = pyqtSignal()
+    cuts_changed = pyqtSignal()
     line_opened = pyqtSignal(str)  # "" when no line is current
     line_loaded = pyqtSignal(str)
     trace_changed = pyqtSignal(str, int)
@@ -133,6 +176,7 @@ class SiteSession(QObject):
         self._selection: tuple[int, int] = (-1, -1)
         self._preview_key: str | None = None
         self._preview_trace = -1
+        self._open_serial = 0
         # Set by SiteLayers' own constructor (see set_pick_store). None
         # until then, which is the normal state of a session built by a
         # test that has no layers at all.
@@ -501,17 +545,69 @@ class SiteSession(QObject):
         self._set_dirty(True)
         self.grids_changed.emit()
 
-    def replace_grid(self, grid: Grid) -> None:
+    def replace_grid(self, grid: Grid) -> GridEditReport:
+        """Swap in an edited grid. A reversed line starts at the far edge,
+        so when the grid's length along an axis changes, every reversed line
+        on that axis moves with the edge, keeping its inset (line editing
+        spec §3 call 6 for the message; the rule itself is decision 4 and
+        §4.3). A fitted line, of either direction, is fitted again to the
+        new length instead (placement corrections plan, call 7), and is
+        counted once, as refitted, never as moved. Lines whose offset now
+        lies outside a changed width are reported, not moved. All of it
+        happens before anything is emitted, then one `grids_changed` and
+        one `lines_changed`."""
         site = self._require_site()
         for i, g in enumerate(site.grids):
             if g.id == grid.id:
+                old = g
                 site.grids[i] = grid
                 break
         else:
             raise KeyError(f"no grid with id {grid.id!r}")
+        moved: list[tuple[str, float, int]] = []
+        refitted: list[tuple[str, float, int]] = []
+        outside: list[str] = []
+        for axis in ("y", "x"):
+            old_len, new_len = length_along(old, axis), length_along(grid, axis)
+            old_wid, new_wid = width_across(old, axis), width_across(grid, axis)
+            on_axis = [
+                (key, line)
+                for key, line in self._lines_by_key.items()
+                if isinstance(line.placement, GridPlacement)
+                and line.placement.grid_id == grid.id
+                and line.placement.axis == axis
+            ]
+            if abs(new_len - old_len) > SAME_M:
+                count = refit = 0
+                for key, line in on_axis:
+                    span = span_m(line.n_traces, line.header.traces_per_metre)
+                    fitted = span > 0 and is_fitted(line.placement, span, old_len)
+                    placement = followed_length(line.placement, old_len, new_len, span)
+                    if not same_placement(placement, line.placement):
+                        self._replace_line(key, dataclasses.replace(line, placement=placement))
+                    count += line.placement.direction == -1 and not fitted
+                    refit += fitted
+                if count:
+                    moved.append((axis, new_len, count))
+                if refit:
+                    refitted.append((axis, new_len, refit))
+            if abs(new_wid - old_wid) > SAME_M:
+                for key, line in on_axis:
+                    offset = line.placement.offset
+                    if offset < -START_TOLERANCE_M or offset > new_wid + START_TOLERANCE_M:
+                        outside.append(line.placement.label or Path(key).stem)
         self._set_dirty(True)
         self.grids_changed.emit()
         self.lines_changed.emit()  # line geometry follows the frame
+        return GridEditReport(grid.id, tuple(moved), tuple(outside), tuple(refitted))
+
+    def _replace_line(self, key: str, new_line: Line) -> None:
+        """Put `new_line` where the line under `key` stood, in both indexes.
+        Same key: only the object changed."""
+        site = self._require_site()
+        old = self._lines_by_key[key]
+        site.lines[site.lines.index(old)] = new_line
+        self._lines_by_key[key] = new_line
 
     def remove_grid(self, grid_id: str, *, with_lines: bool = False) -> None:
         """Remove a grid. One that still has lines is refused unless
@@ -528,17 +624,42 @@ class SiteSession(QObject):
         # M12: the grid's remembered slice source and its place in the
         # site view go with it, so neither outlives the grid on save.
         site.slice_sources.pop(grid_id, None)
+        # A cut on a removed grid would make validate() refuse every save
+        # (cut spec §4.2). Its picks stay: they are authored data.
+        gone_cuts = [c for c in site.cuts if c.grid_id == grid_id]
+        site.cuts = [c for c in site.cuts if c.grid_id != grid_id]
+        cut_keys_gone = [c.key for c in gone_cuts]
         if grid_id in site.site_view.get("grids", []):
             site.site_view["grids"] = [g for g in site.site_view["grids"] if g != grid_id]
-        dropped = self._drop_lines(keys)
+        lines_dropped = self._drop_lines(keys)
+        cuts_dropped = self._reset_cuts(cut_keys_gone)
         self._set_dirty(True)
-        self._announce_dropped(*dropped)
+        self._announce_dropped(
+            lines_dropped[0] or cuts_dropped[0], lines_dropped[1] or cuts_dropped[1]
+        )
         self.grids_changed.emit()
         if keys:
             self.lines_changed.emit()
+        if gone_cuts:
+            self.cuts_changed.emit()
 
     def set_grid_velocity(self, grid_id: str, model: VelocityModel | None) -> None:
-        self.replace_grid(dataclasses.replace(self.grid(grid_id), velocity=model))
+        # The report is empty: a velocity change moves no line.
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        self.replace_grid(
+            dataclasses.replace(self.grid(grid_id), velocity=model, velocity_source=None)
+        )
+
+    def apply_grid_velocity(
+        self, grid_id: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a grid's velocity and the record of where it came from, in one
+        `grids_changed`. Nothing changes, signals or marks the survey dirty when
+        the grid already holds both (an untouched Apply, spec 7.2 rule 1)."""
+        grid = self.grid(grid_id)
+        if grid.velocity == model and grid.velocity_source == source:
+            return
+        self.replace_grid(dataclasses.replace(grid, velocity=model, velocity_source=source))
 
     # ---- lines ------------------------------------------------------------
     def add_lines(self, lines: list[Line]) -> None:
@@ -634,12 +755,149 @@ class SiteSession(QObject):
         if dropped_preview:
             self.preview_changed.emit("", -1)
 
+    def edit_lines(
+        self,
+        edits: Sequence[LineEdit],
+        *,
+        grid_id: str | None = None,
+        order: Sequence[str] | None = None,
+    ) -> EditOutcome:
+        """Apply every edit, and an optional survey order for `grid_id`, as
+        one change: one dirty mark and one `lines_changed` (line editing spec
+        §3 call 14). The table that built the edits may be stale, so each
+        edit is re-checked here and a line is skipped, and named in the
+        outcome, when it was removed (`REMOVED`), when its placement is no
+        longer the one the table saw (`CHANGED_ELSEWHERE`), or when its new
+        grid no longer exists. The rest still apply.
+
+        A key is the file path, so editing never changes one: the current
+        and preview lines, stacks, profiles, velocity, fits and channels all
+        stay attached. `ValueError` for `order` without `grid_id` or a key
+        edited twice; `KeyError` for an unknown `grid_id`, before anything
+        changes."""
+        site = self._require_site()
+        if order is not None and grid_id is None:
+            raise ValueError("an order needs the grid it orders")
+        keys = [e.key for e in edits]
+        if len(set(keys)) != len(keys):
+            raise ValueError("a line may be edited only once per change")
+        # A repeated key would fill two slots with one line and drop another
+        # from the survey file, and the strict zip below only notices after
+        # the slots are written (line editing spec §3 call 14).
+        if order is not None and len(set(order)) != len(order):
+            raise ValueError("an order may name a line only once")
+        if grid_id is not None:
+            self.grid(grid_id)
+        frames = site.frames
+        skipped: list[Skipped] = []
+        applied: list[tuple[str, GridPlacement, GridPlacement]] = []  # key, old, new
+        for edit in edits:
+            label = edit.seen.label or Path(edit.key).stem
+            line = self._lines_by_key.get(edit.key)
+            if line is None:
+                skipped.append(Skipped(edit.key, label, REMOVED))
+                continue
+            current = line.placement
+            if not isinstance(current, GridPlacement) or current != edit.seen:
+                skipped.append(Skipped(edit.key, label, CHANGED_ELSEWHERE))
+                continue
+            try:
+                new = edit.placed(frames)
+            except KeyError:
+                gone = edit.grid_id or current.grid_id
+                skipped.append(Skipped(edit.key, label, f"its new grid {gone!r} no longer exists"))
+                continue
+            if same_placement(new, current):
+                continue
+            applied.append((edit.key, current, new))
+        for key, _, new in applied:
+            line = self._lines_by_key[key]
+            self._replace_line(key, dataclasses.replace(line, placement=new))
+        # A line that changed grid joins the new grid at the end of the survey
+        # order, the way an imported line does, and leaves the old grid's
+        # remembered slice lines.
+        moved = [key for key, old, new in applied if new.grid_id != old.grid_id]
+        for key, old, new in applied:
+            if new.grid_id == old.grid_id:
+                continue
+            remembered = site.slice_sources.get(old.grid_id, {}).get("lines")
+            if isinstance(remembered, list):
+                remembered[:] = [k for k in remembered if k != key]
+        if moved:
+            by_object = {id(line): key for key, line in self._lines_by_key.items()}
+            going = set(moved)
+            site.lines[:] = [ln for ln in site.lines if by_object[id(ln)] not in going] + [
+                self._lines_by_key[k] for k in by_object.values() if k in going
+            ]
+        reordered = False
+        if order is not None and grid_id is not None:
+            on = self.keys_on_grid(grid_id)
+            want = [k for k in order if k in on] + [k for k in on if k not in order]
+            if want != on:
+                by_key = dict(self._lines_by_key)
+                slots = [
+                    i
+                    for i, ln in enumerate(site.lines)
+                    if getattr(ln.placement, "grid_id", None) == grid_id
+                ]
+                for i, k in zip(slots, want, strict=True):
+                    site.lines[i] = by_key[k]
+                reordered = True
+        # Rebuilt in survey order from the lines themselves; a key is never
+        # recomputed (the file path is the key).
+        key_of = {id(line): key for key, line in self._lines_by_key.items()}
+        rebuilt = {key_of[id(ln)]: ln for ln in site.lines}
+        self._lines_by_key.clear()
+        self._lines_by_key.update(rebuilt)
+        if applied or reordered:
+            self._set_dirty(True)
+            self.lines_changed.emit()
+        return EditOutcome(
+            changed=tuple(key for key, _, _ in applied),
+            reordered=reordered,
+            skipped=tuple(skipped),
+        )
+
+    def move_lines(self, keys: Iterable[str], grid_id: str) -> EditOutcome:
+        """Move lines to another grid, keeping each one's inset from the edge
+        it starts at (line editing spec §3 calls 7 and 1). Lines already on
+        `grid_id` are left out; a key that is gone is skipped and named."""
+        self._require_site()
+        self.grid(grid_id)
+        edits: list[LineEdit] = []
+        skipped: list[Skipped] = []
+        for key in dict.fromkeys(keys):
+            line = self._lines_by_key.get(key)
+            if line is None:
+                skipped.append(Skipped(key, Path(key).stem, REMOVED))
+            elif isinstance(line.placement, GridPlacement) and line.placement.grid_id != grid_id:
+                edits.append(LineEdit(key, seen=line.placement, grid_id=grid_id))
+        outcome = self.edit_lines(edits)
+        return dataclasses.replace(outcome, skipped=tuple(skipped) + outcome.skipped)
+
     def set_line_velocity(self, key: str, model: VelocityModel | None) -> None:
         site = self._require_site()
         line = self.line_for_key(key)
-        new_line = dataclasses.replace(line, velocity=model)
+        # A bare number has no source: the record goes (grid velocity spec §7.2).
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=None)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line  # same key: only the object changed
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
+    def apply_line_velocity(
+        self, key: str, model: VelocityModel | None, source: VelocitySource | None
+    ) -> None:
+        """Set a line's velocity and the record of where it came from, in one
+        `lines_changed`. Nothing changes, signals or marks the survey dirty when
+        the line already holds both (an untouched Apply, spec 7.2 rule 1)."""
+        site = self._require_site()
+        line = self.line_for_key(key)
+        if line.velocity == model and line.velocity_source == source:
+            return
+        new_line = dataclasses.replace(line, velocity=model, velocity_source=source)
+        site.lines[site.lines.index(line)] = new_line
+        self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 
@@ -648,46 +906,160 @@ class SiteSession(QObject):
         Stores only: no velocity changes (`set_line_velocity` does that)."""
         site = self._require_site()
         line = self.line_for_key(key)
-        n = len(line.velocity_fits) + 1
-        while f"fit-{n}" in line.velocity_fits:
-            n += 1
+        highest = max((_fit_number(i) for i in line.velocity_fits), default=0)
+        n = max(line.fit_serial, highest) + 1
         fit_id = f"fit-{n}"
-        new_line = dataclasses.replace(line, velocity_fits={**line.velocity_fits, fit_id: fit})
+        new_line = dataclasses.replace(
+            line, velocity_fits={**line.velocity_fits, fit_id: fit}, fit_serial=n
+        )
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
         return fit_id
 
-    def set_velocity_from_fit(self, key: str, fit_id: str | None) -> None:
-        site = self._require_site()
-        line = self.line_for_key(key)
-        if fit_id is not None and fit_id not in line.velocity_fits:
-            raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
-        new_line = dataclasses.replace(line, velocity_from_fit=fit_id)
-        site.lines[site.lines.index(line)] = new_line
-        self._lines_by_key[key] = new_line
-        self._set_dirty(True)
-        self.lines_changed.emit()
-
     def remove_velocity_fit(self, key: str, fit_id: str) -> None:
-        """Delete a stored fit. A velocity it set stays: it was applied
-        deliberately, and only the claim that this fit produced it goes."""
+        """Delete a stored fit. A velocity it set stays, and so does the record
+        of it: the record copies the fit's numbers, so it stays reproducible
+        and shows the member as deleted (grid velocity spec §7.3)."""
         site = self._require_site()
         line = self.line_for_key(key)
         if fit_id not in line.velocity_fits:
             raise KeyError(f"line {key!r} has no stored fit {fit_id!r}")
         fits = {i: f for i, f in line.velocity_fits.items() if i != fit_id}
-        pointer = None if line.velocity_from_fit == fit_id else line.velocity_from_fit
-        new_line = dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=pointer)
+        new_line = dataclasses.replace(line, velocity_fits=fits)
         site.lines[site.lines.index(line)] = new_line
         self._lines_by_key[key] = new_line
         self._set_dirty(True)
         self.lines_changed.emit()
 
+    def member_state(self, member: SourceFit, grid_id: str | None = None) -> str:
+        """Where a record's member stands now: `"present"`, `"deleted"`,
+        `"line removed"`, `f"line moved to grid {gid}"` (only when `grid_id` is
+        given and the line is on another grid) or `"line moved off this grid"`
+        (the line is no longer on any grid)."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return "line removed"
+        if not any(member.names(i, f) for i, f in line.velocity_fits.items()):
+            return "deleted"
+        if grid_id is not None:
+            now = getattr(line.placement, "grid_id", None)
+            if now is None:
+                return "line moved off this grid"
+            if now != grid_id:
+                return f"line moved to grid {now}"
+        return "present"
+
+    def member_fit(self, member: SourceFit) -> StoredFit | None:
+        """The stored fit `member` copied, or None unless it is still `"present"`."""
+        self._require_site()
+        line = self._lines_by_key.get(member.line_key)
+        if line is None:
+            return None
+        fit = line.velocity_fits.get(member.fit_id)
+        return fit if fit is not None and member.names(member.fit_id, fit) else None
+
     def resolved_velocity(self, key: str) -> VelocityModel:
+        if is_cut_key(key):  # a cut takes its grid's velocity, never a line's (cut spec call 16)
+            return self.grid_depth_velocity(self.cut_for_key(key).grid_id)
         line = self.line_for_key(key)
         return resolve_velocity(line, self.grid_for_line(line))
+
+    # ---- cuts (cut spec §4.2) ------------------------------------------------
+    def cut_keys(self) -> list[str]:
+        """Every cut's key, in drawing order. `keys()` stays lines-only."""
+        return [c.key for c in self._require_site().cuts]
+
+    def cut_keys_on_grid(self, grid_id: str) -> list[str]:
+        """The keys of the cuts drawn on `grid_id`, in drawing order."""
+        return [c.key for c in self._require_site().cuts if c.grid_id == grid_id]
+
+    def _require_key(self, key: str) -> None:
+        """`KeyError` unless `key` names a line or a cut."""
+        if is_cut_key(key):
+            self.cut_for_key(key)
+        else:
+            self.line_for_key(key)
+
+    def _reset_cuts(self, keys: Sequence[str]) -> tuple[bool, bool]:
+        """Reset the working and previewed item if it is one of `keys`.
+
+        Emits nothing; returns (dropped current, dropped preview) for
+        `_announce_dropped`, like `_drop_lines`. A caller that drops lines
+        and cuts together resets both first and announces once, so
+        `line_opened` always precedes `preview_changed`.
+        """
+        dropped_current = self._current_key in keys
+        dropped_preview = self._preview_key in keys
+        if dropped_current:
+            self._current_key = None
+            self._current_trace = -1
+            self._selection = (-1, -1)
+        if dropped_preview:
+            self._preview_key = None
+            self._preview_trace = -1
+        return dropped_current, dropped_preview
+
+    def cut_for_key(self, key: str) -> Cut:
+        for cut in self._require_site().cuts:
+            if cut.key == key:
+                return cut
+        raise KeyError(f"no cut with key {key!r}")
+
+    def add_cut(self, grid_id: str, vertices: Sequence[tuple[float, float]]) -> str:
+        """Add a cut on `grid_id` (vertices in grid metres) and return its key.
+
+        `KeyError` for an unknown grid, `ValueError` from `Cut.new` for fewer
+        than two different points. The name is `Cut {n}`, one past the highest
+        `Cut <n>` there is, so a deleted name is not handed out again while a
+        higher one stays.
+        """
+        site = self._require_site()
+        self.grid(grid_id)
+        highest = 0
+        for existing in site.cuts:
+            m = re.fullmatch(r"Cut (\d+)", existing.name)
+            if m:
+                highest = max(highest, int(m.group(1)))
+        cut = Cut.new(grid_id, vertices, f"Cut {highest + 1}")
+        site.cuts.append(cut)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+        return cut.key
+
+    def rename_cut(self, key: str, name: str) -> None:
+        site = self._require_site()
+        name = name.strip()
+        if not name:
+            raise ValueError("a cut needs a name")
+        old = self.cut_for_key(key)
+        site.cuts[site.cuts.index(old)] = dataclasses.replace(old, name=name)
+        self._set_dirty(True)
+        self.cuts_changed.emit()
+
+    def remove_cut(self, key: str) -> None:
+        """Delete a cut. Its picks stay where they are (picks are authored data)."""
+        site = self._require_site()
+        site.cuts.remove(self.cut_for_key(key))
+        self._set_dirty(True)
+        self._announce_dropped(*self._reset_cuts([key]))
+        self.cuts_changed.emit()
+
+    def grid_depth_velocity(self, grid_id: str) -> VelocityModel:
+        """The velocity every cut and every slice on `grid_id` uses (cut spec
+        call 16; grid velocity spec 10): the grid's own, else the HEADER
+        velocity of the grid's first line in survey order. That line's own
+        override is ignored: a line override must never move a cut pick or a
+        slice's depths. `KeyError` when the grid has neither."""
+        grid = self.grid(grid_id)
+        if grid.velocity is not None:
+            return grid.velocity
+        keys = self.keys_on_grid(grid_id)
+        if not keys:
+            raise KeyError(f"grid {grid_id!r} has no velocity and no line to take one from")
+        return VelocityModel.from_dielectric(self.line_for_key(keys[0]).header.epsr)
 
     # ---- stacks -----------------------------------------------------------
     def stack_for(self, key: str, *, insert: bool = True) -> StepStack:
@@ -713,6 +1085,35 @@ class SiteSession(QObject):
                 site.stacks[key] = stack
             self._attach_source(key, stack)
         return stack
+
+    def line_zero(self, key: str, *, load: bool = False) -> float | None:
+        """The radar-clock time the line's own stack calls 0.
+
+        0.0 with no enabled time_zero step (nothing is loaded for that). The
+        source's answer once one is attached. With no source, None, unless
+        `load` reads the line and runs a copy of the stack. None on any
+        failure, which is logged: this never raises, and never plants a stack.
+
+        A cut has no zero of its own: its times are on its cube's clock
+        (cut spec call 18), so it answers None at once and logs nothing.
+        """
+        if is_cut_key(key):
+            return None
+        try:
+            stack = self.stack_for(key, insert=False)
+            if not stack.sets_time_zero():
+                return 0.0
+            if stack.source is not None:
+                return float(stack.zero_ns())
+            if not load:
+                return None
+            profiles = self.line_for_key(key).load()
+            probe = StepStack.from_dicts(stack.to_dicts())
+            probe.source = Radargram.from_profile(profiles[self.channel(key)])
+            return float(probe.zero_ns())
+        except Exception as exc:  # noqa: BLE001 -- a read must not raise; the caller falls back
+            _log(f"could not find where line {key} has its time zero: {exc}")
+            return None
 
     def _attach_source(self, key: str, stack: StepStack) -> None:
         profiles = self._profiles.get(key)
@@ -910,6 +1311,33 @@ class SiteSession(QObject):
         self._require_site().site_view = new
         self._set_dirty(True)
 
+    def slice_colours(self, scope: str) -> dict[str, Any]:
+        """A copy of a slice scope's remembered colours (#180), or {}.
+
+        `scope` is `"grid"` (This grid) or `"site"` (Whole site). The record is
+        `{"own": bool, "style": str}`, each key optional: `own` is True when the
+        slice uses the user's own QGIS symbology, `style` that symbology."""
+        _check_colour_scope(scope)
+        return dict(self._require_site().slice_colours.get(scope, {}))
+
+    def set_slice_colours(
+        self, scope: str, *, own: bool | None = None, style: str | None = None
+    ) -> None:
+        """Merge the given colour choices into a scope's record; None leaves a
+        field as it is. Marks the site unsaved only when something changed."""
+        _check_colour_scope(scope)
+        colours = self._require_site().slice_colours
+        old = colours.get(scope, {})
+        new = dict(old)
+        if own is not None:
+            new["own"] = bool(own)
+        if style is not None:
+            new["style"] = style
+        if new == old:
+            return
+        colours[scope] = new
+        self._set_dirty(True)
+
     def site_resolution(self) -> dict[str, float | str]:
         """A copy of Whole site's remembered resolution (#71), or {}."""
         return dict(self._require_site().site_view.get("resolution", {}))
@@ -947,7 +1375,7 @@ class SiteSession(QObject):
 
     # ---- current line, samples, cursor ------------------------------------
     def open_line(self, key: str) -> None:
-        self.line_for_key(key)
+        self._require_key(key)
         if key == self._current_key:
             # Re-selecting the line already open -- reachable in normal
             # use, not just a defensive corner case: Task 5 promotes a
@@ -971,7 +1399,15 @@ class SiteSession(QObject):
         # drives that render, and ProfileDock clears its own preview on it.
         self._preview_key = None
         self._preview_trace = -1
+        self._open_serial += 1  # before the emit, so every slot of this open reads the same value
         self.line_opened.emit(key)
+
+    @property
+    def open_serial(self) -> int:
+        """Counts the items opened as the working item (`open_line` moving it).
+        Moved before `line_opened` is emitted, so a listener can tell what it did
+        during this open from what it did earlier, whatever order the slots run in."""
+        return self._open_serial
 
     def profiles_for(self, key: str) -> list[Profile] | None:
         return self._profiles.get(key)
@@ -1013,8 +1449,11 @@ class SiteSession(QObject):
     def set_trace(self, key: str, index: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
-        index = max(0, min(int(index), n - 1))
+        if is_cut_key(key):
+            # The column count belongs to the section, so only the bottom clamps (plan call 4).
+            index = max(-1, int(index))
+        else:
+            index = max(0, min(int(index), self.line_for_key(key).n_traces - 1))
         if index != self._current_trace:
             self._current_trace = index
             self.trace_changed.emit(key, index)
@@ -1022,8 +1461,8 @@ class SiteSession(QObject):
     def set_selection(self, key: str, start: int, end: int) -> None:
         if key != self._current_key:
             return
-        n = self.line_for_key(key).n_traces
         lo, hi = sorted((int(start), int(end)))
+        n = 1 << 62 if is_cut_key(key) else self.line_for_key(key).n_traces
         # Each end is clamped independently into [0, n - 1]. That means this
         # can never land on (-1, -1): clearing the selection is exclusively
         # clear_selection()'s job, and a caller cannot accidentally forge the
@@ -1065,8 +1504,14 @@ class SiteSession(QObject):
         """
         self._pick_store = store
 
-    def add_pick(self, key: str, trace: int, time_ns: float) -> Pick:
+    def add_pick(self, key: str, trace: int, time_ns: float, *, zero_ns: float = 0.0) -> Pick:
         """Author one pick on the WORKING line.
+
+        `time_ns` is measured from `zero_ns` (the zero of the view it was
+        clicked on), so its radar time is `time_ns + zero_ns`. That radar time
+        is clamped into the header window, then stored measured from the
+        line's own zero (`line_zero`), with that zero; when the line's zero is
+        unknown it is stored on the radar clock with no zero (#97).
 
         `key` must be `current_key`. This is the same guard `set_trace`
         and `set_selection` carry, and it exists here rather than only in
@@ -1099,6 +1544,8 @@ class SiteSession(QObject):
             raise RuntimeError("no pick store is attached to this session; cannot author a pick")
         if not math.isfinite(time_ns):
             raise ValueError(f"a pick needs a finite two-way time, not {time_ns!r}")
+        if not math.isfinite(zero_ns):
+            raise ValueError(f"a pick needs a finite time zero, not {zero_ns!r}")
         line = self.line_for_key(key)
         index = max(0, min(int(trace), line.n_traces - 1))
         # The view emits a pick for any left click in the widget, and
@@ -1117,19 +1564,18 @@ class SiteSession(QObject):
         t0 = float(line.header.position_ns)
         t_end = t0 + (line.header.n_samples - 1) * float(line.header.dt_ns)
         lo, hi = (t0, t_end) if t0 <= t_end else (t_end, t0)
-        time = max(lo, min(float(time_ns), hi))
-        model = self.resolved_velocity(key)
-        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
-        # call `np.asarray` on whatever they are handed, so this keeps
-        # numpy out of session.py's imports entirely for one scalar.
-        times = [time]
+        radar = max(lo, min(retime_ns(float(time_ns), float(zero_ns), 0.0), hi))
+        zero = self.line_zero(key)
+        time = radar if zero is None else retime_ns(radar, 0.0, zero)
+        distance_m, depth_m, velocity_m_ns = self.derived_pick_fields(key, index, time)
         pick = Pick(
             line_key=key,
             trace=index,
             time_ns=time,
-            distance_m=self._pick_distance(line, index),
-            depth_m=float(model.depth_at(times)[0]),
-            velocity_m_ns=float(model.velocity_at(times)[0]),
+            zero_ns=zero,
+            distance_m=distance_m,
+            depth_m=depth_m,
+            velocity_m_ns=velocity_m_ns,
             # insert=False: reading the stack to record it must not be
             # what creates one. M7's Finding 4 is the same shape -- a
             # hovered line persisted an empty StepStack purely because
@@ -1142,6 +1588,99 @@ class SiteSession(QObject):
         self.picks_changed.emit()
         return pick
 
+    def derived_pick_fields(
+        self, key: str, trace: int, time_ns: float
+    ) -> tuple[float | None, float, float]:
+        """`(distance_m, depth_m, velocity_m_ns)` for a pick at `trace` and
+        `time_ns` on line `key`, from the line's current placement and
+        resolved velocity. `add_pick` records these, and `SiteLayers.
+        follow_lines` re-derives them whenever a line or grid changes, so
+        both read them from one place (line editing spec §4.4).
+
+        `KeyError` for an unknown key. No clamping: `add_pick` clamps the
+        trace and time before calling, and a stored pick is followed with
+        the values it already holds.
+        """
+        line = self.line_for_key(key)
+        model = self.resolved_velocity(key)
+        # A plain list, not a numpy array: `depth_at`/`velocity_at` both
+        # call `np.asarray` on whatever they are handed, so this keeps
+        # numpy out of session.py's imports entirely for one scalar.
+        times = [time_ns]
+        return (
+            self._pick_distance(line, trace),
+            float(model.depth_at(times)[0]),
+            float(model.velocity_at(times)[0]),
+        )
+
+    def add_cut_pick(
+        self, key: str, column: int, distance_m: float, time_ns: float, stack_json: str
+    ) -> Pick:
+        """Author one pick on the WORKING cut (cut spec §4.5, calls 2 and 12).
+
+        A cut pick is a distance along the cut and a time. `column` is the
+        section column it was made on, stored in `trace` for the record
+        only: a column's index changes with the cell size, so nothing ever
+        places the pick by it. The distance is clamped into the cut. The
+        time is on the cube's clock (call 18) and is stored as given,
+        never converted, and never clamped to a line's window since a cut
+        has none. `stack_json` is the section's provenance, in place of a
+        line's stack.
+
+        Refuses like `add_pick`: only the working key, and a raise rather
+        than a silent no-op, since a pick that does not appear is authored
+        data lost. Does not dirty the session, for the reason `add_pick`
+        gives.
+        """
+        if not is_cut_key(key) or key != self._current_key:
+            raise ValueError(
+                f"a cut pick targets the working cut ({self._current_key!r}), not {key!r}; "
+                f"select the cut to work on it"
+            )
+        if self._pick_store is None:
+            raise RuntimeError("no pick store is attached to this session; cannot author a pick")
+        if not math.isfinite(time_ns) or not math.isfinite(distance_m):
+            raise ValueError(
+                f"a pick needs a finite distance and time, not {distance_m!r} and {time_ns!r}"
+            )
+        cut = self.cut_for_key(key)
+        distance = max(0.0, min(float(distance_m), cut.length_m))
+        depth_m, velocity_m_ns = self.derived_cut_pick_fields(key, distance, float(time_ns))
+        pick = Pick(
+            line_key=key,
+            trace=max(0, int(column)),
+            time_ns=float(time_ns),
+            distance_m=distance,
+            depth_m=depth_m,
+            velocity_m_ns=velocity_m_ns,
+            stack_json=stack_json,
+            note="",
+            created=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        )
+        self._pick_store.write_pick(pick)
+        self.picks_changed.emit()
+        return pick
+
+    def derived_cut_pick_fields(
+        self, key: str, distance_m: float, time_ns: float
+    ) -> tuple[float | None, float | None]:
+        """`(depth_m, velocity_m_ns)` for a pick on cut `key` at `time_ns`,
+        from the cut's velocity (cut spec call 16), or `(None, None)` when
+        its grid has neither a velocity nor a line to take one from.
+
+        `distance_m` takes no part in the maths (a cut has one velocity):
+        it is in the signature so a caller hands over a pick's whole
+        position, as `derived_pick_fields` takes its trace. `KeyError` for
+        a key that names no cut.
+        """
+        cut = self.cut_for_key(key)
+        try:
+            model = self.grid_depth_velocity(cut.grid_id)
+        except KeyError:
+            return (None, None)
+        times = [time_ns]
+        return (float(model.depth_at(times)[0]), float(model.velocity_at(times)[0]))
+
     @staticmethod
     def _pick_distance(line: Line, index: int) -> float | None:
         """Distance along the line at `index`, or None when the line has
@@ -1152,6 +1691,11 @@ class SiteSession(QObject):
         file rather than an error. Time is the truth here, so a missing
         distance is a null field, not a refused pick.
         """
+        if index < 0:
+            # NumPy would wrap a negative index to the far end of the line;
+            # a hand-edited trace below zero has no distance, like one past
+            # the end.
+            return None
         try:
             return float(line.distance_along()[index])
         except (ValueError, IndexError):
@@ -1191,8 +1735,10 @@ class SiteSession(QObject):
         if key is None:
             self.clear_preview()
             return
-        line = self.line_for_key(key)  # raises KeyError before anything changes
-        index = -1 if trace < 0 else max(0, min(int(trace), line.n_traces - 1))
+        self._require_key(key)  # raises KeyError before anything changes
+        index = -1 if trace < 0 else int(trace)
+        if not is_cut_key(key):
+            index = min(index, self.line_for_key(key).n_traces - 1)
         if (key, index) == (self._preview_key, self._preview_trace):
             return  # loop guard: a marker update that round-trips is a no-op
         self._preview_key, self._preview_trace = key, index

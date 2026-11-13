@@ -10,6 +10,7 @@ from nsgeo.render import PercentileClip, UnipolarClip
 from nsgeo.slices.cube import Provenance, SliceCube
 from nsgeo.slices.display import (
     SliceWindow,
+    frame_lattice,
     limit_over_slices,
     plan_windows,
     shared_limit,
@@ -129,19 +130,19 @@ def _cube_with_varying_levels(seed: int = 0) -> SliceCube:
         built_utc="2026-09-19T00:00:00Z",
         core_version="0.1.0.dev0",
     )
-    return SliceCube(frame=frame, z=z, mean=mean, count=count, provenance=prov)
+    return SliceCube.from_dense(frame, z, mean, count, prov)
 
 
 def test_the_shared_limit_is_measured_over_displayed_slices_not_raw_levels():
     """The M10 final review's Important 3, now a test. A window mean has
     far lower variance than the levels it averages, so UnipolarClip().
-    limit(cube.mean) is systematically too high -- and because the bias is
+    limit over every level is systematically too high -- and because the bias is
     uniform across depth, every slice renders dim IDENTICALLY at every
     depth, which reads as 'the data is dim' rather than as a bug. That is
     exactly why it needs a test rather than an eye."""
     cube = _cube_with_varying_levels()
     clip = UnipolarClip()
-    over_levels = clip.limit(cube.mean)
+    over_levels = clip.limit(np.stack([cube.level(k) for k in range(cube.z.nz)]))
     over_slices = shared_limit(cube, thickness_levels=10, clip=clip)
     assert over_slices < over_levels
     assert over_slices / over_levels < 0.8  # measured ~0.55 on this fixture
@@ -168,11 +169,11 @@ def test_the_shared_limit_covers_every_level_exactly_once():
 
     # nz=37 with thickness 10: plan_windows gives 0,10,20 and stops at 30,
     # leaving 7 levels. shared_limit must still see all 37.
+    (block,) = cube.blocks
     odd = SliceCube(
         frame=cube.frame,
         z=ZAxis(t0_ns=0.0, dz_ns=0.5, nz=37),
-        mean=cube.mean[:37],
-        count=cube.count,
+        blocks=(dataclasses.replace(block, mean=block.mean[:37]),),
         provenance=cube.provenance,
     )
     seen: list[np.ndarray] = []
@@ -257,7 +258,8 @@ def test_north_up_of_a_rotated_frame_fills_a_larger_box_and_masks_the_corners():
     assert np.isnan(out[0, 0])  # a corner of the box the frame never reaches
     finite = out[np.isfinite(out)]
     assert finite.size > 0
-    assert set(np.unique(finite)) <= set(values.ravel())  # only real cell values, never blended
+    # bilinear: a blend of real cell values, never outside their range
+    assert finite.min() >= values.min() and finite.max() <= values.max()
 
 
 def test_north_up_never_invents_a_value_outside_the_frame():
@@ -303,27 +305,55 @@ def test_north_up_of_an_axis_aligned_frame_has_exactly_the_frames_shape():
         np.testing.assert_allclose(out, values[::-1])
 
 
+def test_frame_lattice_at_the_cell_reproduces_an_axis_aligned_grid():
+    """The lattice `to_north_up` writes through: the frame's own shape, anchored
+    at its north-west corner, so each pixel centre is a cell centre."""
+    for nx, ny, cell in ((29, 12, 0.1), (23, 19, 0.05), (7, 3, 0.2)):
+        frame = CubeFrame((500000.0, 4500000.0), 0.0, cell, nx, ny, "EPSG:32633")
+        lat = frame_lattice(frame, cell)
+        assert (lat.width, lat.height, lat.pixel, lat.crs) == (nx, ny, cell, "EPSG:32633")
+        assert (lat.x0, lat.y1) == pytest.approx((500000.0, 4500000.0 + ny * cell))
+        values = np.arange(ny * nx, dtype=float).reshape(ny, nx)
+        out, gt = to_north_up(values, frame)
+        assert gt == (lat.x0, lat.pixel, 0.0, lat.y1, 0.0, -lat.pixel)
+        assert out.shape == (lat.height, lat.width)
+
+
+def test_frame_lattice_at_half_the_cell_doubles_the_pixels():
+    frame = CubeFrame((500000.0, 4500000.0), 0.0, 0.1, 29, 12, "EPSG:32633")
+    lat = frame_lattice(frame, 0.05)
+    assert (lat.width, lat.height) == (58, 24)
+    assert (lat.x0, lat.y1) == pytest.approx((500000.0, 4500000.0 + 1.2))
+    with pytest.raises(ValueError):
+        frame_lattice(frame, 0.0)
+
+
 def _frame(azimuth, nx=40, ny=25, cell=0.2):
     return CubeFrame(
         origin=(500000.0, 4500000.0), azimuth=azimuth, cell=cell, nx=nx, ny=ny, crs="EPSG:32633"
     )
 
 
-def test_a_rotated_frame_is_resampled_at_half_the_cell():
-    """Ruling 2 (interpolation spec §8): at pitch = cell a backward
-    nearest-neighbour gather loses 15-18% of a rotated frame's cells."""
-    frame = _frame(10.497)
-    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
-    assert gt[1] == pytest.approx(0.1)
-    assert gt[5] == pytest.approx(-0.1)
+def test_a_rotated_frame_is_resampled_at_the_cell():
+    """The pixel is the cell at every azimuth (spec §3 decision 1): the
+    bilinear rule reads every cell at that pitch, so half of it is not needed."""
+    for azimuth in (10.497, 1e-7):
+        frame = _frame(azimuth)
+        _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
+        assert gt[1] == pytest.approx(frame.cell)
+        assert gt[5] == pytest.approx(-frame.cell)
 
 
 @pytest.mark.parametrize("azimuth", [10.497, 33.0, 45.0, 77.3])
 def test_no_cell_is_dropped_on_a_rotated_frame(azimuth):
-    frame = _frame(azimuth)
-    values = np.arange(frame.nx * frame.ny).reshape(frame.ny, frame.nx)
-    out, _ = to_north_up(values, frame)
-    assert set(out[np.isfinite(out)].astype(int)) == set(range(frame.nx * frame.ny))
+    """Every cell feeds some finite pixel: light one cell, resample, and a
+    finite non-zero pixel must exist."""
+    frame = _frame(azimuth, nx=12, ny=9)
+    for index in range(frame.nx * frame.ny):
+        values = np.zeros(frame.nx * frame.ny)
+        values[index] = 1.0
+        out, _ = to_north_up(values.reshape(frame.ny, frame.nx), frame)
+        assert np.nanmax(out) > 0.0, f"cell {index} reached no pixel at {azimuth} degrees"
 
 
 @pytest.mark.parametrize("azimuth", [0.0, 90.0, 180.0])
@@ -335,10 +365,21 @@ def test_an_axis_aligned_frame_keeps_the_full_pitch(azimuth):
         assert out.shape == (frame.ny, frame.nx)
 
 
-def test_a_hair_off_axis_frame_keeps_the_full_pitch():
-    frame = _frame(1e-7, nx=100, ny=100)  # 20 m
-    _, gt = to_north_up(np.zeros((frame.ny, frame.nx)), frame)
-    assert gt[1] == pytest.approx(frame.cell)
+def test_an_axis_aligned_frame_is_reproduced_exactly_at_the_cell():
+    frame = _frame(0.0, nx=37, ny=23, cell=0.05)
+    values = np.random.default_rng(3).random((frame.ny, frame.nx))
+    out, _ = to_north_up(values, frame)
+    np.testing.assert_array_equal(out, values[::-1].astype(np.float32))
+
+
+def test_coverage_counts_are_never_blended():
+    frame = _frame(30.0, nx=20, ny=15)
+    counts = np.random.default_rng(4).integers(1, 9, size=(frame.ny, frame.nx)).astype(float)
+    counts[2:4, 3:6] = np.nan
+    out, _ = to_north_up(counts, frame, counts=True)
+    finite = out[np.isfinite(out)]
+    assert finite.size > 0
+    assert set(np.unique(finite)) <= set(np.unique(counts[np.isfinite(counts)]))
 
 
 def test_the_north_up_gather_is_planned_once_per_frame(monkeypatch):

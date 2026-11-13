@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import datetime
 
@@ -10,7 +11,10 @@ from nsgeo.model.survey import Line
 from nsgeo.processing import build_step
 from nsgeo.project import ProjectError
 from nsgeo.velocity import VelocityModel
+from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 from nsgeo_qgis import session as session_module
+from nsgeo_qgis.line_edit import CHANGED_ELSEWHERE, REMOVED, LineEdit
 from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, SiteSession
 from plugin_testing import REAL_DZT, connect_message_log, needs_real_data, synthetic_dzt
 from qgis.core import Qgis
@@ -1141,6 +1145,27 @@ def test_add_pick_writes_the_pick_and_says_so_once(pickable):
     assert seen == [1]
 
 
+def test_derived_pick_fields_are_what_add_pick_records(pickable):
+    session, _, keys = pickable
+    written = []
+
+    class _Store:
+        def write_pick(self, pick):
+            written.append(pick)
+
+    session.set_pick_store(_Store())
+    pick = session.add_pick(keys[0], 7, 12.5)
+
+    assert written == [pick]
+    assert session.derived_pick_fields(keys[0], 7, pick.time_ns) == (
+        pick.distance_m,
+        pick.depth_m,
+        pick.velocity_m_ns,
+    )
+    with pytest.raises(KeyError):
+        session.derived_pick_fields("raw/NOPE.DZT", 7, 12.5)
+
+
 def test_add_pick_refuses_a_line_that_is_not_the_working_line(pickable):
     """Spec §4.3: picking targets the working line, never a preview. The
     guard is here, in the session, for the same reason set_trace's and
@@ -1499,3 +1524,530 @@ def test_remembering_the_same_method_again_does_not_mark_dirty(session):
     session.remember_slice_resolution("A", method="kriging", max_distance_spacings=0.5)
     session.remember_site_resolution(method="kriging", smooth_x_m=0.0)
     assert not session.dirty
+
+
+# --- line editing (line editing spec §4.2-4.3) --------------------------------
+
+
+def _zigzag(session, folder):
+    """Grid A (11 m along y) with four y lines at offsets 0 .. 1.5, forward
+    and reversed alternately, and Grid B (9 m) with two forward lines.
+    Returns the keys on A and on B."""
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 9.0, "EPSG:32616", 0.5))
+    lines = []
+    for i in range(4):
+        p = synthetic_dzt(folder / "raw", f"FILE__00{i + 1}.DZT", n_traces=60)
+        fwd = i % 2 == 0
+        placement = GridPlacement("A", "y", i * 0.5, 0.0 if fwd else 11.0, 1 if fwd else -1, p.stem)
+        lines.append(Line.open(p, placement))
+    for i in range(2):
+        p = synthetic_dzt(folder / "raw", f"FILE__00{i + 5}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement("B", "y", i * 0.5, 0.0, 1, p.stem)))
+    session.add_lines(lines)
+    return session.keys_on_grid("A"), session.keys_on_grid("B")
+
+
+def _edit(session, key, **kw):
+    return LineEdit(key, session.line_for_key(key).placement, **kw)
+
+
+def test_edit_lines_applies_every_edit_as_one_change(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    lines = Spy(session.lines_changed)
+    outcome = session.edit_lines(
+        [_edit(session, a[0], offset=2.0), _edit(session, a[1], label="wall line")]
+    )
+    assert len(lines.calls) == 1 and session.dirty
+    assert session.line_for_key(a[0]).placement.offset == 2.0
+    assert session.line_for_key(a[1]).placement.label == "wall line"
+    assert outcome.changed == (a[0], a[1])
+
+
+def test_an_edit_that_changes_nothing_emits_nothing(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    lines = Spy(session.lines_changed)
+    own = session.line_for_key(a[0]).placement.offset
+    outcome = session.edit_lines([_edit(session, a[0], offset=own)])
+    assert outcome.changed == () and not outcome.reordered
+    assert lines.calls == [] and not session.dirty
+
+
+def test_a_line_changed_elsewhere_since_the_table_read_it_is_skipped_and_named(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    rev, fwd = a[1], a[0]
+    flips = [
+        _edit(session, rev).flipped(session.site.frames),
+        _edit(session, fwd).flipped(session.site.frames),
+    ]
+    session.replace_grid(dataclasses.replace(session.grid("A"), size_y=12.0))
+    outcome = session.edit_lines(flips)
+    assert [(s.key, s.label, s.reason) for s in outcome.skipped] == [
+        (rev, "FILE__002", CHANGED_ELSEWHERE)
+    ]
+    assert outcome.changed == (fwd,)
+    p = session.line_for_key(fwd).placement
+    assert (p.direction, p.start_along) == (-1, 12.0)  # against today's length
+    assert session.line_for_key(rev).placement.start_along == 12.0  # followed the grid, not edited
+
+
+def test_a_removed_line_is_skipped_not_raised(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    edit = _edit(session, a[0], offset=3.0)
+    session.remove_line(a[0])
+    outcome = session.edit_lines([edit])
+    assert outcome.changed == ()
+    assert [(s.key, s.reason) for s in outcome.skipped] == [(a[0], REMOVED)]
+
+
+def test_moving_a_line_keeps_its_inset_and_joins_the_new_grid_at_the_end(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    key = a[1]  # reversed, starts at 11.0 = its far edge
+    session.append_step(key, build_step("dewow"))
+    session.set_line_velocity(key, VelocityModel.constant(0.07))
+    fit_id = session.add_velocity_fit(
+        key, StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
+    )
+    session.open_line(key)
+    outcome = session.move_lines([key], "B")
+    p = session.line_for_key(key).placement
+    assert (p.grid_id, p.start_along, p.direction) == ("B", 9.0, -1)
+    assert outcome.changed == (key,)
+    assert session.keys_on_grid("B")[-1] == key and session.keys()[-1] == key
+    assert len(session.stack_for(key, insert=False)) == 1
+    assert session.line_for_key(key).velocity == VelocityModel.constant(0.07)
+    assert fit_id in session.line_for_key(key).velocity_fits
+    assert session.current_key == key
+    assert key not in session.keys_on_grid("A")
+    assert set(session.keys_on_grid("B")) == set(b) | {key}
+
+
+def test_a_grid_length_change_keeps_fitted_lines_fitted(session, tmp_path):
+    session.add_grid(Grid("F", (500.0, 700.0), 0.0, 5.0, 10.5, "EPSG:32616", 0.5))
+    lines = []
+    for i, (start, direction, scale) in enumerate(
+        [(0.0, 1, 1.05), (10.5, -1, 1.05), (0.0, 1, 1.0)]
+    ):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__0{i + 1}.DZT", n_traces=601)
+        placement = GridPlacement("F", "y", i * 0.5, start, direction, p.stem, scale=scale)
+        lines.append(Line.open(p, placement))
+    session.add_lines(lines)
+    keys = session.keys_on_grid("F")
+    original_third = session.line_for_key(keys[2]).placement
+    grids, changed = Spy(session.grids_changed), Spy(session.lines_changed)
+
+    report = session.replace_grid(dataclasses.replace(session.grid("F"), size_y=11.0))
+
+    for key, direction in ((keys[0], 1), (keys[1], -1)):
+        p = session.line_for_key(key).placement
+        assert p.scale == pytest.approx(1.1)
+        ends = sorted([p.start_along, p.start_along + direction * p.scale * 10.0])
+        assert ends == [pytest.approx(0.0), pytest.approx(11.0)]
+    third = session.line_for_key(keys[2]).placement
+    assert third == original_third
+    assert report.message() == (
+        "F is now 11.00 m along y; its 2 fitted line(s) were fitted to the new length."
+    )
+    assert len(grids.calls) == 1 and len(changed.calls) == 1
+
+
+def test_a_grid_length_change_names_both_kinds_when_an_unfitted_reversed_line_moves(
+    session, tmp_path
+):
+    session.add_grid(Grid("F", (500.0, 700.0), 0.0, 5.0, 10.5, "EPSG:32616", 0.5))
+    lines = []
+    for i, (start, direction, scale) in enumerate(
+        [(0.0, 1, 1.05), (10.5, -1, 1.05), (10.5, -1, 1.0)]
+    ):
+        p = synthetic_dzt(tmp_path / "raw", f"FILE__0{i + 1}.DZT", n_traces=601)
+        placement = GridPlacement("F", "y", i * 0.5, start, direction, p.stem, scale=scale)
+        lines.append(Line.open(p, placement))
+    session.add_lines(lines)
+    keys = session.keys_on_grid("F")
+
+    report = session.replace_grid(dataclasses.replace(session.grid("F"), size_y=11.0))
+
+    assert session.line_for_key(keys[2]).placement.start_along == pytest.approx(11.0)
+    assert report.message() == (
+        "F is now 11.00 m along y; its 1 reversed line(s) moved with the far edge, "
+        "and its 2 fitted line(s) were fitted to the new length."
+    )
+
+
+def test_a_moved_line_leaves_the_old_grids_remembered_slice_lines(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.remember_slice_source("A", preset="p", lines=(a[0], a[1]))
+    session.move_lines([a[1]], "B")
+    assert session.slice_source("A")["lines"] == [a[0]]
+
+
+def test_order_reorders_only_the_grids_own_slots(session, tmp_path):
+    session.add_grid(Grid("A", (500.0, 700.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("B", (600.0, 700.0), 0.0, 5.0, 9.0, "EPSG:32616", 0.5))
+    lines = []
+    for name, grid in [("A1", "A"), ("B1", "B"), ("A2", "A"), ("B2", "B"), ("A3", "A")]:
+        p = synthetic_dzt(tmp_path / "raw", f"{name}.DZT", n_traces=60)
+        lines.append(Line.open(p, GridPlacement(grid, "y", 0.0, 0.0, 1, name)))
+    session.add_lines(lines)
+    k = {name: f"raw/{name}.DZT" for name in ("A1", "B1", "A2", "B2", "A3")}
+    outcome = session.edit_lines([], grid_id="A", order=[k["A3"], k["A1"], k["A2"]])
+    assert outcome.reordered
+    assert session.keys() == [k["A3"], k["B1"], k["A1"], k["B2"], k["A2"]]
+    session.save()
+    again = SiteSession()
+    again.open_site(session.json_path)
+    assert again.keys() == session.keys()
+
+
+def test_lines_that_arrived_after_the_table_read_go_after_the_reordered_ones(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    outcome = session.edit_lines([], grid_id="A", order=[a[2], a[0]])
+    assert outcome.reordered
+    assert session.keys_on_grid("A") == [a[2], a[0], a[1], a[3]]
+
+
+def test_order_without_a_grid_and_a_key_edited_twice_are_refused(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    with pytest.raises(ValueError):
+        session.edit_lines([], order=a)
+    with pytest.raises(ValueError):
+        session.edit_lines([_edit(session, a[0], offset=2.0), _edit(session, a[0], offset=3.0)])
+    with pytest.raises(KeyError):
+        session.edit_lines([], grid_id="nope")
+
+
+def test_an_order_naming_a_line_twice_is_refused_before_anything_changes(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    session.save()
+    before_lines = list(session.site.lines)
+    before_keys = session.keys()
+    before_places = [session.line_for_key(k).placement for k in before_keys]
+    changed = Spy(session.lines_changed)
+    with pytest.raises(ValueError):
+        session.edit_lines([], grid_id="A", order=[a[0], a[0], a[2]])
+    assert session.site.lines == before_lines
+    assert all(x is y for x, y in zip(session.site.lines, before_lines, strict=True))
+    assert session.keys() == before_keys
+    assert [session.line_for_key(k).placement for k in before_keys] == before_places
+    assert session.dirty is False
+    assert changed.calls == []
+
+
+def test_a_grid_length_change_takes_its_reversed_lines_with_the_far_edge(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    grids, lines = Spy(session.grids_changed), Spy(session.lines_changed)
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_y=10.0))
+    starts = [session.line_for_key(k).placement.start_along for k in a]
+    assert starts == [0.0, 10.0, 0.0, 10.0]
+    assert (
+        report.message()
+        == "A is now 10.00 m along y; its 2 reversed line(s) moved with the far edge."
+    )
+    assert len(grids.calls) == 1 and len(lines.calls) == 1
+
+
+def test_a_width_change_moves_nothing_and_names_lines_left_outside(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    before = [session.line_for_key(k).placement for k in a]
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_x=1.2))
+    assert [session.line_for_key(k).placement for k in a] == before
+    assert report.moved == () and report.outside == ("FILE__004",)
+
+
+def test_a_velocity_only_grid_edit_moves_no_line_and_reports_nothing(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    before = [session.line_for_key(k).placement for k in a]
+    session.set_grid_velocity("A", VelocityModel.constant(0.1))
+    report = session.replace_grid(
+        dataclasses.replace(session.grid("A"), velocity=VelocityModel.constant(0.09))
+    )
+    assert report.message() == "" and report.moved == () and report.outside == ()
+    assert [session.line_for_key(k).placement for k in a] == before
+
+
+def test_both_axes_on_one_grid_follow_only_their_own_length(session, tmp_path):
+    a, _ = _zigzag(session, tmp_path)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "x", 1.0, 5.0, -1, "x 1"))])
+    xkey = session.keys()[-1]
+    before = [session.line_for_key(k).placement for k in a]
+    report = session.replace_grid(dataclasses.replace(session.grid("A"), size_x=4.0))
+    assert session.line_for_key(xkey).placement.start_along == 4.0
+    assert [session.line_for_key(k).placement for k in a] == before
+    assert report.moved == (("x", 4.0, 1),)
+
+
+def test_move_lines_leaves_lines_already_there_alone(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    lines = Spy(session.lines_changed)
+    outcome = session.move_lines([b[0]], "B")
+    assert outcome.changed == () and lines.calls == []
+    gone = session.move_lines(["raw/GONE.DZT"], "B")
+    assert [(s.key, s.label, s.reason) for s in gone.skipped] == [("raw/GONE.DZT", "GONE", REMOVED)]
+    with pytest.raises(KeyError):
+        session.move_lines([a[0]], "nope")
+
+
+def test_line_zero_is_zero_without_a_time_zero_step_and_loads_nothing(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    assert key not in session.site.stacks
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))  # nothing could be loaded
+
+    assert session.line_zero(key) == 0.0
+    assert session.line_zero(key, load=True) == 0.0
+    assert key not in session.site.stacks  # reading planted no stack
+
+
+def test_line_zero_loads_the_line_only_when_asked(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) is None
+    assert session.line_zero(key, load=True) == pytest.approx(-0.0433, abs=1e-3)
+    assert session.stack_for(key).source is None  # the probe ran on a copy
+
+
+def test_line_zero_follows_the_attached_source(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.set_profiles(key, lines[0].load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+
+    assert session.line_zero(key) == pytest.approx(-0.0433, abs=1e-3)
+
+
+def test_line_zero_is_none_not_an_error_when_the_line_cannot_be_read(session, tmp_path):
+    session.add_grid(GRID)
+    lines = _lines(tmp_path, 1)
+    session.add_lines(lines)
+    key = session.keys()[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    lines[0].path.rename(lines[0].path.with_suffix(".gone"))
+
+    assert session.line_zero(key, load=True) is None
+
+
+def test_a_pick_made_on_a_relabelled_view_is_stored_from_the_lines_zero(pickable):
+    session, _, keys = pickable
+    key = keys[0]
+    session.set_profiles(key, session.line_for_key(key).load())
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    zero = session.line_zero(key)
+    assert zero == pytest.approx(-0.0433, abs=1e-3)
+    written = []
+
+    class _Store:
+        def write_pick(self, pick):
+            written.append(pick)
+
+    session.set_pick_store(_Store())
+    on_view = session.add_pick(key, 30, 5.0, zero_ns=zero)
+    on_radar = session.add_pick(key, 30, 5.0 + zero)
+
+    assert on_view.time_ns == pytest.approx(5.0)
+    assert on_view.zero_ns == pytest.approx(zero)
+    assert on_view.radar_ns == pytest.approx(5.0 + zero)
+    for field in ("time_ns", "zero_ns", "depth_m", "velocity_m_ns", "distance_m"):
+        assert getattr(on_radar, field) == pytest.approx(getattr(on_view, field)), field
+    assert written == [on_view, on_radar]
+    # the depth comes from the stored time, measured from the line's zero
+    assert on_view.depth_m == pytest.approx(
+        session.derived_pick_fields(key, 30, on_view.time_ns)[1]
+    )
+
+
+def test_a_pick_on_a_line_whose_zero_is_unknown_is_stored_on_the_radar_clock(pickable):
+    session, _, keys = pickable
+    key = keys[0]
+    session.append_step(key, build_step("time_zero", mode="sample", sample=51))
+    assert session.line_zero(key) is None  # a zero is set but nothing is attached
+    session.set_pick_store(type("S", (), {"write_pick": lambda self, p: None})())
+    pick = session.add_pick(key, 30, 5.0, zero_ns=-0.04)
+    assert pick.zero_ns is None
+    assert pick.time_ns == pytest.approx(5.0 - 0.04)
+
+
+# ---- velocity records (grid velocity from fits, Task 2) ---------------------
+def _fit(stamp="t", v=0.09):
+    return StoredFit(20.0, v, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), stamp)
+
+
+def _member(session, key, fit_id):
+    line = session.line_for_key(key)
+    return SourceFit.of(
+        key, fit_id, line.placement.label or line.path.stem, line.velocity_fits[fit_id]
+    )
+
+
+def test_fit_ids_are_never_reused_after_a_delete(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    assert session.add_velocity_fit(key, _fit()) == "fit-1"
+    assert session.add_velocity_fit(key, _fit()) == "fit-2"
+    session.remove_velocity_fit(key, "fit-2")
+    assert session.add_velocity_fit(key, _fit()) == "fit-3"
+    for i in ("fit-1", "fit-3"):
+        session.remove_velocity_fit(key, i)
+    assert session.add_velocity_fit(key, _fit()) == "fit-4"
+    assert session.line_for_key(key).fit_serial == 4
+
+
+def test_fit_ids_survive_save_and_load(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    session.add_velocity_fit(key, _fit())
+    session.add_velocity_fit(key, _fit())
+    session.remove_velocity_fit(key, "fit-2")
+    session.save()
+    back = SiteSession()
+    back.open_site(tmp_path / SURVEY_FILE)
+    assert back.add_velocity_fit(key, _fit()) == "fit-3"
+
+
+def test_deleting_a_member_keeps_the_record_and_the_velocity(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    m = _member(session, key, fit_id)
+    source = VelocitySource.from_fits([m], "2026-11-12T00:00:00Z")
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    assert session.member_state(m) == "present"
+    session.remove_velocity_fit(key, fit_id)
+    line = session.line_for_key(key)
+    assert line.velocity == VelocityModel.constant(0.09)
+    assert line.velocity_source == source
+    assert session.member_state(m) == "deleted"
+    assert session.member_fit(m) is None
+
+
+def test_a_bare_velocity_drops_the_record(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    source = VelocitySource.from_fits([_member(session, key, fit_id)], None)
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), source)
+    assert session.grid("A").velocity_source == source
+    session.set_line_velocity(key, VelocityModel.constant(0.1))
+    session.set_grid_velocity("A", VelocityModel.constant(0.1))
+    assert session.line_for_key(key).velocity_source is None
+    assert session.grid("A").velocity_source is None
+    assert session.line_for_key(key).velocity == VelocityModel.constant(0.1)
+
+
+def test_apply_sets_velocity_and_record_with_one_signal(session, tmp_path):
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    source = VelocitySource.from_fits([_member(session, key, fit_id)], None)
+    lines, grids = Spy(session.lines_changed), Spy(session.grids_changed)
+    session.apply_line_velocity(key, VelocityModel.constant(0.09), source)
+    assert len(lines.calls) == 1 and grids.calls == []
+    assert session.line_for_key(key).velocity_source == source
+    lines.calls.clear()
+    session.apply_grid_velocity("A", VelocityModel.constant(0.09), source)
+    assert len(grids.calls) == 1  # replace_grid also announces lines, as set_grid_velocity does
+    assert session.grid("A").velocity == VelocityModel.constant(0.09)
+    assert session.grid("A").velocity_source == source
+    session.apply_line_velocity(key, None, None)
+    assert session.line_for_key(key).velocity is None
+    assert session.line_for_key(key).velocity_source is None
+
+
+def test_member_state_names_each_way_a_member_goes(session, tmp_path):
+    a, b = _zigzag(session, tmp_path)
+    key = a[0]
+    fit_id = session.add_velocity_fit(key, _fit("t1"))
+    m = _member(session, key, fit_id)
+    assert session.member_state(m) == "present"
+    assert session.member_fit(m) == _fit("t1")
+    assert session.member_state(m, "A") == "present"
+    session.remove_velocity_fit(key, fit_id)
+    assert session.member_state(m) == "deleted"
+    fit_id = session.add_velocity_fit(key, _fit("t1"))
+    assert fit_id == "fit-2"  # a new id: the old member stays deleted
+    session.move_lines([key], "B")
+    assert session.member_state(m, "A") == "deleted"
+    m2 = _member(session, key, fit_id)
+    assert session.member_state(m2) == "present"
+    assert session.member_state(m2, "A") == "line moved to grid B"
+    assert session.member_state(m2, "B") == "present"
+    session.remove_line(key)
+    assert session.member_state(m2) == "line removed"
+    assert session.member_fit(m2) is None
+    # imported again, with a new fit-1 stamped differently
+    p = tmp_path / "raw" / "FILE__001.DZT"
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    again = session.add_velocity_fit(key, _fit("t9"))
+    assert again == "fit-1"
+    m1 = SourceFit(key, "fit-1", "t1", "FILE__001", 20.0, 0.09, 0.004, 0.0)
+    assert session.member_state(m1) == "deleted"
+
+
+def test_member_state_of_a_loose_line_asked_about_a_grid(session, tmp_path):
+    from types import SimpleNamespace
+
+    session.add_grid(GRID)
+    session.add_lines(_lines(tmp_path, 1))
+    key = session.keys()[0]
+    fit_id = session.add_velocity_fit(key, _fit())
+    m = _member(session, key, fit_id)
+    line = session.line_for_key(key)
+    # No loose placement type exists yet; a stand-in without a grid id is the case.
+    session._lines_by_key[key] = dataclasses.replace(line, placement=SimpleNamespace(label=None))
+    assert session.member_state(m, "A") == "line moved off this grid"
+    assert session.member_state(m) == "present"
+
+
+# ---- #180: each slice scope's colours ---------------------------------------------------
+
+
+def test_slice_colours_default_to_the_plugin_colours(session):
+    assert session.slice_colours("grid") == {}
+    assert session.slice_colours("site") == {}
+
+
+def test_set_slice_colours_merges_per_scope_and_is_quiet_when_unchanged(session, tmp_path):
+    session.save()
+    session.set_slice_colours("grid", own=True)
+    session.set_slice_colours("grid", style="<qgis/>")
+    session.set_slice_colours("site", own=False)
+    assert session.slice_colours("grid") == {"own": True, "style": "<qgis/>"}
+    assert session.slice_colours("site") == {"own": False}
+    assert session.dirty
+    session.save()
+    session.set_slice_colours("grid", own=True, style="<qgis/>")
+    assert not session.dirty
+
+
+def test_slice_colours_are_a_copy(session):
+    session.set_slice_colours("grid", own=True)
+    session.slice_colours("grid")["own"] = False
+    assert session.slice_colours("grid") == {"own": True}
+
+
+def test_set_slice_colours_refuses_an_unknown_scope(session):
+    with pytest.raises(ValueError, match="scope"):
+        session.set_slice_colours("profile", own=True)
+
+
+def test_slice_colours_survive_save_and_reopen(session):
+    session.set_slice_colours("site", own=True, style="<qgis>s</qgis>")
+    session.save()
+    reopened = SiteSession()
+    reopened.open_site(session.root / SURVEY_FILE)
+    assert reopened.slice_colours("site") == {"own": True, "style": "<qgis>s</qgis>"}

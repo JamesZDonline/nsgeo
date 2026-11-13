@@ -14,7 +14,7 @@ from nsgeo_qgis import slice_layer
 from nsgeo_qgis.layers import SiteLayers
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_layer import LAYER_NAME, SITE_LAYER_NAME, SliceLayer, build_shader
-from qgis.core import QgsProject, QgsSingleBandPseudoColorRenderer
+from qgis.core import Qgis, QgsProject, QgsSingleBandPseudoColorRenderer
 from qgis.PyQt.QtGui import qAlpha, qRed
 
 FRAME = CubeFrame(origin=(500.0, 700.0), azimuth=0.0, cell=0.5, nx=12, ny=12, crs="EPSG:32616")
@@ -496,3 +496,370 @@ def test_a_user_rename_survives_site_ticks_but_a_scope_switch_renames(mapped):
     assert sl.layer.name() == LAYER_NAME, "leaving the site renames"
     _site_tick(sl, 5.0)
     assert sl.layer.name() == SITE_LAYER_NAME, "entering the site renames"
+
+
+def _drawn(sl):
+    provider = sl.layer.dataProvider()
+    block = provider.block(1, sl.layer.extent(), sl.layer.width(), sl.layer.height())
+    return np.array(
+        [[block.value(r, c) for c in range(block.width())] for r in range(block.height())]
+    )
+
+
+def test_a_rotated_coverage_view_draws_only_whole_counts(mapped):
+    """`counts=True` takes the largest corner count, never a blend; the
+    same input drawn with counts=False is blended, which is what this pins
+    against (a hard-coded False would blend the counts)."""
+    sl, _, _, _ = mapped
+    frame = CubeFrame(origin=(500.0, 700.0), azimuth=30.0, cell=0.5, nx=16, ny=12, crs="EPSG:32616")
+    counts = np.random.default_rng(2).integers(1, 5, size=(frame.ny, frame.nx)).astype(np.float32)
+    kwargs = {"limit": 5.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update(counts, frame, counts=True, **kwargs)
+    whole = _drawn(sl)
+    finite = whole[np.isfinite(whole) & (whole > -1e30)]
+    assert finite.size > 0
+    np.testing.assert_array_equal(finite, np.round(finite))
+    sl.update(counts, frame, counts=False, **kwargs)
+    blended = _drawn(sl)
+    blended = blended[np.isfinite(blended) & (blended > -1e30)]
+    assert (blended != np.round(blended)).any()
+
+
+def _smooth(layer) -> bool:
+    resampler = layer.resampleFilter().zoomedInResampler()
+    return resampler is not None and resampler.type() == "bilinear"
+
+
+def test_the_slice_layer_is_drawn_smooth_after_every_repoint(mapped):
+    """`setDataSource` can rebuild the pipe, so the resampler is set on
+    every tick, not once when the layer is made."""
+    sl, _, _, _ = mapped
+    kwargs = {"limit": 10.0, "colormap_name": "amp_heat", "unipolar": True, "subtitle": ""}
+    sl.update(_values(), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+    sl.layer.resampleFilter().setZoomedInResampler(None)  # as a rebuilt pipe would
+    assert not _smooth(sl.layer)
+    sl.update(_values(6.0), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+    sl.layer.setResamplingStage(Qgis.RasterResamplingStage.Provider)
+    sl.update(_values(7.0), FRAME, **kwargs)
+    assert _smooth(sl.layer)
+    assert sl.layer.resamplingStage() == Qgis.RasterResamplingStage.ResampleFilter
+
+
+def test_the_site_layer_is_drawn_smooth_after_every_repoint(mapped):
+    sl, _, _, _ = mapped
+    kwargs = {
+        "limit": 10.0,
+        "colormap_name": "amp_heat",
+        "unipolar": True,
+        "subtitle": "",
+        "name": SITE_LAYER_NAME,
+    }
+    site = np.full((6, 9), 4.0, dtype=np.float32)
+    sl.update_north_up(site, SITE_GT, "EPSG:32616", **kwargs)
+    assert _smooth(sl.layer)
+    sl.layer.resampleFilter().setZoomedInResampler(None)
+    sl.update_north_up(site + 1, SITE_GT, "EPSG:32616", **kwargs)
+    assert _smooth(sl.layer)
+
+
+# ---- #180: the user's own colours ------------------------------------------------------
+
+
+def _ramp(fill_from, fill_to):
+    values = np.tile(np.linspace(fill_from, fill_to, FRAME.nx, dtype=np.float32), (FRAME.ny, 1))
+    values[0, :] = np.nan
+    return values
+
+
+def _own_tick(sl, values, style=None, palette="seismic", limit=5.0, unipolar=False):
+    sl.update(
+        values,
+        FRAME,
+        limit=limit,
+        colormap_name=palette,
+        unipolar=unipolar,
+        subtitle="",
+        own=True,
+        own_style=style,
+    )
+
+
+def _range(sl):
+    from nsgeo_qgis.own_colours import style_range
+
+    return style_range(sl.layer)
+
+
+def _computed(sl, limits, extent=None):
+    """As if the user picked a computed min/max in Layer Properties."""
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    shown = sl.layer.renderer()
+    renderer = shown.clone()
+    # As the Symbology page builds it: with its range (a clone drops it).
+    renderer.setClassificationMin(shown.classificationMin())
+    renderer.setClassificationMax(shown.classificationMax())
+    origin = renderer.minMaxOrigin()
+    origin.setLimits(limits)
+    origin.setExtent(extent or QgsRasterMinMaxOrigin.Extent.WholeRaster)
+    origin.setStatAccuracy(QgsRasterMinMaxOrigin.StatAccuracy.Exact)
+    renderer.setMinMaxOrigin(origin)
+    sl.layer.setRenderer(renderer)
+
+
+def test_own_colours_start_from_the_plugin_palette_and_report_the_style(mapped):
+    from nsgeo_qgis.own_colours import style_text
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    renderer = sl.layer.renderer()
+    assert isinstance(renderer, QgsSingleBandPseudoColorRenderer)
+    assert renderer.minMaxOrigin().limits() == QgsRasterMinMaxOrigin.Limits.NotSet
+    assert _range(sl) == (-5.0, 5.0)
+    assert seen == [style_text(sl.layer)]
+
+
+def test_a_given_style_is_applied_and_kept_across_ticks(mapped):
+    from nsgeo_qgis.own_colours import seed_style, style_text
+
+    sl, _, _, _ = mapped
+    _update(sl, 1.0, limit=8.0)
+    seed_style(sl.layer, "amp_heat", 2.5, True)
+    mine = style_text(sl.layer)
+    _update(sl, 1.0)  # the plugin's colours again, at a new limit
+    assert _range(sl) == (0.0, 10.0)
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(0.0, 9.0), style=mine)
+    assert _range(sl) == (0.0, 2.5)
+    _own_tick(sl, _ramp(0.0, 4.0), style=mine)
+    assert _range(sl) == (0.0, 2.5)
+    assert seen == [], "applying the user's own style is not an edit"
+
+
+def test_a_computed_range_is_worked_out_on_every_new_slice(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    _computed(sl, QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    style = seen[-1]
+    _own_tick(sl, _ramp(-1.0, 7.0), style=style)
+    assert _range(sl) == pytest.approx((-1.0, 7.0))
+    _own_tick(sl, _ramp(2.0, 4.0), style=style)
+    assert _range(sl) == pytest.approx((2.0, 4.0))
+
+
+def test_the_users_edit_is_reported_once_and_not_undone(mapped):
+    from nsgeo_qgis.own_colours import set_range, style_text
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    assert len(seen) == 1
+    set_range(sl.layer, -2.0, 5.0)  # as Layer Properties ▸ Apply would
+    assert seen[-1] == style_text(sl.layer)
+    edited = seen[-1]
+    _own_tick(sl, _ramp(-9.0, 9.0), style=edited)
+    _own_tick(sl, _ramp(-9.0, 9.0), style=edited)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+    assert seen.count(edited) == 1 and len(seen) == 2
+
+
+def test_the_plugin_colours_do_not_report_edits(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _update(sl, 1.0)
+    set_range(sl.layer, -2.0, 5.0)
+    _update(sl, 2.0)
+    assert seen == []
+
+
+def test_switching_back_to_own_colours_restores_the_style(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    set_range(sl.layer, -2.0, 5.0)
+    mine = seen[-1]
+    _update(sl, 1.0)  # Show coverage, or the plugin's colours
+    assert _range(sl) == (0.0, 10.0)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+
+
+def test_a_recreated_layer_gets_the_style_back(mapped):
+    from nsgeo_qgis.own_colours import set_range
+
+    sl, _, _, project = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    set_range(sl.layer, -2.0, 5.0)
+    mine = seen[-1]
+    project.removeMapLayer(sl.layer.id())
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert _range(sl) == pytest.approx((-2.0, 5.0))
+    set_range(sl.layer, -1.0, 1.0)
+    assert seen[-1] != mine, "the new layer's edits are heard too"
+
+
+def test_an_unreadable_saved_style_falls_back_to_the_plugin_palette(mapped):
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style")
+    assert _range(sl) == (-5.0, 5.0)
+    assert len(seen) == 1 and seen[0] != "<not a style"
+
+
+def test_the_users_resampling_survives_a_tick(mapped):
+    from qgis.core import QgsCubicRasterResampler
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    sl.layer.resampleFilter().setZoomedInResampler(QgsCubicRasterResampler())
+    sl.layer.emitStyleChanged()  # Layer Properties applies, then says so
+    _own_tick(sl, _ramp(-3.0, 3.0), style=seen[-1])
+    assert sl.layer.resampleFilter().zoomedInResampler().type() == "cubic"
+
+
+def test_the_site_path_takes_own_colours_too(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    kwargs = {"limit": 4.0, "colormap_name": "seismic", "unipolar": False, "subtitle": ""}
+    site = np.tile(np.linspace(-1.0, 3.0, 9, dtype=np.float32), (6, 1))
+    sl.update_north_up(site, SITE_GT, "EPSG:32616", name=SITE_LAYER_NAME, own=True, **kwargs)
+    assert _range(sl) == (-4.0, 4.0)
+    _computed(sl, QgsRasterMinMaxOrigin.Limits.MinimumMaximum)
+    sl.update_north_up(
+        site * 2,
+        SITE_GT,
+        "EPSG:32616",
+        name=SITE_LAYER_NAME,
+        own=True,
+        own_style=seen[-1],
+        **kwargs,
+    )
+    assert _range(sl) == pytest.approx((-2.0, 6.0))
+
+
+def test_current_canvas_reads_the_view_it_is_given(mapped):
+    from qgis.core import QgsRasterMinMaxOrigin
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    asked = []
+
+    def view(crs):
+        asked.append(crs.authid())
+        return (500.0, 700.0, 503.0, 706.0)  # the frame's west half
+
+    sl.extent_in = view
+    _own_tick(sl, _ramp(0.0, 11.0))
+    _computed(
+        sl,
+        QgsRasterMinMaxOrigin.Limits.MinimumMaximum,
+        QgsRasterMinMaxOrigin.Extent.FixedCanvas,
+    )
+    _own_tick(sl, _ramp(0.0, 11.0), style=seen[-1])
+    assert asked and asked[-1] == "EPSG:32616"
+    assert _range(sl) == pytest.approx((0.0, 5.0))
+
+
+def test_leaving_own_colours_puts_back_the_plain_layer(mapped):
+    """Review finding 1: the palette must not be drawn through the user's
+    brightness, saturation or blending."""
+    from qgis.PyQt.QtGui import QPainter
+
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0))
+    sl.layer.brightnessFilter().setBrightness(-80)
+    sl.layer.hueSaturationFilter().setSaturation(-100)
+    sl.layer.setBlendMode(QPainter.CompositionMode.CompositionMode_Multiply)
+    sl.layer.emitStyleChanged()
+    mine = seen[-1]
+    _update(sl, 1.0)
+    assert sl.layer.brightnessFilter().brightness() == 0
+    assert sl.layer.hueSaturationFilter().saturation() == 0
+    assert sl.layer.blendMode() == QPainter.CompositionMode.CompositionMode_SourceOver
+    assert _range(sl) == (0.0, 10.0) and _smooth(sl.layer)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=mine)
+    assert sl.layer.brightnessFilter().brightness() == -80
+    assert sl.layer.hueSaturationFilter().saturation() == -100
+
+
+def test_a_scope_without_a_style_starts_its_own(mapped):
+    """Review finding 2: the other scope's own style already on the layer is
+    not this scope's; a style of None seeds afresh, at this scope's limit."""
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), limit=5.0)
+    site = np.tile(np.linspace(-1.0, 3.0, 9, dtype=np.float32), (6, 1))
+    sl.update_north_up(
+        site,
+        SITE_GT,
+        "EPSG:32616",
+        limit=40.0,
+        colormap_name="seismic",
+        unipolar=False,
+        subtitle="",
+        name=SITE_LAYER_NAME,
+        own=True,
+        own_style=None,
+    )
+    assert _range(sl) == (-40.0, 40.0)
+    assert len(seen) == 2 and seen[0] != seen[1]
+
+
+def test_the_limit_is_read_only_when_it_is_needed(mapped):
+    """The shared stretch is a pass over the whole cube: under the user's own
+    colours it is read only to start their style."""
+    sl, _, _, _ = mapped
+    seen, asked = [], []
+
+    def limit():
+        asked.append(1)
+        return 5.0
+
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), limit=limit)
+    assert len(asked) == 1 and _range(sl) == (-5.0, 5.0)
+    _own_tick(sl, _ramp(-3.0, 3.0), style=seen[-1], limit=limit)
+    _own_tick(sl, _ramp(-1.0, 1.0), style=seen[-1], limit=limit)
+    assert len(asked) == 1
+    _update(sl, 1.0, limit=limit)
+    assert len(asked) == 2 and _range(sl) == (0.0, 5.0)
+
+
+def test_an_unreadable_style_starts_again_from_the_real_limit(mapped):
+    """Review finding 3: the plugin sends the limit as a callable, so the
+    fallback seed is drawn at the palette's real limit, not a placeholder."""
+    sl, _, _, _ = mapped
+    seen = []
+    sl.own_style_changed.connect(seen.append)
+    _own_tick(sl, _ramp(-3.0, 3.0), style="<not a style", limit=lambda: 7.0)
+    assert _range(sl) == (-7.0, 7.0)
+    assert len(seen) == 1

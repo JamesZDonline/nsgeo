@@ -122,15 +122,17 @@ them live here:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
 import nsgeo
 import numpy as np
+from nsgeo.geometry import GridPlacement
 from nsgeo.processing import Radargram, StepStack, build_step, step_title
 from nsgeo.slices import (
     CubeFrame,
@@ -145,6 +147,7 @@ from nsgeo.slices import (
     SliceWindow,
     ZAxis,
     build_cube,
+    covered_cells,
     finish_slice,
     limit_over_slices,
     plan_fill,
@@ -156,7 +159,9 @@ from nsgeo.slices import (
 from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
+from nsgeo_qgis.line_edit import same_placement
 from nsgeo_qgis.slices_plan import (
+    DEFAULT_METHOD,
     LIVE_SOLVE_BUDGET_MS,
     NO_TRANSFORM,
     PREVIEW_METHOD,
@@ -303,6 +308,9 @@ class SliceEngine(QObject):
         self._choice: SourceChoice | None = None
         self._resolution: Resolution | None = None
         self._lines: list[PreparedLine] = []
+        #: `_covered_count`'s cache; `None` means not counted for the current
+        #: lines and frame (#113).
+        self._covered: int | None = None
         #: The preset's steps as they stood when preparation was
         #: dispatched -- see `provenance()`. Deliberately NOT a live read
         #: of `site.presets[name]`: `save_preset` overwrites a name in
@@ -318,11 +326,18 @@ class SliceEngine(QObject):
         #: `grids_changed` (see `_on_grids_changed`/`_grid_fingerprint`,
         #: Ruling M).
         self._grid_fp: tuple[Any, ...] | None = None
+        #: Every site line's placement as of the last `set_source`, label
+        #: dropped (a label is never geometry), keyed by line key. What
+        #: `placements_changed` compares against on `lines_changed`: the
+        #: prepared lines' `coords` were computed from these (line editing
+        #: spec §4.5).
+        self._placements: dict[str, Any] = {}
         #: The chosen grid itself, as of the last `set_source` or
         #: `grids_changed` (M12 final review I2): whether an edit that
         #: moved nothing was to THIS grid -- its velocity -- or to another.
         self._grid_seen: Any = None
-        self._cube: SliceCube | None = None
+        self._cube_generation = 0
+        self._cube_held: SliceCube | None = None
         #: The interpolation weights for the current frame and settings, built
         #: on first use and kept: applying them is cheap per slice, building
         #: them is not (interpolation spec §7). One `(key, weights, preview)`
@@ -385,6 +400,10 @@ class SliceEngine(QObject):
         self._wake_waiter: Callable[[], None] | None = None
         session.site_closed.connect(self.clear)
         session.grids_changed.connect(self._on_grids_changed)
+        # After `grids_changed`: a grid-length change moves reversed lines
+        # and emits both, and the re-preparation `grids_changed` starts
+        # leaves nothing for this one to do (line editing spec §4.5).
+        session.lines_changed.connect(self._on_lines_changed)
 
     # ---- state ------------------------------------------------------------
     @property
@@ -419,6 +438,20 @@ class SliceEngine(QObject):
         caller inspecting coverage must not be able to reorder or drop
         what the next `_ensure_plans()` will plan."""
         return tuple(self._lines)
+
+    def line_zero(self, key: str) -> float | None:
+        """The radar-clock time a prepared line's axis calls 0, or None if
+        that line is not prepared here."""
+        for line in self._lines:
+            if line.key == key:
+                return line.zero_ns
+        return None
+
+    def median_zero(self) -> float | None:
+        """The median of the prepared lines' zeros, or None with nothing prepared."""
+        if not self._lines:
+            return None
+        return float(np.median([line.zero_ns for line in self._lines]))
 
     def prepared_z_bounds(self) -> tuple[float, float] | None:
         """The two-way time range EVERY prepared line covers, or None.
@@ -464,6 +497,34 @@ class SliceEngine(QObject):
         return self._choice
 
     @property
+    def _cube(self) -> SliceCube | None:
+        return self._cube_held
+
+    @_cube.setter
+    def _cube(self, cube: SliceCube | None) -> None:
+        # Every build, drop and clear goes through here, so the generation
+        # moves exactly when the cube held does (see `cube_generation`).
+        if cube is not self._cube_held:
+            self._cube_generation += 1
+        self._cube_held = cube
+
+    @property
+    def cube_generation(self) -> int:
+        """Counts every change of the resident cube: a build, `drop_cube`, a
+        re-source, a resolution or velocity change, `clear`. What a cut's
+        section is fingerprinted by: a rebuild with the same source, frame and
+        axis is a new cube, and `id()` of one nothing holds could repeat."""
+        return self._cube_generation
+
+    @property
+    def preparation_generation(self) -> int:
+        """Counts every `set_source` that dispatches a preparation, and every
+        `clear`. A resolution change does not move it (see `cube_generation`
+        and `frame`/`z` for that). A cut remembers a failed cube build against
+        it, so the build is tried again once the engine is prepared again."""
+        return self._generation
+
+    @property
     def has_cube(self) -> bool:
         """Whether a resident cube is currently held.
 
@@ -488,10 +549,28 @@ class SliceEngine(QObject):
 
     @property
     def estimate(self) -> MemoryEstimate:
+        """The status line's and the residency choice's figures. The weights
+        are counted for the method of those held (#148): the engine is handed
+        a finish only when it draws, so before its first draw on a frame it
+        counts the default method's, one set."""
         samples = sum(int(line.data.size) for line in self._lines)
         n_cells = self._frame.n_cells if self._frame is not None else 0
         nz = self._z.nz if self._z is not None else 0
-        return estimate_memory(samples, n_cells, nz)
+        method = self._weights[0][1] if self._weights is not None else DEFAULT_METHOD
+        return estimate_memory(samples, n_cells, nz, self._covered_count(), method=method)
+
+    def _covered_count(self) -> int:
+        """Cells the prepared lines fall in, for the packed cube's size (#113).
+
+        Cached: the status line reads `estimate` on every redraw, and a count
+        bins every trace. It never goes through `plan_line`, which can raise,
+        and this is read from slots. Reset wherever `_plans` or `_lines` is.
+        """
+        if self._frame is None or not self._lines:
+            return 0
+        if self._covered is None:
+            self._covered = covered_cells(self._frame, (line.coords for line in self._lines))
+        return self._covered
 
     def set_always_resident(self, flag: bool) -> None:
         """The settings override of spec 9.2, worded there for what it
@@ -652,9 +731,11 @@ class SliceEngine(QObject):
             self._lines = []
             self._steps = ()
             self._plans = None
+            self._covered = None
             self._cube = None
             self._drop_fill()
             self._grid_fp = None
+            self._placements = {}
             self._grid_seen = None
             self._redraw_ms = None
             self._choice = choice
@@ -699,9 +780,26 @@ class SliceEngine(QObject):
             grid = frames.get(choice.grid_id)
             self._grid_fp = self._grid_fingerprint(grid) if grid is not None else None
             self._grid_seen = grid
+            self._placements = {
+                key: self._without_label(self.session.line_for_key(key).placement)
+                for key in self.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+            }
             for key in choice.line_keys:
                 try:
                     line = self.session.line_for_key(key)
+                    other = getattr(line.placement, "grid_id", None)
+                    if other is not None and other != choice.grid_id:
+                        # A line moved to another grid is no longer this
+                        # grid's to bin: its coords would land in a frame it
+                        # is not placed in. The dock prunes its own choice,
+                        # but a Whole site engine re-queued from a source the
+                        # dock has not resent yet can still carry the key
+                        # (line editing spec §4.5).
+                        self._report(
+                            f"{key}: now on grid {other!r}, not {choice.grid_id!r}; "
+                            "left out of this source"
+                        )
+                        continue
                     jobs.append((key, line, line.trace_coords(frames)))
                 except Exception as exc:  # noqa: BLE001 -- a missing grid or a stale key
                     self._report(f"{key}: {exc}")
@@ -778,6 +876,7 @@ class SliceEngine(QObject):
                             dt_ns=result.dt_ns,
                             t0_ns=result.t0_ns,
                             coords=coords,
+                            zero_ns=float(result.zero_ns),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 -- one bad line must not
@@ -847,6 +946,7 @@ class SliceEngine(QObject):
                         self._report(str(exception))
                     return
                 self._lines = list(result or [])
+                self._covered = None
                 self._rebuild_geometry()
             except Exception as exc:  # noqa: BLE001 -- see the module docstring:
                 # QgsTaskWrapper swallows this with no traceback anywhere.
@@ -939,6 +1039,7 @@ class SliceEngine(QObject):
         # plan and the values alone (plan call 8).
         held = (self._weights, self._solved, self._last_solve_ms)
         self._plans = None
+        self._covered = None
         self._cube = None
         self._drop_fill()
         self._frame = None
@@ -990,7 +1091,7 @@ class SliceEngine(QObject):
         When the fingerprint has NOT changed, `replace_grid` may still
         have run -- `set_grid_velocity` goes through it too, and
         `grids_changed` carries no information about which grid or which
-        field changed. `provenance()` reads `resolved_velocity` LIVE, but
+        field changed. `provenance()` reads `grid_depth_velocity` LIVE, but
         `cube()` freezes a `Provenance` snapshot into the `SliceCube` the
         moment it is built; a resident cube built before a velocity edit
         would otherwise export the STALE velocity forever, while a
@@ -1026,6 +1127,83 @@ class SliceEngine(QObject):
         if grid != self._grid_seen:
             self._cube = None  # Ruling Q: this grid's velocity changed
         self._grid_seen = grid
+
+    @staticmethod
+    def _without_label(placement: Any) -> Any:
+        """A placement as geometry only: the label names a line and never
+        moves it, so a label-only edit must not re-prepare (line editing spec §4.5)."""
+        if isinstance(placement, GridPlacement):
+            return dataclasses.replace(placement, label=None)
+        return placement
+
+    def _on_grid(self, key: str, grid_id: str) -> bool:
+        try:
+            placed = getattr(self.session.line_for_key(key).placement, "grid_id", None)
+        except KeyError:
+            return False  # removed in the same change
+        return placed == grid_id
+
+    def had_line(self, key: str) -> bool:
+        """Whether `key` was a site line at the last `set_source`."""
+        return key in self._placements
+
+    def placements_changed(self, keys: Iterable[str]) -> bool:
+        """Whether any of `keys`, a site line at the last `set_source` and
+        still one, now sits somewhere else (label ignored). A line removed
+        is not a move: `remove_lines` has its own way of reaching this
+        engine, and a key that was never captured has nothing to compare."""
+        for key in keys:
+            old = self._placements.get(key)
+            if old is None:
+                continue
+            try:
+                new = self._without_label(self.session.line_for_key(key).placement)
+            except KeyError:
+                continue
+            if isinstance(old, GridPlacement) and isinstance(new, GridPlacement):
+                if not same_placement(old, new):
+                    return True
+            elif old != new:
+                return True
+        return False
+
+    def _on_lines_changed(self) -> None:
+        """React to `lines_changed` when a line this source holds moved
+        (line editing spec §4.5): its prepared `coords` were computed from
+        the old placement, so it is re-prepared the way a grid move is.
+
+        A slot on a `pyqtSignal`: it reports, never raises. With
+        `on_grid_moved` set the re-preparation is handed to the owner by the
+        same `_hand_over_the_move` a grid move uses, so the owner's queue
+        (trap 1) and This grid's site-scope gate (R-P5) still decide when a
+        task starts. Otherwise this engine re-prepares itself, narrowed to
+        the keys still on its grid: a line moved to another grid has left.
+        An import or a removal leaves every captured placement as it was,
+        and a label-only edit differs in nothing but the label, so neither
+        reaches either branch."""
+        try:
+            choice = self._choice
+            if choice is None or not self._placements or not self.session.is_open:
+                return
+            if not self.placements_changed(choice.line_keys):
+                return
+            if self.on_grid_moved is not None:
+                self._hand_over_the_move(choice.grid_id)
+                return
+            # In survey order, as the dock's own choice is: a reorder can
+            # arrive in the same change as the edit.
+            held = set(choice.line_keys)
+            narrowed = tuple(
+                k
+                for k in self.session.keys()  # noqa: SIM118 -- SiteSession.keys(), not a dict
+                if k in held and self._on_grid(k, choice.grid_id)
+            )
+            try:
+                self.set_source(dataclasses.replace(choice, line_keys=narrowed))
+            except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+                self._report(f"could not re-prepare after a line moved: {exc}")
+        except Exception as exc:  # noqa: BLE001 -- a slot must report, never raise
+            self._report(f"could not follow the line change: {exc}")
 
     def _hand_over_the_move(self, grid_id: str) -> None:
         """R-P2 (M12): the chosen grid moved and an owner re-prepares.
@@ -1138,12 +1316,6 @@ class SliceEngine(QObject):
         held = fill.nbytes + (0 if preview is None else preview.nbytes)
         return held + sum(solved.nbytes for solved in self._solved.values())
 
-    @property
-    def last_solve_ms(self) -> float | None:
-        """How long the last minimum-curvature solve on the plan held now
-        took; None before one has run on it, and after it is dropped."""
-        return self._last_solve_ms
-
     @staticmethod
     def _weights_key(frame: CubeFrame, settings: FinishSettings) -> tuple[Any, ...]:
         # Smoothing is applied after the weights and is not part of them.
@@ -1192,6 +1364,23 @@ class SliceEngine(QObject):
             preview = built
         self._weights = (self._weights_key(frame, settings), fill, preview)
         return fill, preview
+
+    def section_fills(self, finish: SliceFinish) -> tuple[SliceFill, FillWeights | None]:
+        """The fill a cut's section finishes with, and the kriging stand-in
+        under minimum curvature (cut spec §5).
+
+        What the engine holds when it was built for these settings and this
+        cube's covered cells, which is what the slice's own draw leaves
+        behind; otherwise built through `_fill_for` and held, so a cut never
+        plans weights of its own.
+
+        Needs the cube already resident: `RuntimeError` without one, so
+        nothing that only previews (a hover) can build a cube through here.
+        """
+        if self._cube_held is None:
+            raise RuntimeError("no cube is held; build it before asking for its fills")
+        frame, _ = self._require_geometry()
+        return self._fill_for(self._cube_held.coverage(), frame, self.finish_settings(finish))
 
     def _keep_solved(self, key: bytes, solved: np.ndarray) -> None:
         """Into the solved-slice cache as the most recent; the least recently
@@ -1552,26 +1741,20 @@ class SliceEngine(QObject):
         never actually built from -- the same defect this docstring
         already rejects for `line_keys`, one field over.
 
-        A line can be removed from the survey while a source stays
-        prepared, and `resolved_velocity` raises KeyError for a key that
-        is gone. The cube's own arrays are still correct, so losing the
+        The velocity is the grid's (`grid_depth_velocity`: its own, else
+        the header of its first line in survey order), so a line's
+        override never reaches a slice. A grid can lose every line, or
+        the grid itself, while a source stays prepared, and that raises
+        KeyError. The cube's own arrays are still correct, so losing the
         depth LABEL is the only honest consequence -- blanking the map
-        and breaking "Save cube..." and "Export GeoTIFF" is not. Falling
-        through to the next prepared line is faithful rather than
-        arbitrary: `resolve_velocity` goes line override -> grid velocity
-        -> header dielectric, and a cube is built from one grid (spec 3),
-        so another line of the same grid almost always carries the same
-        model.
+        and breaking "Save cube..." and "Export GeoTIFF" is not.
         """
         if self._choice is None:
             raise RuntimeError("no source is chosen")
+        # The grid's velocity, never a line's override (grid velocity spec 10).
         velocity = None
-        for line in self._lines:
-            try:
-                velocity = self.session.resolved_velocity(line.key).to_dict()
-                break
-            except (KeyError, RuntimeError):
-                continue
+        with contextlib.suppress(KeyError, RuntimeError):
+            velocity = self.session.grid_depth_velocity(self._choice.grid_id).to_dict()
         return Provenance(
             line_keys=tuple(line.key for line in self._lines),
             preset_name=self._choice.preset,
@@ -1617,9 +1800,11 @@ class SliceEngine(QObject):
         self._lines = []
         self._steps = ()
         self._plans = None
+        self._covered = None
         self._frame = None
         self._z = None
         self._grid_fp = None
+        self._placements = {}
         self._grid_seen = None
         self._cube = None
         self._drop_fill()
@@ -1678,6 +1863,8 @@ class SliceEngine(QObject):
             self.session.site_closed.disconnect(self.clear)
         with contextlib.suppress(TypeError, RuntimeError):
             self.session.grids_changed.disconnect(self._on_grids_changed)
+        with contextlib.suppress(TypeError, RuntimeError):
+            self.session.lines_changed.disconnect(self._on_lines_changed)
         self.clear()
         self.on_prepared = None
         self.on_error = None

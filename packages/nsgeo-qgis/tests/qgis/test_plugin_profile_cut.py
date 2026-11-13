@@ -1,0 +1,315 @@
+"""A cut in the profile panel: its section, title, axes and chrome (cut spec §4.3, §4.4)."""
+
+from __future__ import annotations
+
+import json
+
+import numpy as np
+import pytest
+from nsgeo.processing import build_step
+from nsgeo.render import colormap, section_rgba8
+from nsgeo_qgis.cut_sections import NO_CUBE_TEXT, NO_SOURCE_TEXT, CutSection
+from nsgeo_qgis.render.qimage import rgba_to_qimage
+from nsgeo_qgis.ui.profile_dock import PALETTE_ON_CUT_TIP, ProfileDock
+from qgis.PyQt.QtWidgets import QMessageBox
+from test_plugin_cut_sections import (  # noqa: F401 -- fixtures
+    H,
+    shown,
+    shown_zeroed,
+    site,
+    whole_site,
+)
+from test_plugin_slices_dock import _ready
+
+
+def _profile_on(shown_parts):
+    dock, session, sections = shown_parts
+    pd = ProfileDock(session)
+    pd.set_cut_sections(sections)
+    dock.window_changed.connect(pd.set_slice_band)
+    yield pd, dock, session, sections
+    pd.hide()
+    pd.deleteLater()
+
+
+@pytest.fixture
+def profile(shown):  # noqa: F811
+    yield from _profile_on(shown)
+
+
+@pytest.fixture
+def profile_zeroed(shown_zeroed):  # noqa: F811
+    """The same, on a cube whose preset sets time zero (#97)."""
+    yield from _profile_on(shown_zeroed)
+
+
+def _load(session, key=None):
+    key = key or session.keys()[0]
+    session.set_profiles(key, session.line_for_key(key).load())
+    return key
+
+
+def test_opening_a_cut_draws_its_section_with_its_title_and_axes(profile):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", [(5.0, 1.0), (1.0, 1.0)])  # drawn east to west
+    held = dict(pd._held)
+    session.open_line(key)
+    got = sections.section(key, build_cube=True)
+    assert isinstance(got, CutSection)
+    assert pd.windowTitle() == "nsgeo Profile · cut: Cut 1 · A · 4.0 m · Kriging"
+    t = pd.view.transform
+    assert t.n_traces == got.columns.distance_m.size and t.n_samples == got.z.nz
+    assert pd.view._distance[0] == 0.0 and pd.view._distance[-1] == pytest.approx(4.0)
+    assert pd.view._direction == 1  # never mirrored (cut spec call 5)
+    assert pd.view.ruler is None and not t.mirrored
+    assert pd._held == held
+    assert pd.view._image is not None
+    assert (t.t0_ns, t.dt_ns) == (got.z.t0_ns, got.z.dz_ns)
+
+
+def test_whole_site_scope_says_not_normalised(site):  # noqa: F811
+    session = site.session
+    key = session.add_cut("B", H)
+    whole_site(site)
+    session.open_line(key)
+    assert site.profile_dock.windowTitle() == (
+        "nsgeo Profile · cut: Cut 1 · B · 4.0 m · Kriging · site view, not normalised"
+    )
+
+
+def test_a_preview_has_the_preview_prefix_and_builds_nothing(profile):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    dock.engine.drop_cube()
+    session.set_preview(key, 3)
+    assert pd.windowTitle().startswith("nsgeo Profile · PREVIEW: cut: Cut 1")
+    assert pd.view._message == NO_CUBE_TEXT.format(name="Cut 1", grid="A")
+    assert not dock.engine.has_cube
+    assert pd.view._image is None
+    # With the cube there, a preview draws the section and still builds nothing.
+    sections.section(key, build_cube=True)
+    session.set_preview(None)
+    session.set_preview(key, 4)
+    assert pd.view._image is not None
+    assert pd.windowTitle() == "nsgeo Profile · PREVIEW: cut: Cut 1 · A · 4.0 m · Kriging"
+
+
+def test_no_source_shows_the_message_in_the_view(profile):
+    pd, dock, session, sections = profile
+    key = session.add_cut("B", H)  # B is not the shown grid
+    session.open_line(key)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="B")
+    assert pd.view._image is None
+    assert pd.view.transform is None
+    assert "cut: Cut 1" in pd.windowTitle()
+
+
+def test_a_squared_cube_draws_in_the_slices_palette_with_blank_columns_transparent(profile):
+    pd, dock, session, sections = profile
+    dock.transform_combo.set_value("amp_square")
+    _ready(dock)
+    dock.palette_combo.setCurrentText("amp_black_high")
+    line = _load(session)
+    pd.colormap_combo.setCurrentIndex(1)
+    chosen = pd.colormap_combo.currentText()
+    session.open_line(line)
+    assert pd.colormap_combo.isEnabled()
+    key = session.add_cut("A", [(1.0, 1.0), (8.0, 1.0)])  # runs off the 6 m grid
+    session.open_line(key)
+    got = sections.section(key, build_cube=True)
+    assert got.source.unipolar and got.source.palette == "amp_black_high"
+    assert not pd.colormap_combo.isEnabled()
+    assert pd.colormap_combo.toolTip() == PALETTE_ON_CUT_TIP
+    expected = section_rgba8(got.values, pd.percentile, colormap("amp_black_high"), unipolar=True)
+    image = pd.view._image
+    assert image == rgba_to_qimage(expected)
+    inside = np.flatnonzero(got.columns.cells >= 0)
+    outside = np.flatnonzero(got.columns.cells < 0)
+    assert inside.size and outside.size
+    k = got.z.nz // 2
+    finite_col = int(inside[np.flatnonzero(np.isfinite(got.values[k, inside]))[0]])
+    pixel = image.pixelColor(finite_col, k)
+    assert pixel.alpha() == 255
+    assert (pixel.red(), pixel.green(), pixel.blue()) == tuple(
+        int(v) for v in expected[k, finite_col, :3]
+    )
+    for col in outside[:3]:
+        assert image.pixelColor(int(col), k).alpha() == 0
+    # Opening a line gives the combo back, with the choice it had.
+    session.open_line(line)
+    assert pd.colormap_combo.isEnabled() and pd.colormap_combo.toolTip() == ""
+    assert pd.colormap_combo.currentText() == chosen
+
+
+def test_the_percentile_slider_still_applies_to_a_cut(profile):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    got = sections.section(key, build_cube=True)
+    pd.percentile_slider.setValue(900)
+    expected = section_rgba8(
+        got.values, 90.0, colormap(got.source.palette), unipolar=got.source.unipolar
+    )
+    assert pd.view._image == rgba_to_qimage(expected)
+
+
+def test_the_slice_band_shows_on_a_cut(profile_zeroed):
+    """A cut is on its cube's clock, so its band is drawn as it is, whatever zero a
+    lookup would give; a line in the same state is converted (#97, cut spec call 18)."""
+    pd, dock, session, sections = profile_zeroed
+    pd.set_cube_zero_lookup(lambda key: 7.5)  # a non-zero zero for any key
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert pd.shown_zero_ns() == 0.0
+    dock.window_changed.emit(12.0, 14.0)
+    assert pd.view._slice_band == (12.0, 14.0)  # exactly, not retimed
+    # A line in the same state, with the same lookup and band, is still converted.
+    line_key = _load(session)
+    session.open_line(line_key)
+    pd._push_slice_band()
+    lo, hi = pd.view._slice_band
+    assert (lo, hi) == pytest.approx((12.0 + 7.5, 14.0 + 7.5))
+
+
+def test_a_cut_on_a_time_zero_preset_starts_its_axis_at_the_cubes_t0(profile_zeroed):
+    pd, dock, session, sections = profile_zeroed
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    section = sections.section(key, build_cube=True)
+    assert isinstance(section, CutSection)
+    assert any(s["step"] == "time_zero" and s["enabled"] for s in session.site.presets["p"])
+    assert pd.view.transform.t0_ns == section.z.t0_ns
+    assert json.loads(section.provenance_json)["time_base"] == "time_zero"
+
+
+def test_a_cut_after_a_line_has_no_shown_zero(profile):
+    pd, dock, session, sections = profile
+    line_key = _load(session)
+    session.append_step(line_key, build_step("time_zero", mode="sample", sample=40))
+    session.open_line(line_key)
+    assert pd.shown_zero_ns() != 0.0
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert pd.shown_zero_ns() == 0.0
+    assert pd._shown_radargram is None
+
+
+def test_the_depth_axis_uses_the_grid_depth_velocity(profile):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert pd.view._velocity == session.grid_depth_velocity("A")
+
+
+def test_a_section_change_redraws_the_shown_cut(profile, monkeypatch):
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    other = session.add_cut("A", [(1.0, 2.0), (4.0, 2.0)])
+    session.open_line(key)
+    shown_calls = []
+    real = pd._show_cut
+    monkeypatch.setattr(pd, "_show_cut", lambda k, **kw: (shown_calls.append(k), real(k, **kw))[1])
+    sections.section_changed.emit(other)
+    assert shown_calls == []
+    sections.section_changed.emit(key)
+    assert shown_calls == [key]
+
+
+def test_velocity_is_greyed_on_a_cut_and_back_on_a_line(fake_iface, tmp_path, answer_modal):
+    from test_plugin_loads import _plugin_with_one_line
+
+    answer_modal(QMessageBox, "question", QMessageBox.StandardButton.Discard)
+    plugin, line = _plugin_with_one_line(fake_iface, tmp_path)
+    try:
+        session = plugin.session
+        assert plugin.act_velocity.isEnabled()
+        cut = session.add_cut("A", [(1.0, 1.0), (4.0, 1.0)])
+        session.open_line(cut)
+        assert not plugin.act_velocity.isEnabled()
+        from nsgeo_qgis.plugin import VELOCITY_ON_CUT_TIP
+
+        assert plugin.act_velocity.toolTip() == VELOCITY_ON_CUT_TIP
+        assert plugin.act_pick.isEnabled()
+        session.open_line(line)
+        assert plugin.act_velocity.isEnabled()
+        assert plugin.act_velocity.toolTip() != VELOCITY_ON_CUT_TIP
+    finally:
+        plugin.unload()
+
+
+def _shown_cut(pd):
+    return pd.view._image is not None and pd.view.transform is not None
+
+
+def test_a_cut_on_another_grid_draws_once_that_grid_is_shown(profile):
+    """(a) The message is not final: showing B in the Slices panel draws it."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("B", H)
+    session.open_line(key)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="B")
+    dock.grid_combo.setCurrentText("B")
+    _ready(dock)
+    assert _shown_cut(pd)
+    assert pd.windowTitle() == "nsgeo Profile · cut: Cut 1 · B · 4.0 m · Kriging"
+
+
+def test_a_cut_recovers_after_its_grid_is_shrunk_under_it(profile):
+    """(b) `grids_changed` arrives while the grid re-prepares; the cut comes back."""
+    import dataclasses
+
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", [(1.0, 1.0), (5.0, 1.0)])
+    session.open_line(key)
+    assert _shown_cut(pd)
+    n = pd.view.transform.n_traces
+    session.replace_grid(dataclasses.replace(session.grid("A"), size_x=3.0))
+    dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert _shown_cut(pd)
+    assert pd.view.transform.n_traces == n
+    assert pd.windowTitle().startswith("nsgeo Profile · cut: Cut 1 · A · 4.0 m")
+
+
+def test_a_cut_recovers_when_its_grid_is_switched_away_and_back(profile):
+    """(c)"""
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    assert _shown_cut(pd)
+    dock.grid_combo.setCurrentText("B")
+    dock.engine.wait_for_preparation(20_000)
+    assert pd.view._message == NO_SOURCE_TEXT.format(name="Cut 1", grid="A")
+    dock.grid_combo.setCurrentText("A")
+    _ready(dock)
+    assert _shown_cut(pd)
+
+
+def test_a_second_cut_of_equal_length_opens_fitted(profile):
+    pd, dock, session, sections = profile
+    first = session.add_cut("A", [(1.0, 1.0), (5.0, 1.0)])
+    second = session.add_cut("A", [(1.0, 2.0), (5.0, 2.0)])
+    session.open_line(first)
+    fitted = pd.view.transform
+    pd.view.zoom_at(3.0, 100.0, 60.0)
+    assert pd.view.transform.trace_bounds == fitted.trace_bounds
+    assert (pd.view.transform.trace_lo, pd.view.transform.trace_hi) != (
+        fitted.trace_lo,
+        fitted.trace_hi,
+    )
+    session.open_line(second)
+    t = pd.view.transform
+    assert (t.trace_lo, t.trace_hi) == tuple(t.trace_bounds)
+    assert (t.time_lo, t.time_hi) == (t.t0_ns, t.t_end)
+
+
+def test_showing_a_cut_and_removing_its_grid_logs_nothing_from_the_velocity_fit(
+    profile, message_log
+):
+    """#97's velocity-fit code reads a line's stack; on a cut it must stay out of it."""
+    pd, dock, session, sections = profile
+    key = session.add_cut("A", H)
+    session.open_line(key)
+    pd._update_velocity_fit()
+    session.remove_grid("A", with_lines=True)
+    pd._update_velocity_fit()
+    assert not [m for m in message_log if "velocity fit" in m or "time zero" in m], message_log

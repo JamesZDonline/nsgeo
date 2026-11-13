@@ -731,3 +731,34 @@ def test_retarget_to_an_unknown_grid_keeps_the_dialogs_own_grid(session):
     d.retarget("no-such-grid")
     assert d.grid_combo.currentData() == "B"
     assert d.windowTitle() == "Import DZT files into B"
+
+
+@needs_real_data
+def test_the_fit_checkbox_imports_fitted_lines_and_is_off_by_default(session):
+    d = ImportDialog(session, grid_id="A")
+    d.add_files(REAL_DZT)
+    assert not d.fit_to_grid.isChecked()
+    assert "exceeds" in d.table.item(7, COL_NOTE).text()
+    d.fit_to_grid.setChecked(True)
+    assert d.options().fit_to_grid
+    assert "fitted to the grid's 11.00 m" in d.table.item(7, COL_NOTE).text()
+    d.accept()
+    keys = session.keys()
+    scales = [session.line_for_key(k).placement.scale for k in keys]
+    assert [round(r.scale, 6) for r in d.rows] == [round(s, 6) for s in scales]
+    assert all(s != 1.0 for s in scales)
+
+
+def test_ticking_fit_greys_out_start_along_and_fits_the_rows(session, tmp_path):
+    files = [synthetic_dzt(tmp_path / "raw", f"FILE__00{i}.DZT", n_traces=720) for i in (1, 2)]
+    d = ImportDialog(session, grid_id="A")  # grid A is 11 m along y
+    d.add_files(files)
+    assert d.start_along.isEnabled()
+    d.fit_to_grid.setChecked(True)
+    assert not d.start_along.isEnabled()
+    assert all("fitted to the grid's 11.00 m" in d.table.item(r, COL_NOTE).text() for r in (0, 1))
+    assert all(r.scale != 1.0 for r in d.rows)
+    d.fit_to_grid.setChecked(False)
+    assert d.start_along.isEnabled()
+    assert all("fitted" not in d.table.item(r, COL_NOTE).text() for r in (0, 1))
+    assert all(r.scale == 1.0 for r in d.rows)

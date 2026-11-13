@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     Radargram,
     build_step,
@@ -55,6 +56,7 @@ from nsgeo_qgis.ui.param_form import ParamForm
 #: compares: a threshold computed from one of its own operands pins
 #: nothing.
 _VELOCITY_MISMATCH_FRACTION = 0.02
+PROCESSING_ON_CUT_TEXT = "Processing does not apply to a cut."
 
 
 def dest_index(start: int, row: int) -> int:
@@ -296,11 +298,17 @@ class ProcessingDock(QgsDockWidget):
         # so it's cleared on every rebuild rather than left to say
         # something about a stack that no longer applies.
         self.status.setText("")
+        on_cut = key is not None and is_cut_key(key)
         keep = self.list.currentRow()
         self._updating += 1
         try:
             self.list.clear()
-            if key is not None:
+            self.list.setEnabled(not on_cut)
+            if on_cut:
+                # A cut reads the cube, which is already processed: no stack
+                # applies to it (cut spec §4.3).
+                self.status.setText(PROCESSING_ON_CUT_TEXT)
+            elif key is not None:
                 for step, enabled in self.session.stack_for(key).entries:
                     item = QListWidgetItem(self.row_label(step, key))
                     item.setToolTip(step.name)
@@ -318,7 +326,7 @@ class ProcessingDock(QgsDockWidget):
                 self.list.setCurrentRow(keep)
         finally:
             self._updating -= 1
-        has_line = key is not None
+        has_line = key is not None and not on_cut
         for w in (self.add_button, self.apply_button, self.presets_button, self.diff_button):
             w.setEnabled(has_line)
         self._update_row_buttons()
@@ -560,7 +568,7 @@ class ProcessingDock(QgsDockWidget):
         """(t0_ns, dt_ns, n_samples) of the input a step appended right now
         would actually receive: the stack's own `result()` when it
         evaluates cleanly, so a step already in the stack that changes the
-        axis (`time_zero` crops both `t0_ns` and `n_samples` -- see
+        axis (`time_zero` crops `n_samples` and relabels `t0_ns` -- see
         `nsgeo.processing.timezero`) is accounted for, exactly as the new
         step's own `apply()` will see it. Only used today to seed a new
         curve step's identity default (see `add_step_with_dialog`), so the

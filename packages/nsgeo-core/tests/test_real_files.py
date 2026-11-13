@@ -7,21 +7,43 @@ remains green while local runs get real validation.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 from nsgeo.io.dzt import read_header, read_samples, trace_count
 from nsgeo.processing import StepStack, build_step
 from nsgeo.processing.base import Radargram
 
-DATA = Path(__file__).parent / "data" / "local"
-FILES = sorted(p for p in DATA.rglob("*") if p.suffix.lower() == ".dzt") if DATA.exists() else []
+from tests.real_data import CAMPUS_LINES, DATA, GPS_LINES, GRID2_LINES
 
-pytestmark = pytest.mark.skipif(not FILES, reason="no real DZT files in tests/data/local")
+pytestmark = pytest.mark.skipif(not CAMPUS_LINES, reason="no real DZT files in tests/data/local")
 
 
-@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_the_campus_set_is_the_ten_campus_lines_and_nothing_else():
+    """Every test here assumes these ten 10-11 m lines. #141: a recursive
+    search also picked up with-dzg/'s sixty 30 m GPS lines, which reuse the
+    same file names, so 60 length checks failed and name lookups read the
+    wrong survey."""
+    assert [p.name for p in CAMPUS_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 11)]
+    assert {p.parent for p in CAMPUS_LINES} == {DATA}
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="no GPS survey in tests/data/local/with-dzg")
+def test_the_gps_set_is_the_sixty_with_dzg_lines_each_with_its_dzg():
+    """M17's survey, kept apart from the campus lines whose names it reuses."""
+    assert [p.name for p in GPS_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 61)]
+    assert {p.parent for p in GPS_LINES} == {DATA / "with-dzg"}
+    assert all(p.with_suffix(".DZG").is_file() for p in GPS_LINES)
+
+
+@pytest.mark.skipif(not GRID2_LINES, reason="no Grid 2 survey in tests/data/local/grid2")
+def test_the_grid2_set_is_the_sixty_grid2_lines_each_with_its_dzg():
+    """Nashville Grid 2 for #159, kept apart from the lines whose names it reuses."""
+    assert [p.name for p in GRID2_LINES] == [f"FILE__{i:03d}.DZT" for i in range(1, 61)]
+    assert {p.parent for p in GRID2_LINES} == {DATA / "grid2"}
+    assert all(p.with_suffix(".DZG").is_file() for p in GRID2_LINES)
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
 def test_header_matches_verified_expectations(path):
     h = read_header(path)
     assert h.tag == 2047  # not the widely cited 255
@@ -33,7 +55,7 @@ def test_header_matches_verified_expectations(path):
     assert h.traces_per_metre == pytest.approx(60.0)
 
 
-@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
 def test_trace_count_is_a_whole_number(path):
     """The diagnostic that caught the wrong header-size assumption."""
     h = read_header(path)
@@ -43,7 +65,7 @@ def test_trace_count_is_a_whole_number(path):
     assert 9.0 < length_m < 13.0  # recorded lines are 10.1-11.1 m
 
 
-@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
 def test_samples_are_int32_centred_near_zero(path):
     data = read_samples(path)
     assert data.shape[0] == 1
@@ -52,7 +74,7 @@ def test_samples_are_int32_centred_near_zero(path):
     assert np.abs(data).max() > 1_000_000
 
 
-@pytest.mark.parametrize("path", FILES[:1], ids=lambda p: p.name)
+@pytest.mark.parametrize("path", CAMPUS_LINES[:1], ids=lambda p: p.name)
 def test_leading_zero_traces_survive_the_reader(path):
     """Recording starts before the cart moves. Real files begin with zero
     traces, and trimming them would corrupt the distance axis."""
@@ -61,8 +83,8 @@ def test_leading_zero_traces_survive_the_reader(path):
 
 
 def test_a_full_stack_runs_on_a_real_profile():
-    h = read_header(FILES[0])
-    data = read_samples(FILES[0])[0].astype(float)
+    h = read_header(CAMPUS_LINES[0])
+    data = read_samples(CAMPUS_LINES[0])[0].astype(float)
     rg = Radargram(data=data, dt_ns=h.dt_ns, t0_ns=h.position_ns)
 
     stack = StepStack()
@@ -84,8 +106,10 @@ def test_a_full_stack_runs_on_a_real_profile():
 
 
 def test_a_cutoff_after_time_zero_keeps_the_first_rows_of_a_real_profile():
-    h = read_header(FILES[0])
-    rg = Radargram(data=read_samples(FILES[0])[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    h = read_header(CAMPUS_LINES[0])
+    rg = Radargram(
+        data=read_samples(CAMPUS_LINES[0])[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns
+    )
     stack = StepStack()
     stack.source = rg
     stack.append(build_step("time_zero", mode="first_break", threshold=0.25))
@@ -97,7 +121,7 @@ def test_a_cutoff_after_time_zero_keeps_the_first_rows_of_a_real_profile():
     assert stack.result_bypassing(1).n_samples == zeroed.n_samples
 
 
-@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
 def test_row_envelope_on_a_real_line_is_exact_below_the_cap(path):
     from nsgeo.render import row_envelope
 
@@ -122,7 +146,7 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     from nsgeo.slices.store import load_cube, save_cube
 
     prepared = []
-    for i, path in enumerate(FILES[:4]):
+    for i, path in enumerate(CAMPUS_LINES[:4]):
         header = read_header(path)
         rg = Radargram(
             data=np.asarray(read_samples(path, header)[0], dtype=float),
@@ -171,7 +195,7 @@ def test_a_cube_binned_from_real_files_is_covered_and_finite(tmp_path):
     save_cube(cube, out)
     reloaded = load_cube(out)
     assert reloaded.provenance == prov
-    np.testing.assert_array_equal(reloaded.count, cube.count)
+    np.testing.assert_array_equal(reloaded.coverage(), cube.coverage())
     np.testing.assert_allclose(
         reloaded.slice_levels(10, 28)[cube.coverage() > 0], covered, rtol=1e-4, atol=1e-5
     )
@@ -195,7 +219,7 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     because envelope detection is itself a smoothing operation, so a window
     mean barely differs from the levels it averages. Measured on this
     corpus (with the tail window included, per Ruling F), shared_limit
-    falls from 2.724 at thickness 1 to 2.171 at 20, 2.061 at 23, and 2.051
+    falls from 2.726 at thickness 1 to 2.175 at 20, 2.060 at 23, and 2.051
     at 90 -- still monotonic, but far flatter past thickness 20 than
     before that fix (which measured 1.265 at 90): thickness=90 leaves the
     axis's last level as a tail window of its own, and that level is one
@@ -217,7 +241,7 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     from nsgeo.slices.frame import CubeFrame, ZAxis
 
     prepared = []
-    for i, path in enumerate(FILES[:4]):
+    for i, path in enumerate(CAMPUS_LINES[:4]):
         header = read_header(path)
         rg = Radargram(
             data=np.asarray(read_samples(path, header)[0], dtype=float),
@@ -256,26 +280,26 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     clip = UnipolarClip()
     thickness = 23  # ~5.0 ns at this dz -- at least one pulse width, spec 6.6
     correct = shared_limit(cube, thickness, clip)
-    over_raw_levels = clip.limit(cube.mean)
+    over_raw_levels = clip.limit(np.stack([cube.level(k) for k in range(z.nz)]))
     assert correct < over_raw_levels  # the direction M10 measured, on real data
 
     # The exact mechanism, on real data: the shared limit IS the percentile
     # over the slices actually displayed at this thickness. This is what
-    # dies against the `clip.limit(cube.mean)` implementation M10 measured,
+    # dies against the limit-over-every-raw-level implementation M10 measured,
     # and against a windows-overlap mutant that weights mid-depths twice.
     # `shared_limit` folds a final, thinner tail window in when thickness
     # does not divide nz (Ruling F) -- 20 of this axis's 181 levels, here
     # -- so this cross-check must add the same tail window or it measures
     # a different (and, per that ruling, wrong) set of displayed slices.
     #
-    # What this DOES pin: it kills the `clip.limit(cube.mean)` mutant and a
+    # What this DOES pin: it kills the limit-over-every-raw-level mutant and a
     # step-overlap mutant inside `shared_limit`, because both change the
     # percentile's VALUE. What it does NOT pin: tail window PLACEMENT --
     # this reconstructs the same "append a window from the last whole
     # window's end to nz" rule `shared_limit` uses, rather than deriving it
     # independently, so a wrong-but-overlapping tail is invisible here: an
     # overlapping `(158, 181)` tail (vs. the correct `(161, 181)`) measured
-    # 2.060750 on both sides, to 6 decimal places, on this corpus. Tail
+    # 2.059925 on both sides, to 6 decimal places, on this corpus. Tail
     # placement is pinned instead by the synthetic, exact-identity test in
     # `test_slices_display.py`.
     windows = list(plan_windows(z, thickness, thickness))
@@ -294,7 +318,7 @@ def test_the_shared_stretch_on_a_real_cube_uses_most_of_the_colour_table():
     )
 
 
-@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
 def test_bandpass_late_time_does_not_depend_on_the_direct_wave(path):
     """Zeroing the top tenth of a real line must leave the bottom 15% of the
     bandpassed output alone: the two are 75 ns apart, far past the filter's
@@ -315,3 +339,49 @@ def test_bandpass_late_time_does_not_depend_on_the_direct_wave(path):
 
     rms = np.sqrt((out_no_top**2).mean())
     assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.05 * rms
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
+def test_envelope_late_time_barely_depends_on_the_direct_wave(path):
+    """#116, the envelope's version of the bandpass test above, on a stack
+    with no gain before the envelope (the case the wrap hurt most): zeroing
+    the top tenth moved the bottom 15% of the unpadded envelope by 2.7-4.1x
+    the bottom's own RMS. Padded, it moves by 0.17-0.26x. That remainder is the
+    Hilbert transform's own 1/t reach, which a correct envelope keeps."""
+    h = read_header(path)
+    rg = Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+    for name in ("time_zero", "background_mean"):
+        rg = build_step(name).apply(rg)
+    envelope = build_step("amp_envelope")
+
+    n = rg.n_samples
+    no_top = rg.data.copy()
+    no_top[: n // 10] = 0.0
+    bottom = slice(n - (15 * n) // 100, n)
+    out = envelope.apply(rg).data[bottom]
+    out_no_top = envelope.apply(rg.replace(data=no_top)).data[bottom]
+
+    rms = np.sqrt((out_no_top**2).mean())
+    assert np.sqrt(((out - out_no_top) ** 2).mean()) < 0.5 * rms
+
+
+def _source_of(path):
+    h = read_header(path)
+    return Radargram(data=read_samples(path)[0].astype(float), dt_ns=h.dt_ns, t0_ns=h.position_ns)
+
+
+@pytest.mark.parametrize("path", CAMPUS_LINES, ids=lambda p: p.name)
+def test_the_default_time_zero_puts_each_campus_line_at_its_first_break(path):
+    # Spec 2: the default pick lands on row 49 of every campus line: -0.4764 ns on the radar clock
+    # (header position -11.0864, dt 0.216531; measured 2026-11-10).
+    out = build_step("time_zero").apply(_source_of(path))
+    assert out.zero_ns == pytest.approx(-0.4764, abs=0.001)
+    assert out.t0_ns == 0.0
+
+
+@pytest.mark.skipif(not GPS_LINES, reason="no GPS survey in tests/data/local/with-dzg")
+def test_the_gps_survey_first_breaks_sit_between_minus_1_56_and_minus_1_34_ns():
+    zeros = {round(build_step("time_zero").apply(_source_of(p)).zero_ns, 3) for p in GPS_LINES}
+    assert min(zeros) >= -1.57
+    assert max(zeros) <= -1.34
+    assert len(zeros) <= 2  # -1.559 and -1.3425 measured 2026-11-10: one sample apart
