@@ -794,3 +794,78 @@ def test_summary_counts_a_grids_picks_once_however_often_it_is_asked(synth_site,
     for dz in (0.5, 0.6, 0.7):
         export.summary("Grid A", _choice(session, dz_ns=dz))
     assert len(asked) == len(source_keys(session, "Grid A"))
+
+
+# ---- "Down to": the export's own deepest time (walkthrough fix) --------------------------------
+
+
+def _full_end_ns(export, session):
+    """Where the whole record ends, on the cube's clock (what `panel_values` reports)."""
+    return export.panel_values("Grid A")[2]
+
+
+def test_the_deepest_time_clips_the_summary_and_the_depth_levels(synth_site):
+    session, _dock, export = synth_site
+    whole = export.summary("Grid A", _choice(session))
+    end = _full_end_ns(export, session)
+    half = export.summary("Grid A", _choice(session, t1_ns=end / 2))
+    assert half.nd < whole.nd and half.nd >= 2
+    assert half.max_depth_m == pytest.approx(whole.max_depth_m / 2, rel=0.05)
+    assert half.export_bytes < whole.export_bytes
+    # a time beyond the record's end changes nothing
+    assert export.summary("Grid A", _choice(session, t1_ns=end * 3)).nd == whole.nd
+
+
+def test_run_writes_a_cube_with_as_many_levels_as_the_summary_says(synth_site):
+    session, _dock, export = synth_site
+    end = _full_end_ns(export, session)
+    choice = _choice(session, t1_ns=end / 2)
+    folder = export.run("Grid A", choice, progress=_noop)
+    extent, _origin, _spacing, _arrays = read_vti(folder / "cube.vti")
+    assert extent[5] + 1 == export.summary("Grid A", choice).nd
+
+
+def test_two_deepest_times_make_two_caches(synth_site):
+    session, _dock, export = synth_site
+    end = _full_end_ns(export, session)
+    a, b = _choice(session, t1_ns=end / 2), _choice(session, t1_ns=end / 3)
+    export.run("Grid A", a, progress=_noop)
+    assert export.cache_bytes("Grid A", a) == 0
+    assert export.cache_bytes("Grid A", b) > 0  # another depth is not a fill that can be reused
+    export.run("Grid A", b, progress=_noop)
+    assert export.cache_bytes("Grid A", b) == 0
+
+
+def test_a_deepest_time_that_leaves_no_depth_is_refused_in_words(synth_site):
+    session, _dock, export = synth_site
+    dt = session.line_for_key(session.keys()[0]).header.dt_ns
+    shallow = _choice(session, t1_ns=dt / 4)
+    for call in (
+        lambda: export.summary("Grid A", shallow),
+        lambda: export.estimate("Grid A", shallow),
+        lambda: export.cache_bytes("Grid A", shallow),
+        lambda: export.run("Grid A", shallow, progress=_noop),
+    ):
+        with pytest.raises(ValueError, match="Down to must be deeper than time zero; it is "):
+            call()
+    assert not (Path(session.root) / "paraview").exists()
+
+
+def test_defaults_start_from_the_panels_deepest_time_and_then_the_record_wins(synth_site):
+    session, _dock, export = synth_site
+    assert export.defaults("Grid A").t1_ns is None
+    session.remember_slice_resolution("Grid A", t1_ns=40.0)
+    first = export.defaults("Grid A")
+    assert first.t1_ns == 40.0
+    session.remember_volume("Grid A", **first.to_record())
+    session.remember_slice_resolution("Grid A", t1_ns=30.0)  # browsing slices
+    assert export.defaults("Grid A").t1_ns == 40.0
+
+
+def test_panel_values_end_with_the_records_end_time(synth_site):
+    session, _dock, export = synth_site
+    cell, dt, end = export.panel_values("Grid A")
+    assert cell is None and dt > 0 and end > 0
+    assert export.summary("Grid A", _choice(session)).max_depth_m == pytest.approx(
+        float(session.resolved_velocity(session.keys()[0]).depth_at(np.asarray([end]))[0])
+    )

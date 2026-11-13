@@ -64,6 +64,7 @@ from nsgeo_qgis.paraview_scene import (
     in_use_message,
     scene_record,
     scene_title,
+    shallow_t1_message,
     write_scene_files,
 )
 from nsgeo_qgis.slices_engine import SliceEngine
@@ -114,13 +115,36 @@ def _depth_levels(z: ZAxis) -> int:
     return int(np.count_nonzero(z.times_ns() >= -1e-9))
 
 
-def _bounds(lines: Sequence[PreparedLine]) -> tuple[float, float]:
-    """The two-way time range every line covers (as `SliceEngine.prepared_z_bounds`)."""
+def _bounds(lines: Sequence[PreparedLine], t1_ns: float | None = None) -> tuple[float, float]:
+    """The two-way time range every line covers (as `SliceEngine.prepared_z_bounds`), its end
+    clipped to `t1_ns` when that is set."""
     t0 = max(line.t0_ns for line in lines)
     t1 = min(line.t0_ns + (line.data.shape[0] - 1) * line.dt_ns for line in lines)
     if not t1 > t0:
         raise ValueError("the lines share no time range, so there is nothing to export")
+    return _clip(t0, t1, t1_ns)
+
+
+def _clip(t0: float, t1: float, t1_ns: float | None) -> tuple[float, float]:
+    """The range with its end at `t1_ns` when that is earlier; a ValueError, in words, when
+    that leaves nothing after the range's start."""
+    if t1_ns is None:
+        return t0, t1
+    t1 = min(t1, t1_ns)
+    if not t1 > t0:
+        raise ValueError(shallow_t1_message(t1_ns))
     return t0, t1
+
+
+def _levels(t0: float, t1: float, choice: VolumeChoice) -> tuple[ZAxis, int]:
+    """The depth axis of the range and its levels at or after time zero (at least two)."""
+    z = ZAxis.from_range(t0, t1, choice.dz_ns)
+    nd = _depth_levels(z)
+    if nd < 2:
+        if choice.t1_ns is not None:
+            raise ValueError(shallow_t1_message(choice.t1_ns))
+        raise ValueError("the lines have no depth range to export")
+    return z, nd
 
 
 _HEX16 = "[0-9a-f]{16}"
@@ -180,11 +204,13 @@ class ParaViewExport:
             if not keys:
                 raise ValueError(f"grid {grid_id!r} has no lines to export")
             dz = float(self.session.line_for_key(keys[0]).header.dt_ns)
+        t1 = resolution.get("t1_ns")
         return volume_choice(
             self.session.volume_record(grid_id),
             cell_default=float(cell),
             dz_default=float(dz),
             transform_default=transform_value(self.dock.transform_combo.value()),
+            t1_default=t1 if isinstance(t1, float) and t1 > 0.0 else None,
         )
 
     def _source(self, grid_id: str, choice: VolumeChoice) -> SourceChoice:
@@ -213,22 +239,24 @@ class ParaViewExport:
         that sets time zero, a probe of where that first line's zero falls."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source)
-        z = ZAxis.from_range(t0, t1, choice.dz_ns)
-        nd = _depth_levels(z)
-        if nd < 2:
-            raise ValueError("the lines have no depth range to export")
+        t0, t1 = self._time_range(source, choice.t1_ns)
+        _z, nd = _levels(t0, t1, choice)
         return export_size_bytes(frame.nx, frame.ny, nd)
 
-    def panel_values(self, grid_id: str) -> tuple[float | None, float]:
-        """`(the Slices panel's cell for this grid or None, the files' own depth step in ns)`:
-        what the dialog's hints show beside the 3-D cell and depth step."""
+    def panel_values(self, grid_id: str) -> tuple[float | None, float, float | None]:
+        """`(the Slices panel's cell for this grid or None, the files' own depth step in ns,
+        where the record ends in ns or None)`: what the dialog's hints show beside the 3-D
+        cell and depth step, and the reach of "Down to"."""
         cell = self.session.slice_resolution(grid_id).get("cell")
         keys = source_keys(self.session, grid_id)
         if not keys:
             raise ValueError(f"grid {grid_id!r} has no lines to export")
         dt = float(self.session.line_for_key(keys[0]).header.dt_ns)
-        return (float(cell) if isinstance(cell, float) and cell > 0.0 else None), dt
+        try:
+            end: float | None = self._record_range(self._source(grid_id, self.defaults(grid_id)))[1]
+        except ValueError:
+            end = None  # no preset or no shared range: the summary says so
+        return (float(cell) if isinstance(cell, float) and cell > 0.0 else None), dt, end
 
     def summary(self, grid_id: str, choice: VolumeChoice) -> ExportSummary:
         """What an export of `choice` would write and what the disk offers. Cheap (as
@@ -237,11 +265,8 @@ class ParaViewExport:
         too fine, or a grid that cannot be exported."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source)
-        z = ZAxis.from_range(t0, t1, choice.dz_ns)
-        nd = _depth_levels(z)
-        if nd < 2:
-            raise ValueError("the lines have no depth range to export")
+        t0, t1 = self._time_range(source, choice.t1_ns)
+        _z, nd = _levels(t0, t1, choice)
         velocity = self.session.resolved_velocity(source.line_keys[0])
         max_depth = float(velocity.depth_at(np.asarray([t1], dtype=float))[0])
         folder = paraview_folder(self.session, grid_id)
@@ -271,8 +296,8 @@ class ParaViewExport:
         without them a cache file of the grid with the shape this export needs counts."""
         frame = self._frame(grid_id, choice)
         source = self._source(grid_id, choice)
-        t0, t1 = self._time_range(source)
-        shape = (ZAxis.from_range(t0, t1, choice.dz_ns).nz, frame.ny, frame.nx)
+        t0, t1 = self._time_range(source, choice.t1_ns)
+        shape = (_levels(t0, t1, choice)[0].nz, frame.ny, frame.nx)
         cache_dir = paraview_folder(self.session, grid_id).parent / ".cache"
         found = _cache_files(cache_dir, grid_id)
         full = _npy_bytes(shape)
@@ -309,7 +334,12 @@ class ParaViewExport:
             return engine  # type: ignore[no-any-return]
         return None
 
-    def _time_range(self, source: SourceChoice) -> tuple[float, float]:
+    def _time_range(self, source: SourceChoice, t1_ns: float | None = None) -> tuple[float, float]:
+        """The range the lines share, its end clipped to `t1_ns` (the export's "Down to")."""
+        t0, t1 = self._record_range(source)
+        return _clip(t0, t1, t1_ns)
+
+    def _record_range(self, source: SourceChoice) -> tuple[float, float]:
         engine = self._panel_engine(source)
         bounds = engine.prepared_z_bounds() if engine is not None else None
         if bounds is not None:
@@ -395,11 +425,8 @@ class ParaViewExport:
         lines, prov = self._prepared(source)
         got = {line.key for line in lines}
         self.skipped_lines = sorted(k for k in source.line_keys if k not in got)
-        t0, t1 = _bounds(lines)
-        z = ZAxis.from_range(t0, t1, choice.dz_ns)
-        nd = _depth_levels(z)
-        if nd < 2:
-            raise ValueError("the lines have no depth range to export")
+        t0, t1 = _bounds(lines, choice.t1_ns)
+        z, nd = _levels(t0, t1, choice)
         finish = self._finish(grid_id)
         velocity = self.session.resolved_velocity(lines[0].key)
         window = max(1, int(round(choice.settings.period_ns / z.dz_ns)))
@@ -502,6 +529,7 @@ class ParaViewExport:
             "transform": choice.transform,
             "cell": choice.cell,
             "dz_ns": choice.dz_ns,
+            "t1_ns": choice.t1_ns,
             "finish": [
                 finish.method,
                 finish.max_distance_m,

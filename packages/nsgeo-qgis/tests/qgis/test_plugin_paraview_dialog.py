@@ -538,3 +538,54 @@ def test_edits_read_each_lines_picks_once_and_a_path_edit_recomputes_nothing(plu
     assert dialog.open_button.isEnabled()  # but the buttons follow the path
     dialog.path_edit.setText("")
     assert not dialog.open_button.isEnabled() and dialog.export_button.isEnabled()
+
+
+# ---- "Down to" (walkthrough fix) ---------------------------------------------------------------
+
+
+def test_down_to_shows_the_remembered_time_or_the_records_end(plugin):
+    plugin_obj, s = plugin
+    export = ParaViewExport(s, plugin_obj.slices_dock)
+    end = export.panel_values("A")[2]
+    dialog = _make_dialog(plugin_obj)
+    assert dialog.t1_spin.value() == pytest.approx(end, abs=1e-3)
+    assert dialog.t1_spin.maximum() == pytest.approx(end, abs=1e-3)
+    assert "the record ends at" in dialog.t1_hint.text() and " m; " in dialog.t1_hint.text()
+    s.remember_volume("A", t1_ns=end / 2)
+    assert _make_dialog(plugin_obj).t1_spin.value() == pytest.approx(end / 2, abs=1e-3)
+
+
+def test_editing_down_to_refreshes_the_size_and_choice_returns_it(plugin):
+    dialog = _make_dialog(plugin[0])
+    before = dialog.size_label.text()
+    dialog.t1_spin.setValue(dialog.t1_spin.maximum() / 2)
+    assert dialog.size_label.text() != before
+    assert dialog.choice().t1_ns == pytest.approx(dialog.t1_spin.maximum() / 2, abs=1e-3)
+
+
+def test_return_in_down_to_commits_and_does_not_export(plugin):
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtTest import QTest
+
+    dialog = _make_dialog(plugin[0])
+    dialog.path_edit.setText("/bin/true")
+    dialog.show()
+    before = dialog.size_label.text()
+    dialog.t1_spin.setFocus()
+    dialog.t1_spin.selectAll()
+    QTest.keyClicks(dialog.t1_spin, f"{dialog.t1_spin.maximum() / 2:.1f}")
+    QTest.keyClick(dialog.t1_spin, Qt.Key.Key_Return)
+    assert dialog.result() == 0 and dialog.isVisible() and not dialog.open_after()
+    assert dialog.size_label.text() != before
+    dialog.close()
+
+
+def test_accepting_remembers_the_deepest_time(plugin, drive_dialog, message_log):
+    plugin_obj, s = plugin
+
+    def driver(d):
+        d.t1_spin.setValue(d.t1_spin.maximum() / 2)
+        d.export_button.click()
+
+    _open_dialog(plugin_obj, drive_dialog, driver)
+    assert s.volume_record("A")["t1_ns"] > 0

@@ -59,3 +59,28 @@ def test_a_stored_none_reads_back_as_no_transform():
         {"transform": "none"}, cell_default=1, dz_default=1, transform_default="amp_square"
     )
     assert c.transform == ""
+
+
+def test_the_deepest_time_takes_the_panels_at_first_use_then_the_record_wins():
+    kw = {"cell_default": 0.1, "dz_default": 0.2, "transform_default": ""}
+    assert volume_choice(None, **kw).t1_ns is None
+    assert volume_choice(None, t1_default=40.0, **kw).t1_ns == 40.0
+    assert volume_choice({"t1_ns": 25.0}, t1_default=40.0, **kw).t1_ns == 25.0
+    assert volume_choice({"t1_ns": "bad"}, t1_default=40.0, **kw).t1_ns == 40.0
+    assert volume_choice({"t1_ns": -3.0}, t1_default=None, **kw).t1_ns is None
+
+
+def test_an_unset_deepest_time_is_absent_from_the_record_and_round_trips():
+    kw = {"cell_default": 1, "dz_default": 1, "transform_default": ""}
+    unset = VolumeChoice(0.1, 0.1, "amp_square")
+    assert "t1_ns" not in unset.to_record()
+    assert volume_choice(unset.to_record(), **kw).t1_ns is None
+    deep = VolumeChoice(0.1, 0.1, "amp_square", t1_ns=40.0)
+    assert deep.to_record()["t1_ns"] == 40.0
+    assert volume_choice(deep.to_record(), **kw) == deep
+
+
+def test_a_choice_refuses_a_bad_deepest_time():
+    for bad in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            VolumeChoice(0.1, 0.1, "amp_square", t1_ns=bad)

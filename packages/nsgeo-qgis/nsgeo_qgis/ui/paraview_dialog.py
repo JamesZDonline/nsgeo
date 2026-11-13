@@ -41,6 +41,7 @@ from nsgeo_qgis.paraview_scene import (
     disk_refusal,
     dt_hint,
     summary_rows,
+    t1_hint,
 )
 from nsgeo_qgis.slices_plan import VolumeChoice
 from nsgeo_qgis.ui.site_scope import transform_value
@@ -48,6 +49,7 @@ from nsgeo_qgis.ui.transform_combo import NONE as NONE_VALUE
 from nsgeo_qgis.ui.transform_combo import TransformCombo
 
 _WARNING_STYLE = "color: #b3261e;"
+_NO_END_NS = 100_000.0  # the Slices panel's own ceiling for z1: when the record's end is unknown
 
 
 def _log() -> None:
@@ -87,7 +89,7 @@ class ParaViewExportDialog(QDialog):
         choice_for: Callable[[str], VolumeChoice],
         summary_for: Callable[[str, VolumeChoice], ExportSummary],
         paraview_path: str,
-        hints_for: Callable[[str], tuple[float | None, float]] | None = None,
+        hints_for: Callable[[str], tuple[float | None, float, float | None]] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -97,6 +99,7 @@ class ParaViewExportDialog(QDialog):
         self._hints_for = hints_for
         self._open_after = False
         self._loading = False
+        self._record_end: float | None = None  # where the grid's record ends, in ns
         self._can_export = False  # the settings, and the disk, allow an export
 
         outer = QVBoxLayout(self)
@@ -114,6 +117,10 @@ class ParaViewExportDialog(QDialog):
         self.dz_hint = _hint()
         res_form.addRow("Cell", self._with_hint(self.cell_spin, self.cell_hint))
         res_form.addRow("Depth step", self._with_hint(self.dz_spin, self.dz_hint))
+        # The Slices panel's z1 has 4 decimals; the export's "Down to" is the same quantity.
+        self.t1_spin = _spin(0.0001, _NO_END_NS, 4, 0.05, " ns")
+        self.t1_hint = _hint()
+        res_form.addRow("Down to", self._with_hint(self.t1_spin, self.t1_hint))
         outer.addWidget(resolution)
 
         volume = QGroupBox("The volume")
@@ -204,6 +211,7 @@ class ParaViewExportDialog(QDialog):
         return (
             self.cell_spin,
             self.dz_spin,
+            self.t1_spin,
             self.stretch_spin,
             self.period_spin,
             self.blur_spin,
@@ -239,6 +247,7 @@ class ParaViewExportDialog(QDialog):
         return self.grid_combo.currentText()
 
     def choice(self) -> VolumeChoice:
+        at_end = self.t1_spin.value() >= self.t1_spin.maximum()  # to the end of the record
         return VolumeChoice(
             cell=self.cell_spin.value(),
             dz_ns=self.dz_spin.value(),
@@ -249,6 +258,7 @@ class ParaViewExportDialog(QDialog):
                 blur_m=self.blur_spin.value(),
                 trend_m=self.trend_spin.value(),
             ),
+            t1_ns=None if at_end else self.t1_spin.value(),
         )
 
     def paraview_path(self) -> str:
@@ -267,6 +277,11 @@ class ParaViewExportDialog(QDialog):
             self._loading = True
             try:
                 choice = self._choice_for(grid)
+                panel_cell, native_dt, self._record_end = (
+                    self._hints_for(grid) if self._hints_for is not None else (None, 0.0, None)
+                )
+                self.t1_spin.setMaximum(self._record_end or _NO_END_NS)
+                self.t1_spin.setValue(choice.t1_ns or self.t1_spin.maximum())
                 self.cell_spin.setValue(choice.cell)
                 self.dz_spin.setValue(choice.dz_ns)
                 self.transform_combo.set_value(choice.transform or NONE_VALUE)
@@ -275,7 +290,6 @@ class ParaViewExportDialog(QDialog):
                 self.blur_spin.setValue(choice.settings.blur_m)
                 self.trend_spin.setValue(choice.settings.trend_m)
                 if self._hints_for is not None:
-                    panel_cell, native_dt = self._hints_for(grid)
                     self.cell_hint.setText(cell_hint(panel_cell))
                     self.dz_hint.setText(dt_hint(native_dt))
             finally:
@@ -295,6 +309,8 @@ class ParaViewExportDialog(QDialog):
             except ValueError as exc:
                 self._show_problem(str(exc))
                 return
+            if self._record_end is not None:
+                self.t1_hint.setText(t1_hint(summary.max_depth_m, self._record_end))
             for label, text in summary_rows(summary):
                 self._row_labels[label].setText(text)
                 self._row_labels[label].setStyleSheet("")

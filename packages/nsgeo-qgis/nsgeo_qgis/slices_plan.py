@@ -882,21 +882,28 @@ class VolumeChoice:
     transform: str
     stretch: float = DEFAULT_STRETCH
     settings: VolumeSettings = VolumeSettings()
+    #: How deep the export goes, in ns on the cube's clock; None is to the end of the record.
+    t1_ns: float | None = None
 
     def __post_init__(self) -> None:
         for name in ("cell", "dz_ns", "stretch"):
             if not _positive(getattr(self, name)):
                 raise ValueError(f"{name} must be finite and > 0, got {getattr(self, name)!r}")
+        if self.t1_ns is not None and not _positive(self.t1_ns):
+            raise ValueError(f"t1_ns must be None or finite and > 0, got {self.t1_ns!r}")
 
     def to_record(self) -> dict[str, float | str]:
         """The fields `Site.slice_sources[grid]["volume"]` remembers."""
-        return {
+        record: dict[str, float | str] = {
             "cell": self.cell,
             "dz_ns": self.dz_ns,
             "transform": self.transform,
             "stretch": self.stretch,
             **self.settings.to_dict(),
         }
+        if self.t1_ns is not None:
+            record["t1_ns"] = self.t1_ns
+        return record
 
 
 def volume_choice(
@@ -905,10 +912,12 @@ def volume_choice(
     cell_default: float,
     dz_default: float,
     transform_default: str,
+    t1_default: float | None = None,
 ) -> VolumeChoice:
     """The grid's 3-D choice: the defaults on first use, then the record, field by field.
 
-    A field that is missing or unusable in `record` reads as unset and takes its default.
+    A field that is missing or unusable in `record` reads as unset and takes its default
+    (for the deepest time, `t1_default`, which may be None: to the end of the record).
     """
     rec: Mapping[str, Any] = record or {}
 
@@ -928,7 +937,14 @@ def volume_choice(
         else transform_default,
         stretch=number("stretch", DEFAULT_STRETCH),
         settings=VolumeSettings.from_dict(dict(rec)),
+        t1_ns=_positive_or(rec.get("t1_ns"), t1_default),
     )
+
+
+def _positive_or(value: object, default: float | None) -> float | None:
+    if isinstance(value, (int, float)) and _positive(value):
+        return float(value)
+    return default if default is not None and _positive(default) else None
 
 
 def export_size_bytes(nx: int, ny: int, nd: int) -> int:

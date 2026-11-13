@@ -324,13 +324,13 @@ def _clean_resolution(value: object) -> dict[str, float | str]:
     return out
 
 
-_VOLUME_POSITIVE = ("cell", "dz_ns", "stretch", "period_ns", "trend_m")
+_VOLUME_POSITIVE = ("cell", "dz_ns", "stretch", "period_ns", "trend_m", "t1_ns")
 
 
 def _clean_volume(value: object) -> dict[str, float | str]:
     """A grid's remembered 3-D settings (M16), each field kept only if usable.
 
-    Only the seven fields the export reads survive; a damaged one reads as unset
+    Only the eight fields the export reads survive; a damaged one reads as unset
     and the rest still restore, as `_clean_resolution` does.
     """
     if not isinstance(value, dict):

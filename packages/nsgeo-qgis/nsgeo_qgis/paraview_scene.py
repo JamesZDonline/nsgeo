@@ -220,6 +220,16 @@ def dt_hint(native_dt_ns: float) -> str:
     return f"files: {native_dt_ns:.4g} ns"
 
 
+def t1_hint(depth_m: float | None, record_end_ns: float) -> str:
+    """Beside "Down to": the depth it reaches at the grid's velocity, and where the record ends."""
+    end = f"the record ends at {record_end_ns:.1f} ns"
+    return end if depth_m is None else f"{depth_m:.2f} m; {end}"
+
+
+def shallow_t1_message(t1_ns: float) -> str:
+    return f"Down to must be deeper than time zero; it is {t1_ns:.1f} ns"
+
+
 _SKIPPED_SHOWN = 3
 
 
@@ -261,7 +271,7 @@ def launch_failed_message(
 ) -> str:
     script = "open.bat" if windows else "open.sh"
     return (
-        f"{exported_message(grid_id, folder, skipped)}, but ParaView could not be started from "
+        f"{exported_message(grid_id, folder, skipped)}. ParaView could not be started from "
         f"{paraview}. Run {script} there, or fix the ParaView path in the export dialog."
     )
 

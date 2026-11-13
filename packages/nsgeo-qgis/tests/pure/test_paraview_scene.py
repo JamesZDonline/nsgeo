@@ -242,10 +242,31 @@ def test_messages_name_the_folder_and_the_script():
     assert exported_message("A", folder) == f"Exported A for ParaView to {folder}"
     assert "run open.sh there" in how_to_open_message("A", folder)
     assert "run open.bat there" in how_to_open_message("A", folder, windows=True)
-    assert "could not be started from /usr/bin/pv" in launch_failed_message(
-        "A", folder, "/usr/bin/pv"
+    assert launch_failed_message("A", folder, "/usr/bin/pv") == (
+        f"Exported A for ParaView to {folder}. ParaView could not be started from "
+        "/usr/bin/pv. Run open.sh there, or fix the ParaView path in the export dialog."
+    )
+    skipped = launch_failed_message("A", folder, "/usr/bin/pv", skipped=["x"])
+    assert skipped == (
+        f"Exported A for ParaView to {folder}. 1 line could not be prepared: x. "
+        "ParaView could not be started from /usr/bin/pv. Run open.sh there, "
+        "or fix the ParaView path in the export dialog."
     )
     assert CANCELLED_MESSAGE == "ParaView export cancelled"
+
+
+def test_the_deepest_time_hint_gives_the_depth_and_where_the_record_ends():
+    from nsgeo_qgis.paraview_scene import t1_hint
+
+    assert t1_hint(1.42, 100.0) == "1.42 m; the record ends at 100.0 ns"
+    assert t1_hint(None, 99.5) == "the record ends at 99.5 ns"
+
+
+def test_the_too_shallow_message_says_what_to_change():
+    from nsgeo_qgis.paraview_scene import shallow_t1_message
+
+    text = shallow_t1_message(0.0)
+    assert "Down to must be deeper than time zero" in text and "0.0 ns" in text
 
 
 def test_the_hints_name_the_panels_cell_and_the_files_step():
@@ -301,7 +322,7 @@ def test_the_windows_launcher_does_not_hold_the_folder_and_keeps_crlf(tmp_path):
     text = raw.decode()
     assert "cd " not in text and "\n" not in text.replace("\r\n", "")
     assert text.count("\r\n") == len(text.splitlines())
-    assert 'start "" "C:\\pv\\paraview.exe" --script="%HERE%open_scene.py"' in text
+    assert 'start "" /D "%HERE%.." "C:\\pv\\paraview.exe" --script="%HERE%open_scene.py"' in text
     assert 'set "NSGEO_SCENE_DIR=%HERE%"' in text
 
 
