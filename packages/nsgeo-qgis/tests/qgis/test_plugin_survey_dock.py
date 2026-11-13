@@ -205,6 +205,33 @@ def test_a_grid_row_counts_only_its_own_lines_fits(dock, tmp_path):
     assert _grid_item(dock, "B").text(0).endswith(" · 2 fits on 1 line")
 
 
+def test_grid_row_names_where_its_velocity_came_from(dock):
+    from nsgeo.velocity_source import SourceFit, VelocitySource
+
+    session, dock = dock
+    members = []
+    for name in ("FILE__001", "FILE__002", "FILE__003"):
+        key = f"raw/{name}.DZT"
+        for t0 in (20.0, 25.0):
+            fit_id = session.add_velocity_fit(key, _fit(t0, 0.0898))
+            fit = session.line_for_key(key).velocity_fits[fit_id]
+            members.append(SourceFit.of(key, fit_id, name, fit))
+    average = VelocitySource.from_fits(members, applied_at="2026-11-12T00:00:00Z")
+    session.apply_grid_velocity("A", VelocityModel.constant(average.v_m_ns), average)
+    assert (
+        _grid_item(dock, "A").text(0).endswith(" · v 0.090 (average of 6 fits) · 6 fits on 3 lines")
+    )
+
+    one = VelocitySource.from_fits([members[4]], applied_at=None)
+    session.apply_grid_velocity("A", VelocityModel.constant(one.v_m_ns), one)
+    assert (
+        _grid_item(dock, "A").text(0).endswith(" · v 0.090 (fit on FILE__003) · 6 fits on 3 lines")
+    )
+
+    session.set_grid_velocity("A", VelocityModel.constant(0.0898))
+    assert _grid_item(dock, "A").text(0).endswith(" · v 0.090 · 6 fits on 3 lines")
+
+
 def test_removing_a_fit_updates_line_and_grid_rows(dock):
     session, dock = dock
     key = "raw/FILE__001.DZT"

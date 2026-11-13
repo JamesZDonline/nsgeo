@@ -319,6 +319,9 @@ class GridDialog(QDialog):
             self._typed = [True, True]
         else:
             self._settle_crs_at_open()
+        # What the velocity box opened with: OK compares with this, not with
+        # the grid now, because the dialog is modeless (`velocity_unchanged`).
+        self._opening_velocity = self.velocity.value()
         self._validate()
         self._refresh_derived()
         self._refresh_overlay()
@@ -1432,6 +1435,13 @@ class GridDialog(QDialog):
             default_spacing=self.spacing.value(),
             velocity=self._result_velocity(),
         )
+
+    def velocity_unchanged(self) -> bool:
+        """The velocity box still shows the value it opened with, to its four
+        decimals. The grid may have a new velocity by now (grid velocity spec
+        §7.2): unchanged, OK leaves the grid's velocity and record as they are
+        at OK."""
+        return round(self.velocity.value(), 4) == round(self._opening_velocity, 4)
 
     def _result_velocity(self) -> VelocityModel | None:
         """None when unset; the grid's own model when the box still shows it,

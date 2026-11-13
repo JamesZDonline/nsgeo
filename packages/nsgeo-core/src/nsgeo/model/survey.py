@@ -21,6 +21,7 @@ from nsgeo.io.dzt import DztHeader, read_header, read_samples, trace_count
 from nsgeo.model.cut import Cut
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import METHOD_FIT, VelocitySource
 
 #: How many lines' sample arrays stay resident. A 30x30 m grid at 0.5 m
 #: spacing is about 100 MB in total, so a bound of 16 lines is generous
@@ -83,7 +84,26 @@ class Line:
     n_traces: int
     velocity: VelocityModel | None = None
     velocity_fits: Mapping[str, StoredFit] = field(default_factory=dict)
-    velocity_from_fit: str | None = None
+    velocity_source: VelocitySource | None = None
+    #: The highest fit number this line has ever handed out, so a fit id is
+    #: never reused across deletes, saves and loads (spec §8).
+    fit_serial: int = 0
+
+    @property
+    def velocity_from_fit(self) -> str | None:
+        """The id of the one stored fit this line's velocity came from.
+
+        Read-only: None unless the record is a single `fit` member that is
+        still in `velocity_fits` with the same `fitted_at`.
+        """
+        source = self.velocity_source
+        if source is None or source.method != METHOD_FIT or len(source.members) != 1:
+            return None
+        member = source.members[0]
+        fit = self.velocity_fits.get(member.fit_id)
+        if fit is None or not member.names(member.fit_id, fit):
+            return None
+        return member.fit_id
 
     @classmethod
     def open(cls, path: Path, placement: Placement, velocity: VelocityModel | None = None) -> Line:

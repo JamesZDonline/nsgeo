@@ -97,14 +97,10 @@ release's notes list everything in it.
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
 | | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
 | | Colour a slice with QGIS's own symbology: a colour ramp, typed min/max or a cut that follows each depth, kept per scope and in the export ([#180]) | next release |
+| | A grid velocity from its fits: a grid's Set velocity… lists every saved fit on its lines, averages the ones you tick and remembers which fits it used; slices take their depths from the grid's velocity. A site that remembers its fits saves as schema 3, which 0.4.0 cannot open ([#127], [#86]) | next release |
 
 ### In progress
 
-- **A grid velocity from its fits** ([#127], [#86]): a grid's Set velocity…
-  lists every saved fit on the grid's lines, averages the ones you tick, and
-  remembers which fits made the grid's velocity. Slices take their depths
-  from the grid's velocity, as cuts already do. Designed, with a five-task
-  plan.
 - **M16: 3-D**, in four plans. **Plan A, Export for ParaView:** one action
   writes a grid's prepared volume, picks and lines to a folder ParaView opens
   ready to explore. Built, awaiting its walkthrough. **Plan B, surfaces from
@@ -152,7 +148,8 @@ Grouped by area. The order within a group is not a priority.
   placement together is done); the scroll wheel no longer moves a line to
   another grid in Edit lines ([#176]).
 - **Velocity:** a modifier-click for velocity points ([#88]); draw a box
-  around a hyperbola and let the plugin mark it ([#140]).
+  around a hyperbola and let the plugin mark it ([#140]); selecting a fit in
+  a velocity dialog shows its hyperbola on its own profile ([#185]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
   ([#158]); trace stacking ([#114]); a frequency profile
@@ -216,6 +213,7 @@ Grouped by area. The order within a group is not a priority.
 [#178]: https://github.com/JamesZDonline/nsgeo/issues/178
 [#180]: https://github.com/JamesZDonline/nsgeo/issues/180
 [#183]: https://github.com/JamesZDonline/nsgeo/issues/183
+[#185]: https://github.com/JamesZDonline/nsgeo/issues/185
 
 ## Why
 

@@ -16,6 +16,7 @@ import dataclasses
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from nsgeo.processing.stack import StepStack
 from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
 from nsgeo.velocity_fit import StoredFit
+from nsgeo.velocity_source import SourceFit, VelocitySource
 
 __all__ = [
     "ProjectError",
@@ -41,7 +43,12 @@ SCHEMA_VERSION = 1
 #: without cuts still saves as `SCHEMA_VERSION`, and stays readable by those
 #: builds (cut spec §3, plan call 3).
 CUTS_SCHEMA_VERSION = SCHEMA_VERSION + 1
-READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION)
+#: A site with any velocity source record saves as 3, for the same reason: an
+#: older build would drop the record on its next save. A site without one
+#: still saves as 1 or 2 (grid velocity spec §9).
+VELOCITY_SOURCE_SCHEMA_VERSION = CUTS_SCHEMA_VERSION + 1
+READABLE_SCHEMA_VERSIONS = (SCHEMA_VERSION, CUTS_SCHEMA_VERSION, VELOCITY_SOURCE_SCHEMA_VERSION)
+_FIT_ID = re.compile(r"fit-(\d+)")
 
 
 class ProjectError(Exception):
@@ -60,6 +67,8 @@ def _grid_to_dict(grid: Grid) -> dict[str, Any]:
     }
     if grid.velocity is not None:
         doc["velocity"] = grid.velocity.to_dict()
+    if grid.velocity_source is not None:
+        doc["velocity_source"] = grid.velocity_source.to_dict()
     return doc
 
 
@@ -72,6 +81,14 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
             raise ProjectError(
                 f"invalid velocity for grid {doc.get('id', '<unknown>')!r}: {exc}"
             ) from exc
+    source = None
+    if "velocity_source" in doc:
+        try:
+            source = VelocitySource.from_dict(doc["velocity_source"])
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise ProjectError(
+                f"invalid velocity source for grid {doc.get('id', '<unknown>')!r}: {exc}"
+            ) from exc
     return Grid(
         id=doc["id"],
         origin=(float(doc["origin"][0]), float(doc["origin"][1])),
@@ -81,6 +98,7 @@ def _grid_from_dict(doc: dict[str, Any]) -> Grid:
         crs=doc["crs"],
         default_spacing=float(doc["default_spacing"]),
         velocity=velocity,
+        velocity_source=source,
     )
 
 
@@ -235,8 +253,10 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             entry["velocity"] = line.velocity.to_dict()
         if line.velocity_fits:
             entry["velocity_fits"] = {fid: fit.to_dict() for fid, fit in line.velocity_fits.items()}
-        if line.velocity_from_fit is not None:
-            entry["velocity_from_fit"] = line.velocity_from_fit
+        if line.velocity_source is not None:
+            entry["velocity_source"] = line.velocity_source.to_dict()
+        if line.fit_serial > 0:
+            entry["fit_serial"] = line.fit_serial
         lines_data.append(entry)
 
     orphans = sorted(set(site.stacks) - set(keys_written))
@@ -246,8 +266,15 @@ def save_site(site: Site, path: str | Path, *, allow_absolute: bool = False) -> 
             f"expected one of {sorted(keys_written)}"
         )
 
+    has_record = any(g.velocity_source is not None for g in site.grids) or any(
+        ln.velocity_source is not None for ln in site.lines
+    )
+    if has_record:
+        version = VELOCITY_SOURCE_SCHEMA_VERSION
+    else:
+        version = CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION
     doc = {
-        "schema_version": CUTS_SCHEMA_VERSION if site.cuts else SCHEMA_VERSION,
+        "schema_version": version,
         "grids": [_grid_to_dict(g) for g in site.grids],
         "lines": lines_data,
     }
@@ -432,17 +459,37 @@ def load_site(path: str | Path) -> Site:
                 fits[fid] = StoredFit.from_dict(fit_doc)
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid velocity fit for line {entry['path']!r}: {exc}") from exc
-        # Fits are evidence; a selection naming a fit that is gone is dropped
-        # rather than costing the user the file.
-        from_fit = entry.get("velocity_from_fit")
-        if not isinstance(from_fit, str) or from_fit not in fits:
-            from_fit = None
         try:
             placement = _placement_from_dict(entry["placement"])
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid placement for line {entry['path']!r}: {exc}") from exc
+        source = None
+        if "velocity_source" in entry:
+            try:
+                source = VelocitySource.from_dict(entry["velocity_source"])
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                raise ProjectError(
+                    f"invalid velocity source for line {entry['path']!r}: {exc}"
+                ) from exc
+        else:
+            # An older file's pick becomes a one-member record (spec §7.1).
+            # A pick naming a fit that is gone is dropped, as before.
+            from_fit = entry.get("velocity_from_fit")
+            if isinstance(from_fit, str) and from_fit in fits:
+                label = placement.label or Path(entry["path"]).stem
+                member = SourceFit.of(key, from_fit, label, fits[from_fit])
+                source = VelocitySource.from_fits([member], None)
+        serial = entry.get("fit_serial", 0)
+        if not isinstance(serial, int) or isinstance(serial, bool) or serial < 0:
+            serial = 0
+        for fid in fits:
+            found = _FIT_ID.fullmatch(fid)
+            if found:
+                serial = max(serial, int(found.group(1)))
         line = Line.open(dzt, placement, velocity=velocity)
-        lines.append(dataclasses.replace(line, velocity_fits=fits, velocity_from_fit=from_fit))
+        lines.append(
+            dataclasses.replace(line, velocity_fits=fits, velocity_source=source, fit_serial=serial)
+        )
         if "stack" in entry:
             try:
                 stacks[key] = StepStack.from_dicts(entry["stack"])

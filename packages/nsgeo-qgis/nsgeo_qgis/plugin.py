@@ -49,6 +49,7 @@ lean on exec() to make them unreachable.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ from typing import Any
 
 import nsgeo
 import numpy as np
+from nsgeo.geometry import Grid
 from nsgeo.model import is_cut_key
 from nsgeo.processing import build_step, retime_ns, time_base_of
 from nsgeo.project import ProjectError, line_key
@@ -334,7 +336,7 @@ class NsgeoPlugin:
         self.survey_dock.add_grid_requested.connect(lambda: self.open_grid_dialog(None))
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
         self.survey_dock.import_requested.connect(self.open_import_dialog)
-        self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
+        self.survey_dock.grid_velocity_requested.connect(self.open_grid_velocity_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
@@ -1175,7 +1177,7 @@ class NsgeoPlugin:
             self.message("prepare a slice source before exporting.", Qgis.MessageLevel.Warning)
             return
         thickness_levels, step_levels = dock.thickness_step_levels()
-        _key, velocity = dock._resolved_velocity()
+        _grid_id, velocity = dock._resolved_velocity()
         finish = dock.slice_finish()
         coverage = dock.coverage_check.isChecked()
         z = engine.z
@@ -2163,9 +2165,9 @@ class NsgeoPlugin:
         try:
             grid = self.session.grid(grid_id) if grid_id else None
         except KeyError as exc:
-            # edit_grid_requested/grid_velocity_requested carry a grid id
-            # captured when a context menu was built; it is stale if the
-            # grid was removed by then. This is a QAction.triggered-style
+            # edit_grid_requested carries a grid id captured when a context
+            # menu was built; it is stale if the grid was removed by then.
+            # This is a QAction.triggered-style
             # slot (see the module docstring), so this must not raise.
             self.message(str(exc), Qgis.MessageLevel.Critical)
             return
@@ -2223,6 +2225,7 @@ class NsgeoPlugin:
                             if grid is None:
                                 self.session.add_grid(new_grid)
                             else:
+                                new_grid = self._edited_grid_velocity(dialog, new_grid)
                                 report = self.session.replace_grid(new_grid)
                                 if report.message():
                                     self.message(
@@ -2657,14 +2660,29 @@ class NsgeoPlugin:
             Qgis.MessageLevel.Warning if outcome.skipped else Qgis.MessageLevel.Info,
         )
 
+    def _edited_grid_velocity(self, dialog: GridDialog, edited: Grid) -> Grid:
+        """Edit grid's velocity at OK (grid velocity spec §7.2). The dialog is
+        modeless and holds the grid as it opened, so its box is compared with
+        the value it opened with. Unchanged: the grid's velocity and record as
+        they are NOW, so a velocity set meanwhile (the grid velocity dialog,
+        the strip's Apply to grid) is neither put back nor paired with the
+        wrong record. Changed: the box's number, with no record."""
+        if dialog.velocity_unchanged():
+            now = self.session.grid(edited.id)
+            return dataclasses.replace(
+                edited, velocity=now.velocity, velocity_source=now.velocity_source
+            )
+        return dataclasses.replace(edited, velocity_source=None)
+
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a
         saved fit. Modal: it is a short question about one line, and the answer
         is applied the moment it closes.
 
-        `velocity_from_fit` names the fit that produced the override, so every
-        route here keeps it true: applying a fit points at it, a typed number
-        clears it, and clearing the override clears both."""
+        The line's velocity source says which fits produced the override, so
+        every route here keeps it true (grid velocity spec §7.2): applying a
+        fit or an average records them, a typed number drops the record, and
+        clearing the override clears both."""
         try:
             dialog = VelocityDialog(self.session, key, parent=self.iface.mainWindow())
         except (KeyError, ProjectError) as exc:
@@ -2677,25 +2695,59 @@ class NsgeoPlugin:
             # loads fine and fails when its velocity is resolved.
             self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
             return
-        dock = self.profile_dock
+        self._run_velocity_dialog(
+            dialog,
+            lambda: self.session.apply_line_velocity(
+                key, dialog.velocity(), dialog.chosen_source()
+            ),
+        )
+
+    def open_grid_velocity_dialog(self, grid_id: str) -> None:
+        """Set or clear a grid's velocity, from a typed number, one fit on its
+        lines, or the average of the fits ticked (grid velocity spec §4). The
+        Survey panel's grid Set velocity... opens this; Edit grid stays on its
+        own menu item. Modal, like the line's dialog.
+
+        The grid's velocity source records the fits behind the number, as
+        `open_velocity_dialog` does for a line. Line overrides are left alone."""
         try:
-            # The selected fit is lit on the profile while the dialog is open,
-            # so its row can be matched to its curve.
+            dialog = VelocityDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+        except (KeyError, ProjectError) as exc:
+            # The id was captured when a context menu was built; the grid may
+            # be gone by now.
+            self.message(str(exc), Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not open the velocity dialog: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self._run_velocity_dialog(
+            dialog,
+            lambda: self.session.apply_grid_velocity(
+                grid_id, dialog.velocity(), dialog.chosen_source()
+            ),
+        )
+
+    def _run_velocity_dialog(self, dialog: VelocityDialog, apply: Callable[[], None]) -> None:
+        """Show a velocity dialog, `apply` its answer if accepted, and dispose
+        of it. The selected fit is lit on the profile while the dialog is open,
+        so its row can be matched to its curve; the profile lights it only when
+        its line is the one shown."""
+        dock = self.profile_dock
+
+        def light(ref: tuple[str, str] | None) -> None:
             if dock is not None:
-                dialog.fit_highlighted.connect(lambda fit_id: dock.highlight_saved_fit(key, fit_id))
-                dock.highlight_saved_fit(key, dialog.highlighted_fit_id())
+                dock.highlight_saved_fit(*(ref if ref is not None else ("", None)))
+
+        try:
+            dialog.fit_highlighted.connect(light)
+            light(dialog.highlighted_ref())
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            model = dialog.velocity()
-            self.session.set_line_velocity(key, model)
-            self.session.set_velocity_from_fit(
-                key, dialog.selected_fit_id() if model is not None else None
-            )
+            apply()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             self.message(f"could not set the velocity: {exc}", Qgis.MessageLevel.Critical)
         finally:
-            if dock is not None:
-                dock.highlight_saved_fit(key, None)
+            light(None)
             dialog.deleteLater()
 
     def open_line_choice_dialog(self) -> None:

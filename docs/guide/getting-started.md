@@ -167,6 +167,18 @@ grid's velocity (right-click the grid, then **Set velocity…**). If the grid ha
 none either, it uses the dielectric in its file header. The profile names the
 source next to the velocity, for example `v = 0.080 m/ns (header ε 14)`.
 
+**Set velocity…** on a grid's right-click menu opens the grid's velocity dialog.
+It lists every velocity fit saved on the grid's lines, with the line each one is
+on. Tick the fits you want and click **Use average**: the box takes their
+average, weighted by each fit's ±, so tighter fits count for more. A warning
+says when ticked fits disagree, which can mean the ground is layered. You can
+also click one fit to use its velocity, or type a number. **Apply** sets the
+grid's velocity, and the grid remembers which fits it came from: the Survey
+panel shows, for example, `v 0.090 (average of 6 fits)`. Slices and cuts on the
+grid use the grid's velocity. Lines with their own override are starred, and
+**Apply** leaves their overrides alone. A line's **Set velocity override…** has
+the same ticks and **Use average** over that line's fits.
+
 ---
 
 ## 3. A first session
@@ -249,7 +261,8 @@ far (see [What the map shows](#what-the-map-shows)).
    box shows what the headers give, for example `header ε 14 ≈ 0.0801 m/ns`.
    The header value is only the instrument's setting, not a measurement, so
    enter a velocity when you have a better one, for example from a fit. You can
-   change it, or set it back to 0 to clear it, later with **Set velocity…**.
+   change it later with **Set velocity…** on the grid's right-click menu, or
+   clear it there with **Clear grid velocity**.
 7. Click **OK**. It stays greyed out until the Id, CRS and size are all usable.
 
 **The grid's CRS picks itself.** The grid needs a projected CRS in metres. Until

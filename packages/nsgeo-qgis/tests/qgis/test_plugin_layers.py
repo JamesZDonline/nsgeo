@@ -29,6 +29,7 @@ from nsgeo_qgis.session import GPKG_FILE, SURVEY_FILE, Pick, SiteSession
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 from plugin_testing import (
     REAL_DZT,
+    apply_fit,
     connect_message_log,
     drag_in_layers_panel,
     needs_real_data,
@@ -2794,8 +2795,7 @@ def test_a_picks_depth_and_velocity_follow_the_lines_velocity(populated, source)
         fit_id = session.add_velocity_fit(
             key, StoredFit(20.0, 0.09, 0.004, 0.2, 30, ((30, 20.0), (15, 21.0)), "t")
         )
-        session.set_line_velocity(key, VelocityModel.constant(0.09))
-        session.set_velocity_from_fit(key, fit_id)
+        apply_fit(session, key, fit_id)
         expected = 0.09
     f = _rows(layers)[key]
     depth, velocity = session.derived_pick_fields(key, 7, 12.5)[1:]

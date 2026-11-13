@@ -98,7 +98,7 @@ from nsgeo_qgis.slices_plan import (
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
-from nsgeo_qgis.ui.profile_dock import velocity_source
+from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
 from nsgeo_qgis.ui.transform_combo import TransformCombo
@@ -917,6 +917,29 @@ class SlicesDock(QgsDockWidget):
                 # (interpolation spec §8). Direct, like the sliders: no
                 # resolution change to debounce.
                 self.refresh_slice()
+            elif (
+                self._scope == "grid"
+                and self.engine.is_prepared
+                and self.engine.choice is not None
+                and self.engine.choice.grid_id == self.grid_combo.currentText()
+                and self._values is not None
+                and (window := self.current_window()) is not None
+            ):
+                # A grid Apply (or a line edit) can change the velocity the
+                # label and the readout's metres state, never the slice
+                # itself: relabel depths only, as Whole site's
+                # `on_session_changed` does. Export reads the live velocity
+                # through `_resolved_velocity`, so a stale label here would
+                # name a different one.
+                # A hand-edited survey's spacing <= 0 (`SliceFinish.in_metres`,
+                # via the legend's limit) raises ValueError after the readout
+                # and the velocity label are already written, as
+                # `_finish_moved` reads it. Any ValueError is logged, never
+                # swallowed: a header dielectric <= 0 raises one too.
+                try:
+                    self._update_readout(window)
+                except ValueError as exc:
+                    _log(f"could not relabel the slice after a velocity change: {exc}")
             # M12: the site scope follows the same five signals, and a
             # different survey forgets what the last one's site view held.
             if self._scope == "site":
@@ -1354,13 +1377,13 @@ class SlicesDock(QgsDockWidget):
             # this question is answered, not assuming its callers can
             # never change.
             #
-            # KeyError (final review, Minor 6): provenance() also raises
-            # this once the FIRST prepared line has been removed from the
-            # session -- see `_resolved_velocity`'s own docstring, which
-            # widens the identical catch for the identical reason. A
-            # "does not match" answer here is conservative and safe either
-            # way: both callers already treat a mismatch as "stale, not
-            # unprepared".
+            # KeyError (final review, Minor 6): provenance() resolves the
+            # grid's velocity through `grid_depth_velocity`, which raises
+            # KeyError when the grid has neither a velocity nor a line, but
+            # provenance() suppresses that and records no velocity. The
+            # catch stays as a defensive one. A "does not match" answer here
+            # is conservative and safe either way: both callers already
+            # treat a mismatch as "stale, not unprepared".
             return False
         return self._live_preset_steps(preset_name) == prepared_steps
 
@@ -2824,7 +2847,7 @@ class SlicesDock(QgsDockWidget):
         two-argument call here had simply never passed one, so the
         readout stated ns only. `_resolved_velocity()` is the one place
         that resolves it, shared with `velocity_label` so the two always
-        describe the same line's velocity.
+        describe the same grid velocity (`grid_depth_velocity`).
 
         Final review, Minor 5: `plan_windows` is called with `thickness_
         step_levels()[0]` (the SAME unclamped thickness `export_geotiff`
@@ -2849,47 +2872,42 @@ class SlicesDock(QgsDockWidget):
         # it degrades gracefully to "the last slice" there rather than
         # raising.
         index = min(len(windows) - 1, window.k0 // step_levels)
-        key, velocity = self._resolved_velocity()
+        grid_id, velocity = self._resolved_velocity()
         label = window_label(z, window, velocity)  # falls back to ns-only when velocity is None
         self.readout.setText(f"slice {index + 1} / {len(windows)} · {label}")
-        self._update_velocity_label(key, velocity)
+        self._update_velocity_label(grid_id, velocity)
         self._update_legend_label()
 
     def _resolved_velocity(self) -> tuple[str | None, VelocityModel | None]:
-        """The line key and the velocity resolved against it, shared by
-        the readout (spec 9.2's ns-and-m format) and `velocity_label`
-        (spec 9.2's "provenance, not state") so the two never describe
-        two different lines. `None, None` before anything is prepared.
+        """The grid id and the grid's depth velocity, shared by the readout
+        (spec 9.2's ns-and-m format) and `velocity_label` (spec 9.2's
+        "provenance, not state") so the two never describe two different
+        velocities. A slice takes its grid's velocity, never a line's
+        override (grid velocity spec 10). `None, None` before anything is
+        prepared.
 
-        Final review, Minor 6: also `None, None` when `engine.provenance()`
-        raises `KeyError`, not just `RuntimeError` -- `provenance()`
-        resolves velocity against the FIRST prepared line's key, and that
-        raises `KeyError` once that line has been removed from the session
-        (a contributing line can be deleted while a source stays prepared;
-        the cube's own arrays are still entirely correct). Before this,
-        deleting any such line blanked an otherwise still-valid slice --
-        `refresh_slice()`'s broad `except` caught the `KeyError` escaping
-        from here, reported `error: '<key>'`, and cleared the map -- for a
-        reason that has nothing to do with whether the slice itself is
-        still good.
+        Also `None, None` when the grid is gone (`KeyError`) or the engine
+        has no source (`RuntimeError`): a contributing line can be deleted
+        while a source stays prepared, and that must not blank a
+        still-valid slice.
         """
-        try:
-            keys = self.engine.provenance().line_keys
-        except (RuntimeError, KeyError):
+        choice = self.engine.choice
+        if choice is None:
             return None, None
-        if not keys:
-            return None, None
-        key = keys[0]
         try:
-            return key, self.session.resolved_velocity(key)
+            return choice.grid_id, self.session.grid_depth_velocity(choice.grid_id)
         except (KeyError, RuntimeError):
             return None, None
 
-    def _update_velocity_label(self, key: str | None, velocity: VelocityModel | None) -> None:
-        if key is None or velocity is None:
+    def _update_velocity_label(self, grid_id: str | None, velocity: VelocityModel | None) -> None:
+        if grid_id is None or velocity is None:
             self.velocity_label.setText("")
             return
-        source = velocity_source(self.session, key)
+        try:
+            source = grid_velocity_label(self.session, grid_id)
+        except (KeyError, RuntimeError):
+            self.velocity_label.setText("")
+            return
         self.velocity_label.setText(f"v = {velocity.surface_velocity:.3f} m/ns ({source})")
 
     def _update_legend_label(self) -> None:
