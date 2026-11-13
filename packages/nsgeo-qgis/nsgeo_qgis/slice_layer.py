@@ -183,6 +183,11 @@ class SliceLayer(QObject):
         #: requested name rather than `layer.name()`, so a user's rename is
         #: not undone on the next tick.
         self._name: str | None = None
+        #: A layer this one must sit directly above in the site group, when
+        #: that one is in it (M19a: the GPR slice over the mag map, so the
+        #: slice is never hidden under an opaque mag raster, whichever of the
+        #: two is drawn or re-created first). `None`: join at the bottom.
+        self.above: SliceLayer | None = None
 
     # ---- the one thing this class does -------------------------------
     def update(
@@ -442,8 +447,20 @@ class SliceLayer(QObject):
         if group is None or sip.isdeleted(group):
             return
         assert self.layer is not None
-        if group.findLayer(self.layer.id()) is None:
+        if group.findLayer(self.layer.id()) is not None:
+            return
+        anchor = self._anchor_node(group)
+        if anchor is None:
             group.addLayer(self.layer)
+        else:
+            group.insertLayer(group.children().index(anchor), self.layer)
+
+    def _anchor_node(self, group: Any) -> Any:
+        """The group's node for the layer this one stays above, if it is there."""
+        other = self.above
+        if other is None or other.layer is None or sip.isdeleted(other.layer):
+            return None
+        return group.findLayer(other.layer.id())
 
     def _sweep(self) -> None:
         """Delete every scratch file but the two that may be wanted, and

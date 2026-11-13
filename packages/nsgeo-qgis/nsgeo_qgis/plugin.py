@@ -436,6 +436,8 @@ class NsgeoPlugin:
         self.mag_layer = SliceLayer(self.layers)
         self.mag_layer.own_style_changed.connect(self._on_mag_own_style_changed)
         self.mag_layer.extent_in = self._canvas_extent_in
+        # The mag raster is opaque: the GPR slice always draws directly over it.
+        self.slice_layer.above = self.mag_layer
         self.mag_dock.symbology_requested.connect(self._open_mag_symbology)
         self.mag_dock.map_changed.connect(self._on_mag_map_changed)
         self.session.site_closed.connect(self._clear_mag_layer)

@@ -904,3 +904,58 @@ def test_own_colours_seed_around_the_centre(mapped):
         own=True,
     )
     assert _range(sl) == (1.0, 7.0)
+
+
+def _index_in_group(layers, sl):
+    group = layers.group
+    node = group.findLayer(sl.layer.id())
+    assert node is not None
+    return group.children().index(node)
+
+
+def _draw(sl, name=None):
+    if name is None:
+        sl.update(
+            _values(), FRAME, limit=10.0, colormap_name="amp_heat", unipolar=True, subtitle="x"
+        )
+        return
+    sl.update_north_up(
+        _values(),
+        (500.0, 0.5, 0.0, 706.0, 0.0, -0.5),
+        "EPSG:32616",
+        limit=10.0,
+        colormap_name="amp_heat",
+        unipolar=True,
+        subtitle="x",
+        name=name,
+    )
+
+
+def test_a_slice_layer_stays_directly_above_the_layer_it_is_told_to(mapped):
+    """The mag map sits at the bottom of the site group, the GPR slice above it,
+    whichever is drawn first and however often the slice is re-created."""
+    sl, session, layers, _ = mapped
+    session.add_grid(Grid("A", (0.0, 0.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    mag = SliceLayer(layers)
+    sl.above = mag
+    try:
+        _draw(mag, "Mag (live preview)")
+        _draw(sl)
+        assert _index_in_group(layers, sl) < _index_in_group(layers, mag)
+        assert _index_in_group(layers, sl) + 1 == _index_in_group(layers, mag)
+        sl.clear()
+        _draw(sl)
+        assert _index_in_group(layers, sl) + 1 == _index_in_group(layers, mag)
+        # The other order: slice first, mag second.
+        sl.clear()
+        mag.clear()
+        _draw(sl)
+        _draw(mag, "Mag (live preview)")
+        assert _index_in_group(layers, sl) < _index_in_group(layers, mag)
+        # Without a layer to stay above, nothing changes: it joins at the bottom.
+        sl.above = None
+        sl.clear()
+        _draw(sl)
+        assert _index_in_group(layers, sl) > _index_in_group(layers, mag)
+    finally:
+        mag.dispose()
