@@ -205,3 +205,11 @@ def test_along_and_local_are_the_placement_maths_without_a_header(tmp_path):
     p10 = tmp_path / "t.DZT"
     write_dzt(p10, np.zeros((512, 10), dtype=np.int32), traces_per_metre=10.0)
     np.testing.assert_allclose(p.distance_along(5, read_header(p10)), p.along(5, 10.0))
+
+
+def test_trace_coords_also_refuses_a_time_triggered_line(tmp_path, frames):
+    p = tmp_path / "t.DZT"
+    write_dzt(p, np.zeros((512, 10), dtype=np.int32), traces_per_metre=0.0)
+    pl = GridPlacement(grid_id="G", axis="y", offset=0.0)
+    with pytest.raises(ValueError, match="traces_per_metre"):
+        pl.trace_coords(10, read_header(p), frames)

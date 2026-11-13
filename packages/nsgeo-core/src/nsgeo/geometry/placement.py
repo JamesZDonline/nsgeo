@@ -82,7 +82,8 @@ class GridPlacement:
             return np.column_stack([cross, along])
         return np.column_stack([along, cross])
 
-    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
+    @staticmethod
+    def _per_metre(header: DztHeader) -> float:
         spm = header.traces_per_metre
         if not spm > 0:
             raise ValueError(
@@ -90,12 +91,15 @@ class GridPlacement:
                 "recorded with time triggering and cannot be positioned by a "
                 "grid placement"
             )
-        return self.along(n_traces, spm)
+        return spm
+
+    def distance_along(self, n_traces: int, header: DztHeader) -> np.ndarray:
+        return self.along(n_traces, self._per_metre(header))
 
     def trace_coords(
         self, n_traces: int, header: DztHeader, frames: Mapping[str, Grid]
     ) -> np.ndarray:
         if self.grid_id not in frames:
             raise KeyError(f"no grid frame named {self.grid_id!r}")
-        local = self.local(n_traces, header.traces_per_metre)
+        local = self.local(n_traces, self._per_metre(header))
         return frames[self.grid_id].to_world(local)
