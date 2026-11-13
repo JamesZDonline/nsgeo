@@ -5,6 +5,8 @@ GPR machinery. This grid draws the chosen mag grid; Whole site draws every mag
 grid that holds a file (plan call P11). The map is drawn on the GUI thread
 under the busy cursor and only while the panel is showing (P14): closing the
 panel leaves the layer as it was last drawn, and closing the site clears it.
+While the panel is closed, a change to a grid or file the layer shows redraws
+it (or clears it), so it never goes stale; anything else costs nothing.
 
 Every choice the user makes is remembered in the survey (`set_mag_view`), the
 whole set at once, but never on a site that has no magnetometer grid and no
@@ -17,6 +19,7 @@ what goes wrong is reported through `error` and the status line, never raised.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import Any
 
 import numpy as np
@@ -40,13 +43,21 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from nsgeo_qgis.log import log as _log
-from nsgeo_qgis.mag_engine import DEFAULT_MAG_FINISH, MagEngine, MagMosaic, MagSettings
+from nsgeo_qgis.mag_engine import (
+    DEFAULT_MAG_FINISH,
+    MagEngine,
+    MagMosaic,
+    MagSettings,
+    _grid_key,
+)
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.slice_layer import MAG_LAYER_NAME, SliceLayer
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
 
 DEFAULT_PALETTE = "grey_black_high"
 _IMPORT_FIRST = "Import a magnetometer file to see it here."
+#: The Cell spin's floor when no file is shown: the author's 8 readings per metre.
+_DEFAULT_FLOOR = 0.125
 
 
 def draw_mag_layer(dock: MagDock, layer: SliceLayer) -> None:
@@ -87,6 +98,9 @@ class MagDock(QgsDockWidget):
         self.engine = MagEngine()
         self._scope = "grid"
         self._map: MagMosaic | None = None
+        #: What the map was last made from, `(grid id, grid key, file)` for each
+        #: grid drawn; compared with the session while the panel is closed.
+        self._drawn: list[tuple[str, tuple[Any, ...], MagFile]] = []
         self._status = _IMPORT_FIRST
         self._subtitle = ""
         #: True while the widgets are being set from the session or the grid
@@ -218,6 +232,7 @@ class MagDock(QgsDockWidget):
             button.setChecked(True)
         finally:
             self._seeding = False
+        self._sync_cell_floor()
         self._remember()
         self.refresh()
 
@@ -240,14 +255,15 @@ class MagDock(QgsDockWidget):
             self.error.emit(f"could not show the mag grid: {exc}")
 
     # ---- drawing ----------------------------------------------------------
-    def refresh(self) -> None:
+    def refresh(self, *, closed_ok: bool = False) -> None:
         """Make the map for what is chosen, then announce it. Only while the
-        panel is showing; a closed site always clears."""
+        panel is showing (or when `closed_ok`: a drawn grid changed under a
+        closed panel); a closed site always clears."""
         try:
             if not self.session.is_open:
                 self._set_map(None, "", "")
                 return
-            if not self.isVisible():
+            if not (closed_ok or self.isVisible()):
                 return
             with busy_cursor():
                 self._compute()
@@ -279,6 +295,11 @@ class MagDock(QgsDockWidget):
     def _compute(self) -> None:
         items, status = self._items()
         shown = self.engine.mosaic(items, self.settings()) if items else None
+        self._drawn = (
+            [(g.id, _grid_key(g), m) for m, g in items if g.id in shown.grids]
+            if shown is not None
+            else []
+        )
         if shown is None:
             self._set_map(None, status, "")
             return
@@ -294,8 +315,22 @@ class MagDock(QgsDockWidget):
             )
         self._set_map(shown, status, subtitle)
 
+    def _drawn_changed(self) -> bool:
+        """Whether a grid the layer shows was moved, resized or removed, or its
+        file replaced or removed, since the map was made."""
+        grids = {g.id: g for g in self.session.mag_grids()}
+        for grid_id, key, mag in self._drawn:
+            grid = grids.get(grid_id)
+            if grid is None or _grid_key(grid) != key:
+                return True
+            if self.session.mag_file_on(grid_id) is not mag:
+                return True
+        return False
+
     def _set_map(self, shown: MagMosaic | None, status: str, subtitle: str) -> None:
         self._map = shown
+        if shown is None:
+            self._drawn = []
         self._status = status
         self._subtitle = subtitle
         self.status_label.setText(status)
@@ -377,6 +412,7 @@ class MagDock(QgsDockWidget):
                 (self.session.mag_setup() or MagSetup()).spacing_m if self.session.is_open else None
             )
             self.finish_panel.set_spacing(spacing)
+            self._sync_cell_floor()
             return
         self.file_label.setText(mag.path.name)
         try:
@@ -386,6 +422,26 @@ class MagDock(QgsDockWidget):
             missing = 0
         self.missing_label.setText(str(missing) if missing else "none")
         self.finish_panel.set_spacing(mag.setup.spacing_m)
+        self._sync_cell_floor()
+
+    def _sync_cell_floor(self) -> None:
+        """The Cell spin cannot go below the reading interval of the files
+        shown (the finest of them): finer cells only upsample, and kriging at
+        0.025 m took minutes on the GUI thread. A value below it is raised."""
+        rates = []
+        if self.session.is_open:
+            items, _ = self._items()
+            rates = [m.setup.readings_per_metre for m, _g in items]
+        floor = math.ceil(1000.0 / max(rates) - 1e-9) / 1000.0 if rates else _DEFAULT_FLOOR
+        floor = min(floor, self.cell_spin.maximum())
+        before = self.cell_spin.value()
+        blocked = self.cell_spin.blockSignals(True)
+        try:
+            self.cell_spin.setMinimum(floor)
+        finally:
+            self.cell_spin.blockSignals(blocked)
+        if self.cell_spin.value() != before:
+            self._remember()
 
     def _on_site_opened(self) -> None:
         try:
@@ -410,7 +466,12 @@ class MagDock(QgsDockWidget):
         try:
             self._fill_grids()
             self._sync_colours()
-            self.refresh()
+            if self.isVisible():
+                self.refresh()
+            elif self._map is not None and self._drawn_changed():
+                # Closed, with a map on the canvas that no longer matches the
+                # session: redraw it, or clear it when nothing is left.
+                self.refresh(closed_ok=True)
         except Exception as exc:  # noqa: BLE001 -- a slot on a Qt signal
             self.error.emit(f"could not update the Mag panel: {exc}")
 

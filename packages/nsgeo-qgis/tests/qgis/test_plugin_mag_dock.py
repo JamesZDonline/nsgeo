@@ -312,3 +312,105 @@ def test_show_grid_guards_itself(world, monkeypatch):
     dock = world.dock
     dock.show_grid("M2")  # must not raise
     assert world.errors and "boom" in world.errors[-1]
+
+
+# ---- a closed panel leaves no stale map (final review I2) -------------------
+def test_a_hidden_panel_redraws_when_a_drawn_grid_moves(world):
+    dock, session = world.dock, world.session
+    dock.show_grid("M1")
+    x0 = world.extent().xMinimum()
+    dock.hide()
+    old = session.grid("M1")
+    session.replace_grid(dataclasses.replace(old, origin=(old.origin[0] + 10.0, old.origin[1])))
+    assert world.extent().xMinimum() == pytest.approx(x0 + 10.0)
+    assert world.errors == []
+
+
+def test_a_hidden_panel_clears_when_the_drawn_file_is_removed(world):
+    dock, session = world.dock, world.session
+    dock.show_grid("M1")
+    assert world.drawn()
+    dock.hide()
+    session.remove_mag_file(session.mag_key(session.mag_file_on("M1")))
+    assert world.drawn() == []
+    assert world.errors == []
+
+
+def test_a_hidden_panel_redraws_when_the_drawn_file_is_replaced(world, mag_site):
+    session, root = mag_site
+    dock = world.dock
+    dock.show_grid("M1")
+    before = dock.current_map()
+    dock.hide()
+    session.set_mag_file(
+        MagFile.open(
+            synthetic_grad601(root / "raw" / "mag", "m1b.dat", value=50.0), "M1", MagSetup()
+        )
+    )
+    assert dock.current_map() is not before
+    assert dock.subtitle() == "M1 · m1b.dat"
+    assert world.layer.layer.customProperty("nsgeo/window") == "M1 · m1b.dat"
+
+
+def test_a_hidden_panel_ignores_a_gpr_change_and_a_layer_never_drawn(world):
+    dock, session = world.dock, world.session
+    dock.show_grid("M1")
+    serial = world.layer._serial
+    dock.hide()
+    old = session.grid("G1")
+    session.replace_grid(dataclasses.replace(old, origin=(old.origin[0] + 1.0, old.origin[1])))
+    assert world.layer._serial == serial  # nothing redrawn for a GPR grid
+    # Never drawn: a hidden panel does not start drawing on a change.
+    dock.show_grid("M2")
+    dock.show()
+    assert world.drawn() == []
+    dock.hide()
+    session.set_mag_file(
+        MagFile.open(synthetic_grad601(session.root / "raw" / "mag", "m2.dat"), "M2", MagSetup())
+    )
+    assert world.drawn() == []
+
+
+def test_a_mag_change_alone_redraws_a_visible_panel(world, mag_site):
+    session, root = mag_site
+    dock = world.dock
+    dock.show_grid("M1")
+    drawn = []
+    dock.map_changed.connect(lambda: drawn.append(1))
+    session.mag_changed.emit()
+    assert drawn == [1]
+
+
+# ---- the Cell spin's floor (final review I3) --------------------------------
+def test_the_cell_cannot_go_below_the_reading_interval(world):
+    dock = world.dock
+    assert dock.cell_spin.minimum() == pytest.approx(0.125)
+    dock.show_grid("M1")
+    assert dock.cell_spin.minimum() == pytest.approx(0.125)
+    dock.cell_spin.setValue(0.025)
+    assert dock.cell_spin.value() == pytest.approx(0.125)
+    assert dock.cell_spin.singleStep() == pytest.approx(0.025)
+
+
+def test_a_remembered_cell_below_the_floor_is_raised(world, mag_site):
+    session, _ = mag_site
+    world.dock.show_grid("M1")
+    session.set_mag_view(cell=0.05)
+    world.dock._on_site_opened()  # as a reopened site
+    assert world.dock.cell_spin.value() == pytest.approx(0.125)
+    assert world.dock.settings().cell == pytest.approx(0.125)
+
+
+def test_the_floor_follows_the_finest_file_shown(world, mag_site):
+    session, root = mag_site
+    coarse = MagFile.open(
+        synthetic_grad601(root / "raw" / "mag", "m2.dat"), "M2", MagSetup(readings_per_metre=4.0)
+    )
+    session.set_mag_file(coarse)
+    dock = world.dock
+    dock.show_grid("M2")
+    assert dock.cell_spin.minimum() == pytest.approx(0.25)
+    dock.show_grid("M1")
+    assert dock.cell_spin.minimum() == pytest.approx(0.125)
+    dock.set_scope("site")  # the finest of the files shown
+    assert dock.cell_spin.minimum() == pytest.approx(0.125)
