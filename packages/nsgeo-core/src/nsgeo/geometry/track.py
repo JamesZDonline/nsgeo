@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import numpy as np
 
@@ -33,9 +33,23 @@ HEADING_BASE_M: float = 1.0
 """An end's heading is taken from an anchor at least this far away (1 Hz jitter)."""
 
 
-@dataclass(frozen=True)
+_NAN_KEY = "nan"
+
+
+def _key(value: object) -> object:
+    """A value as it compares: every NaN is one, and None stays apart from it."""
+    if isinstance(value, float) and math.isnan(value):
+        return _NAN_KEY
+    return value
+
+
+@dataclass(frozen=True, eq=False)
 class TrackFix:
-    """One GGA fix of a line, placed. x and y are NaN for a fix with no position."""
+    """One GGA fix of a line, placed. x and y are NaN for a fix with no position.
+
+    Equality and hash treat every NaN as the same value, so two placements built
+    from the same log are equal (a plain dataclass compares NaN by identity).
+    """
 
     trace: int
     x: float
@@ -45,6 +59,17 @@ class TrackFix:
     alt_m: float | None = None
     geoid_m: float | None = None
     quality: int = 4
+
+    def _fields(self) -> tuple[object, ...]:
+        return tuple(_key(getattr(self, f.name)) for f in fields(self))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, TrackFix):
+            return NotImplemented
+        return self._fields() == other._fields()
+
+    def __hash__(self) -> int:
+        return hash(self._fields())
 
 
 @dataclass(frozen=True)
@@ -119,11 +144,11 @@ class TrackPlacement:
         return math.hypot(b.x - a.x, b.y - a.y) / abs(b.trace - a.trace)
 
     def _heading(self, end: TrackFix, others: list[TrackFix]) -> np.ndarray:
-        """Unit vector from `end` towards the nearest anchor at least HEADING_BASE_M
-        away, else the farthest."""
+        """Unit vector from `end` towards the first anchor, in the order given
+        (inward along the track), at least HEADING_BASE_M away, else the farthest."""
         best: TrackFix | None = None
         best_d = -1.0
-        for o in others:  # nearest to the end first
+        for o in others:  # in track order from the end, not sorted by distance
             d = math.hypot(o.x - end.x, o.y - end.y)
             if d >= HEADING_BASE_M:
                 best, best_d = o, d

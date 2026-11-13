@@ -177,6 +177,45 @@ def test_coincident_positions_do_not_divide_by_zero(header):
     np.testing.assert_allclose(c[30], (2.1, 0.0), atol=1e-9)
 
 
+def _no_warnings_coords(t, n, header):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        return t.trace_coords(n, header, {})
+
+
+@pytest.mark.parametrize("shift", [0.0, 0.3])
+def test_a_path_ending_in_coincident_positions_extends_along_its_last_real_segment(header, shift):
+    # traces 30-40 all sit at one point: the last segments have no length
+    t = _track([(20, 0.0, 0.0), (30, 2.0, 0.0), (40, 2.0, 0.0)], travel_shift=shift)
+    c = _no_warnings_coords(t, 41, header)
+    assert np.isfinite(c).all()
+    np.testing.assert_allclose(c[40], (2.0 + shift, 0.0), atol=1e-9)
+    np.testing.assert_allclose(c[30], (2.0 + shift, 0.0), atol=1e-9)
+
+
+@pytest.mark.parametrize("shift", [0.0, -0.3])
+def test_a_path_starting_in_coincident_positions_extends_along_its_first_real_segment(
+    header, shift
+):
+    # traces 0-10 all sit at one point: the first segments have no length
+    t = _track([(0, 0.0, 0.0), (10, 0.0, 0.0), (20, 2.0, 0.0)], travel_shift=shift)
+    c = _no_warnings_coords(t, 21, header)
+    assert np.isfinite(c).all()
+    np.testing.assert_allclose(c[0], (shift, 0.0), atol=1e-9)
+    np.testing.assert_allclose(c[20], (2.0 + shift, 0.0), atol=1e-9)
+
+
+def test_the_start_heading_takes_the_first_anchor_in_trace_order_not_the_nearest(header):
+    # the track turns back: (0, 1.2) is nearer than (3, 0) but comes later
+    pos = _track([(5, 0.0, 0.0), (15, 3.0, 0.0), (25, 0.0, 1.2)]).positions(31, header)
+    np.testing.assert_allclose(pos[0], (-0.5, 0.0), atol=1e-9)
+
+
+def test_the_end_heading_takes_the_first_anchor_in_reverse_order_not_the_nearest(header):
+    pos = _track([(5, 0.0, 1.2), (15, 3.0, 0.0), (25, 0.0, 0.0)]).positions(31, header)
+    np.testing.assert_allclose(pos[30], (-0.5, 0.0), atol=1e-9)
+
+
 def test_fewer_than_two_anchors_or_one_point_is_refused():
     with pytest.raises(ValueError, match="no RTK-fixed position"):
         _track([(1, 0.0, 0.0, 5), (2, 1.0, 0.0, 0)])
@@ -204,6 +243,51 @@ def test_a_track_is_hashable_and_compares_by_value():
     a, b = _track(L_SHAPE), _track(L_SHAPE)
     assert a == b and hash(a) == hash(b)
     assert a != _track(L_SHAPE, travel_shift=0.1)
+
+
+def test_no_position_fixes_compare_and_hash_by_value(header):
+    def fixes(nan):
+        return (
+            _fix(10, 0.0, 0.0),
+            TrackFix(30, nan, nan, nan, nan, None, None, 0),
+            _fix(50, 4.0, 0.0),
+        )
+
+    nans = [float("nan"), float("nan"), float("nan"), np.nan, np.float64("nan")]
+    placements = [TrackPlacement(fixes=fixes(n), crs="LOCAL") for n in nans]
+    for other in placements[1:]:
+        assert other == placements[0] and hash(other) == hash(placements[0])
+    changed = TrackPlacement(
+        fixes=(
+            _fix(10, 0.0, 0.0),
+            TrackFix(30, np.nan, np.nan, np.nan, np.nan, 1.0, None, 0),
+            _fix(50, 4.0, 0.0),
+        ),
+        crs="LOCAL",
+    )
+    assert changed != placements[0]
+    # a real value that differs from the NaN stays unequal, and None is not NaN
+    assert TrackFix(1, 0.0, 0.0, 0.0, 0.0) != TrackFix(1, np.nan, 0.0, 0.0, 0.0)
+    assert TrackFix(1, 0.0, 0.0, 0.0, 0.0, None) != TrackFix(1, 0.0, 0.0, 0.0, 0.0, np.nan)
+    assert TrackFix(1, 0.0, 0.0, 0.0, 0.0) != "not a fix"
+
+
+def test_two_placements_from_the_same_log_are_equal():
+    def to_xy(lon, lat):
+        return lon * 100.0, lat * 100.0
+
+    nan = float("nan")
+    log = DzgLog(
+        (
+            DzgFix(10, 1.0, 45.20, 10.50, 4, 20, 0.6, 120.0, 47.5),
+            DzgFix(20, 2.0, nan, nan, 0, None, None, None, None),
+            DzgFix(30, 3.0, 45.21, 10.51, 4, 20, 0.6, 121.0, 47.5),
+        ),
+        0,
+        0,
+    )
+    a, b = track_from_log(log, to_xy, "X"), track_from_log(log, to_xy, "X")
+    assert a == b and hash(a) == hash(b)
 
 
 def test_track_from_log_projects_with_the_given_function_and_keeps_lat_lon():
