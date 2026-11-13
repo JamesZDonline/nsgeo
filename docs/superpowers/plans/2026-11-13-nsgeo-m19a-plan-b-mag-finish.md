@@ -116,6 +116,16 @@ These are as in Plan A: the same virtualenvs, `.venv-tools`, and real data linke
 ## Pre-flight (coordinator, before Task 1)
 
 - [ ] Fold Plan A's walkthrough results into this plan (Q1), and land Plan A fixes first.
+- [ ] Take in main: `git merge origin/main` on `nsgeo-m19-mag`, after the Plan A fixes and before Task 1, as its own commit.
+  - A trial merge on 2026-11-13 conflicted in six files: `geometry/grid.py`, `project.py`, `plugin.py`, `ui/grid_dialog.py`, `ui/survey_dock.py`, and `tests/plugin_testing.py`.
+  - **The schema number clashes.** Main's #186 (c88595b) already uses version 3 for `VELOCITY_SOURCE_SCHEMA_VERSION`, and this branch also uses 3 for `MAG_SCHEMA_VERSION`. Resolve it like this:
+    - Set `MAG_SCHEMA_VERSION = VELOCITY_SOURCE_SCHEMA_VERSION + 1`, which is 4.
+    - `READABLE_SCHEMA_VERSIONS` lists all four versions.
+    - The writer writes the highest feature the site holds: 4 for mag, else 3 for a velocity record, else 2 for cuts, else 1.
+    - Add a test that a site with both mag data and a grid velocity record writes 4 and loads back.
+    - The two mag tests in `tests/test_project.py` that assert `schema_version == 3` now assert 4.
+  - Survey files saved during the Plan A walkthrough say version 3 and hold mag data. They still load, because the reader does not gate any key on the version number.
+  - Run all four verification commands on the merge commit before Task 1.
 - [ ] Update the roadmap's M19a entry to "Plan B building", committing straight to main.
 - [ ] Record the baselines (four commands) in a new ledger `.superpowers/sdd/2026-11-13-nsgeo-m19a-plan-b-mag-finish/`. Check that the `mag-data/` link and the other real-data links are still in place.
 
