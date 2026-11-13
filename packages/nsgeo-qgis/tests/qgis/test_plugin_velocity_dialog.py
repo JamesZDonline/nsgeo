@@ -252,6 +252,7 @@ def test_cancel_changes_nothing(plugin, drive_dialog):
     plugin.open_velocity_dialog(key)
 
     assert s.line_for_key(key) == before
+    assert s.line_for_key(key) is before  # not even replaced by an equal copy (#89)
 
 
 def test_a_stale_key_is_reported_not_raised(plugin, fake_iface):

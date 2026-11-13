@@ -66,9 +66,17 @@ def clear_profile_cache() -> None:
     _load_profiles.cache_clear()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class Line:
-    """One collected survey line. Headers are eager, samples are lazy."""
+    """One collected survey line. Headers are eager, samples are lazy.
+
+    Equality and hash are identity (`eq=False`, #89): a line is this object,
+    and an edited line is a new object that is not equal to the old one.
+    Generated field equality would raise on a field that cannot be compared
+    (an array in a placement) and generated hashing already raises on the
+    `velocity_fits` dict. Across saves a line is named by its file, through
+    `nsgeo.project.line_key`. Comparing two lines' contents is a test
+    concern, done field by field."""
 
     path: Path
     header: DztHeader

@@ -71,7 +71,7 @@ what is coming, and known issues and smaller gaps are tracked in the
 
 ## Roadmap
 
-*Last updated 2026-11-12.* Large pieces of work are numbered milestones (M0,
+*Last updated 2026-11-13.* Large pieces of work are numbered milestones (M0,
 M1, …), each designed in [`docs/superpowers/specs/`](docs/superpowers/specs/)
 before it is built. Smaller requests are issues. This list is updated whenever
 a milestone merges or the plan changes.
@@ -95,7 +95,7 @@ release's notes list everything in it.
 | M15 | Cut anywhere: the vertical section beneath any line drawn on the map | [0.4.0](https://github.com/JamesZDonline/nsgeo/releases/tag/v0.4.0) (2026-11-12) |
 | | Faster, sturdier slices at fine cells; time zero sets the clock; line placement corrections (stretch to fit, destagger); grid velocity is optional | 0.4.0 |
 | | Whole site at fine cells: both exports at a finer cell and pixel, run in the background, with a style file beside the GeoTIFF ([#108], [#175]) | next release |
-| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]) | next release |
+| | The Survey panel marks lines with saved velocity fits; Save fit clears the points for the next hyperbola ([#126], [#128]); a line is identified by itself, settled before M17's GPS lines ([#89]) | next release |
 
 ### In progress
 
@@ -108,22 +108,32 @@ release's notes list everything in it.
   remembers which fits made the grid's velocity. Slices take their depths
   from the grid's velocity, as cuts already do. Built; the walkthrough is
   next.
+- **M16: 3-D**, in four plans. **Plan A, Export for ParaView:** one action
+  writes a grid's prepared volume, picks and lines to a folder ParaView opens
+  ready to explore. Built, awaiting its walkthrough. **Plan B, surfaces from
+  picks:** select picks on the map and nsgeo builds the surface they name,
+  leaving holes where the radar saw nothing; it shows on the map, in the
+  ParaView export and in a Surfaces panel with its fit. Planned, with the
+  panel's mockup under review. Then the QGIS 3-D view, and cuts in the
+  ParaView scene.
 
 ### Next, in order
 
 Most are things the next milestones build on, so doing them now is cheaper
 than reworking M16–M17 afterwards.
 
-1. **M16: a 3-D scene.** Cuts stood upright, picked surfaces and isosurfaces.
-   Being designed.
-2. **How a line is identified** ([#89]), settled before M17 stores GPS
-   coordinates in it.
-3. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
+1. **M16: 3-D.** In progress (above).
+2. **M17: GPS lines.** Read the RTK GPS records in GSSI `.DZG` files and place
    lines by their track ([#134]). Design drafted, in three parts: GPS lines,
    profiles at true distance, and GPS areas.
-4. **M18: issue cleanup.** Work through the backlog of open bugs and review
+3. **M18: issue cleanup.** Work through the backlog of open bugs and review
    follow-ups in the [issues](https://github.com/JamesZDonline/nsgeo/issues).
-5. **M19: magnetometer data.** The first instrument other than GPR.
+4. **M19: magnetometer data.** The first instrument other than GPR:
+   Bartington Grad601 grids placed on the map with the GPR, cleaned up in
+   the Processing panel (zero, destripe, despike) and Edit lines (destagger),
+   joined into one map with the grids levelled to each other, and a mag strip
+   above the radargram on lines and cuts. Designed, in three parts; the first
+   is planned once [#180] merges.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
 that cuts carry picks too; the migration real-data test ([#125]), before M16
