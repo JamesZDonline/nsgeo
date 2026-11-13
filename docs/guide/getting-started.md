@@ -105,13 +105,14 @@ stay exactly where they are.
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
 | **Import DZT…** | Imports DZT files into a grid. |
+| **Import mag…** | Imports Bartington Grad601 grid files onto magnetometer grids. |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
-site is open, and **Pick** and **Velocity** until a line is open.
+**Save site**, **Add grid…**, **Import DZT…**, **Import mag…** and **Cut** stay
+greyed out until a site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
 
@@ -695,6 +696,38 @@ table, and they come back when you turn the setting back.
 Click **Save site** before you close QGIS. nsgeo also asks before **New site…**
 or **Open site…** would discard unsaved changes. Next time, click **Open site…**
 and choose the site's `survey.nsgeo.json`.
+
+### Step 10: Magnetometer grids
+
+nsgeo also maps Bartington Grad601 grid files. Each file goes on its own
+magnetometer grid.
+
+1. **Make a magnetometer grid.** Click **Add grid…** and set **Instrument** to
+   **Magnetometer**, or click **New mag grid…** in the import dialog. A new mag
+   grid starts at 30 × 30 m. A grid keeps its instrument once it exists.
+2. **Click Import mag…** (or right-click the grid, then **Import magnetometer
+   file…**), then **Add files…**. You can add several files at once. Each takes
+   the next magnetometer grid that has no file; change it in the **Grid**
+   column. The **Fits** column says whether the file's length and width match
+   its grid. If a file does not fit, Import asks first, and nothing is cropped
+   or stretched.
+3. **Check the setup.** It describes how you walked: which way the traverses
+   run, the corner the first one starts at, the spacing, the sensors and
+   whether you walked a zigzag. The picture beside it shows the first eight
+   traverses and which way each was walked, so you can see whether it matches
+   your survey. nsgeo remembers the setup for this site and offers it again at
+   the next import.
+4. **Click Import.** For each file, nsgeo says how many readings are missing
+   data and on which traverses. Missing data are runs of zeros that the download
+   writes where a sensor logged nothing. They are left out of the map.
+
+The **nsgeo Mag** panel opens on the grid you imported. **This grid** maps that
+grid and **Whole site** maps every magnetometer grid that holds a file. Choose
+the **Cell** size, the **Interpolation**, and the **Colours** and **Palette**.
+Clicking a magnetometer grid in **nsgeo Survey** shows it in the panel too.
+
+Exporting the magnetometer map, and destaggering magnetometer traverses, are
+not built yet.
 
 ---
 

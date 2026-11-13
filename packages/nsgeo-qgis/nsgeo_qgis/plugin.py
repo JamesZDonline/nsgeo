@@ -128,6 +128,7 @@ from nsgeo_qgis.ui.grid_dialog import GridDialog
 from nsgeo_qgis.ui.import_dialog import ImportDialog
 from nsgeo_qgis.ui.line_choice_dialog import LineChoiceDialog
 from nsgeo_qgis.ui.mag_dock import MagDock, draw_mag_layer
+from nsgeo_qgis.ui.mag_import_dialog import MagImportDialog
 from nsgeo_qgis.ui.processing_dock import ProcessingDock
 from nsgeo_qgis.ui.profile_dock import ProfileDock, curve_param_name
 from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
@@ -241,6 +242,7 @@ class NsgeoPlugin:
         self.act_save: QAction | None = None
         self.act_add_grid: QAction | None = None
         self.act_import: QAction | None = None
+        self.act_import_mag: QAction | None = None
         self.act_pick: QAction | None = None
         self.act_velocity: QAction | None = None
         self.act_cut: QAction | None = None
@@ -255,6 +257,7 @@ class NsgeoPlugin:
         #: Only one pick runs at a time (see `_arm_pick`).
         self._pick_message: QgsMessageBarItem | None = None
         self._import_dialog: ImportDialog | None = None
+        self._mag_import_dialog: MagImportDialog | None = None
         self._edit_lines_dialogs: dict[str, EditLinesDialog] = {}
         self._line_choice_dialog: LineChoiceDialog | None = None
         # What the gain strip was last given, kept in lockstep with what it
@@ -316,6 +319,10 @@ class NsgeoPlugin:
         self.toolbar.addSeparator()
         self.act_add_grid = self._toolbar_action("Add grid…", lambda: self.open_grid_dialog(None))
         self.act_import = self._toolbar_action("Import DZT…", self._import_from_toolbar)
+        self.act_import_mag = self._toolbar_action("Import mag…", self._import_mag_from_toolbar)
+        self.act_import_mag.setToolTip(
+            "Imports Bartington Grad601 grid files onto magnetometer grids."
+        )
         self.toolbar.addSeparator()
         self.act_pick = self._toolbar_action("Pick", self._toggle_pick_mode)
         self.act_pick.setCheckable(True)
@@ -338,6 +345,7 @@ class NsgeoPlugin:
         self.survey_dock.add_grid_requested.connect(lambda: self.open_grid_dialog(None))
         self.survey_dock.edit_grid_requested.connect(self.open_grid_dialog)
         self.survey_dock.import_requested.connect(self.open_import_dialog)
+        self.survey_dock.mag_import_requested.connect(self.open_mag_import_dialog)
         self.survey_dock.grid_velocity_requested.connect(self.open_grid_dialog)
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
@@ -674,6 +682,8 @@ class NsgeoPlugin:
         # reference to a session this method is about to tear down.
         if self._import_dialog is not None:
             self._import_dialog.reject()
+        if self._mag_import_dialog is not None:
+            self._mag_import_dialog.reject()
         # Same reasoning again: Edit lines tables are modeless too, one per
         # grid, and reject() (not close()) runs each one's finished-signal
         # cleanup instead of leaving it dangling with a reference to a
@@ -751,6 +761,7 @@ class NsgeoPlugin:
         self.act_save = None
         self.act_add_grid = None
         self.act_import = None
+        self.act_import_mag = None
         self.act_pick = None
         self.act_velocity = None
         self.act_cut = None
@@ -807,7 +818,7 @@ class NsgeoPlugin:
     def _update_enabled(self, *_: Any) -> None:
         try:
             is_open = self.session is not None and self.session.is_open
-            for act in (self.act_save, self.act_add_grid, self.act_import):
+            for act in (self.act_save, self.act_add_grid, self.act_import, self.act_import_mag):
                 if act is not None:
                     act.setEnabled(is_open)
             # A crosshair over an empty profile invites a click that can
@@ -2607,6 +2618,66 @@ class NsgeoPlugin:
         # falls back to the first grid.
         dock = self.survey_dock
         self.open_import_dialog(dock.target_grid_id() if dock is not None else None)
+
+    def _import_mag_from_toolbar(self) -> None:
+        # Into the mag grid the Survey panel points at; None falls back to the first free one.
+        try:
+            dock = self.survey_dock
+            self.open_mag_import_dialog(dock.target_mag_grid_id() if dock is not None else None)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(
+                f"could not open the magnetometer import: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def open_mag_import_dialog(self, grid_id: str | None) -> None:
+        """Modeless and single-instance, as `open_import_dialog` is. A slot."""
+        try:
+            self._open_mag_import_dialog(grid_id)
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(
+                f"could not open the magnetometer import: {exc}", Qgis.MessageLevel.Warning
+            )
+
+    def _open_mag_import_dialog(self, grid_id: str | None) -> None:
+        assert self.session is not None
+        if not self.session.is_open:
+            return
+        if self._mag_import_dialog is not None:
+            self._mag_import_dialog.retarget(grid_id)
+            self._mag_import_dialog.show()
+            self._mag_import_dialog.raise_()
+            self._mag_import_dialog.activateWindow()
+            return
+        dialog = MagImportDialog(self.session, grid_id=grid_id, parent=self.iface.mainWindow())
+
+        def finished(_result: int) -> None:
+            dialog.deleteLater()
+            self._mag_import_dialog = None
+
+        def clear_if_current() -> None:
+            if self._mag_import_dialog is dialog:
+                self._mag_import_dialog = None
+
+        dialog.finished.connect(finished)
+        dialog.destroyed.connect(clear_if_current)
+        dialog.imported.connect(self._on_mag_imported)
+        dialog.new_grid_requested.connect(lambda: self.open_grid_dialog(None, instrument="mag"))
+        self._mag_import_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_mag_imported(self, done: list) -> None:
+        """After an import: one message per file, then the Mag panel on the first grid. A slot."""
+        try:
+            assert self.session is not None
+            for key, _grid_id, summary in done:
+                name = self.session.mag_for_key(key).path.name
+                self.message(f"{name}: {summary}")
+            if done:
+                self.show_mag_panel(done[0][1])
+        except Exception as exc:  # noqa: BLE001 -- a slot must never raise
+            self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
 
     def open_import_dialog(self, grid_id: str | None) -> None:
         # Modeless -- see the module docstring and open_grid_dialog() above,
