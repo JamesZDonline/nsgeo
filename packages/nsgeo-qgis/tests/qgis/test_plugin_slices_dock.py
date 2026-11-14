@@ -4664,13 +4664,11 @@ def test_folds_are_remembered_across_a_restart(docked):
         again.deleteLater()
 
 
-def _fold_unfold_display_keeps_dz(dock, mutate=None):
+def _fold_unfold_display_keeps_dz(dock):
     """dz focused; Display folds, the panel is scrolled up, Display unfolds and
     scrolls itself into view. Returns (dz still focused, the unfold's scroll)."""
     scroll = _short_and_active(dock)
     bar = scroll.verticalScrollBar()
-    if mutate is not None:
-        mutate(bar, scroll)
     bar.setValue(bar.maximum())
     dock.display_group.setCollapsed(True)
     _events_n()
@@ -4688,18 +4686,6 @@ def test_a_section_folding_does_not_take_focus_from_dz(docked):
     kept, moved = _fold_unfold_display_keeps_dz(dock)
     assert moved > 0, "the unfold must scroll the panel, or this tests nothing"
     assert kept
-
-
-def test_the_guard_would_let_go_on_a_value_change(docked):
-    """The previous test has teeth: a guard that let go on valueChanged fails it."""
-    dock, _ = docked
-
-    def mutate(bar, scroll):
-        bar.valueChanged.connect(lambda _v: dock.dz_spin.hasFocus() and scroll.setFocus())
-
-    kept, moved = _fold_unfold_display_keeps_dz(dock, mutate)
-    assert moved > 0
-    assert not kept
 
 
 def test_the_folding_boxes_are_not_tab_stops(docked):

@@ -61,8 +61,10 @@ def remember_folds(name: str, boxes: Sequence[QgsCollapsibleGroupBox]) -> None:
     for box in boxes:
         box.setSaveCollapsedState(False)
         box.setSaveCheckedState(False)
-        # A header is not a Tab stop of its own; the collapse button keeps its
-        # own Tab focus.
+        # QGIS gives the box StrongFocus, with the collapse button as its focus
+        # proxy. NoFocus mainly sends a header click's focus to the panel's
+        # scroll area rather than to the button; the button stays reachable
+        # by Tab.
         box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         box.installEventFilter(sync)
     try:
