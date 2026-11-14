@@ -8,6 +8,11 @@ the tests assert the agreement rules only. CI has no such data and skips.
 the hand fit was off (the comparison is skipped); `pending.json` maps a key to
 a note on a disagreement awaiting a ruling (the test is a strict xfail). A
 key plus "|boxes" does the same for the three-box test alone.
+
+A saved stack may have Migration or an amplitude transform switched on. The
+panel refuses to trace with those on and tells the author to switch them off,
+and the hand fit was clicked on the hyperbola they collapse, so each line is
+traced with them off, as the author would.
 """
 
 from __future__ import annotations
@@ -40,6 +45,10 @@ def _read(name: str) -> dict[str, str]:
 
 RULINGS = _read("rulings.json")
 PENDING = _read("pending.json")
+
+#: The steps the panel refuses to trace with: Migration and the amplitude
+#: transforms (spec §3, decision 3).
+REFUSED_STEPS = ("migrate_fk", "amp_abs", "amp_square", "amp_envelope")
 
 
 @dataclass
@@ -84,6 +93,9 @@ def _cases() -> tuple[Case, ...]:
                 )  # type: ignore[arg-type]
                 continue
             stack = site.stacks[key]
+            for index, (step, on) in enumerate(stack.entries):
+                if on and step.name in REFUSED_STEPS:
+                    stack.set_enabled(index, False)
             stack.source = Radargram.from_profile(line.load()[0])
             result = stack.result()
             zero = result.zero_ns if stack.sets_time_zero() else 0.0
