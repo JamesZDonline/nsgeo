@@ -194,9 +194,13 @@ def also_note(also: Mapping[str, int], n: int) -> str:
     if not items:
         return ""
     if len(items) == 1 and items[0][1] >= n:
+        if n == 1:
+            return f"This pick is also in “{items[0][0]}”."
         return f"All {n} of these picks are also in “{items[0][0]}”."
     parts = [
-        f"{k} of these picks are also in “{name}”" if i == 0 else f"{k} in “{name}”"
+        f"{k} of these picks {'is' if k == 1 else 'are'} also in “{name}”"
+        if i == 0
+        else f"{k} in “{name}”"
         for i, (name, k) in enumerate(items)
     ]
     return f"{_and(parts)}."

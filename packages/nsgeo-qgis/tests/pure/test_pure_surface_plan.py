@@ -94,6 +94,8 @@ def test_also_note_names_each_surface_once_and_says_nothing_moves():
     assert two.count("“Bowl”") == 1 and two.count("“Ditch”") == 1
     assert "4 of these picks are also in “Bowl”" in two and "2 in “Ditch”" in two
     assert "move" not in two
+    assert also_note({"Bowl": 1}, 1) == "This pick is also in “Bowl”."
+    assert also_note({"Bowl": 1}, 5) == "1 of these picks is also in “Bowl”."
     assert also_note({}, 30) == ""
     assert also_note({"Bowl": 0}, 30) == ""
 

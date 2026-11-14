@@ -178,6 +178,7 @@ def test_adding_picks_already_in_a_surface_writes_and_signals_nothing(site):
     a = surfaces.create("A", fids)
     seen = []
     session.features_changed.connect(lambda: seen.append(1))
+    assert layers.add_pick_feature(fids[:3], a.feature_id) == 0  # nothing written
     surfaces.add_picks(a.feature_id, fids[:3])
     assert seen == []
     assert set(_feature_ids(layers).values()) == {a.feature_id}

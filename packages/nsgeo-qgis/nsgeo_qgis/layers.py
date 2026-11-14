@@ -138,7 +138,9 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             # ordered run of existing picks sharing a `feature_id`, so
             # adding them here -- while `picks` holds at most a handful of
             # authored rows -- costs one migration now instead of a
-            # migration of real interpretations later. `_ensure_table`
+            # migration of real interpretations later. (With multi-membership,
+            # one `seq` per pick cannot order a pick that sits in two ordered
+            # features; a future ordered kind needs its own ordering.) `_ensure_table`
             # sees the field-set mismatch on any pre-M8 package and routes
             # it through `_rebuild_picks`, whose migrate-by-field-name
             # loop leaves both columns NULL on every existing row with no

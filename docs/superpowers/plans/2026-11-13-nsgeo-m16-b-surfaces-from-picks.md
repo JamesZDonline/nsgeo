@@ -114,7 +114,7 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
 2. **The `features` table** has these columns: `feature_id`, `name`, `grid_id`, `kind`, `settings_json` and `created`.
    - `SiteLayers` holds it as a layer, but never adds it to the project or the Layers panel. Surfaces are edited only through nsgeo.
    - `seq` on the picks stays null; a surface needs no order.
-3. **Picks already in another surface move** when they are added to a new one. The New surface dialog says so before anything changes.
+3. **Picks already in another surface move** when they are added to a new one. The New surface dialog says so before anything changes. *Superseded on 2026-11-13 by the user's decision (Ruling R14): a pick can belong to several surfaces; the dialog says which, and nothing moves.*
 4. **Picks on cuts are refused** until Plan D.
 5. **Building remembers the grid's 3-D choice,** as exporting does (`session.remember_volume`). After that, changing the Slices panel's transform or cell can never change a surface's inputs.
 6. **"The volume parameters" in staleness are the wave period and the depth-balance window.** The sideways blur is left out, because a surface never uses it (call 17).
@@ -257,7 +257,7 @@ These are the inputs the spec implies but none of its tests feed. Each is pinned
     - `clean_name(text) -> str`: trims and collapses whitespace.
     - `name_refusal(name, taken: Iterable[str], own: str | None = None) -> str`: "" when the name is fine. Names compare case-folded; `own` is the record being renamed. Empty, taken, and over 80 characters are refused.
     - `selection_refusal(*, n: int, unsaved: int, on_cuts: int, grids: Collection[str], spans_area: bool) -> str`. Checks run in this order: none selected, unsaved, on cuts, two grids, fewer than 3 or in a straight line. The wording is the mockup's (`.lavish/surfaces.html`, "When the selection can't make a surface").
-    - `move_note(moving: Mapping[str, int], n: int) -> str`: for example, "4 of them are in “Bowl”; they will move to this surface, and “Bowl” will need a rebuild."
+    - `move_note(moving: Mapping[str, int], n: int) -> str`: for example, "4 of them are in “Bowl”; they will move to this surface, and “Bowl” will need a rebuild." *(Superseded by R14: replaced by `also_note`, which only says the picks are also in another surface.)*
     - `remove_refusal(left: int) -> str`: refuses leaving fewer than 3.
     - `delete_question(name: str, n_picks: int) -> str`
   - **In `layers.py`:**

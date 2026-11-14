@@ -577,3 +577,20 @@ def test_a_surface_follows_the_grid_velocity_not_a_lines_override(built_site):
     assert surfaces.state(record.feature_id).stale == ("velocity",)
     surfaces.build([record.feature_id], progress=_noop)
     assert _mean_depth(surfaces, record) == pytest.approx(2.0 * slow, rel=0.05)
+
+
+def test_a_built_surface_stays_fresh_when_another_takes_its_picks(built_site):
+    """The walkthrough case: a built Bowl, then a second surface from the same picks."""
+    _, _, _, _, surfaces = built_site
+    a, fids = _surface(built_site, "A")
+    surfaces.build([a.feature_id], progress=_noop)
+    assert surfaces.state(a.feature_id).built and surfaces.state(a.feature_id).stale == ()
+    before = surfaces.inputs(a.feature_id)
+    b = surfaces.create("B", fids, SurfaceSettings(strength=0.0))
+    assert surfaces.state(a.feature_id).built and surfaces.state(a.feature_id).stale == ()
+    assert surfaces.inputs(a.feature_id) == before
+    surfaces.build([b.feature_id], progress=_noop)
+    assert surfaces.remove_picks(b.feature_id, fids[:1]) == 1
+    assert surfaces.state(a.feature_id).stale == ()
+    assert surfaces.inputs(a.feature_id) == before
+    assert surfaces.state(b.feature_id).stale == ("picks",)
