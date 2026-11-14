@@ -142,6 +142,7 @@ _STEP_PARAMS = {
     "amp_abs": {},
     "amp_square": {},
     "amp_envelope": {},
+    "trace_stack": {"window_traces": 3},
 }
 
 

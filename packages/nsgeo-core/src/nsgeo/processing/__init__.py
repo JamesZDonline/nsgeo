@@ -15,6 +15,7 @@ from nsgeo.processing import (  # noqa: F401  (registers the built-in steps)
     migration,
     timecutoff,
     timezero,
+    trace_stack,
 )
 from nsgeo.processing.base import (
     REQUIRED,

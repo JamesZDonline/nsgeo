@@ -218,6 +218,7 @@ def test_the_registry_declares_the_bounds_these_tests_cover():
         "migrate_fk.velocity_m_ns",
         "time_zero.sample",
         "time_zero.threshold",
+        "trace_stack.window_traces",
     }
 
 

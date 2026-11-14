@@ -341,6 +341,7 @@ _PASS_THROUGH = [
     ("amp_envelope", {}),
     ("time_cutoff", {"end_ns": 10.0}),
     ("migrate_fk", {"velocity_m_ns": 0.1}),
+    ("trace_stack", {"window_traces": 3}),
 ]
 
 
