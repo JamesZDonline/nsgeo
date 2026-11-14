@@ -43,7 +43,11 @@ Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey
 def real_radargram(path: Path) -> Radargram:
     """Channel 0 of the DZT at `path` as a Radargram; skips when the file is missing (CI)."""
     if not path.exists():
-        pytest.skip(f"{path.name} is not in tests/data/local")
+        try:
+            shown = path.relative_to(DATA).as_posix()
+        except ValueError:
+            shown = str(path)
+        pytest.skip(f"{shown} is not in tests/data/local")
     header = read_header(path)
     tpm = header.traces_per_metre
     return Radargram(

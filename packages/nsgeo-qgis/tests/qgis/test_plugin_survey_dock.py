@@ -683,7 +683,10 @@ def test_opening_a_project_with_a_refused_setting_turns_the_step_off_and_says_so
     (key,) = plugin.session.site.stacks
     entries = plugin.session.stack_for(key).entries
     assert [on for _, on in entries] == [True, False]
-    assert any("Automatic gain control is turned off. Its Epsilon was 0" in m for m in message_log)
+    assert any(
+        "FILE__001.DZT (grid A): Automatic gain control is turned off. Its Epsilon was 0" in m
+        for m in message_log
+    )
     assert (
         "1 processing step in this project had settings that cannot work. "
         "It was turned off, reset or removed; the nsgeo log says what changed."

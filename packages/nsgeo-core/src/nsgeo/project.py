@@ -413,6 +413,15 @@ def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _held(specs: dict[str, Any], params: dict[str, Any], skip: set[str], lead: str) -> str:
+    """One sentence listing the saved settings not already named, by label."""
+    items = [f"{specs[k].label} {v!r}" for k, v in params.items() if k not in skip]
+    if not items:
+        return ""
+    listed = items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+    return f"{lead} {listed}."
+
+
 #: Steps that stay on when a setting is reset: turning Time zero off would
 #: move every time after it.
 _STAYS_ON = ("time_zero",)
@@ -469,10 +478,13 @@ def _repair_steps(
                 parts.append(f"Its {spec.label} was {value!r}, which {reason}{tail}.")
             for spec in missing:
                 parts.append(f"It has no {spec.label}, which it needs.")
-            notes.append(f"{removed}{' '.join(parts)} {again}")
+            named = {spec.name for spec, _, _ in refused}
+            held = _held(specs, params, named, "It also held")
+            notes.append(f"{removed}{' '.join(parts)} {held + ' ' if held else ''}{again}")
             continue
         repaired = {**entry, "params": fixed}
         note = None
+        sentences: list[str] = []
         if refused:
             sentences = [
                 f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
@@ -481,7 +493,8 @@ def _repair_steps(
             was_on = bool(entry.get("enabled", True))
             if not was_on:
                 note = (
-                    f"{where}: {title} (already off) had settings reset. "
+                    f"{where}: {title} (already off) had "
+                    f"{'a setting' if len(refused) == 1 else 'settings'} reset. "
                     f"{' '.join(sentences)} The step stays off, as it was saved."
                 )
             elif name in _STAYS_ON:
@@ -499,7 +512,9 @@ def _repair_steps(
         try:
             build_step(name, **fixed)
         except (TypeError, ValueError) as exc:
-            notes.append(f"{removed}It could not be built: {exc}. {again}")
+            held = _held(specs, params, set(), "It held")
+            built = " ".join([*sentences, f"It could not be built: {exc}.", held])
+            notes.append(f"{removed}{built.strip()} {again}")
             continue
         if note is not None:
             notes.append(note)
@@ -587,10 +602,11 @@ def load_site(path: str | Path) -> Site:
             dataclasses.replace(line, velocity_fits=fits, velocity_source=source, fit_serial=serial)
         )
         if "stack" in entry:
+            where = f"Line {Path(entry['path']).name}"
+            if placement.grid_id:
+                where += f" (grid {placement.grid_id})"
             try:
-                stacks[key] = StepStack.from_dicts(
-                    _repair_steps(entry["stack"], f"Line {Path(entry['path']).name}", load_notes)
-                )
+                stacks[key] = StepStack.from_dicts(_repair_steps(entry["stack"], where, load_notes))
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(
                     f"invalid processing stack for line {entry['path']!r}: {exc}"

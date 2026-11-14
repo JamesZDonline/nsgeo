@@ -218,9 +218,10 @@ def _direct_running_mean(a, window, axis=0):
     a = np.moveaxis(np.asarray(a, dtype=float), axis, 0)
     n = a.shape[0]
     out = np.empty_like(a)
+    w = min(window, n)
     for i in range(n):
-        lo = max(i - window // 2, 0)
-        hi = min(i - window // 2 + window, n)
+        lo = max(i - w // 2, 0)
+        hi = min(i - w // 2 + w, n)
         for j in np.ndindex(a.shape[1:]):
             vals = [v for v in a[(slice(lo, hi), *j)] if math.isfinite(v)]
             out[(i, *j)] = math.fsum(vals) / len(vals) if vals else np.nan
@@ -234,7 +235,7 @@ def test_running_mean_skips_nan_and_inf():
     a[10, 1] = np.nan
     a[30, 2] = np.inf
     a[31, 2] = -np.inf
-    for window, axis in ((7, 0), (3, 1)):
+    for window, axis in ((7, 0), (3, 1), (8, 0), (70, 0), (4, 1)):
         np.testing.assert_allclose(
             running_mean(a, window, axis=axis), _direct_running_mean(a, window, axis), rtol=1e-12
         )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import nsgeo.processing  # noqa: F401
 import numpy as np
+import pytest
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.stack import StepStack
 
@@ -53,14 +54,14 @@ def _strongest_rows(rg):
     return rows[np.argmax(np.abs(rg.data[rows]), axis=0)]
 
 
-def test_stacking_lowers_trace_to_trace_noise_on_real_lines():
-    for path in (FILE7, GRID2):
-        rg = prepared(path)
-        out = build_step("trace_stack", window_traces=3).apply(rg)
-        ratio = np.var(np.diff(out.data, axis=1)) / np.var(np.diff(rg.data, axis=1))
-        assert ratio < 0.75, (path.name, ratio)
-        shift = np.abs(_strongest_rows(out) - _strongest_rows(rg))
-        assert np.median(shift) == 0, (path.name, np.median(shift))
+@pytest.mark.parametrize("path", [FILE7, GRID2], ids=lambda p: p.parent.name + "/" + p.name)
+def test_stacking_lowers_trace_to_trace_noise_on_real_lines(path):
+    rg = prepared(path)
+    out = build_step("trace_stack", window_traces=3).apply(rg)
+    ratio = np.var(np.diff(out.data, axis=1)) / np.var(np.diff(rg.data, axis=1))
+    assert ratio < 0.75, (path.name, ratio)
+    shift = np.abs(_strongest_rows(out) - _strongest_rows(rg))
+    assert np.median(shift) == 0, (path.name, np.median(shift))
 
 
 def test_a_bad_sample_takes_its_neighbours_mean():

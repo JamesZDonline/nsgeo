@@ -32,7 +32,10 @@ class Dewow:
                 default=4.0,
                 unit="ns",
                 min=0.0,
-                help="Running-mean window; must exceed one sample interval.",
+                help=(
+                    "Running-mean window; must span at least two samples "
+                    "(1.5 sample intervals or more)."
+                ),
             ),
         )
 

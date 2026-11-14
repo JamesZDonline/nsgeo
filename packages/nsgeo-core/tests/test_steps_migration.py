@@ -572,6 +572,9 @@ def test_a_real_diffraction_collapses_at_its_measured_velocity(name, apex_trace,
     slow, _, _ = _migrated_focus(rg, v * 0.6, apex_row, apex_trace)
     fast, _, _ = _migrated_focus(rg, v * 1.6, apex_row, apex_trace)
 
+    # Measured margins (#125). FILE__033: d_trace +1, d_row 5 rows (1.08 ns), focus
+    # unmigrated 0.024 / 0.6v 0.047 / v 0.079 / 1.6v 0.038. FILE__032: d_trace -1,
+    # d_row 6 rows (1.30 ns), focus 0.020 / 0.035 / 0.047 / 0.017.
     assert abs(d_trace) <= 2
     assert 0.5 <= d_row * rg.dt_ns <= 2.0
     assert focus > 0.04

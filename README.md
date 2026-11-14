@@ -49,6 +49,7 @@ the known issues.
   on the map, and a range selected on the profile lights up on the map.
 - **Processing, under your control.** Each line has a stack of steps, and
   **nothing runs automatically**. The steps are time-zero, dewow, bandpass,
+  trace stacking (each trace averaged with its neighbours to cut noise),
   three gains (AGC, parametric, and a manual gain curve you drag on the profile),
   background removal (full-line mean, sliding window, or SVD), and amplitude
   transforms (absolute value, square, envelope), plus a time cutoff you drag on

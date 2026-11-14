@@ -25,7 +25,7 @@ def test_a_refused_setting_turns_the_step_off(tmp_path):
     assert enabled is False
     assert step.eps == 1e-12
     assert site.load_notes == [
-        "Line L0.DZT: Automatic gain control is turned off. Its Epsilon was 0.0, "
+        "Line L0.DZT (grid G): Automatic gain control is turned off. Its Epsilon was 0.0, "
         "which must be > 0.0; it is now 1e-12. Check the step and turn it back on."
     ]
 
@@ -72,7 +72,7 @@ def test_time_zero_stays_on(tmp_path):
     assert enabled is True
     assert step.sample == 0
     assert site.load_notes == [
-        "Line L0.DZT: Time zero's Sample was 12.0, which must be a whole number; "
+        "Line L0.DZT (grid G): Time zero's Sample was 12.0, which must be a whole number; "
         "it is now 0. The step stays on, because turning Time zero off would move "
         "every time after it."
     ]
@@ -85,16 +85,18 @@ def test_a_refused_setting_with_no_default_removes_the_step(tmp_path):
     )
     assert _only(site) == []
     (note,) = site.load_notes
-    assert "Bandpass is removed" in note
-    assert "Low" in note
-    assert "has no default" in note
+    assert note == (
+        "Line L0.DZT (grid G): Bandpass is removed. Its Low was nan, which must be "
+        "a finite number, and Low has no default. It also held High 400.0. "
+        "Add it again with the settings you want."
+    )
 
 
 def test_a_missing_required_setting_removes_the_step(tmp_path):
     site = _load(tmp_path, [{"step": "bandpass", "params": {"low_mhz": 100.0}}])
     assert _only(site) == []
     (note,) = site.load_notes
-    assert note.startswith("Line L0.DZT: Bandpass is removed. It has no ")
+    assert note.startswith("Line L0.DZT (grid G): Bandpass is removed. It has no ")
     assert "which it needs" in note
 
 
@@ -134,9 +136,41 @@ def test_a_constructor_refusal_the_check_does_not_know_removes_the_step(tmp_path
     site = _load(tmp_path, [{"step": "dewow", "params": {}}])
     assert _only(site) == []
     assert site.load_notes == [
-        "Line L0.DZT: Dewow is removed. It could not be built: x. "
+        "Line L0.DZT (grid G): Dewow is removed. It could not be built: x. "
         "Add it again with the settings you want."
     ]
+
+
+def test_a_constructor_refusal_lists_the_settings_the_step_held(tmp_path, monkeypatch):
+    cls = get_step("bandpass")
+
+    def refuse(self, **kwargs):
+        raise ValueError("x")
+
+    monkeypatch.setattr(cls, "__init__", refuse)
+    site = _load(tmp_path, [{"step": "bandpass", "params": {"low_mhz": 100.0, "high_mhz": 600.0}}])
+    assert site.load_notes == [
+        "Line L0.DZT (grid G): Bandpass is removed. It could not be built: x. "
+        "It held Low 100.0 and High 600.0. Add it again with the settings you want."
+    ]
+
+
+def test_a_bandpass_with_one_bad_setting_keeps_the_others_in_its_note(tmp_path):
+    site = _load(
+        tmp_path,
+        [
+            {
+                "step": "bandpass",
+                "params": {"low_mhz": float("nan"), "high_mhz": 600.0, "taper_frac": 0.3},
+            }
+        ],
+    )
+    (note,) = site.load_notes
+    assert note == (
+        "Line L0.DZT (grid G): Bandpass is removed. Its Low was nan, which must be "
+        "a finite number, and Low has no default. It also held High 600.0 and Taper 0.3. "
+        "Add it again with the settings you want."
+    )
 
 
 def test_a_reset_then_constructor_refusal_gives_exactly_one_note(tmp_path, monkeypatch):
@@ -149,8 +183,12 @@ def test_a_reset_then_constructor_refusal_gives_exactly_one_note(tmp_path, monke
     site = _load(tmp_path, [{"step": "gain_agc", "params": {"eps": 0.0}}])
     assert _only(site) == []
     assert len(site.load_notes) == 1
-    assert "is removed. It could not be built: x." in site.load_notes[0]
-    assert "turned off" not in site.load_notes[0]
+    assert site.load_notes == [
+        "Line L0.DZT (grid G): Automatic gain control is removed. "
+        "Its Epsilon was 0.0, which must be > 0.0; "
+        "it is now 1e-12. It could not be built: x. It held Epsilon 0.0. "
+        "Add it again with the settings you want."
+    ]
 
 
 def test_a_removed_step_names_every_refused_setting(tmp_path):
@@ -195,7 +233,7 @@ def test_an_already_off_agc_is_reset_without_claiming_it_was_turned_off(tmp_path
     assert (enabled, step.eps) == (False, 1e-12)
     (note,) = site.load_notes
     assert "is turned off" not in note
-    assert "already off" in note
+    assert "already off) had a setting reset" in note
     assert "Its Epsilon was 0.0, which must be > 0.0; it is now 1e-12." in note
 
 

@@ -169,7 +169,7 @@ def test_a_one_point_gain_curve_is_removed_with_a_note(tmp_path):
     site = load_site(path)
     assert site.stacks["L0.DZT"].entries == []
     assert len(site.load_notes) == 1
-    assert site.load_notes[0].startswith("Line L0.DZT: ")
+    assert site.load_notes[0].startswith("Line L0.DZT (grid G): ")
     assert "is removed" in site.load_notes[0]
 
 

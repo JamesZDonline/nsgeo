@@ -415,7 +415,7 @@ In **nsgeo Processing**, click **Add step** and choose a step. The menu lists
 them in the usual processing order, in four groups:
 
 - **Time:** Time zero, Time cutoff
-- **Filters:** Dewow, Bandpass
+- **Filters:** Dewow, Bandpass, Trace stack
 - **Background:** Background removal (mean), Background removal (sliding),
   Remove leading components (SVD)
 - **Gain:** Gain curve, Automatic gain control, Parametric gain
@@ -423,6 +423,11 @@ them in the usual processing order, in four groups:
 A step whose name ends in **…** asks for values first. For example, **Bandpass…**
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
+
+A step whose setting cannot work on the line (for example a window shorter than
+two samples) is refused with a message saying which setting to change. If a
+project holds such a saved setting, it opens with that step turned off and a
+note in the nsgeo log.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or
@@ -782,29 +787,6 @@ writes those changes back into the GeoPackage itself.
 site folder**, never `site.nsgeo.gpkg` on its own. A cloud-synced folder copies
 files one at a time while you work, so either keep active sites outside one, or
 let it sync only while QGIS is closed.
-
-### A one-sample window blanks the profile (#40)
-
-[Issue #40](https://github.com/JamesZDonline/nsgeo/issues/40). **Dewow** and
-**Background removal (sliding)** subtract a running mean. If the window is one sample (or
-one trace) wide, they subtract each value from itself, and the profile goes
-blank. With **Difference** on, the whole profile then shows as removed. **Automatic gain control**
-has the same edge case with a different symptom. At a one-sample window, every
-value becomes plus or minus the **Target RMS**, so all the amplitude information
-is lost. Nothing warns you in either case.
-
-**Workaround:** keep each window at least two samples wide.
-
-- **Dewow**: **Window (ns)** at least twice the sample interval.
-- **Background removal (sliding)**: **Window (traces)** at least 2.
-- **Automatic gain control**: **Window (ns)** at least twice the sample interval.
-
-The sample interval is the time range divided by the samples per trace. For
-example, 512 samples over 50 ns is about 0.1 ns, so the shortest safe window is
-about 0.2 ns. The default windows (4 ns for Dewow, 200 traces for
-Background removal (sliding) and 20 ns for Automatic gain control) are safe unless your sample
-interval is longer than 2 ns. If a profile goes blank, select the step and widen
-its window. Your DZT files are untouched.
 
 ---
 

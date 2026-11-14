@@ -287,7 +287,7 @@ before `StepStack` is built:
 - **A refused value in a setting the current mode ignores** (parametric gain in power mode with
   alpha 8, say) is handled like any other: the setting is reset, the step is turned off, and there
   is a note. After the reset, turning the step back on gives exactly the old output, because the
-  setting was unused. Every note ends by telling the user to check the step and turn it back on.
+  setting was unused. Notes for steps turned off end by telling the user to check the step and turn it back on; notes for removed steps end by asking the user to add the step again; the Time zero note says the step stays on, and the already-off note says it stays off.
   This keeps the check free of any knowledge about modes. (Designer's call, from the builder
   check.)
 

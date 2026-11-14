@@ -165,6 +165,8 @@ def test_curve_is_fast_enough_to_drag():
 
 def test_agc_window_of_one_sample_on_a_real_line_is_refused_with_a_usable_minimum():
     rg = real_radargram(DATA / "FILE__007.DZT")
+    with pytest.raises(ValueError, match="AGC window 0.1 ns is shorter than one sample"):
+        build_step("gain_agc", window_ns=0.1).apply(rg)
     with pytest.raises(
         ValueError,
         match=re.escape(

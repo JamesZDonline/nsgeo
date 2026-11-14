@@ -154,6 +154,14 @@ def test_dewow_window_of_one_sample_on_a_real_line_is_refused_with_a_usable_mini
         match=re.escape("is one sample at this line's 0.217 ns sampling; use 0.33 ns or more."),
     ):
         build_step("dewow", window_ns=0.2).apply(rg)
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Dewow window 0.3 ns is one sample at this line's 0.217 ns sampling; "
+            "use 0.33 ns or more."
+        ),
+    ):
+        build_step("dewow", window_ns=0.3).apply(rg)
     assert build_step("dewow", window_ns=0.33).apply(rg).data.shape == rg.data.shape
 
 
