@@ -134,10 +134,10 @@ mean.
     - `abs(d_trace) <= 2`;
     - `0.5 <= d_row * dt_ns <= 2.0`. The hand dots sit on the band's top edge and the migrated
       peak is mid-band. Measured: +5 rows (1.08 ns) and +6 rows (1.30 ns).
-    - `focus_migrated > 0.04` and `focus_migrated >= 2 * focus_unmigrated`. Measured: 0.075 vs
-      0.024, and 0.050 vs 0.020.
-    - `focus(v) > focus(0.6 v)` and `focus(v) > focus(1.6 v)`. Measured: 0.047 / 0.075 / 0.038
-      and 0.035 / 0.050 / 0.017.
+    - `focus_migrated > 0.04` and `focus_migrated >= 2 * focus_unmigrated`. Measured: 0.079 vs
+      0.024, and 0.047 vs 0.020.
+    - `focus(v) > focus(0.6 v)` and `focus(v) > focus(1.6 v)`. Measured: 0.047 / 0.079 / 0.038
+      and 0.035 / 0.047 / 0.017.
 
   The docstring says there is **no deep case** and why, with spec §7.3's numbers:
   - below 50 ns, the median signal is 1.3–1.6× the noise of the 80–90 ns band, on the campus lines,

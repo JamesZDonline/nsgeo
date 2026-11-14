@@ -373,11 +373,12 @@ For each diffraction:
 - **Windowed energy:** the same measure as `tests/test_steps_migration.py`'s `_focus` (energy in a
   17 × 17 box around the peak as a fraction of a total), with the total taken over a local window
   (about ±10 ns × ±1.5 m) rather than the whole line. Measured on 2026-11-13 with that window:
-  FILE__033 0.024 unmigrated → 0.075 migrated, FILE__032 0.020 → 0.050. Assert a **literal**
+  FILE__033 0.024 unmigrated → 0.079 migrated, FILE__032 0.020 → 0.047. Assert a **literal**
   fraction between the two, chosen from the builder's own measurement, and that the migrated value
   is several times the unmigrated one.
 - **Velocity sensitivity:** the focus at the fit's velocity beats the focus at 0.6× and 1.6× of
-  it. Measured: FILE__033 0.047 / 0.075 / 0.038, FILE__032 0.035 / 0.050 / 0.017.
+  it. Measured: FILE__033 0.047 / 0.079 / 0.038, FILE__032 0.035 / 0.047 / 0.017. (FILE__032
+  focuses best a little below its fitted velocity: 0.050 at 0.9×.)
 
 The real data is gitignored, so the test skips on CI. Share `_focus` rather than copying it.
 Builder's call how.
