@@ -314,12 +314,11 @@ def _curve_problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
     """What is wrong with a curve's points, and the offending dB entry (or None)."""
     try:
         points = list(value)
-        shaped = all(len(point) == 2 for point in points)
-    except TypeError:
+        if not all(len(point) == 2 for point in points):
+            return "must be (time, dB) pairs of numbers", None
+        pairs = [(point[0], point[1]) for point in points]
+    except (TypeError, KeyError, IndexError):
         return "must be (time, dB) pairs of numbers", None
-    if not shaped:
-        return "must be (time, dB) pairs of numbers", None
-    pairs = [(point[0], point[1]) for point in points]
     if len(pairs) < 2:
         return "must have at least two points", None
     for t, db in pairs:
