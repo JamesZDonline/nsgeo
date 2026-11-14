@@ -166,13 +166,18 @@ def test_dewow_on_a_real_line_a_bad_sample_damages_only_itself(bad):
     assert out[101, 300] == pytest.approx(data[101, 300] - math.fsum(good) / len(good), rel=1e-12)
 
 
-@pytest.mark.parametrize("bad", [None, np.nan, np.inf])
-def test_time_zero_on_a_real_line_crops_49_rows_whatever_one_bad_sample(bad):
-    """#42: one NaN used to cancel the crop, and one inf moved it to row 300."""
+@pytest.mark.parametrize(
+    ("row", "bad"),
+    [(None, None), (300, np.nan), (300, np.inf), (49, np.nan), (49, np.inf)],
+)
+def test_time_zero_on_a_real_line_crops_49_rows_whatever_one_bad_sample(row, bad):
+    """#42: one NaN used to cancel the crop, and one inf moved it to row 300.
+    Row 49 is the pick itself: its mean over its other 634 samples still
+    reaches the threshold, where leaving the whole row out would pick row 50."""
     rg = real_radargram(DATA / "FILE__007.DZT")
-    if bad is not None:
+    if row is not None:
         data = rg.data.copy()
-        data[300, 5] = bad
+        data[row, 5] = bad
         rg = rg.replace(data=data)
     assert first_break_row(rg) == 49
     assert build_step("time_zero").apply(rg).n_samples == rg.n_samples - 49
