@@ -4050,6 +4050,7 @@ def test_a_dz_the_coarse_grid_cannot_take_is_not_drawn_and_is_not_a_toast(
 
 def test_the_normalisation_section_folds_and_is_remembered(plugin):
     from nsgeo_qgis.ui import folds
+    from nsgeo_qgis.ui.slices_dock import SlicesDock
 
     dock = whole_site(plugin)
     dock.setFloating(True)
@@ -4061,3 +4062,18 @@ def test_the_normalisation_section_folds_and_is_remembered(plugin):
     _events()
     assert group.isCollapsed()
     assert folds.fold_settings().value("nsgeo/slices/folded/normalisation", type=bool) is True
+    again = SlicesDock(plugin.slices_dock.session)
+    try:
+        again.setFloating(True)
+        again.show()
+        again.set_scope("site")
+        settle(again)
+        again_group = again.normalisation_panel.group
+        assert again_group.isCollapsed()
+        assert again_group.height() < 60 and again_group.maximumHeight() < 60
+    finally:
+        again.refiner.shutdown()
+        again.site_engine.wait_until_idle(60_000)
+        again.engine.wait_for_preparation(20_000)
+        again.engine.dispose()
+        again.deleteLater()

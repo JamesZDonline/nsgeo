@@ -36,7 +36,7 @@ from nsgeo_qgis.slices_plan import (
     transform_names,
 )
 from nsgeo_qgis.ui import folds
-from nsgeo_qgis.ui.slices_dock import COVERAGE_TIP, CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
@@ -4607,16 +4607,40 @@ def test_every_section_starts_unfolded(docked):
     assert all(not b.isCollapsed() for b in boxes)
 
 
+def _drawn_folded(box):
+    return box.height() < 60 and box.maximumHeight() < 60
+
+
+def _drawn_open(box):
+    return box.height() > 60
+
+
 def test_the_two_interpolation_panels_fold_together(docked):
+    """Through real scope switches: a fold made in one scope is DRAWN in the other."""
     dock, _ = docked
     _shown(dock)
-    dock.grid_finish.setCollapsed(True)
-    QCoreApplication.processEvents()
-    # site_finish is hidden in This grid; QGIS applies its fold when it shows.
-    assert dock.site_finish.isCollapsed()
+    dock.set_scope("site")
+    _events_n()
+    assert dock.site_finish.isVisible() and not dock.grid_finish.isVisible()
+    dock.site_finish.setCollapsed(True)
+    _events_n()
+    assert _drawn_folded(dock.site_finish)
+    dock.set_scope("grid")
+    _events_n()
+    assert dock.grid_finish.isCollapsed()
+    assert _drawn_folded(dock.grid_finish), (dock.grid_finish.height(),)
+    # and the reverse: unfold here, the site's draws open
     dock.grid_finish.setCollapsed(False)
-    QCoreApplication.processEvents()
+    _events_n()
+    dock.set_scope("site")
+    _events_n()
     assert not dock.site_finish.isCollapsed()
+    assert _drawn_open(dock.site_finish), dock.site_finish.height()
+
+
+def _events_n():
+    for _ in range(8):
+        QCoreApplication.processEvents()
 
 
 def test_folds_are_remembered_across_a_restart(docked):
@@ -4627,13 +4651,36 @@ def test_folds_are_remembered_across_a_restart(docked):
     assert folds.fold_settings().value("nsgeo/slices/folded/display", type=bool) is True
     again = SlicesDock(session)
     try:
+        _shown(again)
+        _events_n()
         assert again.display_group.isCollapsed()
+        assert _drawn_folded(again.display_group)
         assert not again.resolution_group.isCollapsed()
+        assert _drawn_open(again.resolution_group)
     finally:
         again.refiner.shutdown()
         again.engine.wait_for_preparation(20_000)
         again.engine.dispose()
         again.deleteLater()
+
+
+def test_a_header_click_folds_without_taking_focus_from_dz(docked):
+    from qgis.PyQt.QtWidgets import QToolButton
+
+    dock, _ = docked
+    _short_and_active(dock)
+    dock.dz_spin.setFocus()
+    assert dock.dz_spin.hasFocus()
+    # Display, not Resolution: folding Resolution hides dz itself, and a hidden
+    # box cannot keep focus whatever the click does.
+    scroll = dock.findChild(QScrollArea)
+    scroll.ensureWidgetVisible(dock.display_group)
+    dock.dz_spin.setFocus()
+    button = dock.display_group.findChild(QToolButton)
+    QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    _events_n()
+    assert dock.display_group.isCollapsed()
+    assert dock.dz_spin.hasFocus()
 
 
 def test_fold_state_never_touches_a_real_settings_file(tmp_path):
@@ -4644,5 +4691,10 @@ def test_fold_state_never_touches_a_real_settings_file(tmp_path):
 
 def test_the_coverage_tooltip_explains_what_and_how_a_preview_draws_it(docked):
     dock, _ = docked
-    assert dock.coverage_check.toolTip() == COVERAGE_TIP
-    assert "largest count" in COVERAGE_TIP
+    assert dock.coverage_check.toolTip() == (
+        "Shows how many traces fell in each cell, instead of the amplitude.\n"
+        "Use it to see where your lines ran and where there is no data: blank cells had no "
+        "line through them.\n"
+        "In a Whole site preview each pixel shows the largest count among the cells under it, "
+        "so lines look wider than they are."
+    )

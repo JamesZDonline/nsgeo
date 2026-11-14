@@ -546,8 +546,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
    full detail. Past a size it draws a preview at a coarser pixel and says so
-   under **Warnings**, below **Position**, where refusals appear too. An export is not limited by the preview: it works out its own
-   cells at the size you choose (see step 6).
+   under **Warnings**, below **Position**, where refusals appear too. An export is not limited by the preview: it works
+   out its own cells at the size you choose (see step 6).
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
    - **my own colours** keeps whatever you set on the slice layer's
