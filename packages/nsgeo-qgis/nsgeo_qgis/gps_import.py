@@ -98,8 +98,6 @@ def _plan_one(
         n_traces = trace_count(path, header)
     except (DztError, OSError) as exc:
         return _refused(path, f"could not read it: {exc}")
-    if taken(path):
-        return _refused(path, ALREADY_IN_SITE, n_traces)
     dzg = dzg_for(path)
     if dzg is None:
         return _refused(path, NO_DZG, n_traces)
@@ -107,21 +105,38 @@ def _plan_one(
         log = read_dzg(dzg, n_traces)
     except (DzgError, OSError) as exc:
         return _refused(path, f"could not read it: {exc}", n_traces)
+    # Where the line starts decides whether `crs` can place it, asked before
+    # anything is projected: a transform that fails point by point would
+    # otherwise make the anchors vanish and the row read "no RTK-fixed position".
+    first = _first_fixed(log)
+    if first is not None and not usable(first[0], first[1]):
+        return _refused(path, f"outside what {crs} can place", n_traces, log)
     try:
         placement = track_from_log(log, to_xy, crs, label=path.stem)
     except ValueError as exc:
         return _refused(path, str(exc), n_traces, log)
-    first = _first_fixed(log)
-    if first is not None and not usable(first[0], first[1]):
-        return _refused(path, f"outside what {crs} can place", n_traces, log)
+    bridges = placement.bridges()
+    end_runs = placement.end_runs(n_traces, header)
+    if taken(path):
+        # Planned, then refused: the row still shows its counts and ends.
+        return GpsRow(
+            path=path,
+            line=None,
+            n_traces=n_traces,
+            n_fixes=len(log.fixes),
+            n_fixed=log.n_fixed,
+            bridges=bridges,
+            end_runs=end_runs,
+            refusal=ALREADY_IN_SITE,
+        )
     return GpsRow(
         path=path,
         line=Line.open(path, placement),
         n_traces=n_traces,
         n_fixes=len(log.fixes),
         n_fixed=log.n_fixed,
-        bridges=placement.bridges(),
-        end_runs=placement.end_runs(n_traces, header),
+        bridges=bridges,
+        end_runs=end_runs,
         refusal=None,
     )
 
@@ -146,7 +161,7 @@ def shifted_lines(rows: Sequence[GpsRow], metres: float) -> list[Line]:
         if row.line is None:
             continue
         placement = dataclasses.replace(row.line.placement, travel_shift=float(metres))  # type: ignore[type-var]
-        out.append(Line.open(row.path, placement))
+        out.append(dataclasses.replace(row.line, placement=placement))
     return out
 
 

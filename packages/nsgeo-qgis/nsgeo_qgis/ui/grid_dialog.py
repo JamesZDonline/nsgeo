@@ -1119,10 +1119,6 @@ class GridDialog(QDialog):
         crs = self.session.site_crs()
         return None if crs is None else QgsCoordinateReferenceSystem(crs)
 
-    def _site_crs(self) -> QgsCoordinateReferenceSystem | None:
-        crs = self.session.site_crs()
-        return None if crs is None else QgsCoordinateReferenceSystem(crs)
-
     def _choose_crs(self, lonlat: QgsPointXY) -> tuple[QgsCoordinateReferenceSystem, str]:
         """The grid CRS for a grid at `lonlat`, and the note saying why (C10):
         `crs_rule.choose_crs`."""

@@ -106,6 +106,9 @@ def test_a_file_already_in_the_site_is_refused_with_how_to_switch(tmp_path):
     (row,) = plan([path], taken=lambda p: p == path)
     assert row.refusal == "already in the site (remove it first to place it by GPS)"
     assert row.line is None
+    # planned, then refused: its counts and ends are still there
+    assert (row.n_traces, row.n_fixes, row.n_fixed) == (200, 4, 4)
+    assert row.end_runs == pytest.approx((2.5, 2.4), abs=0.01)
 
 
 def test_a_file_outside_the_site_crs_is_refused(tmp_path):
@@ -180,3 +183,29 @@ def test_an_end_run_within_the_limit_is_not_reported(tmp_path):
     )
     rows = plan([path])
     assert import_messages(rows, 1) == ["imported 1 GPS line(s)"]
+
+
+def test_a_dzg_naming_a_trace_beyond_its_dzt_is_refused(tmp_path):
+    # A DZG that belongs to another, longer file: a fix at trace 250 of 200.
+    path = synthetic_gps_dzt(
+        tmp_path,
+        "FILE__001.DZT",
+        [fix(25), fix(125), fix(250)],
+        traces_per_metre=10.0,
+    )
+    (row,) = plan([path])
+    assert row.line is None
+    assert row.refusal is not None and row.refusal.startswith("could not read it: ")
+    assert "names trace 250" in row.refusal and "200 traces" in row.refusal
+
+
+def test_the_crs_is_asked_before_anything_is_projected(tmp_path):
+    path = make(tmp_path, "FILE__001.DZT")
+
+    def failing_to_xy(lon, lat):
+        import numpy as np
+
+        return np.full(len(lon), np.nan), np.full(len(lat), np.nan)
+
+    (row,) = plan_gps_rows([path], failing_to_xy, CRS, never, lambda lon, lat: False)
+    assert row.refusal == f"outside what {CRS} can place"

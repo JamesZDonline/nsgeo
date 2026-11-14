@@ -2560,8 +2560,13 @@ class NsgeoPlugin:
                 # the words to say in dialog.messages.
                 try:
                     if result == QDialog.DialogCode.Accepted:
-                        for text in dialog.messages:
-                            self.message(text)
+                        # The count is plain news; everything after it
+                        # (a bridge, a long end run, a refusal) is a warning.
+                        for i, text in enumerate(dialog.messages):
+                            self.message(
+                                text,
+                                Qgis.MessageLevel.Info if i == 0 else Qgis.MessageLevel.Warning,
+                            )
                 except Exception as exc:  # noqa: BLE001 -- see the module docstring
                     self.message(f"could not report the import: {exc}", Qgis.MessageLevel.Warning)
                 finally:

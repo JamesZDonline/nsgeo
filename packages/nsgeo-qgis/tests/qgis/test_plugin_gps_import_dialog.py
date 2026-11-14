@@ -7,11 +7,8 @@ from nsgeo.geometry import Grid, GridPlacement, TrackPlacement
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import (
     COL_ENDS,
-    COL_FILE,
-    COL_FIXES,
     COL_GAP,
     COL_STATUS,
-    COL_TRACES,
     HEADERS,
     GpsImportDialog,
 )
@@ -113,12 +110,11 @@ def test_adding_files_plans_rows_and_shows_the_coordinates(session, tmp_path):
     # sorted like the tape import: by trailing number
     assert cells(d, 0) == ["FILE__001.DZT", "200", "4 of 4", "—", "2.50 / 2.40 m", "ready"]
     assert cells(d, 1) == ["FILE__002.DZT", "200", "3 of 4", "10.0 m", "2.50 / 2.40 m", "ready"]
-    assert cells(d, 2) == ["FILE__003.DZT", "60", "", "", "", "no DZG beside it"]
+    assert cells(d, 2) == ["FILE__003.DZT", "60", "—", "—", "—", "no DZG beside it"]
     assert d.status.text() == "2 of 3 file(s) ready to import."
     assert d.import_button.text() == "Import" and d.import_button.isEnabled()
     assert d.crs_label.text() == "Coordinates: EPSG:32632"
     assert d.note_label.text() == ""
-    assert tuple(range(6)) == (COL_FILE, COL_TRACES, COL_FIXES, COL_GAP, COL_ENDS, COL_STATUS)
     d.reject()
 
 
@@ -168,14 +164,22 @@ def test_a_file_already_in_the_site_shows_how_to_switch(session, tmp_path):
     from nsgeo.model import Line
 
     raw = tmp_path / "raw"
-    taken = synthetic_dzt(raw, "FILE__001.DZT", n_traces=60)
+    taken = gps_file(raw, "FILE__001.DZT")
     session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32632", 0.5))
     session.add_lines(
         [Line.open(taken, GridPlacement(grid_id="A", axis="y", offset=0.5, start_along=0.0))]
     )
     d = GpsImportDialog(session)
     d.add_files([taken])
-    assert cells(d, 0)[COL_STATUS] == "already in the site (remove it first to place it by GPS)"
+    # planned, then refused: the row keeps its counts and ends
+    assert cells(d, 0) == [
+        "FILE__001.DZT",
+        "200",
+        "4 of 4",
+        "—",
+        "2.50 / 2.40 m",
+        "already in the site (remove it first to place it by GPS)",
+    ]
     d.reject()
 
 
@@ -191,6 +195,105 @@ def test_a_site_crs_that_cannot_place_a_file_refuses_that_row(qgis_app, session,
     assert d.status.text() == "Nothing to import: no file is ready."
     assert session.site.lines == [] and session.site_crs() == "EPSG:32616"
     d.reject()
+
+
+# ---- the cues, the opening state and the Import details --------------------------
+
+AMBER = ("#fbf3df", "#8a5a00")
+RED = ("#fbe9e7", "#a12a1e")
+
+
+def colours(d, row, col):
+    item = d.table.item(row, col)
+    return item.background().color().name(), item.foreground().color().name()
+
+
+def plain(d, row, col):
+    return d.table.item(row, col).background().style() == 0  # Qt.NoBrush
+
+
+def test_the_cells_worth_a_look_are_amber_and_refused_statuses_red(session, tmp_path):
+    raw = tmp_path / "raw"
+    d = GpsImportDialog(session)
+    d.add_files(
+        [
+            gps_file(raw, "FILE__001.DZT"),  # 2.5 / 2.4 m: both ends over the limit
+            gps_file(raw, "FILE__002.DZT", {75: 5}),  # a bridge
+            synthetic_gps_dzt(  # 1.5 / 1.4 m, no bridge: nothing to flag
+                raw, "FILE__003.DZT", [fix(15), fix(185)], traces_per_metre=10.0
+            ),
+            synthetic_dzt(raw, "FILE__004.DZT", n_traces=60),  # refused
+        ]
+    )
+    assert colours(d, 0, COL_ENDS) == AMBER and plain(d, 0, COL_GAP)
+    assert colours(d, 1, COL_GAP) == AMBER and colours(d, 1, COL_ENDS) == AMBER
+    assert plain(d, 2, COL_GAP) and plain(d, 2, COL_ENDS) and plain(d, 2, COL_STATUS)
+    assert colours(d, 3, COL_STATUS) == RED and plain(d, 3, COL_GAP)
+    assert plain(d, 0, COL_STATUS)
+    d.reject()
+
+
+def test_the_coordinates_show_the_sites_crs_before_any_file_is_added(qgis_app, session):
+    session.add_grid(Grid("A", (500_000.0, 5_000_000.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    d = GpsImportDialog(session)
+    assert d.crs_label.text() == "Coordinates: EPSG:32616"
+    d.reject()
+
+
+def test_the_notes_sit_beside_the_boxes_and_the_footer_is_one_row(session):
+    d = GpsImportDialog(session)
+    layout = d.layout()
+    footer = layout.itemAt(layout.count() - 1).layout()
+    assert footer.itemAt(0).widget() is d.status and footer.itemAt(1).widget() is d.buttons
+    d.reject()
+
+
+def test_lonlat_to_xy_keeps_nan_and_survives_a_point_the_transform_refuses(qgis_app, monkeypatch):
+    import numpy as np
+    from nsgeo_qgis.ui import gps_import_dialog as mod
+    from qgis.core import QgsCsException, QgsPointXY
+
+    class Refuses:
+        def __init__(self, *_a):
+            pass
+
+        def transform(self, p):
+            if p.x() > 100:
+                raise QgsCsException("outside")
+            return QgsPointXY(p.x() * 2, p.y() * 3)
+
+    monkeypatch.setattr(mod, "QgsCoordinateTransform", Refuses)
+    to_xy = mod.lonlat_to_xy(QgsCoordinateReferenceSystem("EPSG:32632"))
+    xs, ys = to_xy(np.array([1.0, np.nan, 150.0, 2.0]), np.array([1.0, 1.0, 1.0, np.nan]))
+    assert xs[0] == 2.0 and ys[0] == 3.0
+    assert np.isnan(xs[1:]).all() and np.isnan(ys[1:]).all()
+
+
+def test_import_uses_the_planned_lines_even_if_a_file_became_unreadable(plugin, tmp_path):
+    raw = tmp_path / "raw"
+    path = gps_file(raw, "FILE__001.DZT")
+    plugin.open_gps_import_dialog()
+    dialog = plugin._gps_import_dialog
+    dialog.add_files([path])
+    path.write_bytes(b"gone")  # unreadable now; planning already read it
+    dialog.accept()
+    assert [ln.path.name for ln in plugin.session.site.lines] == ["FILE__001.DZT"]
+    assert plugin.session.site_crs() == "EPSG:32632"
+
+
+def test_the_messages_after_the_count_are_warnings(plugin, tmp_path):
+    from qgis.core import Qgis
+
+    shown: list = []
+    plugin.message = lambda text, level=None, title="nsgeo": shown.append((text, level))  # type: ignore[method-assign]
+    raw = tmp_path / "raw"
+    plugin.open_gps_import_dialog()
+    dialog = plugin._gps_import_dialog
+    dialog.add_files([gps_file(raw, "FILE__001.DZT", {75: 5}), synthetic_dzt(raw, "FILE__002.DZT")])
+    dialog.accept()
+    assert len(shown) >= 3
+    assert shown[0][1] == Qgis.MessageLevel.Info
+    assert all(level == Qgis.MessageLevel.Warning for _, level in shown[1:])
 
 
 # ---- Import ------------------------------------------------------------------

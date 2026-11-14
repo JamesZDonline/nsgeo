@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from nsgeo.geometry import END_LIMIT_M
 from nsgeo.project import ProjectError, line_key
 from qgis.core import (
     QgsCoordinateReferenceSystem,
@@ -29,6 +30,7 @@ from qgis.core import (
     QgsProject,
 )
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -47,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
 
 from nsgeo_qgis.crs_rule import choose_crs, usable_at
 from nsgeo_qgis.gps_import import (
+    ALREADY_IN_SITE,
     GpsRow,
     first_fixed_lonlat,
     import_messages,
@@ -64,6 +67,10 @@ SHIFT_TIP = (
     "this import. Change it per line later from the Survey panel."
 )
 EMPTY_STATUS = "Add DZT files that have a DZG beside them."
+# The mockup's cues (Checkpoint C1): amber for a ready row worth a look, red
+# for a refused one.
+FLAG_BG, FLAG_FG = "#fbf3df", "#8a5a00"
+OUT_BG, OUT_FG = "#fbe9e7", "#a12a1e"
 SITE_CHANGED = "The site changed; nothing was imported."
 
 
@@ -131,20 +138,23 @@ class GpsImportDialog(QDialog):
         self.shift.setSingleStep(0.01)
         self.shift.setValue(0.0)
         self.shift.setToolTip(SHIFT_TIP)
-        form.addRow("Destagger (m)", self.shift)
-        layout.addLayout(form)
-
-        crs_row = QHBoxLayout()
+        shift_note = QLabel(SHIFT_TIP)
+        shift_note.setStyleSheet("color: gray;")
+        shift_note.setWordWrap(True)
+        shift_row = QHBoxLayout()
+        shift_row.addWidget(self.shift)
+        shift_row.addWidget(shift_note, 1)
+        form.addRow("Destagger (m)", shift_row)
         self.crs_label = QLabel("")
         self.note_label = QLabel("")
         self.note_label.setStyleSheet("color: gray;")
+        crs_row = QHBoxLayout()
         crs_row.addWidget(self.crs_label)
-        crs_row.addWidget(self.note_label)
-        crs_row.addStretch(1)
-        layout.addLayout(crs_row)
+        crs_row.addWidget(self.note_label, 1)
+        form.addRow("Coordinates:", crs_row)
+        layout.addLayout(form)
 
         self.status = QLabel(EMPTY_STATUS)
-        layout.addWidget(self.status)
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -153,7 +163,11 @@ class GpsImportDialog(QDialog):
         self.import_button.setEnabled(False)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        layout.addWidget(self.buttons)
+        footer = QHBoxLayout()
+        footer.addWidget(self.status, 1)
+        footer.addWidget(self.buttons)
+        layout.addLayout(footer)
+        self._decide_crs()  # the coordinates the import will use, before any file
         self._refresh()
 
     # ---- the site -------------------------------------------------------------
@@ -254,21 +268,34 @@ class GpsImportDialog(QDialog):
     def _refresh(self) -> None:
         self.table.setRowCount(len(self.rows))
         for r, row in enumerate(self.rows):
-            read = row.n_fixes > 0
             ready = row.refusal is None
+            # A refused row that was planned anyway (already in the site)
+            # still shows what its file holds.
+            planned = ready or row.refusal == ALREADY_IN_SITE
+            long_end = max(row.end_runs) > END_LIMIT_M
             values = {
                 COL_FILE: row.path.name,
-                COL_TRACES: "" if row.n_traces is None else str(row.n_traces),
-                COL_FIXES: f"{row.n_fixed} of {row.n_fixes}" if read else "",
-                COL_GAP: ("—" if not row.bridges else f"{row.without_rtk_m:.1f} m")
-                if ready
-                else "",
-                COL_ENDS: f"{row.end_runs[0]:.2f} / {row.end_runs[1]:.2f} m" if ready else "",
+                COL_TRACES: "—" if row.n_traces is None else str(row.n_traces),
+                COL_FIXES: f"{row.n_fixed} of {row.n_fixes}" if row.n_fixes else "—",
+                COL_GAP: f"{row.without_rtk_m:.1f} m" if planned and row.bridges else "—",
+                COL_ENDS: f"{row.end_runs[0]:.2f} / {row.end_runs[1]:.2f} m" if planned else "—",
                 COL_STATUS: "ready" if ready else (row.refusal or ""),
             }
+            flagged = {COL_GAP: bool(row.bridges) and planned, COL_ENDS: long_end and planned}
             for col, text in values.items():
                 item = QTableWidgetItem(text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col == COL_TRACES:
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+                if col == COL_STATUS and not ready:
+                    item.setToolTip(text)
+                    item.setBackground(QBrush(QColor(OUT_BG)))
+                    item.setForeground(QBrush(QColor(OUT_FG)))
+                elif flagged.get(col):
+                    item.setBackground(QBrush(QColor(FLAG_BG)))
+                    item.setForeground(QBrush(QColor(FLAG_FG)))
                 self.table.setItem(r, col, item)
         self.table.resizeColumnsToContents()
         self.crs_label.setText(f"Coordinates: {self._crs.authid()}")
@@ -306,9 +333,11 @@ class GpsImportDialog(QDialog):
                 + self.status.text()
             )
             return
+        # Built from the planned rows, never re-read here: a file that went
+        # unreadable since planning must not leave the site pinned with no lines.
+        lines = shifted_lines(self.rows, self.shift.value())
         if in_force is None:
             self.session.set_site_crs(self._crs.authid())
-        lines = shifted_lines(self.rows, self.shift.value())
         try:
             self.session.add_lines(lines)
         except ValueError as exc:  # a key already in the site, or a CRS mismatch
