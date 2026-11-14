@@ -27,7 +27,7 @@ LONG_NAME = "a name long enough to widen any combo box at all, 60 c"
 LONG_CUBE = LONG_NAME
 LONG_WARNING = (
     "Too many levels: a long warning with one unbroken token "
-    + "x" * 40
+    + "x" * 90
     + " that must wrap or be cut off, never widen the panel."
 )
 LONG_MEMORY = (
@@ -57,8 +57,7 @@ def _events(n: int = 5) -> None:
 
 
 def _carry_data_text(dock) -> None:
-    """The data's longest labels. A late preparation rewrites them, so the guard
-    sets them again once the dock is shown."""
+    """The data's longest labels: the memory label and the velocity source."""
     dock.included_label.setText(LONG_MEMORY)
     dock.velocity_label.setText(LONG_VELOCITY)
 
@@ -72,10 +71,16 @@ def _loaded_dock(session: SiteSession, scope: str):
         assert dock.engine.wait_for_preparation(60_000)
         dock.flush_debounce()
         for combo in (dock.cube_combo, dock.grid_combo, dock.preset_combo):
-            combo.addItem(LONG_NAME)
-            # A combo keeps the minimum width it worked out before the item came;
-            # a theme change (this event) makes it measure the long name.
-            QCoreApplication.sendEvent(combo, QEvent(QEvent.Type.StyleChange))
+            # Signals blocked: adding the item must not look like a user's pick
+            # (it would start a preparation or a cube restore).
+            combo.blockSignals(True)
+            try:
+                combo.addItem(LONG_NAME)
+                # A combo keeps the minimum width it worked out before the item
+                # came; a theme change (this event) makes it measure the name.
+                QCoreApplication.sendEvent(combo, QEvent(QEvent.Type.StyleChange))
+            finally:
+                combo.blockSignals(False)
         dock.slice_slider.setValue(dock.slice_slider.maximum())  # the longest readout
         for box in dock.findChildren(QgsCollapsibleGroupBox):
             box.setCollapsed(False)
@@ -102,8 +107,6 @@ def _assert_fits_the_processing_minimum(session: SiteSession, scope: str) -> Non
         dock.setFloating(True)
         dock.resize(limit, 500)
         dock.show()
-        _events()
-        _carry_data_text(dock)
         _events()
         scroll = dock.findChild(QScrollArea)
         content = scroll.widget()
