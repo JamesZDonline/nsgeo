@@ -56,9 +56,12 @@ because the real files are gitignored and the test would skip on CI either way.
 - **The narrow-band case still exists, but narrower than the issue says.** #116 added zero padding
   to twice the trace, so on a 512-row line the frequencies are 4.51 MHz apart, not 9.97.
 - **The plugin's Add-step dialog test-runs a new step on the line's first trace**
-  (`ui/add_step_dialog.py`, `_validate`). Any refusal that depends on the data, rather than on the
-  settings and the sample interval, also fires there. The first trace of a real line is often all
-  zeros, recorded before the cart moved.
+  (`ui/add_step_dialog.py`, `_validate`). It opens only for steps with a required setting (bandpass,
+  migration, gain curve); every other step is added directly with its defaults
+  (`ProcessingDock.add_step`). So a data-dependent refusal in bandpass or migration also fires on
+  that one trace, which is often all zeros on a real line, recorded before the cart moved.
+- **During slice preparation, a line whose stack refuses is named and skipped**; the other lines
+  go ahead (`slices_engine.py`, around line 882).
 - `load_site` (`project.py`) builds every line's stack and validates every preset through
   `StepStack.from_dicts`, and any `ValueError` becomes a `ProjectError` that stops the whole project
   opening (around lines 495 and 520).
@@ -86,15 +89,22 @@ because the real files are gitignored and the test would skip on CI either way.
    the mean of the finite samples in it. The bad sample itself stays NaN or inf in the output of
    dewow, AGC and sliding background. A window with no finite samples gives NaN.
 3. **Refuse and name the setting**, rather than returning zeros, NaN or an uncropped line, with
-   three exceptions:
+   two exceptions:
    - the bandpass taper keeps stopping at 0 MHz (§4.6), as it does today;
-   - Time zero's first-break pick skips bad samples rather than refusing (§4.5);
-   - an all-zero line still crops nothing in Time zero, as today (§4.5).
+   - Time zero's first-break pick skips bad samples rather than refusing (§4.5).
+
+   A third exception, keeping an all-zero line uncropped, was agreed and then dropped. The reason
+   given for it (the Add-step dialog's first-trace test run) turned out not to apply to Time zero,
+   so an all-zero line is now refused (§4.5). User: "go with your recommendation. Either way,
+   there's no data."
 4. **#125's diffractions** are Grid 2 FILE__033 fit-1 and FILE__032 fit-1 (§7). The user looked at
    both on radargrams, before and after migration, and confirmed them.
 5. **No deep real case for #125.** A search of all 130 local lines found no diffraction below 40
    ns (§7.3). The user's call was to search and, failing that, rely on the synthetic depth sweep
    with the reason written into the test.
+6. **At load, a Time zero step with a refused setting stays on** with that setting reset to its
+   default, unlike every other step (§5). Turning Time zero off would move the clock under
+   everything after it. The user expects this to be very rare, perhaps never.
 
 ---
 
@@ -135,6 +145,27 @@ The last row is a consequence of decision 2, not a separate choice. A stack's ou
 average, so the bad sample is simply not in it. This is the builder's note to test, and the
 reviewer's to check.
 
+### 4.1a The other steps and bad samples (designer's call, from the builder check)
+
+§1's promise ("a bad sample damages only itself") is kept for every step that averages, and the
+steps that cannot keep it refuse instead of spreading NaN (decision 3):
+
+- **Background mean** skips bad samples too. It is an average across traces, the same rule as
+  decision 2. Today one NaN turns its whole row into NaN, and this step is in every saved stack
+  and in #125's chain.
+- **Bandpass, Envelope and SVD** refuse input that holds non-finite samples, with migration's
+  message as the model (*"N of M traces hold samples that are not finite …"*), sharing one helper
+  with migration. An FFT spreads one NaN along its whole trace, and SVD fails with an unclear
+  `LinAlgError`.
+- **Gains, Time cutoff, Trace stack and Migration** need nothing new. A gain multiplies, so a bad
+  sample stays bad. Time cutoff crops. Trace stack averages (§4.1). Migration already refuses.
+
+**Speed (§4.1) against accuracy:** accuracy is required, and speed is measured and reported, not a
+hard test. The builder check measured today's `running_mean` on 512 × 1750 at 18 ms along time
+(window 18) and 40 ms along traces (window 200). A plain finite-skipping version took 72 ms and
+103 ms. A fast path for data with no bad samples is the expected way to stay near today's times.
+Aim for roughly 100 ms per line or less, and record the measured numbers in the ledger.
+
 ### 4.2 One-sample windows (#40)
 
 - **Dewow and AGC** refuse when the step runs, because the window in samples depends on the line's
@@ -162,7 +193,9 @@ All of it in `_validate_params` (`base.py`), through one per-setting check that 
   example a `sample` taken from a pick, and those must pass.
 - **float and time:** a real number (int or float, numpy included), not a `bool`, not a string, and
   finite. NaN and inf are refused.
-- **curve:** unchanged.
+- **curve:** gains the checks `GainCurve.__init__` makes today (at least two points, each a pair
+  of numbers, all finite), so the load repair (§5) sees them. A NaN dB value currently passes
+  `_validate_params`, because comparisons with NaN are false.
 - Bounds are checked after the type, as today.
 
 New and changed bounds. The values are the builder's starting point and the designer's call; the
@@ -207,11 +240,14 @@ gives 0, and the first row reaching `threshold × peak` is the pick.
 So one NaN or inf no longer changes the cut. On FILE__007, a NaN or an inf at `[300, 5]` crops the
 same 49 rows as the clean line.
 
-**An all-zero line still crops nothing** (exception 3). Refusing it would make the Add-step dialog's
-first-trace test run refuse Time zero on any line whose first trace is all zeros, which is common.
+**An all-zero line is refused** by `TimeZero.apply` in first-break mode, where today it silently
+crops nothing. Example: *"Time zero found no first arrival: every sample on this line is zero."*
+The same applies when no row has a finite sample. The refusal lives in `apply`, not in
+`first_break_row`, which keeps returning 0 for "no signal" as today. Other code calls that function
+directly: `first_break_ns`, and the hyperbola tracer branch, which imports it and may call it on a
+crop. During slice preparation such a line is named and skipped (§2).
 
-`first_break_ns` follows. The hyperbola tracer branch imports `first_break_row`; its behaviour on
-finite data is unchanged.
+`first_break_ns` follows. The tracer's results on finite data are unchanged.
 
 ### 4.6 Bandpass (#46)
 
@@ -240,7 +276,20 @@ before `StepStack` is built:
     note records what it held, so the user can re-add it.
 - **A missing required setting** is handled like a refused setting with no default: the step is
   removed, with a note. Today this is a `ProjectError`; it falls under decision 1's "still opens".
+- **Time zero is the exception (decision 6).** A refused Time zero setting is reset to its default
+  and the step **stays on**. Its note says so. Turning it off would put the record back on the
+  radar clock (about −11 ns at the top). Migration would then refuse the line, and Time cutoff and
+  gain-curve times would land about 11 ns from where they were set.
 - One note per affected step, naming all of its refused settings.
+- **After repair, each step is test-built.** If its constructor still refuses, for a rule that does
+  not live in the per-setting check, the step is removed with a note. "Still opens" then holds for
+  every refusal, not only the ones the check knows about.
+- **A refused value in a setting the current mode ignores** (parametric gain in power mode with
+  alpha 8, say) is handled like any other: the setting is reset, the step is turned off, and there
+  is a note. After the reset, turning the step back on gives exactly the old output, because the
+  setting was unused. Every note ends by telling the user to check the step and turn it back on.
+  This keeps the check free of any knowledge about modes. (Designer's call, from the builder
+  check.)
 
 Notes:
 - They are collected on the loaded site, for example `site.load_notes: list[str]`. They are not
@@ -278,8 +327,10 @@ A new step in a new module, `processing/trace_stack.py`. Not `stack.py`, which h
 - **Difference view** works because the shape is unchanged. It shows what the stack removed.
 - The Add-step dialog's first-trace test run is the identity on one trace, so it always passes.
 - Registration needs: a `TITLES` entry and the Filters list in `tests/test_step_titles.py`; the
-  params and bound in `tests/test_schema.py`. The Add menu lists it without any plugin change
-  (`test_plugin_processing_dock.py:66`).
+  params and bound in `tests/test_schema.py`. The Add menu lists it without any plugin code change
+  (`test_plugin_processing_dock.py:66`). The pinned menu layout in the same file
+  (`test_add_menu_is_grouped_in_processing_order`, `("Filters", ["dewow", "bandpass"])`) gains
+  `trace_stack`.
 
 ---
 
@@ -364,13 +415,18 @@ measured cases are the starting list:
   the setting: the `"bogus"` modes, floats, bools and strings for ints, NaN, inf and strings for
   floats, the new bounds. Numpy ints are still accepted for ints.
 - **#42:** FILE__007 with one NaN, and separately one inf, at `[300, 5]` crops 49 rows, as clean.
-  An all-zero radargram still crops 0.
+  An all-zero radargram is refused by Time zero with the message, while `first_break_row` on it
+  still returns 0.
 - **#46:** a band narrower than one step on FILE__007 is refused with the step size in the
   message; a band exactly one step wide runs.
 - **Load repair:** a project with AGC epsilon 0 on a line and sliding background 1 in a preset
   opens. Both steps are off with defaults, there are two notes, and a save and reload keeps the
-  repair. A bad `mode` comes back as the default with the step off. Bandpass with NaN Low is
-  removed with a note. An unknown step or setting still raises `ProjectError`.
+  repair. A bad parametric-gain `mode` comes back as the default with the step off. A Time zero
+  with `sample` 12.0 comes back with the default and **still on**. Bandpass with NaN Low is
+  removed with a note. A gain curve with a NaN point is removed with a note. An unknown step or
+  setting still raises `ProjectError`.
+- **Bad samples in the other steps (§4.1a):** on FILE__007 with one NaN, background mean leaves
+  only that sample NaN, and bandpass, envelope and SVD refuse with the message.
 - **Trace stack:** a constant section is unchanged; window 1 is the identity; shape and time axis
   are unchanged. On FILE__007 and a Grid 2 line, the variance of the trace-to-trace difference
   drops and a strong flat reflector's time does not move. `StepStack.difference` works across it.
@@ -408,10 +464,12 @@ any merge decision:
   - parametric gain alpha ±1 /ns, exponent ±10;
   - SVD at most 20 components;
   - choice, int and float settings are type-checked, and NaN and inf are refused;
-  - averages skip bad samples;
-  - Time zero's first break skips bad samples;
+  - averages skip bad samples, including background mean's;
+  - bandpass, envelope and SVD refuse data holding NaN or inf;
+  - Time zero's first break skips bad samples, and Time zero refuses an all-zero line;
   - bandpass refuses a band holding no frequency;
-  - refused saved settings are turned off with a note when a project opens;
+  - refused saved settings are turned off with a note when a project opens (Time zero's are reset
+    and stay on);
   - the new Trace stack step.
 - **The hyperbola tracer** (`nsgeo-hyperbola-tracer`, built, not merged) runs the user's hand fits
   through processing steps and imports `first_break_row`. Whichever branch merges second reruns the
