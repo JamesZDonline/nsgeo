@@ -39,6 +39,7 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     limit_windows,
 )
 from plugin_testing import REAL_DZT, needs_real_data, spin_until, synthetic_dzt
@@ -1879,3 +1880,27 @@ def test_section_fills_refuse_to_build_a_cube_and_the_generation_follows_it(sour
     engine.cube()
     assert (engine.choice, engine.frame, engine.z) == (choice, frame, z)
     assert engine.cube_generation == before + 3
+
+
+def test_a_stored_resolution_past_the_limit_builds_nothing_once_lines_arrive(sourced):
+    engine, session, errors, _ = sourced
+    engine.set_resolution(Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=100.0))
+    assert engine.frame is None and engine.z is None, "no choice, no check"
+    engine.set_source(
+        SourceChoice(
+            grid_id="A", preset="p", transform="amp_envelope", line_keys=tuple(session.keys())[:3]
+        )
+    )
+    assert engine.wait_for_preparation(20_000), "preparation did not finish"
+    assert engine.frame is None and engine.z is None
+    assert errors == []
+
+
+def test_set_resolution_refuses_before_storing(sourced):
+    engine, session, errors, _ = sourced
+    _prepare(engine, session)
+    z, frame = engine.z, engine.frame
+    with pytest.raises(TooManyLevels, match="Too many levels: dz 0.001 ns"):
+        engine.set_resolution(Resolution(cell=0.25, dz_ns=0.001, t0_ns=2.0, t1_ns=30.0))
+    assert engine.z is z and engine.frame is frame
+    assert errors == []

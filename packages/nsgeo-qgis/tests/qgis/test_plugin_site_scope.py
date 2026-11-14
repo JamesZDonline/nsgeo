@@ -3943,3 +3943,76 @@ def test_an_unchanged_value_is_not_set_again(plugin, monkeypatch):
     monkeypatch.setattr(dock.dz_spin, "setValue", calls.append)
     assert site_scope_module.set_spins_quietly(dock, dz=dock.dz_spin.value()) is False
     assert calls == []
+
+
+# ---- #177: dz floors at the finest sample interval ----
+
+
+def _site_floor(plugin):
+    session = plugin.session
+    return site_scope_module.site_dt_floor(session, plugin.slices_dock._site.included())
+
+
+def test_dz_cannot_go_below_the_finest_interval_in_whole_site(plugin):
+    dock = whole_site(plugin)
+    floor = _site_floor(plugin)
+    assert floor == pytest.approx(110.864 / 512, abs=1e-4)
+    assert dock.dz_spin.minimum() == pytest.approx(floor, abs=1e-4)
+    dock.dz_spin.setValue(0.001)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    dock.dz_spin.stepBy(1)
+    assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + floor, abs=1e-4)
+
+
+def test_a_site_dz_below_the_floor_comes_back_at_the_floor(plugin):
+    plugin.session.remember_site_resolution(dz_ns=0.001)
+    dock = whole_site(plugin)
+    dock.flush_debounce()
+    settle(dock)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert dock.dz_spin.value() > 0.2
+    assert all(dock.site_engine.engine_for(g).z.nz <= 1024 for g in dock.site_engine.ready_grids)
+    assert plugin.session.site_resolution()["dz_ns"] == 0.001, "the record stands"
+    assert dock._site.problem is None
+
+
+def test_the_same_z_range_is_clipped_not_refused_in_whole_site(plugin):
+    dock = whole_site(plugin)
+    scope = dock._site
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    settle(dock)
+    scope.refresh_slice()
+    assert scope.problem is None
+    assert dock.site_engine.lattice is not None, "a drawn site"
+    z = dock.site_engine.site_z
+    assert z is not None and z.nz <= 1024
+    top = max(dock.site_engine.engine_for(g).z.t_end_ns for g in dock.site_engine.ready_grids)
+    assert z.t_end_ns == pytest.approx(top, abs=0.3)
+    assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+
+
+@pytest.mark.parametrize("first", ["A", "B"])
+def test_a_site_mixing_radars_never_refuses_its_seeded_defaults(open_plugin, site3_factory, first):
+    from tests.synthetic import write_dzt
+
+    site = site3_factory()
+    # Grid B's lines: 1,024 samples over the same 110.864 ns, half A's interval.
+    rng = np.random.default_rng(7)
+    for path in sorted((site.json_path.parent / "raw" / "B").glob("*.DZT")):
+        write_dzt(
+            path,
+            (rng.normal(size=(1024, 60)) * 1e6).astype(np.int32),
+            traces_per_metre=10.0,
+            range_ns=110.864,
+        )
+    if first == "B":  # B first in site order, so its header seeds the defaults
+        site.session.site.grids.sort(key=lambda g: g.id != "B")
+        site.session.save()
+    plugin = open_plugin(site)
+    dock = whole_site(plugin)
+    assert dock._site.included()[0] == first
+    assert dock._site.problem is None
+    assert len(dock.site_engine.ready_grids) == 3
+    assert [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == []
+    assert dock.dz_spin.minimum() == pytest.approx(110.864 / 1024, abs=1e-4)

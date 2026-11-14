@@ -132,6 +132,7 @@ from nsgeo_qgis.slices_plan import (
     SiteSource,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     format_bytes,
     limit_windows,
     preview_note,
@@ -734,9 +735,12 @@ class SiteEngine(QObject):
                 # no resolution -- the grid is absent at every window.
                 self._apply_resolution(grid_id, None)
             else:
-                self._apply_resolution(
-                    grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
-                )
+                try:
+                    self._apply_resolution(
+                        grid_id, Resolution(res.cell, res.dz_ns, gz.t0_ns, gz.t_end_ns)
+                    )
+                except TooManyLevels as exc:
+                    raise TooManyLevels(f"Grid {grid_id}: {exc}") from exc
         # Together, last: a raise above never leaves a preview with no lattice.
         self._site_z = site_z
         self._lattice = lattice

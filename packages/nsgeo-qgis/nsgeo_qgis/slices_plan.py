@@ -202,6 +202,37 @@ class Resolution:
             raise ValueError(f"t1_ns must exceed t0_ns, got {self.t0_ns}..{self.t1_ns}")
 
 
+#: #177: a cube may hold this many levels per sample of its deepest line. The
+#: wheel once took dz to 0.001 ns, a cube 200 times deeper than any record.
+LEVELS_PER_SAMPLE = 2
+
+
+class TooManyLevels(ValueError):
+    """A resolution whose z axis is past `LEVELS_PER_SAMPLE` times the samples."""
+
+
+def level_limit_problem(resolution: Resolution, samples: Sequence[int]) -> str | None:
+    """Why `resolution` makes too many levels for lines of `samples` samples, or None.
+
+    No lines, no limit."""
+    if not samples:
+        return None
+    nz = ZAxis.from_range(resolution.t0_ns, resolution.t1_ns, resolution.dz_ns).nz
+    deepest = max(samples)
+    limit = LEVELS_PER_SAMPLE * deepest
+    if nz <= limit:
+        return None
+    if len(set(samples)) == 1:
+        why = f"twice the {deepest:,} samples in each line"
+    else:
+        why = f"twice the {deepest:,} samples in its deepest line"
+    return (
+        f"Too many levels: dz {resolution.dz_ns:.4g} ns from {resolution.t0_ns:,g} to "
+        f"{resolution.t1_ns:,g} ns makes {nz:,} levels; this cube allows {limit:,} ({why}). "
+        "Narrow z0\u2013z1 or raise dz."
+    )
+
+
 #: What a grid is finished with unless the user says otherwise (interpolation
 #: spec §8): kriging, out to three quarters of a line spacing (the user's
 #: decision of 2026-11-03, interpolation spec §5.2). Half a spacing was the

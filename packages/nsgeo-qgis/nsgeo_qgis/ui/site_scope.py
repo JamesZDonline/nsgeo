@@ -78,6 +78,7 @@ class Spins:
 
     cell: float
     cell_min: float
+    dz_min: float
     dz: float
     z0: float
     z1: float
@@ -446,6 +447,7 @@ def capture_spins(dock: Any) -> Spins:
     return Spins(
         cell=dock.cell_spin.value(),
         cell_min=dock.cell_spin.minimum(),
+        dz_min=dock.dz_spin.minimum(),
         dz=dock.dz_spin.value(),
         z0=dock.z0_spin.value(),
         z1=dock.z1_spin.value(),
@@ -476,6 +478,7 @@ def set_spins_quietly(dock: Any, **values: float) -> bool:
 
 
 def restore_spins(dock: Any, spins: Spins) -> None:
+    set_dz_floor(dock, spins.dz_min)
     set_cell_floor(dock, spins.cell_min)
     for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
         spin.setSingleStep(spins.time_step)
@@ -488,6 +491,33 @@ def set_cell_floor(dock: Any, floor: float) -> None:
         dock.cell_spin.setMinimum(floor)
     finally:
         dock.cell_spin.blockSignals(False)
+
+
+def set_dz_floor(dock: Any, floor: float) -> None:
+    """Raise `dz_spin`'s minimum to the sample interval (#177). The box only: a
+    remembered resolution or a cube record is never changed.
+
+    A set re-renders the box's text, losing a half-typed value (#105), so the
+    minimum is set only when it differs."""
+    spin = dock.dz_spin
+    if spin.minimum() == round(floor, spin.decimals()):
+        return
+    spin.blockSignals(True)
+    try:
+        spin.setMinimum(floor)
+    finally:
+        spin.blockSignals(False)
+
+
+def site_dt_floor(session: Any, included: Iterable[str]) -> float | None:
+    """The smallest sample interval among each included grid's first line, or None."""
+    dts = []
+    by_grid = keys_by_grid(session)
+    for grid_id in included:
+        keys = source_keys(session, grid_id, by_grid)
+        if keys:
+            dts.append(float(session.line_for_key(keys[0]).header.dt_ns))
+    return min(dts) if dts else None
 
 
 class SiteScope:
@@ -860,6 +890,9 @@ class SiteScope:
             if header is None:
                 return False
             dt, low, high = header
+        floor = site_dt_floor(self.session, included if included else self.included())
+        if floor is not None:
+            set_dz_floor(dock, floor)
         remembered = self.session.site_resolution()
         z0 = max(remembered["t0_ns"], low) if "t0_ns" in remembered else low
         z1 = min(remembered["t1_ns"], high) if "t1_ns" in remembered else high

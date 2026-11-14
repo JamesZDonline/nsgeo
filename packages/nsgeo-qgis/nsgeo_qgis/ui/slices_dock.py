@@ -88,6 +88,7 @@ from nsgeo_qgis.slices_plan import (
     SiteSource,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     default_cell,
     depth_scroll_steps,
     estimate_memory,
@@ -2084,6 +2085,11 @@ class SlicesDock(QgsDockWidget):
                 # The cube's grid's floor, as a grid change sets it, whether
                 # or not the record has a resolution (spec 6.1).
                 self._set_cell_floor(recipe.choice.grid_id)
+                live_keys = [k for k in kept_keys if k in self.session.keys()]  # noqa: SIM118
+                if live_keys:
+                    site_scope.set_dz_floor(
+                        self, self.session.line_for_key(live_keys[0]).header.dt_ns
+                    )
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
@@ -2268,6 +2274,8 @@ class SlicesDock(QgsDockWidget):
             # (walkthrough round 2, W7).
             for _spin in (self.dz_spin, self.z0_spin, self.z1_spin):
                 _spin.setSingleStep(header.dt_ns)
+            # #177: dz cannot go below the sample interval, before it is set.
+            site_scope.set_dz_floor(self, header.dt_ns)
             self.dz_spin.setValue(header.dt_ns)
             self.z0_spin.setValue(header.position_ns)
             self.z1_spin.setValue(header.position_ns + (header.n_samples - 1) * header.dt_ns)
@@ -2562,9 +2570,16 @@ class SlicesDock(QgsDockWidget):
                     )
                     self.show_warnings()
                     return
+            try:
+                self.engine.set_resolution(resolution)
+            except TooManyLevels as exc:
+                # #177: refused before the engine stored anything, so the map
+                # stays as it was. The reason stands in Warnings, not a toast.
+                self._grid_refusal = str(exc)
+                self.show_warnings()
+                return
             self._grid_refusal = None
             self.show_warnings()
-            self.engine.set_resolution(resolution)
             # Keyed on `(n_levels, choice, mode, finish settings)` -- see
             # `_stretch_key` -- and a geometry change can only have moved
             # `n_levels` (the axis it is measured against changed), so there

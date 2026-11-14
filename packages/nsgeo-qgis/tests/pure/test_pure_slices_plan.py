@@ -22,12 +22,14 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     bands_detail,
     choose_residency,
     combined_time_base,
     estimate_memory,
     format_bytes,
     format_status,
+    level_limit_problem,
     mixed_clock_note,
     name_list,
     old_cube_note,
@@ -833,3 +835,28 @@ def test_combined_time_base_is_one_rule_for_a_set_of_grids():
     assert combined_time_base(["radar", "time_zero"]) == TIME_BASE_MIXED == "mixed"
     with pytest.raises(ValueError):
         combined_time_base([])
+
+
+def test_the_level_limit_message_is_exact():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    assert level_limit_problem(res, [512, 512, 512]) == (
+        "Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube "
+        "allows 1,024 (twice the 512 samples in each line). Narrow z0\u2013z1 or raise dz."
+    )
+
+
+def test_the_level_limit_names_the_deepest_line_when_counts_differ():
+    res = Resolution(cell=0.25, dz_ns=0.2165, t0_ns=0.0, t1_ns=100_000.0)
+    problem = level_limit_problem(res, [512, 1024])
+    assert "allows 2,048 (twice the 1,024 samples in its deepest line)" in problem
+
+
+def test_native_dz_over_the_whole_record_is_within_the_limit():
+    assert level_limit_problem(Resolution(0.25, 0.21653, -11.086, 99.546), [512]) is None
+    assert level_limit_problem(Resolution(0.25, 0.001, 0.0, 100.0), []) is None
+
+
+def test_the_wheel_hazard_dz_is_over_the_limit_and_too_many_levels_is_a_value_error():
+    res = Resolution(cell=0.25, dz_ns=0.001, t0_ns=0.0, t1_ns=110.0)
+    assert level_limit_problem(res, [512]) is not None
+    assert issubclass(TooManyLevels, ValueError)

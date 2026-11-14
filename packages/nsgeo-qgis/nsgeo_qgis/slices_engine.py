@@ -170,9 +170,11 @@ from nsgeo_qgis.slices_plan import (
     Resolution,
     SliceFinish,
     SourceChoice,
+    TooManyLevels,
     choose_residency,
     estimate_memory,
     format_status,
+    level_limit_problem,
     limit_windows,
     preset_transform_conflict,
 )
@@ -1016,9 +1018,33 @@ class SliceEngine(QObject):
 
     # ---- geometry ---------------------------------------------------------
     def set_resolution(self, resolution: Resolution | None) -> None:
-        """Set the binning geometry. Drops every plan; see the module docstring."""
+        """Set the binning geometry. Drops every plan; see the module docstring.
+
+        Raises `TooManyLevels` before storing anything (#177), so the engine
+        keeps the geometry it has."""
+        problem = self._level_problem(resolution)
+        if problem is not None:
+            raise TooManyLevels(problem)
         self._resolution = resolution
         self._rebuild_geometry()
+
+    def _level_problem(self, resolution: Resolution | None) -> str | None:
+        """Why `resolution` is past the level limit for the chosen lines, or None.
+
+        The samples are the raw `n_samples` of the chosen lines still in the
+        session; no choice, no check."""
+        if resolution is None or self._choice is None or not self.session.is_open:
+            return None
+        try:
+            live = set(self.session.keys())
+            samples = [
+                int(self.session.line_for_key(k).header.n_samples)
+                for k in self._choice.line_keys
+                if k in live
+            ]
+        except Exception:  # noqa: BLE001 -- a check never stops a rebuild
+            return None
+        return level_limit_problem(resolution, samples)
 
     def _rebuild_geometry(self) -> None:
         # Unconditional, and wholesale. There is no such thing as keeping
@@ -1050,6 +1076,11 @@ class SliceEngine(QObject):
             return
         grid = self.session.grid(self._choice.grid_id)
         res = self._resolution
+        if self._level_problem(res) is not None:
+            # Past the limit (#177): no cube. This runs inside `set_source` and
+            # task callbacks, so it records nothing and raises nothing.
+            self._choose_mode()
+            return
         self._frame = CubeFrame.for_grid(grid, res.cell)
         self._z = ZAxis.from_range(res.t0_ns, res.t1_ns, res.dz_ns)
         if held[0] is not None and held[0][0][0] == self._frame:

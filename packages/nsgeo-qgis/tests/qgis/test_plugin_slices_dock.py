@@ -29,6 +29,7 @@ from nsgeo_qgis.slices_plan import (
     REFINING_SLICE_INDICATOR,
     Resolution,
     SliceFinish,
+    level_limit_problem,
     limit_windows,
     old_cube_note,
     smallest_safe_cell,
@@ -4354,3 +4355,129 @@ def test_a_long_warning_never_widens_the_panel(docked):
     QApplication.processEvents()
     assert dock.warnings_panel.isVisibleTo(dock)
     assert content.minimumSizeHint().width() == before
+
+
+# ---- #177: dz floors at the sample interval; a cube past twice its samples is refused ----
+
+
+def _first_dt(session, grid_id=None):
+    keys = session.keys() if grid_id is None else _grid_keys(session, grid_id)
+    return session.line_for_key(keys[0]).header.dt_ns
+
+
+def test_dz_cannot_go_below_the_sample_interval_in_this_grid(docked):
+    dock, session = docked
+    assert dock.engine.wait_for_preparation(20_000)
+    dt = _first_dt(session)
+    assert dock.dz_spin.minimum() == pytest.approx(dt, abs=1e-4)
+    dock.dz_spin.setValue(0.001)
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    dock.dz_spin.stepBy(1)
+    assert dock.dz_spin.value() == pytest.approx(dock.dz_spin.minimum() + dt, abs=1e-4)
+
+
+def _assert_at_the_floor_and_built(dock):
+    """The box shows the floor and the cube built within the level limit."""
+    dock.flush_debounce()
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.flush_debounce()
+    assert dock.dz_spin.value() == dock.dz_spin.minimum()
+    assert dock.dz_spin.value() > 0.2
+    assert dock.engine.z is not None
+    assert dock.engine.z.nz <= 1024
+    assert dock.warnings_panel.entries() == ()
+
+
+def test_a_remembered_dz_below_the_floor_comes_back_at_the_floor(docked_two_grids):
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    session.remember_slice_resolution("A", dz_ns=0.001)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("A")
+    _assert_at_the_floor_and_built(dock)
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record stands"
+
+
+def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked):
+    dock, session = docked
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__low", view)
+    record["z"]["dz_ns"] = 0.001
+    dock.dz_spin.setValue(1.0)
+    dock.restore_cube("A__low")
+    _assert_at_the_floor_and_built(dock)
+    assert record["z"]["dz_ns"] == 0.001
+    assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record is remembered as saved"
+
+
+def test_the_dz_floor_travels_with_the_scope(docked_two_grids):
+    from nsgeo_qgis.ui.site_scope import capture_spins
+
+    dock, session = docked_two_grids
+    assert dock.engine.wait_for_preparation(20_000)
+    before = capture_spins(dock).dz_min
+    assert before == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    assert dock.site_engine.wait_until_idle(60_000)
+    QCoreApplication.processEvents()
+    dock.grid_scope_button.click()
+    assert dock.engine.wait_for_preparation(20_000)
+    assert capture_spins(dock).dz_min == before
+
+
+def test_a_z_range_past_the_level_limit_is_refused_in_this_grid_and_the_map_stays(docked):
+    dock, session = docked
+    _ready(dock)
+    z = dock.engine.z
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert dock.engine.z is z
+    entries = dock.warnings_panel.entries()
+    assert [e.kind for e in entries] == [REFUSAL]
+    assert entries[0].text.startswith("Too many levels: dz 0.5 ns from 2 to 100,000 ns")
+    assert errors == []
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.engine.z is not None and dock.engine.z.nz <= 1024
+
+
+@needs_real_data
+def test_real_lines_floor_at_0_2165_and_allow_1024_levels(qgis_app, tmp_path):
+    session = SiteSession()
+    session.new_site(tmp_path)
+    grid = Grid("A", (0.0, 0.0), 0.0, 3.0, 12.0, "EPSG:32616", 0.5)
+    session.add_grid(grid)
+    session.add_lines(
+        [
+            Line.open(REAL_DZT[i], GridPlacement("A", "y", 0.5 + i * 0.5, 0.0, 1, REAL_DZT[i].stem))
+            for i in range(4)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    dock = SlicesDock(session)
+    try:
+        dock.prepare()
+        assert dock.engine.wait_for_preparation(30_000)
+        assert dock.dz_spin.minimum() == pytest.approx(0.2165, abs=1e-4)
+        samples = [session.line_for_key(k).header.n_samples for k in session.keys()]  # noqa: SIM118 -- SiteSession.keys()
+        assert set(samples) == {512}
+        seeded = Resolution(
+            dock.cell_spin.value(),
+            dock.dz_spin.minimum(),
+            dock.z0_spin.value(),
+            dock.z1_spin.value(),
+        )
+        assert level_limit_problem(seeded, samples) is None
+        deep = dataclasses.replace(seeded, t1_ns=100_000.0)
+        assert "1,024 (twice the 512 samples in each line)" in level_limit_problem(deep, samples)
+    finally:
+        dock.engine.wait_for_preparation(20_000)
+        dock.engine.dispose()
+        dock.deleteLater()
