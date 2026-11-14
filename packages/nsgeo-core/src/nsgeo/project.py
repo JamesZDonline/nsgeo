@@ -450,52 +450,59 @@ def _repair_steps(
         title = step_title(name)
         removed = f"{where}: {title} is removed. "
         again = "Add it again with the settings you want."
-        missing = [s for s in specs.values() if s.required and s.name not in params]
-        if missing:
-            notes.append(f"{removed}It has no {missing[0].label}, which it needs. {again}")
-            continue
         fixed = dict(params)
-        sentences: list[str] = []
-        gone = False
+        # Everything wrong with the step is collected first, so one note
+        # names it all; whether the step goes is decided after.
+        missing = [s for s in specs.values() if s.required and s.name not in params]
+        refused: list[tuple[Any, Any, str]] = []
         for spec in specs.values():
-            if spec.name not in params:
-                continue
-            value = params[spec.name]
-            reason = param_problem(spec, value)
-            if reason is None:
-                continue
-            if spec.required:
-                notes.append(
-                    f"{removed}Its {spec.label} was {value!r}, which {reason}, and "
-                    f"{spec.label} has no default. {again}"
-                )
-                gone = True
-                break
-            fixed[spec.name] = spec.default
-            sentences.append(
-                f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
-            )
-        if gone:
+            if spec.name in params:
+                reason = param_problem(spec, params[spec.name])
+                if reason is not None:
+                    refused.append((spec, params[spec.name], reason))
+                    if not spec.required:
+                        fixed[spec.name] = spec.default
+        if missing or any(spec.required for spec, _, _ in refused):
+            parts = []
+            for spec, value, reason in refused:
+                tail = f", and {spec.label} has no default" if spec.required else ""
+                parts.append(f"Its {spec.label} was {value!r}, which {reason}{tail}.")
+            for spec in missing:
+                parts.append(f"It has no {spec.label}, which it needs.")
+            notes.append(f"{removed}{' '.join(parts)} {again}")
             continue
         repaired = {**entry, "params": fixed}
-        if sentences:
-            if name in _STAYS_ON:
-                ending = (
-                    f"The step stays on, because turning {title} off "
-                    "would move every time after it."
+        note = None
+        if refused:
+            sentences = [
+                f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
+                for spec, value, reason in refused
+            ]
+            was_on = bool(entry.get("enabled", True))
+            if not was_on:
+                note = (
+                    f"{where}: {title} (already off) had settings reset. "
+                    f"{' '.join(sentences)} The step stays off, as it was saved."
+                )
+            elif name in _STAYS_ON:
+                sentences = [t.replace("Its ", f"{title}'s ", 1) for t in sentences]
+                note = (
+                    f"{where}: {' '.join(sentences)} The step stays on, because "
+                    f"turning {title} off would move every time after it."
                 )
             else:
                 repaired["enabled"] = False
-                ending = "Check the step and turn it back on."
-            lead = f"{where}: {title} is turned off. " if name not in _STAYS_ON else f"{where}: "
-            if name in _STAYS_ON:
-                sentences = [s.replace("Its ", f"{title}'s ", 1) for s in sentences]
-            notes.append(f"{lead}{' '.join(sentences)} {ending}")
+                note = (
+                    f"{where}: {title} is turned off. {' '.join(sentences)} "
+                    "Check the step and turn it back on."
+                )
         try:
             build_step(name, **fixed)
         except (TypeError, ValueError) as exc:
             notes.append(f"{removed}It could not be built: {exc}. {again}")
             continue
+        if note is not None:
+            notes.append(note)
         out.append(repaired)
     return out
 

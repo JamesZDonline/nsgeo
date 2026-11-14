@@ -133,7 +133,70 @@ def test_a_constructor_refusal_the_check_does_not_know_removes_the_step(tmp_path
     monkeypatch.setattr(cls, "__init__", refuse)
     site = _load(tmp_path, [{"step": "dewow", "params": {}}])
     assert _only(site) == []
-    assert "Dewow is removed" in site.load_notes[0] or "is removed" in site.load_notes[0]
+    assert site.load_notes == [
+        "Line L0.DZT: Dewow is removed. It could not be built: x. "
+        "Add it again with the settings you want."
+    ]
+
+
+def test_a_reset_then_constructor_refusal_gives_exactly_one_note(tmp_path, monkeypatch):
+    cls = get_step("gain_agc")
+
+    def refuse(self, **kwargs):
+        raise ValueError("x")
+
+    monkeypatch.setattr(cls, "__init__", refuse)
+    site = _load(tmp_path, [{"step": "gain_agc", "params": {"eps": 0.0}}])
+    assert _only(site) == []
+    assert len(site.load_notes) == 1
+    assert "is removed. It could not be built: x." in site.load_notes[0]
+    assert "turned off" not in site.load_notes[0]
+
+
+def test_a_removed_step_names_every_refused_setting(tmp_path):
+    site = _load(
+        tmp_path,
+        [
+            {
+                "step": "bandpass",
+                "params": {"low_mhz": float("nan"), "high_mhz": float("inf"), "taper_frac": -1},
+            }
+        ],
+    )
+    assert _only(site) == []
+    (note,) = site.load_notes
+    assert "Its Low was nan" in note
+    assert "Its High was inf" in note
+    assert "Its Taper was -1" in note
+    assert note.count("Add it again with the settings you want.") == 1
+
+
+def test_a_removed_step_names_every_missing_setting(tmp_path):
+    site = _load(tmp_path, [{"step": "bandpass", "params": {}}])
+    (note,) = site.load_notes
+    assert "It has no Low, which it needs." in note
+    assert "It has no High, which it needs." in note
+
+
+def test_an_already_off_time_zero_is_reset_without_claiming_it_stays_on(tmp_path):
+    site = _load(tmp_path, [{"step": "time_zero", "params": {"sample": 12.0}, "enabled": False}])
+    step, enabled = _only(site)[0]
+    assert (enabled, step.sample) == (False, 0)
+    (note,) = site.load_notes
+    assert "stays on" not in note
+    assert "turned off" not in note
+    assert "Its Sample was 12.0" in note
+    assert "already off" in note
+
+
+def test_an_already_off_agc_is_reset_without_claiming_it_was_turned_off(tmp_path):
+    site = _load(tmp_path, [{"step": "gain_agc", "params": {"eps": 0.0}, "enabled": False}])
+    step, enabled = _only(site)[0]
+    assert (enabled, step.eps) == (False, 1e-12)
+    (note,) = site.load_notes
+    assert "is turned off" not in note
+    assert "already off" in note
+    assert "Its Epsilon was 0.0, which must be > 0.0; it is now 1e-12." in note
 
 
 def test_build_step_still_works_for_a_clean_stack(tmp_path):
