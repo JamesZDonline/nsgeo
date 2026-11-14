@@ -684,12 +684,24 @@ def test_the_wheel_over_an_unfocused_grid_combo_moves_no_line(table):
     session, dialog = table
     _shown(dialog)
     combo = dialog.table.cellWidget(2, COL_GRID)
+    changed = Spy(combo.currentTextChanged)
     for dy in (-120, 120):
         QApplication.sendEvent(combo, wheel_event(dy))
-    assert [dialog.table.cellWidget(r, COL_GRID).currentText() for r in range(6)] == ["Grid5"] * 6
+        assert [dialog.table.cellWidget(r, COL_GRID).currentText() for r in range(6)] == [
+            "Grid5"
+        ] * 6
+    assert changed.calls == []
     dialog.accept()
     keys = dialog.keys()
     assert {session.line_for_key(k).placement.grid_id for k in keys} == {"Grid5"}
+
+
+def test_the_grid_combos_take_focus_only_by_click_or_tab(table):
+    _, dialog = table
+    assert all(
+        dialog.table.cellWidget(r, COL_GRID).focusPolicy() == Qt.FocusPolicy.StrongFocus
+        for r in range(6)
+    )
 
 
 def test_after_picking_a_grid_focus_goes_back_to_the_table(table):
@@ -709,4 +721,16 @@ def test_scrolling_the_table_lets_go_of_a_focused_grid_combo(table):
     combo.setFocus()
     assert combo.hasFocus()
     dialog.table.verticalScrollBar().triggerAction(QAbstractSlider.SliderAction.SliderSingleStepAdd)
+    assert not combo.hasFocus()
+
+
+def test_scrolling_the_table_sideways_lets_go_of_a_focused_grid_combo(table):
+    _, dialog = table
+    _shown(dialog)
+    combo = dialog.table.cellWidget(2, COL_GRID)
+    combo.setFocus()
+    assert combo.hasFocus()
+    dialog.table.horizontalScrollBar().triggerAction(
+        QAbstractSlider.SliderAction.SliderSingleStepAdd
+    )
     assert not combo.hasFocus()

@@ -4233,13 +4233,22 @@ def test_scrolling_the_panel_lets_go_of_the_box_you_typed_in(docked):
     _ready(dock)
     scroll = _short_and_active(dock)
     dock.dz_spin.setFocus()
-    dock.dz_spin.setValue(0.75)
+    dock.dz_spin.selectAll()
+    QTest.keyClicks(dock.dz_spin, "0.75")
     QApplication.sendEvent(scroll.viewport(), wheel_event(-120))
     assert not dock.dz_spin.hasFocus()
     assert dock.dz_spin.value() == 0.75
     assert scroll.verticalScrollBar().value() > 0
     QApplication.sendEvent(dock.dz_spin, wheel_event(-120))
     assert dock.dz_spin.value() == 0.75
+
+
+def test_the_resolution_boxes_take_focus_only_by_click_or_tab(docked):
+    dock, _ = docked
+    for name in GUARDED:
+        assert getattr(dock, name).focusPolicy() == Qt.FocusPolicy.StrongFocus
+    # the rule reaches only the four: the thickness box keeps Qt's default
+    assert dock.thickness_spin.focusPolicy() == Qt.FocusPolicy.WheelFocus
 
 
 def test_the_panel_moving_on_its_own_keeps_the_focus(docked):

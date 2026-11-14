@@ -221,7 +221,7 @@ class EditLinesDialog(QDialog):
             combo.addItems(self._grid_ids)
             combo.currentTextChanged.connect(lambda text, r=r: self._on_grid_picked(r, text))
             guard_wheel(combo, self.table)
-            combo.activated.connect(lambda _i: self.table.setFocus())
+            combo.activated.connect(self._focus_table)
             self.table.setCellWidget(r, COL_GRID, combo)
             self._combos.append(combo)
         self.table.itemChanged.connect(self._on_item_changed)
@@ -775,6 +775,13 @@ class EditLinesDialog(QDialog):
             self.table.resizeColumnsToContents()
         finally:
             self._updating = False
+
+    def _focus_table(self, _index: int = 0) -> None:
+        """After a grid is picked, focus goes back to the table (#176)."""
+        try:
+            self.table.setFocus()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot must not raise
+            self._failed(exc)
 
     def _on_grid_picked(self, row: int, text: str) -> None:
         if self._updating or not 0 <= row < len(self._order):

@@ -16,6 +16,14 @@ from nsgeo_qgis.log import log as _log
 
 
 class _WheelFilter(QObject):
+    """Event filter and let-go slot of one guarded box; parented to it, so
+    both connections die with the box."""
+
+    def __init__(self, widget: QWidget, scroll_area: QAbstractScrollArea) -> None:
+        super().__init__(widget)
+        self._widget = widget
+        self._scroll_area = scroll_area
+
     def eventFilter(self, obj, event):  # noqa: N802 -- Qt override
         try:
             if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
@@ -27,6 +35,13 @@ class _WheelFilter(QObject):
             _log(f"wheel guard failed: {exc!r}")
         return False
 
+    def let_go(self, _action: int = 0) -> None:
+        try:
+            if self._widget.hasFocus():
+                self._scroll_area.setFocus()
+        except Exception as exc:  # noqa: BLE001 -- a Qt slot
+            _log(f"wheel guard failed: {exc!r}")
+
 
 def guard_wheel(widget: QWidget, scroll_area: QAbstractScrollArea) -> None:
     """Make `widget` take the wheel only while focused, and drop its focus
@@ -37,13 +52,7 @@ def guard_wheel(widget: QWidget, scroll_area: QAbstractScrollArea) -> None:
     `ensureWidgetVisible` fires no `actionTriggered`, so it keeps focus.
     """
     widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    widget.installEventFilter(_WheelFilter(widget))
-
-    def _let_go(_action: int) -> None:
-        try:
-            if widget.hasFocus():
-                scroll_area.setFocus()
-        except Exception as exc:  # noqa: BLE001 -- a Qt slot
-            _log(f"wheel guard failed: {exc!r}")
-
-    scroll_area.verticalScrollBar().actionTriggered.connect(_let_go)
+    guard = _WheelFilter(widget, scroll_area)
+    widget.installEventFilter(guard)
+    for bar in (scroll_area.verticalScrollBar(), scroll_area.horizontalScrollBar()):
+        bar.actionTriggered.connect(guard.let_go)
