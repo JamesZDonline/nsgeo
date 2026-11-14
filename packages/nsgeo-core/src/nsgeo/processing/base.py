@@ -313,13 +313,19 @@ def _is_finite(value: Any) -> bool:
 def _curve_problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
     """What is wrong with a curve's points, and the offending dB entry (or None)."""
     try:
-        pairs = [(point[0], point[1]) for point in value]
-    except (TypeError, IndexError, KeyError):
-        return None  # malformed shape: the constructor says so better
+        points = list(value)
+        shaped = all(len(point) == 2 for point in points)
+    except TypeError:
+        return "must be (time, dB) pairs of numbers", None
+    if not shaped:
+        return "must be (time, dB) pairs of numbers", None
+    pairs = [(point[0], point[1]) for point in points]
     if len(pairs) < 2:
         return "must have at least two points", None
     for t, db in pairs:
-        if not (_is_number(t) and _is_number(db) and _is_finite(t) and _is_finite(db)):
+        if not (_is_number(t) and _is_number(db)):
+            return "must be (time, dB) pairs of numbers", None
+        if not (_is_finite(t) and _is_finite(db)):
             return "must be pairs of finite numbers", None
     for _, db in pairs:
         reason = _out_of_bounds(spec, db)

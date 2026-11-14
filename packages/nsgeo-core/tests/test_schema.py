@@ -347,3 +347,16 @@ def test_param_problem_phrases():
     assert param_problem(alpha, -8.0) == "must be >= -1.0"
     mode = next(s for s in get_step("gain_parametric").schema() if s.name == "mode")
     assert param_problem(mode, "bogus") == "must be one of ['exponential', 'power']"
+
+
+@pytest.mark.parametrize(
+    "points",
+    [[[0, 0], [10]], [[0, 0, 1], [10, 3, 1]], 5, [[0, 0], ["10", 3]], [[0, 0], [10, True]]],
+)
+def test_curve_points_that_are_not_pairs_of_numbers_are_refused(points):
+    from nsgeo.processing.base import param_problem
+
+    spec = get_step("gain_curve").schema()[0]
+    assert param_problem(spec, points) is not None
+    with pytest.raises(ValueError, match="points"):
+        build_step("gain_curve", points=points)
