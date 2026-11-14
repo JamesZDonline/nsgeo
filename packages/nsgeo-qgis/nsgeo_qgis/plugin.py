@@ -2755,6 +2755,8 @@ class NsgeoPlugin:
                 -2.0,
                 2.0,
                 2,
+                Qt.WindowType(0),  # no flags: the step comes after them in the overload
+                0.01,  # a wheel notch is 0.01 m, as in the import dialog's Destagger box
             )
             if not accepted:
                 return

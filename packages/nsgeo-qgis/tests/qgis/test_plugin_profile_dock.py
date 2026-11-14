@@ -2215,7 +2215,7 @@ def _open_gps(bare, track=None, shift=0.3, n_traces=200):
         path = synthetic_gps_dzt(
             tmp_path / "raw",
             "FILE__001.DZT",
-            [(t, LAT0 + t * m / M_PER_DEG, LON0, 4) for t, m in track],
+            [(t, LAT0 + m / M_PER_DEG, LON0, 4) for t, m in track],
             n_traces=n_traces,
             traces_per_metre=10.0,
         )
@@ -2240,15 +2240,20 @@ def test_a_gps_line_opens_with_walked_distance_and_no_ruler(bare):
     assert dock.view.ruler is None
 
 
-def test_the_velocity_fit_on_a_gps_line_uses_the_wheel_spacing(bare):
+def test_the_velocity_fit_on_a_gps_line_measures_along_the_walked_distance(bare):
     # The fixes put the middle of the line at 0.12 m a trace; the start run, where the
-    # wheel alone places the traces, is 0.1 m a trace. Decision 11's interim (until M17b)
-    # is the spacing at the start.
+    # wheel alone places the traces, is 0.1 m a trace. The fit's x is the walked distance
+    # at each clicked trace (decision 11's interim, until M17b), not trace x wheel spacing.
     session, dock, key, line = _open_gps(
         bare, track=[(50, 5.0), (150, 5.0 + 12.0)], shift=0.0, n_traces=200
     )
-    distance, at_zero, per_trace = dock._velocity_axis()
-    assert per_trace == pytest.approx(0.1)
-    assert at_zero == pytest.approx(distance[0])
-    assert distance[-1] - distance[0] != pytest.approx(0.1 * 199)  # the middle really is 0.12
-    assert per_trace != pytest.approx((distance[-1] - distance[0]) / 199)
+    clicked = [(60, 20.0), (100, 12.0), (140, 20.0)]
+    dock._velocity_points = list(clicked)
+    x_m, _ = dock.velocity_points_in_metres(0.0)
+    walked = line.distance_along()
+    assert list(x_m) == pytest.approx([walked[t] for t, _ in clicked])
+    wheel = walked[1] - walked[0]
+    assert wheel == pytest.approx(0.1)
+    # the middle really is 0.12 m a trace, so trace x wheel spacing would put the points elsewhere
+    assert x_m[2] - x_m[0] != pytest.approx((140 - 60) * wheel)
+    assert x_m[2] - x_m[0] == pytest.approx(80 * 0.12, abs=0.05)

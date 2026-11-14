@@ -134,6 +134,15 @@ def test_a_gssis_followed_by_a_gssis_is_unpaired(tmp_path: Path):
     assert log.unpaired == 1
 
 
+def test_a_dropped_gssis_clears_the_pending_trace(tmp_path: Path):
+    # GSSIS 5 never gets its GGA; the next GSSIS is corrupt and dropped; a later GGA must
+    # not pair with the older GSSIS 5.
+    log = _read(tmp_path, "$GSSIS,5,-1", _bad(nmea("GSSIS,9,-1")), _gga())
+    assert log.fixes == ()
+    assert log.bad_checksum == 1
+    assert log.unpaired == 2
+
+
 def test_a_dropped_gga_does_not_pair_the_next_gga_with_its_gssis(tmp_path: Path):
     log = _read(tmp_path, "$GSSIS,5,-1", _bad(_gga()), _gga(101.0))
     assert log.fixes == ()

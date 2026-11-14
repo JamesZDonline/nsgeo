@@ -111,7 +111,7 @@ stay exactly where they are.
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
 | **Panels ▾** | Shows or hides each nsgeo panel, and switches layouts (see [The panels](#the-panels)). |
 
-**Save site**, **Add grid…**, **Import DZT…** and **Cut** stay greyed out until a
+**Save site**, **Add grid…**, **Import DZT…**, **Import GPS lines…** and **Cut** stay greyed out until a
 site is open, and **Pick** and **Velocity** until a line is open.
 
 ### The panels
@@ -399,7 +399,7 @@ Some surveys were walked with an RTK GPS on the cart. The radar then writes a
 trace being recorded when it arrived. If your lines have DZG files, you can
 place them by where the cart really went instead of by tapes and a grid.
 
-Click **Import GPS lines…**. It needs an open site, and no grid.
+Click **Import GPS lines…**. It needs an open site; a grid is not needed.
 
 1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
    with the same name. A row shows the number of traces, how many fixes were RTK
@@ -424,8 +424,9 @@ than 2 m.
 
 **nsgeo Survey** shows a GPS line as its label, **GPS**, its walked length and
 any **without RTK** length. Its profile reads in distance walked, one column to
-each trace. A line with no grid has no ruler, and a hyperbola fit uses the
-wheel's spacing at the start of the line.
+each trace. A line with no grid has no ruler. A hyperbola fit measures along the walked
+distance at the points you click, so fit hyperbolae away from stretches without
+RTK and away from lifts of the cart until true-distance profiles arrive.
 
 To set the destagger later, right-click a GPS line (or select several) and
 choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
@@ -758,7 +759,7 @@ Everything for a site lives in its site folder:
 | In the site folder | What it holds |
 |---|---|
 | `survey.nsgeo.json` | The site itself: its grids, its lines and where their DZT files are, each line's processing steps, your cuts, the presets, and the saved cubes. **Save site** writes it. |
-| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks** and **picks**. |
+| `site.nsgeo.gpkg` | A GeoPackage with the map layers: **grids**, **lines**, **cuts**, **marks**, **picks** and (with GPS lines) **rtk_gaps**. |
 | `slices` | Saved cubes (`.npz`), and exported GeoTIFFs unless you save them elsewhere. |
 | your DZT files | Read by nsgeo, never changed. |
 

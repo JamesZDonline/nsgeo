@@ -1726,12 +1726,13 @@ def test_set_destagger_starts_at_the_shared_value_and_applies_to_all(
     plugin.survey_dock.destagger_requested.emit(KEYS[:2])
 
     assert len(asked) == 1
-    (_parent, title, label, value, low, high, decimals), _ = asked[0]
+    (_parent, title, label, value, low, high, decimals, _flags, step), _ = asked[0]
     assert title == "Destagger"
     assert label == (
         "Move every trace forward along the way its line was walked, for 2 GPS line(s), by (m):"
     )
     assert (value, low, high, decimals) == (0.24, -2.0, 2.0, 2)
+    assert step == 0.01
     assert [plugin.session.line_for_key(k).placement.travel_shift for k in KEYS[:2]] == [0.31] * 2
     assert fake_iface.messageBar().currentItem().text() == (
         "destagger set to +0.31 m on 2 GPS line(s)"

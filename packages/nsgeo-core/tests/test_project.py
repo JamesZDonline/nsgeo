@@ -920,7 +920,7 @@ def test_a_record_and_cuts_save_as_version_3(tmp_path, site):
     assert load_site(out).cuts == site.cuts
 
 
-def test_version_3_loads_and_4_is_refused(tmp_path, site):
+def test_a_site_loads_and_a_newer_schema_version_is_refused(tmp_path, site):
     site.lines[0] = dataclasses.replace(site.lines[0], velocity_source=_record())
     out = tmp_path / "survey.nsgeo.json"
     save_site(site, out)

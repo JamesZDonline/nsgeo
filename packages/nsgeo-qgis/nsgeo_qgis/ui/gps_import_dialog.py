@@ -298,7 +298,7 @@ class GpsImportDialog(QDialog):
                     item.setForeground(QBrush(QColor(FLAG_FG)))
                 self.table.setItem(r, col, item)
         self.table.resizeColumnsToContents()
-        self.crs_label.setText(f"Coordinates: {self._crs.authid()}")
+        self.crs_label.setText(self._crs.authid())
         self.note_label.setText(self._note)
         n = self.n_ready
         self.import_button.setEnabled(n > 0)

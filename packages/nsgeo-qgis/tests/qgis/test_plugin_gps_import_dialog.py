@@ -113,7 +113,7 @@ def test_adding_files_plans_rows_and_shows_the_coordinates(session, tmp_path):
     assert cells(d, 2) == ["FILE__003.DZT", "60", "—", "—", "—", "no DZG beside it"]
     assert d.status.text() == "2 of 3 file(s) ready to import."
     assert d.import_button.text() == "Import" and d.import_button.isEnabled()
-    assert d.crs_label.text() == "Coordinates: EPSG:32632"
+    assert d.crs_label.text() == "EPSG:32632"
     assert d.note_label.text() == ""
     d.reject()
 
@@ -135,7 +135,7 @@ def test_a_geographic_project_picks_the_utm_zone_and_says_why(
 ):
     d = GpsImportDialog(session)
     d.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
-    assert d.crs_label.text() == "Coordinates: EPSG:32632"
+    assert d.crs_label.text() == "EPSG:32632"
     assert d.note_label.text().startswith("picked for you:")
     placement = d.rows[0].line.placement
     assert placement.crs == "EPSG:32632"
@@ -187,7 +187,7 @@ def test_a_site_crs_that_cannot_place_a_file_refuses_that_row(qgis_app, session,
     session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
     d = GpsImportDialog(session)
     d.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])  # zone 32 is far from zone 16
-    assert d.crs_label.text() == "Coordinates: EPSG:32616"
+    assert d.crs_label.text() == "EPSG:32616"
     assert cells(d, 0)[COL_STATUS] == "outside what EPSG:32616 can place"
     assert d.status.text() == "0 of 1 file(s) ready to import."
     assert not d.import_button.isEnabled()
@@ -236,7 +236,7 @@ def test_the_cells_worth_a_look_are_amber_and_refused_statuses_red(session, tmp_
 def test_the_coordinates_show_the_sites_crs_before_any_file_is_added(qgis_app, session):
     session.add_grid(Grid("A", (500_000.0, 5_000_000.0), 0.0, 5.0, 11.0, "EPSG:32616", 0.5))
     d = GpsImportDialog(session)
-    assert d.crs_label.text() == "Coordinates: EPSG:32616"
+    assert d.crs_label.text() == "EPSG:32616"
     d.reject()
 
 
@@ -349,7 +349,7 @@ def test_an_import_into_a_site_with_grids_uses_their_crs(plugin, tmp_path, proje
     plugin.open_gps_import_dialog()
     dialog = plugin._gps_import_dialog
     dialog.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
-    assert dialog.crs_label.text() == "Coordinates: EPSG:32632"
+    assert dialog.crs_label.text() == "EPSG:32632"
     assert dialog.note_label.text() == "picked for you: the CRS the site's other grids use"
     dialog.accept()
     (line,) = plugin.session.site.lines
@@ -388,11 +388,11 @@ def test_a_site_crs_that_appeared_while_the_dialog_was_open_replans_instead_of_i
     plugin.open_gps_import_dialog()
     dialog = plugin._gps_import_dialog
     dialog.add_files([gps_file(tmp_path / "raw", "FILE__001.DZT")])
-    assert dialog.crs_label.text() == "Coordinates: EPSG:32632"
+    assert dialog.crs_label.text() == "EPSG:32632"
     plugin.session.add_grid(Grid("A", (500_000.0, 5_000_000.0), 0.0, 5.0, 11.0, "EPSG:32633", 0.5))
     dialog.accept()
     assert plugin.session.site.lines == []
-    assert dialog.crs_label.text() == "Coordinates: EPSG:32633"
+    assert dialog.crs_label.text() == "EPSG:32633"
     assert "EPSG:32633" in dialog.status.text()
     dialog.reject()
 

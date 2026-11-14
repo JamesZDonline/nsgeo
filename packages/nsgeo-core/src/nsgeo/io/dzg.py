@@ -158,8 +158,11 @@ def read_dzg(path: str | Path, n_traces: int | None = None) -> DzgLog:
         if body is None:
             if line.strip().startswith("$"):
                 bad += 1
-                # A dropped GGA orphans the GSSIS before it; count it there.
-                if line.strip()[3:6] == "GGA" and pending is not None:
+                # A dropped GGA orphans the GSSIS before it; count it there. A dropped
+                # GSSIS leaves the one before it with no GGA to meet, so a later GGA
+                # must not pair with that older trace.
+                sentence = line.strip()
+                if (sentence[3:6] == "GGA" or sentence[1:6] == "GSSIS") and pending is not None:
                     unpaired += 1
                     pending = None
             continue
