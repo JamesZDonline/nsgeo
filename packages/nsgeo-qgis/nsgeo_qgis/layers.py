@@ -14,8 +14,8 @@
 
 The package CRS is the site's CRS (pinned by its first GPS line, else the
 first grid's); other grids are transformed into it on write. If that CRS
-changes (or a package
-predates a field this version of `TABLES` expects), every table is
+changes (or a package predates a field or table this version of `TABLES`
+expects), every table is
 rebuilt: the derived tables are simply overwritten, since they are fully
 refilled anew immediately afterward, but `picks` has no other source of
 truth, so its rebuild migrates every row into a fresh table and verifies
@@ -898,10 +898,10 @@ class SiteLayers(QObject):
         return len(changes)
 
     def _clear_derived_tables(self) -> None:
-        """No grids left: there is nothing to derive line/mark geometry
-        from. The tables were already created while a grid existed, so
-        clear them rather than leaving the last grid's stale features on
-        the map. `picks` is untouched, same as every other refill."""
+        """The site has no grid and no line (or no CRS), so there is nothing
+        to derive geometry from. The tables were already created while a grid
+        or line existed, so clear them rather than leaving the last
+        features on the map. `picks` is untouched, same as every other refill."""
         for name in DERIVED:
             if name not in self.layers:
                 continue  # a site that has never had a grid: nothing to clear
@@ -1394,12 +1394,12 @@ class SiteLayers(QObject):
         """The CRS `line`'s own coordinates are in: its grid's, or for a GPS
         line the CRS its track was projected into. None for a line placed
         by a grid the site no longer has."""
-        grid = self.session.grid_for_line(line)
-        if grid is not None:
-            return grid.crs
+        # A GPS line's coordinates are in its own CRS even when it names a
+        # grid (M17c), so the placement is asked first.
         if isinstance(line.placement, TrackPlacement):
             return line.placement.crs
-        return None
+        grid = self.session.grid_for_line(line)
+        return None if grid is None else grid.crs
 
     def _line_points(self, line: Line, frames: dict[str, Grid]) -> list[QgsPointXY] | None:
         """World points for every trace of `line`, or None when the line
@@ -2099,7 +2099,16 @@ class SiteLayers(QObject):
             stroke.setUseCustomDashPattern(True)
             stroke.setCustomDashVector([3.0, 2.0])  # mm on, mm off
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
-        # M17a: a GPS line has no grid; its feature carries grid_id "".
+        # M17a: a GPS line has no grid; its feature carries grid_id "". The
+        # row is only there when such a line is, so a tape-only site's legend
+        # is as it always was.
+        keys = self.session.keys()
+        if not any(
+            isinstance(self.session.line_for_key(k).placement, TrackPlacement) for k in keys
+        ):
+            self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
+            self.layers["lines"].triggerRepaint()
+            return
         symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
         symbol.setColor(QColor(NO_GRID_COLOUR))
         symbol.setWidth(0.2)

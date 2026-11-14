@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -32,7 +33,9 @@ from qgis.core import (
     QgsMapLayer,
     QgsPointXY,
     QgsProject,
+    QgsProviderRegistry,
     QgsVectorFileWriter,
+    QgsVectorLayer,
     QgsWkbTypes,
 )
 from qgis.gui import QgsMapCanvas
@@ -53,7 +56,7 @@ def fix(trace, quality=4):
     return (trace, LAT0 + trace * 0.1 / M_PER_DEG, LON0, quality)
 
 
-def gps_line(folder, name, qualities, n_traces=200):
+def gps_line(folder, name, qualities, n_traces=200, travel_shift=0.0):
     """A line at 10 traces a metre with a fix at each trace of `qualities`."""
     path = synthetic_gps_dzt(
         folder,
@@ -62,12 +65,13 @@ def gps_line(folder, name, qualities, n_traces=200):
         n_traces=n_traces,
         traces_per_metre=10.0,
     )
-    return open_gps(path)
+    return open_gps(path, travel_shift=travel_shift)
 
 
-def open_gps(path, crs=CRS):
+def open_gps(path, crs=CRS, travel_shift=0.0, grid_id=None):
     log = read_dzg(dzg_for(path))
     placement = track_from_log(log, lonlat_to_xy(QgsCoordinateReferenceSystem(crs)), crs)
+    placement = dataclasses.replace(placement, travel_shift=travel_shift, grid_id=grid_id)
     return Line.open(path, placement)
 
 
@@ -128,7 +132,7 @@ def test_the_new_table_and_fields_are_declared():
 
 def test_a_gps_line_with_no_grid_is_drawn_along_its_track(site):
     session, layers, tmp = site
-    line = gps_line(tmp / "raw", "FILE__001.DZT", {25: 4, 175: 4})
+    line = gps_line(tmp / "raw", "FILE__001.DZT", {25: 4, 175: 4}, travel_shift=0.24)
     session.add_lines([line])
 
     f = feature(layers, "lines")
@@ -140,7 +144,8 @@ def test_a_gps_line_with_no_grid_is_drawn_along_its_track(site):
     assert f["grid_id"] == ""
     for tape_only in ("axis", "offset_m", "start_along_m", "direction"):
         assert f[tape_only] == NULL, tape_only
-    walked = float(line.placement.distance_along(line.n_traces, line.header)[-1])
+    d = line.placement.distance_along(line.n_traces, line.header)
+    walked = float(d[-1] - d[0])
     assert f["length_m"] == pytest.approx(walked)
     assert f["length_m"] == pytest.approx(f.geometry().length(), abs=1e-6)
     assert f["without_rtk_m"] == pytest.approx(0.0)
@@ -321,6 +326,14 @@ def test_an_older_package_gains_the_new_fields_and_table(site):
     project = QgsProject.instance()
     project.clear()
 
+    # An older package: the old `lines` fields, and no `rtk_gaps` table at all.
+    connection = (
+        QgsProviderRegistry.instance()
+        .providerMetadata("ogr")
+        .createConnection(str(session.gpkg_path), {})
+    )
+    connection.dropVectorTable("", "rtk_gaps")
+    del connection
     old = QgsFields()
     for name, kind in TABLES["lines"][1]:
         if name in ("placed_by", "without_rtk_m"):
@@ -347,6 +360,10 @@ def test_an_older_package_gains_the_new_fields_and_table(site):
     )
     assert writer.hasError() == QgsVectorFileWriter.WriterError.NoError
     del writer
+    assert not QgsVectorLayer(f"{session.gpkg_path}|layername=rtk_gaps", "x", "ogr").isValid()
+    stale = QgsVectorLayer(f"{session.gpkg_path}|layername=lines", "x", "ogr")
+    assert "placed_by" not in [f.name() for f in stale.fields()]
+    del stale
 
     again = SiteSession()
     layers2 = SiteLayers(again, project=project)
@@ -356,7 +373,9 @@ def test_an_older_package_gains_the_new_fields_and_table(site):
             n for n, _ in TABLES["lines"][1]
         ]
         assert layers2.feature_count("lines") == 1
-        assert "rtk_gaps" in layers2.layers
+        assert [f.name() for f in layers2.layers["rtk_gaps"].fields() if f.name() != "fid"] == [
+            n for n, _ in TABLES["rtk_gaps"][1]
+        ]
         assert layers2.feature_count("rtk_gaps") == 1
     finally:
         layers2.detach()
@@ -372,3 +391,40 @@ def test_the_second_surveys_dropout_is_drawn(tape_site):
     bridges = [f for f in layers.layers["rtk_gaps"].getFeatures() if f["kind"] == "bridge"]
     assert len(bridges) == 1
     assert (bridges[0]["first_trace"], bridges[0]["last_trace"]) == (149, 246)
+
+
+def test_a_gps_line_naming_a_grid_in_another_crs_is_drawn_in_its_own_crs(site):
+    session, layers, tmp = site
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    path = synthetic_gps_dzt(
+        tmp / "raw",
+        "FILE__001.DZT",
+        [fix(25), fix(75, 5), fix(125), fix(185)],
+        traces_per_metre=10.0,
+    )
+    (tmp / "raw" / "FILE__001.DZX").write_text(DZX.format(name="FILE__001.DZT"))
+    line = open_gps(path, grid_id="A")
+    session.add_lines([line])
+    assert session.grid_for_line(line) is not None  # the hazard: a grid in another CRS
+
+    expected = line.trace_coords({})
+    assert np.allclose(np.array(vertices(feature(layers, "lines"))), expected, atol=1e-6)
+    assert feature(layers, "lines")["grid_id"] == ""
+    m = feature(layers, "marks").geometry().asPoint()
+    assert (m.x(), m.y()) == pytest.approx(tuple(expected[50]), abs=1e-6)
+    gap = feature(layers, "rtk_gaps", kind="bridge")
+    assert np.allclose(np.array(vertices(gap)), expected[25:126], atol=1e-6)
+    session.open_line("raw/FILE__001.DZT")
+    session.add_pick("raw/FILE__001.DZT", 80, 20.0)
+    p = next(layers.layers["picks"].getFeatures()).geometry().asPoint()
+    assert (p.x(), p.y()) == pytest.approx(tuple(expected[80]), abs=1e-6)
+
+
+def test_a_tape_only_site_has_no_no_grid_row(tape_site):
+    session, layers, tmp = tape_site
+    session.add_grid(Grid("A", (500.0, 700.0), 12.0, 5.0, 11.0, "EPSG:32616", 0.5))
+    p = synthetic_dzt(tmp / "raw", "FILE__001.DZT", n_traces=60)
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.5, 0.0, 1, p.stem))])
+    cats = list(layers.layers["lines"].renderer().categories())
+    assert [str(c.value()) for c in cats] == ["A"]
+    assert [c.label() for c in cats] == ["A"]
