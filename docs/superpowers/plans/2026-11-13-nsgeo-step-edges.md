@@ -320,8 +320,9 @@ mean.
   - Update `test_every_declared_bound_is_enforced_by_build_step` for `min_exclusive`: the edge
     itself is refused there, and `edge + 1e-9` is accepted.
   - **One-sample windows** on FILE__007 (`dt_ns` 0.21653):
-    - dewow at `window_ns` 0.1 and 0.2, and AGC at 0.2, raise matching `"is shorter than one sample"`
-      and `"is one sample at this line's 0.217 ns sampling; use 0.33 ns or more."` respectively;
+    - dewow at `window_ns` 0.1 raises matching `"is shorter than one sample"`;
+    - dewow and AGC at 0.2 raise matching
+      `"is one sample at this line's 0.217 ns sampling; use 0.33 ns or more."`;
     - 0.33 ns runs for both.
     - Replace the `match="window_ns"` in `test_dewow_rejects_window_shorter_than_one_sample`.
   - **Bandpass** on FILE__007:
@@ -495,7 +496,9 @@ mean.
     - no NaN anywhere in the output.
   - `test_the_difference_view_works_across_it`: a `StepStack` holding `trace_stack(5)` on
     FILE__007. `difference(0)` has the input's shape and equals input minus output.
-  - `test_a_window_longer_than_the_line_averages_the_whole_line`: window 10000.
+  - `test_a_window_longer_than_the_line_is_capped_at_its_length`: on FILE__007, `trace_stack`
+    at window 10000 gives exactly what it gives at window 635 (the line's trace count), and
+    doesn't raise.
   - Registration:
     - `TITLES["trace_stack"] = "Trace stack"`, and the Filters list
       `["dewow", "bandpass", "trace_stack"]` in `test_step_titles.py`;

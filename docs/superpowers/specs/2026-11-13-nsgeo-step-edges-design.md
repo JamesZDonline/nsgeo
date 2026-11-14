@@ -320,7 +320,9 @@ A new step in a new module, `processing/trace_stack.py`. Not `stack.py`, which h
   along the lines of *"Averages each trace with its neighbours: this many traces in all, centred on
   it. 1 leaves the line unchanged."*
 - `apply`: `running_mean(rg.data, window_traces, axis=1)`. Window 1 is the identity. A window
-  longer than the line averages the whole line, as in sliding background. An even window sits half
+  longer than the line is capped at the line's length, as in sliding background. Each trace then
+  averages the traces within half that window on either side, which is the whole line only at its
+  middle. An even window sits half
   a trace off-centre, as sliding background's does today; not refused.
 - **Keeps the trace count and the time axis.** Picks, velocity fits, slice binning and the profile
   all index traces as they are (#114 explains why a decimating stack is a different step).
