@@ -13,6 +13,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pytest
+from nsgeo.io.dzt import read_header, read_samples
+from nsgeo.processing.base import Radargram
+
 DATA = Path(__file__).parent / "data" / "local"
 
 
@@ -33,3 +38,17 @@ GRID2_LINES = dzt_files(DATA / "grid2")
 """The sixty lines of Nashville City Cemetery 2023 Grid 2 (29.96 m), links to the raw files.
 
 Grid 1 is `GPS_LINES`. Added for #159, whose per-line tests need a second survey."""
+
+
+def real_radargram(path: Path) -> Radargram:
+    """Channel 0 of the DZT at `path` as a Radargram; skips when the file is missing (CI)."""
+    if not path.exists():
+        pytest.skip(f"{path.name} is not in tests/data/local")
+    header = read_header(path)
+    tpm = header.traces_per_metre
+    return Radargram(
+        data=np.asarray(read_samples(path, header)[0], dtype=float),
+        dt_ns=header.dt_ns,
+        t0_ns=header.position_ns,
+        dx_m=1.0 / tpm if tpm > 0 else None,
+    )

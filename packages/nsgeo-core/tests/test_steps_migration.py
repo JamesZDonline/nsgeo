@@ -15,7 +15,7 @@ from nsgeo.io.dzt import read_header, read_samples
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.migration import migrate_fk
 
-from tests.real_data import CAMPUS_LINES
+from tests.real_data import CAMPUS_LINES, DATA, real_radargram
 
 # The real local lines: dt 0.2165 ns, 60 traces/m, HS350US at 350 MHz, and
 # M13's measured velocity.
@@ -519,3 +519,62 @@ def test_the_step_passes_its_aperture_through_to_the_solver():
     narrow = build_step("migrate_fk", velocity_m_ns=V, max_dip_deg=20.0).apply(rg)
 
     assert _arc_reach(narrow.data, apex_trace) < 0.01 * _arc_reach(wide.data, apex_trace)
+
+
+# The user's hand fits on Nashville City Cemetery 2023 Grid 2, saved 2026-11-06 in the
+# gitignored hand-fit site file. The times are after the default Time zero, which sits at
+# -0.476 ns on the radar clock; the fits were saved on the radar clock (19.947 and 19.363 ns).
+REAL_DIFFRACTIONS = (  # (file in grid2/, apex trace, apex ns after time zero, velocity m/ns)
+    ("FILE__033.DZT", 1375, 20.42, 0.1027),
+    ("FILE__032.DZT", 386, 19.84, 0.1061),
+)
+
+
+def _real_focus(img, apex_row, apex_trace, dt_ns, dx_m):
+    """(focus, d_row, d_trace) at the strongest sample near the apex.
+
+    The window is +-10 ns x +-1.5 m around the hand apex. The peak is searched from 1 ns
+    above to 4 ns below it and +-0.3 m across. Focus is `_focus` (17 x 17 box) over that
+    window: the synthetic test's measure, with the window as the total.
+    """
+    hr, ht = round(10 / dt_ns), round(1.5 / dx_m)
+    r0, t0 = max(apex_row - hr, 0), max(apex_trace - ht, 0)
+    win = img[r0 : apex_row + hr + 1, t0 : apex_trace + ht + 1]
+    ar, at = apex_row - r0, apex_trace - t0
+    lo, hi, st = round(1 / dt_ns), round(4 / dt_ns), round(0.3 / dx_m)
+    sub = np.abs(win[ar - lo : ar + hi + 1, at - st : at + st + 1])
+    pr, pt = np.unravel_index(np.argmax(sub), sub.shape)
+    pr, pt = pr + ar - lo, pt + at - st
+    return _focus(win, pr, pt), int(pr - ar), int(pt - at)
+
+
+def _migrated_focus(rg, velocity, apex_row, apex_trace):
+    out = build_step("migrate_fk", velocity_m_ns=velocity).apply(rg)
+    return _real_focus(out.data, apex_row, apex_trace, rg.dt_ns, rg.dx_m)
+
+
+@pytest.mark.parametrize("name, apex_trace, t_ns, v", REAL_DIFFRACTIONS)
+def test_a_real_diffraction_collapses_at_its_measured_velocity(name, apex_trace, t_ns, v):
+    """Two hand-fitted diffractions on Grid 2 collapse at the velocity the user fitted.
+
+    There is no deep case, and there is none to be had on the local data. Below 50 ns the
+    median signal is 1.3-1.6x the noise of the 80-90 ns band, on the campus lines, Grid 1 and
+    Grid 2. A search of all 130 local lines at 40-85 ns found only flat layers. The deep
+    coverage is the synthetic `test_a_point_diffractor_collapses_to_its_apex`.
+    """
+    rg = real_radargram(DATA / "grid2" / name)
+    for step in ("time_zero", "dewow", "background_mean"):
+        rg = build_step(step).apply(rg)
+    apex_row = round(t_ns / rg.dt_ns)
+
+    before, _, _ = _real_focus(rg.data, apex_row, apex_trace, rg.dt_ns, rg.dx_m)
+    focus, d_row, d_trace = _migrated_focus(rg, v, apex_row, apex_trace)
+    slow, _, _ = _migrated_focus(rg, v * 0.6, apex_row, apex_trace)
+    fast, _, _ = _migrated_focus(rg, v * 1.6, apex_row, apex_trace)
+
+    assert abs(d_trace) <= 2
+    assert 0.5 <= d_row * rg.dt_ns <= 2.0
+    assert focus > 0.04
+    assert focus >= 2 * before
+    assert focus > slow
+    assert focus > fast
