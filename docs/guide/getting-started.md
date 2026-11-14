@@ -334,8 +334,9 @@ If a line went in with the wrong start, offset, direction or grid, right-click
 the grid and choose **Edit lines…**. A table opens with every line on the grid,
 in survey order. You can change a line's **Label**, **Offset (m)**, **Dir**,
 **Start (m)** and **Grid**. Use **↑** and **↓** to set the order the Survey
-panel shows. A **Grid** box takes the mouse wheel only after you click it, so
-scrolling the table never changes a line's grid.
+panel shows. Closing a **Grid** list hands the
+keyboard back to the table, so scrolling the table never changes a line's grid.
+A **Grid** box takes the mouse wheel only when you reach it with **Tab**.
 
 The panel under the table changes every selected line at once. Type a start and
 press **Set**, press **Snap to grid edge**, type an amount and press **Shift**

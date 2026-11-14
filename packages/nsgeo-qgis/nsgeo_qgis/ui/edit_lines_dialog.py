@@ -43,7 +43,7 @@ from nsgeo.geometry import Grid, GridPlacement
 from nsgeo.project import ProjectError
 from qgis.core import Qgis, QgsMessageLog
 from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QColor, QGuiApplication
+from qgis.PyQt.QtGui import QColor, QFocusEvent, QGuiApplication
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -158,6 +158,20 @@ class _PopupFocusCombo(QComboBox):
         super().hidePopup()
         try:
             self._give_back()
+        except Exception as exc:  # noqa: BLE001 -- a Qt override
+            QgsMessageLog.logMessage(
+                f"grid combo focus: {exc!r}", "nsgeo", Qgis.MessageLevel.Warning
+            )
+
+    def focusInEvent(self, event: QFocusEvent) -> None:  # noqa: N802 -- Qt override
+        # Qt 6: the popup is its own window and the dialog is re-activated
+        # after hidePopup returns, so Qt's popup-close focus restore can land
+        # here afterwards. Focus coming back from our own popup goes on to
+        # the table.
+        super().focusInEvent(event)
+        try:
+            if event.reason() == Qt.FocusReason.PopupFocusReason:
+                self._give_back()
         except Exception as exc:  # noqa: BLE001 -- a Qt override
             QgsMessageLog.logMessage(
                 f"grid combo focus: {exc!r}", "nsgeo", Qgis.MessageLevel.Warning

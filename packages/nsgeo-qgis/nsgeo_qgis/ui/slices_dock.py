@@ -2167,7 +2167,10 @@ class SlicesDock(QgsDockWidget):
             # Prepared first, so the apply below is checked against the cube's
             # own grid (`set_source` has already moved the engine's choice),
             # not the one the restore left: its level limit and frame cap are
-            # that grid's.
+            # that grid's. The spin restores above armed the debounce: stop
+            # it so set_source's nested cancel loop cannot fire an apply
+            # against the old grid.
+            self._debounce.stop()
             self.prepare()
             if self._pending_z_shift:
                 # An old record's range is still on the radar clock: nothing

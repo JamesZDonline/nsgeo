@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
@@ -722,6 +724,11 @@ def test_a_grid_popup_dismissed_with_escape_does_not_keep_the_wheel(table):
     assert combo.view().isVisible(), "the click opened the popup"
     QTest.keyClick(combo.view(), Qt.Key.Key_Escape)
     assert not combo.view().isVisible()
+    # Qt 6 re-activates the dialog asynchronously: wait for the outcome.
+    deadline = time.monotonic() + 1.0
+    while not dialog.table.hasFocus() and time.monotonic() < deadline:
+        QApplication.processEvents()
+        QTest.qWait(10)
     assert dialog.table.hasFocus()
     QApplication.sendEvent(combo, wheel_event(-120))
     assert [dialog.table.cellWidget(r, COL_GRID).currentText() for r in range(6)] == ["Grid5"] * 6
