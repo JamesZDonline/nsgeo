@@ -424,10 +424,11 @@ A step whose name ends in **…** asks for values first. For example, **Bandpass
 needs its cut-off frequencies. Hover over a step in the list to see its short
 name (such as `gain_agc`), which is what the survey file stores.
 
-A step whose setting cannot work on the line (for example a window shorter than
-two samples) is refused with a message saying which setting to change. If a
-project holds such a saved setting, it opens with that step turned off and a
-note in the nsgeo log.
+A setting that cannot work (for example a window shorter than two samples on
+this line) is refused with a message saying which setting to change. If a
+project you open holds a setting nsgeo no longer accepts at all, such as an
+epsilon of 0 or a missing value, that step is turned off, reset or removed,
+and the nsgeo log says what changed.
 
 - Select a step to see and change its settings below the list.
 - Untick a step to switch it off without removing it. Use **↑** and **↓**, or

@@ -295,7 +295,7 @@ Notes:
 - They are collected on the loaded site, for example `site.load_notes: list[str]`. They are not
   saved.
 - Each names where (line file name or label, or preset name), the step's title, the setting's
-  label, the old value, and what happened. Example: *"Line FILE__003.DZT: Automatic gain control is
+  label, the old value, and what happened. Example: *"Line FILE__003.DZT (grid Grid2): Automatic gain control is
   turned off. Its Epsilon was 0.0, which must be greater than 0; it is now 1e-12."*
 - Presets are stored repaired in `site.presets`, so applying one later works. Every other place
   that rebuilds steps from saved dicts reads these repaired copies: the session's preset and
