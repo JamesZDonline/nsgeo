@@ -112,8 +112,8 @@ def test_a_fading_leg_drops_the_faded_traces():
     assert all(abs(d[0] - 100) <= 35 for d in dots)
     # Not 2 sigma: at the planted noise sigma is about 0.1%, and the end dots,
     # read where the leg has faded to the floor, carry about five times the
-    # apex's crossing noise, so 2 sigma misses on about a third of seeds, each
-    # time by under 0.35% (Task 5's 100-seed sweep).
+    # apex's crossing noise. Over 100 seeds 2 sigma misses on 34, each time by
+    # under 0.35% (this seed: 0.31% against a sigma of 0.15%).
     assert _fit(dots, x).v_m_ns == pytest.approx(0.07, rel=0.01)
 
 
@@ -226,21 +226,10 @@ def _layered_scene(t0_ns, v_m_ns, half_traces, layer_phase, seed):
 @pytest.mark.parametrize(
     ("t0_ns", "v_m_ns", "half_traces", "layer_phase", "box"),
     [
-        pytest.param(
-            15.0,
-            0.07,
-            25,
-            0.75,
-            TraceBox(65, 135, 13.0, 21.2),
-            id="15ns",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="a layer 0.13 ns ahead of the apex's edge, and layers as strong as the "
-                "leg where the box ends, pull the zero crossings there; a known limit",
-            ),
-        ),
-        pytest.param(25.0, 0.078, 27, 0.375, TraceBox(62, 137, 23.0, 29.5), id="25ns"),
+        (15.0, 0.07, 25, 0.75, TraceBox(65, 135, 13.0, 21.2)),
+        (25.0, 0.078, 27, 0.375, TraceBox(62, 137, 23.0, 29.5)),
     ],
+    ids=["15ns", "25ns"],
 )
 @pytest.mark.parametrize("seed", [1, 2, 3])
 def test_a_hyperbola_among_layers_is_traced_to_its_velocity(
@@ -272,6 +261,24 @@ def test_no_dot_jumps_a_lobe(seed):
     assert np.abs(times - hyperbola_time(fit, x[traces])).max() <= REAL_PERIOD_NS / 4
 
 
+@pytest.mark.parametrize("seed", range(20))
+def test_a_precursor_growing_down_the_legs_does_not_lift_the_dots(seed):
+    # The legs fade into layers as strong as the real ones, so the lobe ahead
+    # of the band grows against the band's main lobe down the legs: from about
+    # 0.2 at the apex to past 0.5 near the box's ends, as on the real lines
+    # (0.25 at the apex, 0.51 at the last clicked dot, 0.75 beyond). Taking the
+    # crossing anywhere within a quarter period of where the lobe is expected
+    # followed the layers there, and the dots floated off the band (#140,
+    # ruling R13). Locked to a narrow window, they stay on the planted edge.
+    data, t, x = _layered_scene(15.0, 0.07, 25, 0.25, seed)
+    dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 13.0, 24.0))
+    traces = np.array([d[0] for d in dots])
+    times = np.array([d[1] for d in dots])
+    truth = np.sqrt(15.0**2 + 4.0 * (x[traces] - x[100]) ** 2 / 0.07**2)
+    assert np.abs(times - truth).max() <= REAL_PERIOD_NS / 8
+    assert _within_2_sigma(_fit(dots, x), 0.07)
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="a flat layer through the apex's own edge shifts the edges there; a known limit",
@@ -293,7 +300,11 @@ def test_a_backwards_box_is_normalised():
 
 
 def test_a_few_survivors_are_all_returned_not_just_the_apex():
-    # Fewer cleaned edges than max_dots must all come back (once returned only the apex).
+    # Fewer cleaned edges than max_dots must all come back (once returned only
+    # the apex). A box only as wide as the flat top no longer serves: the scan
+    # cannot place a curve in nine traces, and the window takes no crossing
+    # far from it.
     data, t, x = _scene([Planted(100, 15.0, 0.07)])
-    dots = trace_hyperbola(data, t, x, TraceBox(96, 104, 10.0, 30.0))
-    assert len(dots) >= ht.MIN_DOTS
+    dots = trace_hyperbola(data, t, x, TraceBox(60, 140, 10.0, 30.0), max_dots=1000)
+    assert len(dots) > ht.MAX_DOTS
+    assert len({d[0] for d in dots}) == len(dots)

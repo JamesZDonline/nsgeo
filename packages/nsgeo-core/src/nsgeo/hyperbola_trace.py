@@ -21,12 +21,14 @@ from the stack of the traces along the scan's curve, so every trace follows
 the same one. A zero crossing does not depend on how bright the trace is, so
 the edge does not drift deeper as a leg fades.
 
-Every dot stays on that lobe. A trace's crossing counts only within a quarter
-period of where the lobe is expected, and of the fit through the dots: the
-next crossing into a lobe of the same sign is a whole period away. Reading a
-window that reached further below the expected crossing than above it, an
-earlier draft took the next lobe down wherever a leg's crossing came early,
-and dots on a leg jumped down a level (#140).
+Every dot stays on that lobe: the crossing is locked to it (ruling R13). On
+each trace it is looked for only in a narrow window around where the lobe is
+expected, the scan's curve plus the lobe's offset on the stack. A trace with
+no crossing there gives no dot; the tracer never takes the next lobe up or
+down. A window that reached further below the expected crossing than above it
+took the next lobe down wherever a leg's crossing came early, and dots on a
+leg jumped down a level; a window a quarter period wide either way followed
+the layers a faded leg runs into, and the dots floated off the band (#140).
 
 This is not the Time zero step's rule (0.2 of the direct wave's peak); the
 small fixed offset between the two is a follow-up. ``trace_hyperbola`` takes
@@ -74,13 +76,21 @@ _COARSE_TRACES = 96
 #: The first strong lobe is the earliest lobe on the stack, within a period
 #: before its peak, that reaches this fraction of that peak. On the stacks of
 #: the author's hand fits, the lobes ahead of the one whose crossing they
-#: clicked reach 0.10-0.30 of the peak (two reach 0.48 and 0.49), and the
-#: clicked lobe 0.54-1.00 (one 0.498, just under this). The measured wavelet's
-#: precursor is 0.21 and its first strong lobe 0.69 (tests/planted.py,
-#: REAL_WAVELET).
+#: clicked reach 0.14-0.47 of the peak and the clicked lobe 0.50-1.00, on all
+#: but two (one clicked the lobe after a 0.56 one, one a 0.39 lobe). The
+#: measured wavelet's precursor is 0.21 and its first strong lobe 0.69
+#: (tests/planted.py, REAL_WAVELET).
 _STRONG_LOBE = 0.5
-#: A dot lies within this many periods of where its lobe's crossing is
-#: expected, and of the fit through the dots.
+#: Each trace's crossing is looked for only this many periods either side of
+#: where the lobe is expected. Near the apex of the author's hand fits, where
+#: the band is clearest, the crossing lies within 0.097 periods of that on 80%
+#: of traces, 0.124 on 90% and 0.150 on 95%; on the legs beyond the last
+#: clicked dot, half the traces are further off than 0.175. A half-width of
+#: 0.125 still lets 90% of the legs reach 90% of the clicked extent (0.1 and
+#: 0.075: 87%).
+_LOBE_WINDOW_PERIODS = 0.125
+#: No dot lies further than this many periods from the fit through the dots:
+#: the next crossing into a lobe of the same sign is a whole period away.
 _LOBE_TOLERANCE_PERIODS = 0.25
 #: A trace's lobe must peak at least this fraction of the lobe's peak on the
 #: band's strongest traces. Where a leg fades below it, the leg ends. On the
@@ -326,28 +336,31 @@ def trace_hyperbola(
     if best < _DETECT_Z * noise:
         raise ValueError("No hyperbola was found in the box.")
 
-    # The lobe to follow, chosen once on the stack along the scan's curve.
+    # The lobe to follow, chosen once on the stack of the box (as drawn) along
+    # the scan's curve: the only place "strong" is judged.
     curve = np.sqrt(t0**2 + 4.0 * (x_box - apex_x) ** 2 / v**2)
-    lobe = _first_strong_lobe(*_stack_along(img, box_times, curve, period), period)
+    lobe = _first_strong_lobe(*_stack_along(box_data, box_times, curve, period), period)
     if lobe is None:
         raise _too_faint()
     lag, sign = lobe
+    window = _LOBE_WINDOW_PERIODS * period
     tolerance = _LOBE_TOLERANCE_PERIODS * period
 
-    # On each trace, the crossing into that lobe nearest where it is expected.
+    # On each trace, the crossing into that lobe in a narrow window around
+    # where it is expected; none there, no dot.
     found: list[tuple[int, float, float]] = []  # (box column, edge, lobe peak)
     for col in range(n_box_tr):
         expected = curve[col] + lag
         if not box_times[0] <= expected <= box_times[-1]:
             continue
-        lo = max(0, int(np.searchsorted(box_times, expected - tolerance)) - 1)
-        hi = int(np.searchsorted(box_times, expected + tolerance + 0.5 * period, "right"))
+        lo = max(0, int(np.searchsorted(box_times, expected - window)) - 1)
+        hi = int(np.searchsorted(box_times, expected + window + 0.5 * period, "right"))
         edges, peaks = _crossings(box_data[lo:hi, col], box_times[lo:hi], sign)
-        if edges.size == 0:
+        inside = np.abs(edges - expected) <= window
+        if not inside.any():
             continue
-        k = int(np.argmin(np.abs(edges - expected)))
-        if abs(edges[k] - expected) <= tolerance:
-            found.append((col, float(edges[k]), float(peaks[k])))
+        k = int(np.argmin(np.where(inside, np.abs(edges - expected), np.inf)))
+        found.append((col, float(edges[k]), float(peaks[k])))
     if not found:
         raise _too_faint()
     cols = np.array([f[0] for f in found])
