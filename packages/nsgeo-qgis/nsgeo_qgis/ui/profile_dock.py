@@ -83,6 +83,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
+from nsgeo.hyperbola_trace import TraceBox, trace_hyperbola
 from nsgeo.model import is_cut_key
 from nsgeo.processing import (
     TIME_BASE_RADAR,
@@ -113,6 +114,7 @@ from qgis.core import Qgis
 from qgis.gui import QgsDockWidget
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -255,6 +257,7 @@ class ProfileDock(QgsDockWidget):
     pick_requested = pyqtSignal(str, int, float)
     gain_points_changed = pyqtSignal(list)
     difference_cleared = pyqtSignal()
+    velocity_mode_requested = pyqtSignal()  # relayed from the view; wired in the plugin
 
     def __init__(self, session: SiteSession, parent: QWidget | None = None) -> None:
         super().__init__("nsgeo Profile", parent)
@@ -272,6 +275,11 @@ class ProfileDock(QgsDockWidget):
         # points are empty after it (#128). Apply to line / grid act on that
         # fit; every reset of `_velocity_points` ends it too.
         self._just_saved: tuple[str, str] | None = None
+        # Why the last box drew nothing, and whether the working dots came from
+        # a trace. Both show in the velocity strip's note and end with the next
+        # edit, Clear, Save fit, a line switch or velocity mode going off.
+        self._box_note = ""
+        self._dots_traced = False
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
         # (line key, fit id) the velocity dialog has selected, drawn bold.
@@ -429,6 +437,8 @@ class ProfileDock(QgsDockWidget):
         self.view.pick_requested.connect(self._pick)
         self.view.velocity_point_requested.connect(self._on_velocity_point_requested)
         self.view.velocity_point_discarded.connect(self._on_velocity_point_discarded)
+        self.view.velocity_box_drawn.connect(self._on_velocity_box_drawn)
+        self.view.velocity_mode_requested.connect(self.velocity_mode_requested)
         self.apply_line_button.clicked.connect(self._apply_velocity_to_line)
         self.apply_grid_button.clicked.connect(self._apply_velocity_to_grid)
         self.save_fit_button.clicked.connect(self._save_velocity_fit)
@@ -698,6 +708,7 @@ class ProfileDock(QgsDockWidget):
         # as if it belonged here.
         self._velocity_points = []
         self._just_saved = None
+        self._reset_box_state()
         self.view.set_velocity_fit([], [])
         self.view.set_saved_velocity_fits([])
         self._difference_index = -1
@@ -1086,6 +1097,7 @@ class ProfileDock(QgsDockWidget):
         self.velocity_label.setText("")
         self._velocity_points = []
         self._just_saved = None
+        self._reset_box_state()
         self._update_velocity_fit()
         self.channel_combo.hide()
 
@@ -1186,6 +1198,7 @@ class ProfileDock(QgsDockWidget):
         self._velocity_mode = bool(flag)
         if not self._velocity_mode:
             self._just_saved = None
+            self._reset_box_state()
         self.view.set_velocity_fit_mode(self._velocity_mode)
         self.velocity_strip.setVisible(self._velocity_mode)
         self._update_velocity_fit()
@@ -1214,12 +1227,103 @@ class ProfileDock(QgsDockWidget):
             if self._refuse_velocity_edit_on_preview():
                 return
             self._just_saved = None
+            self._reset_box_state()
             self._velocity_points.append(
                 (int(trace), float(retime_ns(float(time_ns), self.shown_zero_ns(), 0.0)))
             )
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not add the velocity point: {exc}", Qgis.MessageLevel.Critical)
+
+    def _reset_box_state(self) -> None:
+        self._box_note = ""
+        self._dots_traced = False
+
+    def _box_refusal(self) -> str:
+        """Why a box cannot be traced now, or "" (the preview is refused apart,
+        with an error). A cut never gets here in practice: Velocity is disabled
+        on one, and `_velocity_axis` refuses it if it does."""
+        if self._effective_difference_index >= 0:
+            return "Cannot trace a difference view. Turn the difference off to trace."
+        key = self._working_key
+        if key is None or not self.session.is_open or is_cut_key(key):
+            return ""
+        for step, enabled in self.session.stack_for(key, insert=False).entries:
+            if not enabled:
+                continue
+            if step.name == "migrate_fk":
+                return (
+                    f"Cannot trace with {step.title} on: it has already collapsed the "
+                    "hyperbolas. Switch it off in the processing stack to trace, or click "
+                    "the points by hand."
+                )
+            if step.name in ("amp_abs", "amp_square", "amp_envelope"):
+                return (
+                    f"Cannot trace with {step.title} on: it removes the edge the tracer "
+                    "follows. Switch it off in the processing stack to trace, or click "
+                    "the points by hand."
+                )
+        return ""
+
+    def _time_zero_step(self) -> Any:
+        """The working line's enabled time_zero step, or None."""
+        key = self._working_key
+        if key is None or not self.session.is_open or is_cut_key(key):
+            return None
+        for step, enabled in self.session.stack_for(key, insert=False).entries:
+            if enabled and step.name == "time_zero":
+                return step
+        return None
+
+    def _on_velocity_box_drawn(
+        self, first_trace: int, last_trace: int, top_ns: float, bottom_ns: float
+    ) -> None:
+        try:
+            if self._refuse_velocity_edit_on_preview():
+                return
+            self._box_note = ""
+            self._dots_traced = False
+            reason = self._box_refusal()
+            if not reason:
+                try:
+                    self._trace_box(first_trace, last_trace, top_ns, bottom_ns)
+                except ValueError as exc:
+                    reason = str(exc)
+            if reason:
+                self._box_note = reason
+            self._update_velocity_fit()
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            _log(f"could not trace the box: {exc}", Qgis.MessageLevel.Critical)
+
+    def _trace_box(
+        self, first_trace: int, last_trace: int, top_ns: float, bottom_ns: float
+    ) -> None:
+        """Replace the working dots with the hyperbola traced in the box. Raises
+        `ValueError` with the reason, leaving the dots as they were."""
+        distance, _, _ = self._velocity_axis()
+        rg = self._shown_radargram
+        if rg is None:
+            raise ValueError("no radargram is drawn")
+        zero = self._line_zero()
+        shown = rg.zero_ns
+        # The box and the times are on the drawn axis; the fit's clock is the line's own.
+        times = retime_ns(rg.times_ns(), shown, zero)
+        box = TraceBox(
+            first_trace,
+            last_trace,
+            float(retime_ns(top_ns, shown, zero)),
+            float(retime_ns(bottom_ns, shown, zero)),
+        )
+        tz = self._time_zero_step()
+        fraction = float(tz.threshold) if tz is not None and tz.mode == "first_break" else 0.2
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            dots = trace_hyperbola(rg.data, times, distance, box, fraction=fraction)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._velocity_points = [(int(tr), float(retime_ns(t, zero, 0.0))) for tr, t in dots]
+        self._just_saved = None
+        self._dots_traced = True
 
     def _on_velocity_point_discarded(self, index: int) -> None:
         try:
@@ -1429,10 +1533,17 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
+            tz = self._time_zero_step()
+            sample_note = (
+                "Time zero is set at a sample here, so the traced edge may not line up with it."
+                if self._dots_traced and tz is not None and tz.mode == "sample"
+                else ""
+            )
+            time_zero_note = self._velocity_time_zero_note(
+                None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
+            )
             self.velocity_note.setText(
-                self._velocity_time_zero_note(
-                    None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
-                )
+                " ".join(n for n in (self._box_note, sample_note, time_zero_note) if n)
             )
             if self._preview_key is None and self._velocity_mode:
                 shown = self.shown_zero_ns()
@@ -1605,6 +1716,7 @@ class ProfileDock(QgsDockWidget):
             # The read-out says where the fit went (`_update_velocity_fit`).
             self._velocity_points = []
             self._just_saved = (key, fit_id)
+            self._reset_box_state()
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not save the velocity fit: {exc}", Qgis.MessageLevel.Critical)
@@ -1613,6 +1725,7 @@ class ProfileDock(QgsDockWidget):
         try:
             self._velocity_points = []
             self._just_saved = None
+            self._reset_box_state()
             self._update_velocity_fit()
         except Exception as exc:  # noqa: BLE001 -- see the module docstring
             _log(f"could not clear the velocity points: {exc}", Qgis.MessageLevel.Critical)

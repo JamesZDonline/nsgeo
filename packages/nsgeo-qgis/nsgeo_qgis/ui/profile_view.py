@@ -47,7 +47,7 @@ from nsgeo.velocity import VelocityModel
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QColor, QImage, QPainter, QPen
-from qgis.PyQt.QtWidgets import QWidget
+from qgis.PyQt.QtWidgets import QApplication, QWidget
 
 from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.qtcompat import event_pos
@@ -113,6 +113,11 @@ class ProfileView(QWidget):
     pick_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
     velocity_point_requested = pyqtSignal(int, float)  # trace index, two-way time (ns)
     velocity_point_discarded = pyqtSignal(int)  # index into the last points list
+    # A box dragged in velocity mode: first trace, last trace, top ns, bottom ns,
+    # on the drawn axis, ordered and clipped to the radargram.
+    velocity_box_drawn = pyqtSignal(int, int, float, float)
+    # Declared for the Ctrl/Cmd shortcut, which asks for velocity mode to be switched on.
+    velocity_mode_requested = pyqtSignal()
     view_changed = pyqtSignal()
     # Emitted once, on the release that ends a drag of the cutoff line, with
     # the snapped end time (ns). Always emitted, even for an unmoved line:
@@ -144,6 +149,10 @@ class ProfileView(QWidget):
         self._cutoff_offset = 0.0
         self._pick_mode = False
         self._velocity_mode = False
+        # The velocity gesture: where a left press began (local x, y), and the
+        # box dragged from it once the pointer has travelled far enough.
+        self._box_press: tuple[float, float] | None = None
+        self._box_rect: QRectF | None = None
         # The working hyperbola fit, in VIEW units (trace index, ns). The
         # view only paints it: converting to metres and fitting are the
         # dock's business, never this widget's.
@@ -342,6 +351,7 @@ class ProfileView(QWidget):
 
     def set_velocity_fit_mode(self, flag: bool) -> None:
         self._velocity_mode = bool(flag)
+        self._cancel_velocity_box()
         self.setCursor(Qt.CursorShape.CrossCursor if flag else Qt.CursorShape.ArrowCursor)
 
     def set_velocity_fit(
@@ -377,6 +387,7 @@ class ProfileView(QWidget):
         self._slice_band = None
         self._cutoff_ns = None
         self._cutoff_grab = None
+        self._cancel_velocity_box()
         self._message = "no line open"
         # A hover over the line left the resize cursor up, and only the next
         # hover over the image would reset it; with no line open there is
@@ -515,6 +526,7 @@ class ProfileView(QWidget):
             self._paint_selection(painter, r, t)
             self._paint_picks(painter, r, t)
             self._paint_velocity_fit(painter, r, t)
+            self._paint_velocity_box(painter, r)
             self._paint_cursor(painter, r, t)
             painter.setClipping(False)
             self._paint_axes(painter, r, t)
@@ -659,6 +671,24 @@ class ProfileView(QWidget):
         for x, y in self._pick_positions(t):
             xx, yy = r.left() + x, r.top() + y
             p.drawPolygon(QPointF(xx, yy), QPointF(xx - 5, yy - 9), QPointF(xx + 5, yy - 9))
+
+    def velocity_box_rect(self) -> QRectF | None:
+        """The box being dragged, in the view's local pixels (the same frame as
+        the transform), or None when no box is being drawn."""
+        return None if self._box_rect is None else QRectF(self._box_rect)
+
+    def _cancel_velocity_box(self) -> None:
+        self._box_press = None
+        if self._box_rect is not None:
+            self._box_rect = None
+            self.update()
+
+    def _paint_velocity_box(self, p: QPainter, r: QRect) -> None:
+        if self._box_rect is None:
+            return
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(SELECTION_EDGE, 1, Qt.PenStyle.DashLine))
+        p.drawRect(self._box_rect.translated(r.left(), r.top()))
 
     def _velocity_positions(self, t: ViewTransform) -> list[tuple[float, float]]:
         """Local (x, y) of each working fit point, in list order, so an
@@ -856,6 +886,7 @@ class ProfileView(QWidget):
             # it before deciding what this press is, or its stale state
             # would follow the next gesture and emit from the wrong one.
             self._abandon_stale_cutoff_grab()
+            self._cancel_velocity_box()
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             if self._pick_mode or shift:
                 # Only inside the radargram itself. This handler runs for
@@ -880,9 +911,9 @@ class ProfileView(QWidget):
                 # axis margin would author a point before the record starts.
                 if not (0 <= x < self.transform.width and 0 <= y < self.transform.height):
                     return
-                trace = self.transform.trace_at(x)
-                if trace is not None:
-                    self.velocity_point_requested.emit(trace, self.transform.time_of_y(y))
+                # Nothing is emitted yet: a click is told from a drag on release.
+                self._box_press = (x, y)
+                self._box_rect = None
                 return
             line = self._cutoff_y(self.transform)
             if line is not None and self._near_cutoff(x, y):
@@ -937,6 +968,13 @@ class ProfileView(QWidget):
                 self.view_changed.emit()
                 self.update()
                 return
+        if self._box_press is not None:
+            # Same lesson again: a release lost mid-drag leaves the press armed.
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._cancel_velocity_box()
+            else:
+                self._drag_velocity_box(x, y)
+                return
         if self._cutoff_grab is not None:
             # Same lesson as `_pan_last` above: trust the event's actual
             # buttons, not the bookkeeping. A release lost mid-drag (focus
@@ -985,6 +1023,18 @@ class ProfileView(QWidget):
             if trace is not None:
                 self.trace_hovered.emit(trace)
 
+    def _drag_velocity_box(self, x: float, y: float) -> None:
+        assert self.transform is not None and self._box_press is not None
+        px, py = self._box_press
+        reach = QApplication.startDragDistance()
+        if self._box_rect is None and abs(x - px) <= reach and abs(y - py) <= reach:
+            return  # a wobble: still a click
+        w, h = float(self.transform.width), float(self.transform.height)
+        x0, x1 = sorted((min(max(px, 0.0), w), min(max(x, 0.0), w)))
+        y0, y1 = sorted((min(max(py, 0.0), h), min(max(y, 0.0), h)))
+        self._box_rect = QRectF(x0, y0, x1 - x0, y1 - y0)
+        self.update()
+
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802
         try:
             self._handle_mouse_release(event)
@@ -1008,6 +1058,23 @@ class ProfileView(QWidget):
         # mousePressEvent ever arms `_press`/`_dragging` for, so it is the
         # only one release should act on here.
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._box_press is not None and self.transform is not None:
+            px, py = self._box_press
+            box = self._box_rect
+            self._box_press = None
+            self._box_rect = None
+            self.update()
+            t = self.transform
+            if box is None:
+                trace = t.trace_at(px)
+                if trace is not None:
+                    self.velocity_point_requested.emit(trace, t.time_of_y(py))
+            else:
+                a, b = t.trace_index_at(box.left()), t.trace_index_at(box.right())
+                self.velocity_box_drawn.emit(
+                    min(a, b), max(a, b), t.time_of_y(box.top()), t.time_of_y(box.bottom())
+                )
             return
         if self._cutoff_grab is not None:
             self._cutoff_grab = None
