@@ -564,3 +564,13 @@ def site3_factory(qgis_app, tmp_path):
 def site3(site3_factory):
     """Three adjacent 6 x 6 m synthetic grids, A, B and C, four lines each."""
     return site3_factory()
+
+
+@pytest.fixture(autouse=True)
+def _fold_settings(tmp_path, monkeypatch):
+    """Fold state never reaches a real QGIS settings file (#157 item 6)."""
+    from nsgeo_qgis.ui import folds
+    from qgis.PyQt.QtCore import QSettings
+
+    store = QSettings(str(tmp_path / "folds.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(folds, "fold_settings", lambda: store)

@@ -4046,3 +4046,18 @@ def test_a_dz_the_coarse_grid_cannot_take_is_not_drawn_and_is_not_a_toast(
     assert len(entries) == 1
     assert entries[0].text.startswith("Not drawn: Grid A: Too many levels")
     assert not any("Too many levels" in e for e in errors), "one place only"
+
+
+def test_the_normalisation_section_folds_and_is_remembered(plugin):
+    from nsgeo_qgis.ui import folds
+
+    dock = whole_site(plugin)
+    dock.setFloating(True)
+    dock.show()
+    _events()
+    group = dock.normalisation_panel.group
+    assert not group.isCollapsed()
+    group.setCollapsed(True)
+    _events()
+    assert group.isCollapsed()
+    assert folds.fold_settings().value("nsgeo/slices/folded/normalisation", type=bool) is True

@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import (
@@ -23,7 +24,6 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QWidget,
@@ -77,7 +77,7 @@ def _spin(maximum: float, step: float, suffix: str, tip: str) -> QDoubleSpinBox:
     return spin
 
 
-class FinishPanel(QGroupBox):
+class FinishPanel(QgsCollapsibleGroupBox):
     edited = pyqtSignal(str, object)  # (field, value): only a user's edit
 
     def __init__(self, parent: QWidget | None = None, *, metres_label: bool) -> None:

@@ -50,7 +50,7 @@ from nsgeo.slices import (
     window_times_ns,
 )
 from nsgeo.velocity import VelocityModel
-from qgis.gui import QgsDockWidget
+from qgis.gui import QgsCollapsibleGroupBox, QgsDockWidget
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QEvent, QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -99,6 +99,7 @@ from nsgeo_qgis.slices_plan import (
 )
 from nsgeo_qgis.ui import site_scope
 from nsgeo_qgis.ui.finish_panel import FinishPanel, busy_cursor
+from nsgeo_qgis.ui.folds import remember_folds
 from nsgeo_qgis.ui.profile_dock import grid_velocity_label
 from nsgeo_qgis.ui.refine_flow import RefineFlow
 from nsgeo_qgis.ui.site_panel import NormalisationPanel, SiteSourcePanel
@@ -125,6 +126,15 @@ def _snap_inside(value: float, decimals: int, *, upper: bool) -> float:
     elif not upper and snapped < value:
         snapped += step
     return round(snapped, decimals)
+
+
+COVERAGE_TIP = (
+    "Shows how many traces fell in each cell, instead of the amplitude.\n"
+    "Use it to see where your lines ran and where there is no data: blank cells had no line "
+    "through them.\n"
+    "In a Whole site preview each pixel shows the largest count among the cells under it, so "
+    "lines look wider than they are."
+)
 
 
 class ElidedLabel(QLabel):
@@ -511,7 +521,7 @@ class SlicesDock(QgsDockWidget):
         # ---- Resolution: the binning geometry, debounced (44 ms a
         # rebuild, spec 7.2 and trap 4) so a slider dragged through five
         # cell sizes in a second rebuilds once, not five times.
-        self.resolution_group = QGroupBox("Resolution")
+        self.resolution_group = QgsCollapsibleGroupBox("Resolution")
         resolution_form = QFormLayout(self.resolution_group)
 
         self.cell_spin = QDoubleSpinBox()
@@ -630,7 +640,7 @@ class SlicesDock(QgsDockWidget):
         # ---- Display: how the slice is coloured and stretched, never
         # what it contains -- spec 8's comparability-by-default,
         # legibility-on-demand split.
-        self.display_group = QGroupBox("Display")
+        self.display_group = QgsCollapsibleGroupBox("Display")
         display_form = QFormLayout(self.display_group)
 
         # #180: the plugin's palette and stretch, or the user's own QGIS
@@ -658,16 +668,7 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow("Palette", self.palette_combo)
 
         self.coverage_check = QCheckBox("Show coverage")
-        # Round 2, W6: "Don't know what this is doing." The view is the
-        # whole reason the cube stores a count alongside the mean (spec
-        # 6.2), and it is unreadable without being told what the numbers
-        # are.
-        self.coverage_check.setToolTip(
-            "Shows how many traces fell in each cell instead of the amplitude.\n"
-            "Cells no line crossed are left blank, so an empty bin is "
-            "distinguishable from a real zero reflection -- which is the "
-            "whole point of recording a count."
-        )
+        self.coverage_check.setToolTip(COVERAGE_TIP)
         display_form.addRow(self.coverage_check)
 
         # Ruling AN (M11 final review): the settings override spec 9.2
@@ -691,6 +692,11 @@ class SlicesDock(QgsDockWidget):
         display_form.addRow("Legend", self.legend_label)
 
         outer.addWidget(self.display_group)
+        # Folding, wired once all four panels exist (#157 item 6).
+        remember_folds("resolution", [self.resolution_group])
+        remember_folds("interpolation", [self.grid_finish, self.site_finish])
+        remember_folds("normalisation", [self.normalisation_panel.group])
+        remember_folds("display", [self.display_group])
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)

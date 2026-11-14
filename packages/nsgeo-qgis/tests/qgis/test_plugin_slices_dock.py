@@ -35,7 +35,8 @@ from nsgeo_qgis.slices_plan import (
     smallest_safe_cell,
     transform_names,
 )
-from nsgeo_qgis.ui.slices_dock import CanvasDepthScroll, SlicesDock
+from nsgeo_qgis.ui import folds
+from nsgeo_qgis.ui.slices_dock import COVERAGE_TIP, CanvasDepthScroll, SlicesDock
 from nsgeo_qgis.ui.warnings_panel import REFUSAL, Entry
 from nsgeo_qgis.velocity_records import line_label
 from plugin_testing import (
@@ -4554,3 +4555,94 @@ def test_real_lines_floor_at_0_2165_and_allow_1024_levels(qgis_app, tmp_path):
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
         dock.deleteLater()
+
+
+# ---- #157 item 6: sections that fold, and the coverage view explained ----
+
+FOLDING = ("resolution_group", "grid_finish", "display_group")
+
+
+def _shown(dock):
+    dock.setFloating(True)
+    dock.resize(420, 900)
+    dock.show()
+    QCoreApplication.processEvents()
+
+
+@pytest.mark.parametrize("name", FOLDING)
+def test_each_settings_section_folds_and_unfolds(docked, name):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    _ready(dock)
+    _shown(dock)
+    box = getattr(dock, name)
+    assert isinstance(box, QgsCollapsibleGroupBox)
+    open_height = box.height()
+    box.setCollapsed(True)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert box.isCollapsed()
+    assert box.height() < open_height
+    box.setCollapsed(False)
+    for _ in range(5):
+        QCoreApplication.processEvents()
+    assert not box.isCollapsed()
+    assert box.height() == open_height
+
+
+def test_source_position_and_warnings_do_not_fold(docked):
+    from qgis.gui import QgsCollapsibleGroupBox
+
+    dock, _ = docked
+    for name in ("source_group", "position_group", "warnings_panel"):
+        assert not isinstance(getattr(dock, name), QgsCollapsibleGroupBox)
+
+
+def test_every_section_starts_unfolded(docked):
+    dock, _ = docked
+    _shown(dock)
+    boxes = [getattr(dock, n) for n in FOLDING]
+    boxes += [dock.site_finish, dock.normalisation_panel.group]
+    assert all(not b.isCollapsed() for b in boxes)
+
+
+def test_the_two_interpolation_panels_fold_together(docked):
+    dock, _ = docked
+    _shown(dock)
+    dock.grid_finish.setCollapsed(True)
+    QCoreApplication.processEvents()
+    # site_finish is hidden in This grid; QGIS applies its fold when it shows.
+    assert dock.site_finish.isCollapsed()
+    dock.grid_finish.setCollapsed(False)
+    QCoreApplication.processEvents()
+    assert not dock.site_finish.isCollapsed()
+
+
+def test_folds_are_remembered_across_a_restart(docked):
+    dock, session = docked
+    _shown(dock)
+    dock.display_group.setCollapsed(True)
+    QCoreApplication.processEvents()
+    assert folds.fold_settings().value("nsgeo/slices/folded/display", type=bool) is True
+    again = SlicesDock(session)
+    try:
+        assert again.display_group.isCollapsed()
+        assert not again.resolution_group.isCollapsed()
+    finally:
+        again.refiner.shutdown()
+        again.engine.wait_for_preparation(20_000)
+        again.engine.dispose()
+        again.deleteLater()
+
+
+def test_fold_state_never_touches_a_real_settings_file(tmp_path):
+    from pathlib import Path
+
+    assert Path(folds.fold_settings().fileName()).parent == tmp_path
+
+
+def test_the_coverage_tooltip_explains_what_and_how_a_preview_draws_it(docked):
+    dock, _ = docked
+    assert dock.coverage_check.toolTip() == COVERAGE_TIP
+    assert "largest count" in COVERAGE_TIP

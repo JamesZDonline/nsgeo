@@ -492,6 +492,13 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    explanation. A grid starts at a 0.2 m cell, or half the line spacing if that
    is smaller. Each grid remembers the resolution you set for it, and saving the
    site saves it.
+   The mouse wheel changes **Cell size**, **dz**, **z0** and **z1** only once
+   you have clicked into the box, so scrolling past them changes nothing.
+   **dz** can't go below the radar's own sample interval. In **Whole site** it
+   can't go below the finest grid's interval, and it starts at the coarsest
+   one's. The **Resolution**, **Interpolation**, **Normalisation** and
+   **Display** headers fold their sections away, and nsgeo remembers which are
+   folded.
 4. **Interpolation** decides what is drawn in the cells no line crossed, and
    whether the slice is smoothed. The same box appears for **Whole site**, with
    its own settings.
@@ -538,8 +545,8 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
 
    Each picture blends the cells around every pixel, so it is drawn smooth when
    you zoom in. **Whole site** can cover more ground than a fine cell allows at
-   full detail. Past a size it draws a preview at a coarser pixel and says so in
-   the panel. An export is not limited by the preview: it works out its own
+   full detail. Past a size it draws a preview at a coarser pixel and says so
+   under **Warnings**, below **Position**, where refusals appear too. An export is not limited by the preview: it works out its own
    cells at the size you choose (see step 6).
 5. **Display** sets how the slice is coloured. **Colours** offers two choices:
    - **nsgeo colours** uses the **Stretch** and **Palette** below it.
@@ -563,7 +570,9 @@ Open the **nsgeo Slices** tab, next to **nsgeo Processing**.
    as a low number depends on the cell size: at a fine cell, one or two traces a
    cell is normal, because a cell holds only a few traces along the line. Compare a
    cell with its neighbours, or with the line spacing and the cell size, and
-   look for the cells that stand out as low.
+   look for the cells that stand out as low. In a **Whole site** preview each
+   pixel shows the largest count among the cells under it, so lines look wider
+   than they are.
    Use it to spot gaps and thin coverage between lines before you trust a slice
    in that spot. With **Show coverage** ticked, an export also writes the
    counts as a second file beside it, named like the export with
