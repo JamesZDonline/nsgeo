@@ -64,7 +64,7 @@ the gesture, §6 the panel, §7 the shortcut, §10 the tests.
 - Migration on: `"Cannot trace with Migration (Stolt f-k) on: it has already collapsed the hyperbolas. Switch it off in the processing stack to trace, or click the points by hand."` (the step's `title`)
 - An amplitude transform on: `"Cannot trace with {title} on: it removes the edge the tracer follows. Switch it off in the processing stack to trace, or click the points by hand."` (titles `Absolute value`, `Square of the amplitude`, `Envelope`)
 - A difference view: `"Cannot trace a difference view. Turn the difference off to trace."`
-- Sample-mode time zero, after a successful trace: `"Time zero is set at a sample here, so the traced edge may not line up with it."`
+- Sample-mode time zero, after a successful trace: `"Time zero is set at a sample here, so the traced edge may not line up with it."` *(Removed by Task 5: spec §6 revised.)*
 
 **Plugin, tooltips:**
 - `VELOCITY_TIP` = `"Velocity mode: click a diffraction hyperbola on the profile, apex first, or drag a box around it to trace it. Right-click a point to remove it. Ctrl+click (Cmd+click on a Mac) works with this off."`
@@ -476,7 +476,75 @@ pinned by a test in its owning task.
   pure, lint and types.** Commit and push.
   `git commit -m "feat(profile): Ctrl+click (Cmd+click on a Mac) for velocity points (#88)"`
 
-### After Task 4 (the coordinator, not an implementer)
+### Task 5: The zero-crossing edge (the author's ruling, 2026-11-13)
+
+Added after the real-data check. Spec §4.2 (revised), §3 decision 9, §6 and §10. The author
+looked at six of their hyperbolas marked by each candidate edge rule. They chose "the zero
+crossing into the band's first strong lobe" ("pretty close", but "a little noisy": dots on one
+leg jump down a level). They ruled one hand fit "a level too low".
+
+**Files:**
+- Modify: `packages/nsgeo-core/src/nsgeo/hyperbola_trace.py`
+- Modify: `packages/nsgeo-core/tests/planted.py`
+- Modify: `packages/nsgeo-core/tests/test_hyperbola_trace.py`
+- Modify: `packages/nsgeo-core/tests/test_hyperbola_trace_hand_fits.py`, if needed
+- Modify: `packages/nsgeo-core/README.md` (the `hyperbola_trace` section)
+- Modify: `packages/nsgeo-qgis/nsgeo_qgis/ui/profile_dock.py`
+- Modify: `packages/nsgeo-qgis/tests/qgis/test_plugin_velocity_box.py`
+- Local only, never committed: `tests/data/local/hand-fits/rulings.json` and `pending.json`
+
+**Interfaces:**
+- Produces: `trace_hyperbola(data, times_ns, distance_m, box, *, max_dots=MAX_DOTS) -> list[tuple[int, float]]`.
+  - The `fraction` parameter and its validation are removed.
+  - The per-trace edge helper may be renamed to suit the new rule.
+- `ProfileDock` no longer reads a Time zero fraction and no longer shows the sample-mode note.
+
+- [ ] **Step 1: Measure the real reflected wavelet and plant with it.**
+  - Stack the processed traces along the scan curves of the author's hand-fit hyperbolas. Use only those whose traced and hand fits agree today.
+  - Align and normalise the stack, and write it into `planted.py` as `REAL_WAVELET`, a short dimensionless sample array at `REAL_DT_NS`, with a comment saying how it was measured. It describes the instrument and ground, not a site.
+  - `plant(...)` gains `wavelet=` (default: `REAL_WAVELET`). It places each hyperbola so that the edge rule's point (the zero crossing into the first strong lobe) lies exactly on t(x).
+  - Keep `ricker` for the tests that need an exact analytic wavelet.
+
+- [ ] **Step 2: Write the failing tests** in `test_hyperbola_trace.py`:
+  - `test_the_edge_is_the_zero_crossing_into_the_first_strong_lobe`
+    - On `REAL_WAVELET` (which has a faint precursor), the edge lands within one sample of the zero crossing into the first strong lobe.
+    - It does not land on the precursor.
+  - `test_no_dot_jumps_a_lobe`
+    - A planted hyperbola whose legs cross `real_layers(...)`, over at least 20 seeds.
+    - In every seed, every returned dot lies within a quarter period of the fit through the dots.
+  - **Remove** the tests for the old rule:
+    - the `first_break` consistency test;
+    - the `fraction` refusal tests.
+  - **Keep** every other planted test. Re-run the Task 1 calibration sweep (100 seeds per scene) and report it. The R5/R8 bars stand: planted at least about 85, the 5× noise scene at least 90.
+
+- [ ] **Step 3: Implement the rule** (spec §4.2).
+  - Choose the first strong lobe once per box, from the stack along the chosen curve. Set the "strong" threshold from the measured wavelet and the evidence.
+  - On each trace, the edge is the zero crossing into that lobe, linearly interpolated between samples.
+  - Drop, or re-pick, any dot a lobe away from its neighbours.
+  - Lower the faint floor until the dots follow a leg as far as the author's clicks do. The debug report's evidence says about 0.15–0.2.
+
+- [ ] **Step 4: Real data.**
+  - Add the author's ruling to `rulings.json`: key `"/mnt/DataStorage/VISR/Sunnyside_2023/Grid 1/Raw_Data/FILE__008.DZT#fit-1"`, text `"hand fit off: clicked a level too low (author, 2026-11-13)"`.
+  - Re-run `test_hyperbola_trace_hand_fits.py` and rewrite `pending.json` from the results. A strict xfail that now passes must leave the file.
+  - Report the per-fit table.
+  - Render, into the session scratchpad and copied to `~/nsgeo-tracer-review/`:
+    - a contact sheet of all 22 fits with the new rule's dots, `after-zero-crossing.png`;
+    - the six-panel comparison redrawn with the new rule against the hand dots, `edge-final.png`.
+  - Never commit an image or local data.
+
+- [ ] **Step 5: Update the dock** (spec §6, revised).
+  - Remove the fraction lookup and the sample-mode note. Keep the radar-clock note.
+  - Remove `_dots_traced` and `_time_zero_step` if nothing else uses them.
+  - Remove `test_the_edge_fraction_follows_the_lines_time_zero` and `test_sample_mode_time_zero_adds_the_note_after_a_trace`.
+  - Add `test_a_traced_fit_without_time_zero_shows_the_radar_clock_note`.
+  - Update the README row for `hyperbola_trace`.
+
+- [ ] **Step 6: Verify and commit.**
+  - Run `test_hyperbola_trace.py`, `test_hyperbola_trace_hand_fits.py`, `test_plugin_velocity_box.py`, `test_plugin_velocity_shortcut.py`, the pure tier, ruff and mypy.
+  - Commit the core and plugin changes, and push.
+  - `git commit -m "feat(core): mark the zero crossing into the first strong lobe (#140)"`
+
+### After Task 5 (the coordinator, not an implementer)
 
 1. Run the whole-branch review.
 2. Run the full QGIS tier.
