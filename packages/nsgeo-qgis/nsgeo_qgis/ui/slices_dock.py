@@ -210,10 +210,10 @@ class ElidedLabel(QLabel):
 
 
 class _OpensWideScrollArea(QScrollArea):
-    """A scroll area whose `sizeHint` makes room for the vertical bar (#50).
+    """A scroll area whose `sizeHint` adds the vertical bar's width (#50).
 
-    The stock hint is the content's own hint plus the frame, so a dock that
-    opens at it shows the bar and then scrolls sideways by the bar's width."""
+    The stock hint does not include the bar, so a dock opening at it shows the
+    bar and then scrolls sideways by the bar's width."""
 
     def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
         try:

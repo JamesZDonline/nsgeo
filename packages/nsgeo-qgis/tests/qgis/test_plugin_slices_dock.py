@@ -2353,11 +2353,13 @@ def test_the_legend_label_elides_rather_than_widening_the_dock(qgis_app):
     try:
         text = "1 – 15 traces per cell · blank = no line crossed"
         dock.legend_label.setText(text)
-        assert dock.legend_label.minimumSizeHint().width() <= 200
         dock.legend_label.setParent(None)  # shown on its own, narrower than its text
         dock.legend_label.resize(60, dock.legend_label.height())
         dock.legend_label.show()
+        from qgis.PyQt.QtWidgets import QLabel
+
         assert dock.legend_label.text() == text
+        assert QLabel.text(dock.legend_label).endswith("…"), "what is drawn is cut off"
         assert dock.legend_label.toolTip() == text
     finally:
         dock.engine.wait_for_preparation(20_000)
