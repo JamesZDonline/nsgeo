@@ -129,6 +129,13 @@ release's notes list everything in it.
   Whole site refresh leaves a box you are typing in alone; warnings and
   refusals get their own section in the panel, and its settings sections fold;
   the panel fits the Processing panel's width. Being built.
+- **Processing steps: edge cases and trace stacking** ([#43], [#40], [#44],
+  [#42], [#46], [#125], [#114]). Dewow, background removal, AGC, time zero and
+  bandpass stop returning a blank, NaN or uncropped line from a setting that
+  cannot work or from one bad sample, and say which setting to change; saved
+  settings are checked properly when they load; migration gets its real-data
+  test; and a new Trace stack step averages each trace with its neighbours.
+  Being designed.
 
 ### Next, in order
 
@@ -149,8 +156,7 @@ than reworking M16–M17 afterwards.
    is ready to plan, now that [#180] has merged.
 
 Also worth doing early: edit or delete a pick from the profile ([#36]), now
-that cuts carry picks too; the migration real-data test ([#125]), before M16
-builds on migrated cubes; and the three ways a restored cube can still come
+that cuts carry picks too; and the three ways a restored cube can still come
 back on the wrong clock without a note ([#162]).
 
 ### Wishlist, not yet scheduled
@@ -167,7 +173,7 @@ Grouped by area. The order within a group is not a priority.
   ([#187]); exports record where the grid's velocity came from ([#188]).
 - **Processing and the profile:** choose a preset when importing ([#129]); hide
   the slice band ([#131]); set time zero by eye, dragging it on the profile
-  ([#158]); trace stacking ([#114]); a frequency profile
+  ([#158]); a frequency profile
   ([#34]); configurable axes ([#11]).
 - **Sites and the Survey panel:** more than one site in a QGIS project
   ([#132]); Whole site sharpening as you zoom, for sites too big to draw at the
@@ -192,6 +198,11 @@ Grouped by area. The order within a group is not a priority.
 [#11]: https://github.com/JamesZDonline/nsgeo/issues/11
 [#34]: https://github.com/JamesZDonline/nsgeo/issues/34
 [#36]: https://github.com/JamesZDonline/nsgeo/issues/36
+[#40]: https://github.com/JamesZDonline/nsgeo/issues/40
+[#42]: https://github.com/JamesZDonline/nsgeo/issues/42
+[#43]: https://github.com/JamesZDonline/nsgeo/issues/43
+[#44]: https://github.com/JamesZDonline/nsgeo/issues/44
+[#46]: https://github.com/JamesZDonline/nsgeo/issues/46
 [#47]: https://github.com/JamesZDonline/nsgeo/issues/47
 [#50]: https://github.com/JamesZDonline/nsgeo/issues/50
 [#58]: https://github.com/JamesZDonline/nsgeo/issues/58
