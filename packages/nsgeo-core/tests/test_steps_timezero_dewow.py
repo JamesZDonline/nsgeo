@@ -141,8 +141,20 @@ def test_dewow_leaves_time_axis_untouched():
 
 
 def test_dewow_rejects_window_shorter_than_one_sample():
-    with pytest.raises(ValueError, match="window_ns"):
+    with pytest.raises(ValueError, match="is shorter than one sample"):
         build_step("dewow", window_ns=0.0).apply(make(dt_ns=0.2))
+
+
+def test_dewow_window_of_one_sample_on_a_real_line_is_refused_with_a_usable_minimum():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    with pytest.raises(ValueError, match="Dewow window 0.1 ns is shorter than one sample"):
+        build_step("dewow", window_ns=0.1).apply(rg)
+    with pytest.raises(
+        ValueError,
+        match=re.escape("is one sample at this line's 0.217 ns sampling; use 0.33 ns or more."),
+    ):
+        build_step("dewow", window_ns=0.2).apply(rg)
+    assert build_step("dewow", window_ns=0.33).apply(rg).data.shape == rg.data.shape
 
 
 def test_step_params_are_declared_for_the_ui():

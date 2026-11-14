@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -143,4 +145,24 @@ def refuse_non_finite(data: np.ndarray, consequence: str) -> None:
     bad = int(np.count_nonzero(~finite.all(axis=0)))
     raise ValueError(
         f"{bad} of {data.shape[1]} traces hold samples that are not finite; {consequence}"
+    )
+
+
+def window_samples(window_ns: float, dt_ns: float, title: str) -> int:
+    """A window of `window_ns` as a whole number of samples, at least 2.
+
+    One sample is the signal itself: a running mean of it removes nothing and
+    an RMS of it is the amplitude, so a window that rounds to fewer than two
+    is refused, with the smallest window this line accepts in the message.
+    """
+    count = int(round(window_ns / dt_ns))
+    if count >= 2:
+        return count
+    minimum = math.ceil(150 * dt_ns) / 100
+    if int(round(minimum / dt_ns)) < 2:
+        minimum += 0.01
+    what = "is shorter than one sample" if count < 1 else "is one sample"
+    raise ValueError(
+        f"{title} window {window_ns:g} ns {what} at this line's {dt_ns:.3f} ns sampling; "
+        f"use {minimum:.2f} ns or more."
     )

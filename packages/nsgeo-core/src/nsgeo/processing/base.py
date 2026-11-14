@@ -12,6 +12,8 @@ passes the clock through untouched.
 
 from __future__ import annotations
 
+import math
+import numbers
 from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from typing import Any, ClassVar, Final, Protocol
@@ -139,6 +141,8 @@ class ParamSpec:
     unit: str | None = None
     min: float | None = None
     max: float | None = None
+    #: When true the value must be strictly above `min`, not merely at it.
+    min_exclusive: bool = False
     choices: tuple[str, ...] = field(default=())
     help: str = ""
 
@@ -284,11 +288,77 @@ def get_step(name: str) -> type[Any]:
 
 def _out_of_bounds(spec: ParamSpec, value: float) -> str | None:
     """Why `value` is outside `spec`'s declared bounds, or None if it is not."""
-    if spec.min is not None and value < spec.min:
-        return f"must be >= {spec.min}"
+    if spec.min is not None:
+        if spec.min_exclusive:
+            if value <= spec.min:
+                return f"must be > {spec.min}"
+        elif value < spec.min:
+            return f"must be >= {spec.min}"
     if spec.max is not None and value > spec.max:
         return f"must be <= {spec.max}"
     return None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_))
+
+
+def _is_finite(value: Any) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _curve_problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
+    """What is wrong with a curve's points, and the offending dB entry (or None)."""
+    try:
+        pairs = [(point[0], point[1]) for point in value]
+    except (TypeError, IndexError, KeyError):
+        return None  # malformed shape: the constructor says so better
+    if len(pairs) < 2:
+        return "must have at least two points", None
+    for t, db in pairs:
+        if not (_is_number(t) and _is_number(db) and _is_finite(t) and _is_finite(db)):
+            return "must be pairs of finite numbers", None
+    for _, db in pairs:
+        reason = _out_of_bounds(spec, db)
+        if reason is not None:
+            return reason, db
+    return None
+
+
+def _problem(spec: ParamSpec, value: Any) -> tuple[str, Any] | None:
+    if spec.kind == "choice":
+        if not isinstance(value, str) or value not in spec.choices:
+            return f"must be one of {list(spec.choices)}", None
+    elif spec.kind == "int":
+        if not isinstance(value, numbers.Integral) or isinstance(value, (bool, np.bool_)):
+            return "must be a whole number", None
+    elif spec.kind in ("float", "time"):
+        if not _is_number(value):
+            return "must be a number", None
+        if not _is_finite(value):
+            return "must be a finite number", None
+    elif spec.kind == "curve":
+        return _curve_problem(spec, value)
+    else:
+        return None
+    if spec.kind in ("int", "float", "time"):
+        reason = _out_of_bounds(spec, value)
+        if reason is not None:
+            return reason, None
+    return None
+
+
+def param_problem(spec: ParamSpec, value: Any) -> str | None:
+    """Why `value` cannot be the setting `spec` declares, as a reason phrase, or None.
+
+    The one place that decides, so `build_step` and the project-load repair
+    agree. The phrases are quoted in user-facing notes: reword with care.
+    """
+    found = _problem(spec, value)
+    return None if found is None else found[0]
 
 
 def _validate_params(name: str, cls: type[Any], params: dict[str, Any]) -> None:
@@ -325,32 +395,14 @@ def _validate_params(name: str, cls: type[Any], params: dict[str, Any]) -> None:
     for pname in sorted(params):
         spec = specs[pname]
         value = params[pname]
-        if spec.kind in ("float", "int", "time"):
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"step {name!r}: {pname} must be a number, got {value!r}"
-                ) from None
-            reason = _out_of_bounds(spec, number)
-            if reason is not None:
-                unit = f" {spec.unit}" if spec.unit else ""
-                raise ValueError(f"step {name!r}: {pname} {reason}, got {value!r}{unit}")
-        elif spec.kind == "curve" and (spec.min is not None or spec.max is not None):
-            # A curve's bounds apply to its second column -- the schema's
-            # `unit` is what min/max are expressed in (dB for gain_curve),
-            # while the first column is a time axis the radargram bounds.
-            try:
-                column = [float(point[1]) for point in value]
-            except (TypeError, ValueError, IndexError, KeyError):
-                continue  # malformed shape: the constructor says so better
-            for entry in column:
-                reason = _out_of_bounds(spec, entry)
-                if reason is not None:
-                    unit = f" {spec.unit}" if spec.unit else ""
-                    raise ValueError(
-                        f"step {name!r}: every {pname} value {reason}, got {entry}{unit}"
-                    )
+        found = _problem(spec, value)
+        if found is None:
+            continue
+        reason, entry = found
+        unit = f" {spec.unit}" if spec.unit else ""
+        if spec.kind == "curve" and entry is not None:
+            raise ValueError(f"step {name!r}: every {pname} value {reason}, got {entry}{unit}")
+        raise ValueError(f"step {name!r}: {pname} {reason}, got {value!r}{unit}")
 
 
 def build_step(name: str, **params: Any) -> Any:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import nsgeo.processing.gain  # noqa: F401
 import numpy as np
 import pytest
@@ -159,3 +161,15 @@ def test_curve_is_fast_enough_to_drag():
     start = time.perf_counter()
     step.apply(rg)
     assert time.perf_counter() - start < 0.1
+
+
+def test_agc_window_of_one_sample_on_a_real_line_is_refused_with_a_usable_minimum():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "AGC window 0.2 ns is one sample at this line's 0.217 ns sampling; use 0.33 ns or more."
+        ),
+    ):
+        build_step("gain_agc", window_ns=0.2).apply(rg)
+    assert build_step("gain_agc", window_ns=0.33).apply(rg).data.shape == rg.data.shape

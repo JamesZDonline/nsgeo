@@ -36,6 +36,8 @@ def _in_bounds(spec: ParamSpec, value):
         value = spec.max
     if spec.min is not None and value < spec.min:
         value = spec.min
+    if spec.min is not None and spec.min_exclusive and value <= spec.min:
+        value = spec.min + 1e-9
     return value
 
 
@@ -207,6 +209,8 @@ def test_the_registry_declares_the_bounds_these_tests_cover():
         "gain_agc.window_ns",
         "gain_agc.target",
         "gain_agc.eps",
+        "gain_parametric.alpha",
+        "gain_parametric.exponent",
         "migrate_fk.max_dip_deg",
         "migrate_fk.velocity_m_ns",
         "time_zero.sample",
@@ -232,7 +236,14 @@ def test_every_declared_bound_is_enforced_by_build_step(name, spec):
         params[spec.name] = edge - 1 if bound == "min" else edge + 1
         with pytest.raises(ValueError, match=spec.name):
             build_step(name, **params)
-        params[spec.name] = edge  # the bound itself is allowed
+        if bound == "min" and spec.min_exclusive:
+            # The edge itself is refused; just above it is allowed.
+            params[spec.name] = edge
+            with pytest.raises(ValueError, match=spec.name):
+                build_step(name, **params)
+            params[spec.name] = edge + 1e-9
+        else:
+            params[spec.name] = edge  # the bound itself is allowed
         build_step(name, **params)
 
 
@@ -276,3 +287,63 @@ def test_gain_curve_refuses_a_db_runaway_and_keeps_real_gains(tmp_path):
     )
     with pytest.raises(ProjectError, match="L0.DZT"):
         load_site(path)
+
+
+_BAND = {"low_mhz": 250.0, "high_mhz": 750.0}
+_REFUSED = [
+    ("time_zero", {"mode": "bogus"}, "mode"),
+    ("gain_parametric", {"mode": "bogus"}, "mode"),
+    *[("background_sliding", {"window_traces": v}, "window_traces") for v in (200.0, True, "200")],
+    *[("background_svd", {"n_components": v}, "n_components") for v in (1.5, 2.0, 21)],
+    *[("time_zero", {"mode": "sample", "sample": v}, "sample") for v in (10.7, True, float("inf"))],
+    ("bandpass", {**_BAND, "low_mhz": float("nan")}, "low_mhz"),
+    ("bandpass", {**_BAND, "high_mhz": float("nan")}, "high_mhz"),
+    ("bandpass", {**_BAND, "taper_frac": float("nan")}, "taper_frac"),
+    ("bandpass", {**_BAND, "taper_frac": float("inf")}, "taper_frac"),
+    *[("gain_parametric", {"alpha": v}, "alpha") for v in (float("nan"), 8.0, "0.1")],
+    ("gain_parametric", {"exponent": 50.0}, "exponent"),
+    ("gain_parametric", {"alpha": True}, "alpha"),
+    ("gain_parametric", {"exponent": np.bool_(True)}, "exponent"),
+    ("time_zero", {"mode": "sample", "sample": np.bool_(True)}, "sample"),
+    *[("gain_agc", {"window_ns": v}, "window_ns") for v in (float("nan"), float("inf"))],
+    *[("gain_agc", {"eps": v}, "eps") for v in (0.0, float("inf"))],
+    *[("gain_agc", {"target": v}, "target") for v in (0.0, float("inf"))],
+    ("time_zero", {"threshold": float("nan")}, "threshold"),
+    ("background_sliding", {"window_traces": 1}, "window_traces"),
+]
+
+
+@pytest.mark.parametrize("name, params, setting", _REFUSED)
+def test_settings_that_used_to_pass_build_are_refused(name, params, setting):
+    with pytest.raises(ValueError, match=setting):
+        build_step(name, **params)
+
+
+def test_numpy_scalars_and_ints_for_floats_still_build():
+    build_step("time_zero", mode="sample", sample=np.int64(40))
+    build_step("dewow", window_ns=np.float32(4.0))
+    build_step("dewow", window_ns=4)
+    build_step("background_sliding", window_traces=np.int32(200))
+
+
+def test_a_bad_parametric_gain_mode_is_refused_at_build():
+    # A project saved with it is covered by the load repair; here only the build.
+    with pytest.raises(ValueError, match="one of"):
+        build_step("gain_parametric", mode="bogus")
+
+
+def test_param_problem_phrases():
+    from nsgeo.processing.base import param_problem
+
+    by_name = {s.name: s for s in get_step("gain_agc").schema()}
+    assert param_problem(by_name["eps"], 0.0) == "must be > 0.0"
+    assert param_problem(by_name["eps"], 1e-12) is None
+    assert param_problem(by_name["eps"], float("nan")) == "must be a finite number"
+    assert param_problem(by_name["eps"], "1") == "must be a number"
+    sample = next(s for s in get_step("time_zero").schema() if s.name == "sample")
+    assert param_problem(sample, 12.0) == "must be a whole number"
+    alpha = next(s for s in get_step("gain_parametric").schema() if s.name == "alpha")
+    assert param_problem(alpha, 8.0) == "must be <= 1.0"
+    assert param_problem(alpha, -8.0) == "must be >= -1.0"
+    mode = next(s for s in get_step("gain_parametric").schema() if s.name == "mode")
+    assert param_problem(mode, "bogus") == "must be one of ['exponential', 'power']"

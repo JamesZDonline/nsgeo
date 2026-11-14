@@ -66,13 +66,13 @@ class BackgroundSliding:
     def schema(cls) -> tuple[ParamSpec, ...]:
         return (
             ParamSpec(
-                name="window_traces", kind="int", label="Window", default=200, unit="traces", min=1
+                name="window_traces", kind="int", label="Window", default=200, unit="traces", min=2
             ),
         )
 
     def apply(self, rg: Radargram) -> Radargram:
-        if self.window_traces < 1:
-            raise ValueError(f"window_traces must be >= 1, got {self.window_traces}")
+        if self.window_traces < 2:
+            raise ValueError(f"window_traces must be >= 2, got {self.window_traces}")
         return rg.replace(data=rg.data - running_mean(rg.data, self.window_traces, axis=1))
 
 
@@ -101,7 +101,12 @@ class BackgroundSvd:
     def schema(cls) -> tuple[ParamSpec, ...]:
         return (
             ParamSpec(
-                name="n_components", kind="int", label="Components removed", default=1, min=0
+                name="n_components",
+                kind="int",
+                label="Components removed",
+                default=1,
+                min=0,
+                max=20,
             ),
         )
 

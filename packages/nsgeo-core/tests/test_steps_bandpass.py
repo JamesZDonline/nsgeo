@@ -168,3 +168,21 @@ def test_refuses_a_real_line_holding_a_nan():
         ),
     ):
         build_step("bandpass", low_mhz=250.0, high_mhz=750.0).apply(rg.replace(data=data))
+
+
+def test_a_band_holding_no_frequency_is_refused_on_a_real_line():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    with pytest.raises(
+        ValueError,
+        match="holds no frequency on this line, whose frequencies are 4.51 MHz apart",
+    ):
+        build_step("bandpass", low_mhz=300.0, high_mhz=302.0, taper_frac=0.0).apply(rg)
+    df = 1 / (1024 * 0.21653e-9) / 1e6
+    out = build_step("bandpass", low_mhz=300.0, high_mhz=300.0 + df, taper_frac=0.0).apply(rg)
+    assert out.data.shape == rg.data.shape
+
+
+def test_bandpass_runs_on_an_all_zero_line():
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    out = Bandpass(250, 750).apply(rg.replace(data=np.zeros((512, 1))))
+    assert not out.data.any()

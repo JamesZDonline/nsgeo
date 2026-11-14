@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.processing._util import running_mean
+from nsgeo.processing._util import running_mean, window_samples
 from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 
 
@@ -44,21 +44,27 @@ class GainAgc:
             ParamSpec(
                 name="window_ns", kind="float", label="Window", default=20.0, unit="ns", min=0.0
             ),
-            ParamSpec(name="target", kind="float", label="Target RMS", default=1.0, min=0.0),
+            ParamSpec(
+                name="target",
+                kind="float",
+                label="Target RMS",
+                default=1.0,
+                min=0.0,
+                min_exclusive=True,
+            ),
             ParamSpec(
                 name="eps",
                 kind="float",
                 label="Epsilon",
                 default=1e-12,
                 min=0.0,
+                min_exclusive=True,
                 help="Guards all-zero traces at the start of a line.",
             ),
         )
 
     def apply(self, rg: Radargram) -> Radargram:
-        window = int(round(self.window_ns / rg.dt_ns))
-        if window < 1:
-            raise ValueError(f"window_ns={self.window_ns} is shorter than one sample")
+        window = window_samples(self.window_ns, rg.dt_ns, "AGC")
         rms = np.sqrt(running_mean(np.asarray(rg.data, dtype=float) ** 2, window, axis=0))
         # eps guards all-zero traces, which are normal at the start of a line.
         return rg.replace(data=rg.data * (self.target / np.maximum(rms, self.eps)))
@@ -100,6 +106,8 @@ class GainParametric:
                 label="Alpha",
                 default=0.05,
                 unit="1/ns",
+                min=-1.0,
+                max=1.0,
                 help="Exponential rate; used when mode is 'exponential'.",
             ),
             ParamSpec(
@@ -107,6 +115,8 @@ class GainParametric:
                 kind="float",
                 label="Exponent",
                 default=1.0,
+                min=-10.0,
+                max=10.0,
                 help="Used when mode is 'power'.",
             ),
         )

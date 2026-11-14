@@ -3,6 +3,7 @@ from __future__ import annotations
 import nsgeo.processing  # noqa: F401
 import numpy as np
 import pytest
+from nsgeo.processing.background import BackgroundSliding
 from nsgeo.processing.base import Radargram, available_steps, build_step
 
 from tests.real_data import DATA, real_radargram
@@ -56,10 +57,12 @@ def test_sliding_removes_a_band_that_drifts_along_the_line():
     assert np.abs(sliding.data).mean() < np.abs(full.data).mean()
 
 
-def test_sliding_with_window_of_one_is_a_no_op_in_effect():
+def test_sliding_refuses_a_window_of_one_trace_which_would_subtract_each_trace_from_itself():
     rg, _, _ = banded()
-    out = build_step("background_sliding", window_traces=1).apply(rg)
-    np.testing.assert_allclose(out.data, 0.0, atol=1e-12)
+    with pytest.raises(ValueError, match="window_traces"):
+        build_step("background_sliding", window_traces=1)
+    with pytest.raises(ValueError, match="window_traces must be >= 2, got 1"):
+        BackgroundSliding(window_traces=1).apply(rg)
 
 
 def test_sliding_rejects_zero_window():

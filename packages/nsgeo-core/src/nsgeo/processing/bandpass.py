@@ -123,5 +123,13 @@ class Bandpass:
         n_fft = 1 << (2 * n - 1).bit_length()
         spectrum = np.fft.rfft(rg.data, n=n_fft, axis=0)
         freqs_mhz = np.fft.rfftfreq(n_fft, d=rg.dt_ns * 1e-9) / 1e6
-        filtered = spectrum * self._mask(freqs_mhz)[:, None]
+        mask = self._mask(freqs_mhz)
+        if not mask.any():
+            df = float(freqs_mhz[1])
+            raise ValueError(
+                f"Bandpass {self.low_mhz:g}\u2013{self.high_mhz:g} MHz holds no frequency on "
+                f"this line, whose frequencies are {df:.2f} MHz apart. "
+                f"Make High \u2212 Low at least {df:.2f} MHz."
+            )
+        filtered = spectrum * mask[:, None]
         return rg.replace(data=np.fft.irfft(filtered, n=n_fft, axis=0)[:n])
