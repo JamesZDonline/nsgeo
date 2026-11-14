@@ -24,6 +24,7 @@ from nsgeo.geometry.grid import Grid
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.cut import Cut
 from nsgeo.model.survey import Line, Site
+from nsgeo.processing.base import build_step, get_step, param_problem, step_title
 from nsgeo.processing.stack import StepStack
 from nsgeo.slices.interpolate import METHODS
 from nsgeo.velocity import VelocityModel
@@ -412,6 +413,93 @@ def _clean_slice_colours(value: object) -> dict[str, dict[str, Any]]:
     return out
 
 
+#: Steps that stay on when a setting is reset: turning Time zero off would
+#: move every time after it.
+_STAYS_ON = ("time_zero",)
+
+
+def _repair_steps(
+    entries: list[dict[str, Any]], where: str, notes: list[str]
+) -> list[dict[str, Any]]:
+    """Saved steps whose settings the rules now refuse, made loadable.
+
+    A refused setting with a default is reset to it and the step turned off
+    (Time zero stays on). A refused setting with no default, a missing
+    required one, or a step that cannot be built removes the step. Each
+    change adds one plain-language note. Structural faults (an entry that is
+    not an object, no step name, unknown step or setting) still raise.
+    Returns new dicts; `entries` is untouched.
+    """
+    if not isinstance(entries, list):
+        raise TypeError(f"a stack must be a list of steps, got {type(entries).__name__}")
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise TypeError(f"a step must be an object, got {type(entry).__name__}")
+        name = entry["step"]
+        cls = get_step(name)
+        params = entry.get("params", {})
+        if not isinstance(params, dict):
+            raise TypeError(f"step {name!r}: params must be an object")
+        specs = {s.name: s for s in cls.schema()}
+        unknown = sorted(set(params) - set(specs))
+        if unknown:
+            raise ValueError(
+                f"step {name!r} has no parameter(s) {unknown}; it takes {sorted(specs)}"
+            )
+        title = step_title(name)
+        removed = f"{where}: {title} is removed. "
+        again = "Add it again with the settings you want."
+        missing = [s for s in specs.values() if s.required and s.name not in params]
+        if missing:
+            notes.append(f"{removed}It has no {missing[0].label}, which it needs. {again}")
+            continue
+        fixed = dict(params)
+        sentences: list[str] = []
+        gone = False
+        for spec in specs.values():
+            if spec.name not in params:
+                continue
+            value = params[spec.name]
+            reason = param_problem(spec, value)
+            if reason is None:
+                continue
+            if spec.required:
+                notes.append(
+                    f"{removed}Its {spec.label} was {value!r}, which {reason}, and "
+                    f"{spec.label} has no default. {again}"
+                )
+                gone = True
+                break
+            fixed[spec.name] = spec.default
+            sentences.append(
+                f"Its {spec.label} was {value!r}, which {reason}; it is now {spec.default!r}."
+            )
+        if gone:
+            continue
+        repaired = {**entry, "params": fixed}
+        if sentences:
+            if name in _STAYS_ON:
+                ending = (
+                    f"The step stays on, because turning {title} off "
+                    "would move every time after it."
+                )
+            else:
+                repaired["enabled"] = False
+                ending = "Check the step and turn it back on."
+            lead = f"{where}: {title} is turned off. " if name not in _STAYS_ON else f"{where}: "
+            if name in _STAYS_ON:
+                sentences = [s.replace("Its ", f"{title}'s ", 1) for s in sentences]
+            notes.append(f"{lead}{' '.join(sentences)} {ending}")
+        try:
+            build_step(name, **fixed)
+        except (TypeError, ValueError) as exc:
+            notes.append(f"{removed}It could not be built: {exc}. {again}")
+            continue
+        out.append(repaired)
+    return out
+
+
 def load_site(path: str | Path) -> Site:
     path = Path(path)
     try:
@@ -430,6 +518,7 @@ def load_site(path: str | Path) -> Site:
     grids = [_grid_from_dict(g) for g in doc.get("grids", [])]
     lines = []
     stacks: dict[str, StepStack] = {}
+    load_notes: list[str] = []
     for entry in doc.get("lines", []):
         stored = Path(entry["path"])
         dzt = stored if stored.is_absolute() else root / stored
@@ -492,7 +581,9 @@ def load_site(path: str | Path) -> Site:
         )
         if "stack" in entry:
             try:
-                stacks[key] = StepStack.from_dicts(entry["stack"])
+                stacks[key] = StepStack.from_dicts(
+                    _repair_steps(entry["stack"], f"Line {Path(entry['path']).name}", load_notes)
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 raise ProjectError(
                     f"invalid processing stack for line {entry['path']!r}: {exc}"
@@ -500,6 +591,7 @@ def load_site(path: str | Path) -> Site:
 
     site = Site(grids=grids, lines=lines)
     site.stacks = stacks
+    site.load_notes = load_notes
 
     cuts = doc.get("cuts", [])
     if not isinstance(cuts, list):
@@ -515,12 +607,14 @@ def load_site(path: str | Path) -> Site:
         raise ProjectError(
             f"{path}: 'presets' must be an object keyed by name, got {type(presets).__name__}"
         )
+    repaired_presets: dict[str, list[dict[str, Any]]] = {}
     for name, dicts in presets.items():
         try:
-            StepStack.from_dicts(dicts)
+            repaired_presets[name] = _repair_steps(dicts, f"Preset {name!r}", load_notes)
+            StepStack.from_dicts(repaired_presets[name])
         except (KeyError, TypeError, ValueError) as exc:
             raise ProjectError(f"invalid preset {name!r}: {exc}") from exc
-    site.presets = dict(presets)
+    site.presets = repaired_presets
 
     cubes = doc.get("cubes", {})
     if not isinstance(cubes, dict):

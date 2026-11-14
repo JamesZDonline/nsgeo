@@ -162,12 +162,15 @@ def _write_project_with_stack(tmp_path, stack):
     return path
 
 
-def test_load_site_reports_an_invalid_stack_as_project_error(tmp_path):
+def test_a_one_point_gain_curve_is_removed_with_a_note(tmp_path):
     path = _write_project_with_stack(
         tmp_path, [{"step": "gain_curve", "params": {"points": [[0.0, 0.0]]}}]
     )
-    with pytest.raises(ProjectError, match="L0.DZT"):
-        load_site(path)
+    site = load_site(path)
+    assert site.stacks["L0.DZT"].entries == []
+    assert len(site.load_notes) == 1
+    assert site.load_notes[0].startswith("Line L0.DZT: ")
+    assert "is removed" in site.load_notes[0]
 
 
 def test_an_unknown_parameter_name_is_refused_rather_than_ignored(tmp_path):
@@ -285,8 +288,9 @@ def test_gain_curve_refuses_a_db_runaway_and_keeps_real_gains(tmp_path):
         tmp_path,
         [{"step": "gain_curve", "params": {"points": [[0.0, 0.0], [20.0, 1616316.7]]}}],
     )
-    with pytest.raises(ProjectError, match="L0.DZT"):
-        load_site(path)
+    site = load_site(path)
+    assert site.stacks["L0.DZT"].entries == []
+    assert "is removed" in site.load_notes[0]
 
 
 _BAND = {"low_mhz": 250.0, "high_mhz": 750.0}

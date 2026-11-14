@@ -2064,6 +2064,21 @@ class NsgeoPlugin:
             # which install a session (open_site() only installs after
             # load_site() fully succeeds).
             self.message(f"could not open {path}: {exc}", Qgis.MessageLevel.Critical)
+            return
+        notes = self.session.site.load_notes
+        if notes:
+            # The repair reaches the file at the next save; nothing is dirty.
+            for note in notes:
+                QgsMessageLog.logMessage(note, "nsgeo", Qgis.MessageLevel.Warning)
+            n = len(notes)
+            summary = (
+                "1 processing step in this project had settings that cannot work. "
+                "It was turned off, reset or removed; the nsgeo log says what changed."
+                if n == 1
+                else f"{n} processing steps in this project had settings that cannot work. "
+                "They were turned off, reset or removed; the nsgeo log says what changed."
+            )
+            self.message(summary, Qgis.MessageLevel.Warning)
 
     def save_with_prompt(self, *, ask_first: bool = False, allow_cancel: bool = True) -> bool:
         """Save the site. Returns True when the caller may proceed (saved,

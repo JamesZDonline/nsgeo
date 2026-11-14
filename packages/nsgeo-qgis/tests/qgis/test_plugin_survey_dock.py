@@ -653,6 +653,45 @@ def test_open_site_discarding_abandons_the_old_site_without_saving_it(
     plugin.unload()
 
 
+def test_opening_a_project_with_a_refused_setting_turns_the_step_off_and_says_so(
+    fake_iface, tmp_path, monkeypatch, message_log
+):
+    import nsgeo_qgis
+
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    dzt = synthetic_dzt(tmp_path / "raw", "FILE__001.DZT")
+    session.add_lines([Line.open(dzt, GridPlacement("A", "y", 0.0, 0.0, 1, dzt.stem))])
+    session.save()
+    target = tmp_path / SURVEY_FILE
+    doc = json.loads(target.read_text())
+    doc["lines"][0]["stack"] = [
+        {"step": "dewow", "params": {}},
+        {"step": "gain_agc", "params": {"eps": 0}},
+    ]
+    target.write_text(json.dumps(doc))
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(target), ""))
+    )
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+
+    plugin.open_site()
+
+    assert plugin.session.site is not None
+    (key,) = plugin.session.site.stacks
+    entries = plugin.session.stack_for(key).entries
+    assert [on for _, on in entries] == [True, False]
+    assert any("Automatic gain control is turned off. Its Epsilon was 0" in m for m in message_log)
+    assert (
+        "1 processing step in this project had settings that cannot work. "
+        "It was turned off, reset or removed; the nsgeo log says what changed."
+    ) in message_log
+    assert not plugin.session.dirty
+    plugin.unload()
+
+
 def test_open_site_saves_the_old_site_first_when_the_user_chooses_save(
     fake_iface, tmp_path, monkeypatch, answer_modal
 ):
