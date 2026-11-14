@@ -115,7 +115,7 @@ def test_layers_are_grouped_in_the_project_under_the_site_name(populated):
     session, layers, project = populated
     group = project.layerTreeRoot().findGroup(f"nsgeo · {session.site_name}")
     assert group is not None
-    assert len(group.findLayers()) == 5
+    assert len(group.findLayers()) == 6
 
 
 def test_refill_never_touches_the_picks_table(populated):
@@ -2574,7 +2574,7 @@ def test_a_new_site_group_goes_above_layers_already_open(qgis_app, tmp_path):
 
 def test_the_group_draws_points_over_lines_over_grid_outlines(populated):
     _, layers, _ = populated
-    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "rtk_gaps", "lines", "grids"]
 
 
 def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
@@ -2583,7 +2583,7 @@ def test_a_table_reopened_after_removal_goes_back_to_its_place(populated):
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "rtk_gaps", "lines", "grids"]
 
 
 def test_a_reopened_table_goes_above_rasters_at_the_bottom_of_the_group(populated):
@@ -2613,7 +2613,7 @@ def test_a_group_the_user_dragged_stays_put_and_is_still_the_sites(populated):
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == ["imagery", name]  # not moved back, no second group
-    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "rtk_gaps", "lines", "grids"]
     assert layers.feature_count("lines") == 3
 
     layers.detach()
@@ -2630,7 +2630,7 @@ def test_a_group_the_user_deleted_comes_back_on_the_next_refresh(populated, qgis
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
     assert _names(root) == [f"nsgeo · {session.site_name}"]
-    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "rtk_gaps", "lines", "grids"]
 
 
 def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(populated, tmp_path):
@@ -2645,7 +2645,7 @@ def test_a_saved_qgis_project_read_back_does_not_take_over_the_site_group(popula
 
     session.add_grid(Grid("B", (600.0, 700.0), 0.0, 2.0, 2.0, "EPSG:32616", 0.5))
 
-    assert _names(layers.group) == ["picks", "marks", "cuts", "lines", "grids"]
+    assert _names(layers.group) == ["picks", "marks", "cuts", "rtk_gaps", "lines", "grids"]
 
 
 def test_lines_and_marks_hide_beyond_1_800_per_metre_of_line_spacing(populated, tmp_path):
@@ -3046,7 +3046,7 @@ def test_cuts_table_has_the_declared_fields_and_is_read_only(populated):
 
 def test_legend_order_puts_cuts_between_marks_and_lines(populated):
     session, layers, _ = populated
-    assert LEGEND_ORDER == ("picks", "marks", "cuts", "lines", "grids")
+    assert LEGEND_ORDER == ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
     assert _names(layers.group) == list(LEGEND_ORDER)
 
 

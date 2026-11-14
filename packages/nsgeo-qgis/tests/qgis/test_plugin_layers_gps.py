@@ -19,6 +19,7 @@ from nsgeo_qgis.layers import (
     TABLES,
     SiteLayers,
 )
+from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
 from nsgeo_qgis.ui.gps_import_dialog import lonlat_to_xy
 from plugin_testing import synthetic_dzt, synthetic_gps_dzt
@@ -34,6 +35,7 @@ from qgis.core import (
     QgsVectorFileWriter,
     QgsWkbTypes,
 )
+from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QMetaType
 from tests.real_data import GRID2_LINES
 
@@ -300,6 +302,13 @@ def test_the_gap_table_is_dotted_pink_and_not_selectable(site):
     assert stroke.useCustomDashPattern()
     assert list(stroke.customDashVector()) == [0.5, 1.0]
     assert not (layer.flags() & QgsMapLayer.LayerFlag.Identifiable)
+    # ... and selecting a gap navigates nowhere: MapLink binds no slot to it.
+    link = MapLink(session, layers, QgsMapCanvas())
+    try:
+        assert set(link._selection_slots) == {"lines", "picks", "marks", "cuts"}
+        assert "rtk_gaps" not in link._bound
+    finally:
+        link.dispose()
     assert RTK_GAP_COLOUR not in GRID_COLOURS
     assert RTK_GAP_COLOUR != CUT_COLOUR
 
