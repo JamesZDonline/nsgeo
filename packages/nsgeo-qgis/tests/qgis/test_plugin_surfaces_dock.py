@@ -425,18 +425,32 @@ def test_a_refresh_keeps_the_whole_selection(surface_plugin):
     assert set(dock.selected_ids()) == ids
 
 
-def test_add_selected_picks_says_when_it_moves_picks_out_of_another_surface(surface_plugin):
+def test_add_selected_picks_says_they_are_also_in_another_surface(surface_plugin):
     plugin = surface_plugin
     dock = plugin.surfaces_dock
     fids = plugin.pick_fids
-    plugin.surfaces.create("Bowl", fids[:3], SurfaceSettings())
+    bowl = plugin.surfaces.create("Bowl", fids[:3], SurfaceSettings())
     ridge = plugin.surfaces.create("Ridge", [fids[3], fids[2], fids[1]], SurfaceSettings())
     dock.refresh()
     dock.table.selectRow([r[0] for r in _rows(dock)].index("Ridge"))
     plugin.layers.select_picks([fids[0]])
     dock.add_button.click()
-    assert "“Bowl”" in _shown(plugin) and "will move" in _shown(plugin)
+    assert "“Bowl”" in _shown(plugin) and "also in" in _shown(plugin)
+    assert "move" not in _shown(plugin)
     assert fids[0] in {r.fid for r in plugin.surfaces.members(ridge.feature_id)}
+    assert fids[0] in {r.fid for r in plugin.surfaces.members(bowl.feature_id)}
+
+
+def test_the_build_message_stays_until_it_is_closed(surface_plugin):
+    plugin = surface_plugin
+    record = plugin.surfaces.create("Bowl", plugin.pick_fids[:3], SurfaceSettings(strength=0.0))
+    plugin.iface.messageBar().clearWidgets()
+    plugin.build_surfaces([record.feature_id])
+    item = plugin.iface.messageBar().currentItem()
+    assert item is not None and "Bowl" in item.text()
+    assert item.duration() == 0
+    plugin.message("something else")
+    assert plugin.iface.messageBar().currentItem().duration() == 6
 
 
 def test_build_refuses_while_an_export_runs(surface_plugin, monkeypatch):
@@ -509,7 +523,7 @@ def test_an_oserror_on_the_second_grid_still_syncs_and_reports_both(surface_plug
     monkeypatch.setattr(plugin.surfaces, "build", build)
     messages = []
     monkeypatch.setattr(
-        plugin, "message", lambda text, level=None, title="nsgeo": messages.append(text)
+        plugin, "message", lambda text, level=None, title="nsgeo", duration=6: messages.append(text)
     )
     plugin.build_surfaces([a.feature_id, b.feature_id])
     assert plugin.surfaces.state(a.feature_id).built  # A's build stands...

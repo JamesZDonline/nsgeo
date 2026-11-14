@@ -42,10 +42,10 @@ from nsgeo_qgis.surface_plan import (
     DELETE_TITLE,
     NO_LONGER_MEMBER,
     NOTHING_TO_REMOVE,
+    also_note,
     delete_question,
     fit_rows,
     fit_short,
-    move_note,
     not_built_text,
     outlier_header,
     outlier_line,
@@ -436,7 +436,7 @@ class SurfacesDock(QgsDockWidget):
             fids = self.surfaces.layers.selected_pick_ids()
             found = self.surfaces.check(fids, into=fid)
             self.surfaces.add_picks(fid, fids)
-            note = move_note(found.moving, found.n, found.left)
+            note = also_note(found.also, found.n)
             if note and not found.refusal:
                 self.notice.emit(note)
         except (ValueError, RuntimeError) as exc:

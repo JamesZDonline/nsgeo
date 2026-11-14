@@ -103,7 +103,9 @@ def test_the_dialog_shows_the_refusal_and_disables_create(surface_plugin, drive_
     assert seen["visible"] and not seen["create"]
 
 
-def test_the_dialog_states_picks_that_will_move(surface_plugin, drive_dialog):
+def test_the_dialog_says_picks_are_also_in_another_surface_not_that_they_move(
+    surface_plugin, drive_dialog
+):
     plugin = surface_plugin
     plugin.surfaces.create("Bowl", plugin.pick_fids, SurfaceSettings(strength=0.0))
     plugin.layers.select_picks(plugin.pick_fids[:3])
@@ -116,8 +118,8 @@ def test_the_dialog_states_picks_that_will_move(surface_plugin, drive_dialog):
 
     _open(plugin, drive_dialog, driver)
     assert seen["visible"]
-    assert "All 3 are in “Bowl”; they will move to this surface" in seen["note"]
-    assert "“Bowl” is left with 1 pick, too few to rebuild" in seen["note"]
+    assert seen["note"] == "All 3 of these picks are also in “Bowl”."
+    assert "move" not in seen["note"]
 
 
 def test_the_name_is_checked_as_it_is_typed(surface_plugin, drive_dialog):

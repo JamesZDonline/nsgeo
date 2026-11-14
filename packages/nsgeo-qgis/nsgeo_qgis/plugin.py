@@ -1587,9 +1587,11 @@ class NsgeoPlugin:
     def _report_surface_build(self, done: list[Any], failures: list[str], cancelled: bool) -> None:
         for built in done:
             text, warn = build_outcome(built.name, built.report)
-            self.message(text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info)
+            self.message(
+                text, Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Info, duration=0
+            )
         for text in failures:
-            self.message(text, Qgis.MessageLevel.Warning)
+            self.message(text, Qgis.MessageLevel.Warning, duration=0)
         if cancelled:
             self.message(CANCELLED_MESSAGE)
 
@@ -2376,16 +2378,19 @@ class NsgeoPlugin:
             key, index, float(distances[index]), time_ns, section.provenance_json
         )
 
-    def message(self, text: str, level: Any = None, title: str = "nsgeo") -> None:
+    def message(
+        self, text: str, level: Any = None, title: str = "nsgeo", duration: int = 6
+    ) -> None:
         """Tell the user something through the message bar, and log it too
         so it survives after the bar's message auto-dismisses. Deliberately
         the one silent catch in this file: this is the last resort for
         reporting every other failure, so a failure in the reporting path
-        itself has nowhere further to go."""
+        itself has nowhere further to go. `duration` is the bar's seconds; 0 keeps the
+        message until the user closes it."""
         level = level if level is not None else Qgis.MessageLevel.Info
         try:
             QgsMessageLog.logMessage(text, "nsgeo", level)
-            self.iface.messageBar().pushMessage(title, text, level, 6)
+            self.iface.messageBar().pushMessage(title, text, level, duration)
         except Exception:  # noqa: BLE001 -- see the docstring above
             pass
 

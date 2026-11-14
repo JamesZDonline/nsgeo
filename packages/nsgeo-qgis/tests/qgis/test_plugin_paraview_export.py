@@ -946,6 +946,15 @@ def test_picks_vtp_names_each_picks_surface(built_site):
     feature = doc["point_data"]["feature"]
     assert feature.dtype == np.int32 and len(feature) == 8
     assert sorted(feature.tolist()) == [-1] + [0] * 3 + [1] * 4
+    assert doc["point_data"]["n_surfaces"].dtype == np.int32
+    assert sorted(doc["point_data"]["n_surfaces"].tolist()) == [0] + [1] * 7
+    # a pick in both surfaces names the first of its list and counts both
+    shared = surfaces.members(a.feature_id)[0].fid
+    surfaces.add_picks(b.feature_id, [shared])
+    folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)
+    doc = read_vtk_xml(folder / "picks.vtp")
+    assert sorted(doc["point_data"]["n_surfaces"].tolist()) == [0] + [1] * 6 + [2]
+    assert sorted(doc["point_data"]["feature"].tolist()) == [-1] + [0] * 3 + [1] * 4
     # without surfaces: the same export writes an empty features.vtp and no feature on a pick
     export.surfaces = None
     folder = export.run("Grid A", export.defaults("Grid A"), progress=_noop)

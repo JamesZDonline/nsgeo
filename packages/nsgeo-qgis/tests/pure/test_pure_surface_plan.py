@@ -7,14 +7,16 @@ from nsgeo_qgis.surface_plan import (
     KIND_SURFACE,
     STALE_REASONS,
     FeatureRecord,
+    also_note,
     built_message,
     clean_name,
     delete_question,
     empty_message,
+    feature_ids,
     fit_rows,
+    join_feature_ids,
     mesh_2dm,
     mesh_dat,
-    move_note,
     name_refusal,
     outlier_line,
     rebuild_refusal,
@@ -85,15 +87,23 @@ def test_selection_refusals_come_in_order():
     assert selection_refusal(**{**ok, "n": 1, "spans_area": True, "minimum": 1}) == ""
 
 
-def test_move_note_names_each_surface_once():
-    assert move_note({"Bowl": 4}, 30) == (
-        "4 of them are in “Bowl”; they will move to this surface, and “Bowl” will need a rebuild."
-    )
-    two = move_note({"Bowl": 4, "Ditch": 2}, 30)
-    assert two.count("“Bowl”") == 2 and two.count("“Ditch”") == 2
-    assert "4 of them are in “Bowl”" in two and "2 in “Ditch”" in two
-    assert move_note({}, 30) == ""
-    assert move_note({"Bowl": 0}, 30) == ""
+def test_also_note_names_each_surface_once_and_says_nothing_moves():
+    assert also_note({"Bowl": 4}, 30) == "4 of these picks are also in “Bowl”."
+    assert also_note({"Bowl": 6}, 6) == "All 6 of these picks are also in “Bowl”."
+    two = also_note({"Bowl": 4, "Ditch": 2}, 30)
+    assert two.count("“Bowl”") == 1 and two.count("“Ditch”") == 1
+    assert "4 of these picks are also in “Bowl”" in two and "2 in “Ditch”" in two
+    assert "move" not in two
+    assert also_note({}, 30) == ""
+    assert also_note({"Bowl": 0}, 30) == ""
+
+
+def test_feature_ids_read_tolerantly_and_join_in_order():
+    assert feature_ids(" a ; ;b;a ") == ("a", "b")
+    assert feature_ids(None) == () and feature_ids("") == () and feature_ids(" ; ") == ()
+    assert feature_ids("solo") == ("solo",)
+    assert join_feature_ids(["b", "a", "b", ""]) == "b;a"
+    assert join_feature_ids([]) is None
 
 
 def test_remove_and_delete_wording():
@@ -111,14 +121,6 @@ def test_unreadable_picks_have_their_own_wording_and_come_after_unsaved():
     assert "3 of these picks have no trace or time" in selection_refusal(**base, unreadable=3)
     assert selection_refusal(**{**base, "unsaved": 1}, unreadable=2).startswith("Save")
     assert "cut" not in selection_refusal(**{**base, "on_cuts": 2}, unreadable=1)
-
-
-def test_move_note_says_when_a_surface_is_left_too_small():
-    note = move_note({"Bowl": 4, "Ditch": 2}, 6, {"Bowl": 0, "Ditch": 5})
-    assert note.endswith("“Bowl” is left with 0 picks, too few to rebuild.")
-    assert "Ditch” is left" not in note
-    assert "too few" not in move_note({"Bowl": 4}, 30, {"Bowl": 3})
-    assert "left with 1 pick," in move_note({"Bowl": 4}, 30, {"Bowl": 1})
 
 
 def test_stale_text_names_every_reason():

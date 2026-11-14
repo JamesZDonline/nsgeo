@@ -7,9 +7,9 @@ resolution, runs the core builder and writes `<site>/surfaces/<grid>/`: per surf
 build key, then `<id>.json` last, so a build is complete exactly when its json names its
 files. A cancelled or failed build leaves the previous build's files and json untouched.
 
-A surface is a row in `features` plus every `picks` row whose `feature_id`
-names it. Both live in the GeoPackage and are written straight through the
-data provider, like picks, so none of this dirties the session. Each refused
+A surface is a row in `features` plus every `picks` row whose `feature_id` lists it (a pick
+can be in several surfaces: ids joined by ";"). Both live in the GeoPackage and are written
+straight through the data provider, like picks, so none of this dirties the session. Each refused
 change raises `ValueError` carrying `surface_plan`'s text; each completed one
 emits `session.features_changed` after the write.
 """
@@ -57,6 +57,7 @@ from nsgeo_qgis.surface_plan import (
     WHY_NO_POSITION,
     FeatureRecord,
     clean_name,
+    feature_ids,
     grid_mismatch_refusal,
     input_hash,
     mesh_2dm,
@@ -115,17 +116,15 @@ class BuiltSurface:
 
 @dataclass(frozen=True)
 class SelectionCheck:
-    """What a selection of picks can do: `refusal` is "" when it can make (or
-    join) a surface; `grid_id` is the one grid the picks are on; `moving` maps
-    the name of each other surface that holds some of them to how many; `n` is
+    """What a selection of picks can do: `refusal` is "" when it can make (or join) a
+    surface; `grid_id` is the one grid the picks are on; `also` maps the name of each
+    other surface that already holds some of them to how many (they stay there); `n` is
     the number selected."""
 
     refusal: str
     grid_id: str | None
-    moving: dict[str, int] = field(default_factory=dict)
+    also: dict[str, int] = field(default_factory=dict)
     n: int = 0
-    # What each surface in `moving` keeps after the move (under 3 cannot rebuild).
-    left: dict[str, int] = field(default_factory=dict)
 
 
 class Surfaces:
@@ -211,17 +210,12 @@ class Surfaces:
         if not refusal and joining is not None and grid_id != joining.grid_id:
             refusal = grid_mismatch_refusal(joining.name, joining.grid_id, str(grid_id))
         names = {r.feature_id: r.name for r in self.records()}
-        held = self.layers.members_by_feature()
-        moving: dict[str, int] = {}
-        left: dict[str, int] = {}
+        also: dict[str, int] = {}
         for row in rows:
-            owner = row.pick.feature_id
-            if owner in names and owner != into:
-                moving[names[owner]] = moving.get(names[owner], 0) + 1
-        for owner, name in names.items():
-            if name in moving:
-                left[name] = len(held.get(owner, [])) - moving[name]
-        return SelectionCheck(refusal, grid_id, moving, len(fids), left)
+            for owner in feature_ids(row.pick.feature_id):
+                if owner in names and owner != into:
+                    also[names[owner]] = also.get(names[owner], 0) + 1
+        return SelectionCheck(refusal, grid_id, also, len(fids))
 
     # ---- changes ------------------------------------------------------------
     def _refuse_name(self, name: str, own: str | None = None) -> str:
@@ -262,7 +256,7 @@ class Surfaces:
         # with no picks (removed below), never picks naming nothing.
         self.layers.write_feature(record)
         try:
-            self.layers.set_pick_feature(fids, record.feature_id)
+            self.layers.add_pick_feature(fids, record.feature_id)
         except Exception:
             self.layers.remove_feature(record.feature_id)
             raise
@@ -286,12 +280,8 @@ class Surfaces:
         found = self.check(fids, into=feature_id)
         if found.refusal:
             raise ValueError(found.refusal)
-        already = {r.fid for r in self.members(feature_id)}
-        fresh = [f for f in dict.fromkeys(fids) if f not in already]
-        if not fresh:
-            return
-        self.layers.set_pick_feature(fresh, feature_id)
-        self._changed()
+        if self.layers.add_pick_feature(fids, feature_id):
+            self._changed()
 
     def remove_picks(self, feature_id: str, fids: Iterable[int]) -> int:
         """Take `fids` out of the surface; returns how many were in it (0: nothing changed)."""
@@ -304,14 +294,14 @@ class Surfaces:
         text = remove_refusal(len(held) - len(leaving))
         if text:
             raise ValueError(text)
-        self.layers.set_pick_feature(leaving, None)
+        self.layers.remove_pick_feature(leaving, feature_id)
         self._changed()
         return len(leaving)
 
     def delete(self, feature_id: str) -> None:
-        """Remove the surface. Its picks all stay: they are cleared first, so
-        a failure partway leaves a surface with fewer picks, never picks that
-        name a surface which is gone."""
+        """Remove the surface. Its picks all stay (and keep their other surfaces): its id is
+        taken out of them first, so a failure partway leaves a surface with fewer picks,
+        never picks that name a surface which is gone."""
         self._record(feature_id)
         self._refuse_in_transaction()
         self.layers.clear_pick_feature(feature_id)

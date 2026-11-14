@@ -173,31 +173,33 @@ def grid_mismatch_refusal(name: str, surface_grid: str, picks_grid: str) -> str:
     )
 
 
-def move_note(moving: Mapping[str, int], n: int, left: Mapping[str, int] | None = None) -> str:
-    """The warning that picks already in surfaces will move (call 3): `moving`
-    maps each such surface's name to how many of the `n` picks it holds, and
-    `left` to how many it keeps; one left with fewer than 3 cannot be rebuilt."""
-    items = [(name, k) for name, k in moving.items() if k > 0]
+def feature_ids(value: object) -> tuple[str, ...]:
+    """The surfaces a pick belongs to, from its `feature_id` column (call 8, amended): ids
+    joined by ";". Read tolerantly (hand edits): split, strip, drop empties and repeats."""
+    if value is None:
+        return ()
+    return tuple(dict.fromkeys(p.strip() for p in str(value).split(";") if p.strip()))
+
+
+def join_feature_ids(ids: Iterable[str]) -> str | None:
+    """The column value for `ids`, in order and without repeats; None when there are none."""
+    kept = tuple(dict.fromkeys(i for i in ids if i))
+    return ";".join(kept) if kept else None
+
+
+def also_note(also: Mapping[str, int], n: int) -> str:
+    """Informational: `also` maps the name of each other surface to how many of the `n`
+    selected picks it holds. They join the new one and stay where they are."""
+    items = [(name, k) for name, k in also.items() if k > 0]
     if not items:
         return ""
-    names = _and([f"“{name}”" for name, _ in items])
     if len(items) == 1 and items[0][1] >= n:
-        held = f"All {n} are in {names}"
-    else:
-        parts = [
-            f"{k} of them are in “{name}”" if i == 0 else f"{k} in “{name}”"
-            for i, (name, k) in enumerate(items)
-        ]
-        held = _and(parts)
-    note = f"{held}; they will move to this surface, and {names} will need a rebuild."
-    short = [
-        f"“{name}” is left with {k} pick{'' if k == 1 else 's'}"
-        for name, _ in items
-        if left is not None and (k := left.get(name, MIN_PICKS)) < MIN_PICKS
+        return f"All {n} of these picks are also in “{items[0][0]}”."
+    parts = [
+        f"{k} of these picks are also in “{name}”" if i == 0 else f"{k} in “{name}”"
+        for i, (name, k) in enumerate(items)
     ]
-    if short:
-        note += f" {_and(short)}, too few to rebuild."
-    return note
+    return f"{_and(parts)}."
 
 
 IN_TRANSACTION_REFUSAL = (

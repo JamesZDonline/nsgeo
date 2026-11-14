@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from nsgeo_qgis.surface_plan import move_note, name_refusal, resolution_hint, settings_summary
+from nsgeo_qgis.surface_plan import also_note, name_refusal, resolution_hint, settings_summary
 from nsgeo_qgis.surfaces import SelectionCheck
 from nsgeo_qgis.ui.surface_settings_form import SurfaceSettingsForm
 
@@ -60,7 +60,7 @@ class NewSurfaceDialog(QDialog):
         self.refusal_label.setText(check.refusal)
         self.refusal_label.setVisible(bool(check.refusal))
         layout.addWidget(self.refusal_label)
-        note = "" if check.refusal else move_note(check.moving, check.n, check.left)
+        note = "" if check.refusal else also_note(check.also, check.n)
         self.note_label = _wrapped()
         self.note_label.setText(note)
         self.note_label.setVisible(bool(note))

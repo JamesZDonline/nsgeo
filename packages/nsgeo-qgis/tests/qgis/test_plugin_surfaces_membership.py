@@ -144,18 +144,79 @@ def test_create_sets_feature_id_on_exactly_the_selected_picks(site):
     assert sorted(r.fid for r in surfaces.members(record.feature_id)) == sorted(chosen)
 
 
-def test_picks_already_in_a_surface_move_and_the_check_says_so(site):
+def test_picks_already_in_a_surface_join_another_and_the_check_says_so(site):
     _, layers, surfaces, _ = site
     fids = _bowl_picks(layers, 8)
     bowl = surfaces.create("Bowl", fids[:6])
     found = surfaces.check(fids[2:8])
-    assert found.refusal == "" and found.moving == {"Bowl": 4} and found.n == 6
-    assert found.left == {"Bowl": 2}
+    assert found.refusal == "" and found.also == {"Bowl": 4} and found.n == 6
     other = surfaces.create("Higher", fids[2:8])
-    owners = _feature_ids(layers)
-    assert {f for f, o in owners.items() if o == other.feature_id} == set(fids[2:8])
-    assert {f for f, o in owners.items() if o == bowl.feature_id} == set(fids[:2])
-    assert surfaces.check(fids[2:8], into=other.feature_id).moving == {}
+    # nothing moved: Bowl keeps every pick and is not stale; Higher has its own six
+    assert sorted(r.fid for r in surfaces.members(bowl.feature_id)) == fids[:6]
+    assert sorted(r.fid for r in surfaces.members(other.feature_id)) == fids[2:8]
+    assert surfaces.state(bowl.feature_id).stale == ()
+    assert surfaces.check(fids[2:8], into=other.feature_id).also == {"Bowl": 4}
+    assert surfaces.check(fids[2:8], into=bowl.feature_id).also == {"Higher": 6}
+    both = _feature_ids(layers)[fids[2]]
+    assert both == f"{bowl.feature_id};{other.feature_id}"
+
+
+def test_removing_a_pick_from_one_surface_leaves_it_in_the_other(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 8)
+    a = surfaces.create("A", fids[:6])
+    b = surfaces.create("B", fids[:6])
+    assert surfaces.remove_picks(b.feature_id, fids[:1]) == 1
+    assert fids[0] in {r.fid for r in surfaces.members(a.feature_id)}
+    assert fids[0] not in {r.fid for r in surfaces.members(b.feature_id)}
+    assert _feature_ids(layers)[fids[0]] == a.feature_id
+
+
+def test_adding_picks_already_in_a_surface_writes_and_signals_nothing(site):
+    session, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    a = surfaces.create("A", fids)
+    seen = []
+    session.features_changed.connect(lambda: seen.append(1))
+    surfaces.add_picks(a.feature_id, fids[:3])
+    assert seen == []
+    assert set(_feature_ids(layers).values()) == {a.feature_id}
+
+
+def test_deleting_one_surface_leaves_the_other_its_picks(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    a = surfaces.create("A", fids)
+    b = surfaces.create("B", fids)
+    surfaces.delete(a.feature_id)
+    assert sorted(r.fid for r in surfaces.members(b.feature_id)) == fids
+    assert set(_feature_ids(layers).values()) == {b.feature_id}
+
+
+def test_a_hand_edited_column_reads_tolerantly(site):
+    _, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    a = surfaces.create("A", fids)
+    b = surfaces.create("B", fids)
+    picks = layers.layers["picks"].dataProvider()
+    index = picks.fieldNameIndex("feature_id")
+    text = f" {a.feature_id} ; ;{b.feature_id};{a.feature_id} "
+    assert picks.changeAttributeValues({fids[0]: {index: text}})
+    held = surfaces.layers.members_by_feature()
+    assert fids[0] in {r.fid for r in held[a.feature_id]}
+    assert fids[0] in {r.fid for r in held[b.feature_id]}
+    assert len([r for r in held[a.feature_id] if r.fid == fids[0]]) == 1
+
+
+def test_a_picks_table_rebuild_keeps_multi_membership(site):
+    session, layers, surfaces, _ = site
+    fids = _bowl_picks(layers, 6)
+    a = surfaces.create("A", fids)
+    b = surfaces.create("B", fids)
+    session.replace_grid(Grid("A", (-86.8, 36.4), 12.0, 0.001, 0.001, "EPSG:4326", 0.5))
+    assert len(surfaces.members(a.feature_id)) == 6
+    assert len(surfaces.members(b.feature_id)) == 6
+    assert set(_feature_ids(layers).values()) == {f"{a.feature_id};{b.feature_id}"}
 
 
 def test_delete_clears_membership_and_keeps_every_pick(site):
@@ -385,20 +446,6 @@ def test_delete_clears_a_member_whose_time_was_blanked_after_it_joined(site):
     assert len(surfaces.members(record.feature_id)) == 4  # the blank one reads as absent
     surfaces.delete(record.feature_id)
     assert set(_feature_ids(layers).values()) == {None}
-
-
-def test_moving_every_pick_of_a_surface_says_it_is_left_too_small(site):
-    from nsgeo_qgis.surface_plan import move_note
-
-    _, layers, surfaces, _ = site
-    fids = _bowl_picks(layers, 6)
-    surfaces.create("Bowl", fids)
-    found = surfaces.check(fids)
-    assert found.refusal == "" and found.moving == {"Bowl": 6} and found.left == {"Bowl": 0}
-    note = move_note(found.moving, found.n, found.left)
-    assert "“Bowl” is left with 0 picks, too few to rebuild" in note
-    surfaces.create("Higher", fids)  # allowed
-    assert surfaces.members(surfaces.records()[0].feature_id) == []
 
 
 def test_picks_with_pending_edits_in_the_layer_are_unsaved(site):

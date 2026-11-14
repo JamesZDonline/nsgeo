@@ -88,6 +88,7 @@ from nsgeo_qgis.slices_plan import (
     too_fine_for_export,
     volume_choice,
 )
+from nsgeo_qgis.surface_plan import feature_ids
 from nsgeo_qgis.ui.site_scope import default_preset, source_keys, transform_value
 
 #: The most points a line takes in lines.vtp.
@@ -863,20 +864,22 @@ class ParaViewExport:
         feature_index: dict[str, int] | None = None,
     ) -> int:
         """picks.vtp: each pick at its cube-clock time, converted with the volume's velocity.
-        `feature` is the index (in export.json's `features`) of the pick's built surface, or -1."""
+        `feature` is the index (in export.json's `features`) of the first built surface the
+        pick is in, or -1; `n_surfaces` counts the built ones."""
         feature_index = feature_index or {}
         order = {line.key: i for i, line in enumerate(sorted(lines, key=lambda ln: ln.key))}
         rows = [(line.key, p) for line in lines for p in self.session.picks_for(line.key)]
         spots = place_picks(rows, lines, prov, frame, velocity)
         placed = [p for p in spots if p is not None]
-        feature = np.asarray(
-            [
-                feature_index.get(str(pick.feature_id), -1)
-                for (_key, pick), spot in zip(rows, spots)
-                if spot is not None
-            ],
-            dtype=np.int32,
-        )
+        # A pick can be in several surfaces (`feature_id` lists them): `feature` is its first
+        # built one, `n_surfaces` how many built ones it is in.
+        built = [
+            [feature_index[i] for i in feature_ids(pick.feature_id) if i in feature_index]
+            for (_key, pick), spot in zip(rows, spots)
+            if spot is not None
+        ]
+        feature = np.asarray([b[0] if b else -1 for b in built], dtype=np.int32)
+        n_surfaces = np.asarray([len(b) for b in built], dtype=np.int32)
         depth = np.asarray([p.depth_m for p in placed], dtype=float)
         local = np.asarray([[p.x_m, p.y_m] for p in placed], dtype=float).reshape(-1, 2)
         line_index = np.asarray([order[p.line_key] for p in placed], dtype=np.int32)
@@ -886,7 +889,12 @@ class ParaViewExport:
         write_poly_data(
             folder / "picks.vtp",
             points,
-            {"true_depth_m": depth.astype(np.float32), "line": line_index, "feature": feature},
+            {
+                "true_depth_m": depth.astype(np.float32),
+                "line": line_index,
+                "feature": feature,
+                "n_surfaces": n_surfaces,
+            },
             verts=[[i] for i in range(len(depth))],
         )
         return int(depth.size)

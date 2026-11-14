@@ -792,8 +792,8 @@ Picks on cuts cannot be used yet.
    and show their values; open them only to change how the surface is drawn
    between your picks, how far it may follow the reflection from a pick (the
    window), or the strength test that decides which cells are holes.
-   A pick belongs to at most one surface, so picks already in another surface move
-   to this one, and the dialog says so before anything changes.
+   A pick can belong to several surfaces, so picks already in another surface join
+   this one and stay in the other; the dialog says which.
 3. Click **Create and build**. It builds at the grid's 3-D resolution, the one its
    ParaView export uses. If the grid was exported at those settings the build
    takes seconds; otherwise the first one fills the grid, which takes longer.

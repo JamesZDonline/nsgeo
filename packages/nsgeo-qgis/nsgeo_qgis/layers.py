@@ -66,7 +66,12 @@ from qgis.PyQt.QtCore import QMetaType, QObject, Qt
 from qgis.PyQt.QtGui import QColor
 
 from nsgeo_qgis.session import Pick, SiteSession
-from nsgeo_qgis.surface_plan import FeatureRecord, settings_json
+from nsgeo_qgis.surface_plan import (
+    FeatureRecord,
+    feature_ids,
+    join_feature_ids,
+    settings_json,
+)
 from nsgeo_qgis.ui.profile_view import PICK_COLOUR
 
 _KIND = {
@@ -366,9 +371,8 @@ def _as_str(value: Any) -> str:
 
 
 def _as_opt_str(value: Any) -> str | None:
-    """`feature_id` specifically: null and empty are different states
-    here. Null means "not grouped"; an empty string would be a group
-    whose name is empty."""
+    """`feature_id` specifically: the raw text (a list of ids joined by ";", read with
+    `surface_plan.feature_ids`), or None for NULL."""
     return None if value == NULL else str(value)
 
 
@@ -2052,27 +2056,36 @@ class SiteLayers(QObject):
         return PickRow(feature.id(), pick, point)
 
     def members_by_feature(self) -> dict[str, list[PickRow]]:
-        """Every committed pick that belongs to a feature, by feature id, in
-        one scan. A `feature_id` that names no record in `features` is ignored
-        (a deleted surface's leftovers are not members of anything)."""
+        """Every committed pick that belongs to a feature, by feature id, in one scan. A
+        pick lists its surfaces in `feature_id` (ids joined by ";"), so it appears under
+        each. An id that names no record in `features` is ignored (a deleted surface's
+        leftovers are not members of anything)."""
         layer = self._picks_layer()
         if layer is None:
             return {}
         known = {r.feature_id for r in self.feature_records()}
         out: dict[str, list[PickRow]] = {}
         for feature in layer.dataProvider().getFeatures():
-            fid = _as_opt_str(_attr(feature, "feature_id"))
-            if fid is None or fid not in known:
+            listed = [
+                i for i in feature_ids(_as_opt_str(_attr(feature, "feature_id"))) if i in known
+            ]
+            if not listed:
                 continue
             row = self._pick_row(feature)
             if row is not None:
-                out.setdefault(fid, []).append(row)
+                for fid in listed:
+                    out.setdefault(fid, []).append(row)
         return out
 
-    def set_pick_feature(self, fids: Iterable[int], feature_id: str | None) -> None:
-        """Set (or, with None, clear) `feature_id` on committed rows `fids`,
-        through the provider as `follow_lines` writes: the edit buffer is never
-        read or changed, so a note typed in editing mode survives. Raises
+    def _edit_pick_features(
+        self,
+        fids: Iterable[int] | None,
+        change: Callable[[tuple[str, ...]], tuple[str, ...]],
+    ) -> int:
+        """Rewrite the surface list of committed rows `fids` (None: every row) with `change`,
+        read raw from the provider, as one `changeAttributeValues` through the provider:
+        the edit buffer is never read or changed, so a note typed in editing mode survives.
+        Rows whose list does not change are not written. Returns the rows changed. Raises
         RuntimeError if the write fails."""
         layer = self._picks_layer()
         if layer is None:
@@ -2081,13 +2094,39 @@ class SiteLayers(QObject):
         index = provider.fieldNameIndex("feature_id")
         if index < 0:
             raise RuntimeError("the picks table has no feature_id field")
-        value = NULL if feature_id is None else feature_id
-        changes = {int(f): {index: value} for f in fids if int(f) >= 0}
+        if fids is None:
+            request = QgsFeatureRequest()
+        else:
+            wanted = sorted({int(f) for f in fids if int(f) >= 0})
+            if not wanted:
+                return 0
+            request = QgsFeatureRequest().setFilterFids(wanted)
+        changes: dict[int, dict[int, Any]] = {}
+        for feature in provider.getFeatures(request):
+            raw = _as_opt_str(_attr(feature, "feature_id"))
+            before = feature_ids(raw)
+            after = change(before)
+            if after != before:
+                joined = join_feature_ids(after)
+                changes[int(feature.id())] = {index: NULL if joined is None else joined}
         if not changes:
-            return
+            return 0
         if not provider.changeAttributeValues(changes):
             raise RuntimeError(f"could not update the picks: {_provider_reason(provider)}")
         layer.triggerRepaint()
+        return len(changes)
+
+    def add_pick_feature(self, fids: Iterable[int], feature_id: str) -> int:
+        """Add `feature_id` to the surfaces of committed rows `fids`; the others they are in
+        stay. Returns the rows changed (a row already in it is not written)."""
+        return self._edit_pick_features(
+            fids, lambda ids: ids if feature_id in ids else (*ids, feature_id)
+        )
+
+    def remove_pick_feature(self, fids: Iterable[int], feature_id: str) -> int:
+        """Take `feature_id` out of the surfaces of committed rows `fids`; returns the rows
+        changed."""
+        return self._edit_pick_features(fids, lambda ids: tuple(i for i in ids if i != feature_id))
 
     def _feature_fid(self, feature_id: str) -> int:
         layer = self._features_layer()
@@ -2098,19 +2137,10 @@ class SiteLayers(QObject):
         raise KeyError(f"no feature with id {feature_id!r}")
 
     def clear_pick_feature(self, feature_id: str) -> int:
-        """Set `feature_id` to NULL on every committed row that names it, read
-        raw (not through `_row_to_pick`), so a row with a blank time that was
-        once a member cannot keep naming a deleted surface. Returns the count."""
-        layer = self._picks_layer()
-        if layer is None:
-            return 0
-        fids = [
-            f.id()
-            for f in layer.dataProvider().getFeatures()
-            if _as_opt_str(_attr(f, "feature_id")) == feature_id
-        ]
-        self.set_pick_feature(fids, None)
-        return len(fids)
+        """Take `feature_id` out of every committed row that lists it, read raw (not through
+        `_row_to_pick`), so a row with a blank time that was once a member cannot keep naming
+        a deleted surface. The row's other surfaces stay. Returns the rows changed."""
+        return self._edit_pick_features(None, lambda ids: tuple(i for i in ids if i != feature_id))
 
     def feature_records(self) -> list[FeatureRecord]:
         """Every row of `features`, oldest first."""

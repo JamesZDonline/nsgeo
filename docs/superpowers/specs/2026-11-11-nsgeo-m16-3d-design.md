@@ -195,7 +195,7 @@ On main (414b6aa or later):
    It also refines each cell's depth between samples (§5.3), so that sampling steps are not mistaken for detail.
 7. **A surface reports its fit:** how many picks lie within 2 cm and within 5 cm of it, and how many sit on holes, with the outliers listed. It also reports the measured offset ("your picks sit 3.6 cm above the strongest swing"). That gives the user a way to spot a pick on the wrong reflection.
 8. **Membership and storage carry over from the draft:**
-   - A pick belongs to at most one feature, through `feature_id`.
+   - A pick can belong to several features. `feature_id` holds the list: ids joined by `;`, in the order they were added (a single id is a list of one). The user decided this on 2026-11-13, after the walkthrough, replacing "at most one feature": making a second surface from picks already in the first took them away from it. Creating or adding to a surface adds its id and removes nothing; removing or deleting takes out only that surface's id.
    - Feature definitions are kept in a new authored, non-spatial `features` table in `site.nsgeo.gpkg`, written as you go like picks.
    - Built geometry is derived, regenerable, written into the site folder, and records its provenance.
 9. **Staleness, widened from the draft's call 4.** A surface records everything its numbers depend on, and goes stale when any of these changes:
@@ -301,7 +301,7 @@ Colour scales are set last, so no colouring call rescales them. Depth uses one r
    - builds the surface in a task;
    - adds it to the map, the 3-D view and the next export.
 
-You can add picks to a surface, remove them, change its parameters, rebuild it, rename it and delete it. Deleting a surface clears `feature_id` on its picks and never deletes a pick.
+You can add picks to a surface, remove them, change its parameters, rebuild it, rename it and delete it. Deleting a surface takes its id out of its picks' `feature_id` and never deletes a pick.
 
 **The builder (core):**
 1. Put the picks on the cube's clock: each pick's `time_ns` is measured from its `zero_ns`, and the cube's clock is its time base.

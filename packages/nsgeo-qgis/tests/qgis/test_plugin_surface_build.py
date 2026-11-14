@@ -395,13 +395,13 @@ def test_a_member_deleted_by_hand_marks_the_surface_stale(built_site):
 
 
 def test_picks_moved_out_leave_too_few_to_rebuild(built_site):
-    """Ruling R9: moving picks may leave a surface with fewer than 3; it keeps its last build."""
+    """Removing picks may leave a surface with fewer than 3; it keeps its last build."""
     _, _, _, layers, surfaces = built_site
     record, fids = _surface(built_site)
     surfaces.build([record.feature_id], progress=_noop)
     folder = surfaces.folder(GRID)
     before = _listing(folder)
-    layers.set_pick_feature(fids[:2], None)
+    layers.remove_pick_feature(fids[:2], record.feature_id)
     with pytest.raises(ValueError, match="too few to rebuild"):
         surfaces.build([record.feature_id], progress=_noop)
     assert _listing(folder) == before
@@ -535,7 +535,7 @@ def test_one_too_small_surface_never_blocks_its_grids_rebuild(built_site):
     ok, _ = _surface(built_site, "Ok")
     more = _write(layers, session, [(0, 10, 10.2), (0, 50, 10.8), (1, 30, 10.4)])
     small = surfaces.create("Small", more, SurfaceSettings(strength=0.0))
-    layers.set_pick_feature(more[:1], None)  # two picks left: too few to rebuild
+    layers.remove_pick_feature(more[:1], small.feature_id)  # two picks left: too few to rebuild
     reports = surfaces.build([ok.feature_id, small.feature_id], progress=_noop)
     assert [r.feature_id for r in reports] == [ok.feature_id]
     assert surfaces.built(ok.feature_id) is not None
