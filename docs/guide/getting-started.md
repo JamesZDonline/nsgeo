@@ -105,6 +105,7 @@ stay exactly where they are.
 | **Save site** | Saves the site (see [Where your data lives](#4-where-your-data-lives)). |
 | **Add grid…** | Places a new grid on the map. |
 | **Import DZT…** | Imports DZT files into a grid. |
+| **Import GPS lines…** | Imports DZT files that have a DZG beside them, each placed along its RTK GPS track (see [Step 3a](#step-3a-import-gps-lines)). |
 | **Pick** | Turns pick mode on and off. Click the profile to make a pick. |
 | **Velocity** | Turns velocity mode on and off. Click a diffraction hyperbola on the profile to measure the radar velocity from it. |
 | **Cut** | Turns cut mode on and off. Click points on a grid to draw a line, and the profile shows the vertical section beneath it (see [Step 8](#step-8-draw-a-cut)). |
@@ -390,6 +391,51 @@ gets the grid's value and is named on the status line). Nothing changes until yo
 press OK, and the numbers are a starting point: look at the lines, then adjust.
 Lines Measure cannot use are left as they were and named in the status, with the
 reason. While it runs the button reads **Stop**, and pressing it changes nothing.
+
+### Step 3a: Import GPS lines
+
+Some surveys were walked with an RTK GPS on the cart. The radar then writes a
+**DZG** file beside each DZT: a text log of the GPS sentences, each tied to the
+trace being recorded when it arrived. If your lines have DZG files, you can
+place them by where the cart really went instead of by tapes and a grid.
+
+Click **Import GPS lines…**. It needs an open site, and no grid.
+
+1. Click **Add files…** and choose the DZT files. Each needs its DZG beside it,
+   with the same name. A row shows the number of traces, how many fixes were RTK
+   fixed, and how long the track runs without one (**Without RTK**).
+2. If the site has no coordinate system yet, nsgeo picks one from where the
+   first line lies, and the dialog says which. Every later import goes into that
+   system. A file that cannot be placed in it is refused, with the reason in its
+   **Status** cell.
+3. Set **Destagger (m)** if you already know it. It applies to every line in
+   the import, and you can change it per line afterwards (below).
+4. Click **Import**.
+
+The lines are drawn along the walk, in the **No grid** colour, so the turns at
+the line ends show. Only RTK-fixed positions place a line. Past the first and
+last of them, the line carries on in a straight line by the wheel. If the log
+loses its RTK fix part way, the traces in between are spread along the straight
+stretch between the two good fixes, and that stretch is a **bridge**. The
+message bar names each bridge, with the traces it spans and its length, and the
+**rtk_gaps** layer draws it as a dotted line, so you can judge whether to trust
+that part of the line. It also draws any run past a line's end that is longer
+than 2 m.
+
+**nsgeo Survey** shows a GPS line as its label, **GPS**, its walked length and
+any **without RTK** length. Its profile reads in distance walked, one column to
+each trace. A line with no grid has no ruler, and a hyperbola fit uses the
+wheel's spacing at the start of the line.
+
+To set the destagger later, right-click a GPS line (or select several) and
+choose **Set destagger…**. The map, the marks and the picks move with it. nsgeo
+cannot yet measure the destagger from GPS lines; that comes with GPS areas.
+**Edit line…** and **Move to grid** are also for tape-placed lines only, for now.
+
+A line is placed either by tapes or by GPS, not both. To switch a tape-placed
+line to its GPS track, remove it and import it again with **Import GPS lines…**.
+**Import DZT…** keeps placing by the tapes, even when a DZG sits beside the
+file.
 
 ### Step 4: Open a line and use the map
 

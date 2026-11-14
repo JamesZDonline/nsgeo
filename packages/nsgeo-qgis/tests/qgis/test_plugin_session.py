@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from datetime import datetime
 
 import pytest
@@ -2187,3 +2188,121 @@ def test_a_gps_line_in_another_crs_than_the_site_is_refused_and_nothing_is_added
     with pytest.raises(ValueError, match="EPSG:32616"):
         session.add_lines([_gps_line(tmp_path, "G7.DZT", "EPSG:32616")])
     assert len(session.site.lines) == 1 and seen == [1]
+
+
+# ---- M17a P13: a GPS line's destagger ----------------------------------------------
+
+
+def _gps_session(tmp_path, names=("FILE__001.DZT", "FILE__002.DZT"), shift=0.0):
+    from plugin_testing import CRS, gps_line
+
+    s = SiteSession()
+    s.new_site(tmp_path)
+    s.set_site_crs(CRS)
+    lines = [
+        gps_line(tmp_path / "raw", name, {25: 4, 175: 4}, travel_shift=shift) for name in names
+    ]
+    s.add_lines(lines)
+    return s, [f"raw/{n}" for n in names]
+
+
+def _tape_line(tmp_path, name="FILE__009.DZT"):
+    p = synthetic_dzt(tmp_path / "raw", name)
+    return Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))
+
+
+def test_is_gps_line_tells_the_two_kinds_apart(qgis_app, tmp_path):
+    s, gps_keys = _gps_session(tmp_path)
+    s.add_grid(GRID)
+    s.add_lines([_tape_line(tmp_path)])
+    assert all(s.is_gps_line(k) for k in gps_keys)
+    assert not s.is_gps_line("raw/FILE__009.DZT")
+    with pytest.raises(KeyError):
+        s.is_gps_line("raw/NOPE.DZT")
+
+
+def test_set_travel_shift_is_one_change(qgis_app, tmp_path, monkeypatch):
+    s, keys = _gps_session(tmp_path)
+    s.save()
+    assert not s.dirty
+    changed = Spy(s.lines_changed)
+    marks = []
+    original = s._set_dirty
+    monkeypatch.setattr(s, "_set_dirty", lambda flag: (marks.append(flag), original(flag))[1])
+
+    s.set_travel_shift(keys, 0.24)
+
+    assert [s.line_for_key(k).placement.travel_shift for k in keys] == [0.24, 0.24]
+    assert len(changed.calls) == 1
+    assert marks == [True]
+    assert s.dirty
+    # the key, and so the stack and profile cache, stay where they were
+    assert s.keys() == keys
+
+
+def test_set_travel_shift_to_the_same_value_changes_nothing(qgis_app, tmp_path):
+    s, keys = _gps_session(tmp_path, shift=0.24)
+    s.save()
+    changed = Spy(s.lines_changed)
+    s.set_travel_shift(keys, 0.24)
+    assert changed.calls == []
+    assert not s.dirty
+
+
+def test_set_travel_shift_refuses_a_tape_line_and_changes_nothing(qgis_app, tmp_path):
+    s, keys = _gps_session(tmp_path, names=("FILE__001.DZT",))
+    s.add_grid(GRID)
+    s.add_lines([_tape_line(tmp_path, "FILE__002.DZT")])
+    s.save()
+    changed = Spy(s.lines_changed)
+
+    with pytest.raises(ValueError, match="FILE__002 is not a GPS line"):
+        s.set_travel_shift([keys[0], "raw/FILE__002.DZT"], 0.5)
+
+    assert s.line_for_key(keys[0]).placement.travel_shift == 0.0
+    assert changed.calls == [] and not s.dirty
+
+
+def test_set_travel_shift_refuses_an_unknown_key_and_a_non_finite_value(qgis_app, tmp_path):
+    s, keys = _gps_session(tmp_path)
+    with pytest.raises(KeyError):
+        s.set_travel_shift([keys[0], "raw/NOPE.DZT"], 0.5)
+    assert s.line_for_key(keys[0]).placement.travel_shift == 0.0
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite"):
+            s.set_travel_shift(keys, bad)
+    assert all(s.line_for_key(k).placement.travel_shift == 0.0 for k in keys)
+
+
+def test_a_pick_on_a_gps_line_follows_its_destagger(qgis_app, tmp_path):
+    from nsgeo_qgis.layers import SiteLayers
+    from qgis.core import QgsProject
+
+    project = QgsProject.instance()
+    project.clear()
+    from plugin_testing import CRS, gps_line
+
+    s = SiteSession()
+    s.new_site(tmp_path)
+    s.set_site_crs(CRS)
+    layers = SiteLayers(s, project=project)
+    try:
+        s.add_lines([gps_line(tmp_path / "raw", "FILE__001.DZT", {25: 4, 175: 4})])
+        keys = s.keys()
+        s.open_line(keys[0])
+        s.add_pick(keys[0], 80, 20.0)
+        before = next(layers.layers["picks"].getFeatures()).geometry().asPoint()
+
+        s.set_travel_shift(keys, 0.5)
+
+        line = s.line_for_key(keys[0])
+        after = next(layers.layers["picks"].getFeatures()).geometry().asPoint()
+        assert (after.x(), after.y()) == pytest.approx(tuple(line.trace_coords({})[80]), abs=1e-6)
+        # moved 0.5 m, and along the walk (north, to within grid convergence)
+        assert math.hypot(after.x() - before.x(), after.y() - before.y()) == pytest.approx(
+            0.5, abs=1e-3
+        )
+        assert after.y() > before.y()
+    finally:
+        layers.detach()
+        project.clear()

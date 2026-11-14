@@ -82,6 +82,7 @@ from qgis.PyQt.QtWidgets import (
     QAction,
     QDialog,
     QFileDialog,
+    QInputDialog,
     QMenu,
     QMessageBox,
     QToolButton,
@@ -346,6 +347,7 @@ class NsgeoPlugin:
         self.survey_dock.line_velocity_requested.connect(self.open_velocity_dialog)
         self.survey_dock.edit_lines_requested.connect(self.open_edit_lines_dialog)
         self.survey_dock.move_lines_requested.connect(self.move_lines)
+        self.survey_dock.destagger_requested.connect(self.open_destagger_dialog)
         self.iface.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.survey_dock)
         self.docks.append(self.survey_dock)
 
@@ -2730,6 +2732,41 @@ class NsgeoPlugin:
                 edited, velocity=now.velocity, velocity_source=now.velocity_source
             )
         return dataclasses.replace(edited, velocity_source=None)
+
+    def open_destagger_dialog(self, keys: list[str]) -> None:
+        """Ask for one destagger and set it on every GPS line in `keys`
+        (Survey panel, Set destagger…). A slot: it never raises, and reports on
+        the message bar. The box starts at the lines' shared value, or at 0 when
+        they differ."""
+        try:
+            assert self.session is not None
+            shifts = {
+                self.session.line_for_key(k).placement.travel_shift  # type: ignore[union-attr]
+                for k in keys
+                if self.session.is_gps_line(k)
+            }
+            start = shifts.pop() if len(shifts) == 1 else 0.0
+            value, accepted = QInputDialog.getDouble(
+                self.iface.mainWindow(),
+                "Destagger",
+                "Move every trace forward along the way its line was walked, "
+                f"for {len(keys)} GPS line(s), by (m):",
+                start,
+                -2.0,
+                2.0,
+                2,
+            )
+            if not accepted:
+                return
+            self.session.set_travel_shift(keys, value)
+        except (KeyError, ValueError) as exc:
+            what = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+            self.message(f"could not set the destagger: {what}", Qgis.MessageLevel.Critical)
+            return
+        except Exception as exc:  # noqa: BLE001 -- see the module docstring
+            self.message(f"could not set the destagger: {exc}", Qgis.MessageLevel.Critical)
+            return
+        self.message(f"destagger set to {value:+.2f} m on {len(keys)} GPS line(s)")
 
     def open_velocity_dialog(self, key: str) -> None:
         """Set or clear the line's velocity override, from a typed number or a

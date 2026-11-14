@@ -2198,3 +2198,57 @@ def test_a_relabelled_axis_with_no_ruler_is_not_put_back(opened):
     dock._set_axes_holding("", 100, 200, 0.0, 0.2, None)
     assert dock.view.transform is not before
     assert dock.view.transform.t0_ns == 0.0
+
+
+# ---- M17a P14: a GPS line in the profile ----------------------------------------------
+
+
+def _open_gps(bare, track=None, shift=0.3, n_traces=200):
+    from plugin_testing import CRS, LAT0, LON0, M_PER_DEG, gps_line, open_gps, synthetic_gps_dzt
+
+    session, dock, tmp_path = bare
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    if track is None:
+        line = gps_line(tmp_path / "raw", "FILE__001.DZT", {25: 4, 175: 4}, n_traces, shift)
+    else:
+        path = synthetic_gps_dzt(
+            tmp_path / "raw",
+            "FILE__001.DZT",
+            [(t, LAT0 + t * m / M_PER_DEG, LON0, 4) for t, m in track],
+            n_traces=n_traces,
+            traces_per_metre=10.0,
+        )
+        line = open_gps(path, travel_shift=shift)
+    session.add_lines([line])
+    key = session.keys()[0]
+    session.open_line(key)
+    return session, dock, key, line
+
+
+def test_a_gps_line_opens_with_walked_distance_and_no_ruler(bare):
+    session, dock, key, line = _open_gps(bare, shift=0.3)
+    distance = dock.view._distance
+    assert distance is not None
+    # the bottom axis is the walked distance: 199 traces at 0.1 m, moved on by the destagger
+    assert distance[0] == pytest.approx(0.3)
+    # (to 0.05 m: the projection scales the made-up 0.1 m fix spacing a little)
+    assert distance[-1] == pytest.approx(19.9 + 0.3, abs=0.05)
+    assert np.allclose(distance, line.distance_along())
+    # a line with no grid has no shared ruler to rule against
+    assert dock._ruler_for(line, distance) is None
+    assert dock.view.ruler is None
+
+
+def test_the_velocity_fit_on_a_gps_line_uses_the_wheel_spacing(bare):
+    # The fixes put the middle of the line at 0.12 m a trace; the start run, where the
+    # wheel alone places the traces, is 0.1 m a trace. Decision 11's interim (until M17b)
+    # is the spacing at the start.
+    session, dock, key, line = _open_gps(
+        bare, track=[(50, 5.0), (150, 5.0 + 12.0)], shift=0.0, n_traces=200
+    )
+    distance, at_zero, per_trace = dock._velocity_axis()
+    assert per_trace == pytest.approx(0.1)
+    assert at_zero == pytest.approx(distance[0])
+    assert distance[-1] - distance[0] != pytest.approx(0.1 * 199)  # the middle really is 0.12
+    assert per_trace != pytest.approx((distance[-1] - distance[0]) / 199)

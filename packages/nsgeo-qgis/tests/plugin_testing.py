@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import zlib
@@ -610,3 +611,40 @@ def synthetic_gps_dzt(
     path = synthetic_dzt(folder, name, n_traces=n_traces, **kw)
     write_dzg(path.with_suffix(".DZG"), list(track))
     return path
+
+
+CRS = "EPSG:32632"
+LAT0, LON0 = 45.2, 10.5
+M_PER_DEG = 6_371_000.0 * math.pi / 180.0
+
+
+def fix(trace, quality=4):
+    """A fix on a line walked due north at 0.1 m a trace."""
+    return (trace, LAT0 + trace * 0.1 / M_PER_DEG, LON0, quality)
+
+
+def gps_line(folder, name, qualities, n_traces=200, travel_shift=0.0):
+    """A line at 10 traces a metre with a fix at each trace of `qualities`."""
+    path = synthetic_gps_dzt(
+        folder,
+        name,
+        [fix(t, q) for t, q in sorted(qualities.items())],
+        n_traces=n_traces,
+        traces_per_metre=10.0,
+    )
+    return open_gps(path, travel_shift=travel_shift)
+
+
+def open_gps(path, crs=CRS, travel_shift=0.0, grid_id=None):
+    import dataclasses
+
+    from nsgeo.geometry import track_from_log
+    from nsgeo.io import dzg_for, read_dzg
+    from nsgeo.model.survey import Line
+    from nsgeo_qgis.ui.gps_import_dialog import lonlat_to_xy
+    from qgis.core import QgsCoordinateReferenceSystem
+
+    log = read_dzg(dzg_for(path))
+    placement = track_from_log(log, lonlat_to_xy(QgsCoordinateReferenceSystem(crs)), crs)
+    placement = dataclasses.replace(placement, travel_shift=travel_shift, grid_id=grid_id)
+    return Line.open(path, placement)

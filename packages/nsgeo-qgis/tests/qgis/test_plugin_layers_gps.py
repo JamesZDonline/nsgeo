@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import dataclasses
-import math
-
 import numpy as np
 import pytest
-from nsgeo.geometry import END_LIMIT_M, Grid, GridPlacement, track_from_log
-from nsgeo.io import dzg_for, read_dzg
+from nsgeo.geometry import END_LIMIT_M, Grid, GridPlacement
 from nsgeo.model.survey import Line
 from nsgeo_qgis.layers import (
     CUT_COLOUR,
@@ -22,8 +18,14 @@ from nsgeo_qgis.layers import (
 )
 from nsgeo_qgis.map_link import MapLink
 from nsgeo_qgis.session import SiteSession
-from nsgeo_qgis.ui.gps_import_dialog import lonlat_to_xy
-from plugin_testing import synthetic_dzt, synthetic_gps_dzt
+from plugin_testing import (
+    CRS,
+    fix,
+    gps_line,
+    open_gps,
+    synthetic_dzt,
+    synthetic_gps_dzt,
+)
 from qgis.core import (
     NULL,
     QgsCoordinateReferenceSystem,
@@ -42,37 +44,9 @@ from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QMetaType
 from tests.real_data import GRID2_LINES
 
-CRS = "EPSG:32632"
-LAT0, LON0 = 45.2, 10.5
-M_PER_DEG = 6_371_000.0 * math.pi / 180.0
-
 DZX = """<?xml version="1.0" encoding="UTF-8"?>
 <DZX xmlns="www.geophysical.com/DZX/1.02"><File><name>{name}</name>
 <Profile><WayPt><scan>50</scan><mark>User</mark><name>Mark1</name></WayPt></Profile></File></DZX>"""
-
-
-def fix(trace, quality=4):
-    """A fix on a line walked due north at 0.1 m a trace."""
-    return (trace, LAT0 + trace * 0.1 / M_PER_DEG, LON0, quality)
-
-
-def gps_line(folder, name, qualities, n_traces=200, travel_shift=0.0):
-    """A line at 10 traces a metre with a fix at each trace of `qualities`."""
-    path = synthetic_gps_dzt(
-        folder,
-        name,
-        [fix(t, q) for t, q in sorted(qualities.items())],
-        n_traces=n_traces,
-        traces_per_metre=10.0,
-    )
-    return open_gps(path, travel_shift=travel_shift)
-
-
-def open_gps(path, crs=CRS, travel_shift=0.0, grid_id=None):
-    log = read_dzg(dzg_for(path))
-    placement = track_from_log(log, lonlat_to_xy(QgsCoordinateReferenceSystem(crs)), crs)
-    placement = dataclasses.replace(placement, travel_shift=travel_shift, grid_id=grid_id)
-    return Line.open(path, placement)
 
 
 def _site(tmp_path, pinned):

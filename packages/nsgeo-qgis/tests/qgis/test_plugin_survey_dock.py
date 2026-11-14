@@ -1573,3 +1573,196 @@ def test_a_plain_click_on_a_cut_opens_it_and_a_ctrl_click_does_not(dock, message
     _click(dock, dock.item_for_key(other))
     assert session.current_key == other and opened == [key, other]
     assert message_log == []
+
+
+# ---- M17a P13: GPS lines in the Survey panel ----------------------------------------
+
+#: a 29.8 m walk (299 traces at 10 a metre) with a 1.8 m stretch without RTK
+_GAP_FIXES = {10: 4, 100: 4, 110: 1, 118: 4, 280: 4}
+_STRAIGHT_FIXES = {10: 4, 280: 4}
+
+
+@pytest.fixture
+def gps_dock(qgis_app, tmp_path):
+    """A grid-free site (no grid, so no tape lines) holding three GPS lines."""
+    from plugin_testing import CRS, gps_line
+
+    session = SiteSession()
+    dock = SurveyDock(session)
+    session.new_site(tmp_path)
+    session.set_site_crs(CRS)
+    session.add_lines(
+        [
+            gps_line(tmp_path / "raw", "FILE__001.DZT", _GAP_FIXES, n_traces=299),
+            gps_line(
+                tmp_path / "raw", "FILE__002.DZT", _STRAIGHT_FIXES, n_traces=299, travel_shift=0.24
+            ),
+            gps_line(tmp_path / "raw", "FILE__003.DZT", _STRAIGHT_FIXES, n_traces=299),
+        ]
+    )
+    yield session, dock
+    dock.hide()
+    dock.deleteLater()
+
+
+def _add_tape_line(session, tmp_path):
+    session.add_grid(GRID)
+    p = synthetic_dzt(tmp_path / "raw", "FILE__009.DZT")
+    session.add_lines([Line.open(p, GridPlacement("A", "y", 0.0, 0.0, 1, p.stem))])
+    return "raw/FILE__009.DZT"
+
+
+def test_a_gps_line_row_reads_gps_length_and_gaps(gps_dock):
+    session, dock = gps_dock
+    assert dock.item_for_key(KEYS[0]).text(0) == "FILE__001 · GPS · 29.8 m · 1.8 m without RTK"
+    # a line with no gap says nothing about RTK
+    assert dock.item_for_key(KEYS[2]).text(0) == "FILE__003 · GPS · 29.8 m"
+
+
+def test_a_destaggered_gps_line_row_names_it(gps_dock):
+    session, dock = gps_dock
+    assert dock.item_for_key(KEYS[1]).text(0) == "FILE__002 · GPS · 29.8 m · destagger +0.24 m"
+    session.set_travel_shift([KEYS[0]], -0.1)
+    assert (
+        dock.item_for_key(KEYS[0]).text(0)
+        == "FILE__001 · GPS · 29.8 m · 1.8 m without RTK · destagger -0.10 m"
+    )
+
+
+def test_a_gps_line_row_keeps_the_velocity_and_fit_suffixes_after_destagger(gps_dock):
+    session, dock = gps_dock
+    session.apply_line_velocity(KEYS[1], VelocityModel.constant(0.1), None)
+    text = dock.item_for_key(KEYS[1]).text(0)
+    assert text == "FILE__002 · GPS · 29.8 m · destagger +0.24 m · v 0.100*"
+
+
+def test_a_gps_line_sits_under_the_site_when_it_names_no_grid(gps_dock):
+    session, dock = gps_dock
+    root = dock.tree.topLevelItem(0)
+    assert [dock.key_of(root.child(i)) for i in range(root.childCount())] == KEYS
+
+
+def test_a_gps_line_menu_offers_destagger_not_edit_or_move(gps_dock, answer_modal, message_log):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    menu = _right_click(dock, dock.item_for_key(KEYS[0]))
+    assert _texts(menu) == [
+        "Open",
+        "Set velocity override…",
+        "Set destagger…",
+        "Remove line from site",
+    ]
+    assert menu.actions()[-2].isSeparator()
+    assert menu.findChildren(QMenu) == []  # no Move to grid submenu either
+    fired = []
+    dock.destagger_requested.connect(fired.append)
+    _action(menu, "Set destagger…").trigger()
+    assert fired == [[KEYS[0]]]
+    assert message_log == []
+
+
+def test_a_gps_only_selection_offers_destagger_for_all(gps_dock, answer_modal, message_log):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
+    _select(dock, first, second)
+    menu = _right_click(dock, first)
+    assert _texts(menu) == ["Set destagger for 2 GPS lines…", "Remove 2 lines from site"]
+    assert menu.actions()[1].isSeparator()
+    fired = []
+    dock.destagger_requested.connect(fired.append)
+    _action(menu, "Set destagger for 2 GPS lines…").trigger()
+    assert fired == [[KEYS[0], KEYS[1]]]
+    assert message_log == []
+
+
+def test_a_mixed_selection_offers_only_removal(gps_dock, tmp_path, answer_modal, message_log):
+    session, dock = gps_dock
+    answer_modal(QMenu, "exec", None)
+    tape = _add_tape_line(session, tmp_path)
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(tape)
+    _unfold(second)
+    _select(dock, first, second)
+    menu = _right_click(dock, first)
+    assert _texts(menu) == ["Remove 2 lines from site"]
+    assert message_log == []
+
+
+def test_a_tape_only_selection_still_offers_edit_and_move(dock, answer_modal):
+    session, dock = dock
+    answer_modal(QMenu, "exec", None)
+    first, second = dock.item_for_key(KEYS[0]), dock.item_for_key(KEYS[1])
+    _select(dock, first, second)
+    assert _texts(_right_click(dock, first)) == [
+        "Edit 2 lines…",
+        "Move 2 lines to grid",
+        "Remove 2 lines from site",
+    ]
+
+
+def _plugin_with_gps_site(fake_iface, tmp_path, shifts):
+    import nsgeo_qgis
+    from plugin_testing import CRS, gps_line
+
+    plugin = nsgeo_qgis.classFactory(fake_iface)
+    plugin.initGui()
+    plugin.session.new_site(tmp_path)
+    plugin.session.set_site_crs(CRS)
+    plugin.session.add_lines(
+        [
+            gps_line(tmp_path / "raw", f"FILE__00{i + 1}.DZT", _STRAIGHT_FIXES, 299, travel_shift=s)
+            for i, s in enumerate(shifts)
+        ]
+    )
+    return plugin
+
+
+def test_set_destagger_starts_at_the_shared_value_and_applies_to_all(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin = _plugin_with_gps_site(fake_iface, tmp_path, [0.24, 0.24])
+    asked = answer_modal(QInputDialog, "getDouble", (0.31, True))
+
+    plugin.survey_dock.destagger_requested.emit(KEYS[:2])
+
+    assert len(asked) == 1
+    (_parent, title, label, value, low, high, decimals), _ = asked[0]
+    assert title == "Destagger"
+    assert label == (
+        "Move every trace forward along the way its line was walked, for 2 GPS line(s), by (m):"
+    )
+    assert (value, low, high, decimals) == (0.24, -2.0, 2.0, 2)
+    assert [plugin.session.line_for_key(k).placement.travel_shift for k in KEYS[:2]] == [0.31] * 2
+    assert fake_iface.messageBar().currentItem().text() == (
+        "destagger set to +0.31 m on 2 GPS line(s)"
+    )
+    plugin.session.save()
+    plugin.unload()
+
+
+def test_set_destagger_starts_at_zero_when_the_lines_differ(fake_iface, tmp_path, answer_modal):
+    plugin = _plugin_with_gps_site(fake_iface, tmp_path, [0.24, 0.0])
+    asked = answer_modal(QInputDialog, "getDouble", (0.0, False))
+
+    plugin.survey_dock.destagger_requested.emit(KEYS[:2])
+
+    assert asked[0][0][3] == 0.0
+    # cancelled: nothing changes and nothing is said
+    assert plugin.session.line_for_key(KEYS[0]).placement.travel_shift == 0.24
+    assert plugin.session.line_for_key(KEYS[1]).placement.travel_shift == 0.0
+    plugin.session.save()
+    plugin.unload()
+
+
+def test_set_destagger_names_one_line_in_the_label_and_the_message(
+    fake_iface, tmp_path, answer_modal
+):
+    plugin = _plugin_with_gps_site(fake_iface, tmp_path, [0.0])
+    asked = answer_modal(QInputDialog, "getDouble", (-0.5, True))
+    plugin.survey_dock.destagger_requested.emit(KEYS[:1])
+    assert "for 1 GPS line(s), by (m):" in asked[0][0][2]
+    assert fake_iface.messageBar().currentItem().text() == (
+        "destagger set to -0.50 m on 1 GPS line(s)"
+    )
+    plugin.session.save()
+    plugin.unload()

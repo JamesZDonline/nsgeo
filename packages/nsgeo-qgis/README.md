@@ -7,8 +7,8 @@ signal processing (a test enforces it).
 
 The [getting-started guide](../../docs/guide/getting-started.md) describes
 everything the plugin does: sites and grids, import, processing, picks, and time
-and depth slices. The two sections below record how the map link and picking
-behave in more detail.
+and depth slices, and lines placed along an RTK GPS track (**Import GPS lines…**).
+The two sections below record how the map link and picking behave in more detail.
 
 ### The map ↔ profile link
 

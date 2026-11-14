@@ -731,6 +731,41 @@ class SiteSession(QObject):
         self._announce_dropped(*dropped)
         self.lines_changed.emit()
 
+    def is_gps_line(self, key: str) -> bool:
+        """Whether the line under `key` is placed along its GPS track (`KeyError` if unknown)."""
+        return isinstance(self.line_for_key(key).placement, TrackPlacement)
+
+    def set_travel_shift(self, keys: Iterable[str], metres: float) -> None:
+        """Set the destagger of every GPS line in `keys` to `metres`, as one change:
+        one dirty mark and one `lines_changed`, and nothing at all when no line
+        would change.
+
+        All or nothing: every key is checked first, so an unknown key raises
+        `KeyError`, a tape line `ValueError("{name} is not a GPS line")`, and a
+        non-finite `metres` `ValueError`, each with the site untouched. A line
+        keeps its key, so its stack, profile and picks stay attached.
+        """
+        self._require_site()
+        unique = list(dict.fromkeys(keys))
+        lines = [self.line_for_key(key) for key in unique]
+        for line in lines:
+            if not isinstance(line.placement, TrackPlacement):
+                raise ValueError(f"{line.path.stem} is not a GPS line")
+        if not math.isfinite(metres):
+            raise ValueError(f"travel_shift must be finite, got {metres!r}")
+        changing = [
+            (key, line)
+            for key, line in zip(unique, lines)
+            if line.placement.travel_shift != metres  # type: ignore[union-attr]
+        ]
+        if not changing:
+            return
+        for key, line in changing:
+            placement = dataclasses.replace(line.placement, travel_shift=metres)  # type: ignore[type-var]
+            self._replace_line(key, dataclasses.replace(line, placement=placement))
+        self._set_dirty(True)
+        self.lines_changed.emit()
+
     def _drop_lines(self, keys: list[str]) -> tuple[bool, bool]:
         """Take `keys` (all known) out of the site and every per-line
         cache, and reset the current and preview lines if they were among
