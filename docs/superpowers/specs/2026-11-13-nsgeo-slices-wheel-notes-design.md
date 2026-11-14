@@ -60,6 +60,25 @@ and none of the others has grabbed it by accident. Plugin-wide would have covere
 panel's choice combos, where a wheel notch commits and re-processes the line. That hazard is
 known; it is left until it bites.
 
+**After you use a box, scrolling the panel lets go of it** (the author's call, from the builder
+check). A box you typed in or clicked the arrows of keeps focus, so without this the panel could
+slide it under the pointer and the next notch would change it. So:
+- **As soon as you scroll the panel** (the wheel over the panel, the scroll bar, or its keys),
+  the guarded box that has focus lets go of it. From then on it ignores the wheel like the others.
+- **Click then wheel still works.** With the pointer on the focused box, the wheel goes to the
+  box, and the panel doesn't move.
+- **Letting go is the same as clicking elsewhere:** what you typed is kept and applied, as it is
+  today when you click away.
+- **Only a scroll you make counts.** The panel moving on its own must not take focus away: a
+  Warnings entry appearing or going (§6.1), a section folding, or the panel scrolling a box into
+  view when you Tab to it.
+- **The same holds in Edit lines.** Scrolling the table lets go of a focused Grid combo. It rarely
+  matters there, because a pick already hands focus back (§4).
+
+The other options were: pressing Enter lets go (but after clicking the arrows the box would keep
+the wheel until you clicked elsewhere), or leave it as the Processing panel's time boxes work
+today (a box keeps the wheel until you click something else).
+
 ## 3. dz: a floor at the sample interval, and a level limit (#177)
 
 ### 3.1 What "native interval" means here
@@ -80,8 +99,9 @@ reading, which is the freeze.
 - **Whole site:** the finest interval among the included grids. All of the author's grids share
   one.
 - **Before any line exists** there is no interval to read. The box keeps a small generic minimum
-  then, and the level limit (§3.3) is what protects.
-- **A remembered dz, or a saved cube's dz, below the floor** is raised to the floor in the box.
+  then, and the level limit (§3.3) is what protects. *(My call.)*
+- **A remembered dz, or a saved cube's dz, below the floor** is raised to the floor in the box,
+  without comment *(my call)*.
   The record is not rewritten. This is how the cell size's floor already treats a remembered cell.
   A saved cube is re-prepared from its recipe anyway (`restore_cube`), so it comes back at the
   floor.
@@ -102,8 +122,14 @@ value, or a value from before the lines loaded.
   samples**. That is 1,024 levels on the author's lines. A deeper radar record (1,024 or 2,048
   samples) is never refused at native dz. A fixed number would refuse it.
 - **Checked before any preparation, however the value arrived,** in both scopes: This grid's
-  `_apply_resolution` (beside the frame-cap check) and `SiteScope.apply_resolution`. The level
-  count is the one `ZAxis.from_range` would make.
+  `_apply_resolution` (beside the frame-cap check) and `SiteScope.apply_resolution`.
+- **It counts the levels each cube would actually have** *(my call, from the builder check)*.
+  This grid counts the range as it would be applied, the count `ZAxis.from_range` makes. Whole
+  site counts each grid's own axis after the site clips z0–z1 to that grid's data (`site_axis`,
+  `grid_axis`), against twice that grid's deepest line. So a typed z1 of 100,000 ns is refused in
+  This grid. Whole site already clips it to the data, so it does no harm there and is not
+  refused. Checking each grid alone means a site mixing radars can't have its own seeded default
+  refused.
 - **The message**, shown in the Warnings section (§6), not as a toast:
 
   > Too many levels: dz 0.2165 ns from 0 to 100,000 ns makes 461,894 levels; this cube allows
@@ -148,27 +174,41 @@ Chosen on the mockup: option B, revised by the author, "as drawn".
   to say. It replaces the one-line elided `site_note` under the readout, which goes away.
 - **The same section appears in This grid and Whole site.**
 - **One entry per message, in full, wrapped, with an icon:** ⛔ refusals first, then ⚠ warnings,
-  then ⓘ notes. No hover is needed. A tooltip may repeat the text but carries nothing extra.
+  then ⓘ notes *(the order is my call)*. No hover is needed. A tooltip may repeat the text but carries nothing extra.
 - **What goes in it:**
   - **⚠ the site clock warning** (#163 item 1): `mixed_clock_note`, as its own entry, no longer
     joined onto the end of another message.
   - **ⓘ the preview note** (#157 item 5), tightened to about two sentences. For example: *"Preview
     at 0.4 m pixels: the site (120 × 95 m) is too big to draw at 0.05 m. It draws in full at a
     0.2 m cell or coarser, or without grid C."* Same facts as today's `preview_note`, fewer words.
-  - **⛔ This grid's frame-cap refusal** (#157 item 4), on every route including `restore_cube`.
-    It names the refused value, why, what is still on the map, and the way out. For example:
-    *"Cell 0.01 m refused: grid A would be 9,000,000 cells, too many to draw. Still showing
-    0.05 m. Use 0.02 m or coarser."*
+  - **⛔ This grid's frame-cap refusal** (#157 item 4). It names the refused value, why, what is
+    still on the map, and the way out. For example: *"Cell 0.01 m refused: grid A would be
+    9,000,000 cells, too many to draw. Still showing 0.05 m. Use 0.02 m or coarser."*
   - **⛔ Whole site geometry failures** (#157 item 4): `_rebuild_geometry_reporting` failures on
-    engine-callback paths (a grid becoming ready, moving or being dropped) set the panel's problem
-    too, not only the toast. They show as today's "Not drawn: …".
+    engine-callback paths (a grid becoming ready, moving or being dropped). The engine keeps the
+    failure as state the scope reads, as it keeps `preview_note`, and they show as today's
+    "Not drawn: …". A geometry failure refuses no value, so it clears on the next rebuild that
+    succeeds.
   - **⛔ the level limit's refusal** (§3.3).
-- **A refusal stays until the value it refused changes**, or the scope or grid changes. The toast
-  for these refusals goes away, so each message is in one place.
+- **A restored cube's cell** *(my call, from the builder check)*. Today `restore_cube` never sets
+  the cell floor for the cube's grid. Its frame-cap check runs against the grid shown before the
+  restore, so the cube's own grid is never checked. Fixed: the restore sets the cube's grid's
+  floor first, as a grid change does (`_seed_resolution_defaults`). A saved cell below the floor is
+  then raised to it without comment, the same rule as a saved dz (§3.2) and a remembered cell. The
+  record is not rewritten. The frame-cap check stays as a backstop and reports in Warnings if it is
+  ever reached. With the floor in place, neither typing nor a restore can reach it. #157 item 4
+  already said "the cell spin's floor guards each grid's frame".
+- **A refusal stays until the value it refused changes**, or the scope or grid changes.
+- **Which toasts go** *(my call, from the builder check)*. Every refusal shown in Warnings loses
+  its toast, so each message is in one place: the frame cap, the level limit, and Whole site's
+  "Not drawn" problems, which already show in the panel and toast too today. `Resolution`'s own
+  checks ("t1_ns must exceed t0_ns", "dz_ns must be positive") stay as toasts. The boxes apply
+  while you type, so those fire mid-number, and a panel that jumps while you type is worse than a
+  toast.
 - **The cost the author accepted with this option:** when a message comes or goes, everything below
   the section moves. A refusal appearing while you type in Resolution moves that box down by the
-  message's height. Typing and focus stay put. With the wheel rule, a box that moves under the
-  pointer can't catch a scroll.
+  message's height. Typing and focus stay put: the panel moving on its own is not a scroll you
+  made, so the box keeps focus (§2).
 
 ### 6.2 Sections that fold
 
@@ -178,8 +218,9 @@ Chosen on the mockup: option B, revised by the author, "as drawn".
   Properties), so they look and click like the rest of QGIS. It exists on QGIS 3.44 and 4.2.
 - **Folding is remembered across QGIS restarts.** This grid and Whole site fold together.
   Resolution and Display are already shared widgets. The two Interpolation panels (`grid_finish`,
-  `site_finish`) share one fold state through a sync group.
-- **Every section starts unfolded** the first time.
+  `site_finish`) share one fold state. QGIS's own sync group only syncs on a modifier-click, so
+  the two are wired through the fold signal (`collapsedStateChanged`).
+- **Every section starts unfolded** the first time *(my call)*.
 
 **Approaches considered (from the mockup):**
 - A: today's single line, shortened, with the rest on hover;
@@ -193,7 +234,8 @@ once they are set.
 ## 7. Explaining the coverage view (#157 item 6)
 
 The guide already says what the counts are. Two pieces are missing:
-- **The Show coverage tooltip** says what it is for and how a preview draws it:
+- **The Show coverage tooltip** says what it is for and how a preview draws it *(the wording is my
+  call)*:
 
   > Shows how many traces fell in each cell, instead of the amplitude.
   > Use it to see where your lines ran and where there is no data: blank cells had no line
@@ -243,6 +285,15 @@ author works on several screens and asked not to fit two numbers.
   passes on Qt 6 because of the Interpolation row.
 - **The catch, accepted:** docked on its own, Slices stays about 400 px wide at the author's font.
   If Processing gets narrower later, the guard says Slices must follow.
+- **Measure before changing anything** *(my call, from the builder check)*. §8.1's offscreen
+  figures are for an empty panel. With a site loaded, the repo's own layout probe gives 475 px
+  locally and 520 px in the QGIS 3.44 CI image (`layout_width`, `tests/plugin_testing.py`). Those
+  numbers are at the test font, so they can't be compared directly with the Processing figures
+  above. The plan's first width step measures both panels at the same font, loaded. Today
+  `velocity_label` and `included_label` (with its over-budget suffix) don't wrap. Any row over the
+  guard gives way by wrapping, eliding, or stacking its label above its box. That includes the
+  Interpolation row if the measurement says so; "the Interpolation row stays" holds only if it
+  fits.
 
 **Approaches considered:** a pixel target of about 300 px (the issue's), a rule in characters of
 the panel's own font (about 35, my proposal), or pinning to Processing's minimum (the author's).
@@ -261,6 +312,10 @@ tab stack gets below 449 px. That would be its own issue if the author wants it.
 - The ignored wheel event **scrolls the panel**: the scroll area's position moves. This is what the
   author is after, and it is the easy thing to get wrong (an event filter that swallows the event
   leaves the panel still).
+- **Scrolling the panel lets go:** with dz focused, a wheel notch over another part of the panel
+  scrolls it, dz no longer has focus, and its value is what was typed. A wheel over the focused box
+  itself still changes it. The panel moving on its own (a Warnings entry appearing or going, a fold,
+  Tab scrolling a box into view) leaves focus where it was.
 - **dz can't go below the sample interval**, in both scopes. The arrows step in whole samples.
   A remembered dz below the floor is raised and its record left as it was.
 - **The level limit refuses** a z range or dz past twice the samples, before any preparation, in
@@ -301,10 +356,13 @@ Built and deployed to its own QGIS profile, as usual. It covers:
   scrolls sideways, and every warning reads in full;
 - **scrolling past every box:** dz, z0, z1 and Cell size don't change. A click then the wheel does
   change them. The other boxes behave as before;
-- **dz:** the arrows step 0.2165, 0.433, …; dz can't go below 0.2165. A typed z1 of 100,000 ns is
-  refused in the Warnings section;
-- **a refused cell size,** typed and from a restored cube, shown in Warnings, with the old picture
-  still on the map;
+- **type a dz, then scroll the panel:** dz keeps what you typed, lets go, and the panel scrolls
+  past it without changing it;
+- **dz:** the arrows step 0.2165, 0.433, …; dz can't go below 0.2165. In This grid, a typed z1 of
+  100,000 ns is refused in the Warnings section, with the old picture still on the map. In Whole
+  site the same z1 is clipped to the data;
+- **a restored cube** comes back at its saved settings, or at the floor where its grid no longer
+  allows them. Tests cover the frame-cap backstop, which a person can no longer reach by hand;
 - **typing in dz, z0 or z1 during a Whole site refresh;**
 - **the clock warning and the preview note** in full, on a site with a grid without Time zero and
   at a fine cell;
@@ -318,6 +376,7 @@ The Windows QGIS 4 look (#50) stays in session O.
 
 - The wheel rule anywhere else (Processing choice combos, Thickness/Step, Display combos,
   Interpolation boxes, sliders). Add boxes one line at a time as they bite.
+- Letting go on scroll for the Processing panel's time boxes. They keep today's rule.
 - Making the Processing panel narrower.
 - #157 items 1, 2 and 3 and #163 items 2–6: sessions B, F, H and P.
 - The grid-velocity clock comment on #163: it concerns velocity fits, not the panel's placement.
@@ -328,6 +387,9 @@ The Windows QGIS 4 look (#50) stays in session O.
 
 - The helper's form: a subclass, an event filter or a function that installs one. It must let the
   ignored event reach the scroll area (see §9).
+- How a scroll you make is told apart from the panel moving on its own (§2). For example, the
+  scroll bar's `actionTriggered` fires for the wheel, a drag, its arrows and keys, but not for a
+  value set in code or a range that shrinks.
 - How "text you have changed" is detected for #105 (for example, the line edit's modified flag or
   text that differs from the value's own display).
 - Exact wording of each Warnings entry within §6.1's rule: it names the value, the reason, what is
