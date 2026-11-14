@@ -4324,25 +4324,33 @@ def test_a_restored_cube_below_its_grids_floor_comes_back_at_the_floor(qgis_app,
 
 def test_a_warning_coming_and_going_keeps_the_box_you_type_in(docked):
     dock, _ = docked
+    _ready(dock)  # preparation done, so nothing clears the entries behind the test
     scroll = _short_and_active(dock)
-    scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
-    dock.dz_spin.setFocus()
-    dock.dz_spin.setValue(0.75)
+    bar = scroll.verticalScrollBar()
     dock.warnings_panel.set_entries([Entry(REFUSAL, "x " * 200)])
     QApplication.processEvents()
-    dock.warnings_panel.set_entries([])
-    QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
+    bar.setValue(bar.maximum())
+    assert bar.value() > 0
+    dock.dz_spin.setFocus()
+    dock.dz_spin.setValue(0.75)
+    before = bar.value()
+    dock.warnings_panel.set_entries([])  # the range shrinks under the value
+    QTest.qWait(100)
+    assert bar.value() != before, "the scroll value moved, so the hazard was exercised"
     assert dock.dz_spin.hasFocus()
     assert dock.dz_spin.value() == 0.75
 
 
 def test_a_long_warning_never_widens_the_panel(docked):
     dock, _ = docked
+    _ready(dock)
     dock.setFloating(True)
     dock.show()
     content = dock.findChild(QScrollArea).widget()
     QApplication.processEvents()
     before = content.minimumSizeHint().width()
-    dock.warnings_panel.set_entries([Entry(REFUSAL, "word " * 80)])
+    dock.warnings_panel.set_entries([Entry(REFUSAL, "x" * 400)])
     QApplication.processEvents()
+    assert dock.warnings_panel.isVisibleTo(dock)
     assert content.minimumSizeHint().width() == before

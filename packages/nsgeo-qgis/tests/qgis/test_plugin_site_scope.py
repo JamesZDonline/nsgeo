@@ -3519,7 +3519,7 @@ def test_the_note_clears_on_switching_to_this_grid(plugin):
     assert dock.warnings_panel.entries() == ()
 
 
-def test_a_failed_resolution_says_why_in_the_panel_not_only_a_toast(plugin, monkeypatch):
+def test_a_failed_resolution_says_why_in_the_panel_and_not_as_a_toast(plugin, monkeypatch):
     dock = plugin.slices_dock
     errors: list[str] = []
     dock.error.connect(errors.append)
@@ -3558,10 +3558,10 @@ def test_a_long_warning_never_widens_the_site_panel(plugin):
     probe.settle()
     content = probe.scroll.widget()
     before = content.minimumSizeHint().width()
-    longest = "a very long preview note " * 12
-    assert len(longest) >= 300
+    longest = "x" * 400  # unbreakable: a wrapped label's minimum is its longest word
     dock.warnings_panel.set_entries([Entry(NOTE, longest)])
     probe.settle()
+    assert dock.warnings_panel.isVisibleTo(dock)
     assert content.minimumSizeHint().width() == before
     assert dock.warnings_panel.entries() == (Entry(NOTE, longest),)
 
@@ -3620,7 +3620,7 @@ def _preset_per_grid(session, **presets) -> None:
         session.remember_slice_source(grid_id, preset=presets.get(grid_id, "p"), lines=None)
 
 
-def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
+def test_the_warnings_warn_when_grids_are_on_different_clocks(plugin):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, B="radar")
@@ -3628,7 +3628,7 @@ def test_the_site_note_warns_when_grids_are_on_different_clocks(plugin):
     assert Entry(WARNING, mixed_clock_note(["B"])) in dock.warnings_panel.entries()
 
 
-def test_the_site_note_says_nothing_when_every_grid_is_on_the_radar_clock(plugin):
+def test_the_warnings_say_nothing_when_every_grid_is_on_the_radar_clock(plugin):
     session = plugin.session
     session.site.presets["radar"] = [{"step": "dewow", "params": {}, "enabled": True}]
     _preset_per_grid(session, A="radar", B="radar", C="radar")
@@ -3648,7 +3648,7 @@ def test_grid_time_bases_reads_each_grids_preset(plugin):
     }
 
 
-def test_the_site_note_follows_the_steps_the_grids_were_prepared_with(plugin):
+def test_the_clock_warning_follows_the_steps_the_grids_were_prepared_with(plugin):
     """Ruling R15: saving over a preset does not re-prepare, so the drawn cubes
     and the export keep the old steps; the note must say what they say."""
     session = plugin.session
@@ -3713,12 +3713,12 @@ def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
     dock = whole_site(plugin)
     errors: list[str] = []
     dock.error.connect(errors.append)
-    real = site_engine_module.SiteEngine._rebuild_geometry
+    real = site_engine_module.SiteEngine._rebuild_geometry_now
 
     def boom(self):
         raise RuntimeError("the lattice could not be built")
 
-    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", boom)
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry_now", boom)
     dock.site_engine._rebuild_geometry_reporting()
     dock._site.refresh_slice()
     assert dock.site_engine.geometry_problem == "the lattice could not be built"
@@ -3726,10 +3726,14 @@ def test_a_geometry_failure_on_an_engine_callback_shows_in_warnings_not_a_toast(
         "Not drawn: the lattice could not be built"
     ]
     assert not any("lattice" in e for e in errors)
-    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry", real)
+    monkeypatch.setattr(site_engine_module.SiteEngine, "_rebuild_geometry_now", real)
     _nudge_cell(dock)
     assert dock.site_engine.geometry_problem is None
     assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+    # `clear()` forgets a standing problem too.
+    dock.site_engine._geometry_problem = "stale"
+    dock.site_engine.clear()
+    assert dock.site_engine.geometry_problem is None
 
 
 # ---- #180: the slice coloured with the user's own QGIS symbology -------------------------

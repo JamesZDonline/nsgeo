@@ -680,10 +680,8 @@ class SiteEngine(QObject):
             self._rebuild_geometry()
         except Exception as exc:  # noqa: BLE001 -- reached from callbacks
             # Not a toast: the reason stands in the Warnings section
-            # (`geometry_problem`), where the next tick reads it. Kept here
-            # too, so a failure that never reached `_rebuild_geometry`'s own
-            # handler stands as well.
-            self._geometry_problem = str(exc)
+            # (`geometry_problem`, set by `_rebuild_geometry`), where the next
+            # tick reads it.
             _log(f"could not rebuild the site's geometry: {exc}")
 
     def _rebuild_geometry(self) -> None:

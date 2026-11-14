@@ -2081,8 +2081,10 @@ class SlicesDock(QgsDockWidget):
                 self.grid_combo.setCurrentText(recipe.choice.grid_id)
                 self.preset_combo.setCurrentText(recipe.choice.preset)
                 self.transform_combo.set_value(transform_text)
+                # The cube's grid's floor, as a grid change sets it, whether
+                # or not the record has a resolution (spec 6.1).
+                self._set_cell_floor(recipe.choice.grid_id)
                 if recipe.resolution is not None:
-                    self._set_cell_floor(recipe.choice.grid_id)
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
                     self.z0_spin.setValue(recipe.resolution.t0_ns)
