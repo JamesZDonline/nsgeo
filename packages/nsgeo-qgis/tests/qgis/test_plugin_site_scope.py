@@ -3992,27 +3992,50 @@ def test_the_same_z_range_is_clipped_not_refused_in_whole_site(plugin):
     assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
 
 
-@pytest.mark.parametrize("first", ["A", "B"])
-def test_a_site_mixing_radars_never_refuses_its_seeded_defaults(open_plugin, site3_factory, first):
+def _fine_b_site(site3_factory, first):
+    """site3 with grid B recorded 4.4 times finer than A: 512 samples over 25 ns."""
     from tests.synthetic import write_dzt
 
     site = site3_factory()
-    # Grid B's lines: 1,024 samples over the same 110.864 ns, half A's interval.
     rng = np.random.default_rng(7)
     for path in sorted((site.json_path.parent / "raw" / "B").glob("*.DZT")):
         write_dzt(
             path,
-            (rng.normal(size=(1024, 60)) * 1e6).astype(np.int32),
+            (rng.normal(size=(512, 60)) * 1e6).astype(np.int32),
             traces_per_metre=10.0,
-            range_ns=110.864,
+            range_ns=25.0,
         )
-    if first == "B":  # B first in site order, so its header seeds the defaults
+    if first == "B":  # B first in site order
         site.session.site.grids.sort(key=lambda g: g.id != "B")
         site.session.save()
-    plugin = open_plugin(site)
+    return site
+
+
+@pytest.mark.parametrize("first", ["A", "B"])
+def test_a_site_mixing_radars_never_refuses_its_seeded_defaults(open_plugin, site3_factory, first):
+    plugin = open_plugin(_fine_b_site(site3_factory, first))
     dock = whole_site(plugin)
     assert dock._site.included()[0] == first
     assert dock._site.problem is None
     assert len(dock.site_engine.ready_grids) == 3
     assert [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL] == []
-    assert dock.dz_spin.minimum() == pytest.approx(110.864 / 1024, abs=1e-4)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the finest floor"
+    assert dock.dz_spin.singleStep() == pytest.approx(25.0 / 512, abs=1e-4)
+    assert dock.dz_spin.value() == pytest.approx(110.864 / 512, abs=1e-4), "the coarsest seed"
+
+
+def test_a_dz_the_coarse_grid_cannot_take_is_not_drawn_and_is_not_a_toast(
+    open_plugin, site3_factory
+):
+    plugin = open_plugin(_fine_b_site(site3_factory, "B"))
+    dock = whole_site(plugin)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.dz_spin.setValue(dock.dz_spin.minimum())
+    dock.flush_debounce()
+    settle(dock)
+    dock._site.refresh_slice()
+    entries = [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
+    assert len(entries) == 1
+    assert entries[0].text.startswith("Not drawn: Grid A: Too many levels")
+    assert not any("Too many levels" in e for e in errors), "one place only"

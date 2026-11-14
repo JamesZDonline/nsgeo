@@ -299,24 +299,31 @@ def seed_cell(session: Any, included: Iterable[str]) -> tuple[float, float] | No
     return floor, default_cell(finest, floor)
 
 
+def first_headers(session: Any, grids: Iterable[str]) -> list[Any]:
+    """Each grid's first source line's header, for the grids that have a line."""
+    headers = []
+    by_grid = keys_by_grid(session)
+    for grid_id in grids:
+        keys = source_keys(session, grid_id, by_grid)
+        if keys:
+            headers.append(session.line_for_key(keys[0]).header)
+    return headers
+
+
 def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float, float] | None:
     """`(dz, z0, z1)` from the included grids' first lines' headers, before any is prepared.
 
     The union of what the headers record; replaced by the prepared bounds
     once a grid is ready (`ready_z_bounds`), as M11 corrects its own
-    header-seeded range once its lines are prepared.
+    header-seeded range once its lines are prepared. The dz is the COARSEST
+    interval, so no grid's seeded levels pass its own sample count (#177).
     """
-    headers = []
-    by_grid = keys_by_grid(session)
-    for grid_id in included:
-        keys = source_keys(session, grid_id, by_grid)
-        if keys:
-            headers.append(session.line_for_key(keys[0]).header)
+    headers = first_headers(session, included)
     if not headers:
         return None
     lo = min(h.position_ns for h in headers)
     hi = max(h.position_ns + (h.n_samples - 1) * h.dt_ns for h in headers)
-    return headers[0].dt_ns, lo, hi
+    return max(h.dt_ns for h in headers), lo, hi
 
 
 def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
@@ -333,13 +340,14 @@ def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
 
 
 def ready_dt(site_engine: Any) -> float | None:
-    """The sample interval of the first ready grid's prepared lines."""
+    """The coarsest sample interval among the ready grids' first prepared lines."""
+    dts = []
     for grid_id in site_engine.ready_grids:
         engine = site_engine.engine_for(grid_id)
         lines = engine.prepared_lines() if engine is not None else ()
         if lines:
-            return float(lines[0].dt_ns)
-    return None
+            dts.append(float(lines[0].dt_ns))
+    return max(dts) if dts else None
 
 
 def levels(z: ZAxis, thickness_ns: float, step_ns: float) -> tuple[int, int]:
@@ -497,8 +505,9 @@ def set_dz_floor(dock: Any, floor: float) -> None:
     """Raise `dz_spin`'s minimum to the sample interval (#177). The box only: a
     remembered resolution or a cube record is never changed.
 
-    A set re-renders the box's text, losing a half-typed value (#105), so the
-    minimum is set only when it differs."""
+    `setMinimum` re-renders the box's text only when it clamps the value, which
+    would lose a half-typed value (#105); it is called only when the floor
+    differs, so a tick that changes nothing never reaches it."""
     spin = dock.dz_spin
     if spin.minimum() == round(floor, spin.decimals()):
         return
@@ -510,13 +519,8 @@ def set_dz_floor(dock: Any, floor: float) -> None:
 
 
 def site_dt_floor(session: Any, included: Iterable[str]) -> float | None:
-    """The smallest sample interval among each included grid's first line, or None."""
-    dts = []
-    by_grid = keys_by_grid(session)
-    for grid_id in included:
-        keys = source_keys(session, grid_id, by_grid)
-        if keys:
-            dts.append(float(session.line_for_key(keys[0]).header.dt_ns))
+    """The finest sample interval among each included grid's first line, or None."""
+    dts = [float(h.dt_ns) for h in first_headers(session, included)]
     return min(dts) if dts else None
 
 
@@ -899,12 +903,13 @@ class SiteScope:
         if z1 <= z0:
             z0, z1 = low, high
         values = {"z0": z0, "z1": z1}
-        if dt is not None:
-            # One sample per arrow click, whatever dz the user chose.
+        step = floor if floor is not None else dt
+        if step is not None:
+            # One finest sample per arrow click, whatever dz the user chose.
             for spin in (dock.dz_spin, dock.z0_spin, dock.z1_spin):
                 # A set re-renders the box's text, losing a half-typed value (#105).
-                if spin.singleStep() != dt:
-                    spin.setSingleStep(dt)
+                if spin.singleStep() != step:
+                    spin.setSingleStep(step)
         if "dz_ns" in remembered:
             values["dz"] = remembered["dz_ns"]
         elif dt is not None:

@@ -4399,23 +4399,55 @@ def test_a_remembered_dz_below_the_floor_comes_back_at_the_floor(docked_two_grid
     assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record stands"
 
 
-def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked):
-    dock, session = docked
+@pytest.fixture
+def docked_fine_b(qgis_app, tmp_path):
+    """Grid A as `docked`, and grid B recorded finer: 512 samples over 25 ns
+    (0.0488 ns), so the two grids' dz floors differ."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"FINE__0{i}.DZT", n_traces=60, range_ns=25.0),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"FINE__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    dock = SlicesDock(session)
+    yield dock, session
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked_fine_b):
+    dock, session = docked_fine_b
     _ready(dock)
     view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
     record = _save_cube(dock, session, "A__low", view)
     record["z"]["dz_ns"] = 0.001
-    dock.dz_spin.setValue(1.0)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
     dock.restore_cube("A__low")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
     _assert_at_the_floor_and_built(dock)
     assert record["z"]["dz_ns"] == 0.001
     assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record is remembered as saved"
 
 
-def test_the_dz_floor_travels_with_the_scope(docked_two_grids):
+def test_the_dz_floor_travels_with_the_scope(docked_fine_b):
     from nsgeo_qgis.ui.site_scope import capture_spins
 
-    dock, session = docked_two_grids
+    dock, session = docked_fine_b
     assert dock.engine.wait_for_preparation(20_000)
     before = capture_spins(dock).dz_min
     assert before == pytest.approx(_first_dt(session, "A"), abs=1e-4)
@@ -4423,6 +4455,7 @@ def test_the_dz_floor_travels_with_the_scope(docked_two_grids):
     assert dock.scope() == "site"
     assert dock.site_engine.wait_until_idle(60_000)
     QCoreApplication.processEvents()
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "the site's floor"
     dock.grid_scope_button.click()
     assert dock.engine.wait_for_preparation(20_000)
     assert capture_spins(dock).dz_min == before

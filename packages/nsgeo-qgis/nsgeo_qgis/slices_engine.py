@@ -160,6 +160,7 @@ from qgis.core import QgsApplication, QgsTask
 from qgis.PyQt.QtCore import QEventLoop, QObject, QTimer
 
 from nsgeo_qgis.line_edit import same_placement
+from nsgeo_qgis.log import log as _log
 from nsgeo_qgis.slices_plan import (
     DEFAULT_METHOD,
     LIVE_SOLVE_BUDGET_MS,
@@ -1042,7 +1043,8 @@ class SliceEngine(QObject):
                 for k in self._choice.line_keys
                 if k in live
             ]
-        except Exception:  # noqa: BLE001 -- a check never stops a rebuild
+        except Exception as exc:  # noqa: BLE001 -- a check never stops a rebuild
+            _log(f"could not check the level limit: {exc}")
             return None
         return level_limit_problem(resolution, samples)
 

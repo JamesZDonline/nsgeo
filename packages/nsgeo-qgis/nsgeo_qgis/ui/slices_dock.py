@@ -2085,11 +2085,13 @@ class SlicesDock(QgsDockWidget):
                 # The cube's grid's floor, as a grid change sets it, whether
                 # or not the record has a resolution (spec 6.1).
                 self._set_cell_floor(recipe.choice.grid_id)
-                live_keys = [k for k in kept_keys if k in self.session.keys()]  # noqa: SIM118
-                if live_keys:
-                    site_scope.set_dz_floor(
-                        self, self.session.line_for_key(live_keys[0]).header.dt_ns
-                    )
+                if self._included:
+                    # As `_seed_dz_z_defaults` reads it: the first included line.
+                    # A key no longer in the site is `set_source`'s to name.
+                    with contextlib.suppress(KeyError):
+                        site_scope.set_dz_floor(
+                            self, self.session.line_for_key(self._included[0]).header.dt_ns
+                        )
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
@@ -2570,6 +2572,7 @@ class SlicesDock(QgsDockWidget):
                     )
                     self.show_warnings()
                     return
+            self._grid_refusal = None
             try:
                 self.engine.set_resolution(resolution)
             except TooManyLevels as exc:
@@ -2578,7 +2581,6 @@ class SlicesDock(QgsDockWidget):
                 self._grid_refusal = str(exc)
                 self.show_warnings()
                 return
-            self._grid_refusal = None
             self.show_warnings()
             # Keyed on `(n_levels, choice, mode, finish settings)` -- see
             # `_stretch_key` -- and a geometry change can only have moved
