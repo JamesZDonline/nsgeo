@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, build_step
 
+from tests.real_data import DATA, real_radargram
+
 
 def decaying(n_samples=400, n_traces=10, dt_ns=0.25):
     t = np.arange(n_samples)[:, None]
@@ -39,6 +41,36 @@ def test_agc_leaves_the_time_axis_untouched():
     rg = decaying()
     out = build_step("gain_agc", window_ns=20.0).apply(rg)
     assert out.t0_ns == rg.t0_ns and out.n_samples == rg.n_samples
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_agc_on_a_real_line_a_bad_sample_damages_only_itself(bad):
+    """#43: an inf used to zero the 91 samples whose window held it, and NaN
+    everything below."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[100, 300] = bad
+    window = int(round(20.0 / rg.dt_ns))
+    assert window == 92
+    out = build_step("gain_agc").apply(rg.replace(data=data)).data
+    assert np.argwhere(~np.isfinite(out)).tolist() == [[100, 300]]
+    assert np.isnan(out[100, 300]) == np.isnan(bad)
+    # Rows 55-146 have the bad sample in their window [i - 46, i + 46).
+    around = np.r_[55:100, 101:147]
+    assert around.size == 91
+    assert np.all(out[around, 300] != 0.0)
+
+
+def test_gain_agc_output_never_exceeds_its_cap_beside_a_huge_burst():
+    """|out| <= target * sqrt(samples in the window), since no sample's square
+    exceeds its window's sum. Quiet windows after a 1e10 burst used to come out
+    of a cumulative total near 1e21, and broke the cap."""
+    data = np.random.default_rng(0).normal(size=(512, 3))
+    data[100:111] *= 1e10
+    rg = Radargram(data=data, dt_ns=0.21653, t0_ns=0.0)
+    assert int(round(20.0 / rg.dt_ns)) == 92
+    out = build_step("gain_agc").apply(rg).data
+    assert np.all(np.abs(out) <= 1.0 * np.sqrt(92) * (1 + 1e-9))
 
 
 def test_exponential_gain_increases_with_time():

@@ -6,6 +6,8 @@ from nsgeo.processing import StepStack, build_step
 from nsgeo.processing.amplitude import _analytic_signal, analytic_envelope
 from nsgeo.processing.base import Radargram, is_unipolar
 
+from tests.real_data import DATA, real_radargram
+
 
 def make(data, dt_ns=0.2165, t0_ns=0.0):
     return Radargram(data=np.asarray(data, dtype=float), dt_ns=dt_ns, t0_ns=t0_ns)
@@ -161,3 +163,18 @@ def test_transforms_take_no_parameters():
 def test_unknown_parameter_is_rejected():
     with pytest.raises(ValueError, match="has no parameter"):
         build_step("amp_abs", window_ns=3.0)
+
+
+def test_envelope_refuses_a_real_line_holding_a_nan():
+    """The envelope is built by FFT, which spreads one NaN along its whole trace."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[100, 300] = np.nan
+    with pytest.raises(
+        ValueError,
+        match=(
+            "1 of 635 traces hold samples that are not finite; "
+            "the filter would spread each one along its whole trace"
+        ),
+    ):
+        build_step("amp_envelope").apply(rg.replace(data=data))

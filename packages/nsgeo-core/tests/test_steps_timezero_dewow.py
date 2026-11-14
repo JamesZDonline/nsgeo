@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import math
+import re
+
 import nsgeo.processing.dewow  # noqa: F401  (registers the step)
 import nsgeo.processing.timezero  # noqa: F401
 import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, build_step
 from nsgeo.processing.timezero import first_break_ns, first_break_row, sets_time_zero, time_base_of
+
+from tests.real_data import DATA, real_radargram
 
 
 def make(n_samples=100, n_traces=20, dt_ns=0.2, t0_ns=0.0, fill=0.0):
@@ -143,6 +148,54 @@ def test_dewow_rejects_window_shorter_than_one_sample():
 def test_step_params_are_declared_for_the_ui():
     step = build_step("dewow", window_ns=6.0)
     assert step.params == {"window_ns": 6.0}
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_dewow_on_a_real_line_a_bad_sample_damages_only_itself(bad):
+    """#43: one NaN used to turn the rest of its trace into NaN."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[100, 300] = bad
+    out = build_step("dewow").apply(rg.replace(data=data)).data
+    assert np.argwhere(~np.isfinite(out)).tolist() == [[100, 300]]
+    assert np.isnan(out[100, 300]) == np.isnan(bad)
+    # A neighbour is its sample less the mean of the good samples in its window.
+    window = int(round(4.0 / rg.dt_ns))
+    lo, hi = 101 - window // 2, 101 - window // 2 + window
+    good = [v for v in data[lo:hi, 300] if math.isfinite(v)]
+    assert out[101, 300] == pytest.approx(data[101, 300] - math.fsum(good) / len(good), rel=1e-12)
+
+
+@pytest.mark.parametrize("bad", [None, np.nan, np.inf])
+def test_time_zero_on_a_real_line_crops_49_rows_whatever_one_bad_sample(bad):
+    """#42: one NaN used to cancel the crop, and one inf moved it to row 300."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    if bad is not None:
+        data = rg.data.copy()
+        data[300, 5] = bad
+        rg = rg.replace(data=data)
+    assert first_break_row(rg) == 49
+    assert build_step("time_zero").apply(rg).n_samples == rg.n_samples - 49
+
+
+def test_time_zero_refuses_an_all_zero_line():
+    """It used to crop nothing and say nothing. first_break_row itself still
+    answers 0 for no signal: other code calls it directly."""
+    rg = make(n_samples=100, n_traces=20)
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Time zero found no first arrival: every sample on this line is zero"),
+    ):
+        build_step("time_zero").apply(rg)
+    assert first_break_row(rg) == 0
+    assert build_step("time_zero", mode="sample", sample=3).apply(rg).n_samples == 97
+
+
+def test_time_zero_refuses_a_line_with_no_finite_sample():
+    rg = make(n_samples=100, n_traces=20, fill=np.nan)
+    with pytest.raises(ValueError, match="Time zero found no first arrival"):
+        build_step("time_zero").apply(rg)
+    assert first_break_row(rg) == 0
 
 
 def test_first_break_ns_is_the_picked_rows_time_on_the_axis():

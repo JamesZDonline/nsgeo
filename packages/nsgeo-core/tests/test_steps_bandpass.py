@@ -6,6 +6,8 @@ import pytest
 from nsgeo.processing.bandpass import Bandpass
 from nsgeo.processing.base import Radargram, build_step
 
+from tests.real_data import DATA, real_radargram
+
 DT_NS = 0.2  # 5 GHz sampling -> 2500 MHz Nyquist
 
 
@@ -151,3 +153,18 @@ def test_the_direct_wave_does_not_wrap_into_the_bottom_of_the_trace(low, high):
     n = out.shape[0]
     bottom = out[n - (15 * n) // 100 :]
     assert np.sqrt((bottom**2).mean()) < 1e-4 * np.abs(out).max()
+
+
+def test_refuses_a_real_line_holding_a_nan():
+    """An FFT spreads one NaN along its whole trace."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[100, 300] = np.nan
+    with pytest.raises(
+        ValueError,
+        match=(
+            "1 of 635 traces hold samples that are not finite; "
+            "the filter would spread each one along its whole trace"
+        ),
+    ):
+        build_step("bandpass", low_mhz=250.0, high_mhz=750.0).apply(rg.replace(data=data))

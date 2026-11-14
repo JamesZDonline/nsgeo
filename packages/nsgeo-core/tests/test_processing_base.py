@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
+import re
+
 import numpy as np
 import pytest
 from nsgeo.geometry.placement import GridPlacement
 from nsgeo.model.survey import Line
-from nsgeo.processing._util import running_mean
+from nsgeo.processing._util import refuse_non_finite, running_mean
 from nsgeo.processing.base import (
     ParamSpec,
     Radargram,
@@ -16,6 +19,7 @@ from nsgeo.processing.base import (
     retime_ns,
 )
 
+from tests.real_data import DATA, real_radargram
 from tests.synthetic import write_dzt
 
 
@@ -207,6 +211,66 @@ def test_running_mean_rejects_zero_window():
         running_mean(np.zeros((4, 4)), 0, axis=0)
 
 
+def _direct_running_mean(a, window, axis=0):
+    """running_mean written out: each output i is the mean of the finite samples
+    in [lo, hi), the shrinking-edge rule, or NaN when none is. Summed with
+    math.fsum so the reference carries no rounding of its own."""
+    a = np.moveaxis(np.asarray(a, dtype=float), axis, 0)
+    n = a.shape[0]
+    out = np.empty_like(a)
+    for i in range(n):
+        lo = max(i - window // 2, 0)
+        hi = min(i - window // 2 + window, n)
+        for j in np.ndindex(a.shape[1:]):
+            vals = [v for v in a[(slice(lo, hi), *j)] if math.isfinite(v)]
+            out[(i, *j)] = math.fsum(vals) / len(vals) if vals else np.nan
+    return np.moveaxis(out, 0, axis)
+
+
+def test_running_mean_skips_nan_and_inf():
+    """#43: one NaN or inf used to poison the rest of the axis through the
+    cumulative sum (420 rows of dewow output from one NaN)."""
+    a = np.random.default_rng(0).normal(size=(64, 5))
+    a[10, 1] = np.nan
+    a[30, 2] = np.inf
+    a[31, 2] = -np.inf
+    for window, axis in ((7, 0), (3, 1)):
+        np.testing.assert_allclose(
+            running_mean(a, window, axis=axis), _direct_running_mean(a, window, axis), rtol=1e-12
+        )
+
+
+def test_running_mean_of_a_window_with_no_finite_sample_is_nan():
+    a = np.array([[np.nan], [np.nan], [np.nan], [1.0]])
+    out = running_mean(a, 3, axis=0)
+    assert np.isnan(out[0, 0]) and np.isnan(out[1, 0])
+    assert out[2, 0] == 1.0 and out[3, 0] == 1.0
+
+
+def test_running_mean_keeps_precision_beside_a_huge_value():
+    """A 1e12 sample used to stay in the cumulative total, so every later
+    window came out of a difference of two numbers near 1e12 and kept only
+    about four significant figures. That is what let AGC exceed its cap."""
+    a = np.random.default_rng(0).normal(size=200)
+    a[0] = 1e12
+    out = running_mean(a, 5)
+    # Rows 3 on: windows [i - 2, i + 3) clear of row 0.
+    np.testing.assert_allclose(out[3:], _direct_running_mean(a, 5)[3:], rtol=1e-12)
+
+
+def test_refuse_non_finite_counts_traces_not_samples_or_rows():
+    """Four bad samples, on three rows, in two of six traces."""
+    data = np.zeros((10, 6))
+    data[2, 1] = data[5, 1] = data[7, 1] = np.nan
+    data[2, 4] = -np.inf
+    with pytest.raises(
+        ValueError,
+        match=re.escape("2 of 6 traces hold samples that are not finite; it would spread"),
+    ):
+        refuse_non_finite(data, "it would spread")
+    refuse_non_finite(np.ones((10, 6)), "it would spread")
+
+
 def test_radargram_is_hashable_with_identity_equality():
     r = rg()
     assert r == r and hash(r) == hash(r)
@@ -316,3 +380,26 @@ def test_radar_clock_conversions_are_asymmetric_and_round_trip():
 def test_retime_with_equal_nonzero_zeros_is_exact():
     # Grouped as t + (from - to): equal zeros cancel exactly.
     assert retime_ns(52.0, 12.345678, 12.345678) == 52.0
+
+
+def test_one_nan_through_the_users_stack_stays_one_sample():
+    """The stack every saved project uses, on a real line: one NaN inside the
+    45 ns cutoff comes out as one NaN, at the same sample, and nothing else."""
+    import nsgeo.processing  # noqa: F401
+
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[150, 300] = np.nan
+    out = rg.replace(data=data)
+    for name, params in [
+        ("time_zero", {}),
+        ("time_cutoff", {"end_ns": 45.0}),
+        ("dewow", {}),
+        ("background_mean", {}),
+        ("gain_agc", {}),
+        ("gain_curve", {"points": [[0.0, 0.0], [20.0, 6.0], [45.0, 0.0]]}),
+    ]:
+        out = build_step(name, **params).apply(out)
+    # Time zero crops 49 rows on this line, so the sample is row 101 (21.9 ns).
+    assert np.argwhere(~np.isfinite(out.data)).tolist() == [[150 - 49, 300]]
+    assert np.isnan(out.data[150 - 49, 300])

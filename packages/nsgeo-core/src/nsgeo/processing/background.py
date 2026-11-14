@@ -12,13 +12,18 @@ from typing import Any
 
 import numpy as np
 
-from nsgeo.processing._util import running_mean
+from nsgeo.processing._util import refuse_non_finite, running_mean
 from nsgeo.processing.base import ParamSpec, Radargram, register
 
 
 @register
 class BackgroundMean:
-    """Subtract the mean trace over the whole line."""
+    """Subtract the mean trace over the whole line.
+
+    Each row's mean is over its finite samples, so one NaN or inf damages only
+    itself rather than its whole row. A row with no finite sample subtracts
+    NaN, which touches only samples that were already bad.
+    """
 
     name = "background_mean"
     title = "Background removal (mean)"
@@ -34,7 +39,11 @@ class BackgroundMean:
         return ()
 
     def apply(self, rg: Radargram) -> Radargram:
-        return rg.replace(data=rg.data - rg.data.mean(axis=1, keepdims=True))
+        finite = np.isfinite(rg.data)
+        total = np.where(finite, rg.data, 0.0).sum(axis=1, keepdims=True)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean = total / finite.sum(axis=1, keepdims=True)
+        return rg.replace(data=rg.data - mean)
 
 
 @register
@@ -102,6 +111,7 @@ class BackgroundSvd:
             raise ValueError(f"n_components must be >= 0, got {n}")
         if n == 0:
             return rg
+        refuse_non_finite(rg.data, "the decomposition cannot run on them")
         rank = min(rg.n_samples, rg.n_traces)
         if n > rank:
             raise ValueError(f"n_components={n} exceeds the rank of this radargram ({rank})")

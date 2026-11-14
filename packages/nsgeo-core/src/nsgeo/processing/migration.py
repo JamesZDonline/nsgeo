@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from nsgeo.processing._util import refuse_non_finite
 from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, register
 from nsgeo.velocity import C_M_PER_NS
 
@@ -120,12 +121,7 @@ def migrate_fk(
             f"step (time_zero) ahead of migration."
         )
     arr = np.asarray(data, dtype=float)
-    if not np.all(np.isfinite(arr)):
-        bad = int(np.count_nonzero(~np.isfinite(arr).all(axis=0)))
-        raise ValueError(
-            f"{bad} of {arr.shape[1]} traces hold samples that are not finite; one "
-            "of them would spread across the whole image through the transform"
-        )
+    refuse_non_finite(arr, "one of them would spread across the whole image through the transform")
     n_samples, n_traces = arr.shape
     vm = velocity_m_ns / 2.0
 

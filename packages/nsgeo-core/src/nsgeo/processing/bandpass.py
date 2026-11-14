@@ -13,6 +13,7 @@ from typing import Any
 
 import numpy as np
 
+from nsgeo.processing._util import refuse_non_finite
 from nsgeo.processing.base import REQUIRED, ParamSpec, Radargram, nyquist_mhz, register
 
 
@@ -96,6 +97,7 @@ class Bandpass:
         return mask
 
     def apply(self, rg: Radargram) -> Radargram:
+        refuse_non_finite(rg.data, "the filter would spread each one along its whole trace")
         nyquist = nyquist_mhz(rg.dt_ns)
         if self.taper_frac < 0:
             raise ValueError(

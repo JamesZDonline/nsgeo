@@ -20,15 +20,42 @@ TIME_BASE_RADAR = "radar"
 
 def first_break_row(rg: Radargram, threshold: float = 0.2) -> int:
     """Row of the first arrival: the first where the trace-mean absolute
-    amplitude reaches `threshold` of its peak. 0 when there is no signal."""
+    amplitude reaches `threshold` of its peak. 0 when there is no signal.
+
+    NaN and inf are left out of each row's mean, so one bad sample does not
+    move the pick (#42)."""
+    row = _first_break_or_none(rg, threshold)
+    return 0 if row is None else row
+
+
+def _first_break_or_none(rg: Radargram, threshold: float) -> int | None:
+    """`first_break_row`, but None when there is no signal: no row holds a
+    finite sample, or every finite sample is zero."""
     # Averaging across traces first means leading all-zero traces (recording
-    # before the cart moves) dilute rather than dominate the pick.
-    envelope = np.abs(rg.data).mean(axis=1)
-    peak = envelope.max()
+    # before the cart moves) dilute rather than dominate the pick. Each row's
+    # mean is over its finite samples only: one NaN used to make the peak NaN
+    # and cancel the crop, and one inf made its own row the peak.
+    finite = np.isfinite(rg.data)
+    total = np.where(finite, np.abs(rg.data), 0.0).sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        envelope = total / finite.sum(axis=1)  # NaN on a row with no finite sample
+    usable = np.isfinite(envelope)
+    if not usable.any():
+        return None
+    peak = envelope[usable].max()
     if peak <= 0:
-        return 0
-    above = np.flatnonzero(envelope >= threshold * peak)
+        return None
+    above = np.flatnonzero(usable & (envelope >= threshold * peak))
     return int(above[0]) if above.size else 0
+
+
+def _why_no_first_arrival(data: np.ndarray) -> str:
+    finite = np.isfinite(data)
+    if finite.all():
+        return "every sample on this line is zero"
+    if not finite.any():
+        return "no sample on this line is a finite number"
+    return "every sample on this line is zero or not a finite number"
 
 
 def first_break_ns(rg: Radargram, threshold: float = 0.2) -> float:
@@ -99,7 +126,13 @@ class TimeZero:
         if self.mode == "sample":
             return int(self.sample)
         if self.mode == "first_break":
-            return first_break_row(rg, self.threshold)
+            row = _first_break_or_none(rg, self.threshold)
+            if row is None:
+                # Cropping nothing would pass silently for a time zero.
+                raise ValueError(
+                    f"Time zero found no first arrival: {_why_no_first_arrival(rg.data)}."
+                )
+            return row
         raise ValueError(f"unknown time_zero mode {self.mode!r}; use 'sample' or 'first_break'")
 
     def apply(self, rg: Radargram) -> Radargram:

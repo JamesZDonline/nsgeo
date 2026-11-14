@@ -5,6 +5,16 @@ import numpy as np
 import pytest
 from nsgeo.processing.base import Radargram, available_steps, build_step
 
+from tests.real_data import DATA, real_radargram
+
+
+def file7_with(bad, row=100, trace=300):
+    """Campus FILE__007 with one bad sample."""
+    rg = real_radargram(DATA / "FILE__007.DZT")
+    data = rg.data.copy()
+    data[row, trace] = bad
+    return rg.replace(data=data)
+
 
 def banded(n_samples=128, n_traces=300, seed=0):
     """A strong horizontal band plus random reflectors — the thing background
@@ -82,6 +92,36 @@ def test_svd_rejects_negative_components():
     rg, _, _ = banded()
     with pytest.raises(ValueError, match="n_components"):
         build_step("background_svd", n_components=-1).apply(rg)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+@pytest.mark.parametrize("name", ["background_mean", "background_sliding"])
+def test_on_a_real_line_a_bad_sample_damages_only_itself(name, bad):
+    """#43 and its background-mean twin: one NaN used to turn the rest of its
+    row into NaN (mean: the whole row; sliding: every window that held it)."""
+    out = build_step(name).apply(file7_with(bad)).data
+    assert np.argwhere(~np.isfinite(out)).tolist() == [[100, 300]]
+    assert np.isnan(out[100, 300]) == np.isnan(bad)
+
+
+def test_mean_of_a_row_with_no_finite_sample_touches_only_bad_samples():
+    data = np.ones((4, 3))
+    data[2, :] = [np.nan, np.inf, np.nan]
+    out = build_step("background_mean").apply(Radargram(data=data, dt_ns=0.2, t0_ns=0.0)).data
+    np.testing.assert_array_equal(out[[0, 1, 3]], 0.0)
+    assert np.isnan(out[2]).all()
+
+
+def test_svd_refuses_a_real_line_holding_a_nan():
+    """It used to fail inside numpy with "SVD did not converge"."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            "1 of 635 traces hold samples that are not finite; the decomposition cannot run on them"
+        ),
+    ) as caught:
+        build_step("background_svd", n_components=1).apply(file7_with(np.nan))
+    assert not isinstance(caught.value, np.linalg.LinAlgError)
 
 
 _STEP_PARAMS = {
