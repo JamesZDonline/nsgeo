@@ -233,43 +233,14 @@ def test_a_saved_traced_fit_refits_to_the_velocity_shown(plugin):
     assert round(stored.v_m_ns, 4) == round(shown.v_m_ns, 4)
 
 
-def test_sample_mode_time_zero_adds_the_note_after_a_trace(plugin):
+def test_a_traced_fit_without_time_zero_shows_the_radar_clock_note(plugin):
+    # The tracer follows no Time zero rule (spec §6, revised), so a traced fit
+    # gets no note of its own; with no Time zero step it gets the radar-clock
+    # note a clicked fit gets.
     v, dock = _view(plugin), plugin.profile_dock
-    key = plugin.session.keys()[0]
-    plugin.session.append_step(key, build_step("time_zero", mode="sample", sample=PAD))
     _drag(v, *_box_around(v))
     assert dock.velocity_points()
-    copy = "Time zero is set at a sample here, so the traced edge may not line up with it."
-    assert copy in dock.velocity_note.text()
-    dock.clear_velocity_button.click()
-    assert copy not in dock.velocity_note.text()
-
-
-def _record_fraction(monkeypatch):
-    import nsgeo_qgis.ui.profile_dock as pd
-
-    seen = {}
-    real = pd.trace_hyperbola
-
-    def spy(*args, **kw):
-        seen.update(kw)
-        return real(*args, **kw)
-
-    monkeypatch.setattr(pd, "trace_hyperbola", spy)
-    return seen
-
-
-def test_the_edge_fraction_follows_the_lines_time_zero(plugin, monkeypatch):
-    v = _view(plugin)
-    seen = _record_fraction(monkeypatch)
-    key = plugin.session.keys()[0]
-    plugin.session.append_step(key, build_step("time_zero", threshold=0.5))
-    _drag(v, *_box_around(v))
-    assert seen["fraction"] == 0.5
-
-
-def test_the_edge_fraction_is_a_fifth_with_no_time_zero(plugin, monkeypatch):
-    v = _view(plugin)
-    seen = _record_fraction(monkeypatch)
-    _drag(v, *_box_around(v))
-    assert seen["fraction"] == 0.2
+    note = dock.velocity_note.text()
+    assert note.startswith("Times are from the radar's own zero; the first break is at ")
+    assert note.endswith("Add a Time zero step to measure from it.")
+    assert "traced edge" not in note

@@ -58,19 +58,8 @@ class Case:
     times: np.ndarray
     distance: np.ndarray
     hand: object  # StoredFit at the fit's clock
-    fraction: float
     zero: float
     missing: str = ""
-
-
-def _fraction(stack) -> float:
-    """The line's own time-zero fraction: the last enabled first-break step's
-    threshold, else 0.2 (no such step, or sample mode)."""
-    found = 0.2
-    for step, on in stack.entries:
-        if on and step.name == "time_zero" and step.mode == "first_break":
-            found = float(step.threshold)
-    return found
 
 
 @cache
@@ -88,8 +77,7 @@ def _cases() -> tuple[Case, ...]:
             fit_ids = sorted(line.velocity_fits)
             if not Path(line.path).exists():
                 out.extend(
-                    Case(f"{line.path}#{f}", *([None] * 5), 0.2, 0.0, "DZT missing")
-                    for f in fit_ids
+                    Case(f"{line.path}#{f}", *([None] * 4), 0.0, "DZT missing") for f in fit_ids
                 )  # type: ignore[arg-type]
                 continue
             stack = site.stacks[key]
@@ -109,7 +97,6 @@ def _cases() -> tuple[Case, ...]:
                         result.times_ns(),
                         distance,
                         hand,
-                        _fraction(stack),
                         zero,
                     )
                 )
@@ -171,7 +158,7 @@ def _box(case: Case, margin: float, shift: float = 0.0) -> TraceBox:
 
 
 def _trace_fit(case: Case, box: TraceBox):
-    dots = trace_hyperbola(case.data, case.times, case.distance, box, fraction=case.fraction)
+    dots = trace_hyperbola(case.data, case.times, case.distance, box)
     tr = np.array([d[0] for d in dots])
     return fit_hyperbola(
         case.distance[tr], np.array([d[1] for d in dots]), float(case.distance[tr[0]])
@@ -217,7 +204,7 @@ def test_the_largest_box_traces_within_a_second():
     )
     start = time.perf_counter()
     with contextlib.suppress(ValueError):  # a refusal still has to be quick
-        trace_hyperbola(case.data, case.times, case.distance, box, fraction=case.fraction)
+        trace_hyperbola(case.data, case.times, case.distance, box)
     elapsed = time.perf_counter() - start
     assert elapsed < 1.0, f"{elapsed:.2f} s"
     assert ht.MAX_BOX_CELLS > 0

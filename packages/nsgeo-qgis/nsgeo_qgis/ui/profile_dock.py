@@ -275,11 +275,10 @@ class ProfileDock(QgsDockWidget):
         # points are empty after it (#128). Apply to line / grid act on that
         # fit; every reset of `_velocity_points` ends it too.
         self._just_saved: tuple[str, str] | None = None
-        # Why the last box drew nothing, and whether the working dots came from
-        # a trace. Both show in the velocity strip's note and end with the next
-        # edit, Clear, Save fit, a line switch or velocity mode going off.
+        # Why the last box drew nothing. It shows in the velocity strip's note
+        # and ends with the next edit, Clear, Save fit, a line switch or
+        # velocity mode going off.
         self._box_note = ""
-        self._dots_traced = False
         self._velocity_fit: HyperbolaFit | None = None
         self._velocity_mode = False
         # (line key, fit id) the velocity dialog has selected, drawn bold.
@@ -1237,7 +1236,6 @@ class ProfileDock(QgsDockWidget):
 
     def _reset_box_state(self) -> None:
         self._box_note = ""
-        self._dots_traced = False
 
     def _box_refusal(self) -> str:
         """Why a box cannot be traced now, or "" (the preview is refused apart,
@@ -1265,16 +1263,6 @@ class ProfileDock(QgsDockWidget):
                 )
         return ""
 
-    def _time_zero_step(self) -> Any:
-        """The working line's enabled time_zero step, or None."""
-        key = self._working_key
-        if key is None or not self.session.is_open or is_cut_key(key):
-            return None
-        for step, enabled in self.session.stack_for(key, insert=False).entries:
-            if enabled and step.name == "time_zero":
-                return step
-        return None
-
     def _on_velocity_box_drawn(
         self, first_trace: int, last_trace: int, top_ns: float, bottom_ns: float
     ) -> None:
@@ -1282,7 +1270,6 @@ class ProfileDock(QgsDockWidget):
             if self._refuse_velocity_edit_on_preview():
                 return
             self._box_note = ""
-            self._dots_traced = False
             reason = self._box_refusal()
             if not reason:
                 try:
@@ -1314,16 +1301,13 @@ class ProfileDock(QgsDockWidget):
             float(retime_ns(top_ns, shown, zero)),
             float(retime_ns(bottom_ns, shown, zero)),
         )
-        tz = self._time_zero_step()
-        fraction = float(tz.threshold) if tz is not None and tz.mode == "first_break" else 0.2
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            dots = trace_hyperbola(rg.data, times, distance, box, fraction=fraction)
+            dots = trace_hyperbola(rg.data, times, distance, box)
         finally:
             QApplication.restoreOverrideCursor()
         self._velocity_points = [(int(tr), float(retime_ns(t, zero, 0.0))) for tr, t in dots]
         self._just_saved = None
-        self._dots_traced = True
 
     def _on_velocity_point_discarded(self, index: int) -> None:
         try:
@@ -1533,18 +1517,10 @@ class ProfileDock(QgsDockWidget):
                         )
                     else:
                         self.velocity_readout.setText(str(exc))
-            tz = self._time_zero_step()
-            sample_note = (
-                "Time zero is set at a sample here, so the traced edge may not line up with it."
-                if self._dots_traced and tz is not None and tz.mode == "sample"
-                else ""
-            )
             time_zero_note = self._velocity_time_zero_note(
                 None if self._velocity_fit is None else self._velocity_fit.v_m_ns, zero
             )
-            self.velocity_note.setText(
-                " ".join(n for n in (self._box_note, sample_note, time_zero_note) if n)
-            )
+            self.velocity_note.setText(" ".join(n for n in (self._box_note, time_zero_note) if n))
             if self._preview_key is None and self._velocity_mode:
                 shown = self.shown_zero_ns()
                 self.view.set_velocity_fit(

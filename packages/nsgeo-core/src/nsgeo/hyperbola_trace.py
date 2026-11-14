@@ -1,23 +1,36 @@
 """Trace a diffraction hyperbola from a box, as dots on its outer edge.
 
 The author draws a box around a hyperbola. This module finds the strongest
-hyperbola t(x) = sqrt(t0^2 + 4 (x - x0)^2 / v^2) inside it, marks the first
-break (the outer edge of the top band) on each trace, throws away the edges
-that disagree, and thins the rest to about ten dots. The dots are ordinary
-picks: the caller fits them with ``fit_hyperbola`` exactly as it fits clicked
-points.
-
-The edge rule is the one the Time zero step uses for the first arrival: the
-first time the signal reaches a set fraction of its peak, so the two offsets
-cancel when the fraction is the same.
+hyperbola t(x) = sqrt(t0^2 + 4 (x - x0)^2 / v^2) inside it, marks the outer
+edge of its top band on each trace, throws away the edges that disagree, and
+thins the rest to about ten dots. The dots are ordinary picks: the caller fits
+them with ``fit_hyperbola`` exactly as it fits clicked points.
 
 The scan scores a curve by stacking the signed amplitudes along it, after
 taking each row's mean across the box away. A curve that follows one lobe of
 the band adds up; one that cuts across the band's lobes, or runs along a flat
 layer, cancels. Scoring |amplitude| instead (blind to phase) let a steep curve
-sit in the bright apex and win on real lines (#140). The edge window on each
-trace then starts just ahead of the band's own edge, found on the stack of the
-traces along the curve, so the layers and clutter ahead of it are not read.
+sit in the bright apex and win on real lines (#140).
+
+The edge is the zero crossing into the band's first strong lobe (spec §4.2,
+the author's ruling after the real-data check). A faint precursor lobe runs
+ahead of the band the author sees; the first version marked where the signal
+first reached a fifth of its peak, which often fell on that precursor, so the
+traced curve floated above the hyperbola. The lobe is chosen once per box,
+from the stack of the traces along the scan's curve, so every trace follows
+the same one. A zero crossing does not depend on how bright the trace is, so
+the edge does not drift deeper as a leg fades.
+
+Every dot stays on that lobe. A trace's crossing counts only within a quarter
+period of where the lobe is expected, and of the fit through the dots: the
+next crossing into a lobe of the same sign is a whole period away. Reading a
+window that reached further below the expected crossing than above it, an
+earlier draft took the next lobe down wherever a leg's crossing came early,
+and dots on a leg jumped down a level (#140).
+
+This is not the Time zero step's rule (0.2 of the direct wave's peak); the
+small fixed offset between the two is a follow-up. ``trace_hyperbola`` takes
+no Time zero fraction.
 """
 
 from __future__ import annotations
@@ -35,7 +48,6 @@ __all__ = [
     "TraceBox",
     "V_MAX_M_NS",
     "V_MIN_M_NS",
-    "edge_time",
     "trace_hyperbola",
 ]
 
@@ -59,23 +71,27 @@ _DETECT_Z = 6.0
 _T_STEP_PERIODS = 1.0 / 8.0
 _N_VELOCITIES = 28
 _COARSE_TRACES = 96
-#: A trace's window peak must be at least this fraction of the traces nearest
-#: the apex. Where a leg fades below it, the leg ends. On the author's hand fits
-#: the band at the last clicked dot is 0.45 of the apex (median; quartiles 0.32
-#: and 0.63), so 0.5 dropped legs they had clicked. A trace whose band does not
-#: stand clear of what comes before it gives no edge anyway: its window then
-#: starts at or above the level (see ``_window_edge``).
-_FAINT_FRACTION = 0.25
+#: The first strong lobe is the earliest lobe on the stack, within a period
+#: before its peak, that reaches this fraction of that peak. On the stacks of
+#: the author's hand fits, the lobes ahead of the one whose crossing they
+#: clicked reach 0.10-0.30 of the peak (two reach 0.48 and 0.49), and the
+#: clicked lobe 0.54-1.00 (one 0.498, just under this). The measured wavelet's
+#: precursor is 0.21 and its first strong lobe 0.69 (tests/planted.py,
+#: REAL_WAVELET).
+_STRONG_LOBE = 0.5
+#: A dot lies within this many periods of where its lobe's crossing is
+#: expected, and of the fit through the dots.
+_LOBE_TOLERANCE_PERIODS = 0.25
+#: A trace's lobe must peak at least this fraction of the lobe's peak on the
+#: band's strongest traces. Where a leg fades below it, the leg ends. On the
+#: author's hand fits, the lobe at the outermost clicked dots is 0.51 of that
+#: (median; the 10th percentile is 0.18, the 25th 0.34): 0.2 keeps 86% of them,
+#: 0.3 78% and 0.4 65%.
+_FAINT_FRACTION = 0.2
 #: Residuals beyond this many median absolute residuals are dropped.
 _OUTLIER_MADS = 3.0
 #: ...but never closer than this many samples, so a near-perfect fit keeps all.
 _OUTLIER_FLOOR_SAMPLES = 0.5
-#: The edge window on each trace: from this many periods before the band's
-#: edge on the stack...
-_EDGE_LEAD_PERIODS = 0.15
-#: ...to this many after the band's peak. The stacked edge is looked for up to
-#: one period before that peak.
-_EDGE_TAIL_PERIODS = 0.25
 
 
 @dataclass(frozen=True)
@@ -86,54 +102,35 @@ class TraceBox:
     bottom_ns: float
 
 
-def _window_edge(seg: np.ndarray, times: np.ndarray, fraction: float) -> tuple[float | None, float]:
-    """(edge time or None, window peak) of one window's samples.
-
-    The edge is None when the window holds no signal, or when the signal is
-    already at the level on its first sample: the onset lies before the window,
-    and its start is not the edge.
-    """
-    amp = np.abs(seg)
-    peak = float(amp.max()) if amp.size else 0.0
-    if peak <= 0.0 or amp.size < 2:
-        return None, peak
-    level = fraction * peak
-    j = int(np.flatnonzero(amp >= level)[0])
-    if j == 0:
-        return None, peak
-    a0, a1 = float(amp[j - 1]), float(amp[j])
-    frac = (level - a0) / (a1 - a0)
-    return float(times[j - 1] + frac * (times[j] - times[j - 1])), peak
-
-
 def _too_few(n: int) -> str:
     return f"Too few points were left after cleaning ({n}); a fit needs at least {MIN_DOTS}."
 
 
-def _check_fraction(fraction: float) -> None:
-    if not 0.0 < fraction < 1.0:
-        raise ValueError(
-            f"The edge fraction must be between 0 and 1 (not including either); got {fraction}."
-        )
+def _too_faint() -> ValueError:
+    return ValueError("The hyperbola in the box is too faint to trace.")
 
 
-def edge_time(
-    trace: np.ndarray,
-    times_ns: np.ndarray,
-    start_ns: float,
-    stop_ns: float,
-    fraction: float,
-) -> float | None:
-    """First time in ``[start_ns, stop_ns]`` where |amplitude| reaches
-    ``fraction`` of the window's peak, read between samples by linear
-    interpolation. None when the window holds no signal, or when the signal is
-    already at that level on the window's first sample (the onset is earlier).
-    ``fraction`` must lie strictly between 0 and 1."""
-    _check_fraction(fraction)
-    times = np.asarray(times_ns, dtype=float)
-    keep = (times >= start_ns) & (times <= stop_ns)
-    edge, _ = _window_edge(np.asarray(trace, dtype=float)[keep], times[keep], fraction)
-    return edge
+def _zero_at(seg: np.ndarray, times: np.ndarray, j: int) -> float:
+    """Where the signal crosses zero between samples j - 1 and j, read by
+    linear interpolation."""
+    a0, a1 = float(seg[j - 1]), float(seg[j])
+    return float(times[j - 1] + a0 / (a0 - a1) * (times[j] - times[j - 1]))
+
+
+def _crossings(seg: np.ndarray, times: np.ndarray, sign: float) -> tuple[np.ndarray, np.ndarray]:
+    """(times, peaks): each zero crossing into a lobe of ``sign`` in one
+    trace's samples, and the peak of the lobe it starts (as a positive
+    number)."""
+    s = sign * np.asarray(seg, dtype=float)
+    starts = np.flatnonzero((s[:-1] <= 0.0) & (s[1:] > 0.0)) + 1
+    ends = np.flatnonzero((s[:-1] > 0.0) & (s[1:] <= 0.0)) + 1
+    found_t, found_p = [], []
+    for j in starts:
+        stop = ends[ends > j]
+        k = int(stop[0]) if stop.size else s.size
+        found_t.append(_zero_at(seg, times, int(j)))
+        found_p.append(float(s[j:k].max()))
+    return np.array(found_t), np.array(found_p)
 
 
 def _dominant_period_ns(box: np.ndarray, dt_ns: float) -> float:
@@ -232,37 +229,50 @@ def _scan(
     return best
 
 
-def _edge_window(
-    box_data: np.ndarray,
-    box_times: np.ndarray,
-    curve: np.ndarray,
-    period_ns: float,
-    fraction: float,
-) -> tuple[float, float]:
-    """(lead, tail): each trace's edge window, as offsets from the curve.
-
-    The box is read along the curve on every trace and averaged. That keeps
-    the hyperbola's wavelet and averages away what does not follow the curve.
-    The band's peak on that stack, and its edge by the same rule as each
-    trace's, place every trace's window: from just before that edge to just
-    after that peak, so the layers and clutter ahead of the band are not read.
-    """
-    dt = float(box_times[1] - box_times[0])
-    tau = np.arange(-1.5 * period_ns, 1.5 * period_ns + dt / 2.0, dt)
-    total = np.zeros(tau.size)
-    count = np.zeros(tau.size)
-    for col in range(box_data.shape[1]):
-        t = curve[col] + tau
-        inside = (t >= box_times[0]) & (t <= box_times[-1])
-        total[inside] += np.interp(t[inside], box_times, box_data[:, col])
+def _stack_along(
+    img: np.ndarray, times: np.ndarray, curve: np.ndarray, period_ns: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """(lags, stack): the box read along the curve, at each lag from it, and
+    averaged over the traces. That keeps the hyperbola's wavelet and averages
+    away what does not follow the curve. Lags no trace reaches are left out."""
+    dt = float(times[1] - times[0])
+    lags = np.arange(-1.5 * period_ns, 1.5 * period_ns + dt / 2.0, dt)
+    total = np.zeros(lags.size)
+    count = np.zeros(lags.size)
+    for col in range(img.shape[1]):
+        if not times[0] <= curve[col] <= times[-1]:
+            continue
+        t = curve[col] + lags
+        inside = (t >= times[0]) & (t <= times[-1])
+        total[inside] += np.interp(t[inside], times, img[:, col])
         count[inside] += 1.0
-    stack = np.where(count > 0.0, total / np.maximum(count, 1.0), 0.0)
-    near = np.flatnonzero(np.abs(tau) <= 0.5 * period_ns)
-    peak = float(tau[near[int(np.argmax(np.abs(stack[near])))]])
-    ahead = (tau >= peak - period_ns) & (tau <= peak)
-    edge, _ = _window_edge(stack[ahead], tau[ahead], fraction)
-    onset = peak - period_ns if edge is None else edge
-    return onset - _EDGE_LEAD_PERIODS * period_ns, peak + _EDGE_TAIL_PERIODS * period_ns
+    reached = count > 0.0
+    return lags[reached], total[reached] / count[reached]
+
+
+def _first_strong_lobe(
+    lags: np.ndarray, stack: np.ndarray, period_ns: float
+) -> tuple[float, float] | None:
+    """(lag, sign) of the zero crossing into the first strong lobe on the
+    stack: the earliest lobe, within a period before the stack's peak near the
+    curve, that reaches ``_STRONG_LOBE`` of that peak. None when no such lobe
+    starts with a crossing."""
+    near = np.flatnonzero(np.abs(lags) <= 0.5 * period_ns)
+    if near.size == 0:
+        return None
+    top = int(near[int(np.argmax(np.abs(stack[near])))])
+    sign = np.sign(stack)
+    starts = np.flatnonzero((sign[1:] != sign[:-1]) & (sign[1:] != 0.0)) + 1
+    ends = [*starts[1:], stack.size]
+    for j, k in zip(starts, ends):
+        peak = j + int(np.argmax(np.abs(stack[j:k])))
+        if lags[peak] < lags[top] - period_ns:
+            continue
+        if lags[peak] > lags[top]:
+            break
+        if abs(stack[peak]) >= _STRONG_LOBE * abs(stack[top]):
+            return _zero_at(stack, lags, int(j)), float(sign[peak])
+    return None
 
 
 def trace_hyperbola(
@@ -271,17 +281,17 @@ def trace_hyperbola(
     distance_m: np.ndarray,
     box: TraceBox,
     *,
-    fraction: float = 0.2,
     max_dots: int = MAX_DOTS,
 ) -> list[tuple[int, float]]:
     """Dots ``(trace, time)`` on the outer edge of the strongest hyperbola in
     ``box``, the apex-nearest first and the rest in trace order.
 
-    ``data`` is (n_samples, n_traces); ``times_ns`` is each row's time on the
-    clock the fit uses; ``distance_m`` is each trace's distance along the line
-    (spacing may be uneven). Raises ``ValueError`` with a plain reason.
+    The edge is the zero crossing into the band's first strong lobe, read
+    between samples by linear interpolation. ``data`` is (n_samples,
+    n_traces); ``times_ns`` is each row's time on the clock the fit uses;
+    ``distance_m`` is each trace's distance along the line (spacing may be
+    uneven). Raises ``ValueError`` with a plain reason.
     """
-    _check_fraction(fraction)
     data = np.asarray(data, dtype=float)
     times = np.asarray(times_ns, dtype=float)
     dist = np.asarray(distance_m, dtype=float)
@@ -316,42 +326,59 @@ def trace_hyperbola(
     if best < _DETECT_Z * noise:
         raise ValueError("No hyperbola was found in the box.")
 
-    # The edge on each trace, in a window placed by the band on the stack.
+    # The lobe to follow, chosen once on the stack along the scan's curve.
     curve = np.sqrt(t0**2 + 4.0 * (x_box - apex_x) ** 2 / v**2)
-    lead, tail = _edge_window(box_data, box_times, curve, period, fraction)
-    found: list[tuple[int, float, float]] = []  # (box column, edge, window peak)
+    lobe = _first_strong_lobe(*_stack_along(img, box_times, curve, period), period)
+    if lobe is None:
+        raise _too_faint()
+    lag, sign = lobe
+    tolerance = _LOBE_TOLERANCE_PERIODS * period
+
+    # On each trace, the crossing into that lobe nearest where it is expected.
+    found: list[tuple[int, float, float]] = []  # (box column, edge, lobe peak)
     for col in range(n_box_tr):
-        if not box_times[0] <= curve[col] <= box_times[-1]:
+        expected = curve[col] + lag
+        if not box_times[0] <= expected <= box_times[-1]:
             continue
-        lo = int(np.searchsorted(box_times, curve[col] + lead, "left"))
-        hi = int(np.searchsorted(box_times, curve[col] + tail, "right"))
-        edge, peak = _window_edge(box_data[lo:hi, col], box_times[lo:hi], fraction)
-        if edge is not None:
-            found.append((col, edge, peak))
+        lo = max(0, int(np.searchsorted(box_times, expected - tolerance)) - 1)
+        hi = int(np.searchsorted(box_times, expected + tolerance + 0.5 * period, "right"))
+        edges, peaks = _crossings(box_data[lo:hi, col], box_times[lo:hi], sign)
+        if edges.size == 0:
+            continue
+        k = int(np.argmin(np.abs(edges - expected)))
+        if abs(edges[k] - expected) <= tolerance:
+            found.append((col, float(edges[k]), float(peaks[k])))
     if not found:
-        raise ValueError("The hyperbola in the box is too faint to trace.")
+        raise _too_faint()
     cols = np.array([f[0] for f in found])
     peaks = np.array([f[2] for f in found])
-    near_apex = np.argsort(np.abs(x_box[cols] - apex_x))[:5]
-    floor = _FAINT_FRACTION * float(np.median(peaks[near_apex]))
-    strong = peaks >= floor
-    if not strong[np.argsort(np.abs(x_box[cols] - apex_x))[:3]].any():
-        raise ValueError("The hyperbola in the box is too faint to trace.")
+    # Measured against the band's strongest traces, not the ones nearest the
+    # scan's apex: on a short hyperbola the scan may put a flat curve's apex
+    # on noise, and then every noise crossing passed.
+    strong = peaks >= _FAINT_FRACTION * float(np.median(np.sort(peaks)[-5:]))
     cols = cols[strong]
     edges = np.array([f[1] for f in found])[strong]
 
-    # Clean: fit, drop the edges that disagree, refit.
+    # Clean: fit, drop the edges that disagree, refit. The scan's apex is the
+    # fit's apex guess, moved in to the edges when it lies beyond them (a short
+    # hyperbola can scan as a flat curve whose apex is at the box's side).
     if cols.size < MIN_DOTS:
         raise ValueError(_too_few(int(cols.size)))
     x_e = x_box[cols]
+    apex_x = float(np.clip(apex_x, x_e.min(), x_e.max()))
     fit = fit_hyperbola(x_e, edges, apex_x)
     resid = np.abs(edges - hyperbola_time(fit, x_e))
     limit = max(_OUTLIER_MADS * float(np.median(resid)), _OUTLIER_FLOOR_SAMPLES * dt)
     keep = resid <= limit
-    if int(keep.sum()) < MIN_DOTS:
-        raise ValueError(_too_few(int(keep.sum())))
-    cols, edges, x_e = cols[keep], edges[keep], x_e[keep]
-    fit = fit_hyperbola(x_e, edges, apex_x)
+    while True:
+        if int(keep.sum()) < MIN_DOTS:
+            raise ValueError(_too_few(int(keep.sum())))
+        cols, edges, x_e = cols[keep], edges[keep], x_e[keep]
+        fit = fit_hyperbola(x_e, edges, apex_x)
+        # A dot a lobe away from the rest never stays.
+        keep = np.abs(edges - hyperbola_time(fit, x_e)) <= tolerance
+        if keep.all():
+            break
 
     # Thin: evenly spaced along the traced extent, each target taking the
     # nearest survivor not already taken, and keeping the apex-nearest.

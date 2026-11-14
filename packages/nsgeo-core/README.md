@@ -241,13 +241,12 @@ The destagger a grid's lines need, measured from the lines themselves: each line
 
 ### `nsgeo.hyperbola_trace`
 
-Trace a diffraction hyperbola from a box, as dots on the outer edge of its top band.
+Trace a diffraction hyperbola from a box, as dots on the outer edge of its top band: the zero crossing into the band's first strong lobe.
 
 | Name | Purpose |
 |---|---|
 | `TraceBox` | The box: first and last trace, earliest and latest time on the clock the fit uses. |
-| `trace_hyperbola` | The strongest hyperbola in a box as at most `MAX_DOTS` `(trace, time)` dots, the apex-nearest first, ready for `fit_hyperbola`. Raises `ValueError` with a plain reason when the box is too small, too big, empty, too faint or leaves too few points. |
-| `edge_time` | The first time in a window where the signal reaches a fraction of the window's peak, linearly interpolated between samples (None when there is no signal or the onset is before the window); the same rule as the Time zero step's first break. |
+| `trace_hyperbola` | The strongest hyperbola in a box as at most `MAX_DOTS` `(trace, time)` dots, the apex-nearest first, ready for `fit_hyperbola`. Each dot is the zero crossing into the band's first strong lobe, chosen once from the stack along the hyperbola and read between samples by linear interpolation; no dot is kept a lobe away from the rest. It takes no Time zero fraction. Raises `ValueError` with a plain reason when the box is too small, too big, empty, too faint or leaves too few points. |
 | `MAX_DOTS` | The most dots one trace returns (10). |
 | `MIN_DOTS` | The fewest dots a trace may leave after cleaning (4). |
 | `MAX_BOX_CELLS` | The largest box, in traces times samples, that is traced. |
