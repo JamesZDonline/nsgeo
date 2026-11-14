@@ -1231,12 +1231,10 @@ def test_a_z_bound_never_chosen_follows_every_ready_grid(site3_factory, open_plu
     """Ruling 14 (#71): z0 and z1 are the user's field by field. One never
     chosen is the union of the ready grids however they became ready; a
     remembered dz or cell does not hold it at the first grid's range."""
-    from nsgeo_qgis.ui.site_scope import ready_dt
-
     plugin = _short_a_site(site3_factory, open_plugin, **remembered)
     dock = _every_grid_shown(plugin)
     assert (dock.z0_spin.value(), dock.z1_spin.value()) == _snapped_ready_bounds(dock)
-    dz = pytest.approx(remembered.get("dz_ns", ready_dt(dock.site_engine)), abs=1e-4)
+    dz = pytest.approx(remembered.get("dz_ns", _coarsest_dt(plugin)), abs=1e-4)
     assert dock.dz_spin.value() == dz  # the box holds 4 decimals
     applied = dock._site.res_applied
     assert (applied.dz_ns, applied.t1_ns) == (dz, dock.z1_spin.value())
@@ -3992,6 +3990,11 @@ def test_the_same_z_range_is_clipped_not_refused_in_whole_site(plugin):
     assert not [e for e in dock.warnings_panel.entries() if e.kind == REFUSAL]
 
 
+def _coarsest_dt(plugin):
+    headers = site_scope_module.first_headers(plugin.session, plugin.slices_dock._site.included())
+    return max(h.dt_ns for h in headers)
+
+
 def _fine_b_site(site3_factory, first):
     """site3 with grid B recorded 4.4 times finer than A: 512 samples over 25 ns."""
     from tests.synthetic import write_dzt
@@ -4014,7 +4017,11 @@ def _fine_b_site(site3_factory, first):
 @pytest.mark.parametrize("first", ["A", "B"])
 def test_a_site_mixing_radars_never_refuses_its_seeded_defaults(open_plugin, site3_factory, first):
     plugin = open_plugin(_fine_b_site(site3_factory, first))
-    dock = whole_site(plugin)
+    dock = plugin.slices_dock
+    dock.site_scope_button.click()
+    assert dock.scope() == "site"
+    assert dock.dz_spin.value() == pytest.approx(110.864 / 512, abs=1e-4), "coarsest before ready"
+    settle(dock)
     assert dock._site.included()[0] == first
     assert dock._site.problem is None
     assert len(dock.site_engine.ready_grids) == 3

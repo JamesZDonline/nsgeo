@@ -2085,13 +2085,12 @@ class SlicesDock(QgsDockWidget):
                 # The cube's grid's floor, as a grid change sets it, whether
                 # or not the record has a resolution (spec 6.1).
                 self._set_cell_floor(recipe.choice.grid_id)
-                if self._included:
-                    # As `_seed_dz_z_defaults` reads it: the first included line.
-                    # A key no longer in the site is `set_source`'s to name.
-                    with contextlib.suppress(KeyError):
-                        site_scope.set_dz_floor(
-                            self, self.session.line_for_key(self._included[0]).header.dt_ns
-                        )
+                # As `_seed_dz_z_defaults` reads it: the first included line still
+                # in the site. A key no longer there is `set_source`'s to name.
+                live = set(self.session.keys())
+                first = next((k for k in self._included if k in live), None)
+                if first is not None:
+                    site_scope.set_dz_floor(self, self.session.line_for_key(first).header.dt_ns)
                 if recipe.resolution is not None:
                     self.cell_spin.setValue(recipe.resolution.cell)
                     self.dz_spin.setValue(recipe.resolution.dz_ns)
@@ -2611,6 +2610,8 @@ class SlicesDock(QgsDockWidget):
                 self.slice_slider.blockSignals(False)
             self.refresh_slice()
         except Exception as exc:  # noqa: BLE001 -- a QTimer.timeout slot
+            # A refusal shown for the last apply is not this apply's: one place.
+            self.show_warnings()
             self.error.emit(str(exc))
 
     def refresh_slice(self) -> None:

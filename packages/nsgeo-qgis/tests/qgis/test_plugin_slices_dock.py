@@ -4444,6 +4444,46 @@ def test_a_saved_cube_with_dz_below_the_floor_restores_at_the_floor(docked_fine_
     assert session.slice_resolution("A")["dz_ns"] == 0.001, "the record is remembered as saved"
 
 
+@pytest.mark.parametrize("lines", ["none", "stale_first"])
+def test_a_cube_record_without_usable_first_line_still_sets_its_grids_floor(docked_fine_b, lines):
+    """A record with no `lines` key, or whose first key left the site, restored
+    while the finer grid is shown: the floor is the cube grid's own."""
+    dock, session = docked_fine_b
+    _ready(dock)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    record = _save_cube(dock, session, "A__lines", view)
+    if lines == "none":
+        del record["lines"]
+    else:
+        record["lines"] = ["GONE__999", *record["lines"]]
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    assert dock.dz_spin.minimum() == pytest.approx(25.0 / 512, abs=1e-4), "B's finer floor"
+    dock.restore_cube("A__lines")
+    assert dock.grid_combo.currentText() == "A"
+    assert dock.dz_spin.minimum() == pytest.approx(_first_dt(session, "A"), abs=1e-4)
+    dock.engine.wait_for_preparation(20_000)
+
+
+def test_a_failed_apply_clears_the_refusal_the_last_one_left(docked, monkeypatch):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+
+    def fail(resolution):
+        raise RuntimeError("the engine failed")
+
+    monkeypatch.setattr(dock.engine, "set_resolution", fail)
+    dock.z1_spin.setValue(30.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert errors == ["the engine failed"]
+
+
 def test_the_dz_floor_travels_with_the_scope(docked_fine_b):
     from nsgeo_qgis.ui.site_scope import capture_spins
 

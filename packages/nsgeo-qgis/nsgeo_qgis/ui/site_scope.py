@@ -310,20 +310,19 @@ def first_headers(session: Any, grids: Iterable[str]) -> list[Any]:
     return headers
 
 
-def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float, float] | None:
-    """`(dz, z0, z1)` from the included grids' first lines' headers, before any is prepared.
+def header_z_seed(session: Any, included: Iterable[str]) -> tuple[float, float] | None:
+    """`(z0, z1)` from the included grids' first lines' headers, before any is prepared.
 
     The union of what the headers record; replaced by the prepared bounds
     once a grid is ready (`ready_z_bounds`), as M11 corrects its own
-    header-seeded range once its lines are prepared. The dz is the COARSEST
-    interval, so no grid's seeded levels pass its own sample count (#177).
+    header-seeded range once its lines are prepared.
     """
     headers = first_headers(session, included)
     if not headers:
         return None
     lo = min(h.position_ns for h in headers)
     hi = max(h.position_ns + (h.n_samples - 1) * h.dt_ns for h in headers)
-    return max(h.dt_ns for h in headers), lo, hi
+    return lo, hi
 
 
 def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
@@ -337,17 +336,6 @@ def ready_z_bounds(site_engine: Any) -> tuple[float, float] | None:
     if not spans:
         return None
     return min(s[0] for s in spans), max(s[1] for s in spans)
-
-
-def ready_dt(site_engine: Any) -> float | None:
-    """The coarsest sample interval among the ready grids' first prepared lines."""
-    dts = []
-    for grid_id in site_engine.ready_grids:
-        engine = site_engine.engine_for(grid_id)
-        lines = engine.prepared_lines() if engine is not None else ()
-        if lines:
-            dts.append(float(lines[0].dt_ns))
-    return max(dts) if dts else None
 
 
 def levels(z: ZAxis, thickness_ns: float, step_ns: float) -> tuple[int, int]:
@@ -888,12 +876,16 @@ class SiteScope:
         if bounds is not None:
             low = _snap_inside(bounds[0], dock.z0_spin.decimals(), upper=False)
             high = _snap_inside(bounds[1], dock.z1_spin.decimals(), upper=True)
-            dt = ready_dt(self.engine)
         else:
             header = header_z_seed(self.session, included) if included else None
             if header is None:
                 return False
-            dt, low, high = header
+            low, high = header
+        # The default dz is the coarsest included interval from the headers
+        # at all times, ready or not (prepared dt equals the header's), so it
+        # does not flip as the grids become ready (#177).
+        dts = [h.dt_ns for h in first_headers(self.session, included or self.included())]
+        dt = max(dts) if dts else None
         floor = site_dt_floor(self.session, included if included else self.included())
         if floor is not None:
             set_dz_floor(dock, floor)
