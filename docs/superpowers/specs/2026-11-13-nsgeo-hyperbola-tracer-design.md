@@ -32,10 +32,10 @@ lines up with where they see the hyperbola in the profile**.
 Geophysics* 8:235, doi 10.3997/1873-0604.2010008) found that only the first break of a GPR
 wavelet carries the true travel time and velocity. Later half-cycles give slower velocities.
 Booth & Pringle (2016, *J. Applied Geophysics* 125:37) say the same for diffraction hyperbolas.
-The edge also matches the plugin's own clock: the Time zero step puts 0 ns at the direct wave's
-first break (§2). Marking edge against edge cancels the offset. A fixed shift is something a
-hyperbola cannot absorb, so marking the bright middle against a first-break zero would bias
-every fit.
+A fixed shift is something a hyperbola cannot absorb, so marking the bright middle would bias
+every fit slow. *(Revised: the first version also matched the Time zero step's 0.2 rule exactly.
+On real lines that rule sits on a faint lobe ahead of the band the author sees, so §4.2 now
+marks where the band's first strong lobe begins. See decision 9.)*
 
 ## 2. Starting state (main cc9e51d)
 
@@ -98,6 +98,12 @@ every fit.
 8. **The real-data tests use the author's own saved hand fits** (§10). Those are hyperbolas the
    author picked out themselves, each with their hand dots. The tests read them locally and
    commit nothing from those sites.
+9. **The edge is the zero crossing into the band's first strong lobe** (decided after the
+   real-data check, from a side-by-side of six of their hyperbolas). The author: the green
+   triangles "look a little noisy … but they're pretty close". So every dot must stay on the same
+   lobe (§4.2).
+   - One hand fit, where every edge rule followed the band above the author's clicks, was "a
+     level too low… oops". It is recorded as "hand fit off".
 
 ## 4. The tracer (core)
 
@@ -131,29 +137,32 @@ pin the outcomes (§10).
 
 ### 4.2 Mark the edge on each trace
 
-On each trace in the box, look at the reflection band near the chosen curve, within about one
-wavelet period. The edge is where the signal first reaches a set fraction of that trace's peak in
-the band. It is read between samples by linear interpolation.
+**Revised 2026-11-13 after the real-data check (decision 9).** The first version marked where the
+signal first reaches 0.2 of the band's peak, the Time zero step's rule. On the author's lines that
+point usually sits on a faint lobe *ahead of* the dark band they see and click, so the traced
+curve floated above the hyperbola. That fails the author's own test (§1).
 
-**The fraction is the line's own Time zero fraction,** so the two offsets cancel *(my call)*. The
-panel reads it from the working stack's enabled `time_zero` step in `first_break` mode (its
-`threshold` parameter). With no such step, or in `sample` mode, the fraction is **0.2**, the
-step's default, and §6's note says why the offsets may not cancel. The tracer takes the fraction
-as a parameter.
+**The edge is where the band's first strong lobe begins: the zero crossing into it,** read between
+samples by linear interpolation.
+- The first strong lobe is chosen once per box, from the stack of the traces along the chosen
+  curve. That way every trace follows the same lobe.
+- "Strong" means a lobe that stands clear of the faint precursor lobes ahead of it. The builder
+  sets the threshold from evidence.
+- A zero crossing does not depend on how bright the trace is. So the edge does not drift deeper
+  as a leg fades, which hand marks do.
 
-Two traps the rule must avoid:
-- **a zero crossing inside the band**, which would put the edge on a later lobe and bias the
-  velocity slow;
-- **noise just before the band.**
+**Every dot stays on the same lobe** (the author: the first version "looks a little noisy", with
+dots on one leg jumping down a level). A dot that lands on a different lobe from its neighbours
+is dropped, or re-picked on the right lobe. A dot is never kept a lobe away from the rest.
 
-Measuring on the amplitude envelope, or stepping back from the band's peak, avoids both. How is
-the builder's call.
+**This is not the Time zero step's rule.** Time zero puts 0 ns at the direct wave's 0.2 first
+break. The tracer marks the zero crossing into the first strong lobe of the reflection. The small
+fixed offset between the two can shift a velocity by a few percent. The author's hand marks carry
+the same offset, because they click the same visible edge. Making the two rules match is a
+follow-up (§14). `trace_hyperbola` therefore takes no Time zero fraction.
 
-**Required:** for the same wavelet, this rule and the Time zero step's `first_break` rule land
-within one sample of each other. A test pins this.
-
-A trace whose band peak is too weak to stand above the noise gives no edge. This is where a
-fading leg ends.
+A trace whose band is too weak to stand above the noise gives no edge. This is where a fading
+leg ends. The faint floor must let the dots follow a leg as far as the author would click it.
 
 ### 4.3 Clean up, then thin to about 10 dots
 
@@ -243,9 +252,10 @@ destroys dots without giving new ones)*. The reason shows in the note.
 **When the clocks may not match, it traces anyway and says so** *(my call)*:
 - **With no Time zero step,** times run from the radar's own zero. The strip already shows the
   radar-clock note for hand dots (`radar_clock_note`), and a traced fit gets the same note.
-- **In Time zero's `sample` mode,** 0 ns sits wherever the author chose, so it may not be the
-  first break. The note says that time zero was set at a sample, so the traced edge may not
-  line up with it.
+
+*(Revised with §4.2: the sample-mode note is dropped. The tracer no longer follows the Time zero
+rule in any mode, so the note would be true of every traced fit and say nothing useful. The fixed
+offset is a follow-up, §14.)*
 
 Hand dots carry the same risk today, so this is a note, not a refusal.
 
@@ -300,8 +310,11 @@ walkthrough.
   them into the test as literals, with a note of where they came from. Plant hyperbolas with that
   wavelet and noise:
   - **Known velocity:** the traced v (after the panel-equivalent fit) is within 2σ of the truth.
-  - **Edge consistency:** the edge rule and the `first_break` rule agree within one sample on
-    the same wavelet (§4.2).
+  - **The edge is the zero crossing** into the first strong lobe: on a planted wavelet with a
+    faint precursor lobe, the edge lands within one sample of that crossing, not on the
+    precursor (§4.2).
+  - **No lobe jumps:** on a hyperbola whose legs cross flat layers, no dot sits a lobe away from
+    its neighbours.
   - **Two hyperbolas** in one box: the stronger is traced.
   - **A fading leg:** the dropped traces are the faded ones.
   - **Apex and one leg:** traced.
@@ -420,3 +433,7 @@ Three tasks, then the walkthrough:
 - The held-key button feedback (#88's second half), if the author wants it after trying the
   shortcut.
 - #140's option 3: migrate the box at a range of velocities as a check on the trace.
+- Time zero could offer the tracer's own edge, the zero crossing into the first strong lobe of
+  the direct wave, so that traced fits and the clock share one rule (§4.2).
+- A flat layer lying across the apex's own edge biases a traced v 1.2–1.3× fast. A strict xfail
+  pins it.
