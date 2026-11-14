@@ -12,8 +12,9 @@
    table's own refill and logs a failure via `QgsMessageLog` rather than
    letting one bad table silently cancel the other two.
 
-The package CRS is the CRS of the first grid; other grids are transformed
-into it on write. If the first grid's own CRS changes (or a package
+The package CRS is the site's CRS (pinned by its first GPS line, else the
+first grid's); other grids are transformed into it on write. If that CRS
+changes (or a package
 predates a field this version of `TABLES` expects), every table is
 rebuilt: the derived tables are simply overwritten, since they are fully
 refilled anew immediately afterward, but `picks` has no other source of
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from nsgeo.geometry import Grid
+from nsgeo.geometry import END_LIMIT_M, Grid, TrackPlacement
 from nsgeo.io import DzxError, read_dzx
 from nsgeo.model import Cut, Line, is_cut_key
 from nsgeo.processing import retime_ns
@@ -46,6 +47,7 @@ from qgis.core import (
     QgsFields,
     QgsGeometry,
     QgsLayerTree,
+    QgsMapLayer,
     QgsMessageLog,
     QgsPalLayerSettings,
     QgsPointXY,
@@ -98,6 +100,11 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
             ("length_m", "float"),
             ("antenna", "str"),
             ("file_name", "str"),
+            # M17a (P12): "tape" or "gps". The tape-only fields above are NULL
+            # for a GPS line; `without_rtk_m` is its bridges' metres (NULL on
+            # a tape line).
+            ("placed_by", "str"),
+            ("without_rtk_m", "float"),
         ],
     ),
     "marks": (
@@ -109,6 +116,18 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
     "cuts": (
         QgsWkbTypes.Type.LineString,
         [("cut_key", "str"), ("name", "str"), ("grid_id", "str"), ("length_m", "float")],
+    ),
+    # M17a (P12): one feature per bridge of a GPS line, plus one per end run
+    # over END_LIMIT_M, along the line's own trace positions.
+    "rtk_gaps": (
+        QgsWkbTypes.Type.LineString,
+        [
+            ("line_key", "str"),
+            ("kind", "str"),
+            ("first_trace", "int"),
+            ("last_trace", "int"),
+            ("metres", "float"),
+        ],
     ),
     "picks": (
         QgsWkbTypes.Type.Point,
@@ -142,15 +161,20 @@ TABLES: dict[str, tuple[Any, list[tuple[str, str]]]] = {
         ],
     ),
 }
-DERIVED = ("grids", "lines", "marks", "cuts")
+DERIVED = ("grids", "lines", "marks", "cuts", "rtk_gaps")
 
 # #68: the tables top to bottom in the site's group -- points over lines over
 # grid outlines, so a pick or mark on a line is never drawn under it. The
 # slice preview and exported GeoTIFFs join below them.
-LEGEND_ORDER = ("picks", "marks", "cuts", "lines", "grids")
+LEGEND_ORDER = ("picks", "marks", "cuts", "rtk_gaps", "lines", "grids")
 
 # One colour for every cut, and none of the grid colours (cut spec §4.8).
 CUT_COLOUR = "#e6550d"
+
+# M17a (P12): a line with no grid, and the stretches of a GPS line placed with
+# no RTK fix. Neither is a grid colour or the cut colour.
+NO_GRID_COLOUR = "#636363"
+RTK_GAP_COLOUR = "#e377c2"
 
 # Dragging a group in the Layers panel does not move the node:
 # QgsLayerTreeModel serialises it, builds a new node at the drop and deletes
@@ -591,7 +615,7 @@ class SiteLayers(QObject):
         site = self.session.site
         if site is None:
             return
-        if not site.grids:
+        if (not site.grids and not site.lines) or self.crs() is None:
             self._clear_derived_tables()
             return
         try:
@@ -609,6 +633,7 @@ class SiteLayers(QObject):
             ("lines", self.refill_lines),
             ("marks", self.refill_marks),
             ("cuts", self.refill_cuts),
+            ("rtk_gaps", self.refill_rtk_gaps),
         ):
             try:
                 fn()
@@ -691,8 +716,8 @@ class SiteLayers(QObject):
         keys = set(self.session.keys())
         cut_keys = set(self.session.cut_keys())
         # One computation per line, however many picks it carries. None
-        # marks a line with no points to put a pick on (no grid, or no
-        # distance axis): its picks still follow its velocity.
+        # marks a line with no points to put a pick on (no grid and no GPS
+        # track, or no distance axis): its picks still follow its velocity.
         placed: dict[str, list[QgsPointXY] | None] = {}
         failed: set[str] = set()
         geometry_changes: dict[int, QgsGeometry] = {}
@@ -716,8 +741,7 @@ class SiteLayers(QObject):
                 continue
             if key not in placed:
                 line = self.session.line_for_key(key)
-                grid = self.session.grid_for_line(line)
-                placed[key] = None if grid is None else self._line_points(line, grid, site.frames)
+                placed[key] = self._line_points(line, site.frames)
             coords = placed[key]
             if key in failed:
                 continue
@@ -1366,9 +1390,18 @@ class SiteLayers(QObject):
         pts = [QgsPointXY(float(x), float(y)) for x, y in np.asarray(xy, dtype=float)]
         return [tr.transform(p) for p in pts] if tr is not None else pts
 
-    def _line_points(
-        self, line: Line, grid: Grid, frames: dict[str, Grid]
-    ) -> list[QgsPointXY] | None:
+    def _line_crs(self, line: Line) -> str | None:
+        """The CRS `line`'s own coordinates are in: its grid's, or for a GPS
+        line the CRS its track was projected into. None for a line placed
+        by a grid the site no longer has."""
+        grid = self.session.grid_for_line(line)
+        if grid is not None:
+            return grid.crs
+        if isinstance(line.placement, TrackPlacement):
+            return line.placement.crs
+        return None
+
+    def _line_points(self, line: Line, frames: dict[str, Grid]) -> list[QgsPointXY] | None:
         """World points for every trace of `line`, or None when the line
         cannot be positioned at all.
 
@@ -1380,12 +1413,15 @@ class SiteLayers(QObject):
         from there is a real bug (a bad shape, a broken transform), not
         an unplaceable line, and must not be misreported as one.
         """
+        crs = self._line_crs(line)
+        if crs is None:
+            return None
         try:
             xy = line.trace_coords(frames)
         except ValueError as exc:
             _log(f"{line.path.name} could not be placed and was left out of the map: {exc}")
             return None
-        return self._points(xy, grid.crs)
+        return self._points(xy, crs)
 
     def _refill(self, name: str, features: list[QgsFeature]) -> None:
         layer = self.layers[name]
@@ -1681,10 +1717,7 @@ class SiteLayers(QObject):
             cut = self.session.cut_for_key(pick.line_key)
             return self._cut_point(cut, pick.distance_m)
         line = self.session.line_for_key(pick.line_key)
-        grid = self.session.grid_for_line(line)
-        if grid is None:
-            return None
-        coords = self._line_points(line, grid, site.frames)
+        coords = self._line_points(line, site.frames)
         if coords is None:
             return None
         return _clamped(coords, pick.trace)
@@ -1887,26 +1920,32 @@ class SiteLayers(QObject):
         keys = self.session.keys()
         for key in keys:
             line = self.session.line_for_key(key)
-            grid = self.session.grid_for_line(line)
-            if grid is None:
-                continue  # trackless lines arrive with TrackPlacement, later
-            coords = self._line_points(line, grid, site.frames)
+            coords = self._line_points(line, site.frames)
             if coords is None:
-                continue  # unplaceable (e.g. time-triggered); degrade, don't abort the table
+                continue  # no grid or track, or unplaceable (e.g. time-triggered): degrade
             f = QgsFeature(self.layers["lines"].fields())
             f.setGeometry(QgsGeometry.fromPolylineXY(coords))
             p: Any = line.placement
             f["line_key"] = key
-            f["grid_id"] = grid.id
             f["label"] = p.label or ""
-            f["axis"] = p.axis
-            f["offset_m"] = float(p.offset)
-            f["start_along_m"] = float(p.start_along)
-            f["direction"] = int(p.direction)
             f["n_traces"] = int(line.n_traces)
-            f["length_m"] = float(line.n_traces / line.header.traces_per_metre)
             f["antenna"] = line.header.antenna
             f["file_name"] = line.path.name
+            if isinstance(p, TrackPlacement):
+                # P12: the tape-only fields stay NULL; the length is walked.
+                walked = p.distance_along(line.n_traces, line.header)
+                f["grid_id"] = ""
+                f["length_m"] = float(walked[-1] - walked[0]) if len(walked) else 0.0
+                f["placed_by"] = "gps"
+                f["without_rtk_m"] = float(sum(b.metres for b in p.bridges()))
+            else:
+                f["grid_id"] = p.grid_id
+                f["axis"] = p.axis
+                f["offset_m"] = float(p.offset)
+                f["start_along_m"] = float(p.start_along)
+                f["direction"] = int(p.direction)
+                f["length_m"] = float(line.n_traces / line.header.traces_per_metre)
+                f["placed_by"] = "tape"
             feats.append(f)
         self._refill("lines", feats)
         self._style_lines()
@@ -1919,16 +1958,13 @@ class SiteLayers(QObject):
         keys = self.session.keys()
         for key in keys:
             line = self.session.line_for_key(key)
-            grid = self.session.grid_for_line(line)
-            if grid is None:
-                continue
             try:
                 info = read_dzx(line.path)
             except DzxError:
                 continue
             if info is None or not info.marks:
                 continue
-            coords = self._line_points(line, grid, site.frames)
+            coords = self._line_points(line, site.frames)
             if coords is None:
                 continue  # unplaceable line; its marks have nowhere to go either
             for mark in info.marks:
@@ -1942,6 +1978,78 @@ class SiteLayers(QObject):
                 feats.append(f)
         self._refill("marks", feats)
         self._hide_when_lines_crowd("marks")
+
+    def refill_rtk_gaps(self) -> None:
+        """P12: one feature per bridge of each GPS line, and one per end run
+        over `END_LIMIT_M`, along the line's own trace positions."""
+        site = self.session.site
+        assert site is not None
+        layer_fields = self.layers["rtk_gaps"].fields()
+        feats = []
+
+        def add(
+            key: str, kind: str, coords: list[QgsPointXY], a: int, b: int, metres: float
+        ) -> None:
+            if len(coords) < 2:
+                return
+            f = QgsFeature(layer_fields)
+            f.setGeometry(QgsGeometry.fromPolylineXY(coords))
+            f["line_key"] = key
+            f["kind"] = kind
+            f["first_trace"] = int(a)
+            f["last_trace"] = int(b)
+            f["metres"] = float(metres)
+            feats.append(f)
+
+        keys = self.session.keys()
+        for key in keys:
+            line = self.session.line_for_key(key)
+            p = line.placement
+            if not isinstance(p, TrackPlacement):
+                continue
+            bridges = p.bridges()
+            start_m, end_m = p.end_runs(line.n_traces, line.header)
+            long_start, long_end = start_m > END_LIMIT_M, end_m > END_LIMIT_M
+            if not (bridges or long_start or long_end):
+                continue
+            coords = self._line_points(line, site.frames)
+            if coords is None:
+                continue
+            last = line.n_traces - 1
+            for bridge in bridges:
+                a, b = max(bridge.first_trace, 0), min(bridge.last_trace, last)
+                add(
+                    key,
+                    "bridge",
+                    coords[a : b + 1],
+                    bridge.first_trace,
+                    bridge.last_trace,
+                    bridge.metres,
+                )
+            anchors = p.anchors()
+            if long_start:
+                first = min(anchors[0].trace, last)
+                add(key, "start", coords[: first + 1], 0, anchors[0].trace, start_m)
+            if long_end:
+                at = max(anchors[-1].trace, 0)
+                add(key, "end", coords[at:], anchors[-1].trace, last, end_m)
+        self._refill("rtk_gaps", feats)
+        self._style_rtk_gaps()
+
+    def _style_rtk_gaps(self) -> None:
+        # Dotted and heavier than the survey lines, above them, in a colour no
+        # grid or cut uses. Not identifiable and in no selection slot of
+        # `MapLink`, so a click on a gap never navigates.
+        layer = self.layers["rtk_gaps"]
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(RTK_GAP_COLOUR))
+        symbol.setWidth(0.8)
+        stroke = symbol.symbolLayer(0)
+        stroke.setUseCustomDashPattern(True)
+        stroke.setCustomDashVector([0.5, 1.0])  # mm on, mm off
+        layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+        layer.setFlags(layer.flags() & ~QgsMapLayer.LayerFlag.Identifiable)
+        layer.triggerRepaint()
 
     def refill_cuts(self) -> None:
         site = self.session.site
@@ -1991,6 +2099,14 @@ class SiteLayers(QObject):
             stroke.setUseCustomDashPattern(True)
             stroke.setCustomDashVector([3.0, 2.0])  # mm on, mm off
             categories.append(QgsRendererCategory(grid.id, symbol, grid.id))
+        # M17a: a GPS line has no grid; its feature carries grid_id "".
+        symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.GeometryType.LineGeometry)
+        symbol.setColor(QColor(NO_GRID_COLOUR))
+        symbol.setWidth(0.2)
+        stroke = symbol.symbolLayer(0)
+        stroke.setUseCustomDashPattern(True)
+        stroke.setCustomDashVector([3.0, 2.0])
+        categories.append(QgsRendererCategory("", symbol, "No grid"))
         self.layers["lines"].setRenderer(QgsCategorizedSymbolRenderer("grid_id", categories))
         self.layers["lines"].triggerRepaint()
 
