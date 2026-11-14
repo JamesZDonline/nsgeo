@@ -135,7 +135,7 @@ release's notes list everything in it.
   cannot work or from one bad sample, and say which setting to change; saved
   settings are checked properly when they load; migration gets its real-data
   test; and a new Trace stack step averages each trace with its neighbours.
-  Being designed.
+  Being built.
 
 ### Next, in order
 
