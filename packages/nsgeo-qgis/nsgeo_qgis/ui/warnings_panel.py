@@ -57,6 +57,8 @@ class WarningsPanel(QGroupBox):
                 self._layout.addWidget(label)
                 self._labels.append(label)
             self._labels[i].setText(f"{ICONS[entry.kind]} {entry.text}")
+            # An unbroken word wider than the panel is clipped, not wrapped.
+            self._labels[i].setToolTip(entry.text)
         self.setVisible(bool(ordered))
 
     def entries(self) -> tuple[Entry, ...]:

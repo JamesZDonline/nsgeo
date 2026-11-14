@@ -19,3 +19,12 @@ def test_entries_show_in_full_in_kind_order_and_the_panel_hides_when_empty(qgis_
     assert not panel.isHidden()
     panel.set_entries([])
     assert panel.isHidden() and panel.entries() == ()
+
+
+def test_each_entry_repeats_its_text_in_a_tooltip(qgis_app):
+    panel = WarningsPanel()
+    long_token = "x" * 90
+    panel.set_entries([Entry(WARNING, long_token), Entry(NOTE, "n")])
+    assert [lbl.toolTip() for lbl in panel.findChildren(QLabel)] == [long_token, "n"]
+    panel.set_entries([Entry(WARNING, "changed")])
+    assert [lbl.toolTip() for lbl in panel.findChildren(QLabel)] == ["changed"]

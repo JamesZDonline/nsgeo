@@ -2161,13 +2161,20 @@ class SlicesDock(QgsDockWidget):
             if remembered:
                 self.session.remember_slice_resolution(recipe.choice.grid_id, **remembered)
             self._update_included_label()
+            # A refusal belonged to the grid that was showing.
+            self._grid_refusal = None
+            self.show_warnings()
+            # Prepared first, so the apply below is checked against the cube's
+            # own grid (`set_source` has already moved the engine's choice),
+            # not the one the restore left: its level limit and frame cap are
+            # that grid's.
+            self.prepare()
             if self._pending_z_shift:
                 # An old record's range is still on the radar clock: nothing
                 # is pushed at the engine until the shift has been applied.
                 self._debounce.stop()
             else:
                 self.flush_debounce()
-            self.prepare()
             # Fix round 1, Minor: `prepare()` is a no-op (its own guard)
             # when the computed choice already equals `engine.choice` and
             # the preset's live steps still match -- reachable by
@@ -2556,6 +2563,8 @@ class SlicesDock(QgsDockWidget):
                 # applying them to it now would only draw B's settings onto
                 # A's lines (a spurious "does not cover" error).
                 return
+            # What is refused is decided afresh by this apply.
+            self._grid_refusal = None
             choice = self.engine.choice
             previous_time: float | None = None
             old_z = self.engine.z
@@ -2575,6 +2584,7 @@ class SlicesDock(QgsDockWidget):
             except ValueError as exc:
                 # __post_init__'s own validation (e.g. z1 <= z0) -- a
                 # refusal the user can read, not a crash from a QTimer slot.
+                self.show_warnings()
                 self.error.emit(str(exc))
                 return
             # Defence in depth behind `cell_spin`'s own floor: a

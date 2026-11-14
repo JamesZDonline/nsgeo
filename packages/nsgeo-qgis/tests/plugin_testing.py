@@ -21,7 +21,7 @@ REAL_DZT = CAMPUS_LINES
 needs_real_data = pytest.mark.skipif(not REAL_DZT, reason="no real DZT files in tests/data/local")
 
 
-def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
+def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, n_samples: int = 512, **kw) -> Path:
     """A small synthetic DZT with a visible pattern, written into `folder`."""
     from tests.synthetic import write_dzt
 
@@ -29,7 +29,7 @@ def synthetic_dzt(folder: Path, name: str, n_traces: int = 60, **kw) -> Path:
     # crc32, not hash(): str hashing is salted per-process (PYTHONHASHSEED),
     # so the same `name` would otherwise seed different data every run.
     rng = np.random.default_rng(zlib.crc32(name.encode()))
-    data = (rng.normal(size=(512, n_traces)) * 1e6).astype(np.int32)
+    data = (rng.normal(size=(n_samples, n_traces)) * 1e6).astype(np.int32)
     data[40:44, :] = 5_000_000  # a flat band, so background removal has something to remove
     path = folder / name
     write_dzt(path, data, **kw)

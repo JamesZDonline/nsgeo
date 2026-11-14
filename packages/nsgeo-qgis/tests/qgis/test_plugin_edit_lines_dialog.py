@@ -714,6 +714,19 @@ def test_after_picking_a_grid_focus_goes_back_to_the_table(table):
     assert dialog.table.hasFocus()
 
 
+def test_a_grid_popup_dismissed_with_escape_does_not_keep_the_wheel(table):
+    _, dialog = table
+    _shown(dialog)
+    combo = dialog.table.cellWidget(2, COL_GRID)
+    QTest.mouseClick(combo, Qt.MouseButton.LeftButton)
+    assert combo.view().isVisible(), "the click opened the popup"
+    QTest.keyClick(combo.view(), Qt.Key.Key_Escape)
+    assert not combo.view().isVisible()
+    assert dialog.table.hasFocus()
+    QApplication.sendEvent(combo, wheel_event(-120))
+    assert [dialog.table.cellWidget(r, COL_GRID).currentText() for r in range(6)] == ["Grid5"] * 6
+
+
 def test_scrolling_the_table_lets_go_of_a_focused_grid_combo(table):
     _, dialog = table
     _shown(dialog)

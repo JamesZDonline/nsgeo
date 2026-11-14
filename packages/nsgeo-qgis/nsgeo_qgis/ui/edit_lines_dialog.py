@@ -146,6 +146,24 @@ class _MeasureRun:
     paths: dict[str, str]  # row key -> resolved file path, the cache's key
 
 
+class _PopupFocusCombo(QComboBox):
+    """A Grid combo that hands focus back when its popup closes, however it
+    closes: a pick, Escape or a click away (#176)."""
+
+    def __init__(self, give_back: Callable[[], None]) -> None:
+        super().__init__()
+        self._give_back = give_back
+
+    def hidePopup(self) -> None:  # noqa: N802 -- Qt override
+        super().hidePopup()
+        try:
+            self._give_back()
+        except Exception as exc:  # noqa: BLE001 -- a Qt override
+            QgsMessageLog.logMessage(
+                f"grid combo focus: {exc!r}", "nsgeo", Qgis.MessageLevel.Warning
+            )
+
+
 class EditLinesDialog(QDialog):
     def __init__(
         self,
@@ -217,7 +235,7 @@ class EditLinesDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._combos: list[QComboBox] = []
         for r in range(len(self._order)):
-            combo = QComboBox()
+            combo = _PopupFocusCombo(self._focus_table)
             combo.addItems(self._grid_ids)
             combo.currentTextChanged.connect(lambda text, r=r: self._on_grid_picked(r, text))
             guard_wheel(combo, self.table)

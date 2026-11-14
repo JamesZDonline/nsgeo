@@ -4717,3 +4717,146 @@ def test_the_coverage_tooltip_explains_what_and_how_a_preview_draws_it(docked):
         "In a Whole site preview each pixel shows the largest count among the cells under it, "
         "so lines look wider than they are."
     )
+
+
+# ---- final review I1/M1: a restore onto another grid, and a failed apply ----
+
+
+def _make_dock(session):
+    session.site.presets["p"] = list(PRESET)
+    session.presets_changed.emit()
+    session.save()
+    return SlicesDock(session)
+
+
+def _dispose(dock):
+    dock.engine.wait_for_preparation(20_000)
+    dock.engine.dispose()
+    dock.deleteLater()
+
+
+@pytest.fixture
+def docked_mixed_radar(qgis_app, tmp_path):
+    """Grid A with 512-sample lines, grid B with 2,048 over the same range."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(GRID)
+    session.add_grid(GRID_B)
+    session.add_lines([_line(tmp_path, "A", f"FILE__00{i + 1}", 1.0 + i) for i in range(3)])
+    session.add_lines(
+        [
+            Line.open(
+                synthetic_dzt(tmp_path / "raw", f"DEEP__0{i}.DZT", n_traces=60, n_samples=2048),
+                GridPlacement("B", "y", 1.0 + i, 0.0, 1, f"DEEP__0{i}"),
+            )
+            for i in range(2)
+        ]
+    )
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def test_restoring_a_deep_cube_onto_a_shallower_grid_draws_the_cube_unrefused(docked_mixed_radar):
+    dock, session = docked_mixed_radar
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("B")
+    assert dock.engine.wait_for_preparation(20_000)
+    dz = dock.dz_spin.minimum()
+    assert dz == pytest.approx(110.864 / 2047, abs=1e-3)
+    dock.z0_spin.setValue(0.0)
+    dock.z1_spin.setValue(90.0)  # inside what the lines cover, so nothing is clamped
+    dock.dz_spin.setValue(dz)
+    dock.flush_debounce()
+    deep = dock.engine.z
+    assert deep is not None and deep.nz > 1024, "more levels than A's lines would allow"
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    _save_cube(dock, session, "B__deep", view)
+    dock.grid_combo.setCurrentText("A")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("B__deep")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "B"
+    z = dock.engine.z
+    assert z is not None
+    assert z.nz == deep.nz
+    assert z.dz_ns == pytest.approx(deep.dz_ns)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+@pytest.fixture
+def docked_big_and_small(qgis_app, tmp_path):
+    """A 300 m grid (whose cell floor is about 0.15 m) and a 6 m one."""
+    session = SiteSession()
+    session.new_site(tmp_path)
+    session.add_grid(Grid("Big", (500.0, 700.0), 0.0, 300.0, 300.0, "EPSG:32616", 0.5))
+    session.add_grid(Grid("Small", (900.0, 700.0), 0.0, 6.0, 6.0, "EPSG:32616", 0.5))
+    session.add_lines([_line(tmp_path, "Big", f"BIG__00{i}", 1.0 + i) for i in range(2)])
+    session.add_lines([_line(tmp_path, "Small", f"SMALL__00{i}", 1.0 + i) for i in range(2)])
+    dock = _make_dock(session)
+    yield dock, session
+    _dispose(dock)
+
+
+def _saved_small_fine_cube(dock, session):
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.grid_combo.setCurrentText("Small")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.cell_spin.setValue(0.05)
+    dock.flush_debounce()
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    view = ViewSettings(1.0, 1.0, 0.0, "amp_black_high", "this slice", False)
+    return _save_cube(dock, session, "Small__fine", view)
+
+
+def test_restoring_a_fine_cell_cube_while_a_large_grid_shows_draws_it_unrefused(
+    docked_big_and_small,
+):
+    dock, session = docked_big_and_small
+    _saved_small_fine_cube(dock, session)
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.grid_combo.currentText() == "Small"
+    assert dock.engine.frame.cell == pytest.approx(0.05)
+    assert dock.warnings_panel.entries() == ()
+    assert errors == []
+
+
+def test_a_restore_onto_another_grid_clears_the_refusal_of_the_one_left(docked_big_and_small):
+    dock, session = docked_big_and_small
+    record = _saved_small_fine_cube(dock, session)
+    del record["z"]
+    dock.grid_combo.setCurrentText("Big")
+    assert dock.engine.wait_for_preparation(20_000)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    big_floor = dock.cell_spin.minimum()
+    dock.restore_cube("Small__fine")
+    assert dock.engine.wait_for_preparation(20_000)
+    QCoreApplication.processEvents()
+    assert dock.warnings_panel.entries() == ()
+    assert dock.cell_spin.minimum() < big_floor, "the record has no resolution: Small's floor"
+
+
+def test_a_z_range_the_resolution_rejects_clears_the_last_refusal(docked):
+    dock, session = docked
+    _ready(dock)
+    errors: list[str] = []
+    dock.error.connect(errors.append)
+    dock.z1_spin.setValue(100_000.0)
+    dock.flush_debounce()
+    assert [e.kind for e in dock.warnings_panel.entries()] == [REFUSAL]
+    dock.z1_spin.setValue(1.0)
+    dock.flush_debounce()
+    assert dock.warnings_panel.entries() == ()
+    assert len(errors) == 1 and "must exceed" in errors[0]
