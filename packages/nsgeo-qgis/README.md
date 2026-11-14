@@ -91,8 +91,8 @@ packages/nsgeo-qgis/scripts/in_qgis_docker.sh qgis/qgis:3.44 \
     python3 -m pytest packages/nsgeo-qgis/tests -q -p no:cacheprovider
 ```
 
-CI runs the same two images. On Qt 6, the dock-width test is an expected failure
-until #50 settles the Slices panel's width.
+CI runs the same two images. The Slices panel's width is pinned to the Processing
+panel's minimum by `test_plugin_slices_width.py`.
 
 ## Building the release zip
 

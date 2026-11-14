@@ -209,6 +209,22 @@ class ElidedLabel(QLabel):
             self.setToolTip(self._hint if self.full_text else "")
 
 
+class _OpensWideScrollArea(QScrollArea):
+    """A scroll area whose `sizeHint` makes room for the vertical bar (#50).
+
+    The stock hint is the content's own hint plus the frame, so a dock that
+    opens at it shows the bar and then scrolls sideways by the bar's width."""
+
+    def sizeHint(self) -> QSize:  # noqa: N802 -- Qt override
+        try:
+            hint = super().sizeHint()
+            bar = self.verticalScrollBar().sizeHint().width()
+            return QSize(hint.width() + bar, hint.height())
+        except Exception as exc:  # noqa: BLE001 -- a Qt virtual
+            _log(f"could not size the Slices panel: {exc}")
+            return QSize(0, 0)
+
+
 class SlicesDock(QgsDockWidget):
     #: Ask the plugin to open `LineChoiceDialog` (spec 9.1's one dialog).
     #: A request, not the dialog itself -- the dock owns no dialogs, the
@@ -413,6 +429,13 @@ class SlicesDock(QgsDockWidget):
         self.cube_combo = QComboBox()
         self.grid_combo = QComboBox()
         self.preset_combo = QComboBox()
+        # Names come from the data: a long one is cut off, never a floor on the
+        # panel's width (#121). The popup still lists the whole name.
+        for combo in (self.cube_combo, self.grid_combo, self.preset_combo):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(12)
         self.transform_combo = TransformCombo()
         form.addRow("Cube", self.cube_combo)
         form.addRow("Grid", self.grid_combo)
@@ -422,6 +445,7 @@ class SlicesDock(QgsDockWidget):
 
         included_row = QHBoxLayout()
         self.included_label = QLabel("")
+        self.included_label.setWordWrap(True)  # the over-budget suffix is long (#121)
         self.choose_button = QPushButton("Choose…")
         included_row.addWidget(self.included_label, 1)
         included_row.addWidget(self.choose_button)
@@ -475,6 +499,7 @@ class SlicesDock(QgsDockWidget):
         velocity_font.setPointSizeF(max(1.0, velocity_font.pointSizeF() * 0.85))
         self.velocity_label.setFont(velocity_font)
         self.velocity_label.setStyleSheet("color: palette(mid);")
+        self.velocity_label.setWordWrap(True)  # the source label comes from the data (#121)
         position_layout.addWidget(self.velocity_label)
 
         # M12 spec 4.3: each grid's depth through its own velocity, in the
@@ -683,12 +708,11 @@ class SlicesDock(QgsDockWidget):
         self.resident_check = QCheckBox("Keep the volume in memory")
         display_form.addRow(self.resident_check)
 
-        self.legend_label = QLabel("")
-        # Wraps, because a QLabel's minimum width is its text width and a
-        # dock's minimum width is a hard floor on the QGIS main window's
-        # -- the same mechanism that made this dock force a 556 px window
-        # in round 1. The coverage legend is the longest string here.
-        self.legend_label.setWordWrap(True)
+        # One line, elided with the full text in the tooltip: a QLabel's minimum
+        # width is its text width (round 1's 556 px window), and a wrapped one
+        # changes height with its text as the stretch moves, which shifts the
+        # panel under the wheel (#121). The coverage legend is the longest string.
+        self.legend_label = ElidedLabel("")
         display_form.addRow("Legend", self.legend_label)
 
         outer.addWidget(self.display_group)
@@ -725,7 +749,7 @@ class SlicesDock(QgsDockWidget):
         # from the M11 walkthrough as "it messes up the width/height of
         # the window". A scroll area's own minimum is small, so the dock
         # can be any size the user wants and scrolls to the rest.
-        scroll = QScrollArea(self)
+        scroll = _OpensWideScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(body)

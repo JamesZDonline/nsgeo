@@ -2136,9 +2136,7 @@ def test_the_dock_minimum_does_not_force_the_main_window_to_grow(qgis_app):
         # a "fix" that merely let the groups be squashed would lose rows.
         assert scroll.widget().minimumSizeHint().height() >= 600
 
-        # ... and the dock still OPENS at a usable width, so this is not
-        # the degenerate fix of making everything collapsible to nothing.
-        assert dock.sizeHint().width() >= 280
+        # How wide it opens is pinned in test_plugin_slices_width.py (#50).
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
@@ -2343,17 +2341,24 @@ def test_the_coverage_legend_says_what_a_blank_cell_means(docked):
     assert "blank" not in amplitude.lower(), amplitude
 
 
-def test_the_legend_label_wraps_rather_than_widening_the_dock(qgis_app):
+def test_the_legend_label_elides_rather_than_widening_the_dock(qgis_app):
     """A `QLabel`'s minimum width is its text width unless it wraps, and a
     dock's minimum width is a hard floor on the QGIS main window's -- the
     same mechanism that made this dock force a 556 px window in round 1.
-    The coverage legend is the longest string this dock ever shows.
+    The coverage legend is the longest string this dock ever shows. It is cut
+    off with "…" and not wrapped (#121): a wrapped legend changes height with its
+    text, which moves the panel under the wheel. The tooltip carries the whole text.
     """
     dock = SlicesDock(SiteSession())
     try:
-        assert dock.legend_label.wordWrap()
-        dock.legend_label.setText("1 – 15 traces per cell · blank = no line crossed")
+        text = "1 – 15 traces per cell · blank = no line crossed"
+        dock.legend_label.setText(text)
         assert dock.legend_label.minimumSizeHint().width() <= 200
+        dock.legend_label.setParent(None)  # shown on its own, narrower than its text
+        dock.legend_label.resize(60, dock.legend_label.height())
+        dock.legend_label.show()
+        assert dock.legend_label.text() == text
+        assert dock.legend_label.toolTip() == text
     finally:
         dock.engine.wait_for_preparation(20_000)
         dock.engine.dispose()
